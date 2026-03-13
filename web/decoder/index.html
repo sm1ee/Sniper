@@ -1,0 +1,184 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Sniper Decoder</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link href="main.css" type="text/css" rel="stylesheet" />
+    <script src="lib/jquery-1.7.2.min.js" type="text/javascript" ></script>
+    <script src="lib/cryptojs/components/core-min.js"></script>
+    <script src="lib/cryptojs/components/enc-base64-min.js"></script>
+    <script src="lib/cryptojs/components/enc-utf16-min.js"></script>
+    <script src="lib/cryptojs/rollups/md5.js"></script>
+    <script src="lib/cryptojs/rollups/sha1.js"></script>
+    <script src="lib/cryptojs/rollups/sha224.js"></script>
+    <script src="lib/cryptojs/rollups/sha256.js"></script>
+    <script src="lib/cryptojs/rollups/sha384.js"></script>
+    <script src="lib/cryptojs/rollups/sha512.js"></script>
+    <script src="lib/cryptojs/rollups/hmac-md5.js"></script>
+    <script src="lib/cryptojs/rollups/hmac-sha1.js"></script>
+    <script src="lib/cryptojs/rollups/hmac-sha224.js"></script>
+    <script src="lib/cryptojs/rollups/hmac-sha256.js"></script>
+    <script src="lib/cryptojs/rollups/hmac-sha384.js"></script>
+    <script src="lib/cryptojs/rollups/hmac-sha512.js"></script>
+    <script src="lib/cryptojs/rollups/aes.js"></script>
+    <script src="lib/cryptojs/rollups/tripledes.js"></script>
+    <script src="lib/cryptojs/rollups/rabbit.js"></script>
+    <script src="lib/cryptojs/rollups/rc4.js"></script>
+    <script src="lib/hash/md4.js"></script>
+    <script src="lib/hash/ripemd.js"></script>
+    <script src="lib/hash/whirpool.js"></script>
+    <script src="lib/hash/crc.js"></script>
+    <script src="lib/snov/numbers.js"></script>
+    <script src="lib/snov/romanconverter.js"></script>
+    <script src="lib/snov/rot13.js"></script>
+    <script src="lib/snov/ipcalc.js"></script>
+    <script src="lib/xmorse.min.js"></script>
+    <script src="lib/custom-jwt.js"></script>
+    <script src="lib/custom-json.js"></script>
+    <script src="hasher.js"></script>
+    <script src="popup.js"></script>
+    <script src="lib/textarea.js"></script>
+  </head>
+  <body>
+
+    <div id="screen-1" class="screens app-shell">
+      <div class="app-header">
+        <div class="app-title-wrap">
+          <div class="app-title-row">
+            <img class="app-title-icon" src="images/icon32.png" alt="" />
+            <div class="app-title">Sniper Decoder</div>
+          </div>
+          <div class="app-subtitle">Embedded conversion and inspection workbench</div>
+        </div>
+        <div id="info" class="header-actions">
+          <a id="button-info" class="button header-button" href="#info">About</a>
+          <button id="button-popout" class="button header-button" type="button">Open Tab</button>
+        </div>
+      </div>
+      <ul id="tabs" class="buttons">
+        <li id="hash" class="on l1">Hash</li>
+        <li id="hmac" class="l2">HMAC</li>
+        <li id="crc" class="l2">CRC</li>
+        <li id="cipher" class="l3">Cipher</li>
+        <li id="net">Net</li>
+        <li id="time">Time</li>
+        <li id="number" class="l1">Num</li>
+        <li id="string" class="l3">Strings</li>
+        <li id="encode">Encode</li>
+        <li id="jwt">JWT</li>
+        <li id="json">JSON</li>
+        <li id="morse">Morse</li>
+        <li id="password">Password</li>
+      </ul>
+      <!-- input -->
+      <div id="input">
+        <div class="title">
+          Input:
+        </div>
+        <textarea id="input-value" autofocus spellcheck="false"></textarea>
+        <div id="input-password-wrapper" style="display: none;">
+          <div class="title">
+            Password:
+          </div>
+          <input id="input-password" type="password" autocomplete="off" />
+        </div>
+        <div id="input-url-wrapper" style="display: none;">
+          <div class="title">
+            Attack Payload (JKU/X5U/KID):
+          </div>
+          <input id="input-url" placeholder="ex) https://trusted@attacker.com" autocomplete="off" />
+        </div>
+      </div>
+
+      <!-- output -->
+      <div id="output" class="output-list">
+      </div>
+    </div>
+    
+    <div id="screen-2" class="screens about-screen">
+
+      <div style="position: absolute;">
+        <a href="" class="button">Back</a>
+      </div>
+
+      <!-- <div style="position: absolute; right: 10px;">
+        <a href="#info" class="button" title="Local-only toolbox">dencoder</a>
+      </div> -->
+      
+      <h1 style="text-align: center;">
+        About dencoder
+      </h1>
+
+      <p>
+        dencoder is used to compute cryptographic hashes, inspect payloads, and run common developer conversions.
+        It is entirely implemented in JavaScript and all calculations are performed on the client side.
+      </p>
+
+      <ul>
+        <li>
+          <b>Hash</b>:
+          MD5, SHA-1, SHA-2 (224, 256, 384, 512), RIPEMD-160, MD4, Whirpool
+        </li>
+        <li>
+          <b>HMAC</b>:
+          MD5, SHA-1, SHA-2 (224, 256, 384, 512), RIPEMD-160, MD4
+        </li>
+        <li>
+          <b>CRC</b>:
+          CRC-8, CRC-16, FCS-16, FCS/CRC-32
+        </li>
+        <li>
+          <b>Cipher</b> <i title='openssl enc -aes-256-cbc -in infile -out outfile -pass pass:"Secret Passphrase" -e -base64' style="cursor: help; border-bottom: 1px dashed #111;">(interoperable with OpenSSL)</i>:
+          AES-256, DES, Triple DES, Rabbit, RC4, RC4Drop. CBC/Pkcs7 is used.
+        </li>
+        <li>
+          <b>Net</b>:
+          Subnet calculator, Ip &harr; Dec, Ip &rarr; Bin, Ip &rarr; Hex
+        </li>
+        <li>
+          <b>Time</b>:
+          Unix &harr; Datetime, Unix &harr; RFC-1123, Unix &harr; ISO 8601
+        </li>
+        <li>
+          <b>Numbers</b>:
+          Dec &harr; Hex, Dec &harr; Bin, Dec &harr; Roman
+        </li>
+        <li>
+          <b>Strings</b>:
+          ASCII &harr; Hex, UTF-8 &harr; Hex, UTF-16 &harr; Hex
+        </li>
+        <li>
+          <b>Encode</b>:
+          Base64, Base32, Base45, Base58, ROT-13, JavaScript encodeURI(), encodeURIComponent(), HTML special chars encode/decode, 텍스트 ↔ 유니코드 변환
+        </li>
+        <li>
+          <b>JWT / JSON / Morse</b>:
+          JWT encode/decode and header mutation payloads, JSON beautifier, dict beautifier, Morse encode/decode
+        </li>
+        <li>
+          <b>Password</b>:
+          Password strength scoring and entropy analysis
+        </li>
+      </ul>
+
+      <p>
+        <b>Usage:</b> enter text and click on the result. It will be <b>copied to clipboard</b>.
+      </p>
+
+      <p>
+        Extension is using <a href="https://code.google.com/p/crypto-js/" target="_blank" rel="noreferrer">crypto-js</a> and other open-source libraries.<br/>
+        The current dencoder build is based on the legacy Hasher workflow and keeps all processing local.
+      </p>
+
+      <p>
+        Source: <a href="https://github.com/sm1ee/dencoder" target="_blank" rel="noreferrer">github.com/sm1ee/dencoder</a>
+      </p>
+
+      <p>
+        Legacy Hasher credits remain with the original upstream authors.
+      </p>
+    </div>
+    
+  </body>
+</html>
