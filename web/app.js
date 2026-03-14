@@ -1490,7 +1490,7 @@ function renderToolPanels() {
 
   if (repeaterVisible) {
     renderRepeater();
-    els.footerMode.textContent = "Repeater active";
+    els.footerMode.textContent = "Replay active";
     return;
   }
 
@@ -1511,7 +1511,7 @@ function renderToolPanels() {
 
   if (targetVisible) {
     renderTarget();
-    els.footerMode.textContent = "Target active";
+    els.footerMode.textContent = "Scope active";
     return;
   }
 
@@ -1766,16 +1766,10 @@ function renderProxyPanels() {
 }
 
 function renderInspectorPanels() {
-  els.lowerWorkbench.classList.toggle("inspector-collapsed", state.inspectorCollapsed);
-  els.inspectorColumn.classList.toggle("collapsed", state.inspectorCollapsed);
-  railTabs.forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.inspectorTab === state.activeInspectorTab);
-  });
-
-  const showingInspector = state.activeInspectorTab === "inspector";
-  const hidePanels = state.inspectorCollapsed;
-  els.inspectorContent.classList.toggle("hidden", hidePanels || !showingInspector);
-  els.notesPanel.classList.toggle("hidden", hidePanels || showingInspector);
+  if (!els.lowerWorkbench) {
+    return;
+  }
+  els.lowerWorkbench.classList.remove("inspector-collapsed");
 }
 
 function renderInterceptStatus() {
@@ -4053,11 +4047,14 @@ function renderCodeHtml(text, mode, target) {
 function renderHttpHtml(text, target) {
   const lines = String(text).split("\n");
   let inBody = false;
+  let contentType = "";
+  let bodyMode = "plain";
 
   return lines
     .map((line, index) => {
       if (!inBody && line === "") {
         inBody = true;
+        bodyMode = inferBodyHighlightMode(contentType);
         return wrapCodeLine("&nbsp;", "code-line code-line-gap");
       }
 
@@ -4066,10 +4063,15 @@ function renderHttpHtml(text, target) {
           return wrapCodeLine(highlightStartLine(line, target), "code-line code-line-start");
         }
 
+        const headerMatch = line.match(/^([^:]+):(.*)$/);
+        if (headerMatch && headerMatch[1].trim().toLowerCase() === "content-type") {
+          contentType = headerMatch[2].trim();
+        }
+
         return wrapCodeLine(highlightHeaderLine(line), "code-line");
       }
 
-      return wrapCodeLine(highlightBodyLine(line), "code-line code-line-body");
+      return wrapCodeLine(highlightBodyLine(line, bodyMode), "code-line code-line-body");
     })
     .join("");
 }
@@ -4243,9 +4245,6 @@ function bindPaneResizer(handle, mode) {
     if (window.matchMedia(WORKBENCH_STACK_BREAKPOINT).matches) {
       return;
     }
-    if (mode === "response-inspector" && state.inspectorCollapsed) {
-      return;
-    }
 
     event.preventDefault();
     const start = getWorkbenchWidths();
@@ -4268,14 +4267,6 @@ function bindPaneResizer(handle, mode) {
         applyWorkbenchPaneWidths(nextRequest, combinedWidth - nextRequest, start.total);
         return;
       }
-
-      const combinedWidth = start.response + start.inspector;
-      const nextResponse = clamp(
-        start.response + delta,
-        WORKBENCH_MIN_WIDTHS.response,
-        combinedWidth - WORKBENCH_MIN_WIDTHS.inspector,
-      );
-      applyWorkbenchPaneWidths(start.request, nextResponse, start.total);
     };
 
     const onUp = () => {
@@ -4292,7 +4283,7 @@ function bindPaneResizer(handle, mode) {
 }
 
 function getWorkbenchWidths() {
-  if (!els.lowerWorkbench || !els.requestColumn || !els.responseColumn || !els.inspectorColumn) {
+  if (!els.lowerWorkbench || !els.requestColumn || !els.responseColumn) {
     return null;
   }
 
@@ -4300,9 +4291,6 @@ function getWorkbenchWidths() {
     total: els.lowerWorkbench.getBoundingClientRect().width,
     request: els.requestColumn.getBoundingClientRect().width,
     response: els.responseColumn.getBoundingClientRect().width,
-    inspector: state.inspectorCollapsed
-      ? 46
-      : els.inspectorColumn.getBoundingClientRect().width,
   };
 }
 
@@ -4333,10 +4321,10 @@ function normalizeWorkbenchPaneWidths() {
     return;
   }
 
-  const visibleHandleWidth = state.inspectorCollapsed ? 10 : 20;
+  const visibleHandleWidth = 10;
   const maxRequestAndResponse = Math.max(
     WORKBENCH_MIN_WIDTHS.request + WORKBENCH_MIN_WIDTHS.response,
-    bounds.total - visibleHandleWidth - (state.inspectorCollapsed ? 46 : WORKBENCH_MIN_WIDTHS.inspector),
+    bounds.total - visibleHandleWidth,
   );
   const currentCombined = bounds.request + bounds.response;
   const combinedWidth = Math.min(currentCombined, maxRequestAndResponse);
@@ -4641,7 +4629,58 @@ function highlightHeaderValue(value) {
   return `<span class="token-plain">${escapeHtml(value)}</span>`;
 }
 
-function highlightBodyLine(line) {
+function inferBodyHighlightMode(contentType) {
+  const normalized = String(contentType || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+
+  if (!normalized) {
+    return "plain";
+  }
+
+  if (normalized.includes("json") || normalized.endsWith("+json")) {
+    return "json";
+  }
+
+  if (
+    normalized === "text/html"
+    || normalized === "application/xhtml+xml"
+  ) {
+    return "html";
+  }
+
+  if (
+    normalized === "text/xml"
+    || normalized === "application/xml"
+    || normalized === "image/svg+xml"
+    || normalized.endsWith("+xml")
+  ) {
+    return "xml";
+  }
+
+  if (normalized === "text/css") {
+    return "css";
+  }
+
+  if (
+    normalized === "application/javascript"
+    || normalized === "text/javascript"
+    || normalized === "application/x-javascript"
+    || normalized.includes("javascript")
+    || normalized.includes("ecmascript")
+  ) {
+    return "javascript";
+  }
+
+  if (normalized === "application/x-www-form-urlencoded") {
+    return "form";
+  }
+
+  return "plain";
+}
+
+function highlightBodyLine(line, mode = "plain") {
   const trimmed = line.trim();
 
   if (!trimmed) {
@@ -4652,11 +4691,35 @@ function highlightBodyLine(line) {
     return `<span class="token-meta">${escapeHtml(line)}</span>`;
   }
 
+  if (mode === "json") {
+    return highlightJsonLine(line);
+  }
+
+  if (mode === "form" && looksLikeFormEncoded(trimmed)) {
+    return highlightQueryString(trimmed);
+  }
+
+  if (mode === "html" || mode === "xml") {
+    return highlightMarkupLine(line);
+  }
+
+  if (mode === "css") {
+    return highlightCssLine(line);
+  }
+
+  if (mode === "javascript") {
+    return highlightJavaScriptLine(line);
+  }
+
   if (looksLikeJson(trimmed)) {
     return highlightJsonLine(line);
   }
 
-  if (trimmed.includes("=") && trimmed.includes("&") && !trimmed.includes(" ")) {
+  if (looksLikeMarkup(trimmed)) {
+    return highlightMarkupLine(line);
+  }
+
+  if (looksLikeFormEncoded(trimmed)) {
     return highlightQueryString(trimmed);
   }
 
@@ -4665,6 +4728,14 @@ function highlightBodyLine(line) {
 
 function looksLikeJson(line) {
   return /^[\s,[\]{}"]/u.test(line) || /:\s*/u.test(line);
+}
+
+function looksLikeMarkup(line) {
+  return /^<\/?[a-z!?][^>]*>$/iu.test(line) || /^<!DOCTYPE/i.test(line);
+}
+
+function looksLikeFormEncoded(line) {
+  return line.includes("=") && !/\s/u.test(line);
 }
 
 function highlightJsonLine(line) {
@@ -4687,6 +4758,143 @@ function highlightJsonLine(line) {
     }
 
     cursor = regex.lastIndex;
+  }
+
+  html += escapeHtml(line.slice(cursor));
+  return html || `<span class="token-plain">${escapeHtml(line)}</span>`;
+}
+
+function highlightMarkupLine(line) {
+  const tagPattern = /<!--.*?-->|<!DOCTYPE[^>]*>|<\?[^>]*\?>|<\/?[\w:-]+(?:\s+[\w:-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>/g;
+  let cursor = 0;
+  let html = "";
+  let match;
+
+  while ((match = tagPattern.exec(line)) !== null) {
+    html += escapeHtml(line.slice(cursor, match.index));
+    html += highlightMarkupToken(match[0]);
+    cursor = tagPattern.lastIndex;
+  }
+
+  html += escapeHtml(line.slice(cursor));
+  return html || `<span class="token-plain">${escapeHtml(line)}</span>`;
+}
+
+function highlightMarkupToken(token) {
+  if (token.startsWith("<!--") || token.startsWith("<!") || token.startsWith("<?")) {
+    return `<span class="token-markup-meta">${escapeHtml(token)}</span>`;
+  }
+
+  const tagMatch = token.match(/^(<\/?)([\w:-]+)([\s\S]*?)(\/?>)$/);
+  if (!tagMatch) {
+    return `<span class="token-markup-tag">${escapeHtml(token)}</span>`;
+  }
+
+  const [, open, name, attributes, close] = tagMatch;
+  return `${highlightMarkupPunctuation(open)}<span class="token-markup-tag">${escapeHtml(name)}</span>${highlightMarkupAttributes(attributes)}${highlightMarkupPunctuation(close)}`;
+}
+
+function highlightMarkupAttributes(attributes) {
+  if (!attributes) {
+    return "";
+  }
+
+  const attributePattern = /([\w:-]+)(\s*=\s*)(".*?"|'.*?'|[^\s"'=<>`]+)/g;
+  let cursor = 0;
+  let html = "";
+  let match;
+
+  while ((match = attributePattern.exec(attributes)) !== null) {
+    html += escapeHtml(attributes.slice(cursor, match.index));
+    html += `<span class="token-markup-attr">${escapeHtml(match[1])}</span>${highlightMarkupPunctuation(match[2])}<span class="token-markup-string">${escapeHtml(match[3])}</span>`;
+    cursor = attributePattern.lastIndex;
+  }
+
+  html += escapeHtml(attributes.slice(cursor));
+  return html;
+}
+
+function highlightMarkupPunctuation(value) {
+  return `<span class="token-punctuation">${escapeHtml(value)}</span>`;
+}
+
+function highlightCssLine(line) {
+  const trimmed = line.trim();
+
+  if (!trimmed) {
+    return "&nbsp;";
+  }
+
+  if (trimmed.startsWith("/*") || trimmed.startsWith("*") || trimmed.endsWith("*/")) {
+    return `<span class="token-meta">${escapeHtml(line)}</span>`;
+  }
+
+  const propertyMatch = line.match(/^(\s*)([\w-]+)(\s*:\s*)(.*?)(\s*;?\s*)$/);
+  if (propertyMatch) {
+    const [, indent, property, separator, value, suffix] = propertyMatch;
+    return `${escapeHtml(indent)}<span class="token-css-property">${escapeHtml(property)}</span><span class="token-punctuation">${escapeHtml(separator)}</span>${highlightCssValue(value)}${highlightMarkupPunctuation(suffix)}`;
+  }
+
+  const selectorMatch = line.match(/^(\s*)([^{}]+?)(\s*)([{}])(\s*)$/);
+  if (selectorMatch) {
+    const [, indent, selector, innerSpace, brace, suffix] = selectorMatch;
+    return `${escapeHtml(indent)}<span class="token-css-selector">${escapeHtml(selector)}</span>${escapeHtml(innerSpace)}<span class="token-punctuation">${escapeHtml(brace)}</span>${escapeHtml(suffix)}`;
+  }
+
+  const atRuleMatch = line.match(/^(\s*)(@[\w-]+)(.*)$/);
+  if (atRuleMatch) {
+    const [, indent, keyword, rest] = atRuleMatch;
+    return `${escapeHtml(indent)}<span class="token-css-keyword">${escapeHtml(keyword)}</span>${highlightCssValue(rest)}`;
+  }
+
+  if (trimmed === "{" || trimmed === "}") {
+    return `<span class="token-punctuation">${escapeHtml(line)}</span>`;
+  }
+
+  return `<span class="token-plain">${escapeHtml(line)}</span>`;
+}
+
+function highlightCssValue(value) {
+  const tokenPattern = /(".*?"|'.*?'|#[0-9a-f]{3,8}\b|-?\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|ms|s|deg)?)/gi;
+  let cursor = 0;
+  let html = "";
+  let match;
+
+  while ((match = tokenPattern.exec(value)) !== null) {
+    html += escapeHtml(value.slice(cursor, match.index));
+    if (match[0].startsWith('"') || match[0].startsWith("'")) {
+      html += `<span class="token-markup-string">${escapeHtml(match[0])}</span>`;
+    } else {
+      html += `<span class="token-json-number">${escapeHtml(match[0])}</span>`;
+    }
+    cursor = tokenPattern.lastIndex;
+  }
+
+  html += escapeHtml(value.slice(cursor));
+  return html || `<span class="token-plain">${escapeHtml(value)}</span>`;
+}
+
+function highlightJavaScriptLine(line) {
+  const tokenPattern = /\/\/.*$|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:const|let|var|function|return|if|else|for|while|true|false|null|undefined|class|new|await|async|import|export|switch|case|break|continue|throw|try|catch|finally)\b|-?\d+(?:\.\d+)?/gm;
+  let cursor = 0;
+  let html = "";
+  let match;
+
+  while ((match = tokenPattern.exec(line)) !== null) {
+    html += escapeHtml(line.slice(cursor, match.index));
+    const token = match[0];
+
+    if (token.startsWith("//")) {
+      html += `<span class="token-meta">${escapeHtml(token)}</span>`;
+    } else if (token.startsWith('"') || token.startsWith("'") || token.startsWith("`")) {
+      html += `<span class="token-js-string">${escapeHtml(token)}</span>`;
+    } else if (/^-?\d/u.test(token)) {
+      html += `<span class="token-json-number">${escapeHtml(token)}</span>`;
+    } else {
+      html += `<span class="token-js-keyword">${escapeHtml(token)}</span>`;
+    }
+
+    cursor = tokenPattern.lastIndex;
   }
 
   html += escapeHtml(line.slice(cursor));

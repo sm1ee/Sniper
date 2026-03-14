@@ -38,7 +38,7 @@ pub struct MatchReplaceRule {
     pub case_sensitive: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MatchReplaceRulesPayload {
     pub rules: Vec<MatchReplaceRule>,
 }

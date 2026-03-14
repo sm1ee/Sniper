@@ -2,11 +2,11 @@
 
 ## Product direction
 
-Sniper starts as a lightweight local interception proxy with a Burp-style workflow:
+Sniper starts as a lightweight local traffic proxy with a direct capture workflow:
 
 - traffic enters through a dedicated proxy listener
 - captured transactions are normalized into a single in-memory store
-- a separate UI/API listener renders history and inspectors
+- a separate UI/API listener renders records and detail panels
 - a local certificate authority bootstraps trust through a dedicated `sniper` host
 - a session registry isolates traffic, rules, and runtime settings per workspace
 - later features plug into the same transaction model instead of coupling directly to socket logic
@@ -15,9 +15,9 @@ The first milestone intentionally focuses on:
 
 - fast local feedback for HTTP requests
 - local termination of `CONNECT` tunnels for HTTPS MITM
-- an English-only familiar history + inspector UI
+- an English-only capture + detail UI
 - self-service root CA export from the desktop UI and `https://sniper`
-- modular boundaries for MITM, repeater, scanner, and extension hooks
+- modular boundaries for MITM, replay, scanner, and extension hooks
 
 ## Why Rust first
 
@@ -37,10 +37,10 @@ flowchart LR
     Capture --> Store["Active Session Stores"]
     SessionRegistry["Session Registry + Disk Snapshots"] --> Store
     Store --> API["UI/API Listener (:3000)"]
-    API --> UI["Burp-style Inspector UI + Dashboard"]
+    API --> UI["Desktop UI + Session Workspace"]
     Proxy -. bootstrap .-> SpecialHost["sniper / certificate portal"]
     SpecialHost --> CA["Persistent Root CA"]
-    Store -. future .-> Repeater["Repeater"]
+    Store -. future .-> Replay["Replay"]
     Store -. future .-> MITM["HTTPS MITM CA + TLS Termination"]
     Store -. future .-> Scanner["Passive / Active Scanner"]
 ```
@@ -75,16 +75,16 @@ flowchart LR
 - `src/session.rs`
   - tracks session metadata and the active workspace
   - persists per-session snapshots under `data_dir/sessions/<session-id>`
-  - restores runtime settings, history, websockets, rules, and intruder records per session
+  - restores runtime settings, records, websockets, rules, and fuzzer records per session
 - `src/model.rs`
   - defines the shared transaction schema used by proxy, API, and future tooling
 - `src/api.rs`
-  - exposes history/detail APIs
-  - serves the lightweight inspector UI
+  - exposes record/detail APIs
+  - serves the lightweight desktop UI
   - exports the root CA through API download routes
 - `src/bin/sniper-desktop.rs`
   - starts the proxy and UI listeners inside one process
-  - opens the Burp-style UI in a native desktop window
+  - opens the desktop UI in a native window
 
 ## Bootstrap and trust flow
 
@@ -97,7 +97,7 @@ flowchart LR
     Trust --> Future["Future full HTTPS MITM for target hosts"]
 ```
 
-The current bootstrap experience is intentionally close to Burp:
+The current bootstrap experience is intentionally self-service:
 
 - generate one local root CA and reuse it across restarts
 - expose export buttons in the GUI
@@ -118,7 +118,7 @@ The next features should plug in through the transaction model and explicit midd
 That lets us add:
 
 - HTTPS MITM as a transport plugin
-- repeater by replaying normalized requests
+- replay by resending normalized requests
 - passive scanner as a post-processing stage
 - project/workspace persistence behind a storage trait
 
@@ -128,6 +128,6 @@ That lets us add:
 - only preview bytes are persisted in-memory for inspection
 - HTTPS MITM currently speaks HTTP/1.1 to the client-facing side
 - session persistence currently writes full JSON snapshots instead of an append-only store
-- WebSocket history and richer interception controls are still evolving
+- WebSocket records and richer request-hold controls are still evolving
 
 These tradeoffs keep the first implementation simple while preserving the right boundaries for the next iteration.
