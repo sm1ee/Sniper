@@ -7,12 +7,13 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use reqwest::{Method, StatusCode};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
 use sniper::{
     certificate::default_data_dir,
     intercept::{InterceptRecord, InterceptSummary},
     intruder::IntruderAttackRecord,
+    match_replace::{MatchReplaceRule, MatchReplaceRulesPayload},
     model::{
         BodyEncoding, EditableRequest, HeaderRecord, RequestTargetOverride, TransactionRecord,
         TransactionSummary, WebSocketSessionRecord, WebSocketSessionSummary,
@@ -50,15 +51,17 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    History {
+    Capture {
         #[command(subcommand)]
-        command: HistoryCommand,
+        command: CaptureCommand,
     },
-    Target {
+    #[command(name = "scope", visible_alias = "target")]
+    Scope {
         #[command(subcommand)]
         command: TargetCommand,
     },
-    Repeater {
+    #[command(name = "replay", visible_alias = "repeater")]
+    Replay {
         #[command(subcommand)]
         command: RepeaterCommand,
     },
@@ -66,17 +69,52 @@ enum Command {
         #[command(subcommand)]
         command: FuzzerCommand,
     },
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
+    #[command(name = "http", visible_alias = "history", hide = true)]
+    History {
+        #[command(subcommand)]
+        command: HistoryCommand,
+    },
+    #[command(hide = true)]
     Intercept {
         #[command(subcommand)]
         command: InterceptCommand,
     },
+    #[command(name = "web-socket", visible_alias = "websocket", hide = true)]
     Websocket {
         #[command(subcommand)]
         command: WebSocketCommand,
     },
-    Skills {
+    #[command(name = "auto-replace", visible_alias = "match-replace", hide = true)]
+    AutoReplace {
         #[command(subcommand)]
-        command: SkillsCommand,
+        command: AutoReplaceCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CaptureCommand {
+    #[command(name = "http", visible_alias = "history")]
+    Http {
+        #[command(subcommand)]
+        command: HistoryCommand,
+    },
+    Intercept {
+        #[command(subcommand)]
+        command: InterceptCommand,
+    },
+    #[command(name = "web-socket", visible_alias = "websocket")]
+    WebSocket {
+        #[command(subcommand)]
+        command: WebSocketCommand,
+    },
+    #[command(name = "auto-replace", visible_alias = "match-replace")]
+    AutoReplace {
+        #[command(subcommand)]
+        command: AutoReplaceCommand,
     },
 }
 
@@ -103,6 +141,8 @@ struct SessionSwitchArgs {
 enum HistoryCommand {
     List(HistoryListArgs),
     Get(HistoryGetArgs),
+    Replay(HistoryReplayArgs),
+    Fuzzer(HistoryFuzzerArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -117,6 +157,24 @@ struct HistoryListArgs {
 
 #[derive(Args, Debug)]
 struct HistoryGetArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug, Default)]
+struct HistoryReplayArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long)]
+    scheme: Option<String>,
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(long)]
+    port: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct HistoryFuzzerArgs {
     #[arg(long)]
     id: Uuid,
 }
@@ -241,6 +299,12 @@ enum WebSocketCommand {
     Get(WebSocketGetArgs),
 }
 
+#[derive(Subcommand, Debug)]
+enum AutoReplaceCommand {
+    List,
+    Set(AutoReplaceSetArgs),
+}
+
 #[derive(Args, Debug, Default)]
 struct WebSocketListArgs {
     #[arg(long)]
@@ -270,6 +334,21 @@ struct SkillsInstallArgs {
     codex_dir: Option<PathBuf>,
     #[arg(long)]
     claude_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Default)]
+struct AutoReplaceSetArgs {
+    #[arg(long)]
+    file: Option<PathBuf>,
+    #[arg(long)]
+    stdin: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AutoReplaceInput {
+    Rules(Vec<MatchReplaceRule>),
+    Payload(MatchReplaceRulesPayload),
 }
 
 #[derive(Clone)]
@@ -428,13 +507,22 @@ async fn run(cli: Cli) -> Result<()> {
             let api = ApiClient::discover(cli.api).await?;
             match command {
                 Command::Session { command } => handle_session(api, command).await,
-                Command::History { command } => handle_history(api, command).await,
-                Command::Target { command } => handle_target(api, command).await,
-                Command::Repeater { command } => handle_repeater(api, command).await,
+                Command::Capture { command } => match command {
+                    CaptureCommand::Http { command } => handle_history(api, command).await,
+                    CaptureCommand::Intercept { command } => handle_intercept(api, command).await,
+                    CaptureCommand::WebSocket { command } => handle_websocket(api, command).await,
+                    CaptureCommand::AutoReplace { command } => {
+                        handle_auto_replace(api, command).await
+                    }
+                },
+                Command::Scope { command } => handle_target(api, command).await,
+                Command::Replay { command } => handle_repeater(api, command).await,
                 Command::Fuzzer { command } => handle_fuzzer(api, command).await,
+                Command::Skills { .. } => unreachable!(),
+                Command::History { command } => handle_history(api, command).await,
                 Command::Intercept { command } => handle_intercept(api, command).await,
                 Command::Websocket { command } => handle_websocket(api, command).await,
-                Command::Skills { .. } => unreachable!(),
+                Command::AutoReplace { command } => handle_auto_replace(api, command).await,
             }
         }
     }
@@ -489,6 +577,31 @@ async fn handle_history(api: ApiClient, command: HistoryCommand) -> Result<()> {
                 .await?;
             print_json(&record)
         }
+        HistoryCommand::Replay(args) => {
+            let tab = open_replay_tab(
+                &api,
+                Some(args.id),
+                None,
+                false,
+                args.scheme,
+                args.host,
+                args.port,
+            )
+            .await?;
+            print_json(&tab)
+        }
+        HistoryCommand::Fuzzer(args) => {
+            let mut workspace: WorkspaceStateSnapshot = api.get_json("/api/workspace-state").await?;
+            let (base_request, source_transaction_id, request_text) =
+                resolve_request_source(&api, Some(args.id), None, false).await?;
+            workspace.intruder.base_request = base_request;
+            workspace.intruder.source_transaction_id = source_transaction_id;
+            workspace.intruder.request_text = request_text;
+            workspace.intruder.notice.clear();
+            let snapshot: WorkspaceStateSnapshot =
+                api.post_json("/api/workspace-state", &workspace).await?;
+            print_json(&snapshot.intruder)
+        }
     }
 }
 
@@ -526,35 +639,17 @@ async fn handle_repeater(api: ApiClient, command: RepeaterCommand) -> Result<()>
             print_json(&workspace.repeater)
         }
         RepeaterCommand::Open(args) => {
-            let mut workspace: WorkspaceStateSnapshot =
-                api.get_json("/api/workspace-state").await?;
-            let (base_request, source_transaction_id, request_text) =
-                resolve_request_source(&api, args.transaction_id, args.request_file, args.stdin)
-                    .await?;
-            let normalized =
-                normalize_target_inputs(args.scheme, args.host, args.port, base_request.as_ref());
-            let sequence = workspace.repeater.tab_sequence + 1;
-            let tab = RepeaterTabState {
-                id: Uuid::new_v4().to_string(),
-                sequence,
-                base_request,
-                source_transaction_id,
-                notice: String::new(),
-                request_text,
-                response_record: None,
-                target_scheme: normalized.scheme,
-                target_host: normalized.host,
-                target_port: normalized.port,
-                history_entries: Vec::new(),
-                history_index: None,
-            };
-            workspace.repeater.tab_sequence = sequence;
-            workspace.repeater.active_tab_id = Some(tab.id.clone());
-            workspace.repeater.tabs.push(tab.clone());
-            let snapshot: WorkspaceStateSnapshot =
-                api.post_json("/api/workspace-state", &workspace).await?;
-            let tab = find_repeater_tab(&snapshot.repeater, &tab.id)?;
-            print_json(tab)
+            let tab = open_replay_tab(
+                &api,
+                args.transaction_id,
+                args.request_file,
+                args.stdin,
+                args.scheme,
+                args.host,
+                args.port,
+            )
+            .await?;
+            print_json(&tab)
         }
         RepeaterCommand::Update(args) => {
             let mut workspace: WorkspaceStateSnapshot =
@@ -769,6 +864,64 @@ async fn handle_websocket(api: ApiClient, command: WebSocketCommand) -> Result<(
             print_json(&websocket)
         }
     }
+}
+
+async fn handle_auto_replace(api: ApiClient, command: AutoReplaceCommand) -> Result<()> {
+    match command {
+        AutoReplaceCommand::List => {
+            let rules: Vec<MatchReplaceRule> = api.get_json("/api/match-replace").await?;
+            print_json(&rules)
+        }
+        AutoReplaceCommand::Set(args) => {
+            let raw = read_text_input(args.file, args.stdin)?;
+            let parsed: AutoReplaceInput = serde_json::from_str(&raw).context(
+                "failed to parse auto-replace JSON; expected either an array of rules or {\"rules\": [...]}",
+            )?;
+            let payload = match parsed {
+                AutoReplaceInput::Rules(rules) => MatchReplaceRulesPayload { rules },
+                AutoReplaceInput::Payload(payload) => payload,
+            };
+            let rules: Vec<MatchReplaceRule> =
+                api.post_json("/api/match-replace", &payload).await?;
+            print_json(&rules)
+        }
+    }
+}
+
+async fn open_replay_tab(
+    api: &ApiClient,
+    transaction_id: Option<Uuid>,
+    request_file: Option<PathBuf>,
+    stdin: bool,
+    scheme: Option<String>,
+    host: Option<String>,
+    port: Option<String>,
+) -> Result<RepeaterTabState> {
+    let mut workspace: WorkspaceStateSnapshot = api.get_json("/api/workspace-state").await?;
+    let (base_request, source_transaction_id, request_text) =
+        resolve_request_source(api, transaction_id, request_file, stdin).await?;
+    let normalized = normalize_target_inputs(scheme, host, port, base_request.as_ref());
+    let sequence = workspace.repeater.tab_sequence + 1;
+    let tab = RepeaterTabState {
+        id: Uuid::new_v4().to_string(),
+        sequence,
+        base_request,
+        source_transaction_id,
+        notice: String::new(),
+        request_text,
+        response_record: None,
+        target_scheme: normalized.scheme,
+        target_host: normalized.host,
+        target_port: normalized.port,
+        history_entries: Vec::new(),
+        history_index: None,
+    };
+    workspace.repeater.tab_sequence = sequence;
+    workspace.repeater.active_tab_id = Some(tab.id.clone());
+    workspace.repeater.tabs.push(tab.clone());
+    let snapshot: WorkspaceStateSnapshot = api.post_json("/api/workspace-state", &workspace).await?;
+    let tab = find_repeater_tab(&snapshot.repeater, &tab.id)?;
+    Ok(tab.clone())
 }
 
 async fn resolve_request_source(

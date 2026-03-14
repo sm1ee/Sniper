@@ -1337,11 +1337,9 @@ code {
   grid-row: 5;
   display: grid;
   grid-template-columns:
-    minmax(280px, var(--request-pane-width, 36%))
+    minmax(280px, var(--request-pane-width, 50%))
     10px
-    minmax(280px, var(--response-pane-width, 36%))
-    10px
-    minmax(260px, 1fr);
+    minmax(280px, var(--response-pane-width, 50%));
   min-height: 0;
   height: 100%;
   min-height: 180px;
@@ -1355,20 +1353,7 @@ code {
   min-height: 0;
 }
 
-.lower-workbench.inspector-collapsed {
-  grid-template-columns:
-    minmax(280px, var(--request-pane-width, 44%))
-    10px
-    minmax(280px, 1fr)
-    46px;
-}
-
-.lower-workbench.inspector-collapsed #responseInspectorResizer {
-  display: none;
-}
-
-.message-column,
-.inspector-column {
+.message-column {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
@@ -1376,10 +1361,6 @@ code {
   min-width: 0;
   background: transparent;
   overflow: hidden;
-}
-
-.inspector-column.collapsed {
-  border-left: 1px solid var(--line);
 }
 
 .pane-resizer {
@@ -1597,7 +1578,11 @@ code {
 .token-header,
 .token-json-key,
 .token-query-key,
-.token-hex-offset {
+.token-hex-offset,
+.token-markup-tag,
+.token-markup-attr,
+.token-css-property,
+.token-js-keyword {
   color: var(--token-info-color);
 }
 
@@ -1612,7 +1597,9 @@ code {
 }
 
 .token-json-string,
-.token-hex-bytes {
+.token-hex-bytes,
+.token-markup-string,
+.token-js-string {
   color: var(--token-string-color);
 }
 
@@ -1621,7 +1608,10 @@ code {
 }
 
 .token-json-boolean,
-.token-meta {
+.token-meta,
+.token-markup-meta,
+.token-css-selector,
+.token-css-keyword {
   color: #b89f7c;
 }
 
@@ -1904,9 +1894,30 @@ body.pane-resizing-y {
   line-height: 1.22;
 }
 
+.intruder-shell .panel-toolbar {
+  align-items: center;
+  padding-top: 16px;
+  padding-bottom: 16px;
+}
+
 .intruder-shell .inline-copy {
-  font-size: var(--font-sm);
-  line-height: 1.45;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--font-md);
+  line-height: 1.5;
+}
+
+.intruder-shell .inline-copy code {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 0.95em;
+  line-height: 1;
 }
 
 .intruder-shell .request-editor {
@@ -2105,6 +2116,12 @@ body.pane-resizing-y {
 .websocket-handshake-column,
 .websocket-frames-column {
   min-width: 0;
+}
+
+.websocket-handshake-column .panel-toolbar h2 {
+  font-size: var(--font-xl);
+  line-height: 1.28;
+  word-break: break-word;
 }
 
 .websocket-workbench .dual-code-panel,
@@ -2786,19 +2803,9 @@ body.pane-resizing-y {
 
   .lower-workbench {
     grid-template-columns:
-      minmax(280px, var(--request-pane-width, 37%))
+      minmax(280px, var(--request-pane-width, 50%))
       10px
-      minmax(280px, var(--response-pane-width, 37%))
-      10px
-      minmax(260px, 1fr);
-  }
-
-  .lower-workbench.inspector-collapsed {
-    grid-template-columns:
-      minmax(280px, var(--request-pane-width, 45%))
-      10px
-      minmax(280px, 1fr)
-      46px;
+      minmax(280px, var(--response-pane-width, 50%));
   }
 
   .repeater-toolbar {
@@ -2878,21 +2885,7 @@ body.pane-resizing-y {
 
   .lower-workbench {
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: minmax(0, 1fr) minmax(0, 0.9fr);
-  }
-
-  .lower-workbench.inspector-collapsed {
-    grid-template-columns: 1fr 1fr;
     grid-template-rows: minmax(0, 1fr);
-  }
-
-  .inspector-column {
-    grid-column: 1 / -1;
-    border-top: 1px solid var(--line);
-  }
-
-  .inspector-column.collapsed {
-    display: none;
   }
 
   .request-column {
@@ -2928,21 +2921,14 @@ body.pane-resizing-y {
 
   .lower-workbench {
     grid-template-columns: 1fr;
-    grid-template-rows: repeat(3, minmax(0, 1fr));
-  }
-
-  .lower-workbench.inspector-collapsed {
-    grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   }
 
-  .message-column,
-  .inspector-column {
-    border-right: none;
+  .message-column {
     border-bottom: 1px solid var(--line);
   }
 
-  .inspector-column {
+  .response-column {
     border-bottom: none;
   }
 

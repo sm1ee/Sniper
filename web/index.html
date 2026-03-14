@@ -11,25 +11,16 @@
       <header class="top-strip">
         <nav class="main-tabs" aria-label="Main tools">
           <button class="main-tab" data-tool="dashboard">Session</button>
-          <button class="main-tab" data-tool="target">Target</button>
-          <button class="main-tab active" data-tool="proxy">Proxy</button>
+          <button class="main-tab" data-tool="target">Scope</button>
+          <button class="main-tab active" data-tool="proxy">Capture</button>
           <button class="main-tab" data-tool="intruder">Fuzzer</button>
-          <button class="main-tab" data-tool="repeater">Repeater</button>
+          <button class="main-tab" data-tool="repeater">Replay</button>
           <button class="main-tab" data-tool="decoder">Tools</button>
           <button class="main-tab" data-tool="logger">Logger</button>
         </nav>
 
         <div class="top-utilities">
           <span class="utility-version" id="appVersionLabel" title="Current version">v...</span>
-          <a
-            class="utility-button"
-            href="https://github.com/sm1ee/Sniper/issues/new"
-            target="_blank"
-            rel="noopener noreferrer"
-            title="Open GitHub issue form"
-          >
-            Issue
-          </a>
           <a
             class="utility-button hidden"
             id="openUpdateButton"
@@ -65,9 +56,9 @@
                 <dd id="dashboardCurrentSessionWebsockets">0</dd>
                 <dt>Event log</dt>
                 <dd id="dashboardCurrentSessionEvents">0</dd>
-                <dt>Fuzzer</dt>
+                <dt>Fuzzer runs</dt>
                 <dd id="dashboardCurrentSessionIntruder">0</dd>
-                <dt>Match/replace rules</dt>
+                <dt>Auto-replace rules</dt>
                 <dd id="dashboardCurrentSessionRules">0</dd>
                 <dt>Created</dt>
                 <dd id="dashboardCurrentSessionCreated">-</dd>
@@ -131,7 +122,7 @@
         </section>
 
         <section class="proxy-shell" id="proxyShell">
-          <nav class="sub-tabs" aria-label="Proxy tools">
+          <nav class="sub-tabs" aria-label="Capture tools">
             <button class="sub-tab" data-proxy-tab="intercept">Intercept</button>
             <button class="sub-tab active" data-proxy-tab="http-history">HTTP</button>
             <button class="sub-tab" data-proxy-tab="websockets-history">Web Socket</button>
@@ -295,60 +286,6 @@
               </footer>
             </section>
 
-            <div class="pane-resizer" id="responseInspectorResizer" data-resizer="response-inspector" role="separator" aria-orientation="vertical" aria-label="Resize response and inspector panes"></div>
-
-            <section class="inspector-column">
-              <div class="inspector-layout">
-                <div class="inspector-main">
-                  <header class="pane-header inspector-header">
-                    <div class="inspector-header-copy">
-                      <strong id="detailTitle">Inspector</strong>
-                      <div class="detail-tags" id="detailTags"></div>
-                    </div>
-                    <button class="pane-close" id="closeInspectorButton" type="button" aria-label="Close inspector">×</button>
-                  </header>
-
-                  <div class="inspector-content" id="inspectorContent">
-                    <section class="inspector-section">
-                      <button class="section-toggle" type="button">
-                        <span>Request attributes</span>
-                        <span class="section-count" id="attributesCount">0</span>
-                      </button>
-                      <div class="section-body">
-                        <div class="protocol-strip" id="protocolStrip"></div>
-                        <dl class="summary-list" id="summaryList"></dl>
-                      </div>
-                    </section>
-
-                    <section class="inspector-section">
-                      <button class="section-toggle" type="button">
-                        <span>Request headers</span>
-                        <span class="section-count" id="requestHeaderCount">0</span>
-                      </button>
-                      <div class="section-body" id="requestHeadersBody"></div>
-                    </section>
-
-                    <section class="inspector-section">
-                      <button class="section-toggle" type="button">
-                        <span>Response headers</span>
-                        <span class="section-count" id="responseHeaderCount">0</span>
-                      </button>
-                      <div class="section-body" id="responseHeadersBody"></div>
-                    </section>
-                  </div>
-
-                  <div class="notes-panel hidden" id="notesPanel">
-                    <h3>Notes</h3>
-                    <div id="notesCard">No anomalies were recorded for this transaction.</div>
-                  </div>
-                </div>
-
-                <div class="inspector-rail">
-                  <button class="rail-tab active" data-inspector-tab="inspector">Inspector</button>
-                  <button class="rail-tab" data-inspector-tab="notes">Notes</button>
-                </div>
-              </div>
-            </section>
           </section>
 
           <section class="proxy-panel hidden" id="interceptPanel">
@@ -356,8 +293,8 @@
               <section class="panel-card">
                 <header class="panel-toolbar">
                   <div>
-                    <p class="placeholder-kicker">Intercept queue</p>
-                    <h2>Queued requests</h2>
+                    <p class="placeholder-kicker">Request hold</p>
+                    <h2>Held requests</h2>
                   </div>
                   <div class="toolbar-actions">
                     <button class="toggle-pill" id="interceptStatus" type="button">
@@ -592,7 +529,7 @@
                 <div class="settings-form">
                   <label class="settings-toggle">
                     <input id="proxySettingIntercept" type="checkbox" />
-                    <span>Enable intercept queue</span>
+                    <span>Enable request hold</span>
                   </label>
                   <label class="settings-toggle">
                     <input id="proxySettingWebsocketCapture" type="checkbox" />
@@ -821,7 +758,7 @@
         <section class="intruder-shell hidden" id="intruderShell">
           <header class="panel-toolbar repeater-header">
             <div>
-              <p class="inline-copy">Use Burp-style <code>§payload§</code> markers or <code>{{INTRUDER}}</code> placeholders in the request.</p>
+              <p class="inline-copy">Use <code>§payload§</code> markers or <code>{{PAYLOAD}}</code> placeholders in the request.</p>
             </div>
             <div class="toolbar-actions">
               <button class="secondary-action" id="resetIntruderButton" type="button">Reset</button>

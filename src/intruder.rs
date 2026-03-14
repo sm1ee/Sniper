@@ -148,7 +148,7 @@ pub async fn run_attack(
     let marker_count = count_request_markers(&template);
     if marker_count == 0 {
         return Err(anyhow!(
-            "Intruder request is missing markers. Use Burp-style §value§ markers or {{INTRUDER}}."
+            "Request template is missing markers. Use §value§ markers or {{PAYLOAD}}."
         ));
     }
 
@@ -281,23 +281,25 @@ fn apply_payload_to_request(template: &EditableRequest, payload: &str) -> Result
 }
 
 fn count_markers(value: &str) -> usize {
-    let burp = Regex::new("§[^§]*§").expect("valid burp marker regex");
-    let count = burp.find_iter(value).count();
+    let marker = Regex::new("§[^§]*§").expect("valid marker regex");
+    let count = marker.find_iter(value).count();
     if count > 0 {
         count
     } else {
-        value.matches("{{INTRUDER}}").count()
+        value.matches("{{PAYLOAD}}").count() + value.matches("{{INTRUDER}}").count()
     }
 }
 
 fn replace_markers(value: &str, payload: &str) -> Result<String> {
-    let burp = Regex::new("§[^§]*§").expect("valid burp marker regex");
-    if burp.is_match(value) {
-        return Ok(burp.replace_all(value, payload).into_owned());
+    let marker = Regex::new("§[^§]*§").expect("valid marker regex");
+    if marker.is_match(value) {
+        return Ok(marker.replace_all(value, payload).into_owned());
     }
 
-    if value.contains("{{INTRUDER}}") {
-        return Ok(value.replace("{{INTRUDER}}", payload));
+    if value.contains("{{PAYLOAD}}") || value.contains("{{INTRUDER}}") {
+        return Ok(value
+            .replace("{{PAYLOAD}}", payload)
+            .replace("{{INTRUDER}}", payload));
     }
 
     Ok(value.to_string())

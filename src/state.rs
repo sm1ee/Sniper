@@ -123,7 +123,7 @@ impl AppState {
                 "special_https_host".to_string(),
                 "root_ca_export".to_string(),
                 "live_history".to_string(),
-                "burp_style_ui".to_string(),
+                "desktop_capture_ui".to_string(),
                 "intercept_queue".to_string(),
                 "repeater".to_string(),
                 "websocket_history".to_string(),

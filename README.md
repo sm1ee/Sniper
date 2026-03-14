@@ -1,15 +1,15 @@
 # Sniper
 
-Sniper is a lightweight, fast, open-source interception proxy for people who want a familiar workflow without dragging in a huge platform.
+Sniper is a lightweight, fast, open-source desktop web proxy for people who want a clean workflow without dragging in a huge platform.
 
 It is built for:
 
-- a familiar proxy UI
+- a simple proxy UI
 - a lean runtime
 - simple day-to-day proxy work: capture, inspect, replay, fuzz, scope
 - automation through `sniper-cli` and AI skills
 
-If you want a clean tool that feels approachable like a classic proxy suite, but lighter and easier to automate, Sniper is the idea.
+If you want a clean tool that feels approachable, but lighter and easier to automate, Sniper is the idea.
 
 ## Why Sniper
 
@@ -33,9 +33,9 @@ The project is intentionally shaped as a focused proxy first, not an everything-
 - persistent local root CA generation
 - `http://sniper` / `https://sniper` certificate bootstrap portal
 - session-based workspaces
-- HTTP history
-- Web Socket history
-- intercept queue
+- HTTP records
+- Web Socket records
+- queued request review
 - replay workspace
 - fuzzer workspace
 - tools workspace for decoding, encoding, hashing, JWT inspection, and transformations
@@ -48,7 +48,7 @@ The project is intentionally shaped as a focused proxy first, not an everything-
 
 Sniper is a good fit if you want:
 
-- a simple proxy with a familiar layout
+- a simple proxy with a clean layout
 - something lighter than a heavy all-in-one platform
 - a tool that is pleasant for manual testing
 - a proxy that can also be driven from automation
@@ -85,8 +85,8 @@ Then:
 Sniper keeps the UI simple and workbench-oriented:
 
 - `Session`: manage isolated workspaces
-- `Target`: define scope and inspect captured hosts and paths
-- `Proxy`: use `Intercept`, `HTTP`, `Web Socket`, `Auto replace`, and `Settings`
+- `Scope`: define scope and inspect captured hosts and paths
+- `Capture`: use `Intercept`, `HTTP`, `Web Socket`, `Auto replace`, and `Settings`
 - `Replay`: modify and resend captured requests
 - `Fuzzer`: run payload-based request tests
 - `Tools`: decode, encode, hash, inspect JWTs, and transform data
@@ -96,7 +96,7 @@ Sniper keeps the UI simple and workbench-oriented:
 
 Each session keeps its own:
 
-- HTTP history
+- HTTP records
 - Web Socket captures
 - event log
 - scope
@@ -121,12 +121,13 @@ cargo run --bin sniper-cli -- --help
 Available command groups:
 
 - `session list|create|switch`
-- `history list|get`
-- `target get-scope|set-scope`
-- `repeater list|open|update|send`
+- `capture http list|get|replay|fuzzer`
+- `capture intercept on|off|list|forward|drop`
+- `capture web-socket list|get`
+- `capture auto-replace list|set`
+- `scope get-scope|set-scope`
+- `replay list|open|update|send`
 - `fuzzer set-template|set-payloads|run`
-- `intercept on|off|list|forward|drop`
-- `websocket list|get`
 - `skills install`
 
 Example commands:
@@ -134,11 +135,14 @@ Example commands:
 ```bash
 cargo run --bin sniper-cli -- session list
 cargo run --bin sniper-cli -- session create --name "Bug bounty"
-cargo run --bin sniper-cli -- target set-scope --pattern '*.example.com' --pattern api.example.com
-cargo run --bin sniper-cli -- history list --limit 10
-cargo run --bin sniper-cli -- repeater list
-printf 'GET / HTTP/1.1\nHost: example.com\n\n' | cargo run --bin sniper-cli -- repeater open --stdin
-cargo run --bin sniper-cli -- intercept list
+cargo run --bin sniper-cli -- scope set-scope --pattern '*.example.com' --pattern api.example.com
+cargo run --bin sniper-cli -- capture http list --limit 10
+cargo run --bin sniper-cli -- capture http replay --id <transaction-id>
+cargo run --bin sniper-cli -- capture http fuzzer --id <transaction-id>
+cargo run --bin sniper-cli -- replay list
+printf 'GET / HTTP/1.1\nHost: example.com\n\n' | cargo run --bin sniper-cli -- replay open --stdin
+cargo run --bin sniper-cli -- capture intercept list
+cargo run --bin sniper-cli -- capture auto-replace list
 ```
 
 Notes:
@@ -147,6 +151,7 @@ Notes:
 - replay keeps raw `Host:` separate from the connection override target
 - fuzzer operates on the active session workspace
 - CLI discovers the running desktop app from the local runtime state file
+- older aliases like `history`, `target`, `repeater`, and `websocket` still work for compatibility
 
 ## AI skills
 
@@ -170,12 +175,14 @@ Default macOS install paths:
 This means Sniper can be used by an AI agent to:
 
 - switch sessions
-- read captured traffic
+- read captured traffic from `capture http`
 - update scope
 - open and send replay requests
-- run fuzzing payloads
+- seed replay/fuzzer workspaces from HTTP history
+- run payload sets
 - inspect Web Socket sessions
-- control intercept flow
+- manage queued requests
+- manage auto-replace rules
 
 ## Certificate bootstrap
 
@@ -215,6 +222,61 @@ Run tests:
 cargo test
 ```
 
+## macOS release packaging
+
+Sniper can be packaged as a signed macOS `.app` and `.dmg`.
+
+Create a local `.app` bundle:
+
+```bash
+./packaging/macos/make-app.sh
+```
+
+Create a `.dmg` from the app bundle:
+
+```bash
+./packaging/macos/make-dmg.sh
+```
+
+Create both release artifacts:
+
+```bash
+./packaging/macos/release-macos.sh
+```
+
+Artifacts are written to:
+
+```text
+dist/
+```
+
+Signing behavior:
+
+- if `DEVELOPER_ID_APP` is set, the app is signed with your Developer ID
+- otherwise the bundle is ad-hoc signed for local testing
+
+Optional notarization:
+
+- set `APPLE_ID`
+- set `APPLE_TEAM_ID`
+- set `APPLE_APP_PASSWORD`
+
+Then `release-macos.sh` will notarize and staple the `.app`, and notarize the `.dmg`.
+
+Optional icon:
+
+- set `APP_ICON=/absolute/path/to/AppIcon.icns`
+
+Example:
+
+```bash
+DEVELOPER_ID_APP="Developer ID Application: Your Name (TEAMID)" \
+APPLE_ID="you@example.com" \
+APPLE_TEAM_ID="TEAMID" \
+APPLE_APP_PASSWORD="app-specific-password" \
+./packaging/macos/release-macos.sh
+```
+
 ## Project layout
 
 - `src/bin/sniper-desktop.rs`: native desktop shell
@@ -228,15 +290,16 @@ cargo test
 - `src/certificate.rs`: root CA generation and export
 - `web/`: desktop UI
 - `packaging/skills/`: Codex and Claude skill templates
+- `packaging/macos/`: macOS `.app` and `.dmg` packaging scripts
 - `docs/architecture.md`: architecture notes
 
 ## Status
 
-Sniper is already usable as a focused desktop interception proxy with session storage, replay, fuzzing, Web Socket capture, tools, CLI automation, and AI skill integration.
+Sniper is already usable as a focused desktop traffic proxy with session storage, replay, fuzzing, Web Socket capture, tools, CLI automation, and AI skill integration.
 
 It is still evolving, but the goal stays simple:
 
 - keep the proxy fast
-- keep the UI familiar
+- keep the UI clean
 - keep the workflow focused
 - make automation first-class
