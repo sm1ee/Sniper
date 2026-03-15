@@ -1285,6 +1285,31 @@ code {
   background: rgba(169, 186, 205, 0.7);
 }
 
+/* Column drag-and-drop reordering */
+.history-table thead th[draggable] {
+  cursor: grab;
+}
+
+.history-table thead th[draggable]:active {
+  cursor: grabbing;
+}
+
+.history-table thead th.column-dragging {
+  opacity: 0.4;
+}
+
+.history-table thead th.column-drag-active {
+  transition: none;
+}
+
+.history-table thead th.column-drag-over-left {
+  box-shadow: inset 3px 0 0 var(--accent, #c9a96e);
+}
+
+.history-table thead th.column-drag-over-right {
+  box-shadow: inset -3px 0 0 var(--accent, #c9a96e);
+}
+
 .history-row {
   cursor: pointer;
   transition: background 140ms ease;
