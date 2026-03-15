@@ -69,6 +69,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/styles.css", get(styles_css))
         .route("/favicon.svg", get(favicon_svg))
         .route("/logo.svg", get(logo_svg))
+        .route("/fonts/Bungee-Regular.ttf", get(bungee_font))
         .route("/api/settings", get(get_settings))
         .route("/api/app-version", get(get_app_version))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -249,7 +250,8 @@ async fn update_runtime_settings(
 }
 
 async fn get_startup_settings(State(state): State<Arc<AppState>>) -> Json<StartupSettingsView> {
-    Json(state.startup.view(state.config.proxy_addr).await)
+    let active_addr = state.get_active_proxy_addr().await;
+    Json(state.startup.view(active_addr).await)
 }
 
 async fn get_ui_settings(State(state): State<Arc<AppState>>) -> Json<AppUiSettingsSnapshot> {
@@ -271,23 +273,56 @@ async fn update_startup_settings(
     Json(update): Json<StartupSettingsUpdate>,
 ) -> Response {
     match state.startup.update(update).await {
-        Ok(_) => {
-            let view = state.startup.view(state.config.proxy_addr).await;
-            state
-                .log_info(
-                    "config",
-                    "Proxy listener startup settings updated",
-                    format!(
-                        "Saved {} for next launch{}",
-                        view.proxy_addr,
-                        if view.restart_required {
-                            format!(" (active listener remains {})", view.active_proxy_addr)
-                        } else {
-                            String::new()
-                        }
-                    ),
-                )
-                .await;
+        Ok(snapshot) => {
+            let active_addr = state.get_active_proxy_addr().await;
+            let desired_addr = match snapshot.proxy_addr() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+                }
+            };
+
+            // Try hot-rebind if address changed
+            let (rebound, rebind_error) = if desired_addr != active_addr {
+                match crate::proxy::rebind_proxy(state.clone(), desired_addr).await {
+                    Ok(()) => (Some(true), None),
+                    Err(err) => (Some(false), Some(err)),
+                }
+            } else {
+                (None, None)
+            };
+
+            let new_active = state.get_active_proxy_addr().await;
+            let mut view = state.startup.view(new_active).await;
+            view.rebound = rebound;
+            view.rebind_error = rebind_error.clone();
+
+            // Log appropriate message
+            match (rebound, &rebind_error) {
+                (Some(true), _) => {
+                    state
+                        .log_info(
+                            "config",
+                            "Proxy listener rebound",
+                            format!("Proxy listener moved to {}", view.active_proxy_addr),
+                        )
+                        .await;
+                }
+                (Some(false), Some(err)) => {
+                    state
+                        .log_warn(
+                            "config",
+                            "Proxy rebind failed",
+                            format!(
+                                "Could not rebind to {}: {}. Saved for next launch.",
+                                view.proxy_addr, err
+                            ),
+                        )
+                        .await;
+                }
+                _ => {}
+            }
+
             Json(view).into_response()
         }
         Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
@@ -707,6 +742,10 @@ async fn logo_svg() -> Response {
     )
 }
 
+async fn bungee_font() -> Response {
+    binary_asset_response("font/ttf", include_bytes!("../web/fonts/Bungee-Regular.ttf"))
+}
+
 async fn styles_css() -> Response {
     asset_response("text/css; charset=utf-8", include_str!("../web/styles.css"))
 }
@@ -719,6 +758,14 @@ async fn app_js() -> Response {
 }
 
 fn asset_response(content_type: &'static str, body: &'static str) -> Response {
+    (
+        [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+        body,
+    )
+        .into_response()
+}
+
+fn binary_asset_response(content_type: &'static str, body: &'static [u8]) -> Response {
     (
         [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
         body,

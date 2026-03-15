@@ -86,5 +86,5 @@
   </g>
 
   <!-- "SNIPER" text at bottom -->
-  <text x="256" y="420" text-anchor="middle" font-family="'SF Pro Display', 'Inter', -apple-system, sans-serif" font-size="32" font-weight="700" letter-spacing="8" fill="#c9a96e" opacity="0.75">SNIPER</text>
+  <text x="256" y="420" text-anchor="middle" font-family="'Bungee', 'SF Pro Display', 'Inter', -apple-system, sans-serif" font-size="36" font-weight="400" letter-spacing="10" fill="#c9a96e" opacity="0.8">SNIPER</text>
 </svg>

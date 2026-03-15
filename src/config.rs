@@ -86,6 +86,10 @@ pub struct StartupSettingsView {
     pub active_proxy_addr: String,
     pub restart_required: bool,
     pub file_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebound: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebind_error: Option<String>,
 }
 
 pub struct StartupSettingsStore {
@@ -113,6 +117,8 @@ impl StartupSettingsStore {
                 .proxy_addr()
                 .map_or(true, |addr| addr != active_proxy_addr),
             file_path: self.path.display().to_string(),
+            rebound: None,
+            rebind_error: None,
         }
     }
 

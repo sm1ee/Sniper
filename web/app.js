@@ -25,6 +25,7 @@ function createDefaultFilterSettings() {
     },
     hiddenExtensions: "png,ico,css,woff,woff2,ttf,svg,jpg,jpeg,gif",
     port: "",
+    colorTags: new Set(),
   };
 }
 
@@ -80,9 +81,9 @@ const HISTORY_COLUMN_DEFS = {
   host: { label: "Host", cssClass: "col-host", sortKey: "host" },
   method: { label: "Method", cssClass: "col-method", sortKey: "method" },
   path: { label: "URL", cssClass: "col-url", sortKey: "path" },
-  status: { label: "Status code", cssClass: "col-status", sortKey: "status" },
-  length: { label: "Length", cssClass: "col-length", sortKey: "length" },
-  mime: { label: "MIME type", cssClass: "col-type", sortKey: "mime" },
+  status: { label: "Status", cssClass: "col-status", sortKey: "status" },
+  length: { label: "Length", cssClass: "col-length col-center", sortKey: "length" },
+  mime: { label: "MIME", cssClass: "col-type col-center", sortKey: "mime" },
   notes: { label: "Notes", cssClass: "col-notes", sortKey: "notes" },
   tls: { label: "TLS", cssClass: "col-tls", sortKey: "tls" },
   started_at: { label: "Time", cssClass: "col-time", sortKey: "started_at" },
@@ -333,6 +334,7 @@ const els = {
   filterStatusOther: document.getElementById("filterStatusOther"),
   filterHiddenExtensions: document.getElementById("filterHiddenExtensions"),
   filterPort: document.getElementById("filterPort"),
+  colorTagFilter: document.getElementById("colorTagFilter"),
   interceptTableBody: document.getElementById("interceptTableBody"),
   interceptDetailPath: document.getElementById("interceptDetailPath"),
   interceptDetailTitle: document.getElementById("interceptDetailTitle"),
@@ -618,6 +620,20 @@ function bindEvents() {
     scheduleRefresh();
   });
 
+  els.colorTagFilter.addEventListener("click", (event) => {
+    const btn = event.target.closest(".color-dot-btn");
+    if (!btn) return;
+    const color = btn.dataset.color;
+    if (state.filterSettings.colorTags.has(color)) {
+      state.filterSettings.colorTags.delete(color);
+      btn.classList.remove("active");
+    } else {
+      state.filterSettings.colorTags.add(color);
+      btn.classList.add("active");
+    }
+    scheduleRefresh();
+  });
+
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
   els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
@@ -698,7 +714,15 @@ function bindEvents() {
   });
   els.saveProxySettingsButton.addEventListener("click", () => {
     saveProxySettings()
-      .then(() => showToast("Proxy settings saved"))
+      .then((result) => {
+        if (result?.rebound === true) {
+          showToast(`Proxy listener moved to ${result.active_proxy_addr}`);
+        } else if (result?.rebound === false && result?.rebind_error) {
+          showToast(result.rebind_error, "error");
+        } else {
+          showToast("Proxy settings saved");
+        }
+      })
       .catch((error) => { console.error(error); showToast("Failed to save proxy settings", "error"); });
   });
   els.reloadProxySettingsButton.addEventListener("click", () => {
@@ -1780,6 +1804,7 @@ function renderProxyPanels() {
   const showProxySettings = state.activeProxyTab === "proxy-settings";
   const showPlaceholder = !showHistory && !showIntercept && !showWebsockets && !showMatchReplace && !showProxySettings;
 
+  els.colorTagFilter.classList.toggle("hidden", !showHistory);
   els.filterBar.classList.toggle("hidden", !showHistory);
   els.trafficRegion.classList.toggle("hidden", !showHistory);
   els.historyWorkbenchResizer.classList.toggle("hidden", !showHistory);
@@ -1861,6 +1886,7 @@ function renderHistory() {
   if (state.filterSettings.onlyParameterized) summary.push("parameterized only");
   if (state.filterSettings.onlyNotes) summary.push("notes only");
   if (state.filterSettings.searchTerm) summary.push(`advanced: ${state.filterSettings.searchTerm}`);
+  if (state.filterSettings.colorTags?.size) summary.push(`color: ${[...state.filterSettings.colorTags].join(", ")}`);
   summary.push(`sort: ${humanizeSortKey(state.sortKey)} ${state.sortDirection}`);
   els.historyMeta.textContent = `Filter settings: ${summary.join(" | ")}`;
   renderSortHeaders();
@@ -2460,9 +2486,13 @@ function renderProxySettings() {
   els.proxySettingsStartupPath.textContent = startup?.file_path || state.settings.data_dir;
   els.proxySettingsCertificateName.textContent = `${state.settings.certificate.common_name} · expires ${formatTimestamp(state.settings.certificate.expires_at)}`;
   els.proxySettingListenerHelp.textContent = startup
-    ? startup.restart_required
-      ? `Saved ${startup.proxy_addr} for the next launch. Restart Sniper to replace the active listener ${startup.active_proxy_addr}.`
-      : `Proxy listener is already running on ${startup.active_proxy_addr}. Changes here apply on the next launch.`
+    ? startup.rebound === true
+      ? `Proxy listener is now running on ${startup.active_proxy_addr}.`
+      : startup.rebind_error
+        ? `${startup.rebind_error} Saved ${startup.proxy_addr} for the next launch.`
+        : startup.restart_required
+          ? `Saved ${startup.proxy_addr} for the next launch. Restart Sniper to replace the active listener ${startup.active_proxy_addr}.`
+          : `Proxy listener is running on ${startup.active_proxy_addr}.`
     : "Changes are saved for the next app start.";
 }
 
@@ -3036,10 +3066,18 @@ async function saveProxySettings() {
   }
 
   state.runtime = await runtimeResponse.json();
-  state.settings.startup = await startupResponse.json();
+  const startupResult = await startupResponse.json();
+  state.settings.startup = startupResult;
+
+  // If proxy was rebound, update the main proxy_addr in settings too
+  if (startupResult.rebound === true) {
+    state.settings.proxy_addr = startupResult.active_proxy_addr;
+  }
+
   renderInterceptStatus();
   renderProxySettings();
   renderHistory();
+  return startupResult;
 }
 
 async function forwardSelectedIntercept() {
@@ -3788,9 +3826,9 @@ function renderHistoryCell(colKey, item, entry) {
     case "status":
       return `<td><span class="status-pill-row ${statusTone(item.status)}">${escapeHtml(formatStatus(item.status))}</span></td>`;
     case "length":
-      return `<td>${escapeHtml(formatSize((item.request_bytes ?? 0) + (item.response_bytes ?? 0)))}</td>`;
+      return `<td class="col-center">${escapeHtml(formatSize((item.request_bytes ?? 0) + (item.response_bytes ?? 0)))}</td>`;
     case "mime":
-      return `<td>${escapeHtml(inferMimeType(item))}</td>`;
+      return `<td class="col-center">${escapeHtml(inferMimeType(item))}</td>`;
     case "notes": {
       const tagDot = item.color_tag ? `<span class="row-color-tag row-color-tag-${escapeHtml(item.color_tag)}"></span>` : "";
       const noteIndicator = item.has_user_note ? `<span class="note-icon" title="Has note">\ud83d\udcdd</span>` : "";
@@ -4022,6 +4060,7 @@ function hydrateFilterForm() {
   els.filterStatusOther.checked = filters.status.other;
   els.filterHiddenExtensions.value = filters.hiddenExtensions;
   els.filterPort.value = filters.port;
+  syncColorTagFilterUI();
 }
 
 function applyFilterSettings() {
@@ -4051,6 +4090,7 @@ function applyFilterSettings() {
     },
     hiddenExtensions: els.filterHiddenExtensions.value.trim(),
     port: els.filterPort.value.trim(),
+    colorTags: state.filterSettings.colorTags,
   };
   closeFilterModal();
   scheduleRefresh();
@@ -5412,6 +5452,10 @@ function matchesAdvancedFilters(item) {
     return false;
   }
 
+  if (!matchesColorTagFilter(item)) {
+    return false;
+  }
+
   return matchesAdvancedSearch(item);
 }
 
@@ -5464,6 +5508,21 @@ function matchesPortFilter(item) {
 
   const port = item.host.split(":")[1] || "";
   return port === state.filterSettings.port;
+}
+
+function matchesColorTagFilter(item) {
+  const tags = state.filterSettings.colorTags;
+  if (!tags || tags.size === 0) {
+    return true;
+  }
+  return tags.has(item.color_tag);
+}
+
+function syncColorTagFilterUI() {
+  const tags = state.filterSettings.colorTags;
+  els.colorTagFilter.querySelectorAll(".color-dot-btn").forEach((btn) => {
+    btn.classList.toggle("active", tags.has(btn.dataset.color));
+  });
 }
 
 function matchesAdvancedSearch(item) {

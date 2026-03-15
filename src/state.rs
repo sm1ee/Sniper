@@ -1,4 +1,5 @@
 use std::{
+    net::SocketAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -12,6 +13,7 @@ use reqwest::StatusCode;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 
 use crate::{
     certificate::{CertificateAuthority, CertificateExport},
@@ -38,6 +40,10 @@ pub struct AppState {
     pub proxy_online: Arc<AtomicBool>,
     active_session: Arc<RwLock<Arc<SessionContext>>>,
     app_version_cache: Arc<RwLock<Option<CachedAppVersionInfo>>>,
+    /// The currently active proxy listener address (mutable — updated on rebind).
+    pub active_proxy_addr: Arc<RwLock<SocketAddr>>,
+    /// Handle for the running proxy task so it can be aborted on rebind.
+    proxy_task: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl AppState {
@@ -54,6 +60,7 @@ impl AppState {
             MAX_WEBSOCKET_FRAMES_PER_SESSION,
         )?;
 
+        let active_proxy_addr = config.proxy_addr;
         Ok(Self {
             config,
             certificates,
@@ -63,6 +70,8 @@ impl AppState {
             proxy_online: Arc::new(AtomicBool::new(false)),
             active_session: Arc::new(RwLock::new(active_session)),
             app_version_cache: Arc::new(RwLock::new(None)),
+            active_proxy_addr: Arc::new(RwLock::new(active_proxy_addr)),
+            proxy_task: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -121,10 +130,34 @@ impl AppState {
         Ok(session.summary(session.id() == self.sessions.active_session_id()))
     }
 
+    pub async fn get_active_proxy_addr(&self) -> SocketAddr {
+        *self.active_proxy_addr.read().await
+    }
+
+    pub async fn set_active_proxy_addr(&self, addr: SocketAddr) {
+        *self.active_proxy_addr.write().await = addr;
+    }
+
+    pub async fn set_proxy_task(&self, handle: JoinHandle<()>) {
+        let mut guard = self.proxy_task.write().await;
+        if let Some(old) = guard.take() {
+            old.abort();
+        }
+        *guard = Some(handle);
+    }
+
+    pub async fn abort_proxy_task(&self) {
+        let mut guard = self.proxy_task.write().await;
+        if let Some(old) = guard.take() {
+            old.abort();
+        }
+    }
+
     pub async fn runtime_info(&self) -> RuntimeInfo {
         let session = self.session().await;
+        let active_addr = self.get_active_proxy_addr().await;
         RuntimeInfo {
-            proxy_addr: self.config.proxy_addr.to_string(),
+            proxy_addr: active_addr.to_string(),
             ui_addr: self.config.ui_addr.to_string(),
             max_entries: self.config.max_entries,
             body_preview_bytes: self.config.body_preview_bytes,
@@ -163,7 +196,7 @@ impl AppState {
             ],
             certificate: self.certificates.export().clone(),
             runtime: session.runtime.snapshot().await,
-            startup: self.startup.view(self.config.proxy_addr).await,
+            startup: self.startup.view(active_addr).await,
             active_session: self.active_session_summary().await,
         }
     }
