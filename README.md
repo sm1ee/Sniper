@@ -13,6 +13,10 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" />
 </p>
 
+<p align="center">
+  <img src="web/screenshot.png" width="800" alt="Sniper UI" />
+</p>
+
 ---
 
 ## Features
