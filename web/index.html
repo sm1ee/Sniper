@@ -1,0 +1,1091 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sniper</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="toast-container" id="toastContainer"></div>
+    <div class="app-shell">
+      <header class="top-strip">
+        <nav class="main-tabs" aria-label="Main tools">
+          <button class="main-tab" data-tool="dashboard">Session</button>
+          <button class="main-tab" data-tool="target">Scope</button>
+          <button class="main-tab active" data-tool="proxy">Capture</button>
+          <button class="main-tab" data-tool="fuzzer">Fuzzer</button>
+          <button class="main-tab" data-tool="replay">Replay</button>
+          <button class="main-tab" data-tool="tools">Tools</button>
+          <button class="main-tab" data-tool="logger">Logger</button>
+        </nav>
+
+        <div class="top-utilities">
+          <span class="proxy-status-indicator offline" id="proxyStatusIndicator" title="Proxy offline">
+            <span class="proxy-status-dot"></span>
+            <span class="proxy-status-label" id="proxyStatusLabel">Proxy</span>
+          </span>
+          <span class="utility-version" id="appVersionLabel" title="Current version">v...</span>
+          <a
+            class="utility-button hidden"
+            id="openUpdateButton"
+            href="https://github.com/sm1ee/Sniper/releases"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Update
+          </a>
+          <button class="utility-button icon-button" id="openDisplaySettingsButton" type="button" aria-label="Settings" title="Settings">&#9881;</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="dashboard-shell hidden" id="dashboardShell">
+          <section class="split-panel split-panel-tight">
+            <section class="panel-card">
+              <header class="panel-toolbar">
+                <div>
+                  <p class="placeholder-kicker">Workspace</p>
+                  <h2 id="dashboardCurrentSessionName">Current session</h2>
+                </div>
+                <div class="toolbar-actions">
+                  <span class="detail-chip info" id="dashboardCurrentSessionStatus">Active</span>
+                </div>
+              </header>
+              <dl class="modal-list runtime-list">
+                <dt>Storage path</dt>
+                <dd id="dashboardCurrentSessionPath">Loading...</dd>
+                <dt>Requests</dt>
+                <dd id="dashboardCurrentSessionRequests">0</dd>
+                <dt>WebSockets</dt>
+                <dd id="dashboardCurrentSessionWebsockets">0</dd>
+                <dt>Event log</dt>
+                <dd id="dashboardCurrentSessionEvents">0</dd>
+                <dt>Fuzzer runs</dt>
+                <dd id="dashboardCurrentSessionFuzzer">0</dd>
+                <dt>Replace rules</dt>
+                <dd id="dashboardCurrentSessionRules">0</dd>
+                <dt>Created</dt>
+                <dd id="dashboardCurrentSessionCreated">-</dd>
+                <dt>Last opened</dt>
+                <dd id="dashboardCurrentSessionOpened">-</dd>
+              </dl>
+            </section>
+
+            <section class="panel-card">
+              <header class="panel-toolbar">
+                <div>
+                  <p class="placeholder-kicker">Sessions</p>
+                  <h2>Create a new session</h2>
+                </div>
+                <div class="toolbar-actions">
+                  <button class="secondary-action" id="dashboardReloadSessionsButton" type="button">Reload</button>
+                </div>
+              </header>
+              <div class="settings-form">
+                <label class="settings-field">
+                  <span>Session name</span>
+                  <input
+                    id="dashboardCreateSessionName"
+                    type="text"
+                    placeholder="Bug bounty run, staging review, mobile replay"
+                  />
+                  <small>Create a session to keep traffic, rules, notes, and runtime state isolated.</small>
+                </label>
+                <div class="toolbar-actions">
+                  <button class="primary-action" id="dashboardCreateSessionButton" type="button">Create</button>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <section class="panel-card">
+            <header class="panel-toolbar">
+              <div>
+                <p class="placeholder-kicker">History</p>
+                <h2>Recent sessions</h2>
+              </div>
+            </header>
+            <div class="history-table-shell">
+              <table class="mini-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Requests</th>
+                    <th>WebSockets</th>
+                    <th>Events</th>
+                    <th>Rules</th>
+                    <th>Last opened</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="dashboardSessionsBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="proxy-shell" id="proxyShell">
+          <nav class="sub-tabs" aria-label="Capture tools">
+            <button class="sub-tab" data-proxy-tab="intercept">Intercept</button>
+            <button class="sub-tab active" data-proxy-tab="http-history">HTTP</button>
+            <button class="sub-tab" data-proxy-tab="websockets-history">Web Socket</button>
+            <button class="sub-tab" data-proxy-tab="replace">Replace</button>
+            <button class="sub-tab" data-proxy-tab="proxy-settings">Settings</button>
+          </nav>
+
+          <section class="filter-bar" id="filterBar">
+            <button class="filter-summary" id="historyMeta" type="button">
+              Filter settings: showing captured traffic
+            </button>
+
+            <label class="search-box" aria-label="Search history">
+              <input id="searchInput" type="search" placeholder="Host, path, method" />
+            </label>
+
+            <label class="select-box select-box-compact" aria-label="Filter method">
+              <select id="methodFilter">
+                <option value="">All</option>
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="PATCH">PATCH</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+            </label>
+
+            <div class="filter-actions">
+              <button class="secondary-action" id="openFilterSettingsButton" type="button">
+                Filter
+              </button>
+            </div>
+          </section>
+
+          <section class="traffic-region" id="trafficRegion">
+            <div class="history-table-shell">
+              <table class="history-table" id="historyTable">
+                <thead>
+                  <tr></tr>
+                </thead>
+                <tbody id="historyTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <div class="stack-resizer" id="historyWorkbenchResizer" role="separator" aria-orientation="horizontal" aria-label="Resize history and message panes"></div>
+
+          <section class="lower-workbench" id="lowerWorkbench">
+            <section class="message-column request-column" id="requestColumn">
+              <header class="pane-header">
+                <strong>Request</strong>
+                <div class="view-tabs">
+                  <button class="view-tab active" data-target="request" data-view="pretty">Pretty</button>
+                  <button class="view-tab" data-target="request" data-view="raw">Raw</button>
+                  <button class="view-tab" data-target="request" data-view="hex">Hex</button>
+                  <button class="view-tab diff-tab hidden" data-target="request" data-view="diff">Diff</button>
+                </div>
+              </header>
+              <div class="editor-shell">
+                <div class="code-gutter" id="requestLines"></div>
+                    <pre class="code-view" id="requestView" tabindex="0" aria-label="Request message view">Select a transaction from HTTP.</pre>
+              </div>
+              <footer class="pane-footer">
+                <label class="pane-search" aria-label="Search request">
+                  <input id="requestSearchInput" type="search" placeholder="Search request" />
+                </label>
+                <span id="requestSearchMeta">No highlights</span>
+              </footer>
+            </section>
+
+            <div class="pane-resizer" id="requestResponseResizer" data-resizer="request-response" role="separator" aria-orientation="vertical" aria-label="Resize request and response panes"></div>
+
+            <section class="message-column response-column" id="responseColumn">
+              <header class="pane-header">
+                <strong>Response</strong>
+                <div class="view-tabs">
+                  <button class="view-tab active" data-target="response" data-view="pretty">Pretty</button>
+                  <button class="view-tab" data-target="response" data-view="raw">Raw</button>
+                  <button class="view-tab" data-target="response" data-view="hex">Hex</button>
+                  <button class="view-tab diff-tab hidden" data-target="response" data-view="diff">Diff</button>
+                </div>
+              </header>
+              <div class="editor-shell">
+                <div class="code-gutter" id="responseLines"></div>
+                <pre class="code-view" id="responseView" tabindex="0" aria-label="Response message view">No response selected.</pre>
+              </div>
+              <footer class="pane-footer">
+                <label class="pane-search" aria-label="Search response">
+                  <input id="responseSearchInput" type="search" placeholder="Search response" />
+                </label>
+                <span id="responseSearchMeta">No highlights</span>
+              </footer>
+            </section>
+
+            <div class="pane-resizer" id="responseInspectorResizer" data-resizer="response-inspector" role="separator" aria-orientation="vertical" aria-label="Resize response and inspector panes"></div>
+
+            <section class="message-column inspector-column">
+              <div class="inspector-layout">
+                <div class="inspector-main">
+                  <header class="pane-header inspector-header">
+                    <div>
+                      <strong id="detailTitle">Inspector</strong>
+                      <div class="detail-tags" id="detailTags"></div>
+                    </div>
+                    <button class="pane-close" id="closeInspectorButton" type="button">&times;</button>
+                  </header>
+                  <div class="inspector-content" id="inspectorContent">
+                    <section class="inspector-section">
+                      <button class="section-toggle" type="button">
+                        <span>Attributes</span>
+                        <span class="section-count" id="attributesCount">0</span>
+                      </button>
+                      <div class="section-body">
+                        <div class="protocol-strip" id="protocolStrip"></div>
+                        <dl class="summary-list" id="summaryList"></dl>
+                      </div>
+                    </section>
+                    <section class="inspector-section">
+                      <button class="section-toggle" type="button">
+                        <span>Request headers</span>
+                        <span class="section-count" id="requestHeaderCount">0</span>
+                      </button>
+                      <div class="section-body" id="requestHeadersBody"></div>
+                    </section>
+                    <section class="inspector-section">
+                      <button class="section-toggle" type="button">
+                        <span>Response headers</span>
+                        <span class="section-count" id="responseHeaderCount">0</span>
+                      </button>
+                      <div class="section-body" id="responseHeadersBody"></div>
+                    </section>
+                    <div class="notes-panel" id="notesPanel">
+                      <h3>Notes</h3>
+                      <div id="notesCard"><p>No anomalies were recorded for this transaction.</p></div>
+                    </div>
+                  </div>
+                </div>
+                <nav class="inspector-rail">
+                  <button class="rail-tab active" data-inspector-tab="inspector" type="button">Inspector</button>
+                  <button class="rail-tab" data-inspector-tab="notes" type="button">Notes</button>
+                </nav>
+              </div>
+            </section>
+
+          </section>
+
+          <section class="proxy-panel hidden" id="interceptPanel">
+            <div class="split-panel">
+              <section class="panel-card">
+                <header class="panel-toolbar">
+                  <div>
+                    <p class="placeholder-kicker">Request hold</p>
+                    <h2>Held requests</h2>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="toggle-pill" id="interceptStatus" type="button">
+                      Intercept is off
+                    </button>
+                    <button class="secondary-action" id="refreshInterceptsButton" type="button">Refresh</button>
+                  </div>
+                </header>
+                <div class="history-table-shell">
+                  <table class="mini-table">
+                    <thead>
+                      <tr>
+                        <th>Method</th>
+                        <th>Host</th>
+                        <th>Path</th>
+                        <th>Type</th>
+                        <th>Time</th>
+                      </tr>
+                    </thead>
+                    <tbody id="interceptTableBody"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section class="panel-card">
+                <header class="panel-toolbar">
+                  <div>
+                    <p class="placeholder-kicker" id="interceptDetailPath">Intercept</p>
+                    <h2 id="interceptDetailTitle">No request selected</h2>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="secondary-action" id="dropInterceptButton" type="button">Drop</button>
+                    <button class="primary-action" id="forwardInterceptButton" type="button">Forward</button>
+                  </div>
+                </header>
+                <div class="editor-panel">
+                  <div class="replay-highlight-shell">
+                    <pre id="interceptRequestHighlight" class="simple-code-view replay-highlight-view" aria-hidden="true"></pre>
+                    <textarea id="interceptRequestEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Select an intercepted request to edit and forward it."></textarea>
+                  </div>
+                </div>
+                <footer class="pane-footer">
+                  <span id="interceptMeta">Intercept is empty.</span>
+                </footer>
+              </section>
+            </div>
+          </section>
+
+          <section class="proxy-panel hidden" id="websocketPanel">
+            <div class="stack-panel">
+              <section class="panel-card panel-card-top">
+                <header class="panel-toolbar">
+                  <div>
+                    <p class="placeholder-kicker">Web Socket</p>
+                    <h2>Captured sessions</h2>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="secondary-action" id="refreshWebsocketsButton" type="button">Refresh</button>
+                  </div>
+                </header>
+                <div class="filter-bar websocket-filter-bar">
+                  <div class="filter-summary websocket-filter-summary" id="websocketMeta" aria-live="polite">
+                    Loading captured WebSocket sessions.
+                  </div>
+                  <label class="search-box" for="websocketSearchInput">
+                    <span>Filter</span>
+                    <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" />
+                  </label>
+                </div>
+                <div class="history-table-shell">
+                  <table class="mini-table">
+                    <thead>
+                      <tr>
+                        <th>Host</th>
+                        <th>Path</th>
+                        <th>Status</th>
+                        <th>Frames</th>
+                        <th>Duration</th>
+                        <th>Time</th>
+                      </tr>
+                    </thead>
+                    <tbody id="websocketTableBody"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section class="websocket-workbench" id="websocketWorkbench">
+                <section class="panel-card websocket-handshake-column" id="websocketHandshakeColumn">
+                  <header class="panel-toolbar">
+                    <div>
+                      <p class="placeholder-kicker">Handshake</p>
+                      <h2 id="websocketDetailTitle">No session selected</h2>
+                    </div>
+                  </header>
+                  <div class="dual-code-panel">
+                    <div class="simple-code-card">
+                      <h3>Request</h3>
+                      <pre id="websocketRequestView" class="simple-code-view">Select a WebSocket session.</pre>
+                    </div>
+                    <div class="simple-code-card">
+                      <h3>Response</h3>
+                      <pre id="websocketResponseView" class="simple-code-view">No response selected.</pre>
+                    </div>
+                  </div>
+                </section>
+                <div class="pane-resizer" id="websocketSplitResizer" aria-hidden="true"></div>
+
+                <section class="panel-card websocket-frames-column" id="websocketFramesColumn">
+                  <header class="panel-toolbar">
+                    <div>
+                      <p class="placeholder-kicker">Frames</p>
+                      <h2>Captured frames</h2>
+                    </div>
+                  </header>
+                  <div class="history-table-shell">
+                    <table class="mini-table frame-table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Direction</th>
+                          <th>Kind</th>
+                          <th>Size</th>
+                          <th>Preview</th>
+                        </tr>
+                      </thead>
+                      <tbody id="websocketFramesBody"></tbody>
+                    </table>
+                  </div>
+                </section>
+              </section>
+            </div>
+          </section>
+
+          <section class="proxy-panel hidden" id="matchReplacePanel">
+            <div class="split-panel split-panel-tight">
+              <section class="panel-card">
+                <header class="panel-toolbar">
+                  <div>
+                    <p class="placeholder-kicker">Proxy</p>
+                    <h2>Replace rules</h2>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="danger-action" id="deleteMatchReplaceRuleButton" type="button" disabled>Delete</button>
+                  </div>
+                </header>
+                <div class="history-table-shell">
+                  <table class="mini-table">
+                    <thead>
+                      <tr>
+                        <th>On</th>
+                        <th>Name</th>
+                        <th>Scope</th>
+                        <th>Target</th>
+                      </tr>
+                    </thead>
+                    <tbody id="matchReplaceTableBody"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section class="panel-card">
+                <header class="panel-toolbar">
+                  <div>
+                    <p class="placeholder-kicker" id="matchReplaceEditorPath">Rule</p>
+                    <h2 id="matchReplaceEditorTitle">New rule</h2>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="primary-action" id="saveMatchReplaceRuleButton" type="button">Add</button>
+                  </div>
+                </header>
+                <div class="settings-form">
+                  <label class="settings-toggle">
+                    <input id="matchReplaceEnabled" type="checkbox" />
+                    <span>Rule enabled</span>
+                  </label>
+                  <label class="settings-field">
+                    <span>Description</span>
+                    <input id="matchReplaceDescription" type="text" placeholder="Rewrite a staging hostname or remove a debug header" />
+                  </label>
+                  <label class="settings-field">
+                    <span>Scope</span>
+                    <select id="matchReplaceScope">
+                      <option value="request">Request</option>
+                      <option value="response">Response</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    <span>Target</span>
+                    <select id="matchReplaceTarget">
+                      <option value="any">Any</option>
+                      <option value="path">Path</option>
+                      <option value="header_name">Header name</option>
+                      <option value="header_value">Header value</option>
+                      <option value="body">Body</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    <span>Search</span>
+                    <input id="matchReplaceSearch" type="text" placeholder="foo.example.com" />
+                  </label>
+                  <label class="settings-field">
+                    <span>Replace</span>
+                    <input id="matchReplaceReplace" type="text" placeholder="bar.example.com" />
+                  </label>
+                  <label class="settings-toggle">
+                    <input id="matchReplaceRegex" type="checkbox" />
+                    <span>Regex</span>
+                  </label>
+                  <label class="settings-toggle">
+                    <input id="matchReplaceCaseSensitive" type="checkbox" />
+                    <span>Case sensitive</span>
+                  </label>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="proxy-panel hidden" id="proxySettingsPanel">
+            <div class="split-panel split-panel-tight">
+              <section class="panel-card">
+                <header class="panel-toolbar">
+                  <div>
+                    <p class="placeholder-kicker">Runtime</p>
+                    <h2>Settings</h2>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="secondary-action" id="reloadProxySettingsButton" type="button">Reload</button>
+                    <button class="primary-action" id="saveProxySettingsButton" type="button">Save</button>
+                  </div>
+                </header>
+                <div class="settings-form">
+                  <label class="settings-toggle">
+                    <input id="proxySettingIntercept" type="checkbox" />
+                    <span>Enable request hold</span>
+                  </label>
+                  <label class="settings-toggle">
+                    <input id="proxySettingWebsocketCapture" type="checkbox" />
+                    <span>Capture WebSocket sessions and frames</span>
+                  </label>
+                  <label class="settings-field">
+                    <span>Scope patterns</span>
+                    <textarea id="proxySettingScopePatterns" rows="6" placeholder="*.example.com&#10;api.example.com"></textarea>
+                    <small>Only in-scope hosts are intercepted when intercept is enabled. Leave empty to match all hosts.</small>
+                  </label>
+                  <label class="settings-field">
+                    <span>SSL passthrough hosts</span>
+                    <textarea id="proxySettingPassthroughHosts" rows="4" placeholder="*.pinned-app.com&#10;banking.example.com"></textarea>
+                    <small>Hosts listed here bypass TLS interception entirely. Use for certificate-pinned apps that reject the proxy CA. Wildcards supported.</small>
+                  </label>
+                  <label class="settings-field">
+                    <span>Proxy bind host</span>
+                    <input id="proxySettingBindHost" type="text" list="proxyBindHostPresets" placeholder="127.0.0.1 or 0.0.0.0" />
+                    <small>Common values: <code>127.0.0.1</code> for local-only, <code>0.0.0.0</code> to accept traffic from other devices.</small>
+                  </label>
+                  <label class="settings-field">
+                    <span>Proxy port</span>
+                    <input id="proxySettingPort" type="number" min="1" max="65535" placeholder="18080" />
+                    <small id="proxySettingListenerHelp">Changes are saved for the next app start.</small>
+                  </label>
+                  <datalist id="proxyBindHostPresets">
+                    <option value="127.0.0.1"></option>
+                    <option value="0.0.0.0"></option>
+                    <option value="::1"></option>
+                  </datalist>
+                </div>
+              </section>
+
+              <section class="panel-card">
+                <header class="panel-toolbar">
+                  <div>
+                    <p class="placeholder-kicker">Workspace</p>
+                    <h2>Runtime details</h2>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="secondary-action" id="proxySettingsPemButton" type="button">Export PEM</button>
+                    <button class="secondary-action" id="proxySettingsDerButton" type="button">Export DER</button>
+                  </div>
+                </header>
+                <dl class="modal-list runtime-list">
+                  <dt>Proxy listener</dt>
+                  <dd id="proxySettingsProxyAddr">Loading...</dd>
+                  <dt>Next launch proxy</dt>
+                  <dd id="proxySettingsNextProxyAddr">Loading...</dd>
+                  <dt>UI listener</dt>
+                  <dd id="proxySettingsUiAddr">Loading...</dd>
+                  <dt>Capture cap</dt>
+                  <dd id="proxySettingsCaptureCap">Loading...</dd>
+                  <dt>Bootstrap host</dt>
+                  <dd id="proxySettingsBootstrap">Loading...</dd>
+                  <dt>Data directory</dt>
+                  <dd id="proxySettingsDataDir">Loading...</dd>
+                  <dt>Startup settings</dt>
+                  <dd id="proxySettingsStartupPath">Loading...</dd>
+                  <dt>Root CA</dt>
+                  <dd id="proxySettingsCertificateName">Loading...</dd>
+                </dl>
+              </section>
+            </div>
+          </section>
+
+          <section class="proxy-sub-placeholder hidden" id="proxySubPlaceholder">
+            <div class="placeholder-card">
+              <p class="placeholder-kicker" id="proxySubPath">Proxy</p>
+              <h2 id="proxySubTitle">HTTP is active</h2>
+              <p id="proxySubDescription">
+                This Proxy surface will be wired into the same transport and storage pipeline next.
+              </p>
+            </div>
+          </section>
+        </section>
+
+        <section class="replay-shell hidden" id="replayShell">
+          <div class="replay-tab-strip">
+            <div class="replay-tab-list" id="replayTabStrip"></div>
+            <button class="utility-button replay-tab-add" id="newReplayTabButton" type="button" aria-label="New replay tab">+</button>
+          </div>
+
+          <header class="replay-toolbar">
+            <div class="replay-toolbar-actions">
+              <button class="primary-action replay-send-button" id="sendReplayButton" type="button">Send</button>
+              <button class="secondary-action" id="resetReplayButton" type="button">Reset</button>
+              <button class="secondary-action replay-history-button" id="replayBackButton" type="button" aria-label="Previous replay history">&lt;</button>
+              <button class="secondary-action replay-history-button" id="replayForwardButton" type="button" aria-label="Next replay history">&gt;</button>
+            </div>
+            <div class="replay-target-cluster">
+              <div class="replay-target-bar">
+                <label class="compact-field compact-field-scheme">
+                  <span>Scheme</span>
+                  <select id="replaySchemeSelect">
+                    <option value="https">HTTPS</option>
+                    <option value="http">HTTP</option>
+                  </select>
+                </label>
+                <label class="compact-field replay-target-field">
+                  <span>Target host</span>
+                  <input id="replayHostInput" type="text" placeholder="api.example.com" />
+                </label>
+                <label class="compact-field compact-field-port">
+                  <span>Port</span>
+                  <input id="replayPortInput" type="number" min="1" max="65535" placeholder="443" />
+                </label>
+              </div>
+            </div>
+          </header>
+
+          <section class="split-panel replay-workbench">
+            <section class="panel-card">
+              <header class="panel-toolbar replay-panel-toolbar">
+                <h2>Request</h2>
+              </header>
+              <div class="editor-panel">
+                <div class="replay-highlight-shell">
+                  <pre id="replayRequestHighlight" class="simple-code-view replay-highlight-view" aria-hidden="true"></pre>
+                  <textarea id="replayRequestEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Paste or send a captured request here."></textarea>
+                </div>
+              </div>
+              <footer class="pane-footer">
+                <label class="pane-search">
+                  <input id="replayRequestSearchInput" type="search" placeholder="Search request" />
+                </label>
+                <span id="replayRequestSearchMeta">No highlights · 1 lines · Pretty view</span>
+              </footer>
+            </section>
+
+            <section class="panel-card">
+              <header class="panel-toolbar replay-panel-toolbar">
+                <h2>Response</h2>
+                <p class="inline-copy replay-response-copy" id="replayResponseMeta">No response yet.</p>
+              </header>
+              <div class="editor-panel">
+                <pre id="replayResponseView" class="simple-code-view replay-response-view">Send a request from Replay to capture the response here.</pre>
+              </div>
+              <footer class="pane-footer">
+                <label class="pane-search">
+                  <input id="replayResponseSearchInput" type="search" placeholder="Search response" />
+                </label>
+                <span id="replayResponseSearchMeta">No highlights · 1 lines · Pretty view</span>
+              </footer>
+            </section>
+          </section>
+        </section>
+
+        <section class="tools-shell hidden" id="toolsShell">
+          <section class="tools-workbench">
+            <section class="panel-card tools-input-card">
+              <div>
+                <div class="panel-toolbar">
+                  <div>
+                    <h2>Tools</h2>
+                    <p class="inline-copy" id="toolsMeta">Loading decoder tools...</p>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="secondary-action" id="toolsClearButton" type="button">Clear</button>
+                  </div>
+                </div>
+                <div class="tools-tool-strip">
+                  <ul id="tabs" class="tools-tool-list">
+                    <li id="hash" class="on">Hash</li>
+                    <li id="hmac">HMAC</li>
+                    <li id="crc">CRC</li>
+                    <li id="cipher">Cipher</li>
+                    <li id="net">Net</li>
+                    <li id="time">Time</li>
+                    <li id="number">Num</li>
+                    <li id="string">Strings</li>
+                    <li id="encode">Encode</li>
+                    <li id="jwt">JWT</li>
+                    <li id="json">JSON</li>
+                    <li id="morse">Morse</li>
+                    <li id="password">Password</li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="tools-input-stack">
+                <label class="tools-field" for="input-value">
+                  <span>Input</span>
+                  <textarea
+                    id="input-value"
+                    class="request-editor tools-input-editor"
+                    data-autosize="decoder"
+                    spellcheck="false"
+                    placeholder="Paste text, tokens, payloads, JSON, JWT, hashes, or network values here."
+                  ></textarea>
+                </label>
+
+                <label class="tools-field tools-inline-field" id="input-password-wrapper" style="display: none;" for="input-password">
+                  <span>Password</span>
+                  <input
+                    id="input-password"
+                    class="tools-inline-input"
+                    type="password"
+                    autocomplete="off"
+                    placeholder="Required for HMAC and cipher tools"
+                  />
+                </label>
+
+                <label class="tools-field tools-inline-field" id="input-url-wrapper" style="display: none;" for="input-url">
+                  <span>Attack payload URL</span>
+                  <input
+                    id="input-url"
+                    class="tools-inline-input"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="https://trusted.example@attacker.example"
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section class="panel-card tools-output-card">
+              <header class="panel-toolbar tools-output-toolbar">
+                <div>
+                  <h2 id="toolsActiveToolTitle">Hash outputs</h2>
+                  <p class="inline-copy" id="toolsOutputMeta">Click any result to copy it.</p>
+                </div>
+              </header>
+              <div id="output" class="tools-output-list">
+                <div class="tools-empty-state">Choose a decoder tool and start typing to see results here.</div>
+              </div>
+            </section>
+          </section>
+        </section>
+
+        <section class="fuzzer-shell hidden" id="fuzzerShell">
+          <header class="panel-toolbar replay-header">
+            <div>
+              <p class="inline-copy">Use <code>§payload§</code> markers or <code>{{PAYLOAD}}</code> placeholders in the request.</p>
+            </div>
+            <div class="toolbar-actions">
+              <button class="secondary-action" id="resetFuzzerButton" type="button">Reset</button>
+              <button class="primary-action" id="startFuzzerButton" type="button">Start</button>
+            </div>
+          </header>
+
+          <section class="fuzzer-layout">
+            <section class="panel-card">
+              <header class="panel-toolbar">
+                <h2>Request template</h2>
+              </header>
+              <div class="editor-panel">
+                <div class="replay-highlight-shell">
+                  <pre id="fuzzerRequestHighlight" class="simple-code-view replay-highlight-view" aria-hidden="true"></pre>
+                  <textarea id="fuzzerRequestEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Press Command+I in HTTP or paste a request template with markers."></textarea>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel-card">
+              <header class="panel-toolbar">
+                <h2>Payloads</h2>
+              </header>
+              <div class="editor-panel">
+                <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="one payload per line"></textarea>
+              </div>
+            </section>
+
+            <section class="panel-card fuzzer-results-card">
+              <header class="panel-toolbar">
+                <div>
+                  <h2>Run results</h2>
+                  <p class="inline-copy" id="fuzzerMeta">No fuzz run has been started yet.</p>
+                </div>
+              </header>
+              <div class="history-table-shell">
+                <table class="mini-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Payload</th>
+                      <th>Status</th>
+                      <th>Duration</th>
+                      <th>Response</th>
+                      <th>Transaction</th>
+                    </tr>
+                  </thead>
+                  <tbody id="fuzzerResultsBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+        </section>
+
+        <section class="target-shell hidden" id="targetShell">
+          <section class="split-panel split-panel-tight">
+            <section class="panel-card target-scope-card">
+              <header class="panel-toolbar">
+                <div>
+                  <p class="placeholder-kicker">Target</p>
+                  <h2>Scope</h2>
+                </div>
+                <div class="toolbar-actions">
+                  <button class="secondary-action" id="reloadTargetButton" type="button">Reload</button>
+                  <button class="primary-action" id="saveTargetScopeButton" type="button">Save</button>
+                </div>
+              </header>
+              <div class="target-scope-body">
+                <label class="settings-field target-scope-field">
+                  <span>In-scope hosts</span>
+                  <textarea id="targetScopeEditor" rows="4" placeholder="*.example.com&#10;api.example.com"></textarea>
+                  <small>These patterns are shared with intercept and filter settings.</small>
+                </label>
+              </div>
+            </section>
+
+            <section class="panel-card">
+              <header class="panel-toolbar">
+                <div>
+                  <p class="placeholder-kicker">Site map</p>
+                  <h2>Captured hosts and paths</h2>
+                </div>
+              </header>
+              <div class="target-tree" id="targetTree"></div>
+            </section>
+          </section>
+        </section>
+
+        <section class="logger-shell hidden" id="loggerShell">
+          <section class="panel-card">
+            <header class="panel-toolbar">
+              <div>
+                <p class="placeholder-kicker">Event log</p>
+                <h2>Runtime events</h2>
+              </div>
+              <div class="toolbar-actions">
+                <button class="secondary-action" id="clearEventLogButton" type="button">Clear</button>
+              </div>
+            </header>
+            <div class="history-table-shell">
+              <table class="mini-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Level</th>
+                    <th>Source</th>
+                    <th>Title</th>
+                    <th>Message</th>
+                  </tr>
+                </thead>
+                <tbody id="eventLogTableBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+      </main>
+
+      <footer class="status-bar">
+        <div class="status-left">
+          <button class="status-link" id="openEventLogButton" type="button">Event log</button>
+          <span id="eventLogStatus">0 entries</span>
+          <span id="footerMode">HTTP active</span>
+        </div>
+        <div class="status-right">
+          <span id="captureMode">Preview capture only</span>
+        </div>
+      </footer>
+    </div>
+
+    <div class="modal-backdrop hidden" id="filterModal">
+      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="filterModalTitle">
+        <header class="modal-header">
+          <div>
+            <p class="placeholder-kicker">HTTP</p>
+            <h2 id="filterModalTitle">Filter settings</h2>
+          </div>
+          <button class="modal-close" id="closeFilterModalButton" type="button">Close</button>
+        </header>
+
+        <div class="modal-body modal-grid">
+          <section class="filter-group">
+            <h3>Request type</h3>
+            <label class="settings-toggle"><input id="filterInScopeOnly" type="checkbox" /><span>Show only in-scope items</span></label>
+            <label class="settings-toggle"><input id="filterHideWithoutResponses" type="checkbox" /><span>Hide items without responses</span></label>
+            <label class="settings-toggle"><input id="filterOnlyParameterized" type="checkbox" /><span>Show only parameterized requests</span></label>
+            <label class="settings-toggle"><input id="filterOnlyNotes" type="checkbox" /><span>Show only items with notes</span></label>
+          </section>
+
+          <section class="filter-group">
+            <h3>Search term</h3>
+            <label class="settings-field">
+              <span>Advanced search</span>
+              <input id="filterSearchTerm" type="text" placeholder="Regex or plain text" />
+            </label>
+            <label class="settings-toggle"><input id="filterRegex" type="checkbox" /><span>Regex</span></label>
+            <label class="settings-toggle"><input id="filterCaseSensitive" type="checkbox" /><span>Case sensitive</span></label>
+            <label class="settings-toggle"><input id="filterNegativeSearch" type="checkbox" /><span>Negative search</span></label>
+          </section>
+
+          <section class="filter-group">
+            <h3>MIME type</h3>
+            <label class="settings-toggle"><input id="filterMimeHtml" type="checkbox" checked /><span>HTML</span></label>
+            <label class="settings-toggle"><input id="filterMimeScript" type="checkbox" checked /><span>Script</span></label>
+            <label class="settings-toggle"><input id="filterMimeJson" type="checkbox" checked /><span>JSON / text</span></label>
+            <label class="settings-toggle"><input id="filterMimeCss" type="checkbox" checked /><span>CSS</span></label>
+            <label class="settings-toggle"><input id="filterMimeImage" type="checkbox" checked /><span>Images</span></label>
+            <label class="settings-toggle"><input id="filterMimeOther" type="checkbox" checked /><span>Other</span></label>
+          </section>
+
+          <section class="filter-group">
+            <h3>Status code</h3>
+            <label class="settings-toggle"><input id="filterStatus2xx" type="checkbox" checked /><span>2xx</span></label>
+            <label class="settings-toggle"><input id="filterStatus3xx" type="checkbox" checked /><span>3xx</span></label>
+            <label class="settings-toggle"><input id="filterStatus4xx" type="checkbox" checked /><span>4xx</span></label>
+            <label class="settings-toggle"><input id="filterStatus5xx" type="checkbox" checked /><span>5xx</span></label>
+            <label class="settings-toggle"><input id="filterStatusOther" type="checkbox" checked /><span>Other / none</span></label>
+          </section>
+
+          <section class="filter-group filter-group-wide">
+            <h3>Extensions and listener</h3>
+            <label class="settings-field">
+              <span>Hide file extensions</span>
+              <input id="filterHiddenExtensions" type="text" placeholder="png,ico,css,woff,woff2,ttf,svg" />
+            </label>
+            <label class="settings-field">
+              <span>Port</span>
+              <input id="filterPort" type="text" placeholder="443" />
+            </label>
+          </section>
+        </div>
+
+        <div class="modal-actions">
+          <button class="secondary-action" id="resetFilterSettingsButton" type="button">Reset</button>
+          <button class="primary-action" id="applyFilterSettingsButton" type="button">Apply</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="displaySettingsModal">
+      <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="displaySettingsTitle">
+        <header class="modal-header">
+          <div>
+            <p class="placeholder-kicker">Application</p>
+            <h2 id="displaySettingsTitle">Settings</h2>
+          </div>
+          <button class="modal-close" id="closeDisplaySettingsButton" type="button">Close</button>
+        </header>
+
+        <div class="modal-body">
+          <div class="display-settings-grid">
+                <section class="filter-group">
+              <h3>Display</h3>
+              <label class="settings-field">
+                <span>Theme</span>
+                <select id="displayThemeSelect">
+                  <option value="charcoal">Charcoal</option>
+                  <option value="black">Black</option>
+                  <option value="graphite">Graphite</option>
+                  <option value="midnight">Midnight</option>
+                  <option value="slate">Slate</option>
+                  <option value="obsidian">Obsidian</option>
+                  <option value="dusk">Dusk</option>
+                  <option value="white">White</option>
+                  <option value="paper">Paper</option>
+                </select>
+              </label>
+
+              <label class="settings-field">
+                <span>Base text size (px)</span>
+                <input id="displaySizeInput" type="number" min="8" max="20" step="1" />
+                <small>Lower numbers make the whole workbench denser. The default is 12 px.</small>
+              </label>
+
+              <label class="settings-field">
+                <span>UI font</span>
+                <select id="displayUiFontSelect">
+                  <option value="plex">IBM Plex Sans</option>
+                  <option value="system">System UI</option>
+                  <option value="pretendard">Pretendard</option>
+                  <option value="notokr">Noto Sans KR</option>
+                  <option value="applekr">Apple SD Gothic Neo</option>
+                  <option value="nanumgothic">Nanum Gothic</option>
+                </select>
+              </label>
+
+              <label class="settings-field">
+                <span>Code font</span>
+                <select id="displayMonoFontSelect">
+                  <option value="jetbrains">JetBrains Mono</option>
+                  <option value="sfmono">SF Mono</option>
+                  <option value="plexmono">IBM Plex Mono</option>
+                  <option value="d2coding">D2Coding</option>
+                  <option value="nanumgothiccoding">Nanum Gothic Coding</option>
+                  <option value="notomonokr">Noto Sans Mono CJK KR</option>
+                </select>
+              </label>
+            </section>
+
+            <section class="filter-group">
+              <h3>Runtime</h3>
+              <dl class="modal-list modal-list-compact">
+                <dt>Proxy listener</dt>
+                <dd id="proxyAddr">Loading...</dd>
+                <dt>UI listener</dt>
+                <dd id="uiAddr">Loading...</dd>
+                <dt>Status</dt>
+                <dd><span class="status-pill settings-status online" id="liveStatus">Proxy live</span></dd>
+                <dt>Bootstrap host</dt>
+                <dd id="settingsSpecialHostHttp">http://sniper</dd>
+              </dl>
+            </section>
+
+            <section class="filter-group filter-group-wide">
+              <div class="filter-group-header">
+                <h3>Certificate authority</h3>
+                <div class="filter-group-actions">
+                  <button class="secondary-action" id="downloadPemButton" type="button">Export PEM</button>
+                  <button class="secondary-action" id="downloadDerButton" type="button">Export DER</button>
+                </div>
+              </div>
+              <p class="modal-copy" id="certificateNote">
+                Download the local root certificate and trust it before using HTTPS interception.
+              </p>
+
+              <dl class="modal-list">
+                <dt>Common name</dt>
+                <dd id="certificateName">Loading...</dd>
+                <dt>Valid until</dt>
+                <dd id="certificateExpiry">Loading...</dd>
+                <dt>PEM file</dt>
+                <dd id="certificatePemPath">Loading...</dd>
+                <dt>DER file</dt>
+                <dd id="certificateDerPath">Loading...</dd>
+                <dt>Data directory</dt>
+                <dd id="dataDir">Loading...</dd>
+                <dt>HTTPS bootstrap</dt>
+                <dd id="specialHostHttps">https://sniper</dd>
+              </dl>
+            </section>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button class="secondary-action" id="resetDisplaySettingsButton" type="button">Reset</button>
+          <button class="primary-action" id="applyDisplaySettingsButton" type="button">Apply</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="context-menu hidden" id="contextMenu">
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-action="send-to-replay" type="button">Send to Replay</button>
+        <button class="context-menu-item" data-action="send-to-fuzzer" type="button">Send to Fuzzer</button>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <span class="context-menu-label">Color tag</span>
+        <div class="context-menu-colors">
+          <button class="color-dot color-dot-red" data-color="red" type="button" title="Red"></button>
+          <button class="color-dot color-dot-orange" data-color="orange" type="button" title="Orange"></button>
+          <button class="color-dot color-dot-yellow" data-color="yellow" type="button" title="Yellow"></button>
+          <button class="color-dot color-dot-green" data-color="green" type="button" title="Green"></button>
+          <button class="color-dot color-dot-blue" data-color="blue" type="button" title="Blue"></button>
+          <button class="color-dot color-dot-purple" data-color="purple" type="button" title="Purple"></button>
+          <button class="color-dot color-dot-none" data-color="" type="button" title="Clear"></button>
+        </div>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <span class="context-menu-label">Note</span>
+        <input class="context-menu-note" id="contextMenuNote" type="text" placeholder="Add a note..." />
+      </div>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
