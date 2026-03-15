@@ -471,7 +471,7 @@ code {
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 100svh;
   height: 100svh;
-  padding: 12px;
+  padding: 0;
   gap: 0;
 }
 
@@ -482,13 +482,12 @@ code {
   gap: 12px;
   min-height: 52px;
   padding: 0 12px;
-  border: 1px solid var(--line-strong);
-  border-bottom: none;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border: none;
+  border-bottom: 1px solid var(--line-strong);
+  border-radius: 0;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%),
     linear-gradient(180deg, var(--top-strip-top) 0%, var(--top-strip-bottom) 100%);
-  box-shadow: var(--shadow);
 }
 
 .main-tabs,
@@ -671,12 +670,10 @@ code {
 .placeholder-screen {
   min-height: 0;
   height: 100%;
-  border: 1px solid var(--line-strong);
-  border-top: none;
-  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  border: none;
+  border-radius: 0;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%), var(--shell);
   overflow: hidden;
-  box-shadow: var(--shadow);
 }
 
 .dashboard-shell {
@@ -2684,10 +2681,11 @@ body.pane-resizing-y {
   justify-content: space-between;
   gap: 12px;
   min-height: 34px;
-  margin-top: 10px;
+  margin-top: 0;
   padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  border: none;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
   background: rgba(255, 255, 255, 0.02);
   color: var(--text-dim);
 }
@@ -2899,7 +2897,7 @@ body.pane-resizing-y {
 
 @media (max-width: 980px) {
   .app-shell {
-    padding: 10px;
+    padding: 0;
   }
 
   .filter-bar {
@@ -3050,7 +3048,7 @@ body.pane-resizing-y {
 
 @media (max-height: 920px) {
   .app-shell {
-    padding: 10px;
+    padding: 0;
   }
 
   .top-strip {
@@ -3108,7 +3106,7 @@ body.pane-resizing-y {
 
 @media (max-height: 760px) {
   .app-shell {
-    padding: 8px;
+    padding: 0;
   }
 
   .top-strip,
@@ -3159,13 +3157,13 @@ body.pane-resizing-y {
 
   .status-bar {
     min-height: 32px;
-    margin-top: 8px;
+    margin-top: 0;
   }
 }
 
 @media (max-width: 560px) {
   .app-shell {
-    padding: 8px;
+    padding: 0;
   }
 
   .metric-pill,
@@ -3192,4 +3190,39 @@ body.pane-resizing-y {
   .editor-shell {
     grid-template-columns: 1fr;
   }
+}
+
+/* Toast notifications */
+.toast-container {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  font-size: var(--font-sm);
+  color: #fff;
+  pointer-events: auto;
+  animation: toast-in 0.25s ease-out;
+  transition: opacity 0.3s ease;
+}
+
+.toast-success {
+  background: #22863a;
+}
+
+.toast-error {
+  background: #cb2431;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
 }

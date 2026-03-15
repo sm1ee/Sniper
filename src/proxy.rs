@@ -1,8 +1,8 @@
 use std::{
     convert::Infallible,
     net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Instant,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -573,23 +573,25 @@ fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
 
 fn text_response(status: StatusCode, message: impl Into<String>) -> Response<Body> {
     let message = message.into();
-    let mut response = Response::new(Body::from(message.clone()));
+    let len = message.len();
+    let mut response = Response::new(Body::from(message));
     *response.status_mut() = status;
     response.headers_mut().insert(
         CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
-    if let Ok(value) = HeaderValue::from_str(&message.len().to_string()) {
+    if let Ok(value) = HeaderValue::from_str(&len.to_string()) {
         response.headers_mut().insert(CONTENT_LENGTH, value);
     }
     response
 }
 
 fn build_local_response(status: StatusCode, headers: HeaderMap, body: Vec<u8>) -> Response<Body> {
-    let mut response = Response::new(Body::from(body.clone()));
+    let len = body.len();
+    let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
     *response.headers_mut() = headers;
-    if let Ok(value) = HeaderValue::from_str(&body.len().to_string()) {
+    if let Ok(value) = HeaderValue::from_str(&len.to_string()) {
         response.headers_mut().insert(CONTENT_LENGTH, value);
     }
     response
@@ -1656,7 +1658,19 @@ fn build_websocket_client_response_headers(
     Ok(headers)
 }
 
+static LAST_PERSIST: Mutex<Option<Instant>> = Mutex::new(None);
+const PERSIST_DEBOUNCE: Duration = Duration::from_secs(2);
+
 async fn persist_session_quiet(state: &Arc<AppState>, session: &Arc<SessionContext>) {
+    {
+        let mut last = LAST_PERSIST.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ts) = *last {
+            if ts.elapsed() < PERSIST_DEBOUNCE {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+    }
     if let Err(error) = state.persist_session_context(session).await {
         warn!(?error, session_id = %session.id(), "failed to persist session snapshot");
     }
