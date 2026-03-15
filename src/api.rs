@@ -14,7 +14,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Response,
     },
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use indexmap::IndexMap;
@@ -26,7 +26,7 @@ use crate::{
     config::{StartupSettingsUpdate, StartupSettingsView},
     event_log::EventLogEntry,
     intercept::{InterceptRecord, InterceptSummary},
-    intruder::{self, IntruderAttackPayload, IntruderAttackRecord, IntruderAttackSummary},
+    fuzzer::{self, FuzzerAttackPayload, FuzzerAttackRecord, FuzzerAttackSummary},
     match_replace::{MatchReplaceRule, MatchReplaceRulesPayload},
     model::{EditableRequest, RequestTargetOverride},
     proxy,
@@ -67,6 +67,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/decoder/*path", get(decoder_asset))
         .route("/app.js", get(app_js))
         .route("/styles.css", get(styles_css))
+        .route("/favicon.svg", get(favicon_svg))
+        .route("/logo.svg", get(logo_svg))
         .route("/api/settings", get(get_settings))
         .route("/api/app-version", get(get_app_version))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -100,16 +102,21 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/target/site-map", get(get_target_site_map))
         .route("/api/transactions", get(list_transactions))
         .route("/api/transactions/:id", get(get_transaction))
+        .route(
+            "/api/transactions/:id/annotations",
+            patch(update_transaction_annotations),
+        )
         .route("/api/intercepts", get(list_intercepts))
         .route("/api/intercepts/:id", get(get_intercept))
+        .route("/api/intercepts/forward-all", post(forward_all_intercepts))
         .route("/api/intercepts/:id/forward", post(forward_intercept))
         .route("/api/intercepts/:id/drop", post(drop_intercept))
-        .route("/api/repeater/send", post(send_repeater))
+        .route("/api/replay/send", post(send_replay))
         .route(
-            "/api/intruder/attacks",
-            get(list_intruder_attacks).post(run_intruder_attack),
+            "/api/fuzzer/attacks",
+            get(list_fuzzer_attacks).post(run_fuzzer_attack),
         )
-        .route("/api/intruder/attacks/:id", get(get_intruder_attack))
+        .route("/api/fuzzer/attacks/:id", get(get_fuzzer_attack))
         .route("/api/websockets", get(list_websockets))
         .route("/api/websockets/:id", get(get_websocket))
         .route("/api/events", get(events))
@@ -135,7 +142,7 @@ struct EventLogQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct IntruderQuery {
+struct FuzzerQuery {
     limit: Option<usize>,
 }
 
@@ -145,7 +152,7 @@ struct InterceptForwardPayload {
 }
 
 #[derive(Debug, Deserialize)]
-struct RepeaterSendPayload {
+struct ReplaySendPayload {
     request: EditableRequest,
     target: Option<RequestTargetOverride>,
     source_transaction_id: Option<Uuid>,
@@ -154,6 +161,12 @@ struct RepeaterSendPayload {
 #[derive(Debug, Deserialize)]
 struct CreateSessionPayload {
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnnotationsPayload {
+    color_tag: Option<Option<String>>,
+    user_note: Option<Option<String>>,
 }
 
 async fn get_settings(State(state): State<Arc<AppState>>) -> Json<crate::state::RuntimeInfo> {
@@ -436,6 +449,29 @@ async fn get_transaction(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+async fn update_transaction_annotations(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<AnnotationsPayload>,
+) -> Response {
+    let id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let session = state.session().await;
+    match session
+        .store
+        .update_annotations(id, payload.color_tag, payload.user_note)
+        .await
+    {
+        Some(summary) => {
+            persist_session_quiet(&state).await;
+            Json(summary).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn list_intercepts(State(state): State<Arc<AppState>>) -> Json<Vec<InterceptSummary>> {
     let session = state.session().await;
     Json(session.intercepts.list().await)
@@ -508,11 +544,27 @@ async fn drop_intercept(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn send_repeater(
+async fn forward_all_intercepts(State(state): State<Arc<AppState>>) -> StatusCode {
+    let session = state.session().await;
+    let count = session.intercepts.forward_all().await;
+    if count > 0 {
+        state
+            .log_info(
+                "intercept",
+                "All requests forwarded",
+                format!("{count} intercepted request(s) forwarded"),
+            )
+            .await;
+        persist_session_quiet(&state).await;
+    }
+    StatusCode::NO_CONTENT
+}
+
+async fn send_replay(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<RepeaterSendPayload>,
+    Json(payload): Json<ReplaySendPayload>,
 ) -> Response {
-    match proxy::send_repeater_request(
+    match proxy::send_replay_request(
         state,
         payload.request,
         payload.target,
@@ -525,33 +577,33 @@ async fn send_repeater(
     }
 }
 
-async fn list_intruder_attacks(
+async fn list_fuzzer_attacks(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<IntruderQuery>,
-) -> Json<Vec<IntruderAttackSummary>> {
+    Query(query): Query<FuzzerQuery>,
+) -> Json<Vec<FuzzerAttackSummary>> {
     let session = state.session().await;
-    Json(session.intruder.list(query.limit).await)
+    Json(session.fuzzer.list(query.limit).await)
 }
 
-async fn get_intruder_attack(
+async fn get_fuzzer_attack(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<IntruderAttackRecord>, StatusCode> {
+) -> Result<Json<FuzzerAttackRecord>, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let session = state.session().await;
     session
-        .intruder
+        .fuzzer
         .get(id)
         .await
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn run_intruder_attack(
+async fn run_fuzzer_attack(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<IntruderAttackPayload>,
+    Json(payload): Json<FuzzerAttackPayload>,
 ) -> Response {
-    match intruder::run_attack(
+    match fuzzer::run_attack(
         state,
         payload.template,
         payload.payloads,
@@ -639,6 +691,20 @@ async fn decoder_index() -> Response {
 
 async fn decoder_asset(Path(path): Path<String>) -> Response {
     serve_decoder_asset(&path).await
+}
+
+async fn favicon_svg() -> Response {
+    asset_response(
+        "image/svg+xml",
+        include_str!("../web/favicon.svg"),
+    )
+}
+
+async fn logo_svg() -> Response {
+    asset_response(
+        "image/svg+xml",
+        include_str!("../web/logo.svg"),
+    )
 }
 
 async fn styles_css() -> Response {
@@ -812,6 +878,8 @@ mod tests {
                 message.clone(),
                 Some(message),
                 vec!["one note".to_string()],
+                None,
+                None,
             ))
             .await;
 

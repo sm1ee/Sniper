@@ -28,7 +28,7 @@ impl AppConfig {
     }
 
     pub fn from_env_for_desktop() -> Result<Self> {
-        Self::from_env_with_defaults("127.0.0.1:18080", "127.0.0.1:0")
+        Self::from_env_with_defaults("127.0.0.1:8080", "127.0.0.1:0")
     }
 
     pub fn from_env_with_defaults(proxy_default: &str, ui_default: &str) -> Result<Self> {

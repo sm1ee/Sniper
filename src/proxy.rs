@@ -23,7 +23,10 @@ use http::{
 };
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, server::conn::http1, service::service_fn};
-use hyper_util::rt::TokioIo;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder as AutoBuilder,
+};
 use reqwest::{redirect::Policy, Client};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -71,7 +74,7 @@ struct UpstreamError {
     message: String,
 }
 
-pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
+pub async fn run_proxy_listener(state: Arc<AppState>) -> Result<TcpListener> {
     let listener = TcpListener::bind(state.config.proxy_addr)
         .await
         .with_context(|| {
@@ -82,6 +85,11 @@ pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
         })?;
 
     info!(proxy_addr = %listener.local_addr()?, "proxy listener ready");
+    Ok(listener)
+}
+
+pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
+    let listener = run_proxy_listener(state.clone()).await?;
     serve_proxy(listener, state).await
 }
 
@@ -112,7 +120,7 @@ pub async fn serve_proxy(listener: TcpListener, state: Arc<AppState>) -> Result<
     }
 }
 
-pub async fn send_repeater_request(
+pub async fn send_replay_request(
     state: Arc<AppState>,
     request: EditableRequest,
     target: Option<RequestTargetOverride>,
@@ -121,7 +129,7 @@ pub async fn send_repeater_request(
     let session = state.session().await;
     if is_websocket_upgrade_editable(&request) {
         return Err(anyhow!(
-            "Repeater currently supports HTTP/HTTPS requests only, not WebSocket upgrades"
+            "Replay currently supports HTTP/HTTPS requests only, not WebSocket upgrades"
         ));
     }
 
@@ -129,11 +137,11 @@ pub async fn send_repeater_request(
 
     let started_at = Utc::now();
     let started = Instant::now();
-    let (request, mut notes) = apply_request_match_replace(session.as_ref(), request).await;
-    let request = build_repeater_exchange_request(&request, target.as_ref())?;
+    let (request, mut notes, original_request_capture) = apply_request_match_replace(session.as_ref(), request, state.config.body_preview_bytes).await;
+    let request = build_replay_exchange_request(&request, target.as_ref())?;
     let client =
-        build_repeater_client(state.config.upstream_insecure, &request, target.as_ref()).await?;
-    notes.push("Sent from Repeater.".to_string());
+        build_replay_client(state.config.upstream_insecure, &request, target.as_ref()).await?;
+    notes.push("Sent from Replay.".to_string());
     let exchange = execute_http_exchange(
         state.clone(),
         session.clone(),
@@ -143,6 +151,7 @@ pub async fn send_repeater_request(
         started,
         notes,
         true,
+        original_request_capture,
     )
     .await;
 
@@ -151,7 +160,7 @@ pub async fn send_repeater_request(
         .event_log
         .push(
             EventLevel::Info,
-            "repeater",
+            "replay",
             "Request sent",
             format!(
                 "{} {}{}",
@@ -171,7 +180,7 @@ fn build_client(upstream_insecure: bool) -> ProxyClient {
         .expect("failed to build upstream HTTP client")
 }
 
-async fn build_repeater_client(
+async fn build_replay_client(
     upstream_insecure: bool,
     request: &EditableRequest,
     target: Option<&RequestTargetOverride>,
@@ -188,7 +197,7 @@ async fn build_repeater_client(
             && request_authority.host.parse::<IpAddr>().is_err()
         {
             let target_port =
-                repeater_target_port(target.port.trim(), &request.scheme, request_authority.port)?;
+                replay_target_port(target.port.trim(), &request.scheme, request_authority.port)?;
             let resolved_addrs = resolve_target_host(target_host, target_port).await?;
             builder = builder.resolve_to_addrs(&request_authority.host, &resolved_addrs);
         }
@@ -196,10 +205,10 @@ async fn build_repeater_client(
 
     builder
         .build()
-        .context("failed to build repeater HTTP client")
+        .context("failed to build replay HTTP client")
 }
 
-fn build_repeater_exchange_request(
+fn build_replay_exchange_request(
     request: &EditableRequest,
     target: Option<&RequestTargetOverride>,
 ) -> Result<EditableRequest> {
@@ -221,7 +230,7 @@ fn build_repeater_exchange_request(
 
     let request_authority = parse_request_authority(&request.host, &rewritten.scheme)?;
     let effective_port =
-        repeater_target_port(target_port, &rewritten.scheme, request_authority.port)?;
+        replay_target_port(target_port, &rewritten.scheme, request_authority.port)?;
     rewritten.host = build_authority(&request_authority.host, effective_port);
     Ok(rewritten)
 }
@@ -239,21 +248,21 @@ fn parse_request_authority(authority: &str, scheme: &str) -> Result<ParsedAuthor
     })
 }
 
-fn repeater_target_port(target_port: &str, scheme: &str, request_port: Option<u16>) -> Result<u16> {
+fn replay_target_port(target_port: &str, scheme: &str, request_port: Option<u16>) -> Result<u16> {
     if target_port.is_empty() {
         return Ok(request_port.unwrap_or(default_port_for_scheme(scheme)?));
     }
 
     target_port
         .parse::<u16>()
-        .with_context(|| format!("invalid repeater target port: {target_port}"))
+        .with_context(|| format!("invalid replay target port: {target_port}"))
 }
 
 fn default_port_for_scheme(scheme: &str) -> Result<u16> {
     match scheme.to_ascii_lowercase().as_str() {
         "https" => Ok(443),
         "http" => Ok(80),
-        other => Err(anyhow!("unsupported request scheme for repeater: {other}")),
+        other => Err(anyhow!("unsupported request scheme for replay: {other}")),
     }
 }
 
@@ -272,12 +281,12 @@ async fn resolve_target_host(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
 
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
-        .with_context(|| format!("failed to resolve repeater target host {host}:{port}"))?
+        .with_context(|| format!("failed to resolve replay target host {host}:{port}"))?
         .collect();
 
     if addrs.is_empty() {
         Err(anyhow!(
-            "repeater target host {host}:{port} resolved to no addresses"
+            "replay target host {host}:{port} resolved to no addresses"
         ))
     } else {
         Ok(addrs)
@@ -343,6 +352,25 @@ async fn handle_connect(
             .await
             {
                 warn!(?error, "special host TLS handler failed");
+            }
+        });
+    } else if session.runtime.is_passthrough(&target).await {
+        let state = state.clone();
+        let session = session.clone();
+        let target = target.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve_passthrough_tunnel(
+                upgrade,
+                state.clone(),
+                session.clone(),
+                target.clone(),
+                request_capture,
+                started_at,
+                started,
+            )
+            .await
+            {
+                warn!(%peer_addr, ?error, target = %target, "passthrough tunnel failed");
             }
         });
     } else {
@@ -634,12 +662,82 @@ async fn serve_special_host_tls(
     let service = service_fn(move |request| {
         handle_special_host_request(request, state.clone(), session.clone())
     });
-    http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
+    let mut builder = AutoBuilder::new(TokioExecutor::new());
+    builder.http1().preserve_header_case(true).title_case_headers(true);
+    builder
         .serve_connection(io, service)
         .await
-        .context("special host HTTP serving failed")
+        .map_err(|error| anyhow!("special host HTTP serving failed: {error}"))
+}
+
+async fn serve_passthrough_tunnel(
+    upgrade: hyper::upgrade::OnUpgrade,
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+    target: String,
+    request_capture: MessageRecord,
+    started_at: chrono::DateTime<chrono::Utc>,
+    started: Instant,
+) -> Result<()> {
+    let upgraded = upgrade
+        .await
+        .context("CONNECT upgrade failed for passthrough tunnel")?;
+    let mut client_stream = TokioIo::new(upgraded);
+
+    let upstream_addr = if target.contains(':') {
+        target.clone()
+    } else {
+        format!("{target}:443")
+    };
+
+    let mut upstream_stream = match tokio::net::TcpStream::connect(&upstream_addr).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            session
+                .store
+                .insert(TransactionRecord::tunnel(
+                    started_at,
+                    target.clone(),
+                    Some(StatusCode::BAD_GATEWAY.as_u16()),
+                    started.elapsed().as_millis() as u64,
+                    request_capture,
+                    vec![format!(
+                        "Passthrough tunnel failed to connect to upstream: {error}"
+                    )],
+                ))
+                .await;
+            persist_session_quiet(&state, &session).await;
+            return Err(error).context("passthrough tunnel upstream connect failed");
+        }
+    };
+
+    let result = tokio::io::copy_bidirectional(&mut client_stream, &mut upstream_stream).await;
+
+    let notes = match &result {
+        Ok((client_to_server, server_to_client)) => {
+            vec![format!(
+                "SSL passthrough: {client_to_server} bytes sent, {server_to_client} bytes received"
+            )]
+        }
+        Err(error) => {
+            vec![format!("SSL passthrough tunnel error: {error}")]
+        }
+    };
+
+    session
+        .store
+        .insert(TransactionRecord::tunnel(
+            started_at,
+            target,
+            Some(StatusCode::OK.as_u16()),
+            started.elapsed().as_millis() as u64,
+            request_capture,
+            notes,
+        ))
+        .await;
+    persist_session_quiet(&state, &session).await;
+
+    Ok(())
 }
 
 async fn serve_https_mitm(
@@ -697,13 +795,12 @@ async fn serve_https_mitm(
             connect_authority.clone(),
         )
     });
-    http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .serve_connection(io, service)
-        .with_upgrades()
+    let mut builder = AutoBuilder::new(TokioExecutor::new());
+    builder.http1().preserve_header_case(true).title_case_headers(true);
+    builder
+        .serve_connection_with_upgrades(io, service)
         .await
-        .context("HTTPS MITM HTTP serving failed")
+        .map_err(|error| anyhow!("HTTPS MITM HTTP serving failed: {error}"))
 }
 
 async fn handle_special_host_request(
@@ -745,6 +842,8 @@ async fn handle_special_host_request(
             request_capture,
             Some(response_capture),
             response.notes.clone(),
+            None,
+            None,
         ))
         .await;
     persist_session_quiet(&state, &session).await;
@@ -813,8 +912,8 @@ async fn forward_http_request(
             return dropped.response;
         }
     };
-    let (forwarded_request, notes) =
-        apply_request_match_replace(session.as_ref(), intercepted_request).await;
+    let (forwarded_request, notes, original_request_capture) =
+        apply_request_match_replace(session.as_ref(), intercepted_request, state.config.body_preview_bytes).await;
 
     let exchange = execute_http_exchange(
         state.clone(),
@@ -825,6 +924,7 @@ async fn forward_http_request(
         started,
         notes,
         secure_special_host,
+        original_request_capture,
     )
     .await;
     let record = exchange.record.clone();
@@ -873,8 +973,8 @@ async fn forward_websocket_request(
             return dropped.response;
         }
     };
-    let (forwarded_request, request_notes) =
-        apply_request_match_replace(session.as_ref(), forwarded_request).await;
+    let (forwarded_request, request_notes, original_request_capture) =
+        apply_request_match_replace(session.as_ref(), forwarded_request, state.config.body_preview_bytes).await;
 
     if !is_websocket_upgrade_editable(&forwarded_request) {
         let client = build_client(state.config.upstream_insecure);
@@ -890,6 +990,7 @@ async fn forward_websocket_request(
                 vec!["Request left intercept without websocket upgrade headers.".to_string()],
             ),
             secure_special_host,
+            original_request_capture,
         )
         .await;
         let record = exchange.record.clone();
@@ -917,6 +1018,7 @@ async fn forward_websocket_request(
                 ],
             ),
             secure_special_host,
+            original_request_capture,
         )
         .await;
         let record = exchange.record.clone();
@@ -948,6 +1050,8 @@ async fn forward_websocket_request(
                 request_capture,
                 None,
                 vec![format!("WebSocket connect failed: {error}")],
+                None,
+                None,
             );
             session.store.insert(record).await;
             persist_session_quiet(&state, &session).await;
@@ -975,6 +1079,8 @@ async fn forward_websocket_request(
                 request_capture,
                 None,
                 vec![format!("Invalid WebSocket handshake: {error}")],
+                None,
+                None,
             );
             session.store.insert(record).await;
             persist_session_quiet(&state, &session).await;
@@ -1020,6 +1126,8 @@ async fn forward_websocket_request(
             request_notes,
             vec!["WebSocket upgrade proxied and mirrored into WebSockets history.".to_string()],
         ),
+        None,
+        None,
     );
     session.store.insert(http_record).await;
     session
@@ -1149,6 +1257,7 @@ async fn execute_http_exchange(
     started: Instant,
     mut notes: Vec<String>,
     secure_special_host: bool,
+    original_request_capture: Option<MessageRecord>,
 ) -> ExecutedExchange {
     let request_headers = header_map_from_records(&request.headers);
     let request_body = request.body_bytes();
@@ -1177,6 +1286,8 @@ async fn execute_http_exchange(
                     request_capture,
                     Some(response_capture),
                     notes,
+                    None,
+                    None,
                 ),
                 response: Err(UpstreamError {
                     status: StatusCode::BAD_REQUEST,
@@ -1211,6 +1322,8 @@ async fn execute_http_exchange(
                 request_capture,
                 Some(response_capture),
                 notes,
+                None,
+                None,
             ),
             response: Ok(UpstreamResponse {
                 status: response.status,
@@ -1239,6 +1352,8 @@ async fn execute_http_exchange(
                     request_capture,
                     Some(response_capture),
                     notes,
+                    None,
+                    None,
                 ),
                 response: Err(UpstreamError {
                     status: StatusCode::BAD_REQUEST,
@@ -1268,10 +1383,23 @@ async fn execute_http_exchange(
             let response_headers = response.headers().clone();
             match response.bytes().await {
                 Ok(response_bytes) => {
+                    let original_response_capture = {
+                        let pre = MessageRecord::from_headers_and_body(
+                            &response_headers,
+                            response_bytes.as_ref(),
+                            state.config.body_preview_bytes,
+                        );
+                        Some(pre)
+                    };
                     let applied_response = session
                         .match_replace
                         .apply_response(response_headers, response_bytes)
                         .await;
+                    let original_response_capture = if applied_response.notes.is_empty() {
+                        None
+                    } else {
+                        original_response_capture
+                    };
                     if !applied_response.notes.is_empty() {
                         session
                             .event_log
@@ -1301,6 +1429,8 @@ async fn execute_http_exchange(
                             request_capture,
                             Some(response_capture),
                             notes,
+                            original_request_capture,
+                            original_response_capture,
                         ),
                         response: Ok(UpstreamResponse {
                             status,
@@ -1335,6 +1465,8 @@ async fn execute_http_exchange(
                             request_capture,
                             Some(response_capture),
                             notes,
+                            None,
+                            None,
                         ),
                         response: Err(UpstreamError {
                             status: StatusCode::BAD_GATEWAY,
@@ -1370,6 +1502,8 @@ async fn execute_http_exchange(
                     request_capture,
                     Some(response_capture),
                     notes,
+                    None,
+                    None,
                 ),
                 response: Err(UpstreamError {
                     status: StatusCode::BAD_GATEWAY,
@@ -1383,7 +1517,10 @@ async fn execute_http_exchange(
 async fn apply_request_match_replace(
     session: &SessionContext,
     request: EditableRequest,
-) -> (EditableRequest, Vec<String>) {
+    preview_bytes: usize,
+) -> (EditableRequest, Vec<String>, Option<MessageRecord>) {
+    let original_headers = header_map_from_records(&request.headers);
+    let original_body = request.body_bytes();
     let applied_request = session.match_replace.apply_request(request).await;
     if !applied_request.notes.is_empty() {
         session
@@ -1396,7 +1533,16 @@ async fn apply_request_match_replace(
             )
             .await;
     }
-    (applied_request.request, applied_request.notes)
+    let original_capture = if applied_request.notes.is_empty() {
+        None
+    } else {
+        Some(MessageRecord::from_headers_and_body(
+            &original_headers,
+            original_body.as_ref(),
+            preview_bytes,
+        ))
+    };
+    (applied_request.request, applied_request.notes, original_capture)
 }
 
 async fn validate_reusable_request_source(
@@ -1538,6 +1684,8 @@ fn build_dropped_transaction(
             request_capture,
             Some(response_capture),
             vec![note.to_string()],
+            None,
+            None,
         ),
         response,
     }

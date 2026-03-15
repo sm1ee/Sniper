@@ -112,6 +112,17 @@ impl InterceptQueue {
         Ok(())
     }
 
+    pub async fn forward_all(&self) -> usize {
+        let mut queue = self.queue.lock().await;
+        let count = queue.len();
+        while let Some(pending) = queue.pop_front() {
+            let _ = pending
+                .responder
+                .send(InterceptResolution::Forward(pending.record.request));
+        }
+        count
+    }
+
     pub async fn drop_request(&self, id: Uuid) -> Result<()> {
         let mut queue = self.queue.lock().await;
         let index = queue

@@ -14,13 +14,13 @@ use crate::{model::EditableRequest, proxy, state::AppState};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum IntruderAttackStatus {
+pub enum FuzzerAttackStatus {
     Completed,
     Failed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IntruderAttackResult {
+pub struct FuzzerAttackResult {
     pub index: usize,
     pub payload: String,
     pub transaction_id: Option<Uuid>,
@@ -31,24 +31,24 @@ pub struct IntruderAttackResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IntruderAttackRecord {
+pub struct FuzzerAttackRecord {
     pub id: Uuid,
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
-    pub status: IntruderAttackStatus,
+    pub status: FuzzerAttackStatus,
     pub template: EditableRequest,
     pub payload_count: usize,
     pub marker_count: usize,
-    pub results: Vec<IntruderAttackResult>,
+    pub results: Vec<FuzzerAttackResult>,
     pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IntruderAttackSummary {
+pub struct FuzzerAttackSummary {
     pub id: Uuid,
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
-    pub status: IntruderAttackStatus,
+    pub status: FuzzerAttackStatus,
     pub host: String,
     pub path: String,
     pub payload_count: usize,
@@ -56,23 +56,23 @@ pub struct IntruderAttackSummary {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct IntruderAttackPayload {
+pub struct FuzzerAttackPayload {
     pub template: EditableRequest,
     pub payloads: Vec<String>,
     pub source_transaction_id: Option<Uuid>,
 }
 
-pub struct IntruderStore {
+pub struct FuzzerStore {
     max_entries: usize,
-    attacks: RwLock<VecDeque<IntruderAttackRecord>>,
+    attacks: RwLock<VecDeque<FuzzerAttackRecord>>,
 }
 
-impl IntruderStore {
+impl FuzzerStore {
     pub fn new(max_entries: usize) -> Self {
         Self::from_attacks(max_entries, Vec::new())
     }
 
-    pub fn from_attacks(max_entries: usize, records: Vec<IntruderAttackRecord>) -> Self {
+    pub fn from_attacks(max_entries: usize, records: Vec<FuzzerAttackRecord>) -> Self {
         let mut attacks = VecDeque::with_capacity(max_entries);
         attacks.extend(records.into_iter().take(max_entries));
         Self {
@@ -81,7 +81,7 @@ impl IntruderStore {
         }
     }
 
-    pub async fn insert(&self, record: IntruderAttackRecord) {
+    pub async fn insert(&self, record: FuzzerAttackRecord) {
         let mut attacks = self.attacks.write().await;
         attacks.push_front(record);
         while attacks.len() > self.max_entries {
@@ -89,17 +89,17 @@ impl IntruderStore {
         }
     }
 
-    pub async fn list(&self, limit: Option<usize>) -> Vec<IntruderAttackSummary> {
+    pub async fn list(&self, limit: Option<usize>) -> Vec<FuzzerAttackSummary> {
         self.attacks
             .read()
             .await
             .iter()
             .take(limit.unwrap_or(self.max_entries).min(self.max_entries))
-            .map(IntruderAttackRecord::summary)
+            .map(FuzzerAttackRecord::summary)
             .collect()
     }
 
-    pub async fn get(&self, id: Uuid) -> Option<IntruderAttackRecord> {
+    pub async fn get(&self, id: Uuid) -> Option<FuzzerAttackRecord> {
         self.attacks
             .read()
             .await
@@ -108,7 +108,7 @@ impl IntruderStore {
             .cloned()
     }
 
-    pub async fn snapshot(&self, limit: Option<usize>) -> Vec<IntruderAttackRecord> {
+    pub async fn snapshot(&self, limit: Option<usize>) -> Vec<FuzzerAttackRecord> {
         self.attacks
             .read()
             .await
@@ -118,16 +118,16 @@ impl IntruderStore {
             .collect()
     }
 
-    pub async fn replace_all(&self, records: Vec<IntruderAttackRecord>) {
+    pub async fn replace_all(&self, records: Vec<FuzzerAttackRecord>) {
         let mut attacks = self.attacks.write().await;
         attacks.clear();
         attacks.extend(records.into_iter().take(self.max_entries));
     }
 }
 
-impl IntruderAttackRecord {
-    pub fn summary(&self) -> IntruderAttackSummary {
-        IntruderAttackSummary {
+impl FuzzerAttackRecord {
+    pub fn summary(&self) -> FuzzerAttackSummary {
+        FuzzerAttackSummary {
             id: self.id,
             started_at: self.started_at,
             completed_at: self.completed_at,
@@ -145,7 +145,7 @@ pub async fn run_attack(
     template: EditableRequest,
     payloads: Vec<String>,
     source_transaction_id: Option<Uuid>,
-) -> Result<IntruderAttackRecord> {
+) -> Result<FuzzerAttackRecord> {
     let session = state.session().await;
     let started_at = Utc::now();
     let marker_count = count_request_markers(&template);
@@ -161,12 +161,12 @@ pub async fn run_attack(
         .filter(|payload| !payload.is_empty())
         .collect::<Vec<_>>();
     if normalized_payloads.is_empty() {
-        return Err(anyhow!("Intruder needs at least one payload"));
+        return Err(anyhow!("Fuzzer needs at least one payload"));
     }
 
     state
         .log_info(
-            "intruder",
+            "fuzzer",
             "Attack started",
             format!(
                 "Running {} payload(s) against {}{}",
@@ -183,11 +183,11 @@ pub async fn run_attack(
 
     for (index, payload) in normalized_payloads.iter().enumerate() {
         let request = apply_payload_to_request(&template, payload)?;
-        match proxy::send_repeater_request(state.clone(), request, None, source_transaction_id)
+        match proxy::send_replay_request(state.clone(), request, None, source_transaction_id)
             .await
         {
             Ok(record) => {
-                results.push(IntruderAttackResult {
+                results.push(FuzzerAttackResult {
                     index,
                     payload: payload.clone(),
                     transaction_id: Some(record.id),
@@ -204,7 +204,7 @@ pub async fn run_attack(
                 failed = true;
                 let message = error.to_string();
                 notes.push(message.clone());
-                results.push(IntruderAttackResult {
+                results.push(FuzzerAttackResult {
                     index,
                     payload: payload.clone(),
                     transaction_id: None,
@@ -218,14 +218,14 @@ pub async fn run_attack(
     }
 
     let completed_at = Utc::now();
-    let record = IntruderAttackRecord {
+    let record = FuzzerAttackRecord {
         id: Uuid::new_v4(),
         started_at,
         completed_at,
         status: if failed {
-            IntruderAttackStatus::Failed
+            FuzzerAttackStatus::Failed
         } else {
-            IntruderAttackStatus::Completed
+            FuzzerAttackStatus::Completed
         },
         template: template.clone(),
         payload_count: normalized_payloads.len(),
@@ -234,10 +234,10 @@ pub async fn run_attack(
         notes,
     };
 
-    session.intruder.insert(record.clone()).await;
+    session.fuzzer.insert(record.clone()).await;
     state
         .log_info(
-            "intruder",
+            "fuzzer",
             "Attack completed",
             format!(
                 "Completed {} payload(s) against {}{}",
@@ -248,7 +248,7 @@ pub async fn run_attack(
     if let Err(error) = state.persist_session_context(&session).await {
         tracing::warn!(
             ?error,
-            "failed to persist active session after intruder attack"
+            "failed to persist active session after fuzzer attack"
         );
     }
 

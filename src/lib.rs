@@ -3,7 +3,7 @@ pub mod certificate;
 pub mod config;
 pub mod event_log;
 pub mod intercept;
-pub mod intruder;
+pub mod fuzzer;
 pub mod match_replace;
 pub mod model;
 pub mod proxy;
@@ -23,7 +23,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use config::AppConfig;
 use state::AppState;
-use tracing::info;
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub async fn run() -> Result<()> {
@@ -33,16 +33,6 @@ pub async fn run() -> Result<()> {
 
 pub async fn run_with_config(config: AppConfig) -> Result<()> {
     let state = Arc::new(AppState::new(config.clone())?);
-    state
-        .log_info(
-            "runtime",
-            "Sniper started",
-            format!(
-                "Proxy listener {} and UI listener {} are starting",
-                config.proxy_addr, config.ui_addr
-            ),
-        )
-        .await;
 
     info!(
         proxy_addr = %config.proxy_addr,
@@ -53,8 +43,47 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
         "starting sniper"
     );
 
-    tokio::try_join!(proxy::run_proxy(state.clone()), api::run_api(state))?;
-    Ok(())
+    match proxy::run_proxy_listener(state.clone()).await {
+        Ok(listener) => {
+            state.set_proxy_online(true);
+            state
+                .log_info(
+                    "runtime",
+                    "Sniper started",
+                    format!(
+                        "Proxy listener {} and UI listener {} are starting",
+                        config.proxy_addr, config.ui_addr
+                    ),
+                )
+                .await;
+
+            let proxy_state = state.clone();
+            let proxy_task = tokio::spawn(async move {
+                if let Err(e) = proxy::serve_proxy(listener, proxy_state).await {
+                    error!(?e, "proxy task stopped");
+                }
+            });
+
+            let api_result = api::run_api(state).await;
+            proxy_task.abort();
+            api_result
+        }
+        Err(bind_error) => {
+            warn!(%bind_error, "proxy listener failed to bind — starting UI only");
+            state
+                .log_error(
+                    "runtime",
+                    "Proxy listener failed",
+                    format!(
+                        "Could not bind proxy to {}: {}. The UI is available but proxy capture is offline.",
+                        config.proxy_addr, bind_error
+                    ),
+                )
+                .await;
+
+            api::run_api(state).await
+        }
+    }
 }
 
 pub fn init_tracing() {
