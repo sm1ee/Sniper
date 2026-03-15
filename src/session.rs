@@ -450,11 +450,12 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
     }
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(value).context("failed to serialize JSON file")?,
-    )
-    .with_context(|| format!("failed to write {}", path.display()))
+    let data = serde_json::to_vec_pretty(value).context("failed to serialize JSON file")?;
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, &data)
+        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("failed to rename {} to {}", tmp_path.display(), path.display()))
 }
 
 #[cfg(test)]

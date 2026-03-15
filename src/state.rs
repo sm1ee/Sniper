@@ -322,6 +322,6 @@ fn parse_version(value: &str) -> Option<Version> {
 fn is_newer_version(current: &str, latest: &str) -> bool {
     match (parse_version(current), parse_version(latest)) {
         (Some(current), Some(latest)) => latest > current,
-        _ => normalize_version_text(current) != normalize_version_text(latest),
+        _ => false,
     }
 }

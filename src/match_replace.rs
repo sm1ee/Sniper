@@ -269,7 +269,7 @@ fn replace_text(value: &str, rule: &MatchReplaceRule) -> Result<(String, bool)> 
 fn replace_case_insensitive(value: &str, search: &str, replace: &str) -> Result<(String, bool)> {
     let escaped = regex::escape(search);
     let regex = RegexBuilder::new(&escaped).case_insensitive(true).build()?;
-    let replaced = regex.replace_all(value, replace).into_owned();
+    let replaced = regex.replace_all(value, regex::NoExpand(replace)).into_owned();
     let changed = replaced != value;
     Ok((replaced, changed))
 }

@@ -117,6 +117,19 @@ const DECODER_SCRIPT_SOURCES = [
   "/decoder/hasher.js",
 ];
 
+function showToast(message, type = "success", durationMs = 2000) {
+  const container = document.getElementById("toastContainer");
+  if (!container) return;
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = "0";
+    setTimeout(() => toast.remove(), 300);
+  }, durationMs);
+}
+
 const state = {
   items: [],
   selectedId: null,
@@ -438,16 +451,24 @@ async function init() {
   hydrateFilterForm();
   await loadUiSettings();
   hydrateDisplaySettingsForm();
-  await loadSessions();
-  await loadSettings();
+  const loads = [
+    loadSessions(),
+    loadSettings(),
+    loadWorkspaceState(),
+    loadTransactions(false),
+    loadIntercepts(false),
+    loadWebsockets(false),
+    loadEventLog(),
+    loadMatchReplaceRules(),
+    loadTargetSiteMap(),
+  ];
   loadAppVersionInfo().catch((error) => console.error(error));
-  await loadWorkspaceState();
-  await loadTransactions(false);
-  await loadIntercepts(false);
-  await loadWebsockets(false);
-  await loadEventLog();
-  await loadMatchReplaceRules();
-  await loadTargetSiteMap();
+  const results = await Promise.allSettled(loads);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error("init load failed:", result.reason);
+    }
+  }
   connectEvents();
   auxTimer = window.setInterval(() => {
     pollAuxiliaryData().catch((error) => console.error(error));
@@ -487,16 +508,16 @@ function bindEvents() {
   mainTabs.forEach((tab) => {
     tab.addEventListener("click", () => {
       state.activeTool = tab.dataset.tool;
+      renderToolPanels();
       if (state.activeTool === "dashboard") {
         loadSessions().catch((error) => console.error(error));
       }
       if (state.activeTool === "target") {
-        loadTargetSiteMap().catch((error) => console.error(error));
+        loadTargetSiteMap(true).catch((error) => console.error(error));
       }
       if (state.activeTool === "logger") {
         loadEventLog().catch((error) => console.error(error));
       }
-      renderToolPanels();
     });
   });
 
@@ -662,7 +683,9 @@ function bindEvents() {
     toggleIntercept().catch((error) => console.error(error));
   });
   els.saveProxySettingsButton.addEventListener("click", () => {
-    saveProxySettings().catch((error) => console.error(error));
+    saveProxySettings()
+      .then(() => showToast("Proxy settings saved"))
+      .catch((error) => { console.error(error); showToast("Failed to save proxy settings", "error"); });
   });
   els.reloadProxySettingsButton.addEventListener("click", () => {
     loadSettings().catch((error) => console.error(error));
@@ -683,7 +706,9 @@ function bindEvents() {
   });
   els.newMatchReplaceRuleButton.addEventListener("click", createNewMatchReplaceRule);
   els.saveMatchReplaceRuleButton.addEventListener("click", () => {
-    saveMatchReplaceRules().catch((error) => console.error(error));
+    saveMatchReplaceRules()
+      .then(() => showToast("Match & Replace rules saved"))
+      .catch((error) => { console.error(error); showToast("Failed to save rules", "error"); });
   });
   els.deleteMatchReplaceRuleButton.addEventListener("click", deleteSelectedMatchReplaceRule);
   [
@@ -700,7 +725,9 @@ function bindEvents() {
     element.addEventListener("change", syncMatchReplaceEditor);
   });
   els.saveTargetScopeButton.addEventListener("click", () => {
-    saveTargetScope().catch((error) => console.error(error));
+    saveTargetScope()
+      .then(() => showToast("Scope saved"))
+      .catch((error) => { console.error(error); showToast("Failed to save scope", "error"); });
   });
   els.targetScopeEditor.addEventListener("input", () => {
     state.targetScopeDraft = els.targetScopeEditor.value;
@@ -949,6 +976,9 @@ function bindEvents() {
 
 async function loadSettings() {
   const response = await fetch("/api/settings");
+  if (!response.ok) {
+    throw new Error(`loadSettings failed: ${response.status}`);
+  }
   state.settings = await response.json();
   state.runtime = state.settings.runtime;
   state.activeSession = state.settings.active_session;
@@ -1405,6 +1435,10 @@ async function pollAuxiliaryData() {
     tasks.push(loadWebsockets(true));
   }
 
+  if (state.activeTool === "proxy" && state.activeProxyTab === "http-history") {
+    tasks.push(loadTransactions(true));
+  }
+
   if (state.activeTool === "logger") {
     tasks.push(loadEventLog());
   }
@@ -1447,8 +1481,11 @@ function connectEvents() {
 }
 
 function scheduleRefresh() {
-  window.clearTimeout(refreshTimer);
+  if (refreshTimer) {
+    return;
+  }
   refreshTimer = window.setTimeout(() => {
+    refreshTimer = null;
     loadTransactions(true).catch((error) => console.error(error));
   }, 160);
 }
@@ -1769,7 +1806,7 @@ function renderInspectorPanels() {
   if (!els.lowerWorkbench) {
     return;
   }
-  els.lowerWorkbench.classList.remove("inspector-collapsed");
+  els.lowerWorkbench.classList.toggle("inspector-collapsed", state.inspectorCollapsed);
 }
 
 function renderInterceptStatus() {
@@ -2777,6 +2814,9 @@ async function saveTargetScope() {
       websocket_capture_enabled: state.runtime?.websocket_capture_enabled,
     }),
   });
+  if (!response.ok) {
+    throw new Error(`saveTargetScope failed: ${response.status}`);
+  }
   state.runtime = await response.json();
   state.targetScopeDraft = formatScopePatternsText(state.runtime?.scope_patterns);
   state.targetScopeDirty = false;

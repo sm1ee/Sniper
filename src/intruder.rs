@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::LazyLock};
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -6,6 +6,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+static MARKER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("§[^§]*§").expect("valid marker regex"));
 
 use crate::{model::EditableRequest, proxy, state::AppState};
 
@@ -281,8 +284,7 @@ fn apply_payload_to_request(template: &EditableRequest, payload: &str) -> Result
 }
 
 fn count_markers(value: &str) -> usize {
-    let marker = Regex::new("§[^§]*§").expect("valid marker regex");
-    let count = marker.find_iter(value).count();
+    let count = MARKER_REGEX.find_iter(value).count();
     if count > 0 {
         count
     } else {
@@ -291,9 +293,8 @@ fn count_markers(value: &str) -> usize {
 }
 
 fn replace_markers(value: &str, payload: &str) -> Result<String> {
-    let marker = Regex::new("§[^§]*§").expect("valid marker regex");
-    if marker.is_match(value) {
-        return Ok(marker.replace_all(value, payload).into_owned());
+    if MARKER_REGEX.is_match(value) {
+        return Ok(MARKER_REGEX.replace_all(value, payload).into_owned());
     }
 
     if value.contains("{{PAYLOAD}}") || value.contains("{{INTRUDER}}") {
