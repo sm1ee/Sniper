@@ -24,7 +24,9 @@ cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 sed "s/__SNIPER_VERSION__/$VERSION/g" "$PLIST_TEMPLATE" > "$PLIST_OUT"
 
-if [[ -n "${APP_ICON:-}" && -f "${APP_ICON}" ]]; then
+BUNDLED_ICON="$ROOT_DIR/packaging/macos/AppIcon.icns"
+APP_ICON="${APP_ICON:-$BUNDLED_ICON}"
+if [[ -f "$APP_ICON" ]]; then
   cp "$APP_ICON" "$RESOURCES_DIR/AppIcon.icns"
   /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$PLIST_OUT" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$PLIST_OUT"

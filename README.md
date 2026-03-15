@@ -1,6 +1,12 @@
-# Sniper
+<p align="center">
+  <img src="web/logo.svg" width="180" alt="Sniper logo" />
+</p>
 
-Sniper is a lightweight, fast, open-source desktop web proxy for people who want a clean workflow without dragging in a huge platform.
+<h1 align="center">Sniper</h1>
+
+<p align="center">
+  A lightweight, fast, open-source desktop web proxy for people who want a clean workflow without dragging in a huge platform.
+</p>
 
 It is built for:
 

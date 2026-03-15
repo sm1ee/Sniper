@@ -69,6 +69,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/styles.css", get(styles_css))
         .route("/favicon.svg", get(favicon_svg))
         .route("/logo.svg", get(logo_svg))
+        .route("/fonts/Bungee-Regular.ttf", get(bungee_font))
         .route("/api/settings", get(get_settings))
         .route("/api/app-version", get(get_app_version))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -707,6 +708,10 @@ async fn logo_svg() -> Response {
     )
 }
 
+async fn bungee_font() -> Response {
+    binary_asset_response("font/ttf", include_bytes!("../web/fonts/Bungee-Regular.ttf"))
+}
+
 async fn styles_css() -> Response {
     asset_response("text/css; charset=utf-8", include_str!("../web/styles.css"))
 }
@@ -719,6 +724,14 @@ async fn app_js() -> Response {
 }
 
 fn asset_response(content_type: &'static str, body: &'static str) -> Response {
+    (
+        [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+        body,
+    )
+        .into_response()
+}
+
+fn binary_asset_response(content_type: &'static str, body: &'static [u8]) -> Response {
     (
         [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
         body,
