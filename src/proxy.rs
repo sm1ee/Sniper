@@ -93,6 +93,56 @@ pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
     serve_proxy(listener, state).await
 }
 
+/// Try to rebind the proxy listener to a new address at runtime.
+/// On success: aborts old proxy task, spawns new one, updates active_proxy_addr.
+/// On failure: returns the error message (e.g. port already in use).
+pub async fn rebind_proxy(
+    state: Arc<AppState>,
+    new_addr: std::net::SocketAddr,
+) -> std::result::Result<(), String> {
+    let current = state.get_active_proxy_addr().await;
+    if current == new_addr {
+        return Ok(());
+    }
+
+    // Try binding the new address first — if this fails the old listener keeps running
+    let listener = match TcpListener::bind(new_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            return Err(format!(
+                "Port {} is already in use ({})",
+                new_addr.port(),
+                e
+            ));
+        }
+    };
+
+    let bound_addr = listener
+        .local_addr()
+        .map_err(|e| format!("failed to read bound address: {e}"))?;
+
+    // Abort old proxy task
+    state.abort_proxy_task().await;
+    state.set_proxy_online(false);
+
+    // Update active address
+    state.set_active_proxy_addr(bound_addr).await;
+    state.set_proxy_online(true);
+
+    info!(old = %current, new = %bound_addr, "proxy listener rebound");
+
+    // Spawn new proxy task
+    let proxy_state = state.clone();
+    let handle = tokio::spawn(async move {
+        if let Err(error) = serve_proxy(listener, proxy_state).await {
+            tracing::error!(?error, "rebound proxy task stopped");
+        }
+    });
+    state.set_proxy_task(handle).await;
+
+    Ok(())
+}
+
 pub async fn serve_proxy(listener: TcpListener, state: Arc<AppState>) -> Result<()> {
     let client = build_client(state.config.upstream_insecure);
 

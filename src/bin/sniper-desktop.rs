@@ -87,11 +87,15 @@ fn main() -> Result<()> {
 
     let proxy_task = if let Some(listener) = proxy_listener {
         let proxy_state = state.clone();
-        Some(runtime.spawn(async move {
+        let handle = runtime.spawn(async move {
             if let Err(error) = proxy::serve_proxy(listener, proxy_state).await {
                 error!(?error, "proxy task stopped");
             }
-        }))
+        });
+        // Store the handle so rebind_proxy can abort it later
+        runtime.block_on(state.set_proxy_task(handle));
+        // Read the handle back — we still need a reference for shutdown
+        None::<tokio::task::JoinHandle<()>>
     } else {
         None
     };
@@ -126,10 +130,12 @@ fn main() -> Result<()> {
         .build()
         .context("failed to build desktop webview")?;
 
+    let close_state = state.clone();
     event_loop.run(move |event, _, control_flow| {
         let _keep_runtime = &runtime;
         let _keep_window = &window;
         let _keep_webview = &webview;
+        let _keep_proxy_task = &proxy_task;
         *control_flow = ControlFlow::Wait;
 
         if let Event::WindowEvent {
@@ -137,9 +143,7 @@ fn main() -> Result<()> {
             ..
         } = event
         {
-            if let Some(ref task) = proxy_task {
-                task.abort();
-            }
+            runtime.block_on(close_state.abort_proxy_task());
             ui_task.abort();
             *control_flow = ControlFlow::Exit;
         }
