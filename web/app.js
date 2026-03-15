@@ -75,6 +75,19 @@ const HISTORY_COLUMN_RULES = {
   tls: { default: 92, min: 72, max: 140 },
   started_at: { default: 176, min: 132, max: 260 },
 };
+const HISTORY_COLUMN_DEFS = {
+  index: { label: "#", cssClass: "col-index", sortKey: "index" },
+  host: { label: "Host", cssClass: "col-host", sortKey: "host" },
+  method: { label: "Method", cssClass: "col-method", sortKey: "method" },
+  path: { label: "URL", cssClass: "col-url", sortKey: "path" },
+  status: { label: "Status code", cssClass: "col-status", sortKey: "status" },
+  length: { label: "Length", cssClass: "col-length", sortKey: "length" },
+  mime: { label: "MIME type", cssClass: "col-type", sortKey: "mime" },
+  notes: { label: "Notes", cssClass: "col-notes", sortKey: "notes" },
+  tls: { label: "TLS", cssClass: "col-tls", sortKey: "tls" },
+  started_at: { label: "Time", cssClass: "col-time", sortKey: "started_at" },
+};
+const DEFAULT_HISTORY_COLUMN_ORDER = ["index", "host", "method", "path", "status", "length", "mime", "notes", "tls", "started_at"];
 const WORKBENCH_STACK_MIN_HEIGHTS = {
   history: 140,
   messages: 180,
@@ -162,6 +175,7 @@ const state = {
   activeMessagePane: null,
   displaySettings: createDefaultDisplaySettings(),
   historyColumnWidths: createDefaultHistoryColumnWidths(),
+  historyColumnOrder: [...DEFAULT_HISTORY_COLUMN_ORDER],
   filterSettings: createDefaultFilterSettings(),
   targetScopeDraft: "",
   targetScopeDirty: false,
@@ -409,8 +423,8 @@ const proxyTabs = Array.from(document.querySelectorAll(".sub-tab"));
 const viewTabs = Array.from(document.querySelectorAll(".view-tab"));
 const railTabs = Array.from(document.querySelectorAll(".rail-tab"));
 const sectionToggles = Array.from(document.querySelectorAll(".section-toggle"));
-const sortHeaders = Array.from(document.querySelectorAll(".sort-header"));
-const historyColumnHandles = Array.from(document.querySelectorAll(".column-resize-handle"));
+let sortHeaders = Array.from(document.querySelectorAll(".sort-header"));
+let historyColumnHandles = Array.from(document.querySelectorAll(".column-resize-handle"));
 
 let refreshTimer = null;
 let auxTimer = null;
@@ -451,6 +465,7 @@ async function init() {
   loadDisplaySettings();
   loadHistoryColumnWidths();
   loadWorkbenchLayout();
+  renderHistoryHeader();
   bindEvents();
   resetLayoutTextareas();
   hydrateFilterForm();
@@ -559,12 +574,6 @@ function bindEvents() {
       state.activeInspectorTab = tab.dataset.inspectorTab;
       state.inspectorCollapsed = false;
       renderInspectorPanels();
-    });
-  });
-
-  sortHeaders.forEach((header) => {
-    header.addEventListener("click", () => {
-      toggleSort(header.dataset.sortKey);
     });
   });
 
@@ -1869,27 +1878,9 @@ function renderHistory() {
     .map((entry) => {
       const item = entry.item;
       const selected = item.id === state.selectedId ? "selected" : "";
-      const mimeType = inferMimeType(item);
-      const url = item.path || "(CONNECT tunnel)";
-      const tls = isTlsRecord(item) ? "<span class=\"tls-badge\">TLS</span>" : "<span class=\"tls-badge empty\">-</span>";
       const tagClass = item.color_tag ? ` tagged-${escapeHtml(item.color_tag)}` : "";
-      const tagDot = item.color_tag ? `<span class="row-color-tag row-color-tag-${escapeHtml(item.color_tag)}"></span>` : "";
-      const noteIndicator = item.has_user_note ? `<span class="note-icon" title="Has note">📝</span>` : "";
-      const noteCell = `${tagDot}${noteIndicator}${item.note_count ? ` ${item.note_count}` : ""}`;
-      return `
-        <tr class="history-row ${selected}${tagClass}" data-id="${item.id}">
-          <td>${entry.index + 1}</td>
-          <td class="cell-host">${escapeHtml(item.host)}</td>
-          <td><span class="method-pill ${methodTone(item.method)}">${escapeHtml(item.method)}</span></td>
-          <td class="cell-url">${escapeHtml(url)}</td>
-          <td><span class="status-pill-row ${statusTone(item.status)}">${escapeHtml(formatStatus(item.status))}</span></td>
-          <td>${escapeHtml(formatSize((item.request_bytes ?? 0) + (item.response_bytes ?? 0)))}</td>
-          <td>${escapeHtml(mimeType)}</td>
-          <td>${noteCell}</td>
-          <td class="tls-cell">${tls}</td>
-          <td>${escapeHtml(formatTimestamp(item.started_at))}</td>
-        </tr>
-      `;
+      const cells = state.historyColumnOrder.map((colKey) => renderHistoryCell(colKey, item, entry)).join("");
+      return `<tr class="history-row ${selected}${tagClass}" data-id="${item.id}">${cells}</tr>`;
     })
     .join("");
 
@@ -3698,6 +3689,7 @@ function sanitizeDisplaySettings(candidate) {
 
 function loadHistoryColumnWidths() {
   state.historyColumnWidths = createDefaultHistoryColumnWidths();
+  state.historyColumnOrder = [...DEFAULT_HISTORY_COLUMN_ORDER];
   applyHistoryColumnWidths();
 }
 
@@ -3726,6 +3718,164 @@ function applyHistoryColumnWidths() {
     totalWidth += width;
   });
   els.historyTable.style.setProperty("--history-table-width", `${Math.max(totalWidth, 1160)}px`);
+}
+
+function sanitizeHistoryColumnOrder(candidate) {
+  if (!Array.isArray(candidate) || candidate.length === 0) {
+    return [...DEFAULT_HISTORY_COLUMN_ORDER];
+  }
+  const validKeys = new Set(Object.keys(HISTORY_COLUMN_DEFS));
+  const seen = new Set();
+  const order = [];
+  for (const key of candidate) {
+    if (validKeys.has(key) && !seen.has(key)) {
+      order.push(key);
+      seen.add(key);
+    }
+  }
+  for (const key of DEFAULT_HISTORY_COLUMN_ORDER) {
+    if (!seen.has(key)) {
+      order.push(key);
+    }
+  }
+  return order;
+}
+
+function renderHistoryHeader() {
+  const thead = els.historyTable?.querySelector("thead tr");
+  if (!thead) return;
+
+  thead.innerHTML = state.historyColumnOrder
+    .map((colKey) => {
+      const def = HISTORY_COLUMN_DEFS[colKey];
+      if (!def) return "";
+      return `
+        <th class="${def.cssClass}" data-column-key="${colKey}" draggable="true">
+          <button class="sort-header" data-sort-key="${def.sortKey}" type="button">
+            <span>${def.label}</span>
+            <span class="sort-indicator" aria-hidden="true">\u2195</span>
+          </button>
+          <span class="column-resize-handle" data-column-key="${colKey}" aria-hidden="true"></span>
+        </th>
+      `;
+    })
+    .join("");
+
+  sortHeaders = Array.from(els.historyTable.querySelectorAll(".sort-header"));
+  historyColumnHandles = Array.from(els.historyTable.querySelectorAll(".column-resize-handle"));
+
+  sortHeaders.forEach((header) => {
+    header.addEventListener("click", () => {
+      toggleSort(header.dataset.sortKey);
+    });
+  });
+
+  bindHistoryColumnResizers();
+  bindColumnDragAndDrop();
+  renderSortHeaders();
+}
+
+function renderHistoryCell(colKey, item, entry) {
+  switch (colKey) {
+    case "index":
+      return `<td>${entry.index + 1}</td>`;
+    case "host":
+      return `<td class="cell-host">${escapeHtml(item.host)}</td>`;
+    case "method":
+      return `<td><span class="method-pill ${methodTone(item.method)}">${escapeHtml(item.method)}</span></td>`;
+    case "path":
+      return `<td class="cell-url">${escapeHtml(item.path || "(CONNECT tunnel)")}</td>`;
+    case "status":
+      return `<td><span class="status-pill-row ${statusTone(item.status)}">${escapeHtml(formatStatus(item.status))}</span></td>`;
+    case "length":
+      return `<td>${escapeHtml(formatSize((item.request_bytes ?? 0) + (item.response_bytes ?? 0)))}</td>`;
+    case "mime":
+      return `<td>${escapeHtml(inferMimeType(item))}</td>`;
+    case "notes": {
+      const tagDot = item.color_tag ? `<span class="row-color-tag row-color-tag-${escapeHtml(item.color_tag)}"></span>` : "";
+      const noteIndicator = item.has_user_note ? `<span class="note-icon" title="Has note">\ud83d\udcdd</span>` : "";
+      return `<td>${tagDot}${noteIndicator}${item.note_count ? ` ${item.note_count}` : ""}</td>`;
+    }
+    case "tls": {
+      const tls = isTlsRecord(item) ? '<span class="tls-badge">TLS</span>' : '<span class="tls-badge empty">-</span>';
+      return `<td class="tls-cell">${tls}</td>`;
+    }
+    case "started_at":
+      return `<td>${escapeHtml(formatTimestamp(item.started_at))}</td>`;
+    default:
+      return "<td></td>";
+  }
+}
+
+let columnDragState = null;
+
+function bindColumnDragAndDrop() {
+  const headerRow = els.historyTable?.querySelector("thead tr");
+  if (!headerRow) return;
+
+  const headers = Array.from(headerRow.querySelectorAll("th[draggable]"));
+  headers.forEach((th) => {
+    th.addEventListener("dragstart", (event) => {
+      columnDragState = th.dataset.columnKey;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", columnDragState);
+      th.classList.add("column-dragging");
+      requestAnimationFrame(() => {
+        headers.forEach((h) => h.classList.add("column-drag-active"));
+      });
+    });
+
+    th.addEventListener("dragend", () => {
+      th.classList.remove("column-dragging");
+      headers.forEach((h) => {
+        h.classList.remove("column-drag-active", "column-drag-over", "column-drag-over-left", "column-drag-over-right");
+      });
+      columnDragState = null;
+    });
+
+    th.addEventListener("dragover", (event) => {
+      if (!columnDragState || columnDragState === th.dataset.columnKey) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      const rect = th.getBoundingClientRect();
+      const midX = rect.left + rect.width / 2;
+      const isLeft = event.clientX < midX;
+      th.classList.toggle("column-drag-over-left", isLeft);
+      th.classList.toggle("column-drag-over-right", !isLeft);
+      th.classList.add("column-drag-over");
+    });
+
+    th.addEventListener("dragleave", () => {
+      th.classList.remove("column-drag-over", "column-drag-over-left", "column-drag-over-right");
+    });
+
+    th.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const fromKey = columnDragState;
+      const toKey = th.dataset.columnKey;
+      if (!fromKey || fromKey === toKey) return;
+
+      const order = [...state.historyColumnOrder];
+      const fromIdx = order.indexOf(fromKey);
+      const toIdx = order.indexOf(toKey);
+      if (fromIdx === -1 || toIdx === -1) return;
+
+      const rect = th.getBoundingClientRect();
+      const midX = rect.left + rect.width / 2;
+      const dropLeft = event.clientX < midX;
+
+      order.splice(fromIdx, 1);
+      let insertIdx = order.indexOf(toKey);
+      if (!dropLeft) insertIdx += 1;
+      order.splice(insertIdx, 0, fromKey);
+
+      state.historyColumnOrder = order;
+      renderHistoryHeader();
+      applyHistoryColumnWidths();
+      renderHistory();
+      scheduleUiSettingsSave();
+    });
+  });
 }
 
 function loadWorkbenchLayout() {
@@ -3795,8 +3945,10 @@ function applyUiSettingsSnapshot(snapshot) {
     monoFont: snapshot?.display_settings?.mono_font,
   });
   state.historyColumnWidths = sanitizeHistoryColumnWidths(snapshot?.history_column_widths);
+  state.historyColumnOrder = sanitizeHistoryColumnOrder(snapshot?.history_column_order);
   state.workbenchHeight = sanitizeWorkbenchHeight(snapshot?.workbench_height);
   applyDisplaySettingsState();
+  renderHistoryHeader();
   applyHistoryColumnWidths();
 
   if (state.workbenchHeight) {
@@ -3815,6 +3967,7 @@ function snapshotUiSettings() {
       mono_font: state.displaySettings.monoFont,
     },
     history_column_widths: { ...state.historyColumnWidths },
+    history_column_order: [...state.historyColumnOrder],
     workbench_height: state.workbenchHeight,
   };
 }

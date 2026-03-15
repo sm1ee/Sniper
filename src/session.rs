@@ -35,6 +35,7 @@ pub struct SessionMetadata {
     pub request_count: usize,
     pub websocket_count: usize,
     pub event_count: usize,
+    #[serde(alias = "intruder_count")]
     pub fuzzer_count: usize,
     pub rule_count: usize,
 }
@@ -49,6 +50,7 @@ pub struct SessionSummary {
     pub request_count: usize,
     pub websocket_count: usize,
     pub event_count: usize,
+    #[serde(alias = "intruder_count")]
     pub fuzzer_count: usize,
     pub rule_count: usize,
     pub storage_path: String,
@@ -69,6 +71,7 @@ struct StoredSessionSnapshot {
     websockets: Vec<WebSocketSessionRecord>,
     event_log: Vec<EventLogEntry>,
     match_replace_rules: Vec<MatchReplaceRule>,
+    #[serde(alias = "intruder_attacks")]
     fuzzer_attacks: Vec<FuzzerAttackRecord>,
     workspace: WorkspaceStateSnapshot,
 }

@@ -10,7 +10,9 @@ use crate::{
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceStateSnapshot {
+    #[serde(alias = "repeater")]
     pub replay: ReplayWorkspaceState,
+    #[serde(alias = "intruder")]
     pub fuzzer: FuzzerWorkspaceState,
 }
 

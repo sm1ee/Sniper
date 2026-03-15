@@ -44,6 +44,8 @@ impl DisplaySettingsSnapshot {
 pub struct AppUiSettingsSnapshot {
     pub display_settings: DisplaySettingsSnapshot,
     pub history_column_widths: BTreeMap<String, u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_column_order: Vec<String>,
     pub workbench_height: Option<u16>,
 }
 
@@ -52,6 +54,7 @@ impl Default for AppUiSettingsSnapshot {
         Self {
             display_settings: DisplaySettingsSnapshot::default(),
             history_column_widths: default_history_column_widths(),
+            history_column_order: Vec::new(),
             workbench_height: None,
         }
     }
@@ -72,6 +75,12 @@ impl AppUiSettingsSnapshot {
                 sanitized.history_column_widths.insert(key, value.max(1));
             }
         }
+
+        sanitized.history_column_order = self
+            .history_column_order
+            .into_iter()
+            .filter(|key| !key.trim().is_empty())
+            .collect();
 
         sanitized
     }

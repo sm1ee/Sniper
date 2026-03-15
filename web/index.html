@@ -167,78 +167,7 @@
             <div class="history-table-shell">
               <table class="history-table" id="historyTable">
                 <thead>
-                  <tr>
-                    <th class="col-index" data-column-key="index">
-                      <button class="sort-header" data-sort-key="index" type="button">
-                        <span>#</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="index" aria-hidden="true"></span>
-                    </th>
-                    <th class="col-host" data-column-key="host">
-                      <button class="sort-header" data-sort-key="host" type="button">
-                        <span>Host</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="host" aria-hidden="true"></span>
-                    </th>
-                    <th class="col-method" data-column-key="method">
-                      <button class="sort-header" data-sort-key="method" type="button">
-                        <span>Method</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="method" aria-hidden="true"></span>
-                    </th>
-                    <th class="col-url" data-column-key="path">
-                      <button class="sort-header" data-sort-key="path" type="button">
-                        <span>URL</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="path" aria-hidden="true"></span>
-                    </th>
-                    <th class="col-status" data-column-key="status">
-                      <button class="sort-header" data-sort-key="status" type="button">
-                        <span>Status code</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="status" aria-hidden="true"></span>
-                    </th>
-                    <th class="col-length" data-column-key="length">
-                      <button class="sort-header" data-sort-key="length" type="button">
-                        <span>Length</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="length" aria-hidden="true"></span>
-                    </th>
-                    <th class="col-type" data-column-key="mime">
-                      <button class="sort-header" data-sort-key="mime" type="button">
-                        <span>MIME type</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="mime" aria-hidden="true"></span>
-                    </th>
-                    <th class="col-notes" data-column-key="notes">
-                      <button class="sort-header" data-sort-key="notes" type="button">
-                        <span>Notes</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="notes" aria-hidden="true"></span>
-                    </th>
-                    <th class="col-tls" data-column-key="tls">
-                      <button class="sort-header" data-sort-key="tls" type="button">
-                        <span>TLS</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="tls" aria-hidden="true"></span>
-                    </th>
-                    <th class="col-time" data-column-key="started_at">
-                      <button class="sort-header" data-sort-key="started_at" type="button">
-                        <span>Time</span>
-                        <span class="sort-indicator" aria-hidden="true">↕</span>
-                      </button>
-                      <span class="column-resize-handle" data-column-key="started_at" aria-hidden="true"></span>
-                    </th>
-                  </tr>
+                  <tr></tr>
                 </thead>
                 <tbody id="historyTableBody"></tbody>
               </table>
@@ -673,7 +602,7 @@
           <header class="replay-toolbar">
             <div class="replay-toolbar-actions">
               <button class="primary-action replay-send-button" id="sendReplayButton" type="button">Send</button>
-              <button class="secondary-action" id="resetRepeaterButton" type="button">Reset</button>
+              <button class="secondary-action" id="resetReplayButton" type="button">Reset</button>
               <button class="secondary-action replay-history-button" id="replayBackButton" type="button" aria-label="Previous replay history">&lt;</button>
               <button class="secondary-action replay-history-button" id="replayForwardButton" type="button" aria-label="Next replay history">&gt;</button>
             </div>
