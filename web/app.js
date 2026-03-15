@@ -714,7 +714,15 @@ function bindEvents() {
   });
   els.saveProxySettingsButton.addEventListener("click", () => {
     saveProxySettings()
-      .then(() => showToast("Proxy settings saved"))
+      .then((result) => {
+        if (result?.rebound === true) {
+          showToast(`Proxy listener moved to ${result.active_proxy_addr}`);
+        } else if (result?.rebound === false && result?.rebind_error) {
+          showToast(result.rebind_error, "error");
+        } else {
+          showToast("Proxy settings saved");
+        }
+      })
       .catch((error) => { console.error(error); showToast("Failed to save proxy settings", "error"); });
   });
   els.reloadProxySettingsButton.addEventListener("click", () => {
@@ -2478,9 +2486,13 @@ function renderProxySettings() {
   els.proxySettingsStartupPath.textContent = startup?.file_path || state.settings.data_dir;
   els.proxySettingsCertificateName.textContent = `${state.settings.certificate.common_name} · expires ${formatTimestamp(state.settings.certificate.expires_at)}`;
   els.proxySettingListenerHelp.textContent = startup
-    ? startup.restart_required
-      ? `Saved ${startup.proxy_addr} for the next launch. Restart Sniper to replace the active listener ${startup.active_proxy_addr}.`
-      : `Proxy listener is already running on ${startup.active_proxy_addr}. Changes here apply on the next launch.`
+    ? startup.rebound === true
+      ? `Proxy listener is now running on ${startup.active_proxy_addr}.`
+      : startup.rebind_error
+        ? `${startup.rebind_error} Saved ${startup.proxy_addr} for the next launch.`
+        : startup.restart_required
+          ? `Saved ${startup.proxy_addr} for the next launch. Restart Sniper to replace the active listener ${startup.active_proxy_addr}.`
+          : `Proxy listener is running on ${startup.active_proxy_addr}.`
     : "Changes are saved for the next app start.";
 }
 
@@ -3054,10 +3066,18 @@ async function saveProxySettings() {
   }
 
   state.runtime = await runtimeResponse.json();
-  state.settings.startup = await startupResponse.json();
+  const startupResult = await startupResponse.json();
+  state.settings.startup = startupResult;
+
+  // If proxy was rebound, update the main proxy_addr in settings too
+  if (startupResult.rebound === true) {
+    state.settings.proxy_addr = startupResult.active_proxy_addr;
+  }
+
   renderInterceptStatus();
   renderProxySettings();
   renderHistory();
+  return startupResult;
 }
 
 async function forwardSelectedIntercept() {
