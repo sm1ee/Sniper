@@ -661,7 +661,7 @@ function bindEvents() {
     clearEventLog().catch((error) => console.error(error));
   });
 
-  els.closeInspectorButton.addEventListener("click", () => {
+  els.closeInspectorButton?.addEventListener("click", () => {
     state.inspectorCollapsed = true;
     renderInspectorPanels();
   });
@@ -2101,6 +2101,7 @@ function selectCodePaneContents(targetPane) {
 }
 
 function renderDetail(record) {
+  if (!els.detailTitle) return;
   els.detailTitle.textContent = "Inspector";
   els.detailTags.innerHTML = "";
 
