@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     event_log::{EventLogEntry, EventLogStore},
     intercept::InterceptQueue,
-    intruder::{IntruderAttackRecord, IntruderStore},
+    fuzzer::{FuzzerAttackRecord, FuzzerStore},
     match_replace::{MatchReplaceRule, MatchReplaceStore},
     model::{TransactionRecord, WebSocketSessionRecord},
     runtime::{RuntimeSettings, RuntimeSettingsSnapshot},
@@ -35,7 +35,7 @@ pub struct SessionMetadata {
     pub request_count: usize,
     pub websocket_count: usize,
     pub event_count: usize,
-    pub intruder_count: usize,
+    pub fuzzer_count: usize,
     pub rule_count: usize,
 }
 
@@ -49,7 +49,7 @@ pub struct SessionSummary {
     pub request_count: usize,
     pub websocket_count: usize,
     pub event_count: usize,
-    pub intruder_count: usize,
+    pub fuzzer_count: usize,
     pub rule_count: usize,
     pub storage_path: String,
     pub active: bool,
@@ -69,7 +69,7 @@ struct StoredSessionSnapshot {
     websockets: Vec<WebSocketSessionRecord>,
     event_log: Vec<EventLogEntry>,
     match_replace_rules: Vec<MatchReplaceRule>,
-    intruder_attacks: Vec<IntruderAttackRecord>,
+    fuzzer_attacks: Vec<FuzzerAttackRecord>,
     workspace: WorkspaceStateSnapshot,
 }
 
@@ -83,7 +83,7 @@ pub struct SessionContext {
     pub websockets: Arc<WebSocketStore>,
     pub event_log: Arc<EventLogStore>,
     pub match_replace: Arc<MatchReplaceStore>,
-    pub intruder: Arc<IntruderStore>,
+    pub fuzzer: Arc<FuzzerStore>,
     pub workspace: Arc<WorkspaceStateStore>,
     metadata: RwLock<SessionMetadata>,
 }
@@ -113,9 +113,9 @@ impl SessionContext {
             )),
             event_log: Arc::new(EventLogStore::from_entries(max_entries, snapshot.event_log)),
             match_replace: Arc::new(MatchReplaceStore::from_rules(snapshot.match_replace_rules)),
-            intruder: Arc::new(IntruderStore::from_attacks(
+            fuzzer: Arc::new(FuzzerStore::from_attacks(
                 max_entries,
-                snapshot.intruder_attacks,
+                snapshot.fuzzer_attacks,
             )),
             workspace: Arc::new(WorkspaceStateStore::from_snapshot(snapshot.workspace)),
             metadata: RwLock::new(metadata),
@@ -146,7 +146,7 @@ impl SessionContext {
             websockets: self.websockets.snapshot(Some(self.max_entries)).await,
             event_log: self.event_log.snapshot(Some(self.max_entries)).await,
             match_replace_rules: self.match_replace.snapshot().await,
-            intruder_attacks: self.intruder.snapshot(Some(self.max_entries)).await,
+            fuzzer_attacks: self.fuzzer.snapshot(Some(self.max_entries)).await,
             workspace: self.workspace.snapshot().await,
         };
 
@@ -159,7 +159,7 @@ impl SessionContext {
         metadata.request_count = snapshot.transactions.len();
         metadata.websocket_count = snapshot.websockets.len();
         metadata.event_count = snapshot.event_log.len();
-        metadata.intruder_count = snapshot.intruder_attacks.len();
+        metadata.fuzzer_count = snapshot.fuzzer_attacks.len();
         metadata.rule_count = snapshot.match_replace_rules.len();
 
         fs::create_dir_all(&self.storage_dir).with_context(|| {
@@ -293,7 +293,7 @@ impl SessionRegistry {
             request_count: 0,
             websocket_count: 0,
             event_count: 0,
-            intruder_count: 0,
+            fuzzer_count: 0,
             rule_count: 0,
         };
 
@@ -374,7 +374,7 @@ fn default_session_metadata(name: &str) -> SessionMetadata {
         request_count: 0,
         websocket_count: 0,
         event_count: 0,
-        intruder_count: 0,
+        fuzzer_count: 0,
         rule_count: 0,
     }
 }
@@ -396,7 +396,7 @@ fn session_summary(metadata: &SessionMetadata, storage_dir: &Path, active: bool)
         request_count: metadata.request_count,
         websocket_count: metadata.websocket_count,
         event_count: metadata.event_count,
-        intruder_count: metadata.intruder_count,
+        fuzzer_count: metadata.fuzzer_count,
         rule_count: metadata.rule_count,
         storage_path: storage_dir.display().to_string(),
         active,
@@ -466,8 +466,8 @@ mod tests {
     use crate::{
         model::{BodyEncoding, EditableRequest, HeaderRecord, MessageRecord, TransactionRecord},
         workspace::{
-            IntruderWorkspaceState, RepeaterHistoryEntryState, RepeaterTabState,
-            RepeaterWorkspaceState, WorkspaceStateSnapshot,
+            FuzzerWorkspaceState, ReplayHistoryEntryState, ReplayTabState,
+            ReplayWorkspaceState, WorkspaceStateSnapshot,
         },
     };
 
@@ -510,8 +510,8 @@ mod tests {
         active
             .workspace
             .replace_snapshot(WorkspaceStateSnapshot {
-                repeater: RepeaterWorkspaceState {
-                    tabs: vec![RepeaterTabState {
+                replay: ReplayWorkspaceState {
+                    tabs: vec![ReplayTabState {
                         id: "tab-1".to_string(),
                         sequence: 1,
                         base_request: Some(request.clone()),
@@ -522,7 +522,7 @@ mod tests {
                         target_scheme: "https".to_string(),
                         target_host: "example.com".to_string(),
                         target_port: "443".to_string(),
-                        history_entries: vec![RepeaterHistoryEntryState {
+                        history_entries: vec![ReplayHistoryEntryState {
                             request: request.clone(),
                             request_text: "POST /login HTTP/1.1".to_string(),
                             response_record: None,
@@ -536,7 +536,7 @@ mod tests {
                     active_tab_id: Some("tab-1".to_string()),
                     tab_sequence: 1,
                 },
-                intruder: IntruderWorkspaceState {
+                fuzzer: FuzzerWorkspaceState {
                     base_request: Some(request.clone()),
                     source_transaction_id: None,
                     notice: "Ready".to_string(),
@@ -551,13 +551,13 @@ mod tests {
 
         let loaded = registry.load_context(active.id()).unwrap();
         let workspace = loaded.workspace.snapshot().await;
-        assert_eq!(workspace.repeater.tabs.len(), 1);
-        assert_eq!(workspace.repeater.active_tab_id.as_deref(), Some("tab-1"));
-        assert_eq!(workspace.intruder.notice, "Ready");
-        assert_eq!(workspace.intruder.payloads_text, "admin\nuser");
+        assert_eq!(workspace.replay.tabs.len(), 1);
+        assert_eq!(workspace.replay.active_tab_id.as_deref(), Some("tab-1"));
+        assert_eq!(workspace.fuzzer.notice, "Ready");
+        assert_eq!(workspace.fuzzer.payloads_text, "admin\nuser");
         assert_eq!(
             workspace
-                .repeater
+                .replay
                 .tabs
                 .first()
                 .and_then(|tab| tab.history_index),
@@ -565,7 +565,7 @@ mod tests {
         );
         assert_eq!(
             workspace
-                .repeater
+                .replay
                 .tabs
                 .first()
                 .and_then(|tab| tab.base_request.as_ref())
@@ -574,7 +574,7 @@ mod tests {
         );
         assert_eq!(
             workspace
-                .repeater
+                .replay
                 .tabs
                 .first()
                 .and_then(|tab| tab.history_entries.first())
@@ -627,6 +627,8 @@ mod tests {
                 request,
                 Some(response),
                 vec!["persisted".to_string()],
+                None,
+                None,
             ))
             .await;
 

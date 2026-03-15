@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- Organic blob shape clip -->
+    <clipPath id="blobClip">
+      <path d="M256 48c60 0 108 12 148 52s52 88 52 148c0 62-14 112-52 150s-88 50-148 50-110-12-150-50S56 310 56 248c0-60 18-108 50-148S196 48 256 48Z"/>
+    </clipPath>
+    <!-- Glow filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <!-- Subtle noise texture -->
+    <filter id="noise">
+      <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch" result="noise"/>
+      <feColorMatrix type="saturate" values="0" in="noise" result="grayNoise"/>
+      <feBlend in="SourceGraphic" in2="grayNoise" mode="overlay" result="textured"/>
+      <feComponentTransfer in="textured">
+        <feFuncA type="linear" slope="1"/>
+      </feComponentTransfer>
+    </filter>
+    <!-- Inner shadow -->
+    <filter id="innerShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8" result="blur"/>
+      <feOffset dx="0" dy="4" result="offsetBlur"/>
+      <feComposite in2="SourceAlpha" operator="arithmetic" k2="-1" k3="1" result="inverse"/>
+      <feFlood flood-color="#000" flood-opacity="0.35" result="color"/>
+      <feComposite in="color" in2="inverse" operator="in" result="shadow"/>
+      <feComposite in="SourceGraphic" in2="shadow" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Outer thick border (sticker feel) -->
+  <path d="M256 28c68 0 120 14 164 58s58 96 58 164c0 70-16 124-58 166s-96 56-164 56-122-14-166-56S30 318 30 248c0-68 20-120 60-164S188 28 256 28Z"
+        fill="#f0ece4" opacity="0.95"/>
+
+  <!-- Main dark blob body -->
+  <g filter="url(#innerShadow)">
+    <path d="M256 48c60 0 108 12 148 52s52 88 52 148c0 62-14 112-52 150s-88 50-148 50-110-12-150-50S56 310 56 248c0-60 18-108 50-148S196 48 256 48Z"
+          fill="#1a1d23"/>
+  </g>
+
+  <!-- Subtle texture overlay on body -->
+  <g clip-path="url(#blobClip)" opacity="0.04">
+    <rect width="512" height="512" filter="url(#noise)" fill="#fff"/>
+  </g>
+
+  <!-- Crosshair scope -->
+  <g transform="translate(256,252)" filter="url(#glow)">
+    <!-- Outer ring -->
+    <circle cx="0" cy="0" r="100" fill="none" stroke="#c9a96e" stroke-width="7" opacity="0.9"/>
+
+    <!-- Inner ring -->
+    <circle cx="0" cy="0" r="58" fill="none" stroke="#c9a96e" stroke-width="3" opacity="0.5"/>
+
+    <!-- Crosshair lines -->
+    <!-- Top -->
+    <line x1="0" y1="-120" x2="0" y2="-70" stroke="#c9a96e" stroke-width="5" stroke-linecap="round" opacity="0.9"/>
+    <!-- Bottom -->
+    <line x1="0" y1="70" x2="0" y2="120" stroke="#c9a96e" stroke-width="5" stroke-linecap="round" opacity="0.9"/>
+    <!-- Left -->
+    <line x1="-120" y1="0" x2="-70" y2="0" stroke="#c9a96e" stroke-width="5" stroke-linecap="round" opacity="0.9"/>
+    <!-- Right -->
+    <line x1="70" y1="0" x2="120" y2="0" stroke="#c9a96e" stroke-width="5" stroke-linecap="round" opacity="0.9"/>
+
+    <!-- Center dot -->
+    <circle cx="0" cy="0" r="6" fill="#c9a96e" opacity="0.95"/>
+
+    <!-- Small tick marks on outer ring -->
+    <!-- 45deg marks -->
+    <line x1="67" y1="-67" x2="75" y2="-75" stroke="#c9a96e" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+    <line x1="67" y1="67" x2="75" y2="75" stroke="#c9a96e" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+    <line x1="-67" y1="-67" x2="-75" y2="-75" stroke="#c9a96e" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+    <line x1="-67" y1="67" x2="-75" y2="75" stroke="#c9a96e" stroke-width="3" stroke-linecap="round" opacity="0.5"/>
+
+    <!-- Network node dots around scope -->
+    <circle cx="-88" cy="-60" r="4" fill="#c9a96e" opacity="0.35"/>
+    <circle cx="92" cy="52" r="3.5" fill="#c9a96e" opacity="0.3"/>
+    <circle cx="-55" cy="90" r="3" fill="#c9a96e" opacity="0.25"/>
+    <circle cx="68" cy="-85" r="3.5" fill="#c9a96e" opacity="0.3"/>
+
+    <!-- Faint connecting lines (network feel) -->
+    <line x1="-88" y1="-60" x2="-70" y2="-2" stroke="#c9a96e" stroke-width="1" opacity="0.15"/>
+    <line x1="92" y1="52" x2="70" y2="2" stroke="#c9a96e" stroke-width="1" opacity="0.15"/>
+    <line x1="-55" y1="90" x2="-2" y2="70" stroke="#c9a96e" stroke-width="1" opacity="0.15"/>
+    <line x1="68" y1="-85" x2="2" y2="-70" stroke="#c9a96e" stroke-width="1" opacity="0.15"/>
+  </g>
+
+  <!-- "SNIPER" text at bottom -->
+  <text x="256" y="420" text-anchor="middle" font-family="'SF Pro Display', 'Inter', -apple-system, sans-serif" font-size="32" font-weight="700" letter-spacing="8" fill="#c9a96e" opacity="0.75">SNIPER</text>
+</svg>

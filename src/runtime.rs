@@ -6,6 +6,8 @@ pub struct RuntimeSettingsSnapshot {
     pub intercept_enabled: bool,
     pub websocket_capture_enabled: bool,
     pub scope_patterns: Vec<String>,
+    #[serde(default)]
+    pub passthrough_hosts: Vec<String>,
 }
 
 impl Default for RuntimeSettingsSnapshot {
@@ -14,6 +16,7 @@ impl Default for RuntimeSettingsSnapshot {
             intercept_enabled: false,
             websocket_capture_enabled: true,
             scope_patterns: Vec::new(),
+            passthrough_hosts: Vec::new(),
         }
     }
 }
@@ -23,6 +26,7 @@ pub struct RuntimeSettingsUpdate {
     pub intercept_enabled: Option<bool>,
     pub websocket_capture_enabled: Option<bool>,
     pub scope_patterns: Option<Vec<String>>,
+    pub passthrough_hosts: Option<Vec<String>>,
 }
 
 pub struct RuntimeSettings {
@@ -59,6 +63,10 @@ impl RuntimeSettings {
             current.scope_patterns = normalize_scope_patterns(scope_patterns);
         }
 
+        if let Some(passthrough_hosts) = update.passthrough_hosts {
+            current.passthrough_hosts = normalize_scope_patterns(passthrough_hosts);
+        }
+
         current.clone()
     }
 
@@ -83,6 +91,11 @@ impl RuntimeSettings {
         let current = self.inner.read().await;
         matches_scope(host, &current.scope_patterns)
     }
+
+    pub async fn is_passthrough(&self, host: &str) -> bool {
+        let current = self.inner.read().await;
+        matches_passthrough(host, &current.passthrough_hosts)
+    }
 }
 
 fn normalize_scope_patterns(patterns: Vec<String>) -> Vec<String> {
@@ -98,6 +111,18 @@ fn matches_scope(host: &str, patterns: &[String]) -> bool {
         return true;
     }
 
+    host_matches_any(host, patterns)
+}
+
+fn matches_passthrough(host: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+
+    host_matches_any(host, patterns)
+}
+
+fn host_matches_any(host: &str, patterns: &[String]) -> bool {
     let hostname = host
         .split_once(':')
         .map(|(value, _)| value)

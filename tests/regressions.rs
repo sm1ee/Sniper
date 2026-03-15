@@ -8,7 +8,7 @@ use sniper::{
     model::{
         BodyEncoding, EditableRequest, MessageRecord, RequestTargetOverride, TransactionRecord,
     },
-    proxy::{send_repeater_request, serve_proxy},
+    proxy::{send_replay_request, serve_proxy},
     runtime::RuntimeSettingsUpdate,
     state::AppState,
     store::ListFilters,
@@ -92,7 +92,7 @@ async fn proxy_applies_request_match_replace_only_once() {
 }
 
 #[tokio::test]
-async fn repeater_rejects_truncated_captured_request_reuse() {
+async fn replay_rejects_truncated_captured_request_reuse() {
     let config = AppConfig {
         proxy_addr: "127.0.0.1:0".parse().unwrap(),
         ui_addr: "127.0.0.1:0".parse().unwrap(),
@@ -100,7 +100,7 @@ async fn repeater_rejects_truncated_captured_request_reuse() {
         body_preview_bytes: 4,
         upstream_insecure: false,
         data_dir: std::env::temp_dir().join(format!(
-            "sniper-test-regression-repeater-{}",
+            "sniper-test-regression-replay-{}",
             Uuid::new_v4()
         )),
     };
@@ -121,6 +121,8 @@ async fn repeater_rejects_truncated_captured_request_reuse() {
         captured_request,
         None,
         Vec::new(),
+        None,
+        None,
     );
     session.store.insert(source_record).await;
     let source_id = session.store.list(&ListFilters::default()).await[0].id;
@@ -139,14 +141,14 @@ async fn repeater_rejects_truncated_captured_request_reuse() {
         preview_truncated: true,
     };
 
-    let error = send_repeater_request(state, request, None, Some(source_id))
+    let error = send_replay_request(state, request, None, Some(source_id))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("truncated at the preview cap"));
 }
 
 #[tokio::test]
-async fn repeater_preserves_custom_host_header() {
+async fn replay_preserves_custom_host_header() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream.local_addr().unwrap();
     let upstream_app = Router::new().fallback(get(|headers: HeaderMap| async move {
@@ -167,7 +169,7 @@ async fn repeater_preserves_custom_host_header() {
         body_preview_bytes: 4096,
         upstream_insecure: false,
         data_dir: std::env::temp_dir().join(format!(
-            "sniper-test-regression-repeater-host-header-{}",
+            "sniper-test-regression-replay-host-header-{}",
             Uuid::new_v4()
         )),
     };
@@ -194,7 +196,7 @@ async fn repeater_preserves_custom_host_header() {
         port: upstream_addr.port().to_string(),
     };
 
-    let record = send_repeater_request(state, request, Some(target), None)
+    let record = send_replay_request(state, request, Some(target), None)
         .await
         .unwrap();
     let response_body = record.response.as_ref().expect("response should exist");
@@ -237,6 +239,7 @@ async fn intercept_forward_keeps_client_request_alive() {
             intercept_enabled: Some(true),
             websocket_capture_enabled: None,
             scope_patterns: None,
+            passthrough_hosts: None,
         })
         .await;
 

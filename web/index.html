@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Sniper</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -14,13 +15,17 @@
           <button class="main-tab" data-tool="dashboard">Session</button>
           <button class="main-tab" data-tool="target">Scope</button>
           <button class="main-tab active" data-tool="proxy">Capture</button>
-          <button class="main-tab" data-tool="intruder">Fuzzer</button>
-          <button class="main-tab" data-tool="repeater">Replay</button>
-          <button class="main-tab" data-tool="decoder">Tools</button>
+          <button class="main-tab" data-tool="fuzzer">Fuzzer</button>
+          <button class="main-tab" data-tool="replay">Replay</button>
+          <button class="main-tab" data-tool="tools">Tools</button>
           <button class="main-tab" data-tool="logger">Logger</button>
         </nav>
 
         <div class="top-utilities">
+          <span class="proxy-status-indicator offline" id="proxyStatusIndicator" title="Proxy offline">
+            <span class="proxy-status-dot"></span>
+            <span class="proxy-status-label" id="proxyStatusLabel">Proxy</span>
+          </span>
           <span class="utility-version" id="appVersionLabel" title="Current version">v...</span>
           <a
             class="utility-button hidden"
@@ -58,8 +63,8 @@
                 <dt>Event log</dt>
                 <dd id="dashboardCurrentSessionEvents">0</dd>
                 <dt>Fuzzer runs</dt>
-                <dd id="dashboardCurrentSessionIntruder">0</dd>
-                <dt>Auto-replace rules</dt>
+                <dd id="dashboardCurrentSessionFuzzer">0</dd>
+                <dt>Replace rules</dt>
                 <dd id="dashboardCurrentSessionRules">0</dd>
                 <dt>Created</dt>
                 <dd id="dashboardCurrentSessionCreated">-</dd>
@@ -127,7 +132,7 @@
             <button class="sub-tab" data-proxy-tab="intercept">Intercept</button>
             <button class="sub-tab active" data-proxy-tab="http-history">HTTP</button>
             <button class="sub-tab" data-proxy-tab="websockets-history">Web Socket</button>
-            <button class="sub-tab" data-proxy-tab="match-and-replace">Auto replace</button>
+            <button class="sub-tab" data-proxy-tab="replace">Replace</button>
             <button class="sub-tab" data-proxy-tab="proxy-settings">Settings</button>
           </nav>
 
@@ -250,6 +255,7 @@
                   <button class="view-tab active" data-target="request" data-view="pretty">Pretty</button>
                   <button class="view-tab" data-target="request" data-view="raw">Raw</button>
                   <button class="view-tab" data-target="request" data-view="hex">Hex</button>
+                  <button class="view-tab diff-tab hidden" data-target="request" data-view="diff">Diff</button>
                 </div>
               </header>
               <div class="editor-shell">
@@ -273,6 +279,7 @@
                   <button class="view-tab active" data-target="response" data-view="pretty">Pretty</button>
                   <button class="view-tab" data-target="response" data-view="raw">Raw</button>
                   <button class="view-tab" data-target="response" data-view="hex">Hex</button>
+                  <button class="view-tab diff-tab hidden" data-target="response" data-view="diff">Diff</button>
                 </div>
               </header>
               <div class="editor-shell">
@@ -285,6 +292,56 @@
                 </label>
                 <span id="responseSearchMeta">No highlights</span>
               </footer>
+            </section>
+
+            <div class="pane-resizer" id="responseInspectorResizer" data-resizer="response-inspector" role="separator" aria-orientation="vertical" aria-label="Resize response and inspector panes"></div>
+
+            <section class="message-column inspector-column">
+              <div class="inspector-layout">
+                <div class="inspector-main">
+                  <header class="pane-header inspector-header">
+                    <div>
+                      <strong id="detailTitle">Inspector</strong>
+                      <div class="detail-tags" id="detailTags"></div>
+                    </div>
+                    <button class="pane-close" id="closeInspectorButton" type="button">&times;</button>
+                  </header>
+                  <div class="inspector-content" id="inspectorContent">
+                    <section class="inspector-section">
+                      <button class="section-toggle" type="button">
+                        <span>Attributes</span>
+                        <span class="section-count" id="attributesCount">0</span>
+                      </button>
+                      <div class="section-body">
+                        <div class="protocol-strip" id="protocolStrip"></div>
+                        <dl class="summary-list" id="summaryList"></dl>
+                      </div>
+                    </section>
+                    <section class="inspector-section">
+                      <button class="section-toggle" type="button">
+                        <span>Request headers</span>
+                        <span class="section-count" id="requestHeaderCount">0</span>
+                      </button>
+                      <div class="section-body" id="requestHeadersBody"></div>
+                    </section>
+                    <section class="inspector-section">
+                      <button class="section-toggle" type="button">
+                        <span>Response headers</span>
+                        <span class="section-count" id="responseHeaderCount">0</span>
+                      </button>
+                      <div class="section-body" id="responseHeadersBody"></div>
+                    </section>
+                    <div class="notes-panel" id="notesPanel">
+                      <h3>Notes</h3>
+                      <div id="notesCard"><p>No anomalies were recorded for this transaction.</p></div>
+                    </div>
+                  </div>
+                </div>
+                <nav class="inspector-rail">
+                  <button class="rail-tab active" data-inspector-tab="inspector" type="button">Inspector</button>
+                  <button class="rail-tab" data-inspector-tab="notes" type="button">Notes</button>
+                </nav>
+              </div>
             </section>
 
           </section>
@@ -332,8 +389,8 @@
                   </div>
                 </header>
                 <div class="editor-panel">
-                  <div class="repeater-highlight-shell">
-                    <pre id="interceptRequestHighlight" class="simple-code-view repeater-highlight-view" aria-hidden="true"></pre>
+                  <div class="replay-highlight-shell">
+                    <pre id="interceptRequestHighlight" class="simple-code-view replay-highlight-view" aria-hidden="true"></pre>
                     <textarea id="interceptRequestEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Select an intercepted request to edit and forward it."></textarea>
                   </div>
                 </div>
@@ -435,18 +492,17 @@
                 <header class="panel-toolbar">
                   <div>
                     <p class="placeholder-kicker">Proxy</p>
-                    <h2>Auto replace rules</h2>
+                    <h2>Replace rules</h2>
                   </div>
                   <div class="toolbar-actions">
-                    <button class="secondary-action" id="newMatchReplaceRuleButton" type="button">New rule</button>
-                    <button class="primary-action" id="saveMatchReplaceRuleButton" type="button">Save all</button>
+                    <button class="danger-action" id="deleteMatchReplaceRuleButton" type="button" disabled>Delete</button>
                   </div>
                 </header>
                 <div class="history-table-shell">
                   <table class="mini-table">
                     <thead>
                       <tr>
-                        <th>Enabled</th>
+                        <th>On</th>
                         <th>Name</th>
                         <th>Scope</th>
                         <th>Target</th>
@@ -464,7 +520,7 @@
                     <h2 id="matchReplaceEditorTitle">New rule</h2>
                   </div>
                   <div class="toolbar-actions">
-                    <button class="secondary-action" id="deleteMatchReplaceRuleButton" type="button">Delete</button>
+                    <button class="primary-action" id="saveMatchReplaceRuleButton" type="button">Add</button>
                   </div>
                 </header>
                 <div class="settings-form">
@@ -542,6 +598,11 @@
                     <small>Only in-scope hosts are intercepted when intercept is enabled. Leave empty to match all hosts.</small>
                   </label>
                   <label class="settings-field">
+                    <span>SSL passthrough hosts</span>
+                    <textarea id="proxySettingPassthroughHosts" rows="4" placeholder="*.pinned-app.com&#10;banking.example.com"></textarea>
+                    <small>Hosts listed here bypass TLS interception entirely. Use for certificate-pinned apps that reject the proxy CA. Wildcards supported.</small>
+                  </label>
+                  <label class="settings-field">
                     <span>Proxy bind host</span>
                     <input id="proxySettingBindHost" type="text" list="proxyBindHostPresets" placeholder="127.0.0.1 or 0.0.0.0" />
                     <small>Common values: <code>127.0.0.1</code> for local-only, <code>0.0.0.0</code> to accept traffic from other devices.</small>
@@ -603,92 +664,92 @@
           </section>
         </section>
 
-        <section class="repeater-shell hidden" id="repeaterShell">
-          <div class="repeater-tab-strip">
-            <div class="repeater-tab-list" id="repeaterTabStrip"></div>
-            <button class="utility-button repeater-tab-add" id="newRepeaterTabButton" type="button" aria-label="New repeater tab">+</button>
+        <section class="replay-shell hidden" id="replayShell">
+          <div class="replay-tab-strip">
+            <div class="replay-tab-list" id="replayTabStrip"></div>
+            <button class="utility-button replay-tab-add" id="newReplayTabButton" type="button" aria-label="New replay tab">+</button>
           </div>
 
-          <header class="repeater-toolbar">
-            <div class="repeater-toolbar-actions">
-              <button class="primary-action repeater-send-button" id="sendRepeaterButton" type="button">Send</button>
+          <header class="replay-toolbar">
+            <div class="replay-toolbar-actions">
+              <button class="primary-action replay-send-button" id="sendReplayButton" type="button">Send</button>
               <button class="secondary-action" id="resetRepeaterButton" type="button">Reset</button>
-              <button class="secondary-action repeater-history-button" id="repeaterBackButton" type="button" aria-label="Previous repeater history">&lt;</button>
-              <button class="secondary-action repeater-history-button" id="repeaterForwardButton" type="button" aria-label="Next repeater history">&gt;</button>
+              <button class="secondary-action replay-history-button" id="replayBackButton" type="button" aria-label="Previous replay history">&lt;</button>
+              <button class="secondary-action replay-history-button" id="replayForwardButton" type="button" aria-label="Next replay history">&gt;</button>
             </div>
-            <div class="repeater-target-cluster">
-              <div class="repeater-target-bar">
+            <div class="replay-target-cluster">
+              <div class="replay-target-bar">
                 <label class="compact-field compact-field-scheme">
                   <span>Scheme</span>
-                  <select id="repeaterSchemeSelect">
+                  <select id="replaySchemeSelect">
                     <option value="https">HTTPS</option>
                     <option value="http">HTTP</option>
                   </select>
                 </label>
-                <label class="compact-field repeater-target-field">
+                <label class="compact-field replay-target-field">
                   <span>Target host</span>
-                  <input id="repeaterHostInput" type="text" placeholder="api.example.com" />
+                  <input id="replayHostInput" type="text" placeholder="api.example.com" />
                 </label>
                 <label class="compact-field compact-field-port">
                   <span>Port</span>
-                  <input id="repeaterPortInput" type="number" min="1" max="65535" placeholder="443" />
+                  <input id="replayPortInput" type="number" min="1" max="65535" placeholder="443" />
                 </label>
               </div>
             </div>
           </header>
 
-          <section class="split-panel repeater-workbench">
+          <section class="split-panel replay-workbench">
             <section class="panel-card">
-              <header class="panel-toolbar repeater-panel-toolbar">
+              <header class="panel-toolbar replay-panel-toolbar">
                 <h2>Request</h2>
               </header>
               <div class="editor-panel">
-                <div class="repeater-highlight-shell">
-                  <pre id="repeaterRequestHighlight" class="simple-code-view repeater-highlight-view" aria-hidden="true"></pre>
-                  <textarea id="repeaterRequestEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Paste or send a captured request here."></textarea>
+                <div class="replay-highlight-shell">
+                  <pre id="replayRequestHighlight" class="simple-code-view replay-highlight-view" aria-hidden="true"></pre>
+                  <textarea id="replayRequestEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Paste or send a captured request here."></textarea>
                 </div>
               </div>
               <footer class="pane-footer">
                 <label class="pane-search">
-                  <input id="repeaterRequestSearchInput" type="search" placeholder="Search request" />
+                  <input id="replayRequestSearchInput" type="search" placeholder="Search request" />
                 </label>
-                <span id="repeaterRequestSearchMeta">No highlights · 1 lines · Pretty view</span>
+                <span id="replayRequestSearchMeta">No highlights · 1 lines · Pretty view</span>
               </footer>
             </section>
 
             <section class="panel-card">
-              <header class="panel-toolbar repeater-panel-toolbar">
+              <header class="panel-toolbar replay-panel-toolbar">
                 <h2>Response</h2>
-                <p class="inline-copy repeater-response-copy" id="repeaterResponseMeta">No response yet.</p>
+                <p class="inline-copy replay-response-copy" id="replayResponseMeta">No response yet.</p>
               </header>
               <div class="editor-panel">
-                <pre id="repeaterResponseView" class="simple-code-view repeater-response-view">Send a request from Repeater to capture the response here.</pre>
+                <pre id="replayResponseView" class="simple-code-view replay-response-view">Send a request from Replay to capture the response here.</pre>
               </div>
               <footer class="pane-footer">
                 <label class="pane-search">
-                  <input id="repeaterResponseSearchInput" type="search" placeholder="Search response" />
+                  <input id="replayResponseSearchInput" type="search" placeholder="Search response" />
                 </label>
-                <span id="repeaterResponseSearchMeta">No highlights · 1 lines · Pretty view</span>
+                <span id="replayResponseSearchMeta">No highlights · 1 lines · Pretty view</span>
               </footer>
             </section>
           </section>
         </section>
 
-        <section class="decoder-shell hidden" id="decoderShell">
-          <section class="decoder-workbench">
-            <section class="panel-card decoder-input-card">
+        <section class="tools-shell hidden" id="toolsShell">
+          <section class="tools-workbench">
+            <section class="panel-card tools-input-card">
               <div>
                 <div class="panel-toolbar">
                   <div>
                     <h2>Tools</h2>
-                    <p class="inline-copy" id="decoderMeta">Loading decoder tools...</p>
+                    <p class="inline-copy" id="toolsMeta">Loading decoder tools...</p>
                   </div>
                   <div class="toolbar-actions">
-                    <button class="secondary-action" id="decoderClearButton" type="button">Clear</button>
+                    <button class="secondary-action" id="toolsClearButton" type="button">Clear</button>
                   </div>
                 </div>
-                <div class="decoder-tool-strip">
-                  <ul id="tabs" class="decoder-tool-list">
+                <div class="tools-tool-strip">
+                  <ul id="tabs" class="tools-tool-list">
                     <li id="hash" class="on">Hash</li>
                     <li id="hmac">HMAC</li>
                     <li id="crc">CRC</li>
@@ -706,34 +767,34 @@
                 </div>
               </div>
 
-              <div class="decoder-input-stack">
-                <label class="decoder-field" for="input-value">
+              <div class="tools-input-stack">
+                <label class="tools-field" for="input-value">
                   <span>Input</span>
                   <textarea
                     id="input-value"
-                    class="request-editor decoder-input-editor"
+                    class="request-editor tools-input-editor"
                     data-autosize="decoder"
                     spellcheck="false"
                     placeholder="Paste text, tokens, payloads, JSON, JWT, hashes, or network values here."
                   ></textarea>
                 </label>
 
-                <label class="decoder-field decoder-inline-field" id="input-password-wrapper" style="display: none;" for="input-password">
+                <label class="tools-field tools-inline-field" id="input-password-wrapper" style="display: none;" for="input-password">
                   <span>Password</span>
                   <input
                     id="input-password"
-                    class="decoder-inline-input"
+                    class="tools-inline-input"
                     type="password"
                     autocomplete="off"
                     placeholder="Required for HMAC and cipher tools"
                   />
                 </label>
 
-                <label class="decoder-field decoder-inline-field" id="input-url-wrapper" style="display: none;" for="input-url">
+                <label class="tools-field tools-inline-field" id="input-url-wrapper" style="display: none;" for="input-url">
                   <span>Attack payload URL</span>
                   <input
                     id="input-url"
-                    class="decoder-inline-input"
+                    class="tools-inline-input"
                     type="text"
                     autocomplete="off"
                     placeholder="https://trusted.example@attacker.example"
@@ -742,40 +803,40 @@
               </div>
             </section>
 
-            <section class="panel-card decoder-output-card">
-              <header class="panel-toolbar decoder-output-toolbar">
+            <section class="panel-card tools-output-card">
+              <header class="panel-toolbar tools-output-toolbar">
                 <div>
-                  <h2 id="decoderActiveToolTitle">Hash outputs</h2>
-                  <p class="inline-copy" id="decoderOutputMeta">Click any result to copy it.</p>
+                  <h2 id="toolsActiveToolTitle">Hash outputs</h2>
+                  <p class="inline-copy" id="toolsOutputMeta">Click any result to copy it.</p>
                 </div>
               </header>
-              <div id="output" class="decoder-output-list">
-                <div class="decoder-empty-state">Choose a decoder tool and start typing to see results here.</div>
+              <div id="output" class="tools-output-list">
+                <div class="tools-empty-state">Choose a decoder tool and start typing to see results here.</div>
               </div>
             </section>
           </section>
         </section>
 
-        <section class="intruder-shell hidden" id="intruderShell">
-          <header class="panel-toolbar repeater-header">
+        <section class="fuzzer-shell hidden" id="fuzzerShell">
+          <header class="panel-toolbar replay-header">
             <div>
               <p class="inline-copy">Use <code>§payload§</code> markers or <code>{{PAYLOAD}}</code> placeholders in the request.</p>
             </div>
             <div class="toolbar-actions">
-              <button class="secondary-action" id="resetIntruderButton" type="button">Reset</button>
-              <button class="primary-action" id="startIntruderButton" type="button">Start</button>
+              <button class="secondary-action" id="resetFuzzerButton" type="button">Reset</button>
+              <button class="primary-action" id="startFuzzerButton" type="button">Start</button>
             </div>
           </header>
 
-          <section class="intruder-layout">
+          <section class="fuzzer-layout">
             <section class="panel-card">
               <header class="panel-toolbar">
                 <h2>Request template</h2>
               </header>
               <div class="editor-panel">
-                <div class="repeater-highlight-shell">
-                  <pre id="intruderRequestHighlight" class="simple-code-view repeater-highlight-view" aria-hidden="true"></pre>
-                  <textarea id="intruderRequestEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Press Command+I in HTTP or paste a request template with markers."></textarea>
+                <div class="replay-highlight-shell">
+                  <pre id="fuzzerRequestHighlight" class="simple-code-view replay-highlight-view" aria-hidden="true"></pre>
+                  <textarea id="fuzzerRequestEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Press Command+I in HTTP or paste a request template with markers."></textarea>
                 </div>
               </div>
             </section>
@@ -785,15 +846,15 @@
                 <h2>Payloads</h2>
               </header>
               <div class="editor-panel">
-                <textarea id="intruderPayloadsEditor" class="request-editor" spellcheck="false" placeholder="one payload per line"></textarea>
+                <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="one payload per line"></textarea>
               </div>
             </section>
 
-            <section class="panel-card intruder-results-card">
+            <section class="panel-card fuzzer-results-card">
               <header class="panel-toolbar">
                 <div>
                   <h2>Run results</h2>
-                  <p class="inline-copy" id="intruderMeta">No fuzz run has been started yet.</p>
+                  <p class="inline-copy" id="fuzzerMeta">No fuzz run has been started yet.</p>
                 </div>
               </header>
               <div class="history-table-shell">
@@ -808,7 +869,7 @@
                       <th>Transaction</th>
                     </tr>
                   </thead>
-                  <tbody id="intruderResultsBody"></tbody>
+                  <tbody id="fuzzerResultsBody"></tbody>
                 </table>
               </div>
             </section>
@@ -1068,6 +1129,31 @@
           <button class="secondary-action" id="resetDisplaySettingsButton" type="button">Reset</button>
           <button class="primary-action" id="applyDisplaySettingsButton" type="button">Apply</button>
         </div>
+      </div>
+    </div>
+
+    <div class="context-menu hidden" id="contextMenu">
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-action="send-to-replay" type="button">Send to Replay</button>
+        <button class="context-menu-item" data-action="send-to-fuzzer" type="button">Send to Fuzzer</button>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <span class="context-menu-label">Color tag</span>
+        <div class="context-menu-colors">
+          <button class="color-dot color-dot-red" data-color="red" type="button" title="Red"></button>
+          <button class="color-dot color-dot-orange" data-color="orange" type="button" title="Orange"></button>
+          <button class="color-dot color-dot-yellow" data-color="yellow" type="button" title="Yellow"></button>
+          <button class="color-dot color-dot-green" data-color="green" type="button" title="Green"></button>
+          <button class="color-dot color-dot-blue" data-color="blue" type="button" title="Blue"></button>
+          <button class="color-dot color-dot-purple" data-color="purple" type="button" title="Purple"></button>
+          <button class="color-dot color-dot-none" data-color="" type="button" title="Clear"></button>
+        </div>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <span class="context-menu-label">Note</span>
+        <input class="context-menu-note" id="contextMenuNote" type="text" placeholder="Add a note..." />
       </div>
     </div>
 

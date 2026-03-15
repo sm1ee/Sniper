@@ -80,6 +80,23 @@ impl TransactionStore {
             .collect()
     }
 
+    pub async fn update_annotations(
+        &self,
+        id: Uuid,
+        color_tag: Option<Option<String>>,
+        user_note: Option<Option<String>>,
+    ) -> Option<TransactionSummary> {
+        let mut entries = self.entries.write().await;
+        let record = entries.iter_mut().find(|r| r.id == id)?;
+        if let Some(tag) = color_tag {
+            record.color_tag = tag;
+        }
+        if let Some(note) = user_note {
+            record.user_note = note;
+        }
+        Some(record.summary())
+    }
+
     pub async fn replace_all(&self, records: Vec<TransactionRecord>) {
         let mut entries = self.entries.write().await;
         entries.clear();
@@ -138,6 +155,8 @@ mod tests {
                 empty_message.clone(),
                 Some(empty_message.clone()),
                 Vec::new(),
+                None,
+                None,
             ))
             .await;
 
@@ -153,6 +172,8 @@ mod tests {
                 empty_message.clone(),
                 Some(empty_message.clone()),
                 Vec::new(),
+                None,
+                None,
             ))
             .await;
 
@@ -168,6 +189,8 @@ mod tests {
                 empty_message.clone(),
                 Some(empty_message),
                 Vec::new(),
+                None,
+                None,
             ))
             .await;
 

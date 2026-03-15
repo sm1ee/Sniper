@@ -12,7 +12,7 @@ use serde_json::json;
 use sniper::{
     certificate::default_data_dir,
     intercept::{InterceptRecord, InterceptSummary},
-    intruder::IntruderAttackRecord,
+    fuzzer::FuzzerAttackRecord,
     match_replace::{MatchReplaceRule, MatchReplaceRulesPayload},
     model::{
         BodyEncoding, EditableRequest, HeaderRecord, RequestTargetOverride, TransactionRecord,
@@ -22,7 +22,7 @@ use sniper::{
     runtime_state::load_runtime_state,
     session::SessionSummary,
     workspace::{
-        RepeaterHistoryEntryState, RepeaterTabState, RepeaterWorkspaceState, WorkspaceStateSnapshot,
+        ReplayHistoryEntryState, ReplayTabState, ReplayWorkspaceState, WorkspaceStateSnapshot,
     },
 };
 use url::Url;
@@ -63,7 +63,7 @@ enum Command {
     #[command(name = "replay", visible_alias = "repeater")]
     Replay {
         #[command(subcommand)]
-        command: RepeaterCommand,
+        command: ReplayCommand,
     },
     Fuzzer {
         #[command(subcommand)]
@@ -143,6 +143,7 @@ enum HistoryCommand {
     Get(HistoryGetArgs),
     Replay(HistoryReplayArgs),
     Fuzzer(HistoryFuzzerArgs),
+    Annotate(HistoryAnnotateArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -179,6 +180,24 @@ struct HistoryFuzzerArgs {
     id: Uuid,
 }
 
+#[derive(Args, Debug)]
+struct HistoryAnnotateArgs {
+    #[arg(long)]
+    id: Uuid,
+    /// Set color tag (e.g. red, orange, yellow, green, blue, purple). Use --clear-color to remove.
+    #[arg(long)]
+    color: Option<String>,
+    /// Remove the color tag.
+    #[arg(long)]
+    clear_color: bool,
+    /// Set a user note on the transaction.
+    #[arg(long)]
+    note: Option<String>,
+    /// Remove the user note.
+    #[arg(long)]
+    clear_note: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum TargetCommand {
     GetScope,
@@ -196,15 +215,15 @@ struct TargetSetScopeArgs {
 }
 
 #[derive(Subcommand, Debug)]
-enum RepeaterCommand {
+enum ReplayCommand {
     List,
-    Open(RepeaterOpenArgs),
-    Update(RepeaterUpdateArgs),
-    Send(RepeaterSendArgs),
+    Open(ReplayOpenArgs),
+    Update(ReplayUpdateArgs),
+    Send(ReplaySendArgs),
 }
 
 #[derive(Args, Debug, Default)]
-struct RepeaterOpenArgs {
+struct ReplayOpenArgs {
     #[arg(long)]
     transaction_id: Option<Uuid>,
     #[arg(long)]
@@ -220,7 +239,7 @@ struct RepeaterOpenArgs {
 }
 
 #[derive(Args, Debug, Default)]
-struct RepeaterUpdateArgs {
+struct ReplayUpdateArgs {
     #[arg(long)]
     tab_id: String,
     #[arg(long)]
@@ -236,7 +255,7 @@ struct RepeaterUpdateArgs {
 }
 
 #[derive(Args, Debug)]
-struct RepeaterSendArgs {
+struct ReplaySendArgs {
     #[arg(long)]
     tab_id: String,
 }
@@ -471,7 +490,7 @@ struct CreateSessionPayload {
 }
 
 #[derive(Serialize)]
-struct RepeaterSendPayload {
+struct ReplaySendPayload {
     request: EditableRequest,
     target: Option<RequestTargetOverride>,
     source_transaction_id: Option<Uuid>,
@@ -516,7 +535,7 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                 },
                 Command::Scope { command } => handle_target(api, command).await,
-                Command::Replay { command } => handle_repeater(api, command).await,
+                Command::Replay { command } => handle_replay(api, command).await,
                 Command::Fuzzer { command } => handle_fuzzer(api, command).await,
                 Command::Skills { .. } => unreachable!(),
                 Command::History { command } => handle_history(api, command).await,
@@ -594,13 +613,40 @@ async fn handle_history(api: ApiClient, command: HistoryCommand) -> Result<()> {
             let mut workspace: WorkspaceStateSnapshot = api.get_json("/api/workspace-state").await?;
             let (base_request, source_transaction_id, request_text) =
                 resolve_request_source(&api, Some(args.id), None, false).await?;
-            workspace.intruder.base_request = base_request;
-            workspace.intruder.source_transaction_id = source_transaction_id;
-            workspace.intruder.request_text = request_text;
-            workspace.intruder.notice.clear();
+            workspace.fuzzer.base_request = base_request;
+            workspace.fuzzer.source_transaction_id = source_transaction_id;
+            workspace.fuzzer.request_text = request_text;
+            workspace.fuzzer.notice.clear();
             let snapshot: WorkspaceStateSnapshot =
                 api.post_json("/api/workspace-state", &workspace).await?;
-            print_json(&snapshot.intruder)
+            print_json(&snapshot.fuzzer)
+        }
+        HistoryCommand::Annotate(args) => {
+            let color_tag: Option<Option<String>> = if args.clear_color {
+                Some(None)
+            } else {
+                args.color.map(Some)
+            };
+            let user_note: Option<Option<String>> = if args.clear_note {
+                Some(None)
+            } else {
+                args.note.map(Some)
+            };
+            if color_tag.is_none() && user_note.is_none() {
+                bail!("provide at least one of --color, --clear-color, --note, or --clear-note");
+            }
+            let payload = json!({
+                "color_tag": color_tag,
+                "user_note": user_note,
+            });
+            let summary: TransactionSummary = api
+                .request_json(
+                    Method::PATCH,
+                    &format!("/api/transactions/{}/annotations", args.id),
+                    Some(&payload),
+                )
+                .await?;
+            print_json(&summary)
         }
     }
 }
@@ -632,13 +678,13 @@ async fn handle_target(api: ApiClient, command: TargetCommand) -> Result<()> {
     }
 }
 
-async fn handle_repeater(api: ApiClient, command: RepeaterCommand) -> Result<()> {
+async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
     match command {
-        RepeaterCommand::List => {
+        ReplayCommand::List => {
             let workspace: WorkspaceStateSnapshot = api.get_json("/api/workspace-state").await?;
-            print_json(&workspace.repeater)
+            print_json(&workspace.replay)
         }
-        RepeaterCommand::Open(args) => {
+        ReplayCommand::Open(args) => {
             let tab = open_replay_tab(
                 &api,
                 args.transaction_id,
@@ -651,10 +697,10 @@ async fn handle_repeater(api: ApiClient, command: RepeaterCommand) -> Result<()>
             .await?;
             print_json(&tab)
         }
-        RepeaterCommand::Update(args) => {
+        ReplayCommand::Update(args) => {
             let mut workspace: WorkspaceStateSnapshot =
                 api.get_json("/api/workspace-state").await?;
-            let tab = find_repeater_tab_mut(&mut workspace.repeater, &args.tab_id)?;
+            let tab = find_replay_tab_mut(&mut workspace.replay, &args.tab_id)?;
             if args.request_file.is_some() || args.stdin {
                 let request_text = read_text_input(args.request_file, args.stdin)?;
                 if !request_text.trim().is_empty() {
@@ -678,20 +724,20 @@ async fn handle_repeater(api: ApiClient, command: RepeaterCommand) -> Result<()>
             }
             let snapshot: WorkspaceStateSnapshot =
                 api.post_json("/api/workspace-state", &workspace).await?;
-            let tab = find_repeater_tab(&snapshot.repeater, &args.tab_id)?;
+            let tab = find_replay_tab(&snapshot.replay, &args.tab_id)?;
             print_json(tab)
         }
-        RepeaterCommand::Send(args) => {
+        ReplayCommand::Send(args) => {
             let mut workspace: WorkspaceStateSnapshot =
                 api.get_json("/api/workspace-state").await?;
-            let tab = find_repeater_tab_mut(&mut workspace.repeater, &args.tab_id)?.clone();
+            let tab = find_replay_tab_mut(&mut workspace.replay, &args.tab_id)?.clone();
             let request = parse_editable_raw_request(&tab.request_text, tab.base_request.as_ref())?;
             let target =
                 build_target_override(&tab.target_scheme, &tab.target_host, &tab.target_port);
             let record: TransactionRecord = api
                 .post_json(
-                    "/api/repeater/send",
-                    &RepeaterSendPayload {
+                    "/api/replay/send",
+                    &ReplaySendPayload {
                         request: request.clone(),
                         target,
                         source_transaction_id: tab.source_transaction_id,
@@ -699,10 +745,10 @@ async fn handle_repeater(api: ApiClient, command: RepeaterCommand) -> Result<()>
                 )
                 .await?;
 
-            let tab_mut = find_repeater_tab_mut(&mut workspace.repeater, &args.tab_id)?;
+            let tab_mut = find_replay_tab_mut(&mut workspace.replay, &args.tab_id)?;
             tab_mut.response_record = Some(record.clone());
             tab_mut.notice.clear();
-            tab_mut.history_entries.push(RepeaterHistoryEntryState {
+            tab_mut.history_entries.push(ReplayHistoryEntryState {
                 request,
                 request_text: tab_mut.request_text.clone(),
                 response_record: Some(record.clone()),
@@ -728,47 +774,47 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
             let (base_request, source_transaction_id, request_text) =
                 resolve_request_source(&api, args.transaction_id, args.request_file, args.stdin)
                     .await?;
-            workspace.intruder.base_request = base_request;
-            workspace.intruder.source_transaction_id = source_transaction_id;
-            workspace.intruder.request_text = request_text;
-            workspace.intruder.notice.clear();
+            workspace.fuzzer.base_request = base_request;
+            workspace.fuzzer.source_transaction_id = source_transaction_id;
+            workspace.fuzzer.request_text = request_text;
+            workspace.fuzzer.notice.clear();
             let snapshot: WorkspaceStateSnapshot =
                 api.post_json("/api/workspace-state", &workspace).await?;
-            print_json(&snapshot.intruder)
+            print_json(&snapshot.fuzzer)
         }
         FuzzerCommand::SetPayloads(args) => {
             let mut workspace: WorkspaceStateSnapshot =
                 api.get_json("/api/workspace-state").await?;
-            workspace.intruder.payloads_text =
+            workspace.fuzzer.payloads_text =
                 read_payloads_input(args.payloads, args.file, args.stdin)?;
-            workspace.intruder.notice.clear();
+            workspace.fuzzer.notice.clear();
             let snapshot: WorkspaceStateSnapshot =
                 api.post_json("/api/workspace-state", &workspace).await?;
-            print_json(&snapshot.intruder)
+            print_json(&snapshot.fuzzer)
         }
         FuzzerCommand::Run => {
             let mut workspace: WorkspaceStateSnapshot =
                 api.get_json("/api/workspace-state").await?;
             let template = parse_editable_raw_request(
-                &workspace.intruder.request_text,
-                workspace.intruder.base_request.as_ref(),
+                &workspace.fuzzer.request_text,
+                workspace.fuzzer.base_request.as_ref(),
             )?;
-            let payloads = split_payload_lines(&workspace.intruder.payloads_text);
+            let payloads = split_payload_lines(&workspace.fuzzer.payloads_text);
             if payloads.is_empty() {
                 bail!("fuzzer payloads are empty");
             }
-            let record: IntruderAttackRecord = api
+            let record: FuzzerAttackRecord = api
                 .post_json(
-                    "/api/intruder/attacks",
+                    "/api/fuzzer/attacks",
                     &FuzzerRunPayload {
                         template,
                         payloads,
-                        source_transaction_id: workspace.intruder.source_transaction_id,
+                        source_transaction_id: workspace.fuzzer.source_transaction_id,
                     },
                 )
                 .await?;
-            workspace.intruder.attack_record = Some(record.clone());
-            workspace.intruder.notice.clear();
+            workspace.fuzzer.attack_record = Some(record.clone());
+            workspace.fuzzer.notice.clear();
             let _snapshot: WorkspaceStateSnapshot =
                 api.post_json("/api/workspace-state", &workspace).await?;
             print_json(&record)
@@ -896,13 +942,13 @@ async fn open_replay_tab(
     scheme: Option<String>,
     host: Option<String>,
     port: Option<String>,
-) -> Result<RepeaterTabState> {
+) -> Result<ReplayTabState> {
     let mut workspace: WorkspaceStateSnapshot = api.get_json("/api/workspace-state").await?;
     let (base_request, source_transaction_id, request_text) =
         resolve_request_source(api, transaction_id, request_file, stdin).await?;
     let normalized = normalize_target_inputs(scheme, host, port, base_request.as_ref());
-    let sequence = workspace.repeater.tab_sequence + 1;
-    let tab = RepeaterTabState {
+    let sequence = workspace.replay.tab_sequence + 1;
+    let tab = ReplayTabState {
         id: Uuid::new_v4().to_string(),
         sequence,
         base_request,
@@ -916,11 +962,11 @@ async fn open_replay_tab(
         history_entries: Vec::new(),
         history_index: None,
     };
-    workspace.repeater.tab_sequence = sequence;
-    workspace.repeater.active_tab_id = Some(tab.id.clone());
-    workspace.repeater.tabs.push(tab.clone());
+    workspace.replay.tab_sequence = sequence;
+    workspace.replay.active_tab_id = Some(tab.id.clone());
+    workspace.replay.tabs.push(tab.clone());
     let snapshot: WorkspaceStateSnapshot = api.post_json("/api/workspace-state", &workspace).await?;
-    let tab = find_repeater_tab(&snapshot.repeater, &tab.id)?;
+    let tab = find_replay_tab(&snapshot.replay, &tab.id)?;
     Ok(tab.clone())
 }
 
@@ -1288,26 +1334,26 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
     stdout.write_all(b"\n").context("failed to write stdout")
 }
 
-fn find_repeater_tab<'a>(
-    repeater: &'a RepeaterWorkspaceState,
+fn find_replay_tab<'a>(
+    replay: &'a ReplayWorkspaceState,
     tab_id: &str,
-) -> Result<&'a RepeaterTabState> {
-    repeater
+) -> Result<&'a ReplayTabState> {
+    replay
         .tabs
         .iter()
         .find(|tab| tab.id == tab_id)
-        .ok_or_else(|| anyhow!("repeater tab not found: {tab_id}"))
+        .ok_or_else(|| anyhow!("replay tab not found: {tab_id}"))
 }
 
-fn find_repeater_tab_mut<'a>(
-    repeater: &'a mut RepeaterWorkspaceState,
+fn find_replay_tab_mut<'a>(
+    replay: &'a mut ReplayWorkspaceState,
     tab_id: &str,
-) -> Result<&'a mut RepeaterTabState> {
-    repeater
+) -> Result<&'a mut ReplayTabState> {
+    replay
         .tabs
         .iter_mut()
         .find(|tab| tab.id == tab_id)
-        .ok_or_else(|| anyhow!("repeater tab not found: {tab_id}"))
+        .ok_or_else(|| anyhow!("replay tab not found: {tab_id}"))
 }
 
 fn split_host_port(value: &str) -> Option<(&str, &str)> {

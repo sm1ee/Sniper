@@ -1,5 +1,8 @@
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -32,6 +35,7 @@ pub struct AppState {
     pub startup: Arc<StartupSettingsStore>,
     pub ui_settings: Arc<AppUiSettingsStore>,
     pub sessions: Arc<SessionRegistry>,
+    pub proxy_online: Arc<AtomicBool>,
     active_session: Arc<RwLock<Arc<SessionContext>>>,
     app_version_cache: Arc<RwLock<Option<CachedAppVersionInfo>>>,
 }
@@ -56,9 +60,18 @@ impl AppState {
             startup,
             ui_settings,
             sessions: Arc::new(sessions),
+            proxy_online: Arc::new(AtomicBool::new(false)),
             active_session: Arc::new(RwLock::new(active_session)),
             app_version_cache: Arc::new(RwLock::new(None)),
         })
+    }
+
+    pub fn set_proxy_online(&self, online: bool) {
+        self.proxy_online.store(online, Ordering::Relaxed);
+    }
+
+    pub fn is_proxy_online(&self) -> bool {
+        self.proxy_online.load(Ordering::Relaxed)
     }
 
     pub async fn session(&self) -> Arc<SessionContext> {
@@ -116,6 +129,7 @@ impl AppState {
             max_entries: self.config.max_entries,
             body_preview_bytes: self.config.body_preview_bytes,
             data_dir: self.config.data_dir.display().to_string(),
+            proxy_online: self.is_proxy_online(),
             features: vec![
                 "http_capture".to_string(),
                 "connect_tunnel".to_string(),
@@ -125,12 +139,12 @@ impl AppState {
                 "live_history".to_string(),
                 "desktop_capture_ui".to_string(),
                 "intercept_queue".to_string(),
-                "repeater".to_string(),
+                "replay".to_string(),
                 "websocket_history".to_string(),
                 "runtime_settings".to_string(),
                 "event_log".to_string(),
                 "match_and_replace".to_string(),
-                "intruder".to_string(),
+                "fuzzer".to_string(),
                 "target_site_map".to_string(),
                 "session_storage".to_string(),
             ],
@@ -258,6 +272,7 @@ pub struct RuntimeInfo {
     pub max_entries: usize,
     pub body_preview_bytes: usize,
     pub data_dir: String,
+    pub proxy_online: bool,
     pub features: Vec<String>,
     pub notes: Vec<String>,
     pub certificate: CertificateExport,

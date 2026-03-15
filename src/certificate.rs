@@ -341,7 +341,7 @@ fn build_special_host_tls_config(
             PrivateKey(leaf_key.serialize_der()),
         )
         .context("failed to build special host TLS config")?;
-    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(server_config))
 }
@@ -416,7 +416,7 @@ fn build_signed_host_tls_config(
             PrivateKey(leaf_key.serialize_der()),
         )
         .context("failed to build host MITM TLS config")?;
-    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(server_config))
 }

@@ -1,6 +1,6 @@
 ---
 name: sniper-operator
-description: Use when operating a local Sniper proxy through sniper-cli for session switching, Capture record review, Scope updates, Replay tabs, fuzzer runs, held-request control, Web Socket inspection, auto-replace updates, or Sniper skill installation.
+description: Use when operating a local Sniper proxy through sniper-cli for session switching, Capture record review, Scope updates, Replay tabs, fuzzer runs, held-request control, Web Socket inspection, auto-replace updates, color tag and note annotations, or Sniper skill installation.
 ---
 
 # Sniper Operator
@@ -17,6 +17,7 @@ Use `sniper-cli` for all Sniper operations. Prefer JSON output and avoid scrapin
 - Set Fuzzer templates and payloads, then run them
 - Toggle request holding and forward or drop held requests
 - List or replace auto-replace rules
+- Set color tags and notes on HTTP records
 - Install Sniper skills into Codex or Claude
 
 ## Workflow
@@ -36,6 +37,8 @@ sniper-cli capture http list --limit 20
 sniper-cli capture http get --id <uuid>
 sniper-cli capture http replay --id <uuid>
 sniper-cli capture http fuzzer --id <uuid>
+sniper-cli capture http annotate --id <uuid> --color red --note "suspicious"
+sniper-cli capture http annotate --id <uuid> --clear-color --clear-note
 sniper-cli scope get-scope
 sniper-cli scope set-scope --pattern '*.example.com'
 sniper-cli replay list

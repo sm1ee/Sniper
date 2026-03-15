@@ -3,27 +3,27 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
-    intruder::IntruderAttackRecord,
+    fuzzer::FuzzerAttackRecord,
     model::{EditableRequest, TransactionRecord},
 };
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceStateSnapshot {
-    pub repeater: RepeaterWorkspaceState,
-    pub intruder: IntruderWorkspaceState,
+    pub replay: ReplayWorkspaceState,
+    pub fuzzer: FuzzerWorkspaceState,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RepeaterWorkspaceState {
-    pub tabs: Vec<RepeaterTabState>,
+pub struct ReplayWorkspaceState {
+    pub tabs: Vec<ReplayTabState>,
     pub active_tab_id: Option<String>,
     pub tab_sequence: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RepeaterHistoryEntryState {
+pub struct ReplayHistoryEntryState {
     pub request: EditableRequest,
     pub request_text: String,
     pub response_record: Option<TransactionRecord>,
@@ -35,7 +35,7 @@ pub struct RepeaterHistoryEntryState {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RepeaterTabState {
+pub struct ReplayTabState {
     pub id: String,
     pub sequence: usize,
     pub base_request: Option<EditableRequest>,
@@ -46,19 +46,19 @@ pub struct RepeaterTabState {
     pub target_scheme: String,
     pub target_host: String,
     pub target_port: String,
-    pub history_entries: Vec<RepeaterHistoryEntryState>,
+    pub history_entries: Vec<ReplayHistoryEntryState>,
     pub history_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct IntruderWorkspaceState {
+pub struct FuzzerWorkspaceState {
     pub base_request: Option<EditableRequest>,
     pub source_transaction_id: Option<Uuid>,
     pub notice: String,
     pub request_text: String,
     pub payloads_text: String,
-    pub attack_record: Option<IntruderAttackRecord>,
+    pub attack_record: Option<FuzzerAttackRecord>,
 }
 
 pub struct WorkspaceStateStore {

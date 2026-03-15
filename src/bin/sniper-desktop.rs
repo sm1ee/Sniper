@@ -21,19 +21,31 @@ fn main() -> Result<()> {
         .context("failed to create desktop runtime")?;
 
     let mut config = AppConfig::from_env_for_desktop()?;
-    let proxy_listener = runtime
-        .block_on(TcpListener::bind(config.proxy_addr))
-        .with_context(|| format!("failed to bind proxy listener to {}", config.proxy_addr))?;
+
+    let proxy_listener = match runtime.block_on(TcpListener::bind(config.proxy_addr)) {
+        Ok(listener) => {
+            config.proxy_addr = listener
+                .local_addr()
+                .context("failed to read bound proxy address")?;
+            Some(listener)
+        }
+        Err(bind_error) => {
+            error!(
+                addr = %config.proxy_addr,
+                %bind_error,
+                "proxy listener failed to bind — starting UI only"
+            );
+            None
+        }
+    };
+
     let ui_listener = runtime
         .block_on(TcpListener::bind(config.ui_addr))
         .with_context(|| format!("failed to bind UI listener to {}", config.ui_addr))?;
-
-    config.proxy_addr = proxy_listener
-        .local_addr()
-        .context("failed to read bound proxy address")?;
     config.ui_addr = ui_listener
         .local_addr()
         .context("failed to read bound UI address")?;
+
     if let Err(error) = sniper::runtime_state::persist_runtime_state(
         &config.data_dir,
         &RuntimeStateSnapshot::new(config.proxy_addr, config.ui_addr),
@@ -42,28 +54,47 @@ fn main() -> Result<()> {
     }
 
     let state = Arc::new(AppState::new(config.clone())?);
-    runtime.block_on(state.log_info(
-        "runtime",
-        "Sniper desktop started",
-        format!(
-            "Proxy listener {} and UI listener {} are ready",
-            config.proxy_addr, config.ui_addr
-        ),
-    ));
-    let proxy_state = state.clone();
+
+    if proxy_listener.is_some() {
+        state.set_proxy_online(true);
+        runtime.block_on(state.log_info(
+            "runtime",
+            "Sniper desktop started",
+            format!(
+                "Proxy listener {} and UI listener {} are ready",
+                config.proxy_addr, config.ui_addr
+            ),
+        ));
+    } else {
+        runtime.block_on(state.log_error(
+            "runtime",
+            "Proxy listener failed",
+            format!(
+                "Could not bind proxy to {}. The UI is available but proxy capture is offline.",
+                config.proxy_addr
+            ),
+        ));
+    }
+
     let ui_state = state.clone();
 
     info!(
         proxy_addr = %config.proxy_addr,
         ui_addr = %config.ui_addr,
+        proxy_online = proxy_listener.is_some(),
         "starting sniper desktop"
     );
 
-    let proxy_task = runtime.spawn(async move {
-        if let Err(error) = proxy::serve_proxy(proxy_listener, proxy_state).await {
-            error!(?error, "proxy task stopped");
-        }
-    });
+    let proxy_task = if let Some(listener) = proxy_listener {
+        let proxy_state = state.clone();
+        Some(runtime.spawn(async move {
+            if let Err(error) = proxy::serve_proxy(listener, proxy_state).await {
+                error!(?error, "proxy task stopped");
+            }
+        }))
+    } else {
+        None
+    };
     let ui_task = runtime.spawn(async move {
         if let Err(error) = api::serve_api(ui_listener, ui_state).await {
             error!(?error, "ui task stopped");
@@ -106,7 +137,9 @@ fn main() -> Result<()> {
             ..
         } = event
         {
-            proxy_task.abort();
+            if let Some(ref task) = proxy_task {
+                task.abort();
+            }
             ui_task.abort();
             *control_flow = ControlFlow::Exit;
         }

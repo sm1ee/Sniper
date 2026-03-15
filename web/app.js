@@ -80,7 +80,7 @@ const WORKBENCH_STACK_MIN_HEIGHTS = {
   messages: 180,
 };
 const REPEATER_HISTORY_LIMIT = 30;
-const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "intruder", "repeater", "decoder", "logger"]);
+const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "fuzzer", "replay", "tools", "logger"]);
 const DECODER_SCRIPT_SOURCES = [
   "/decoder/lib/jquery-1.7.2.min.js",
   "/decoder/lib/cryptojs/components/core-min.js",
@@ -155,7 +155,7 @@ const state = {
     request: "",
     response: "",
   },
-  repeaterMessageSearch: {
+  replayMessageSearch: {
     request: "",
     response: "",
   },
@@ -173,21 +173,21 @@ const state = {
   websocketQuery: "",
   selectedWebsocketId: null,
   selectedWebsocketRecord: null,
-  repeaterTabs: [],
-  activeRepeaterTabId: null,
-  repeaterTabSequence: 0,
+  replayTabs: [],
+  activeReplayTabId: null,
+  replayTabSequence: 0,
   interceptEditorSeedId: null,
   eventLog: [],
   matchReplaceRules: [],
   selectedMatchReplaceRuleId: null,
   targetSiteMap: [],
-  intruderBaseRequest: null,
-  intruderSourceTransactionId: null,
-  intruderNotice: "",
-  intruderRequestText: "",
-  intruderPayloadsText: "",
-  intruderAttackRecord: null,
-  decoderReady: false,
+  fuzzerBaseRequest: null,
+  fuzzerSourceTransactionId: null,
+  fuzzerNotice: "",
+  fuzzerRequestText: "",
+  fuzzerPayloadsText: "",
+  fuzzerAttackRecord: null,
+  toolsReady: false,
   workbenchHeight: null,
 };
 
@@ -199,7 +199,7 @@ const els = {
   dashboardCurrentSessionRequests: document.getElementById("dashboardCurrentSessionRequests"),
   dashboardCurrentSessionWebsockets: document.getElementById("dashboardCurrentSessionWebsockets"),
   dashboardCurrentSessionEvents: document.getElementById("dashboardCurrentSessionEvents"),
-  dashboardCurrentSessionIntruder: document.getElementById("dashboardCurrentSessionIntruder"),
+  dashboardCurrentSessionFuzzer: document.getElementById("dashboardCurrentSessionFuzzer"),
   dashboardCurrentSessionRules: document.getElementById("dashboardCurrentSessionRules"),
   dashboardCurrentSessionCreated: document.getElementById("dashboardCurrentSessionCreated"),
   dashboardCurrentSessionOpened: document.getElementById("dashboardCurrentSessionOpened"),
@@ -207,6 +207,8 @@ const els = {
   dashboardCreateSessionButton: document.getElementById("dashboardCreateSessionButton"),
   dashboardReloadSessionsButton: document.getElementById("dashboardReloadSessionsButton"),
   dashboardSessionsBody: document.getElementById("dashboardSessionsBody"),
+  proxyStatusIndicator: document.getElementById("proxyStatusIndicator"),
+  proxyStatusLabel: document.getElementById("proxyStatusLabel"),
   appVersionLabel: document.getElementById("appVersionLabel"),
   openUpdateButton: document.getElementById("openUpdateButton"),
   proxyAddr: document.getElementById("proxyAddr"),
@@ -218,15 +220,15 @@ const els = {
   searchInput: document.getElementById("searchInput"),
   methodFilter: document.getElementById("methodFilter"),
   proxyShell: document.getElementById("proxyShell"),
-  repeaterShell: document.getElementById("repeaterShell"),
-  decoderShell: document.getElementById("decoderShell"),
-  decoderMeta: document.getElementById("decoderMeta"),
-  decoderClearButton: document.getElementById("decoderClearButton"),
-  decoderActiveToolTitle: document.getElementById("decoderActiveToolTitle"),
-  decoderOutputMeta: document.getElementById("decoderOutputMeta"),
-  repeaterTabStrip: document.getElementById("repeaterTabStrip"),
-  newRepeaterTabButton: document.getElementById("newRepeaterTabButton"),
-  intruderShell: document.getElementById("intruderShell"),
+  replayShell: document.getElementById("replayShell"),
+  toolsShell: document.getElementById("toolsShell"),
+  toolsMeta: document.getElementById("toolsMeta"),
+  toolsClearButton: document.getElementById("toolsClearButton"),
+  toolsActiveToolTitle: document.getElementById("toolsActiveToolTitle"),
+  toolsOutputMeta: document.getElementById("toolsOutputMeta"),
+  replayTabStrip: document.getElementById("replayTabStrip"),
+  newReplayTabButton: document.getElementById("newReplayTabButton"),
+  fuzzerShell: document.getElementById("fuzzerShell"),
   targetShell: document.getElementById("targetShell"),
   loggerShell: document.getElementById("loggerShell"),
   filterBar: document.getElementById("filterBar"),
@@ -341,6 +343,7 @@ const els = {
   proxySettingIntercept: document.getElementById("proxySettingIntercept"),
   proxySettingWebsocketCapture: document.getElementById("proxySettingWebsocketCapture"),
   proxySettingScopePatterns: document.getElementById("proxySettingScopePatterns"),
+  proxySettingPassthroughHosts: document.getElementById("proxySettingPassthroughHosts"),
   proxySettingBindHost: document.getElementById("proxySettingBindHost"),
   proxySettingPort: document.getElementById("proxySettingPort"),
   proxySettingListenerHelp: document.getElementById("proxySettingListenerHelp"),
@@ -356,21 +359,21 @@ const els = {
   proxySettingsDataDir: document.getElementById("proxySettingsDataDir"),
   proxySettingsStartupPath: document.getElementById("proxySettingsStartupPath"),
   proxySettingsCertificateName: document.getElementById("proxySettingsCertificateName"),
-  repeaterSchemeSelect: document.getElementById("repeaterSchemeSelect"),
-  repeaterHostInput: document.getElementById("repeaterHostInput"),
-  repeaterPortInput: document.getElementById("repeaterPortInput"),
-  repeaterRequestHighlight: document.getElementById("repeaterRequestHighlight"),
-  repeaterRequestEditor: document.getElementById("repeaterRequestEditor"),
-  repeaterRequestSearchInput: document.getElementById("repeaterRequestSearchInput"),
-  repeaterRequestSearchMeta: document.getElementById("repeaterRequestSearchMeta"),
-  repeaterResponseMeta: document.getElementById("repeaterResponseMeta"),
-  repeaterResponseView: document.getElementById("repeaterResponseView"),
-  repeaterResponseSearchInput: document.getElementById("repeaterResponseSearchInput"),
-  repeaterResponseSearchMeta: document.getElementById("repeaterResponseSearchMeta"),
-  sendRepeaterButton: document.getElementById("sendRepeaterButton"),
-  resetRepeaterButton: document.getElementById("resetRepeaterButton"),
-  repeaterBackButton: document.getElementById("repeaterBackButton"),
-  repeaterForwardButton: document.getElementById("repeaterForwardButton"),
+  replaySchemeSelect: document.getElementById("replaySchemeSelect"),
+  replayHostInput: document.getElementById("replayHostInput"),
+  replayPortInput: document.getElementById("replayPortInput"),
+  replayRequestHighlight: document.getElementById("replayRequestHighlight"),
+  replayRequestEditor: document.getElementById("replayRequestEditor"),
+  replayRequestSearchInput: document.getElementById("replayRequestSearchInput"),
+  replayRequestSearchMeta: document.getElementById("replayRequestSearchMeta"),
+  replayResponseMeta: document.getElementById("replayResponseMeta"),
+  replayResponseView: document.getElementById("replayResponseView"),
+  replayResponseSearchInput: document.getElementById("replayResponseSearchInput"),
+  replayResponseSearchMeta: document.getElementById("replayResponseSearchMeta"),
+  sendReplayButton: document.getElementById("sendReplayButton"),
+  resetReplayButton: document.getElementById("resetReplayButton"),
+  replayBackButton: document.getElementById("replayBackButton"),
+  replayForwardButton: document.getElementById("replayForwardButton"),
   eventLogTableBody: document.getElementById("eventLogTableBody"),
   clearEventLogButton: document.getElementById("clearEventLogButton"),
   matchReplaceTableBody: document.getElementById("matchReplaceTableBody"),
@@ -384,20 +387,21 @@ const els = {
   matchReplaceReplace: document.getElementById("matchReplaceReplace"),
   matchReplaceRegex: document.getElementById("matchReplaceRegex"),
   matchReplaceCaseSensitive: document.getElementById("matchReplaceCaseSensitive"),
-  newMatchReplaceRuleButton: document.getElementById("newMatchReplaceRuleButton"),
   saveMatchReplaceRuleButton: document.getElementById("saveMatchReplaceRuleButton"),
   deleteMatchReplaceRuleButton: document.getElementById("deleteMatchReplaceRuleButton"),
   targetScopeEditor: document.getElementById("targetScopeEditor"),
   saveTargetScopeButton: document.getElementById("saveTargetScopeButton"),
   reloadTargetButton: document.getElementById("reloadTargetButton"),
   targetTree: document.getElementById("targetTree"),
-  intruderRequestHighlight: document.getElementById("intruderRequestHighlight"),
-  intruderRequestEditor: document.getElementById("intruderRequestEditor"),
-  intruderPayloadsEditor: document.getElementById("intruderPayloadsEditor"),
-  intruderMeta: document.getElementById("intruderMeta"),
-  intruderResultsBody: document.getElementById("intruderResultsBody"),
-  startIntruderButton: document.getElementById("startIntruderButton"),
-  resetIntruderButton: document.getElementById("resetIntruderButton"),
+  fuzzerRequestHighlight: document.getElementById("fuzzerRequestHighlight"),
+  fuzzerRequestEditor: document.getElementById("fuzzerRequestEditor"),
+  fuzzerPayloadsEditor: document.getElementById("fuzzerPayloadsEditor"),
+  fuzzerMeta: document.getElementById("fuzzerMeta"),
+  fuzzerResultsBody: document.getElementById("fuzzerResultsBody"),
+  startFuzzerButton: document.getElementById("startFuzzerButton"),
+  resetFuzzerButton: document.getElementById("resetFuzzerButton"),
+  contextMenu: document.getElementById("contextMenu"),
+  contextMenuNote: document.getElementById("contextMenuNote"),
 };
 
 const mainTabs = Array.from(document.querySelectorAll(".main-tab"));
@@ -413,7 +417,7 @@ let auxTimer = null;
 let eventSource = null;
 let workspaceSaveTimer = null;
 let uiSettingsSaveTimer = null;
-let decoderBootPromise = null;
+let toolsBootPromise = null;
 let displaySettingsPreviewActive = false;
 
 const WORKBENCH_STACK_BREAKPOINT = "(max-width: 1260px)";
@@ -431,7 +435,8 @@ const WEBSOCKET_WORKBENCH_MIN_WIDTHS = {
 const LAYOUT_TEXTAREA_IDS = [
   "interceptRequestEditor",
   "proxySettingScopePatterns",
-  "intruderPayloadsEditor",
+  "proxySettingPassthroughHosts",
+  "fuzzerPayloadsEditor",
   "targetScopeEditor",
 ];
 
@@ -481,12 +486,12 @@ async function init() {
   renderProxySettings();
   renderIntercepts();
   renderWebsocketSessions();
-  renderRepeater();
+  renderReplay();
   renderDashboard();
   renderEventLog();
   renderMatchReplaceRules();
   renderTarget();
-  renderIntruder();
+  renderFuzzer();
   normalizeWorkbenchStackHeight();
 }
 
@@ -534,7 +539,7 @@ function bindEvents() {
       if (state.activeProxyTab === "proxy-settings") {
         loadRuntimeSettings().catch((error) => console.error(error));
       }
-      if (state.activeProxyTab === "match-and-replace") {
+      if (state.activeProxyTab === "replace") {
         loadMatchReplaceRules().catch((error) => console.error(error));
       }
     });
@@ -584,14 +589,14 @@ function bindEvents() {
     renderMessagePanes();
   });
 
-  els.repeaterRequestSearchInput.addEventListener("input", () => {
-    state.repeaterMessageSearch.request = els.repeaterRequestSearchInput.value;
-    updateRepeaterSearchPane("request", els.repeaterRequestEditor.value || "");
+  els.replayRequestSearchInput.addEventListener("input", () => {
+    state.replayMessageSearch.request = els.replayRequestSearchInput.value;
+    updateReplaySearchPane("request", els.replayRequestEditor.value || "");
   });
 
-  els.repeaterResponseSearchInput.addEventListener("input", () => {
-    state.repeaterMessageSearch.response = els.repeaterResponseSearchInput.value;
-    updateRepeaterSearchPane("response", els.repeaterResponseView.textContent || "");
+  els.replayResponseSearchInput.addEventListener("input", () => {
+    state.replayMessageSearch.response = els.replayResponseSearchInput.value;
+    updateReplaySearchPane("response", els.replayResponseView.textContent || "");
   });
 
   els.websocketSearchInput.addEventListener("input", () => {
@@ -605,7 +610,7 @@ function bindEvents() {
   });
 
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
-  els.decoderClearButton.addEventListener("click", clearDecoderInputs);
+  els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
   els.displaySettingsModal.addEventListener("click", (event) => {
     if (event.target === els.displaySettingsModal) {
@@ -691,24 +696,26 @@ function bindEvents() {
     loadSettings().catch((error) => console.error(error));
   });
 
-  els.sendRepeaterButton.addEventListener("click", () => {
-    sendRepeater().catch((error) => console.error(error));
+  els.sendReplayButton.addEventListener("click", () => {
+    sendReplay().catch((error) => console.error(error));
   });
-  els.newRepeaterTabButton.addEventListener("click", () => {
-    openBlankRepeaterTab();
+  els.newReplayTabButton.addEventListener("click", () => {
+    openBlankReplayTab();
   });
-  els.resetRepeaterButton.addEventListener("click", resetRepeater);
-  els.repeaterBackButton.addEventListener("click", () => {
-    navigateRepeaterHistory(-1);
+  els.resetReplayButton.addEventListener("click", resetReplay);
+  els.replayBackButton.addEventListener("click", () => {
+    navigateReplayHistory(-1);
   });
-  els.repeaterForwardButton.addEventListener("click", () => {
-    navigateRepeaterHistory(1);
+  els.replayForwardButton.addEventListener("click", () => {
+    navigateReplayHistory(1);
   });
-  els.newMatchReplaceRuleButton.addEventListener("click", createNewMatchReplaceRule);
   els.saveMatchReplaceRuleButton.addEventListener("click", () => {
+    if (!state.selectedMatchReplaceRuleId) {
+      createNewMatchReplaceRule();
+    }
     saveMatchReplaceRules()
-      .then(() => showToast("Match & Replace rules saved"))
-      .catch((error) => { console.error(error); showToast("Failed to save rules", "error"); });
+      .then(() => showToast("Rule saved"))
+      .catch((error) => { console.error(error); showToast("Failed to save rule", "error"); });
   });
   els.deleteMatchReplaceRuleButton.addEventListener("click", deleteSelectedMatchReplaceRule);
   [
@@ -736,40 +743,40 @@ function bindEvents() {
   els.reloadTargetButton.addEventListener("click", () => {
     loadTargetSiteMap(true).catch((error) => console.error(error));
   });
-  els.startIntruderButton.addEventListener("click", () => {
-    runIntruderAttack().catch((error) => console.error(error));
+  els.startFuzzerButton.addEventListener("click", () => {
+    runFuzzerAttack().catch((error) => console.error(error));
   });
-  els.resetIntruderButton.addEventListener("click", resetIntruder);
-  els.repeaterRequestEditor.addEventListener("input", () => {
-    const tab = getActiveRepeaterTab();
+  els.resetFuzzerButton.addEventListener("click", resetFuzzer);
+  els.replayRequestEditor.addEventListener("input", () => {
+    const tab = getActiveReplayTab();
     if (!tab) {
       return;
     }
-    tab.requestText = els.repeaterRequestEditor.value;
-    renderRepeaterRequestHighlight(tab.requestText);
-    updateRepeaterSearchPane("request", tab.requestText);
-    syncRepeaterToolbar(tab);
-    renderRepeaterTabs();
+    tab.requestText = els.replayRequestEditor.value;
+    renderReplayRequestHighlight(tab.requestText);
+    updateReplaySearchPane("request", tab.requestText);
+    syncReplayToolbar(tab);
+    renderReplayTabs();
     scheduleWorkspaceStateSave();
   });
-  els.repeaterRequestEditor.addEventListener("scroll", syncRepeaterRequestHighlightScroll);
-  els.repeaterSchemeSelect.addEventListener("change", () => {
-    applyRepeaterTargetFields().catch((error) => console.error(error));
+  els.replayRequestEditor.addEventListener("scroll", syncReplayRequestHighlightScroll);
+  els.replaySchemeSelect.addEventListener("change", () => {
+    applyReplayTargetFields().catch((error) => console.error(error));
   });
-  els.repeaterHostInput.addEventListener("input", () => {
-    applyRepeaterTargetFields().catch((error) => console.error(error));
+  els.replayHostInput.addEventListener("input", () => {
+    applyReplayTargetFields().catch((error) => console.error(error));
   });
-  els.repeaterPortInput.addEventListener("input", () => {
-    applyRepeaterTargetFields().catch((error) => console.error(error));
+  els.replayPortInput.addEventListener("input", () => {
+    applyReplayTargetFields().catch((error) => console.error(error));
   });
-  els.intruderRequestEditor.addEventListener("input", () => {
-    state.intruderRequestText = els.intruderRequestEditor.value;
-    renderIntruderRequestHighlight(state.intruderRequestText);
+  els.fuzzerRequestEditor.addEventListener("input", () => {
+    state.fuzzerRequestText = els.fuzzerRequestEditor.value;
+    renderFuzzerRequestHighlight(state.fuzzerRequestText);
     scheduleWorkspaceStateSave();
   });
-  els.intruderRequestEditor.addEventListener("scroll", syncIntruderRequestHighlightScroll);
-  els.intruderPayloadsEditor.addEventListener("input", () => {
-    state.intruderPayloadsText = els.intruderPayloadsEditor.value;
+  els.fuzzerRequestEditor.addEventListener("scroll", syncFuzzerRequestHighlightScroll);
+  els.fuzzerPayloadsEditor.addEventListener("input", () => {
+    state.fuzzerPayloadsText = els.fuzzerPayloadsEditor.value;
     scheduleWorkspaceStateSave();
   });
   els.interceptRequestEditor.addEventListener("input", () => {
@@ -911,10 +918,10 @@ function bindEvents() {
       !event.shiftKey &&
       !event.altKey &&
       event.key.toLowerCase() === "r" &&
-      state.activeTool === "repeater"
+      state.activeTool === "replay"
     ) {
       event.preventDefault();
-      duplicateActiveRepeaterTab();
+      duplicateActiveReplayTab();
       return;
     }
 
@@ -928,7 +935,7 @@ function bindEvents() {
       state.selectedId
     ) {
       event.preventDefault();
-      openRepeaterFromSelection().catch((error) => console.error(error));
+      openReplayFromSelection().catch((error) => console.error(error));
     }
 
     if (
@@ -941,7 +948,7 @@ function bindEvents() {
       state.selectedId
     ) {
       event.preventDefault();
-      openIntruderFromSelection().catch((error) => console.error(error));
+      openFuzzerFromSelection().catch((error) => console.error(error));
     }
   });
 
@@ -987,6 +994,8 @@ async function loadSettings() {
   els.uiAddr.textContent = state.settings.ui_addr;
   els.captureMode.textContent = `${formatSize(state.settings.body_preview_bytes)} preview cap / ${state.settings.max_entries} entries`;
   els.settingsSpecialHostHttp.textContent = state.settings.certificate.special_host_http;
+
+  updateProxyStatusIndicator(state.settings.proxy_online);
 
   const certificate = state.settings.certificate;
   els.certificateName.textContent = certificate.common_name;
@@ -1045,31 +1054,31 @@ async function loadWorkspaceState() {
 }
 
 function applyWorkspaceState(snapshot) {
-  const repeater = snapshot?.repeater || {};
-  const tabs = Array.isArray(repeater.tabs)
-    ? repeater.tabs.map((tab) => hydrateRepeaterTab(tab)).filter(Boolean)
+  const replayWS = snapshot?.replay || {};
+  const tabs = Array.isArray(replayWS.tabs)
+    ? replayWS.tabs.map((tab) => hydrateReplayTab(tab)).filter(Boolean)
     : [];
 
-  state.repeaterTabs = tabs;
-  state.repeaterTabSequence = Math.max(
-    Number.isFinite(repeater.tab_sequence) ? repeater.tab_sequence : 0,
+  state.replayTabs = tabs;
+  state.replayTabSequence = Math.max(
+    Number.isFinite(replayWS.tab_sequence) ? replayWS.tab_sequence : 0,
     ...tabs.map((tab) => tab.sequence || 0),
     0,
   );
-  state.activeRepeaterTabId = tabs.some((tab) => tab.id === repeater.active_tab_id)
-    ? repeater.active_tab_id
+  state.activeReplayTabId = tabs.some((tab) => tab.id === replayWS.active_tab_id)
+    ? replayWS.active_tab_id
     : tabs[0]?.id ?? null;
 
-  const intruder = snapshot?.intruder || {};
-  state.intruderBaseRequest = intruder.base_request ? cloneEditableRequest(intruder.base_request) : null;
-  state.intruderSourceTransactionId = intruder.source_transaction_id || null;
-  state.intruderNotice = intruder.notice || "";
-  state.intruderRequestText = intruder.request_text || "";
-  state.intruderPayloadsText = intruder.payloads_text || "";
-  state.intruderAttackRecord = intruder.attack_record || null;
+  const fuzzerWS = snapshot?.fuzzer || {};
+  state.fuzzerBaseRequest = fuzzerWS.base_request ? cloneEditableRequest(fuzzerWS.base_request) : null;
+  state.fuzzerSourceTransactionId = fuzzerWS.source_transaction_id || null;
+  state.fuzzerNotice = fuzzerWS.notice || "";
+  state.fuzzerRequestText = fuzzerWS.request_text || "";
+  state.fuzzerPayloadsText = fuzzerWS.payloads_text || "";
+  state.fuzzerAttackRecord = fuzzerWS.attack_record || null;
 }
 
-function hydrateRepeaterTab(tab) {
+function hydrateReplayTab(tab) {
   if (!tab || typeof tab !== "object") {
     return null;
   }
@@ -1087,7 +1096,7 @@ function hydrateRepeaterTab(tab) {
   );
   return {
     id: typeof tab.id === "string" && tab.id ? tab.id : crypto.randomUUID(),
-    sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.repeaterTabSequence + 1,
+    sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
     baseRequest: fallbackRequest,
     sourceTransactionId: tab.source_transaction_id || null,
     notice: tab.notice || "",
@@ -1126,8 +1135,8 @@ function hydrateRepeaterHistoryEntry(entry, fallbackRequest) {
 
 function snapshotWorkspaceState() {
   return {
-    repeater: {
-      tabs: state.repeaterTabs.map((tab) => ({
+    replay: {
+      tabs: state.replayTabs.map((tab) => ({
         id: tab.id,
         sequence: tab.sequence,
         base_request: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : null,
@@ -1149,16 +1158,16 @@ function snapshotWorkspaceState() {
         })),
         history_index: normalizeRepeaterHistoryIndex(tab.historyIndex, (tab.historyEntries || []).length),
       })),
-      active_tab_id: state.activeRepeaterTabId,
-      tab_sequence: state.repeaterTabSequence,
+      active_tab_id: state.activeReplayTabId,
+      tab_sequence: state.replayTabSequence,
     },
-    intruder: {
-      base_request: state.intruderBaseRequest ? cloneEditableRequest(state.intruderBaseRequest) : null,
-      source_transaction_id: state.intruderSourceTransactionId || null,
-      notice: state.intruderNotice || "",
-      request_text: state.intruderRequestText || "",
-      payloads_text: state.intruderPayloadsText || "",
-      attack_record: state.intruderAttackRecord || null,
+    fuzzer: {
+      base_request: state.fuzzerBaseRequest ? cloneEditableRequest(state.fuzzerBaseRequest) : null,
+      source_transaction_id: state.fuzzerSourceTransactionId || null,
+      notice: state.fuzzerNotice || "",
+      request_text: state.fuzzerRequestText || "",
+      payloads_text: state.fuzzerPayloadsText || "",
+      attack_record: state.fuzzerAttackRecord || null,
     },
   };
 }
@@ -1219,15 +1228,15 @@ function resetSessionScopedUiState() {
   state.targetScopeDraft = "";
   state.targetScopeDirty = false;
   state.targetExpandedHosts = new Set();
-  state.repeaterTabs = [];
-  state.activeRepeaterTabId = null;
-  state.repeaterTabSequence = 0;
-  state.intruderBaseRequest = null;
-  state.intruderSourceTransactionId = null;
-  state.intruderNotice = "";
-  state.intruderRequestText = "";
-  state.intruderPayloadsText = "";
-  state.intruderAttackRecord = null;
+  state.replayTabs = [];
+  state.activeReplayTabId = null;
+  state.replayTabSequence = 0;
+  state.fuzzerBaseRequest = null;
+  state.fuzzerSourceTransactionId = null;
+  state.fuzzerNotice = "";
+  state.fuzzerRequestText = "";
+  state.fuzzerPayloadsText = "";
+  state.fuzzerAttackRecord = null;
 }
 
 async function reloadSessionWorkspace() {
@@ -1292,6 +1301,9 @@ async function loadTransactions(preserveSelection = true) {
 
   renderHistory();
   if (state.selectedId) {
+    if (preserveSelection && state.selectedRecord && state.selectedRecord.id === state.selectedId) {
+      return;
+    }
     await loadTransactionDetail(state.selectedId);
   } else {
     renderEmptyDetail();
@@ -1501,16 +1513,16 @@ function renderToolPanels() {
 
   const dashboardVisible = state.activeTool === "dashboard";
   const proxyVisible = state.activeTool === "proxy";
-  const repeaterVisible = state.activeTool === "repeater";
-  const decoderVisible = state.activeTool === "decoder";
-  const intruderVisible = state.activeTool === "intruder";
+  const replayVisible = state.activeTool === "replay";
+  const decoderVisible = state.activeTool === "tools";
+  const fuzzerVisible = state.activeTool === "fuzzer";
   const targetVisible = state.activeTool === "target";
   const loggerVisible = state.activeTool === "logger";
   els.dashboardShell.classList.toggle("hidden", !dashboardVisible);
   els.proxyShell.classList.toggle("hidden", !proxyVisible);
-  els.repeaterShell.classList.toggle("hidden", !repeaterVisible);
-  els.decoderShell.classList.toggle("hidden", !decoderVisible);
-  els.intruderShell.classList.toggle("hidden", !intruderVisible);
+  els.replayShell.classList.toggle("hidden", !replayVisible);
+  els.toolsShell.classList.toggle("hidden", !decoderVisible);
+  els.fuzzerShell.classList.toggle("hidden", !fuzzerVisible);
   els.targetShell.classList.toggle("hidden", !targetVisible);
   els.loggerShell.classList.toggle("hidden", !loggerVisible);
 
@@ -1525,8 +1537,8 @@ function renderToolPanels() {
     return;
   }
 
-  if (repeaterVisible) {
-    renderRepeater();
+  if (replayVisible) {
+    renderReplay();
     els.footerMode.textContent = "Replay active";
     return;
   }
@@ -1534,14 +1546,14 @@ function renderToolPanels() {
   if (decoderVisible) {
     ensureDecoderWorkbench().catch((error) => {
       console.error(error);
-      els.decoderMeta.textContent = "Failed to load decoder tools.";
+      els.toolsMeta.textContent = "Failed to load decoder tools.";
     });
     els.footerMode.textContent = "Tools active";
     return;
   }
 
-  if (intruderVisible) {
-    renderIntruder();
+  if (fuzzerVisible) {
+    renderFuzzer();
     els.footerMode.textContent = "Fuzzer active";
     return;
   }
@@ -1560,20 +1572,20 @@ function renderToolPanels() {
 }
 
 async function ensureDecoderWorkbench() {
-  if (state.decoderReady) {
+  if (state.toolsReady) {
     syncDecoderToolMeta();
     return;
   }
 
-  if (!decoderBootPromise) {
-    decoderBootPromise = bootDecoderWorkbench();
+  if (!toolsBootPromise) {
+    toolsBootPromise = bootToolsWorkbench();
   }
 
-  await decoderBootPromise;
+  await toolsBootPromise;
 }
 
-async function bootDecoderWorkbench() {
-  els.decoderMeta.textContent = "Loading decoder tools...";
+async function bootToolsWorkbench() {
+  els.toolsMeta.textContent = "Loading decoder tools...";
 
   for (const source of DECODER_SCRIPT_SOURCES) {
     await loadScriptOnce(source);
@@ -1588,7 +1600,7 @@ async function bootDecoderWorkbench() {
     window.hasher.update();
     syncDecoderToolMeta();
     if (typeof window.autoScroll === "function") {
-      window.autoScroll(els.decoderShell);
+      window.autoScroll(els.toolsShell);
     }
   };
 
@@ -1609,20 +1621,20 @@ async function bootDecoderWorkbench() {
   window.hasher.updateUI();
   syncDecoderToolMeta();
   if (typeof window.autoScroll === "function") {
-    window.autoScroll(els.decoderShell);
+    window.autoScroll(els.toolsShell);
   }
-  state.decoderReady = true;
-  els.decoderMeta.textContent = "Core decoder tools are ready. Click any result to copy it.";
+  state.toolsReady = true;
+  els.toolsMeta.textContent = "Core decoder tools are ready. Click any result to copy it.";
 }
 
 function syncDecoderToolMeta() {
   const activeTab = document.querySelector("#tabs li.on");
   const activeLabel = activeTab?.textContent?.trim() || "Decoder";
-  els.decoderActiveToolTitle.textContent = `${activeLabel} outputs`;
-  els.decoderOutputMeta.textContent = "Click any result to copy it.";
+  els.toolsActiveToolTitle.textContent = `${activeLabel} outputs`;
+  els.toolsOutputMeta.textContent = "Click any result to copy it.";
 }
 
-function clearDecoderInputs() {
+function clearToolsInputs() {
   const input = document.getElementById("input-value");
   const password = document.getElementById("input-password");
   const url = document.getElementById("input-url");
@@ -1635,7 +1647,7 @@ function clearDecoderInputs() {
     window.resizeTextarea(input);
   }
 
-  if (state.decoderReady && window.hasher) {
+  if (state.toolsReady && window.hasher) {
     window.hasher.update();
     syncDecoderToolMeta();
   }
@@ -1655,13 +1667,13 @@ async function pasteIntoDecoder() {
       window.resizeTextarea(input);
     }
 
-    if (state.decoderReady && window.hasher) {
+    if (state.toolsReady && window.hasher) {
       window.hasher.update();
       syncDecoderToolMeta();
     }
   } catch (error) {
     console.error(error);
-    els.decoderMeta.textContent = "Clipboard paste failed. Paste directly into the input field.";
+    els.toolsMeta.textContent = "Clipboard paste failed. Paste directly into the input field.";
   }
 }
 
@@ -1706,7 +1718,7 @@ function renderDashboard() {
   els.dashboardCurrentSessionRequests.textContent = String(current?.request_count ?? 0);
   els.dashboardCurrentSessionWebsockets.textContent = String(current?.websocket_count ?? 0);
   els.dashboardCurrentSessionEvents.textContent = String(current?.event_count ?? 0);
-  els.dashboardCurrentSessionIntruder.textContent = String(current?.intruder_count ?? 0);
+  els.dashboardCurrentSessionFuzzer.textContent = String(current?.fuzzer_count ?? 0);
   els.dashboardCurrentSessionRules.textContent = String(current?.rule_count ?? 0);
   els.dashboardCurrentSessionCreated.textContent = current ? formatTimestamp(current.created_at) : "-";
   els.dashboardCurrentSessionOpened.textContent = current ? formatTimestamp(current.last_opened_at) : "-";
@@ -1755,7 +1767,7 @@ function renderProxyPanels() {
   const showHistory = state.activeProxyTab === "http-history";
   const showIntercept = state.activeProxyTab === "intercept";
   const showWebsockets = state.activeProxyTab === "websockets-history";
-  const showMatchReplace = state.activeProxyTab === "match-and-replace";
+  const showMatchReplace = state.activeProxyTab === "replace";
   const showProxySettings = state.activeProxyTab === "proxy-settings";
   const showPlaceholder = !showHistory && !showIntercept && !showWebsockets && !showMatchReplace && !showProxySettings;
 
@@ -1786,7 +1798,7 @@ function renderProxyPanels() {
 
   if (showMatchReplace) {
     renderMatchReplaceRules();
-    els.footerMode.textContent = "Auto replace active";
+    els.footerMode.textContent = "Replace active";
     return;
   }
 
@@ -1813,6 +1825,17 @@ function renderInterceptStatus() {
   const enabled = Boolean(state.runtime?.intercept_enabled);
   els.interceptStatus.textContent = enabled ? "Intercept is on" : "Intercept is off";
   els.interceptStatus.classList.toggle("online", enabled);
+}
+
+function updateProxyStatusIndicator(online) {
+  if (!els.proxyStatusIndicator) return;
+  const isOnline = Boolean(online);
+  els.proxyStatusIndicator.classList.toggle("online", isOnline);
+  els.proxyStatusIndicator.classList.toggle("offline", !isOnline);
+  els.proxyStatusLabel.textContent = isOnline ? "Proxy" : "Offline";
+  els.proxyStatusIndicator.title = isOnline
+    ? `Proxy listening on ${state.settings?.proxy_addr || "..."}`
+    : `Proxy failed to bind on ${state.settings?.proxy_addr || "..."}. Restart the app after freeing the port.`;
 }
 
 function renderHistory() {
@@ -1849,8 +1872,12 @@ function renderHistory() {
       const mimeType = inferMimeType(item);
       const url = item.path || "(CONNECT tunnel)";
       const tls = isTlsRecord(item) ? "<span class=\"tls-badge\">TLS</span>" : "<span class=\"tls-badge empty\">-</span>";
+      const tagClass = item.color_tag ? ` tagged-${escapeHtml(item.color_tag)}` : "";
+      const tagDot = item.color_tag ? `<span class="row-color-tag row-color-tag-${escapeHtml(item.color_tag)}"></span>` : "";
+      const noteIndicator = item.has_user_note ? `<span class="note-icon" title="Has note">📝</span>` : "";
+      const noteCell = `${tagDot}${noteIndicator}${item.note_count ? ` ${item.note_count}` : ""}`;
       return `
-        <tr class="history-row ${selected}" data-id="${item.id}">
+        <tr class="history-row ${selected}${tagClass}" data-id="${item.id}">
           <td>${entry.index + 1}</td>
           <td class="cell-host">${escapeHtml(item.host)}</td>
           <td><span class="method-pill ${methodTone(item.method)}">${escapeHtml(item.method)}</span></td>
@@ -1858,7 +1885,7 @@ function renderHistory() {
           <td><span class="status-pill-row ${statusTone(item.status)}">${escapeHtml(formatStatus(item.status))}</span></td>
           <td>${escapeHtml(formatSize((item.request_bytes ?? 0) + (item.response_bytes ?? 0)))}</td>
           <td>${escapeHtml(mimeType)}</td>
-          <td>${item.note_count}</td>
+          <td>${noteCell}</td>
           <td class="tls-cell">${tls}</td>
           <td>${escapeHtml(formatTimestamp(item.started_at))}</td>
         </tr>
@@ -1872,6 +1899,12 @@ function renderHistory() {
       renderHistory();
       scrollSelectedHistoryRowIntoView();
       loadTransactionDetail(state.selectedId).catch((error) => console.error(error));
+    });
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      state.selectedId = row.dataset.id;
+      renderHistory();
+      openContextMenu(event.clientX, event.clientY, row.dataset.id);
     });
   });
 }
@@ -2117,6 +2150,8 @@ function renderDetail(record) {
     ["Response size", formatSize(record.response?.body_size ?? 0)],
     ["MIME type", record.response?.content_type || record.request.content_type || "n/a"],
     ["Notes", `${record.notes.length}`],
+    ...(record.color_tag ? [["Color tag", record.color_tag]] : []),
+    ...(record.user_note ? [["User note", record.user_note]] : []),
   ];
 
   els.attributesCount.textContent = String(attributes.length);
@@ -2130,8 +2165,15 @@ function renderDetail(record) {
     ? renderHeaderList(record.response.headers)
     : "<p class=\"empty-copy\">No response headers were captured.</p>";
 
-  els.notesCard.innerHTML = record.notes.length
-    ? record.notes.map((note) => `<p>${escapeHtml(note)}</p>`).join("")
+  const noteParts = [];
+  if (record.user_note) {
+    noteParts.push(`<p class="user-note-display"><strong>Note:</strong> ${escapeHtml(record.user_note)}</p>`);
+  }
+  if (record.notes.length) {
+    noteParts.push(...record.notes.map((note) => `<p>${escapeHtml(note)}</p>`));
+  }
+  els.notesCard.innerHTML = noteParts.length
+    ? noteParts.join("")
     : "<p>No anomalies were recorded for this transaction.</p>";
 
   renderMessagePanes();
@@ -2195,9 +2237,16 @@ function renderMessagePanes() {
 }
 
 function renderViewTabs() {
+  const record = state.selectedRecord;
+  const hasRequestDiff = Boolean(record?.original_request);
+  const hasResponseDiff = Boolean(record?.original_response);
   viewTabs.forEach((tab) => {
     const target = tab.dataset.target;
     tab.classList.toggle("active", state.messageViews[target] === tab.dataset.view);
+    if (tab.dataset.view === "diff") {
+      const hasDiff = target === "request" ? hasRequestDiff : hasResponseDiff;
+      tab.classList.toggle("hidden", !hasDiff);
+    }
   });
 }
 
@@ -2404,6 +2453,7 @@ function renderProxySettings() {
   els.proxySettingIntercept.checked = Boolean(state.runtime.intercept_enabled);
   els.proxySettingWebsocketCapture.checked = Boolean(state.runtime.websocket_capture_enabled);
   els.proxySettingScopePatterns.value = (state.runtime.scope_patterns || []).join("\n");
+  els.proxySettingPassthroughHosts.value = (state.runtime.passthrough_hosts || []).join("\n");
   if (startup && document.activeElement !== els.proxySettingBindHost) {
     els.proxySettingBindHost.value = startup.proxy_bind_host;
   }
@@ -2425,41 +2475,41 @@ function renderProxySettings() {
     : "Changes are saved for the next app start.";
 }
 
-function renderRepeater() {
+function renderReplay() {
   const tab = ensureRepeaterTab();
-  renderRepeaterTabs();
+  renderReplayTabs();
 
   if (!tab) {
-    els.repeaterRequestEditor.value = "";
-    renderRepeaterRequestHighlight("");
-    els.repeaterHostInput.value = "";
-    els.repeaterPortInput.value = "";
-    els.repeaterSchemeSelect.value = "https";
-    els.repeaterResponseMeta.textContent = "No response yet.";
-    renderRepeaterResponseView("Send a request from Repeater to capture the response here.");
-    updateRepeaterSearchPane("request", "");
-    updateRepeaterSearchPane("response", "Send a request from Repeater to capture the response here.");
-    els.repeaterBackButton.disabled = true;
-    els.repeaterForwardButton.disabled = true;
+    els.replayRequestEditor.value = "";
+    renderReplayRequestHighlight("");
+    els.replayHostInput.value = "";
+    els.replayPortInput.value = "";
+    els.replaySchemeSelect.value = "https";
+    els.replayResponseMeta.textContent = "No response yet.";
+    renderReplayResponseView("Send a request from Replay to capture the response here.");
+    updateReplaySearchPane("request", "");
+    updateReplaySearchPane("response", "Send a request from Replay to capture the response here.");
+    els.replayBackButton.disabled = true;
+    els.replayForwardButton.disabled = true;
     return;
   }
 
-  syncRepeaterToolbar(tab);
-  if (els.repeaterRequestEditor.value !== tab.requestText) {
-    els.repeaterRequestEditor.value = tab.requestText;
+  syncReplayToolbar(tab);
+  if (els.replayRequestEditor.value !== tab.requestText) {
+    els.replayRequestEditor.value = tab.requestText;
   }
-  renderRepeaterRequestHighlight(tab.requestText);
-  updateRepeaterSearchPane("request", tab.requestText);
+  renderReplayRequestHighlight(tab.requestText);
+  updateReplaySearchPane("request", tab.requestText);
 
   if (!tab.responseRecord) {
-    const notice = tab.notice || "Send a request from Repeater to capture the response here.";
-    els.repeaterResponseMeta.textContent = tab.notice || "No response yet.";
-    renderRepeaterResponseView(notice);
-    updateRepeaterSearchPane("response", notice);
+    const notice = tab.notice || "Send a request from Replay to capture the response here.";
+    els.replayResponseMeta.textContent = tab.notice || "No response yet.";
+    renderReplayResponseView(notice);
+    updateReplaySearchPane("response", notice);
     return;
   }
 
-  els.repeaterResponseMeta.textContent = [
+  els.replayResponseMeta.textContent = [
     `${formatStatus(tab.responseRecord.status)}`,
     `${tab.responseRecord.duration_ms} ms`,
     tab.responseRecord.response?.content_type || tab.responseRecord.request.content_type || "n/a",
@@ -2469,26 +2519,26 @@ function renderRepeater() {
     buildRawResponse(tab.responseRecord),
     tab.responseRecord.response,
   );
-  renderRepeaterResponseView(responseText);
-  updateRepeaterSearchPane("response", responseText);
+  renderReplayResponseView(responseText);
+  updateReplaySearchPane("response", responseText);
 }
 
-function renderRepeaterRequestHighlight(text) {
-  if (!els.repeaterRequestHighlight) {
+function renderReplayRequestHighlight(text) {
+  if (!els.replayRequestHighlight) {
     return;
   }
 
-  els.repeaterRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
-  syncRepeaterRequestHighlightScroll();
+  els.replayRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
+  syncReplayRequestHighlightScroll();
 }
 
-function syncRepeaterRequestHighlightScroll() {
-  if (!els.repeaterRequestHighlight || !els.repeaterRequestEditor) {
+function syncReplayRequestHighlightScroll() {
+  if (!els.replayRequestHighlight || !els.replayRequestEditor) {
     return;
   }
 
-  els.repeaterRequestHighlight.scrollTop = els.repeaterRequestEditor.scrollTop;
-  els.repeaterRequestHighlight.scrollLeft = els.repeaterRequestEditor.scrollLeft;
+  els.replayRequestHighlight.scrollTop = els.replayRequestEditor.scrollTop;
+  els.replayRequestHighlight.scrollLeft = els.replayRequestEditor.scrollLeft;
 }
 
 function renderInterceptRequestHighlight(text) {
@@ -2509,34 +2559,34 @@ function syncInterceptRequestHighlightScroll() {
   els.interceptRequestHighlight.scrollLeft = els.interceptRequestEditor.scrollLeft;
 }
 
-function renderIntruderRequestHighlight(text) {
-  if (!els.intruderRequestHighlight) {
+function renderFuzzerRequestHighlight(text) {
+  if (!els.fuzzerRequestHighlight) {
     return;
   }
 
-  els.intruderRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
-  syncIntruderRequestHighlightScroll();
+  els.fuzzerRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
+  syncFuzzerRequestHighlightScroll();
 }
 
-function syncIntruderRequestHighlightScroll() {
-  if (!els.intruderRequestHighlight || !els.intruderRequestEditor) {
+function syncFuzzerRequestHighlightScroll() {
+  if (!els.fuzzerRequestHighlight || !els.fuzzerRequestEditor) {
     return;
   }
 
-  els.intruderRequestHighlight.scrollTop = els.intruderRequestEditor.scrollTop;
-  els.intruderRequestHighlight.scrollLeft = els.intruderRequestEditor.scrollLeft;
+  els.fuzzerRequestHighlight.scrollTop = els.fuzzerRequestEditor.scrollTop;
+  els.fuzzerRequestHighlight.scrollLeft = els.fuzzerRequestEditor.scrollLeft;
 }
 
-function renderRepeaterResponseView(text) {
-  els.repeaterResponseView.innerHTML = renderCodeHtml(text, "pretty", "response");
+function renderReplayResponseView(text) {
+  els.replayResponseView.innerHTML = renderCodeHtml(text, "pretty", "response");
 }
 
-function updateRepeaterSearchPane(target, text) {
+function updateReplaySearchPane(target, text) {
   const isRequest = target === "request";
-  const query = state.repeaterMessageSearch[target];
-  const input = isRequest ? els.repeaterRequestSearchInput : els.repeaterResponseSearchInput;
-  const meta = isRequest ? els.repeaterRequestSearchMeta : els.repeaterResponseSearchMeta;
-  const view = isRequest ? els.repeaterRequestHighlight : els.repeaterResponseView;
+  const query = state.replayMessageSearch[target];
+  const input = isRequest ? els.replayRequestSearchInput : els.replayResponseSearchInput;
+  const meta = isRequest ? els.replayRequestSearchMeta : els.replayResponseSearchMeta;
+  const view = isRequest ? els.replayRequestHighlight : els.replayResponseView;
 
   if (input && input.value !== query) {
     input.value = query;
@@ -2550,20 +2600,20 @@ function updateRepeaterSearchPane(target, text) {
   meta.textContent = buildSearchMeta(countLines(text), "pretty", searchResult.count);
 }
 
-function syncRepeaterToolbar(tab) {
+function syncReplayToolbar(tab) {
   const request = deriveRepeaterRequest(tab);
   const target = getRepeaterTargetConfig(tab, request);
-  if (document.activeElement !== els.repeaterHostInput && els.repeaterHostInput.value !== target.host) {
-    els.repeaterHostInput.value = target.host;
+  if (document.activeElement !== els.replayHostInput && els.replayHostInput.value !== target.host) {
+    els.replayHostInput.value = target.host;
   }
-  if (document.activeElement !== els.repeaterPortInput && els.repeaterPortInput.value !== target.port) {
-    els.repeaterPortInput.value = target.port;
+  if (document.activeElement !== els.replayPortInput && els.replayPortInput.value !== target.port) {
+    els.replayPortInput.value = target.port;
   }
-  if (document.activeElement !== els.repeaterSchemeSelect && els.repeaterSchemeSelect.value !== target.scheme) {
-    els.repeaterSchemeSelect.value = target.scheme;
+  if (document.activeElement !== els.replaySchemeSelect && els.replaySchemeSelect.value !== target.scheme) {
+    els.replaySchemeSelect.value = target.scheme;
   }
-  els.repeaterBackButton.disabled = !canNavigateRepeaterHistory(tab, -1);
-  els.repeaterForwardButton.disabled = !canNavigateRepeaterHistory(tab, 1);
+  els.replayBackButton.disabled = !canNavigateReplayHistory(tab, -1);
+  els.replayForwardButton.disabled = !canNavigateReplayHistory(tab, 1);
   return target;
 }
 
@@ -2596,7 +2646,7 @@ function renderMatchReplaceRules() {
           const active = rule.id === state.selectedMatchReplaceRuleId ? "selected" : "";
           return `
             <tr class="history-row ${active}" data-id="${rule.id}">
-              <td>${rule.enabled ? "on" : "off"}</td>
+              <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${rule.enabled ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
               <td>${escapeHtml(rule.description || "Untitled rule")}</td>
               <td>${escapeHtml(rule.scope)}</td>
               <td>${escapeHtml(rule.target)}</td>
@@ -2606,14 +2656,26 @@ function renderMatchReplaceRules() {
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="4">No match-and-replace rules are configured.</td>
+          <td colspan="4">No replace rules are configured.</td>
         </tr>
       `;
 
   Array.from(els.matchReplaceTableBody.querySelectorAll(".history-row")).forEach((row) => {
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (event) => {
+      if (event.target.closest(".mini-toggle")) return;
       state.selectedMatchReplaceRuleId = row.dataset.id;
       renderMatchReplaceRules();
+    });
+  });
+
+  Array.from(els.matchReplaceTableBody.querySelectorAll("[data-rule-toggle]")).forEach((toggle) => {
+    toggle.addEventListener("change", (event) => {
+      event.stopPropagation();
+      const rule = state.matchReplaceRules.find((r) => r.id === toggle.dataset.ruleToggle);
+      if (rule) {
+        rule.enabled = toggle.checked;
+        saveMatchReplaceRules().catch(console.error);
+      }
     });
   });
 
@@ -2629,11 +2691,12 @@ function renderMatchReplaceRules() {
     els.matchReplaceRegex.checked = false;
     els.matchReplaceCaseSensitive.checked = false;
     els.deleteMatchReplaceRuleButton.disabled = true;
+    els.saveMatchReplaceRuleButton.textContent = "Add";
     return;
   }
 
   els.matchReplaceEditorPath.textContent = `${selected.scope} / ${selected.target}`;
-  els.matchReplaceEditorTitle.textContent = selected.description || "Selected rule";
+  els.matchReplaceEditorTitle.textContent = selected.description || "Edit rule";
   els.matchReplaceEnabled.checked = Boolean(selected.enabled);
   els.matchReplaceDescription.value = selected.description || "";
   els.matchReplaceScope.value = selected.scope;
@@ -2643,6 +2706,7 @@ function renderMatchReplaceRules() {
   els.matchReplaceRegex.checked = Boolean(selected.regex);
   els.matchReplaceCaseSensitive.checked = Boolean(selected.case_sensitive);
   els.deleteMatchReplaceRuleButton.disabled = false;
+  els.saveMatchReplaceRuleButton.textContent = "Save";
 }
 
 function renderTarget() {
@@ -2714,31 +2778,31 @@ function renderTarget() {
   });
 }
 
-function renderIntruder() {
-  if (els.intruderRequestEditor.value !== state.intruderRequestText) {
-    els.intruderRequestEditor.value = state.intruderRequestText;
+function renderFuzzer() {
+  if (els.fuzzerRequestEditor.value !== state.fuzzerRequestText) {
+    els.fuzzerRequestEditor.value = state.fuzzerRequestText;
   }
-  renderIntruderRequestHighlight(state.intruderRequestText);
-  if (els.intruderPayloadsEditor.value !== state.intruderPayloadsText) {
-    els.intruderPayloadsEditor.value = state.intruderPayloadsText;
+  renderFuzzerRequestHighlight(state.fuzzerRequestText);
+  if (els.fuzzerPayloadsEditor.value !== state.fuzzerPayloadsText) {
+    els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText;
   }
 
-  if (!state.intruderAttackRecord) {
-    els.intruderMeta.textContent = state.intruderNotice || "No fuzz run has been started yet.";
-    els.intruderResultsBody.innerHTML = `
+  if (!state.fuzzerAttackRecord) {
+    els.fuzzerMeta.textContent = state.fuzzerNotice || "No fuzz run has been started yet.";
+    els.fuzzerResultsBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="6">${escapeHtml(state.intruderNotice || "Use Command+I from HTTP or paste a template with markers to run the fuzzer.")}</td>
+        <td colspan="6">${escapeHtml(state.fuzzerNotice || "Use Command+I from HTTP or paste a template with markers to run the fuzzer.")}</td>
       </tr>
     `;
     return;
   }
 
-  els.intruderMeta.textContent = [
-    `${state.intruderAttackRecord.payload_count} payload(s)`,
-    `${state.intruderAttackRecord.marker_count} marker(s)`,
-    state.intruderAttackRecord.status,
+  els.fuzzerMeta.textContent = [
+    `${state.fuzzerAttackRecord.payload_count} payload(s)`,
+    `${state.fuzzerAttackRecord.marker_count} marker(s)`,
+    state.fuzzerAttackRecord.status,
   ].join(" · ");
-  els.intruderResultsBody.innerHTML = state.intruderAttackRecord.results
+  els.fuzzerResultsBody.innerHTML = state.fuzzerAttackRecord.results
     .map((result) => `
       <tr>
         <td>${result.index + 1}</td>
@@ -2830,7 +2894,7 @@ async function saveTargetScope() {
   renderHistory();
 }
 
-async function openIntruderFromSelection() {
+async function openFuzzerFromSelection() {
   let record = state.selectedRecord;
   if (!record && state.selectedId) {
     const response = await fetch(`/api/transactions/${state.selectedId}`);
@@ -2844,31 +2908,31 @@ async function openIntruderFromSelection() {
   }
 
   const request = editableRequestFromRecord(record);
-  state.intruderBaseRequest = request;
-  state.intruderSourceTransactionId = record.id;
-  state.intruderNotice = record.request.preview_truncated
-    ? buildTruncatedBodyNotice(record, "Intruder")
+  state.fuzzerBaseRequest = request;
+  state.fuzzerSourceTransactionId = record.id;
+  state.fuzzerNotice = record.request.preview_truncated
+    ? buildTruncatedBodyNotice(record, "Fuzzer")
     : "";
-  state.intruderRequestText = buildEditableRawRequest(request);
-  state.intruderPayloadsText = "";
-  state.intruderAttackRecord = null;
-  state.activeTool = "intruder";
+  state.fuzzerRequestText = buildEditableRawRequest(request);
+  state.fuzzerPayloadsText = "";
+  state.fuzzerAttackRecord = null;
+  state.activeTool = "fuzzer";
   scheduleWorkspaceStateSave();
   renderToolPanels();
 }
 
-function resetIntruder() {
-  state.intruderRequestText = state.intruderBaseRequest
-    ? buildEditableRawRequest(state.intruderBaseRequest)
+function resetFuzzer() {
+  state.fuzzerRequestText = state.fuzzerBaseRequest
+    ? buildEditableRawRequest(state.fuzzerBaseRequest)
     : "";
-  state.intruderPayloadsText = "";
-  state.intruderAttackRecord = null;
+  state.fuzzerPayloadsText = "";
+  state.fuzzerAttackRecord = null;
   scheduleWorkspaceStateSave();
-  renderIntruder();
+  renderFuzzer();
 }
 
-async function runIntruderAttack() {
-  const fallback = state.intruderBaseRequest || {
+async function runFuzzerAttack() {
+  const fallback = state.fuzzerBaseRequest || {
     scheme: "https",
     host: "",
     method: "GET",
@@ -2878,32 +2942,32 @@ async function runIntruderAttack() {
     body_encoding: "utf8",
     preview_truncated: false,
   };
-  const template = parseEditableRawRequest(els.intruderRequestEditor.value, fallback);
-  const payloads = els.intruderPayloadsEditor.value
+  const template = parseEditableRawRequest(els.fuzzerRequestEditor.value, fallback);
+  const payloads = els.fuzzerPayloadsEditor.value
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  const response = await fetch("/api/intruder/attacks", {
+  const response = await fetch("/api/fuzzer/attacks", {
     method: "POST",
     headers: {
       "content-type": "application/json",
     },
-    body: JSON.stringify({ template, payloads, source_transaction_id: state.intruderSourceTransactionId }),
+    body: JSON.stringify({ template, payloads, source_transaction_id: state.fuzzerSourceTransactionId }),
   });
   if (!response.ok) {
-    state.intruderAttackRecord = null;
-    state.intruderNotice = await response.text();
+    state.fuzzerAttackRecord = null;
+    state.fuzzerNotice = await response.text();
     scheduleWorkspaceStateSave();
-    renderIntruder();
+    renderFuzzer();
     return;
   }
-  state.intruderBaseRequest = template;
-  state.intruderNotice = "";
-  state.intruderRequestText = els.intruderRequestEditor.value;
-  state.intruderPayloadsText = els.intruderPayloadsEditor.value;
-  state.intruderAttackRecord = await response.json();
+  state.fuzzerBaseRequest = template;
+  state.fuzzerNotice = "";
+  state.fuzzerRequestText = els.fuzzerRequestEditor.value;
+  state.fuzzerPayloadsText = els.fuzzerPayloadsEditor.value;
+  state.fuzzerAttackRecord = await response.json();
   scheduleWorkspaceStateSave();
-  renderIntruder();
+  renderFuzzer();
   scheduleRefresh();
 }
 
@@ -2911,6 +2975,8 @@ async function toggleIntercept() {
   if (!state.runtime) {
     return;
   }
+
+  const turningOff = state.runtime.intercept_enabled;
 
   const response = await fetch("/api/runtime", {
     method: "POST",
@@ -2922,12 +2988,23 @@ async function toggleIntercept() {
     }),
   });
   state.runtime = await response.json();
+
+  if (turningOff) {
+    await fetch("/api/intercepts/forward-all", { method: "POST" });
+    await loadIntercepts(false);
+    scheduleRefresh();
+  }
+
   renderInterceptStatus();
   renderProxySettings();
 }
 
 async function saveProxySettings() {
   const scopePatterns = els.proxySettingScopePatterns.value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const passthroughHosts = els.proxySettingPassthroughHosts.value
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
@@ -2944,6 +3021,7 @@ async function saveProxySettings() {
       intercept_enabled: els.proxySettingIntercept.checked,
       websocket_capture_enabled: els.proxySettingWebsocketCapture.checked,
       scope_patterns: scopePatterns,
+      passthrough_hosts: passthroughHosts,
     }),
   });
 
@@ -3019,7 +3097,7 @@ async function dropSelectedIntercept() {
   scheduleRefresh();
 }
 
-async function openRepeaterFromSelection() {
+async function openReplayFromSelection() {
   let record = state.selectedRecord;
   if (!record && state.selectedId) {
     const response = await fetch(`/api/transactions/${state.selectedId}`);
@@ -3033,21 +3111,21 @@ async function openRepeaterFromSelection() {
   }
 
   const request = editableRequestFromRecord(record);
-  const tab = createRepeaterTab({
+  const tab = createReplayTab({
     baseRequest: request,
     sourceTransactionId: record.id,
-    notice: record.request.preview_truncated ? buildTruncatedBodyNotice(record, "Repeater") : "",
+    notice: record.request.preview_truncated ? buildTruncatedBodyNotice(record, "Replay") : "",
     requestText: buildEditableRawRequest(request),
   });
-  state.repeaterTabs.push(tab);
-  state.activeRepeaterTabId = tab.id;
-  state.activeTool = "repeater";
+  state.replayTabs.push(tab);
+  state.activeReplayTabId = tab.id;
+  state.activeTool = "replay";
   scheduleWorkspaceStateSave();
   renderToolPanels();
 }
 
-function resetRepeater() {
-  const tab = getActiveRepeaterTab();
+function resetReplay() {
+  const tab = getActiveReplayTab();
   if (!tab) {
     return;
   }
@@ -3066,20 +3144,20 @@ function resetRepeater() {
   }
   tab.responseRecord = null;
   scheduleWorkspaceStateSave();
-  renderRepeater();
+  renderReplay();
 }
 
-async function sendRepeater() {
-  const tab = getActiveRepeaterTab();
+async function sendReplay() {
+  const tab = getActiveReplayTab();
   if (!tab) {
     return;
   }
 
   const fallback = tab.baseRequest || createDefaultEditableRequest();
-  const request = parseEditableRawRequest(els.repeaterRequestEditor.value, fallback);
-  const requestText = els.repeaterRequestEditor.value;
+  const request = parseEditableRawRequest(els.replayRequestEditor.value, fallback);
+  const requestText = els.replayRequestEditor.value;
   const target = getRepeaterTargetConfig(tab, request);
-  const response = await fetch("/api/repeater/send", {
+  const response = await fetch("/api/replay/send", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -3111,7 +3189,7 @@ async function sendRepeater() {
       target,
     });
     scheduleWorkspaceStateSave();
-    renderRepeater();
+    renderReplay();
     return;
   }
 
@@ -3130,27 +3208,27 @@ async function sendRepeater() {
     target,
   });
   scheduleWorkspaceStateSave();
-  renderRepeater();
+  renderReplay();
   scheduleRefresh();
 }
 
-function openBlankRepeaterTab() {
-  const tab = createRepeaterTab();
-  state.repeaterTabs.push(tab);
-  state.activeRepeaterTabId = tab.id;
-  state.activeTool = "repeater";
+function openBlankReplayTab() {
+  const tab = createReplayTab();
+  state.replayTabs.push(tab);
+  state.activeReplayTabId = tab.id;
+  state.activeTool = "replay";
   scheduleWorkspaceStateSave();
   renderToolPanels();
 }
 
-function duplicateActiveRepeaterTab() {
-  const tab = getActiveRepeaterTab();
+function duplicateActiveReplayTab() {
+  const tab = getActiveReplayTab();
   if (!tab) {
     return;
   }
 
   const fallback = tab.baseRequest || createDefaultEditableRequest();
-  const requestText = els.repeaterRequestEditor?.value || tab.requestText || buildEditableRawRequest(fallback);
+  const requestText = els.replayRequestEditor?.value || tab.requestText || buildEditableRawRequest(fallback);
   let request = cloneEditableRequest(fallback);
   try {
     request = parseEditableRawRequest(requestText, fallback);
@@ -3159,9 +3237,9 @@ function duplicateActiveRepeaterTab() {
   }
 
   const target = normalizeRepeaterTargetInput(
-    els.repeaterHostInput?.value || tab.targetHost,
-    els.repeaterPortInput?.value || tab.targetPort,
-    els.repeaterSchemeSelect?.value || tab.targetScheme || request.scheme || "https",
+    els.replayHostInput?.value || tab.targetHost,
+    els.replayPortInput?.value || tab.targetPort,
+    els.replaySchemeSelect?.value || tab.targetScheme || request.scheme || "https",
   );
 
   tab.baseRequest = cloneEditableRequest(request);
@@ -3173,7 +3251,7 @@ function duplicateActiveRepeaterTab() {
   const historyEntries = Array.isArray(tab.historyEntries)
     ? tab.historyEntries.map(cloneRepeaterHistoryEntry)
     : [];
-  const duplicate = createRepeaterTab({
+  const duplicate = createReplayTab({
     baseRequest: request,
     sourceTransactionId: tab.sourceTransactionId,
     notice: tab.notice,
@@ -3186,14 +3264,14 @@ function duplicateActiveRepeaterTab() {
     historyIndex: normalizeRepeaterHistoryIndex(tab.historyIndex, historyEntries.length),
   });
 
-  state.repeaterTabs.push(duplicate);
-  state.activeRepeaterTabId = duplicate.id;
+  state.replayTabs.push(duplicate);
+  state.activeReplayTabId = duplicate.id;
   scheduleWorkspaceStateSave();
-  renderRepeater();
+  renderReplay();
 }
 
-function createRepeaterTab(seed = {}) {
-  state.repeaterTabSequence += 1;
+function createReplayTab(seed = {}) {
+  state.replayTabSequence += 1;
   const baseRequest = seed.baseRequest ? cloneEditableRequest(seed.baseRequest) : createDefaultEditableRequest();
   const target = authorityToTargetState(baseRequest.host, baseRequest.scheme);
   const normalizedTarget = normalizeRepeaterTargetInput(
@@ -3203,7 +3281,7 @@ function createRepeaterTab(seed = {}) {
   );
   return {
     id: crypto.randomUUID(),
-    sequence: state.repeaterTabSequence,
+    sequence: state.replayTabSequence,
     baseRequest,
     sourceTransactionId: seed.sourceTransactionId || null,
     notice: seed.notice || "",
@@ -3218,46 +3296,46 @@ function createRepeaterTab(seed = {}) {
 }
 
 function ensureRepeaterTab() {
-  if (!state.repeaterTabs.length) {
-    state.repeaterTabSequence = 0;
-    const tab = createRepeaterTab();
-    state.repeaterTabs = [tab];
-    state.activeRepeaterTabId = tab.id;
+  if (!state.replayTabs.length) {
+    state.replayTabSequence = 0;
+    const tab = createReplayTab();
+    state.replayTabs = [tab];
+    state.activeReplayTabId = tab.id;
     return tab;
   }
 
-  if (!state.repeaterTabs.some((tab) => tab.id === state.activeRepeaterTabId)) {
-    state.activeRepeaterTabId = state.repeaterTabs[0].id;
+  if (!state.replayTabs.some((tab) => tab.id === state.activeReplayTabId)) {
+    state.activeReplayTabId = state.replayTabs[0].id;
   }
 
-  return getActiveRepeaterTab();
+  return getActiveReplayTab();
 }
 
-function getActiveRepeaterTab() {
-  return state.repeaterTabs.find((tab) => tab.id === state.activeRepeaterTabId) || null;
+function getActiveReplayTab() {
+  return state.replayTabs.find((tab) => tab.id === state.activeReplayTabId) || null;
 }
 
-function renderRepeaterTabs() {
-  els.repeaterTabStrip.innerHTML = state.repeaterTabs
+function renderReplayTabs() {
+  els.replayTabStrip.innerHTML = state.replayTabs
     .map((tab) => {
-      const active = tab.id === state.activeRepeaterTabId ? "active" : "";
+      const active = tab.id === state.activeReplayTabId ? "active" : "";
       return `
-        <div class="repeater-tab ${active}" data-repeater-tab-id="${tab.id}">
-          <button class="repeater-tab-button" type="button">${escapeHtml(repeaterTabLabel(tab))}</button>
-          <button class="repeater-tab-close" type="button" aria-label="Close repeater tab">×</button>
+        <div class="replay-tab ${active}" data-replay-tab-id="${tab.id}">
+          <button class="replay-tab-button" type="button">${escapeHtml(replayTabLabel(tab))}</button>
+          <button class="replay-tab-close" type="button" aria-label="Close replay tab">×</button>
         </div>
       `;
     })
     .join("");
 
-  Array.from(els.repeaterTabStrip.querySelectorAll(".repeater-tab")).forEach((tabElement) => {
+  Array.from(els.replayTabStrip.querySelectorAll(".replay-tab")).forEach((tabElement) => {
     const id = tabElement.dataset.repeaterTabId;
-    tabElement.querySelector(".repeater-tab-button")?.addEventListener("click", () => {
-      state.activeRepeaterTabId = id;
+    tabElement.querySelector(".replay-tab-button")?.addEventListener("click", () => {
+      state.activeReplayTabId = id;
       scheduleWorkspaceStateSave();
-      renderRepeater();
+      renderReplay();
     });
-    tabElement.querySelector(".repeater-tab-close")?.addEventListener("click", (event) => {
+    tabElement.querySelector(".replay-tab-close")?.addEventListener("click", (event) => {
       event.stopPropagation();
       closeRepeaterTab(id);
     });
@@ -3265,25 +3343,25 @@ function renderRepeaterTabs() {
 }
 
 function closeRepeaterTab(id) {
-  const index = state.repeaterTabs.findIndex((tab) => tab.id === id);
+  const index = state.replayTabs.findIndex((tab) => tab.id === id);
   if (index === -1) {
     return;
   }
 
-  state.repeaterTabs.splice(index, 1);
-  if (!state.repeaterTabs.length) {
-    state.repeaterTabSequence = 0;
-    const replacement = createRepeaterTab();
-    state.repeaterTabs = [replacement];
-    state.activeRepeaterTabId = replacement.id;
-  } else if (state.activeRepeaterTabId === id) {
-    state.activeRepeaterTabId = state.repeaterTabs[Math.max(0, index - 1)].id;
+  state.replayTabs.splice(index, 1);
+  if (!state.replayTabs.length) {
+    state.replayTabSequence = 0;
+    const replacement = createReplayTab();
+    state.replayTabs = [replacement];
+    state.activeReplayTabId = replacement.id;
+  } else if (state.activeReplayTabId === id) {
+    state.activeReplayTabId = state.replayTabs[Math.max(0, index - 1)].id;
   }
   scheduleWorkspaceStateSave();
-  renderRepeater();
+  renderReplay();
 }
 
-function repeaterTabLabel(tab) {
+function replayTabLabel(tab) {
   const request = deriveRepeaterRequest(tab);
   const target = getRepeaterTargetConfig(tab, request);
   const authority = joinAuthority(target.host, target.port) || "draft";
@@ -3299,23 +3377,23 @@ function deriveRepeaterRequest(tab) {
   }
 }
 
-async function applyRepeaterTargetFields() {
-  const tab = getActiveRepeaterTab();
+async function applyReplayTargetFields() {
+  const tab = getActiveReplayTab();
   if (!tab) {
     return;
   }
 
   const normalizedTarget = normalizeRepeaterTargetInput(
-    els.repeaterHostInput.value,
-    els.repeaterPortInput.value,
-    els.repeaterSchemeSelect.value || "https",
+    els.replayHostInput.value,
+    els.replayPortInput.value,
+    els.replaySchemeSelect.value || "https",
   );
   tab.targetScheme = normalizedTarget.scheme;
   tab.targetHost = normalizedTarget.host;
   tab.targetPort = normalizedTarget.port;
   tab.responseRecord = null;
   scheduleWorkspaceStateSave();
-  renderRepeater();
+  renderReplay();
 }
 
 function applyRepeaterTargetOverride(request, target) {
@@ -3480,7 +3558,7 @@ function restoreRepeaterHistoryEntry(tab, entry) {
   tab.targetPort = normalizedTarget.port;
 }
 
-function canNavigateRepeaterHistory(tab, direction) {
+function canNavigateReplayHistory(tab, direction) {
   if (!Array.isArray(tab.historyEntries) || tab.historyEntries.length <= 1) {
     return false;
   }
@@ -3494,9 +3572,9 @@ function canNavigateRepeaterHistory(tab, direction) {
   return nextIndex >= 0 && nextIndex < tab.historyEntries.length;
 }
 
-function navigateRepeaterHistory(direction) {
-  const tab = getActiveRepeaterTab();
-  if (!tab || !canNavigateRepeaterHistory(tab, direction)) {
+function navigateReplayHistory(direction) {
+  const tab = getActiveReplayTab();
+  if (!tab || !canNavigateReplayHistory(tab, direction)) {
     return;
   }
 
@@ -3509,7 +3587,7 @@ function navigateRepeaterHistory(direction) {
   tab.historyIndex = nextIndex;
   restoreRepeaterHistoryEntry(tab, entry);
   scheduleWorkspaceStateSave();
-  renderRepeater();
+  renderReplay();
 }
 
 function createDefaultEditableRequest() {
@@ -3844,6 +3922,11 @@ async function downloadCertificate(format) {
 
 function buildMessagePresentation(target, record) {
   const mode = state.messageViews[target];
+
+  if (mode === "diff") {
+    return buildDiffPresentation(target, record);
+  }
+
   const text = target === "request" ? buildRawRequest(record) : buildRawResponse(record);
 
   if (mode === "hex") {
@@ -3855,6 +3938,47 @@ function buildMessagePresentation(target, record) {
   }
 
   return text;
+}
+
+function buildDiffPresentation(target, record) {
+  const originalField = target === "request" ? "original_request" : "original_response";
+  const original = record[originalField];
+  if (!original) {
+    return target === "request"
+      ? "No match-replace rules were applied to the request."
+      : "No match-replace rules were applied to the response.";
+  }
+
+  const fakeOriginal = { ...record };
+  if (target === "request") {
+    fakeOriginal.request = original;
+  } else {
+    fakeOriginal.response = original;
+  }
+  const originalText = target === "request" ? buildRawRequest(fakeOriginal) : buildRawResponse(fakeOriginal);
+  const modifiedText = target === "request" ? buildRawRequest(record) : buildRawResponse(record);
+
+  const originalLines = originalText.split("\n");
+  const modifiedLines = modifiedText.split("\n");
+  const result = [];
+  const maxLen = Math.max(originalLines.length, modifiedLines.length);
+
+  result.push("--- Original");
+  result.push("+++ Modified");
+  result.push("");
+
+  for (let i = 0; i < maxLen; i++) {
+    const oLine = i < originalLines.length ? originalLines[i] : undefined;
+    const mLine = i < modifiedLines.length ? modifiedLines[i] : undefined;
+    if (oLine === mLine) {
+      result.push("  " + (oLine ?? ""));
+    } else {
+      if (oLine !== undefined) result.push("- " + oLine);
+      if (mLine !== undefined) result.push("+ " + mLine);
+    }
+  }
+
+  return result.join("\n");
 }
 
 function buildRawRequest(record) {
@@ -4082,7 +4206,30 @@ function renderCodeHtml(text, mode, target) {
     return renderHexHtml(text);
   }
 
+  if (mode === "diff") {
+    return renderDiffHtml(text);
+  }
+
   return renderHttpHtml(text, target);
+}
+
+function renderDiffHtml(text) {
+  const lines = String(text).split("\n");
+  return lines
+    .map((line) => {
+      const escaped = escapeHtml(line);
+      if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+        return wrapCodeLine(escaped, "code-line diff-line-header");
+      }
+      if (line.startsWith("+ ")) {
+        return wrapCodeLine(escaped, "code-line diff-line-added");
+      }
+      if (line.startsWith("- ")) {
+        return wrapCodeLine(escaped, "code-line diff-line-removed");
+      }
+      return wrapCodeLine(escaped, "code-line");
+    })
+    .join("");
 }
 
 function renderHttpHtml(text, target) {
@@ -5348,3 +5495,136 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+
+/* ─── Context menu (color tags & notes) ─── */
+let contextMenuTargetId = null;
+let contextMenuNoteTimer = null;
+
+function openContextMenu(x, y, transactionId) {
+  contextMenuTargetId = transactionId;
+  const menu = els.contextMenu;
+  menu.classList.remove("hidden");
+
+  const item = state.items.find((i) => i.id === transactionId);
+  const currentColor = item?.color_tag || "";
+
+  menu.querySelectorAll(".color-dot").forEach((dot) => {
+    dot.classList.toggle("active", dot.dataset.color === currentColor);
+  });
+
+  els.contextMenuNote.value = "";
+  if (transactionId) {
+    loadUserNote(transactionId);
+  }
+
+  const menuWidth = menu.offsetWidth;
+  const menuHeight = menu.offsetHeight;
+  const maxX = window.innerWidth - menuWidth - 8;
+  const maxY = window.innerHeight - menuHeight - 8;
+  menu.style.left = `${Math.min(x, maxX)}px`;
+  menu.style.top = `${Math.min(y, maxY)}px`;
+}
+
+function closeContextMenu() {
+  els.contextMenu.classList.add("hidden");
+  contextMenuTargetId = null;
+}
+
+async function loadUserNote(transactionId) {
+  try {
+    const response = await fetch(`/api/transactions/${transactionId}`);
+    if (response.ok) {
+      const record = await response.json();
+      if (contextMenuTargetId === transactionId) {
+        els.contextMenuNote.value = record.user_note || "";
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+async function updateAnnotations(transactionId, payload) {
+  try {
+    const response = await fetch(`/api/transactions/${transactionId}/annotations`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (response.ok) {
+      const summary = await response.json();
+      const index = state.items.findIndex((i) => i.id === transactionId);
+      if (index !== -1) {
+        Object.assign(state.items[index], summary);
+        renderHistory();
+      }
+      if (state.selectedRecord && state.selectedRecord.id === transactionId) {
+        if (payload.color_tag !== undefined) {
+          state.selectedRecord.color_tag = payload.color_tag;
+        }
+        if (payload.user_note !== undefined) {
+          state.selectedRecord.user_note = payload.user_note;
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Failed to update annotations:", error);
+  }
+}
+
+document.addEventListener("click", (event) => {
+  if (!els.contextMenu.contains(event.target)) {
+    closeContextMenu();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.contextMenu.classList.contains("hidden")) {
+    closeContextMenu();
+  }
+});
+
+els.contextMenu.querySelectorAll(".color-dot").forEach((dot) => {
+  dot.addEventListener("click", () => {
+    if (!contextMenuTargetId) return;
+    const color = dot.dataset.color || null;
+    updateAnnotations(contextMenuTargetId, { color_tag: color });
+    els.contextMenu.querySelectorAll(".color-dot").forEach((d) => {
+      d.classList.toggle("active", d.dataset.color === (color || ""));
+    });
+  });
+});
+
+els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
+  item.addEventListener("click", () => {
+    const action = item.dataset.action;
+    if (!contextMenuTargetId) return;
+    state.selectedId = contextMenuTargetId;
+    closeContextMenu();
+    if (action === "send-to-replay") {
+      openReplayFromSelection().catch((error) => console.error(error));
+    } else if (action === "send-to-fuzzer") {
+      openFuzzerFromSelection().catch((error) => console.error(error));
+    }
+  });
+});
+
+els.contextMenuNote.addEventListener("input", () => {
+  if (!contextMenuTargetId) return;
+  clearTimeout(contextMenuNoteTimer);
+  const id = contextMenuTargetId;
+  const value = els.contextMenuNote.value;
+  contextMenuNoteTimer = setTimeout(() => {
+    updateAnnotations(id, { user_note: value || null });
+  }, 500);
+});
+
+els.contextMenuNote.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    if (!contextMenuTargetId) return;
+    const value = els.contextMenuNote.value;
+    clearTimeout(contextMenuNoteTimer);
+    updateAnnotations(contextMenuTargetId, { user_note: value || null });
+    closeContextMenu();
+  }
+  event.stopPropagation();
+});

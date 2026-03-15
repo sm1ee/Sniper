@@ -86,7 +86,7 @@ Sniper keeps the UI simple and workbench-oriented:
 
 - `Session`: manage isolated workspaces
 - `Scope`: define scope and inspect captured hosts and paths
-- `Capture`: use `Intercept`, `HTTP`, `Web Socket`, `Auto replace`, and `Settings`
+- `Capture`: use `Intercept`, `HTTP`, `Web Socket`, `Replace`, and `Settings`
 - `Replay`: modify and resend captured requests
 - `Fuzzer`: run payload-based request tests
 - `Tools`: decode, encode, hash, inspect JWTs, and transform data
@@ -121,7 +121,7 @@ cargo run --bin sniper-cli -- --help
 Available command groups:
 
 - `session list|create|switch`
-- `capture http list|get|replay|fuzzer`
+- `capture http list|get|replay|fuzzer|annotate`
 - `capture intercept on|off|list|forward|drop`
 - `capture web-socket list|get`
 - `capture auto-replace list|set`
@@ -139,6 +139,7 @@ cargo run --bin sniper-cli -- scope set-scope --pattern '*.example.com' --patter
 cargo run --bin sniper-cli -- capture http list --limit 10
 cargo run --bin sniper-cli -- capture http replay --id <transaction-id>
 cargo run --bin sniper-cli -- capture http fuzzer --id <transaction-id>
+cargo run --bin sniper-cli -- capture http annotate --id <transaction-id> --color red --note "suspicious"
 cargo run --bin sniper-cli -- replay list
 printf 'GET / HTTP/1.1\nHost: example.com\n\n' | cargo run --bin sniper-cli -- replay open --stdin
 cargo run --bin sniper-cli -- capture intercept list

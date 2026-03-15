@@ -179,6 +179,14 @@ pub struct TransactionRecord {
     pub request: MessageRecord,
     pub response: Option<MessageRecord>,
     pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_request: Option<MessageRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_response: Option<MessageRecord>,
 }
 
 impl TransactionRecord {
@@ -193,6 +201,8 @@ impl TransactionRecord {
         request: MessageRecord,
         response: Option<MessageRecord>,
         notes: Vec<String>,
+        original_request: Option<MessageRecord>,
+        original_response: Option<MessageRecord>,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -207,6 +217,10 @@ impl TransactionRecord {
             request,
             response,
             notes,
+            color_tag: None,
+            user_note: None,
+            original_request,
+            original_response,
         }
     }
 
@@ -231,6 +245,10 @@ impl TransactionRecord {
             request,
             response: None,
             notes,
+            color_tag: None,
+            user_note: None,
+            original_request: None,
+            original_response: None,
         }
     }
 
@@ -258,6 +276,9 @@ impl TransactionRecord {
                 .and_then(|message| message.content_type.clone())
                 .or_else(|| self.request.content_type.clone()),
             is_websocket: self.is_websocket(),
+            has_match_replace: self.original_request.is_some() || self.original_response.is_some(),
+            color_tag: self.color_tag.clone(),
+            has_user_note: self.user_note.is_some(),
         }
     }
 
@@ -298,6 +319,12 @@ pub struct TransactionSummary {
     pub has_response: bool,
     pub content_type: Option<String>,
     pub is_websocket: bool,
+    #[serde(default)]
+    pub has_match_replace: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_tag: Option<String>,
+    #[serde(default)]
+    pub has_user_note: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
