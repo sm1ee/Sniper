@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     io::{self, Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -21,19 +21,13 @@ use sniper::{
     runtime::RuntimeSettingsSnapshot,
     runtime_state::load_runtime_state,
     session::SessionSummary,
+    skills,
     workspace::{
         ReplayHistoryEntryState, ReplayTabState, ReplayWorkspaceState, WorkspaceStateSnapshot,
     },
 };
 use url::Url;
 use uuid::Uuid;
-
-const CODEX_SKILL_NAME: &str = "sniper-operator";
-const CLAUDE_SKILL_NAME: &str = "sniper-operator";
-const CODEX_SKILL_TEMPLATE: &str =
-    include_str!("../../packaging/skills/codex/sniper-operator/SKILL.md");
-const CLAUDE_SKILL_TEMPLATE: &str =
-    include_str!("../../packaging/skills/claude/sniper-operator/SKILL.md");
 
 #[derive(Parser, Debug)]
 #[command(name = "sniper-cli", version = env!("CARGO_PKG_VERSION"), about = "Operate a local Sniper proxy through its JSON API.")]
@@ -464,17 +458,6 @@ struct InterceptActionResult {
     ok: bool,
     action: &'static str,
     id: Uuid,
-}
-
-#[derive(Serialize)]
-struct SkillsInstallResult {
-    installed: Vec<InstalledSkill>,
-}
-
-#[derive(Serialize)]
-struct InstalledSkill {
-    agent: &'static str,
-    path: String,
 }
 
 #[derive(Serialize)]
@@ -1386,7 +1369,7 @@ fn default_port_for_scheme(scheme: &str) -> u16 {
     }
 }
 
-fn install_skills(args: SkillsInstallArgs) -> Result<SkillsInstallResult> {
+fn install_skills(args: SkillsInstallArgs) -> Result<skills::SkillsInstallResult> {
     let install_codex = args.all || args.codex;
     let install_claude = args.all || args.claude;
     if !install_codex && !install_claude {
@@ -1398,9 +1381,9 @@ fn install_skills(args: SkillsInstallArgs) -> Result<SkillsInstallResult> {
         let root = args
             .codex_dir
             .clone()
-            .unwrap_or_else(default_codex_skills_dir);
-        let path = install_skill_folder(&root, CODEX_SKILL_NAME, CODEX_SKILL_TEMPLATE)?;
-        installed.push(InstalledSkill {
+            .unwrap_or_else(skills::default_codex_skills_dir);
+        let path = skills::install_skill_folder(&root, skills::SKILL_NAME, skills::CODEX_SKILL_TEMPLATE)?;
+        installed.push(skills::InstalledSkill {
             agent: "codex",
             path: path.display().to_string(),
         });
@@ -1409,51 +1392,15 @@ fn install_skills(args: SkillsInstallArgs) -> Result<SkillsInstallResult> {
         let root = args
             .claude_dir
             .clone()
-            .unwrap_or_else(default_claude_skills_dir);
-        let path = install_skill_folder(&root, CLAUDE_SKILL_NAME, CLAUDE_SKILL_TEMPLATE)?;
-        installed.push(InstalledSkill {
+            .unwrap_or_else(skills::default_claude_skills_dir);
+        let path = skills::install_skill_folder(&root, skills::SKILL_NAME, skills::CLAUDE_SKILL_TEMPLATE)?;
+        installed.push(skills::InstalledSkill {
             agent: "claude",
             path: path.display().to_string(),
         });
     }
 
-    Ok(SkillsInstallResult { installed })
-}
-
-fn install_skill_folder(root: &Path, name: &str, skill_md: &str) -> Result<PathBuf> {
-    fs::create_dir_all(root)
-        .with_context(|| format!("failed to create skills dir {}", root.display()))?;
-    let skill_dir = root.join(name);
-    if skill_dir.exists() {
-        fs::remove_dir_all(&skill_dir)
-            .with_context(|| format!("failed to replace {}", skill_dir.display()))?;
-    }
-    fs::create_dir_all(&skill_dir)
-        .with_context(|| format!("failed to create {}", skill_dir.display()))?;
-    fs::write(skill_dir.join("SKILL.md"), skill_md)
-        .with_context(|| format!("failed to write {}", skill_dir.display()))?;
-    Ok(skill_dir)
-}
-
-fn default_codex_skills_dir() -> PathBuf {
-    if let Some(codex_home) = env::var_os("CODEX_HOME") {
-        return PathBuf::from(codex_home).join("skills");
-    }
-    user_home_dir().join(".codex/skills")
-}
-
-fn default_claude_skills_dir() -> PathBuf {
-    if let Some(claude_home) = env::var_os("CLAUDE_HOME") {
-        return PathBuf::from(claude_home).join("skills");
-    }
-    user_home_dir().join(".claude/skills")
-}
-
-fn user_home_dir() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."))
+    Ok(skills::SkillsInstallResult { installed })
 }
 
 struct NormalizedTarget {
@@ -1465,10 +1412,10 @@ struct NormalizedTarget {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_editable_raw_request, default_claude_skills_dir, default_codex_skills_dir,
-        install_skill_folder, normalize_api_base_url, parse_editable_raw_request,
+        build_editable_raw_request, normalize_api_base_url, parse_editable_raw_request,
     };
     use sniper::model::{BodyEncoding, EditableRequest, HeaderRecord};
+    use sniper::skills;
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
 
@@ -1515,20 +1462,20 @@ mod tests {
 
     #[test]
     fn codex_default_skills_dir_uses_hidden_folder() {
-        let path = default_codex_skills_dir();
+        let path = skills::default_codex_skills_dir();
         assert!(path.to_string_lossy().contains(".codex/skills") || path.ends_with("skills"));
     }
 
     #[test]
     fn claude_default_skills_dir_uses_hidden_folder() {
-        let path = default_claude_skills_dir();
+        let path = skills::default_claude_skills_dir();
         assert!(path.to_string_lossy().contains(".claude/skills") || path.ends_with("skills"));
     }
 
     #[test]
     fn install_skill_folder_writes_skill_markdown() {
         let root = std::env::temp_dir().join(format!("sniper-skill-test-{}", Uuid::new_v4()));
-        let skill_dir = install_skill_folder(&root, "sniper-operator", "# test skill\n").unwrap();
+        let skill_dir = skills::install_skill_folder(&root, "sniper-operator", "# test skill\n").unwrap();
         let skill_md = fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
         assert_eq!(skill_md, "# test skill\n");
         fs::remove_dir_all(PathBuf::from(root)).unwrap();

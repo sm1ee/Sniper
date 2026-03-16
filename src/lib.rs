@@ -10,6 +10,7 @@ pub mod proxy;
 pub mod runtime;
 pub mod runtime_state;
 pub mod session;
+pub mod skills;
 pub mod special_host;
 pub mod state;
 pub mod store;

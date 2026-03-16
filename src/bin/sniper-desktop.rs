@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sniper::{api, config::AppConfig, proxy, runtime_state::RuntimeStateSnapshot, state::AppState};
+use sniper::{api, config::AppConfig, proxy, runtime_state::RuntimeStateSnapshot, skills, state::AppState};
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -51,6 +51,13 @@ fn main() -> Result<()> {
         &RuntimeStateSnapshot::new(config.proxy_addr, config.ui_addr),
     ) {
         error!(?error, "failed to persist runtime-state.json");
+    }
+
+    // Auto-install Claude & Codex skills on every launch so they stay in sync
+    // with the current Sniper version. Errors are silently logged.
+    let skill_results = skills::auto_install_all();
+    for skill in &skill_results {
+        info!(agent = skill.agent, path = %skill.path, "installed sniper-operator skill");
     }
 
     let state = Arc::new(AppState::new(config.clone())?);
