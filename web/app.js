@@ -790,36 +790,32 @@ function bindEvents() {
     runFuzzerAttack().catch((error) => console.error(error));
   });
   els.resetFuzzerButton.addEventListener("click", resetFuzzer);
-  els.replayRequestEditor.addEventListener("input", () => {
+  // The replay request editor uses a contenteditable <pre> for editing so that
+  // native text selection works over syntax-highlighted text (WKWebView renders
+  // textarea selection in an opaque native layer that cannot be hidden).
+  // The hidden <textarea> is kept as a data store only.
+  els.replayRequestHighlight.addEventListener("input", () => {
     const tab = getActiveReplayTab();
-    if (!tab) {
-      return;
-    }
-    tab.requestText = els.replayRequestEditor.value;
-    renderReplayRequestHighlight(tab.requestText);
-    updateReplaySearchPane("request", tab.requestText);
+    if (!tab) return;
+    const text = els.replayRequestHighlight.textContent || "";
+    els.replayRequestEditor.value = text;
+    tab.requestText = text;
+    // Debounce re-render so syntax highlighting refreshes without losing cursor
+    clearTimeout(els.replayRequestHighlight._renderTimer);
+    els.replayRequestHighlight._renderTimer = setTimeout(() => {
+      replayHighlightRerender(text);
+    }, 400);
+    updateReplaySearchPane("request", text);
     syncReplayToolbar(tab);
     renderReplayTabs();
     scheduleWorkspaceStateSave();
   });
-  els.replayRequestEditor.addEventListener("scroll", syncReplayRequestHighlightScroll);
-  els.replayRequestEditor.addEventListener("contextmenu", showReplayContextMenu);
-  els.replayRequestEditor.addEventListener("select", () => {
-    const hasSelection = els.replayRequestEditor.selectionStart !== els.replayRequestEditor.selectionEnd;
-    if (els.replayRequestHighlight) {
-      els.replayRequestHighlight.style.opacity = hasSelection ? "0" : "1";
-    }
+  els.replayRequestHighlight.addEventListener("paste", (e) => {
+    e.preventDefault();
+    const text = e.clipboardData.getData("text/plain");
+    document.execCommand("insertText", false, text);
   });
-  els.replayRequestEditor.addEventListener("click", () => {
-    if (els.replayRequestHighlight) {
-      els.replayRequestHighlight.style.opacity = "1";
-    }
-  });
-  els.replayRequestEditor.addEventListener("blur", () => {
-    if (els.replayRequestHighlight) {
-      els.replayRequestHighlight.style.opacity = "1";
-    }
-  });
+  els.replayRequestHighlight.addEventListener("contextmenu", showReplayContextMenu);
   initReplayContextMenu();
   els.replaySchemeSelect.addEventListener("change", () => {
     applyReplayTargetFields().catch((error) => console.error(error));
@@ -2662,18 +2658,58 @@ function renderReplayRequestHighlight(text) {
   if (!els.replayRequestHighlight) {
     return;
   }
-
   els.replayRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
-  syncReplayRequestHighlightScroll();
+}
+
+// Re-render syntax highlighting while preserving cursor position in the
+// contenteditable replay editor.
+function replayHighlightRerender(text) {
+  if (!els.replayRequestHighlight) return;
+  const saved = saveContentEditableCaret(els.replayRequestHighlight);
+  els.replayRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
+  restoreContentEditableCaret(els.replayRequestHighlight, saved);
+}
+
+function saveContentEditableCaret(el) {
+  const sel = window.getSelection();
+  if (!sel.rangeCount || !el.contains(sel.anchorNode)) return null;
+  const range = sel.getRangeAt(0);
+  const pre = document.createRange();
+  pre.selectNodeContents(el);
+  pre.setEnd(range.startContainer, range.startOffset);
+  const start = pre.toString().length;
+  pre.setEnd(range.endContainer, range.endOffset);
+  const end = pre.toString().length;
+  return { start, end };
+}
+
+function restoreContentEditableCaret(el, pos) {
+  if (!pos) return;
+  const sel = window.getSelection();
+  const range = document.createRange();
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let startSet = false;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!startSet && offset + node.length >= pos.start) {
+      range.setStart(node, pos.start - offset);
+      startSet = true;
+    }
+    if (startSet && offset + node.length >= pos.end) {
+      range.setEnd(node, pos.end - offset);
+      break;
+    }
+    offset += node.length;
+  }
+  if (startSet) {
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
 }
 
 function syncReplayRequestHighlightScroll() {
-  if (!els.replayRequestHighlight || !els.replayRequestEditor) {
-    return;
-  }
-
-  els.replayRequestHighlight.scrollTop = els.replayRequestEditor.scrollTop;
-  els.replayRequestHighlight.scrollLeft = els.replayRequestEditor.scrollLeft;
+  // No longer needed — the contenteditable pre scrolls natively.
 }
 
 function renderInterceptRequestHighlight(text) {

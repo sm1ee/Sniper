@@ -93,9 +93,22 @@ pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
     serve_proxy(listener, state).await
 }
 
+/// Bind a TCP listener with `SO_REUSEADDR` so that recently-closed sockets
+/// on the same port don't block us.
+async fn bind_tcp_reuse(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv6() {
+        tokio::net::TcpSocket::new_v6()?
+    } else {
+        tokio::net::TcpSocket::new_v4()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
 /// Try to rebind the proxy listener to a new address at runtime.
 /// On success: aborts old proxy task, spawns new one, updates active_proxy_addr.
-/// On failure: returns the error message (e.g. port already in use).
+/// On failure: attempts to restore the old listener; returns the error message.
 pub async fn rebind_proxy(
     state: Arc<AppState>,
     new_addr: std::net::SocketAddr,
@@ -105,14 +118,66 @@ pub async fn rebind_proxy(
         return Ok(());
     }
 
-    // Try binding the new address first — if this fails the old listener keeps running
-    let listener = match TcpListener::bind(new_addr).await {
+    // Always stop the old listener first.  When the host changes on the same
+    // port (e.g. 127.0.0.1:8080 → 0.0.0.0:8080) the old socket would block
+    // the new bind because 0.0.0.0 encompasses 127.0.0.1.
+    // `abort_proxy_task` awaits the task so the TcpListener is fully dropped.
+    state.abort_proxy_task().await;
+    state.set_proxy_online(false);
+
+    // Bind the new address with SO_REUSEADDR.
+    // Retry a few times because macOS may not release the port instantly
+    // after the old TcpListener is dropped.
+    let bind_result = {
+        let mut last_err = None;
+        let mut listener = None;
+        for attempt in 0..10 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            match bind_tcp_reuse(new_addr).await {
+                Ok(l) => {
+                    listener = Some(l);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        listener.ok_or_else(|| last_err.unwrap())
+    };
+    let listener = match bind_result {
         Ok(l) => l,
-        Err(e) => {
+        Err(bind_err) => {
+            // New bind failed — try to restore the old listener
+            warn!(
+                old = %current,
+                new = %new_addr,
+                %bind_err,
+                "rebind failed, attempting to restore old listener"
+            );
+            match bind_tcp_reuse(current).await {
+                Ok(restored) => {
+                    let restored_addr = restored.local_addr().unwrap_or(current);
+                    state.set_active_proxy_addr(restored_addr).await;
+                    state.set_proxy_online(true);
+                    let proxy_state = state.clone();
+                    let handle = tokio::spawn(async move {
+                        if let Err(error) = serve_proxy(restored, proxy_state).await {
+                            tracing::error!(?error, "restored proxy task stopped");
+                        }
+                    });
+                    state.set_proxy_task(handle).await;
+                }
+                Err(restore_err) => {
+                    tracing::error!(
+                        %restore_err,
+                        "failed to restore old proxy listener — proxy is offline"
+                    );
+                }
+            }
             return Err(format!(
-                "Port {} is already in use ({})",
-                new_addr.port(),
-                e
+                "Could not bind to {} ({})",
+                new_addr, bind_err
             ));
         }
     };
@@ -120,10 +185,6 @@ pub async fn rebind_proxy(
     let bound_addr = listener
         .local_addr()
         .map_err(|e| format!("failed to read bound address: {e}"))?;
-
-    // Abort old proxy task
-    state.abort_proxy_task().await;
-    state.set_proxy_online(false);
 
     // Update active address
     state.set_active_proxy_addr(bound_addr).await;
