@@ -27,12 +27,10 @@ mkdir -p "$STAGING_DIR/.background"
 cp -R "$APP_BUNDLE" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
 
-# Copy background image into hidden .background folder
 if [[ -f "$BG_IMG" ]]; then
   cp "$BG_IMG" "$STAGING_DIR/.background/background.png"
 fi
 
-# Copy volume icon into staging (before DMG creation)
 VOLUME_ICON="$ROOT_DIR/packaging/macos/AppIcon.icns"
 if [[ -f "$VOLUME_ICON" ]]; then
   cp "$VOLUME_ICON" "$STAGING_DIR/.VolumeIcon.icns"
@@ -40,7 +38,7 @@ if [[ -f "$VOLUME_ICON" ]]; then
   SetFile -a C "$STAGING_DIR" 2>/dev/null || true
 fi
 
-# Create read-write HFS+ DMG (needed for AppleScript styling)
+# Create read-write HFS+ DMG
 hdiutil create \
   -volname "$VOLUME_NAME" \
   -srcfolder "$STAGING_DIR" \
@@ -49,56 +47,56 @@ hdiutil create \
   -format UDRW \
   "$DMG_TMP"
 
-# Mount the writable DMG — find actual mount point
+# Mount
 ATTACH_OUTPUT=$(hdiutil attach -readwrite -noverify -noautoopen "$DMG_TMP")
 DEVICE=$(echo "$ATTACH_OUTPUT" | awk '/\/Volumes\// { print $1 }')
 MOUNT_POINT=$(echo "$ATTACH_OUTPUT" | awk '/\/Volumes\// { for(i=NF;i>=1;i--) if($i ~ /^\/Volumes/) { s=$i; for(j=i+1;j<=NF;j++) s=s" "$j; print s; exit } }')
+DISK_NAME=$(basename "$MOUNT_POINT")
 
 echo "Mounted at: $MOUNT_POINT (device: $DEVICE)"
 sleep 2
 
-DISK_NAME=$(basename "$MOUNT_POINT")
-
-osascript <<APPLESCRIPT
+# Style with AppleScript — run twice to ensure Finder persists DS_Store
+for pass in 1 2; do
+  osascript <<APPLESCRIPT
 tell application "Finder"
   tell disk "$DISK_NAME"
     open
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    set bounds of container window to {200, 100, 860, 540}
+    set bounds of container window to {200, 120, 854, 542}
 
     set theViewOptions to icon view options of container window
     set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 128
+    set icon size of theViewOptions to 100
 
-    if exists file ".background:background.png" then
-      set background picture of theViewOptions to file ".background:background.png"
-    end if
+    set background picture of theViewOptions to file ".background:background.png"
 
-    -- App on left, Applications on right (like Ghostty / Claude)
-    set position of item "${APP_NAME}.app" to {165, 200}
-    set position of item "Applications" to {495, 200}
+    set position of item "${APP_NAME}.app" to {170, 190}
+    set position of item "Applications" to {490, 190}
 
-    -- Hide dot-folders off screen
     try
-      set position of item ".background" to {-1000, -1000}
+      set position of item ".background" to {900, 900}
     end try
     try
-      set position of item ".fseventsd" to {-1000, -1000}
+      set position of item ".fseventsd" to {900, 900}
     end try
     try
-      set position of item ".VolumeIcon.icns" to {-1000, -1000}
+      set position of item ".VolumeIcon.icns" to {900, 900}
     end try
 
     update without registering applications
-    delay 2
+    delay 3
     close
   end tell
 end tell
 APPLESCRIPT
+  sleep 2
+done
 
 sync
+sleep 1
 hdiutil detach "$DEVICE" -quiet || hdiutil detach "$DEVICE" -force
 
 # Convert to compressed read-only DMG
