@@ -125,8 +125,27 @@ pub async fn rebind_proxy(
     state.abort_proxy_task().await;
     state.set_proxy_online(false);
 
-    // Bind the new address with SO_REUSEADDR
-    let listener = match bind_tcp_reuse(new_addr).await {
+    // Bind the new address with SO_REUSEADDR.
+    // Retry a few times because macOS may not release the port instantly
+    // after the old TcpListener is dropped.
+    let bind_result = {
+        let mut last_err = None;
+        let mut listener = None;
+        for attempt in 0..10 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            match bind_tcp_reuse(new_addr).await {
+                Ok(l) => {
+                    listener = Some(l);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        listener.ok_or_else(|| last_err.unwrap())
+    };
+    let listener = match bind_result {
         Ok(l) => l,
         Err(bind_err) => {
             // New bind failed — try to restore the old listener
