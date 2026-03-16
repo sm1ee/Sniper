@@ -126,6 +126,8 @@ fn main() -> Result<()> {
     let ui_url = format!("http://{}/", config.ui_addr);
     let ui_origin = format!("http://{}", config.ui_addr);
     let webview = WebViewBuilder::new(&window)
+        .with_incognito(true)
+        .with_devtools(true)
         .with_navigation_handler({
             let ui_origin = ui_origin.clone();
             move |url| handle_navigation_request(&url, &ui_origin)

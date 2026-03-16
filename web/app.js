@@ -6006,7 +6006,14 @@ els.contextMenuNote.addEventListener("keydown", (event) => {
 
 /* ─── Replay request context menu ─── */
 
-const replayContextMenu = document.getElementById("replayContextMenu");
+// Lazy-initialised: the element may not yet exist when top-level code runs,
+// and bindEvents() → initReplayContextMenu() is called early in init().
+function getReplayContextMenu() {
+  if (!getReplayContextMenu._el) {
+    getReplayContextMenu._el = document.getElementById("replayContextMenu");
+  }
+  return getReplayContextMenu._el;
+}
 
 function showReplayContextMenu(event) {
   event.preventDefault();
@@ -6015,19 +6022,19 @@ function showReplayContextMenu(event) {
 
   // Highlight current method
   const currentMethod = (tab.requestText.match(/^([A-Z]+)\s/)?.[1] || "GET").toUpperCase();
-  replayContextMenu.querySelectorAll(".method-btn").forEach((btn) => {
+  getReplayContextMenu().querySelectorAll(".method-btn").forEach((btn) => {
     btn.classList.toggle("active-method", btn.dataset.method === currentMethod);
   });
 
-  replayContextMenu.classList.remove("hidden");
+  getReplayContextMenu().classList.remove("hidden");
   const x = Math.min(event.clientX, window.innerWidth - 240);
   const y = Math.min(event.clientY, window.innerHeight - 300);
-  replayContextMenu.style.left = `${x}px`;
-  replayContextMenu.style.top = `${y}px`;
+  getReplayContextMenu().style.left = `${x}px`;
+  getReplayContextMenu().style.top = `${y}px`;
 }
 
 function closeReplayContextMenu() {
-  replayContextMenu.classList.add("hidden");
+  getReplayContextMenu().classList.add("hidden");
 }
 
 function changeReplayMethod(newMethod) {
@@ -6088,7 +6095,7 @@ function replayRequestToCurl() {
 
 function initReplayContextMenu() {
   // Method buttons
-  replayContextMenu.querySelectorAll(".method-btn").forEach((btn) => {
+  getReplayContextMenu().querySelectorAll(".method-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       changeReplayMethod(btn.dataset.method);
       closeReplayContextMenu();
@@ -6096,7 +6103,7 @@ function initReplayContextMenu() {
   });
 
   // Action buttons
-  replayContextMenu.querySelectorAll("[data-replay-action]").forEach((btn) => {
+  getReplayContextMenu().querySelectorAll("[data-replay-action]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const action = btn.dataset.replayAction;
       const tab = getActiveReplayTab();
@@ -6129,7 +6136,7 @@ function initReplayContextMenu() {
 
   // Close on outside click
   document.addEventListener("click", (event) => {
-    if (!replayContextMenu.contains(event.target)) {
+    if (!getReplayContextMenu().contains(event.target)) {
       closeReplayContextMenu();
     }
   });
