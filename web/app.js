@@ -3816,7 +3816,7 @@ function renderHistoryHeader() {
 function renderHistoryCell(colKey, item, entry) {
   switch (colKey) {
     case "index":
-      return `<td>${entry.index + 1}</td>`;
+      return `<td>${item.sequence != null ? item.sequence + 1 : entry.index + 1}</td>`;
     case "host":
       return `<td class="cell-host">${escapeHtml(item.host)}</td>`;
     case "method":
@@ -5397,8 +5397,11 @@ function getVisibleEntries() {
     .filter(matchesAdvancedFilters)
     .map((item, index) => ({ item, index }))
     .sort((left, right) => {
+      const leftSeq = left.item.sequence ?? left.index;
+      const rightSeq = right.item.sequence ?? right.index;
+
       if (state.sortKey === "index") {
-        return (left.index - right.index) * direction;
+        return (leftSeq - rightSeq) * direction;
       }
 
       const comparison = compareSortValues(
@@ -5410,7 +5413,7 @@ function getVisibleEntries() {
         return comparison * direction;
       }
 
-      return left.index - right.index;
+      return leftSeq - rightSeq;
     })
 }
 

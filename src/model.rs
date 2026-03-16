@@ -170,6 +170,9 @@ pub struct TransactionRecord {
     pub id: Uuid,
     pub started_at: DateTime<Utc>,
     pub kind: TrafficKind,
+    /// Stable capture sequence number (1-based, monotonically increasing).
+    #[serde(default)]
+    pub sequence: u64,
     pub method: String,
     pub scheme: String,
     pub host: String,
@@ -208,6 +211,7 @@ impl TransactionRecord {
             id: Uuid::new_v4(),
             started_at,
             kind: TrafficKind::Http,
+            sequence: 0,
             method,
             scheme,
             host,
@@ -236,6 +240,7 @@ impl TransactionRecord {
             id: Uuid::new_v4(),
             started_at,
             kind: TrafficKind::Tunnel,
+            sequence: 0,
             method: "CONNECT".to_string(),
             scheme: "tcp".to_string(),
             host,
@@ -257,6 +262,7 @@ impl TransactionRecord {
             id: self.id,
             started_at: self.started_at,
             kind: self.kind.clone(),
+            sequence: self.sequence,
             method: self.method.clone(),
             scheme: self.scheme.clone(),
             host: self.host.clone(),
@@ -307,6 +313,8 @@ pub struct TransactionSummary {
     pub id: Uuid,
     pub started_at: DateTime<Utc>,
     pub kind: TrafficKind,
+    #[serde(default)]
+    pub sequence: u64,
     pub method: String,
     pub scheme: String,
     pub host: String,
