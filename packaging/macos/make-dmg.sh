@@ -51,15 +51,12 @@ hdiutil create \
 
 # Mount the writable DMG — find actual mount point
 ATTACH_OUTPUT=$(hdiutil attach -readwrite -noverify -noautoopen "$DMG_TMP")
-# Find the line with /Volumes (works for both HFS+ and APFS)
 DEVICE=$(echo "$ATTACH_OUTPUT" | awk '/\/Volumes\// { print $1 }')
 MOUNT_POINT=$(echo "$ATTACH_OUTPUT" | awk '/\/Volumes\// { for(i=NF;i>=1;i--) if($i ~ /^\/Volumes/) { s=$i; for(j=i+1;j<=NF;j++) s=s" "$j; print s; exit } }')
 
 echo "Mounted at: $MOUNT_POINT (device: $DEVICE)"
 sleep 2
 
-# The Finder disk name is the volume label, which should be VOLUME_NAME
-# but we reference the actual mount point for safety.
 DISK_NAME=$(basename "$MOUNT_POINT")
 
 osascript <<APPLESCRIPT
@@ -69,19 +66,19 @@ tell application "Finder"
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    set bounds of container window to {200, 120, 860, 520}
+    set bounds of container window to {200, 100, 860, 540}
 
     set theViewOptions to icon view options of container window
     set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 80
+    set icon size of theViewOptions to 128
 
     if exists file ".background:background.png" then
       set background picture of theViewOptions to file ".background:background.png"
     end if
 
-    -- Position icons: app on left, Applications shortcut on right
-    set position of item "${APP_NAME}.app" to {170, 190}
-    set position of item "Applications" to {490, 190}
+    -- App on left, Applications on right (like Ghostty / Claude)
+    set position of item "${APP_NAME}.app" to {165, 200}
+    set position of item "Applications" to {495, 200}
 
     update without registering applications
     delay 2
