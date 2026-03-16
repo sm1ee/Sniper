@@ -56,6 +56,12 @@ DISK_NAME=$(basename "$MOUNT_POINT")
 echo "Mounted at: $MOUNT_POINT (device: $DEVICE)"
 sleep 2
 
+# Remove .fseventsd so it never shows up
+rm -rf "$MOUNT_POINT/.fseventsd"
+# Prevent fseventsd from recreating it
+touch "$MOUNT_POINT/.fseventsd"
+chmod 000 "$MOUNT_POINT/.fseventsd" 2>/dev/null || true
+
 # Style with AppleScript — run twice to ensure Finder persists DS_Store
 for pass in 1 2; do
   osascript <<APPLESCRIPT
@@ -65,26 +71,16 @@ tell application "Finder"
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    set bounds of container window to {200, 120, 740, 500}
+    set bounds of container window to {200, 120, 860, 540}
 
     set theViewOptions to icon view options of container window
     set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 100
+    set icon size of theViewOptions to 128
 
     set background picture of theViewOptions to file ".background:background.png"
 
-    set position of item "${APP_NAME}.app" to {135, 170}
-    set position of item "Applications" to {405, 170}
-
-    try
-      set position of item ".background" to {900, 900}
-    end try
-    try
-      set position of item ".fseventsd" to {900, 900}
-    end try
-    try
-      set position of item ".VolumeIcon.icns" to {900, 900}
-    end try
+    set position of item "${APP_NAME}.app" to {165, 200}
+    set position of item "Applications" to {495, 200}
 
     update without registering applications
     delay 3
@@ -94,6 +90,11 @@ end tell
 APPLESCRIPT
   sleep 2
 done
+
+# Hide hidden files via SetFile if available
+SetFile -a V "$MOUNT_POINT/.background" 2>/dev/null || true
+SetFile -a V "$MOUNT_POINT/.fseventsd" 2>/dev/null || true
+SetFile -a V "$MOUNT_POINT/.VolumeIcon.icns" 2>/dev/null || true
 
 sync
 sleep 1
