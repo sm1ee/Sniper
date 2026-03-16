@@ -804,6 +804,22 @@ function bindEvents() {
   });
   els.replayRequestEditor.addEventListener("scroll", syncReplayRequestHighlightScroll);
   els.replayRequestEditor.addEventListener("contextmenu", showReplayContextMenu);
+  els.replayRequestEditor.addEventListener("select", () => {
+    const hasSelection = els.replayRequestEditor.selectionStart !== els.replayRequestEditor.selectionEnd;
+    if (els.replayRequestHighlight) {
+      els.replayRequestHighlight.style.opacity = hasSelection ? "0" : "1";
+    }
+  });
+  els.replayRequestEditor.addEventListener("click", () => {
+    if (els.replayRequestHighlight) {
+      els.replayRequestHighlight.style.opacity = "1";
+    }
+  });
+  els.replayRequestEditor.addEventListener("blur", () => {
+    if (els.replayRequestHighlight) {
+      els.replayRequestHighlight.style.opacity = "1";
+    }
+  });
   initReplayContextMenu();
   els.replaySchemeSelect.addEventListener("change", () => {
     applyReplayTargetFields().catch((error) => console.error(error));
