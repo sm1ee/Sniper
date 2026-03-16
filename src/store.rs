@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
@@ -16,6 +17,7 @@ pub struct TransactionStore {
     max_entries: usize,
     entries: RwLock<VecDeque<TransactionRecord>>,
     events: broadcast::Sender<TransactionSummary>,
+    next_sequence: AtomicU64,
 }
 
 impl TransactionStore {
@@ -27,14 +29,18 @@ impl TransactionStore {
         let (events, _) = broadcast::channel(max_entries.max(32));
         let mut entries = VecDeque::with_capacity(max_entries);
         entries.extend(records.into_iter().take(max_entries));
+        // Resume sequence from the highest existing number.
+        let max_seq = entries.iter().map(|r| r.sequence).max().unwrap_or(0);
         Self {
             max_entries,
             entries: RwLock::new(entries),
             events,
+            next_sequence: AtomicU64::new(max_seq + 1),
         }
     }
 
-    pub async fn insert(&self, record: TransactionRecord) {
+    pub async fn insert(&self, mut record: TransactionRecord) {
+        record.sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let summary = record.summary();
         let mut entries = self.entries.write().await;
         entries.push_front(record);
@@ -101,6 +107,8 @@ impl TransactionStore {
         let mut entries = self.entries.write().await;
         entries.clear();
         entries.extend(records.into_iter().take(self.max_entries));
+        let max_seq = entries.iter().map(|r| r.sequence).max().unwrap_or(0);
+        self.next_sequence.store(max_seq + 1, Ordering::Relaxed);
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<TransactionSummary> {
