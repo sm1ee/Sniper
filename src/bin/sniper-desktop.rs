@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use sniper::{api, config::AppConfig, proxy, runtime_state::RuntimeStateSnapshot, skills, state::AppState};
@@ -59,6 +59,9 @@ fn main() -> Result<()> {
     for skill in &skill_results {
         info!(agent = skill.agent, path = %skill.path, "installed sniper-operator skill");
     }
+
+    // Symlink sniper-cli into /usr/local/bin so it's available from the terminal.
+    install_cli_symlink();
 
     let state = Arc::new(AppState::new(config.clone())?);
 
@@ -261,6 +264,46 @@ fn install_platform_app_menu() {
 
 #[cfg(not(target_os = "macos"))]
 fn install_platform_app_menu() {}
+
+/// Try to create a symlink at /usr/local/bin/sniper-cli pointing to the
+/// bundled CLI binary inside the running .app bundle.  If the binary is not
+/// running from an app bundle (e.g. `cargo run`) this is a no-op.
+fn install_cli_symlink() {
+    let Ok(exe) = env::current_exe() else { return };
+    // exe is e.g. /Applications/Sniper.app/Contents/MacOS/Sniper
+    let macos_dir = exe.parent().unwrap_or(&exe);
+    let cli_bin = macos_dir.join("sniper-cli");
+    if !cli_bin.exists() {
+        return;
+    }
+
+    let link_path = PathBuf::from("/usr/local/bin/sniper-cli");
+
+    // Already correct
+    if link_path.read_link().ok().as_ref() == Some(&cli_bin) {
+        info!("sniper-cli symlink already up to date");
+        return;
+    }
+
+    // Remove stale link / file if present
+    if link_path.exists() || link_path.read_link().is_ok() {
+        if std::fs::remove_file(&link_path).is_err() {
+            error!("failed to remove old sniper-cli at {} — may need sudo", link_path.display());
+            return;
+        }
+    }
+
+    // Ensure /usr/local/bin exists
+    if let Err(e) = std::fs::create_dir_all("/usr/local/bin") {
+        error!(?e, "failed to create /usr/local/bin");
+        return;
+    }
+
+    match std::os::unix::fs::symlink(&cli_bin, &link_path) {
+        Ok(()) => info!(src = %cli_bin.display(), dst = %link_path.display(), "installed sniper-cli symlink"),
+        Err(e) => error!(?e, "failed to symlink sniper-cli — may need sudo"),
+    }
+}
 
 fn handle_navigation_request(url: &str, ui_origin: &str) -> bool {
     if url == "about:blank" || url.starts_with(ui_origin) || url.starts_with("data:") {
