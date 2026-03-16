@@ -351,6 +351,10 @@ const els = {
   websocketRequestView: document.getElementById("websocketRequestView"),
   websocketResponseView: document.getElementById("websocketResponseView"),
   websocketFramesBody: document.getElementById("websocketFramesBody"),
+  frameDetailPanel: document.getElementById("frameDetailPanel"),
+  frameDetailMeta: document.getElementById("frameDetailMeta"),
+  frameDetailBody: document.getElementById("frameDetailBody"),
+  frameDetailClose: document.getElementById("frameDetailClose"),
   refreshWebsocketsButton: document.getElementById("refreshWebsocketsButton"),
   websocketWorkbench: document.getElementById("websocketWorkbench"),
   websocketHandshakeColumn: document.getElementById("websocketHandshakeColumn"),
@@ -702,6 +706,7 @@ function bindEvents() {
   els.refreshWebsocketsButton.addEventListener("click", () => {
     loadWebsockets(true).catch((error) => console.error(error));
   });
+  els.frameDetailClose.addEventListener("click", hideFrameDetail);
   els.forwardInterceptButton.addEventListener("click", () => {
     forwardSelectedIntercept().catch((error) => console.error(error));
   });
@@ -1390,6 +1395,7 @@ async function loadWebsockets(preserveSelection = true) {
 }
 
 async function loadWebsocketDetail(id) {
+  hideFrameDetail();
   const response = await fetch(`/api/websockets/${id}`);
   if (!response.ok) {
     if (state.selectedWebsocketId !== id) {
@@ -2343,8 +2349,8 @@ function renderWebsocketSessions() {
           const selected = session.id === state.selectedWebsocketId ? "selected" : "";
           return `
             <tr class="history-row ${selected}" data-id="${session.id}">
-              <td>${escapeHtml(session.host)}</td>
-              <td>${escapeHtml(session.path)}</td>
+              <td class="cell-host">${escapeHtml(session.host)}</td>
+              <td class="cell-url">${escapeHtml(session.path)}</td>
               <td>${escapeHtml(formatStatus(session.status))}</td>
               <td>${session.frame_count}</td>
               <td>${session.duration_ms == null ? "live" : `${session.duration_ms} ms`}</td>
@@ -2394,8 +2400,8 @@ function renderWebsocketSessions() {
   els.websocketResponseView.innerHTML = renderHttpHtml(buildRawWebsocketResponse(session), "response");
   els.websocketFramesBody.innerHTML = session.frames.length
     ? session.frames
-        .map((frame) => `
-          <tr>
+        .map((frame, idx) => `
+          <tr class="history-row" data-frame-idx="${idx}">
             <td>${frame.index}</td>
             <td>${frame.direction.replaceAll("_", " ")}</td>
             <td>${frame.kind}</td>
@@ -2409,6 +2415,22 @@ function renderWebsocketSessions() {
           <td colspan="5">Handshake captured, but no frames have been recorded yet.</td>
         </tr>
       `;
+
+  // Frame click handlers
+  Array.from(els.websocketFramesBody.querySelectorAll(".history-row")).forEach((row) => {
+    row.addEventListener("click", () => {
+      const idx = parseInt(row.dataset.frameIdx, 10);
+      const frame = session.frames[idx];
+      if (!frame) return;
+
+      // Highlight selected row
+      els.websocketFramesBody.querySelectorAll(".frame-selected").forEach((r) => r.classList.remove("frame-selected"));
+      row.classList.add("frame-selected");
+
+      // Show detail panel
+      showFrameDetail(frame);
+    });
+  });
 }
 
 function buildWebsocketFilterSummary(visibleCount, totalCount, query) {
@@ -4362,6 +4384,41 @@ function renderFramePreview(frame) {
   return frame.body_encoding === "base64"
     ? `[base64] ${frame.body_preview}`
     : frame.body_preview;
+}
+
+function showFrameDetail(frame) {
+  const dir = frame.direction.replaceAll("_", " ");
+  els.frameDetailMeta.innerHTML = `
+    <span>#${frame.index}</span>
+    <span>${escapeHtml(dir)}</span>
+    <span>${escapeHtml(frame.kind)}</span>
+    <span>${escapeHtml(formatSize(frame.body_size))}</span>
+  `;
+
+  let body = frame.body_preview || "(empty)";
+  if (frame.body_encoding === "base64") {
+    try {
+      body = atob(frame.body_preview);
+    } catch {
+      body = `[base64] ${frame.body_preview}`;
+    }
+  }
+
+  // Try to pretty-print JSON
+  try {
+    const parsed = JSON.parse(body);
+    body = JSON.stringify(parsed, null, 2);
+  } catch {
+    // not JSON, keep as-is
+  }
+
+  els.frameDetailBody.textContent = body;
+  els.frameDetailPanel.classList.remove("hidden");
+}
+
+function hideFrameDetail() {
+  els.frameDetailPanel.classList.add("hidden");
+  els.websocketFramesBody.querySelectorAll(".frame-selected").forEach((r) => r.classList.remove("frame-selected"));
 }
 
 function toHexDump(text) {
