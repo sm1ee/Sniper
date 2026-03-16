@@ -150,6 +150,9 @@ impl AppState {
         let mut guard = self.proxy_task.write().await;
         if let Some(old) = guard.take() {
             old.abort();
+            // Wait for the task to actually finish so its TcpListener is dropped
+            // and the OS releases the socket before we try to rebind.
+            let _ = old.await;
         }
     }
 

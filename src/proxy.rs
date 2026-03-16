@@ -93,6 +93,19 @@ pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
     serve_proxy(listener, state).await
 }
 
+/// Bind a TCP listener with `SO_REUSEADDR` so that recently-closed sockets
+/// on the same port don't block us.
+async fn bind_tcp_reuse(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv6() {
+        tokio::net::TcpSocket::new_v6()?
+    } else {
+        tokio::net::TcpSocket::new_v4()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
 /// Try to rebind the proxy listener to a new address at runtime.
 /// On success: aborts old proxy task, spawns new one, updates active_proxy_addr.
 /// On failure: attempts to restore the old listener; returns the error message.
@@ -105,77 +118,54 @@ pub async fn rebind_proxy(
         return Ok(());
     }
 
-    // When the port is the same but the host differs (e.g. 127.0.0.1 → 0.0.0.0),
-    // the new bind will fail with "address already in use" because 0.0.0.0
-    // encompasses 127.0.0.1. We must stop the old listener first.
-    //
-    // First, try a non-conflicting bind (different port or non-overlapping host).
-    // If that fails, stop the old listener and retry.
-    let (listener, bound_addr) = match TcpListener::bind(new_addr).await {
-        Ok(l) => {
-            let addr = l
-                .local_addr()
-                .map_err(|e| format!("failed to read bound address: {e}"))?;
-            // Success without stopping old listener — no conflict
-            state.abort_proxy_task().await;
-            (l, addr)
-        }
-        Err(first_err) => {
-            // Likely a port conflict with the old listener. Stop it and retry.
-            state.abort_proxy_task().await;
-            state.set_proxy_online(false);
+    // Always stop the old listener first.  When the host changes on the same
+    // port (e.g. 127.0.0.1:8080 → 0.0.0.0:8080) the old socket would block
+    // the new bind because 0.0.0.0 encompasses 127.0.0.1.
+    // `abort_proxy_task` awaits the task so the TcpListener is fully dropped.
+    state.abort_proxy_task().await;
+    state.set_proxy_online(false);
 
-            // Small delay to let the OS release the socket
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-            match TcpListener::bind(new_addr).await {
-                Ok(l) => {
-                    let addr = l
-                        .local_addr()
-                        .map_err(|e| format!("failed to read bound address: {e}"))?;
-                    (l, addr)
+    // Bind the new address with SO_REUSEADDR
+    let listener = match bind_tcp_reuse(new_addr).await {
+        Ok(l) => l,
+        Err(bind_err) => {
+            // New bind failed — try to restore the old listener
+            warn!(
+                old = %current,
+                new = %new_addr,
+                %bind_err,
+                "rebind failed, attempting to restore old listener"
+            );
+            match bind_tcp_reuse(current).await {
+                Ok(restored) => {
+                    let restored_addr = restored.local_addr().unwrap_or(current);
+                    state.set_active_proxy_addr(restored_addr).await;
+                    state.set_proxy_online(true);
+                    let proxy_state = state.clone();
+                    let handle = tokio::spawn(async move {
+                        if let Err(error) = serve_proxy(restored, proxy_state).await {
+                            tracing::error!(?error, "restored proxy task stopped");
+                        }
+                    });
+                    state.set_proxy_task(handle).await;
                 }
-                Err(retry_err) => {
-                    // New bind failed even after stopping old — try to restore old listener
-                    warn!(
-                        old = %current,
-                        new = %new_addr,
-                        %first_err,
-                        %retry_err,
-                        "rebind failed, attempting to restore old listener"
+                Err(restore_err) => {
+                    tracing::error!(
+                        %restore_err,
+                        "failed to restore old proxy listener — proxy is offline"
                     );
-                    match TcpListener::bind(current).await {
-                        Ok(restored) => {
-                            let restored_addr = restored
-                                .local_addr()
-                                .unwrap_or(current);
-                            state.set_active_proxy_addr(restored_addr).await;
-                            state.set_proxy_online(true);
-                            let proxy_state = state.clone();
-                            let handle = tokio::spawn(async move {
-                                if let Err(error) = serve_proxy(restored, proxy_state).await {
-                                    tracing::error!(?error, "restored proxy task stopped");
-                                }
-                            });
-                            state.set_proxy_task(handle).await;
-                        }
-                        Err(restore_err) => {
-                            tracing::error!(
-                                %restore_err,
-                                "failed to restore old proxy listener — proxy is offline"
-                            );
-                        }
-                    }
-                    return Err(format!(
-                        "Could not bind to {} ({})",
-                        new_addr, retry_err
-                    ));
                 }
             }
+            return Err(format!(
+                "Could not bind to {} ({})",
+                new_addr, bind_err
+            ));
         }
     };
 
-    state.set_proxy_online(false);
+    let bound_addr = listener
+        .local_addr()
+        .map_err(|e| format!("failed to read bound address: {e}"))?;
 
     // Update active address
     state.set_active_proxy_addr(bound_addr).await;
