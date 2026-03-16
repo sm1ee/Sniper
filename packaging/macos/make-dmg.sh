@@ -80,6 +80,17 @@ tell application "Finder"
     set position of item "${APP_NAME}.app" to {165, 200}
     set position of item "Applications" to {495, 200}
 
+    -- Hide dot-folders off screen
+    try
+      set position of item ".background" to {-1000, -1000}
+    end try
+    try
+      set position of item ".fseventsd" to {-1000, -1000}
+    end try
+    try
+      set position of item ".VolumeIcon.icns" to {-1000, -1000}
+    end try
+
     update without registering applications
     delay 2
     close
