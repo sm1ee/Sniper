@@ -60,8 +60,8 @@ fn main() -> Result<()> {
         info!(agent = skill.agent, path = %skill.path, "installed sniper-operator skill");
     }
 
-    // Symlink sniper-cli into /usr/local/bin so it's available from the terminal.
-    install_cli_symlink();
+    // Ensure sniper-cli is reachable from the user's shell.
+    install_cli_path();
 
     let state = Arc::new(AppState::new(config.clone())?);
 
@@ -265,43 +265,54 @@ fn install_platform_app_menu() {
 #[cfg(not(target_os = "macos"))]
 fn install_platform_app_menu() {}
 
-/// Try to create a symlink at /usr/local/bin/sniper-cli pointing to the
-/// bundled CLI binary inside the running .app bundle.  If the binary is not
-/// running from an app bundle (e.g. `cargo run`) this is a no-op.
-fn install_cli_symlink() {
+/// Append a `PATH` export line to `~/.zshrc` (and `~/.bashrc` if present) so
+/// that `sniper-cli` is available from the terminal without requiring root.
+/// If the line already exists the function is a no-op.
+fn install_cli_path() {
     let Ok(exe) = env::current_exe() else { return };
-    // exe is e.g. /Applications/Sniper.app/Contents/MacOS/Sniper
     let macos_dir = exe.parent().unwrap_or(&exe);
     let cli_bin = macos_dir.join("sniper-cli");
     if !cli_bin.exists() {
         return;
     }
 
-    let link_path = PathBuf::from("/usr/local/bin/sniper-cli");
+    let dir = macos_dir.to_string_lossy();
+    let export_line = format!("export PATH=\"{}:$PATH\" # Added by Sniper.app", dir);
 
-    // Already correct
-    if link_path.read_link().ok().as_ref() == Some(&cli_bin) {
-        info!("sniper-cli symlink already up to date");
-        return;
+    let home = match env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => return,
+    };
+
+    // Always patch .zshrc (macOS default shell). Also patch .bashrc if it exists.
+    let mut targets = vec![home.join(".zshrc")];
+    let bashrc = home.join(".bashrc");
+    if bashrc.exists() {
+        targets.push(bashrc);
     }
 
-    // Remove stale link / file if present
-    if link_path.exists() || link_path.read_link().is_ok() {
-        if std::fs::remove_file(&link_path).is_err() {
-            error!("failed to remove old sniper-cli at {} — may need sudo", link_path.display());
-            return;
+    for rc_path in &targets {
+        if let Ok(contents) = std::fs::read_to_string(rc_path) {
+            if contents.contains(&*dir) {
+                info!(file = %rc_path.display(), "sniper-cli PATH already configured");
+                continue;
+            }
         }
-    }
-
-    // Ensure /usr/local/bin exists
-    if let Err(e) = std::fs::create_dir_all("/usr/local/bin") {
-        error!(?e, "failed to create /usr/local/bin");
-        return;
-    }
-
-    match std::os::unix::fs::symlink(&cli_bin, &link_path) {
-        Ok(()) => info!(src = %cli_bin.display(), dst = %link_path.display(), "installed sniper-cli symlink"),
-        Err(e) => error!(?e, "failed to symlink sniper-cli — may need sudo"),
+        // Append the export line
+        let mut line = String::from("\n");
+        line.push_str(&export_line);
+        line.push('\n');
+        match std::fs::OpenOptions::new().create(true).append(true).open(rc_path) {
+            Ok(mut f) => {
+                use std::io::Write;
+                if let Err(e) = f.write_all(line.as_bytes()) {
+                    error!(?e, file = %rc_path.display(), "failed to write PATH to shell rc");
+                } else {
+                    info!(file = %rc_path.display(), "added sniper-cli to PATH");
+                }
+            }
+            Err(e) => error!(?e, file = %rc_path.display(), "failed to open shell rc"),
+        }
     }
 }
 
