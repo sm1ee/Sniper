@@ -2498,6 +2498,54 @@ body.pane-resizing-y {
   min-width: 0;
 }
 
+.websocket-frames-column {
+  display: flex;
+  flex-direction: column;
+}
+
+.websocket-frames-column .history-table-shell {
+  flex: 1;
+  min-height: 0;
+}
+
+.frame-detail-panel {
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  max-height: 40%;
+  min-height: 120px;
+  overflow: hidden;
+}
+
+.frame-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--font-sm);
+  color: var(--text-dim);
+}
+
+.frame-detail-meta span {
+  margin-right: 12px;
+}
+
+.frame-detail-body {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  font-size: var(--font-sm);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.websocket-frames-column tr.frame-selected td {
+  background: var(--accent-dim);
+}
+
 .websocket-handshake-column .panel-toolbar h2 {
   font-size: var(--font-xl);
   line-height: 1.28;
