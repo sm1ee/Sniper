@@ -1042,11 +1042,25 @@ function bindEvents() {
   });
 }
 
-async function loadSettings() {
-  const response = await fetch("/api/settings");
-  if (!response.ok) {
-    throw new Error(`loadSettings failed: ${response.status}`);
+async function loadSettings(retries = 5) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch("/api/settings");
+      if (!response.ok) {
+        throw new Error(`loadSettings failed: ${response.status}`);
+      }
+      return await _applySettings(response);
+    } catch (err) {
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
   }
+}
+
+async function _applySettings(response) {
   state.settings = await response.json();
   state.runtime = state.settings.runtime;
   state.activeSession = state.settings.active_session;

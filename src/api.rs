@@ -12,7 +12,7 @@ use axum::{
     http::{header, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
-        Html, IntoResponse, Response,
+        IntoResponse, Response,
     },
     routing::{get, patch, post},
     Json, Router,
@@ -716,8 +716,15 @@ async fn events(
     )
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("../web/index.html"))
+async fn index() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8")),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache, no-store, must-revalidate")),
+        ],
+        include_str!("../web/index.html"),
+    )
+        .into_response()
 }
 
 async fn decoder_index() -> Response {
@@ -759,7 +766,10 @@ async fn app_js() -> Response {
 
 fn asset_response(content_type: &'static str, body: &'static str) -> Response {
     (
-        [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache, no-store, must-revalidate")),
+        ],
         body,
     )
         .into_response()
