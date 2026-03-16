@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, process::Command as StdCommand, sync::Arc};
+use std::{env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use sniper::{api, config::AppConfig, proxy, runtime_state::RuntimeStateSnapshot, skills, state::AppState};
@@ -60,8 +60,8 @@ fn main() -> Result<()> {
         info!(agent = skill.agent, path = %skill.path, "installed sniper-operator skill");
     }
 
-    // Symlink sniper-cli into /usr/local/bin so it's available from the terminal.
-    install_cli_symlink();
+    // Ensure sniper-cli is reachable from the user's shell.
+    install_cli_path();
 
     let state = Arc::new(AppState::new(config.clone())?);
 
@@ -265,84 +265,55 @@ fn install_platform_app_menu() {
 #[cfg(not(target_os = "macos"))]
 fn install_platform_app_menu() {}
 
-/// Try to create a symlink at /usr/local/bin/sniper-cli pointing to the
-/// bundled CLI binary inside the running .app bundle.  If the binary is not
-/// running from an app bundle (e.g. `cargo run`) this is a no-op.
-///
-/// When the directory is root-owned (typical macOS), we first try without
-/// elevation and, on failure, use `osascript` to prompt the user for admin
-/// credentials so the link can be created.
-fn install_cli_symlink() {
+/// Append a `PATH` export line to `~/.zshrc` (and `~/.bashrc` if present) so
+/// that `sniper-cli` is available from the terminal without requiring root.
+/// If the line already exists the function is a no-op.
+fn install_cli_path() {
     let Ok(exe) = env::current_exe() else { return };
-    // exe is e.g. /Applications/Sniper.app/Contents/MacOS/Sniper
     let macos_dir = exe.parent().unwrap_or(&exe);
     let cli_bin = macos_dir.join("sniper-cli");
     if !cli_bin.exists() {
         return;
     }
 
-    let link_path = PathBuf::from("/usr/local/bin/sniper-cli");
+    let dir = macos_dir.to_string_lossy();
+    let export_line = format!("export PATH=\"{}:$PATH\" # Added by Sniper.app", dir);
 
-    // Already correct
-    if link_path.read_link().ok().as_ref() == Some(&cli_bin) {
-        info!("sniper-cli symlink already up to date");
-        return;
+    let home = match env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => return,
+    };
+
+    // Always patch .zshrc (macOS default shell). Also patch .bashrc if it exists.
+    let mut targets = vec![home.join(".zshrc")];
+    let bashrc = home.join(".bashrc");
+    if bashrc.exists() {
+        targets.push(bashrc);
     }
 
-    // Try unprivileged first — works when user owns /usr/local/bin (e.g. Homebrew).
-    if try_symlink_direct(&cli_bin, &link_path) {
-        info!(src = %cli_bin.display(), dst = %link_path.display(), "installed sniper-cli symlink");
-        return;
-    }
-
-    // Fallback: ask for admin privileges via osascript.
-    let script = build_symlink_shell_script(&cli_bin, &link_path);
-    match StdCommand::new("osascript")
-        .arg("-e")
-        .arg(format!(
-            "do shell script \"{}\" with administrator privileges",
-            script.replace('\\', "\\\\").replace('"', "\\\"")
-        ))
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            info!(src = %cli_bin.display(), dst = %link_path.display(), "installed sniper-cli symlink (admin)");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            // User clicked Cancel — not an error worth alarming about.
-            if stderr.contains("User canceled") {
-                info!("user cancelled admin prompt for sniper-cli symlink");
-            } else {
-                error!(%stderr, "osascript failed to create sniper-cli symlink");
+    for rc_path in &targets {
+        if let Ok(contents) = std::fs::read_to_string(rc_path) {
+            if contents.contains(&*dir) {
+                info!(file = %rc_path.display(), "sniper-cli PATH already configured");
+                continue;
             }
         }
-        Err(e) => error!(?e, "failed to launch osascript for sniper-cli symlink"),
-    }
-}
-
-/// Attempt to create the symlink without elevation.
-fn try_symlink_direct(src: &PathBuf, dst: &PathBuf) -> bool {
-    // Remove stale link / file if present
-    if dst.exists() || dst.read_link().is_ok() {
-        if std::fs::remove_file(dst).is_err() {
-            return false;
+        // Append the export line
+        let mut line = String::from("\n");
+        line.push_str(&export_line);
+        line.push('\n');
+        match std::fs::OpenOptions::new().create(true).append(true).open(rc_path) {
+            Ok(mut f) => {
+                use std::io::Write;
+                if let Err(e) = f.write_all(line.as_bytes()) {
+                    error!(?e, file = %rc_path.display(), "failed to write PATH to shell rc");
+                } else {
+                    info!(file = %rc_path.display(), "added sniper-cli to PATH");
+                }
+            }
+            Err(e) => error!(?e, file = %rc_path.display(), "failed to open shell rc"),
         }
     }
-    if std::fs::create_dir_all("/usr/local/bin").is_err() {
-        return false;
-    }
-    std::os::unix::fs::symlink(src, dst).is_ok()
-}
-
-/// Build a shell snippet that creates the symlink (run as root via osascript).
-fn build_symlink_shell_script(src: &PathBuf, dst: &PathBuf) -> String {
-    format!(
-        "mkdir -p /usr/local/bin && rm -f '{}' && ln -s '{}' '{}'",
-        dst.display(),
-        src.display(),
-        dst.display(),
-    )
 }
 
 fn handle_navigation_request(url: &str, ui_origin: &str) -> bool {
