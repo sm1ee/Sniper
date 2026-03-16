@@ -1081,6 +1081,31 @@
       </div>
     </div>
 
+    <div class="context-menu hidden" id="replayContextMenu">
+      <div class="context-menu-section">
+        <span class="context-menu-label">Change method</span>
+        <div class="context-menu-methods">
+          <button class="context-menu-item method-btn" data-method="GET" type="button">GET</button>
+          <button class="context-menu-item method-btn" data-method="POST" type="button">POST</button>
+          <button class="context-menu-item method-btn" data-method="PUT" type="button">PUT</button>
+          <button class="context-menu-item method-btn" data-method="PATCH" type="button">PATCH</button>
+          <button class="context-menu-item method-btn" data-method="DELETE" type="button">DELETE</button>
+          <button class="context-menu-item method-btn" data-method="OPTIONS" type="button">OPTIONS</button>
+          <button class="context-menu-item method-btn" data-method="HEAD" type="button">HEAD</button>
+        </div>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-replay-action="toggle-body" type="button">Add/Remove body</button>
+        <button class="context-menu-item" data-replay-action="add-content-type-json" type="button">Set Content-Type: JSON</button>
+        <button class="context-menu-item" data-replay-action="add-content-type-form" type="button">Set Content-Type: Form</button>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-replay-action="copy-as-curl" type="button">Copy as cURL</button>
+      </div>
+    </div>
+
     <div class="context-menu hidden" id="contextMenu">
       <div class="context-menu-section">
         <button class="context-menu-item" data-action="send-to-replay" type="button">Send to Replay</button>

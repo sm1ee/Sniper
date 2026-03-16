@@ -3855,6 +3855,36 @@ body.pane-resizing-y {
   border-color: var(--point-border);
 }
 
+.context-menu-methods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.context-menu-methods .method-btn {
+  display: inline-block;
+  width: auto;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  text-align: center;
+}
+
+.context-menu-methods .method-btn:hover {
+  background: var(--point-muted);
+  color: var(--point-text);
+}
+
+.context-menu-methods .method-btn.active-method {
+  background: var(--point-muted);
+  color: var(--point-text);
+  border-color: var(--point-border);
+}
+
 /* ─── Color tag indicator in history row ─── */
 .row-color-tag {
   display: inline-block;
