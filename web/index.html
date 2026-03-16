@@ -361,15 +361,16 @@
                   </label>
                 </div>
                 <div class="history-table-shell">
-                  <table class="mini-table">
+                  <table class="mini-table" id="websocketTable">
                     <thead>
                       <tr>
-                        <th>Host</th>
-                        <th>Path</th>
-                        <th>Status</th>
-                        <th>Frames</th>
-                        <th>Duration</th>
-                        <th>Time</th>
+                        <th><button class="sort-header ws-sort" data-ws-sort-key="index" type="button">#<span class="sort-indicator">↕</span></button></th>
+                        <th><button class="sort-header ws-sort" data-ws-sort-key="host" type="button">Host<span class="sort-indicator">↕</span></button></th>
+                        <th><button class="sort-header ws-sort" data-ws-sort-key="path" type="button">Path<span class="sort-indicator">↕</span></button></th>
+                        <th><button class="sort-header ws-sort" data-ws-sort-key="status" type="button">Status<span class="sort-indicator">↕</span></button></th>
+                        <th><button class="sort-header ws-sort" data-ws-sort-key="frame_count" type="button">Frames<span class="sort-indicator">↕</span></button></th>
+                        <th><button class="sort-header ws-sort" data-ws-sort-key="duration_ms" type="button">Duration<span class="sort-indicator">↕</span></button></th>
+                        <th><button class="sort-header ws-sort" data-ws-sort-key="started_at" type="button">Time<span class="sort-indicator">↕</span></button></th>
                       </tr>
                     </thead>
                     <tbody id="websocketTableBody"></tbody>

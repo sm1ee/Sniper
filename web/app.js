@@ -186,6 +186,8 @@ const state = {
   selectedInterceptRecord: null,
   websocketSessions: [],
   websocketQuery: "",
+  websocketSortKey: "started_at",
+  websocketSortDirection: "desc",
   selectedWebsocketId: null,
   selectedWebsocketRecord: null,
   replayTabs: [],
@@ -707,6 +709,9 @@ function bindEvents() {
     loadWebsockets(true).catch((error) => console.error(error));
   });
   els.frameDetailClose.addEventListener("click", hideFrameDetail);
+  document.querySelectorAll(".ws-sort").forEach((btn) => {
+    btn.addEventListener("click", () => toggleWebsocketSort(btn.dataset.wsSortKey));
+  });
   els.forwardInterceptButton.addEventListener("click", () => {
     forwardSelectedIntercept().catch((error) => console.error(error));
   });
@@ -2333,22 +2338,25 @@ function renderIntercepts() {
 }
 
 function renderWebsocketSessions() {
-  const visibleSessions = getVisibleWebsocketSessions();
+  const sortedEntries = getSortedWebsocketEntries();
   if (els.websocketSearchInput.value !== state.websocketQuery) {
     els.websocketSearchInput.value = state.websocketQuery;
   }
   els.websocketMeta.textContent = buildWebsocketFilterSummary(
-    visibleSessions.length,
+    sortedEntries.length,
     state.websocketSessions.length,
     state.websocketQuery,
   );
 
-  els.websocketTableBody.innerHTML = visibleSessions.length
-    ? visibleSessions
-        .map((session) => {
+  updateWebsocketSortIndicators();
+
+  els.websocketTableBody.innerHTML = sortedEntries.length
+    ? sortedEntries
+        .map(({ session, index }) => {
           const selected = session.id === state.selectedWebsocketId ? "selected" : "";
           return `
             <tr class="history-row ${selected}" data-id="${session.id}">
+              <td>${index + 1}</td>
               <td class="cell-host">${escapeHtml(session.host)}</td>
               <td class="cell-url">${escapeHtml(session.path)}</td>
               <td>${escapeHtml(formatStatus(session.status))}</td>
@@ -2361,7 +2369,7 @@ function renderWebsocketSessions() {
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="6">${
+          <td colspan="7">${
             state.websocketSessions.length
               ? "No WebSocket sessions match the current filter."
               : "No WebSocket sessions have been captured yet."
@@ -2378,14 +2386,14 @@ function renderWebsocketSessions() {
 
   if (!state.selectedWebsocketRecord) {
     els.websocketDetailTitle.textContent = "No session selected";
-    els.websocketRequestView.textContent = state.websocketSessions.length && !visibleSessions.length
+    els.websocketRequestView.textContent = state.websocketSessions.length && !sortedEntries.length
       ? "No WebSocket session matches the current filter."
       : "Select a WebSocket session.";
     els.websocketResponseView.textContent = "No response selected.";
     els.websocketFramesBody.innerHTML = `
       <tr class="empty-row">
         <td colspan="5">${
-          state.websocketSessions.length && !visibleSessions.length
+          state.websocketSessions.length && !sortedEntries.length
             ? "Clear or adjust the filter to inspect captured frames."
             : "Frame capture will appear here after a WebSocket handshake completes."
         }</td>
@@ -2461,6 +2469,58 @@ function getVisibleWebsocketSessions() {
       .join("\n")
       .toLowerCase();
     return haystack.includes(normalizedQuery);
+  });
+}
+
+function getSortedWebsocketEntries() {
+  const filtered = getVisibleWebsocketSessions();
+  const direction = state.websocketSortDirection === "asc" ? 1 : -1;
+
+  return filtered
+    .map((session, index) => ({ session, index }))
+    .sort((a, b) => {
+      if (state.websocketSortKey === "index") {
+        return (a.index - b.index) * direction;
+      }
+
+      const av = getWebsocketSortValue(a.session, state.websocketSortKey);
+      const bv = getWebsocketSortValue(b.session, state.websocketSortKey);
+      const cmp = compareSortValues(av, bv);
+      return cmp !== 0 ? cmp * direction : a.index - b.index;
+    });
+}
+
+function getWebsocketSortValue(session, key) {
+  switch (key) {
+    case "host": return session.host.toLowerCase();
+    case "path": return (session.path || "").toLowerCase();
+    case "status": return session.status ?? -1;
+    case "frame_count": return session.frame_count ?? 0;
+    case "duration_ms": return session.duration_ms ?? Infinity;
+    case "started_at": return Date.parse(session.started_at) || 0;
+    default: return "";
+  }
+}
+
+function toggleWebsocketSort(key) {
+  if (state.websocketSortKey === key) {
+    state.websocketSortDirection = state.websocketSortDirection === "asc" ? "desc" : "asc";
+  } else {
+    state.websocketSortKey = key;
+    state.websocketSortDirection = key === "index" ? "asc" : "desc";
+  }
+  renderWebsocketSessions();
+}
+
+function updateWebsocketSortIndicators() {
+  document.querySelectorAll(".ws-sort").forEach((btn) => {
+    const key = btn.dataset.wsSortKey;
+    const active = key === state.websocketSortKey;
+    const indicator = btn.querySelector(".sort-indicator");
+    if (indicator) {
+      indicator.textContent = active ? (state.websocketSortDirection === "asc" ? "↑" : "↓") : "↕";
+    }
+    btn.closest("th")?.setAttribute("aria-sort", active ? (state.websocketSortDirection === "asc" ? "ascending" : "descending") : "none");
   });
 }
 
