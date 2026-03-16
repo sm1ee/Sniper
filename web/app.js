@@ -4243,15 +4243,26 @@ function prettyFormat(text, message) {
   const head = text.slice(0, boundary);
   const body = text.slice(boundary + divider.length);
   const contentType = (message.content_type || "").toLowerCase();
-  if (!contentType.includes("json")) {
-    return text;
+
+  if (contentType.includes("json")) {
+    try {
+      return `${head}${divider}${JSON.stringify(JSON.parse(body), null, 2)}`;
+    } catch (_error) {
+      return text;
+    }
   }
 
-  try {
-    return `${head}${divider}${JSON.stringify(JSON.parse(body), null, 2)}`;
-  } catch (_error) {
-    return text;
+  // Fallback: try to detect JSON even if Content-Type doesn't say json
+  const trimmed = body.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return `${head}${divider}${JSON.stringify(JSON.parse(body), null, 2)}`;
+    } catch (_error) {
+      // not valid JSON, return as-is
+    }
   }
+
+  return text;
 }
 
 function editableRequestFromRecord(record) {
