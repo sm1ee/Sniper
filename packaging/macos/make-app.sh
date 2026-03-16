@@ -18,10 +18,14 @@ VERSION="${VERSION:-$(awk -F '\"' '/^version = / { print $2; exit }' Cargo.toml)
 rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
-cargo build --release --bin sniper-desktop
+cargo build --release --bin sniper-desktop --bin sniper-cli
 
 cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
+
+CLI_BIN_PATH="$ROOT_DIR/target/release/sniper-cli"
+cp "$CLI_BIN_PATH" "$MACOS_DIR/sniper-cli"
+chmod +x "$MACOS_DIR/sniper-cli"
 sed "s/__SNIPER_VERSION__/$VERSION/g" "$PLIST_TEMPLATE" > "$PLIST_OUT"
 
 BUNDLED_ICON="$ROOT_DIR/packaging/macos/AppIcon.icns"
