@@ -2862,6 +2862,8 @@ body.pane-resizing-y {
   pointer-events: none;
   opacity: 1;
   transition: opacity 120ms ease;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .request-editor-highlighted {
@@ -2885,9 +2887,9 @@ body.pane-resizing-y {
 }
 
 .request-editor-highlighted::selection {
-  background: var(--selection);
-  color: var(--selection-text);
-  -webkit-text-fill-color: var(--selection-text);
+  background: var(--point-muted, #3a5a8a);
+  color: var(--text);
+  -webkit-text-fill-color: var(--text);
 }
 
 .replay-response-view {
