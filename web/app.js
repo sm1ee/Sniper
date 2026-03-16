@@ -641,6 +641,7 @@ function bindEvents() {
   });
 
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
+  els.openUpdateButton.addEventListener("click", performSelfUpdate);
   els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
   els.displaySettingsModal.addEventListener("click", (event) => {
@@ -1095,15 +1096,34 @@ async function loadAppVersionInfo() {
   els.appVersionLabel.textContent = `v${state.appVersion.current_version}`;
   els.appVersionLabel.title = `Current version ${state.appVersion.current_version}`;
 
-  const updateUrl = state.appVersion.latest_release_url || state.appVersion.releases_url;
-  if (state.appVersion.update_available && updateUrl) {
-    els.openUpdateButton.href = updateUrl;
+  if (state.appVersion.update_available) {
     els.openUpdateButton.title = state.appVersion.latest_version
-      ? `Open latest release (${state.appVersion.latest_version})`
-      : "Open latest release";
+      ? `Update to ${state.appVersion.latest_version}`
+      : "Update available";
     els.openUpdateButton.classList.remove("hidden");
   } else {
     els.openUpdateButton.classList.add("hidden");
+  }
+}
+
+async function performSelfUpdate() {
+  if (els.openUpdateButton.disabled) return;
+  els.openUpdateButton.disabled = true;
+  els.openUpdateButton.textContent = "Downloading...";
+  try {
+    const response = await fetch("/api/self-update", { method: "POST" });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text);
+    }
+    els.openUpdateButton.textContent = "Restarting...";
+  } catch (error) {
+    els.openUpdateButton.textContent = "Update failed";
+    els.openUpdateButton.disabled = false;
+    setTimeout(() => {
+      els.openUpdateButton.textContent = "Update";
+    }, 3000);
+    console.error("Self-update failed:", error);
   }
 }
 

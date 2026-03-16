@@ -261,6 +261,154 @@ impl AppState {
         Ok(info)
     }
 
+    /// Download the latest DMG from GitHub releases, mount it, copy the new
+    /// app bundle over the current one, then restart the process.
+    pub async fn self_update(&self) -> Result<String> {
+        use std::process::Command;
+
+        let app_bundle = self.app_bundle_path()?;
+
+        // Fetch latest release info to find the DMG asset URL
+        let client = reqwest::Client::builder()
+            .user_agent(format!(
+                "Sniper/{} (+{})",
+                env!("CARGO_PKG_VERSION"),
+                APP_RELEASES_URL
+            ))
+            .build()
+            .context("failed to build HTTP client")?;
+
+        let release: GitHubRelease = client
+            .get(APP_LATEST_RELEASE_API_URL)
+            .send()
+            .await
+            .context("failed to query GitHub latest release")?
+            .error_for_status()
+            .context("GitHub API error")?
+            .json()
+            .await
+            .context("failed to decode release JSON")?;
+
+        let dmg_asset = release
+            .assets
+            .iter()
+            .find(|a| a.name.ends_with(".dmg"))
+            .context("no DMG asset found in the latest release")?;
+
+        // Download DMG to a temp file
+        let tmp_dir = std::env::temp_dir().join("sniper-update");
+        tokio::fs::create_dir_all(&tmp_dir).await?;
+        let dmg_path = tmp_dir.join(&dmg_asset.name);
+
+        let dmg_bytes = client
+            .get(&dmg_asset.browser_download_url)
+            .send()
+            .await
+            .context("failed to download DMG")?
+            .error_for_status()
+            .context("DMG download failed")?
+            .bytes()
+            .await
+            .context("failed to read DMG bytes")?;
+
+        tokio::fs::write(&dmg_path, &dmg_bytes).await?;
+
+        // Mount the DMG
+        let mount_output = Command::new("hdiutil")
+            .args(["attach", "-nobrowse", "-quiet"])
+            .arg(&dmg_path)
+            .output()
+            .context("failed to mount DMG")?;
+
+        if !mount_output.status.success() {
+            anyhow::bail!(
+                "hdiutil attach failed: {}",
+                String::from_utf8_lossy(&mount_output.stderr)
+            );
+        }
+
+        // Find the mount point from stdout
+        let stdout = String::from_utf8_lossy(&mount_output.stdout);
+        let mount_point = stdout
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.splitn(3, '\t').collect();
+                parts.get(2).map(|s| s.trim().to_string())
+            })
+            .find(|p| p.starts_with("/Volumes/"))
+            .context("could not find DMG mount point")?;
+
+        // Find the .app inside the mounted volume
+        let mut new_app_path = None;
+        let mut read_dir = tokio::fs::read_dir(&mount_point).await?;
+        while let Some(entry) = read_dir.next_entry().await? {
+            let name = entry.file_name();
+            if name.to_string_lossy().ends_with(".app") {
+                new_app_path = Some(entry.path());
+                break;
+            }
+        }
+        let new_app_path = new_app_path.context("no .app found in DMG")?;
+
+        // Copy new app over the current bundle using shell cp -R
+        let cp_output = Command::new("cp")
+            .args(["-Rf"])
+            .arg(&new_app_path)
+            .arg(app_bundle.parent().unwrap_or(std::path::Path::new("/")))
+            .output()
+            .context("failed to copy new app bundle")?;
+
+        if !cp_output.status.success() {
+            // Detach before bailing
+            let _ = Command::new("hdiutil")
+                .args(["detach", "-quiet"])
+                .arg(&mount_point)
+                .output();
+            anyhow::bail!(
+                "cp failed: {}",
+                String::from_utf8_lossy(&cp_output.stderr)
+            );
+        }
+
+        // Detach DMG
+        let _ = Command::new("hdiutil")
+            .args(["detach", "-quiet"])
+            .arg(&mount_point)
+            .output();
+
+        // Clean up temp
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+
+        // Launch the new app and exit
+        let _ = Command::new("open")
+            .args(["-n", "-a"])
+            .arg(&app_bundle)
+            .spawn();
+
+        let version = release.tag_name.clone();
+
+        // Give the new process time to start, then exit
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            std::process::exit(0);
+        });
+
+        Ok(version)
+    }
+
+    /// Resolve the `.app` bundle directory from the current executable path.
+    /// Expects layout: `Sniper.app/Contents/MacOS/<binary>`.
+    fn app_bundle_path(&self) -> Result<std::path::PathBuf> {
+        let exe = std::env::current_exe().context("cannot determine executable path")?;
+        // exe → Contents/MacOS/<binary>
+        let contents = exe
+            .parent() // MacOS/
+            .and_then(|p| p.parent()) // Contents/
+            .and_then(|p| p.parent()) // Sniper.app/
+            .context("executable is not inside a .app bundle")?;
+        Ok(contents.to_path_buf())
+    }
+
     pub async fn log_info(
         &self,
         source: impl Into<String>,
@@ -357,6 +505,14 @@ impl CachedAppVersionInfo {
 struct GitHubRelease {
     tag_name: String,
     html_url: String,
+    #[serde(default)]
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
 }
 
 fn normalize_version_text(value: &str) -> String {

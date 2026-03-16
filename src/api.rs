@@ -72,6 +72,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/fonts/Bungee-Regular.ttf", get(bungee_font))
         .route("/api/settings", get(get_settings))
         .route("/api/app-version", get(get_app_version))
+        .route("/api/self-update", post(self_update))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/:id/activate", post(activate_session))
         .route(
@@ -176,6 +177,20 @@ async fn get_settings(State(state): State<Arc<AppState>>) -> Json<crate::state::
 
 async fn get_app_version(State(state): State<Arc<AppState>>) -> Json<crate::state::AppVersionInfo> {
     Json(state.app_version_info().await)
+}
+
+async fn self_update(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match state.self_update().await {
+        Ok(version) => Ok(Json(
+            serde_json::json!({ "ok": true, "version": version }),
+        )),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Update failed: {err:#}"),
+        )),
+    }
 }
 
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
