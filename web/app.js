@@ -803,6 +803,8 @@ function bindEvents() {
     scheduleWorkspaceStateSave();
   });
   els.replayRequestEditor.addEventListener("scroll", syncReplayRequestHighlightScroll);
+  els.replayRequestEditor.addEventListener("contextmenu", showReplayContextMenu);
+  initReplayContextMenu();
   els.replaySchemeSelect.addEventListener("change", () => {
     applyReplayTargetFields().catch((error) => console.error(error));
   });
@@ -5971,3 +5973,162 @@ els.contextMenuNote.addEventListener("keydown", (event) => {
   }
   event.stopPropagation();
 });
+
+/* ─── Replay request context menu ─── */
+
+const replayContextMenu = document.getElementById("replayContextMenu");
+
+function showReplayContextMenu(event) {
+  event.preventDefault();
+  const tab = getActiveReplayTab();
+  if (!tab) return;
+
+  // Highlight current method
+  const currentMethod = (tab.requestText.match(/^([A-Z]+)\s/)?.[1] || "GET").toUpperCase();
+  replayContextMenu.querySelectorAll(".method-btn").forEach((btn) => {
+    btn.classList.toggle("active-method", btn.dataset.method === currentMethod);
+  });
+
+  replayContextMenu.classList.remove("hidden");
+  const x = Math.min(event.clientX, window.innerWidth - 240);
+  const y = Math.min(event.clientY, window.innerHeight - 300);
+  replayContextMenu.style.left = `${x}px`;
+  replayContextMenu.style.top = `${y}px`;
+}
+
+function closeReplayContextMenu() {
+  replayContextMenu.classList.add("hidden");
+}
+
+function changeReplayMethod(newMethod) {
+  const tab = getActiveReplayTab();
+  if (!tab) return;
+
+  const text = tab.requestText || els.replayRequestEditor.value || "";
+  const updated = text.replace(/^[A-Z]+(\s)/i, newMethod + "$1");
+  tab.requestText = updated;
+  els.replayRequestEditor.value = updated;
+  renderReplayRequestHighlight(updated);
+  updateReplaySearchPane("request", updated);
+  syncReplayToolbar(tab);
+  renderReplayTabs();
+  scheduleWorkspaceStateSave();
+}
+
+function replayRequestToCurl() {
+  const tab = getActiveReplayTab();
+  if (!tab) return "";
+
+  const text = tab.requestText || "";
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const [startLine = "GET / HTTP/1.1", ...rest] = lines;
+  const match = startLine.match(/^([A-Z]+)\s+(\S+)/i);
+  if (!match) return "";
+
+  const method = match[1];
+  const path = match[2];
+  const scheme = tab.targetScheme || "https";
+  const host = tab.targetHost || "localhost";
+  const port = tab.targetPort || "";
+  const portSuffix = port && !(scheme === "https" && port === "443") && !(scheme === "http" && port === "80") ? `:${port}` : "";
+  const url = `${scheme}://${host}${portSuffix}${path}`;
+
+  const parts = [`curl -X ${method}`];
+
+  // Separate headers and body
+  const bodyIdx = rest.indexOf("");
+  const headerLines = bodyIdx === -1 ? rest.filter((l) => l.includes(":")) : rest.slice(0, bodyIdx).filter((l) => l.includes(":"));
+  const body = bodyIdx === -1 ? "" : rest.slice(bodyIdx + 1).join("\n");
+
+  for (const h of headerLines) {
+    const idx = h.indexOf(":");
+    if (idx === -1) continue;
+    const name = h.slice(0, idx).trim();
+    const value = h.slice(idx + 1).trim();
+    parts.push(`-H '${name}: ${value}'`);
+  }
+
+  if (body.trim()) {
+    parts.push(`-d '${body.replace(/'/g, "'\\''")}'`);
+  }
+
+  parts.push(`'${url}'`);
+  return parts.join(" \\\n  ");
+}
+
+function initReplayContextMenu() {
+  // Method buttons
+  replayContextMenu.querySelectorAll(".method-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      changeReplayMethod(btn.dataset.method);
+      closeReplayContextMenu();
+    });
+  });
+
+  // Action buttons
+  replayContextMenu.querySelectorAll("[data-replay-action]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const action = btn.dataset.replayAction;
+      const tab = getActiveReplayTab();
+      if (!tab) { closeReplayContextMenu(); return; }
+
+      if (action === "toggle-body") {
+        const text = tab.requestText || "";
+        if (text.includes("\n\n")) {
+          // Remove body
+          tab.requestText = text.split("\n\n")[0];
+        } else {
+          // Add empty body section
+          tab.requestText = text + "\n\n";
+        }
+        els.replayRequestEditor.value = tab.requestText;
+        renderReplayRequestHighlight(tab.requestText);
+        scheduleWorkspaceStateSave();
+      } else if (action === "add-content-type-json") {
+        setReplayHeader("Content-Type", "application/json");
+      } else if (action === "add-content-type-form") {
+        setReplayHeader("Content-Type", "application/x-www-form-urlencoded");
+      } else if (action === "copy-as-curl") {
+        const curl = replayRequestToCurl();
+        navigator.clipboard.writeText(curl).catch(() => {});
+      }
+
+      closeReplayContextMenu();
+    });
+  });
+
+  // Close on outside click
+  document.addEventListener("click", (event) => {
+    if (!replayContextMenu.contains(event.target)) {
+      closeReplayContextMenu();
+    }
+  });
+}
+
+function setReplayHeader(name, value) {
+  const tab = getActiveReplayTab();
+  if (!tab) return;
+
+  const text = tab.requestText || "";
+  const normalized = text.replace(/\r\n/g, "\n");
+  const bodyIdx = normalized.indexOf("\n\n");
+  const head = bodyIdx === -1 ? normalized : normalized.slice(0, bodyIdx);
+  const body = bodyIdx === -1 ? "" : normalized.slice(bodyIdx);
+  const lines = head.split("\n");
+
+  // Check if header already exists (case-insensitive)
+  const lowerName = name.toLowerCase();
+  const existingIdx = lines.findIndex((l, i) => i > 0 && l.toLowerCase().startsWith(lowerName + ":"));
+
+  if (existingIdx !== -1) {
+    lines[existingIdx] = `${name}: ${value}`;
+  } else {
+    lines.push(`${name}: ${value}`);
+  }
+
+  tab.requestText = lines.join("\n") + body;
+  els.replayRequestEditor.value = tab.requestText;
+  renderReplayRequestHighlight(tab.requestText);
+  updateReplaySearchPane("request", tab.requestText);
+  scheduleWorkspaceStateSave();
+}
