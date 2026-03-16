@@ -35,8 +35,9 @@ pub struct SessionMetadata {
     pub request_count: usize,
     pub websocket_count: usize,
     pub event_count: usize,
-    #[serde(alias = "intruder_count")]
+    #[serde(default, alias = "intruder_count")]
     pub fuzzer_count: usize,
+    #[serde(default)]
     pub rule_count: usize,
 }
 
@@ -50,8 +51,9 @@ pub struct SessionSummary {
     pub request_count: usize,
     pub websocket_count: usize,
     pub event_count: usize,
-    #[serde(alias = "intruder_count")]
+    #[serde(default, alias = "intruder_count")]
     pub fuzzer_count: usize,
+    #[serde(default)]
     pub rule_count: usize,
     pub storage_path: String,
     pub active: bool,
