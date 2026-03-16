@@ -82,6 +82,19 @@ tell application "Finder"
     set position of item "${APP_NAME}.app" to {165, 200}
     set position of item "Applications" to {495, 200}
 
+    try
+      set position of item ".background" to {900, 900}
+    end try
+    try
+      set position of item ".fseventsd" to {900, 900}
+    end try
+    try
+      set position of item ".VolumeIcon.icns" to {900, 900}
+    end try
+    try
+      set position of item ".DS_Store" to {900, 900}
+    end try
+
     update without registering applications
     delay 3
     close
