@@ -1109,22 +1109,48 @@ async function loadAppVersionInfo() {
 async function performSelfUpdate() {
   if (els.openUpdateButton.disabled) return;
   els.openUpdateButton.disabled = true;
-  els.openUpdateButton.textContent = "Downloading...";
-  try {
-    const response = await fetch("/api/self-update", { method: "POST" });
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text);
-    }
-    els.openUpdateButton.textContent = "Restarting...";
-  } catch (error) {
-    els.openUpdateButton.textContent = "Update failed";
-    els.openUpdateButton.disabled = false;
-    setTimeout(() => {
-      els.openUpdateButton.textContent = "Update";
-    }, 3000);
-    console.error("Self-update failed:", error);
-  }
+
+  // Show inline progress bar
+  els.openUpdateButton.innerHTML =
+    '<span class="update-label">Updating...</span>' +
+    '<span class="update-bar"><span class="update-bar-fill"></span></span>';
+
+  const fill = els.openUpdateButton.querySelector(".update-bar-fill");
+  const label = els.openUpdateButton.querySelector(".update-label");
+
+  const es = new EventSource("/api/self-update");
+  es.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.step.startsWith("error:")) {
+        es.close();
+        label.textContent = "Update failed";
+        fill.style.width = "0%";
+        els.openUpdateButton.disabled = false;
+        setTimeout(() => {
+          els.openUpdateButton.textContent = "Update";
+        }, 3000);
+        console.error("Self-update failed:", data.step);
+        return;
+      }
+      if (data.percent != null) {
+        fill.style.width = data.percent + "%";
+        const mb = (data.downloaded / 1048576).toFixed(1);
+        const totalMb = (data.total / 1048576).toFixed(1);
+        label.textContent = `${mb} / ${totalMb} MB`;
+      } else {
+        label.textContent = data.step;
+        if (data.step === "Installing update...") fill.style.width = "90%";
+        if (data.step === "Restarting...") fill.style.width = "100%";
+      }
+    } catch (_) {}
+  };
+  es.onerror = () => {
+    es.close();
+    // Connection lost probably means the app is restarting — that's OK
+    label.textContent = "Restarting...";
+    fill.style.width = "100%";
+  };
 }
 
 async function loadSessions() {

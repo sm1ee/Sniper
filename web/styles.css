@@ -828,6 +828,30 @@ code {
   text-decoration: none;
 }
 
+.update-label {
+  white-space: nowrap;
+  font-size: 0.85em;
+}
+
+.update-bar {
+  display: block;
+  width: 100%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  margin-top: 3px;
+  overflow: hidden;
+}
+
+.update-bar-fill {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: var(--point);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
 .utility-button.icon-button {
   width: 36px;
   min-width: 36px;

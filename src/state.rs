@@ -263,12 +263,18 @@ impl AppState {
 
     /// Download the latest DMG from GitHub releases, mount it, copy the new
     /// app bundle over the current one, then restart the process.
-    pub async fn self_update(&self) -> Result<String> {
+    /// Sends progress events through the provided sender.
+    pub async fn self_update(
+        &self,
+        tx: tokio::sync::mpsc::Sender<UpdateProgress>,
+    ) -> Result<()> {
         use std::process::Command;
+        use tokio::io::AsyncWriteExt;
 
         let app_bundle = self.app_bundle_path()?;
 
-        // Fetch latest release info to find the DMG asset URL
+        tx.send(UpdateProgress::step("Checking for updates...")).await.ok();
+
         let client = reqwest::Client::builder()
             .user_agent(format!(
                 "Sniper/{} (+{})",
@@ -295,27 +301,51 @@ impl AppState {
             .find(|a| a.name.ends_with(".dmg"))
             .context("no DMG asset found in the latest release")?;
 
-        // Download DMG to a temp file
+        let total_size = dmg_asset.size;
+        tx.send(UpdateProgress::step("Downloading update...")).await.ok();
+
+        // Stream-download DMG with progress
         let tmp_dir = std::env::temp_dir().join("sniper-update");
         tokio::fs::create_dir_all(&tmp_dir).await?;
         let dmg_path = tmp_dir.join(&dmg_asset.name);
 
-        let dmg_bytes = client
+        let response = client
             .get(&dmg_asset.browser_download_url)
             .send()
             .await
             .context("failed to download DMG")?
             .error_for_status()
-            .context("DMG download failed")?
-            .bytes()
-            .await
-            .context("failed to read DMG bytes")?;
+            .context("DMG download failed")?;
 
-        tokio::fs::write(&dmg_path, &dmg_bytes).await?;
+        let content_length = response
+            .content_length()
+            .or(total_size)
+            .unwrap_or(0);
 
-        // Mount the DMG
+        let mut file = tokio::fs::File::create(&dmg_path).await?;
+        let mut stream = response.bytes_stream();
+        let mut downloaded: u64 = 0;
+
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("download interrupted")?;
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+            if content_length > 0 {
+                let pct = ((downloaded as f64 / content_length as f64) * 100.0) as u8;
+                tx.send(UpdateProgress::download(pct, downloaded, content_length))
+                    .await
+                    .ok();
+            }
+        }
+        file.flush().await?;
+        drop(file);
+
+        // Mount the DMG (no -quiet so we get stdout with mount point)
+        tx.send(UpdateProgress::step("Installing update...")).await.ok();
+
         let mount_output = Command::new("hdiutil")
-            .args(["attach", "-nobrowse", "-quiet"])
+            .args(["attach", "-nobrowse"])
             .arg(&dmg_path)
             .output()
             .context("failed to mount DMG")?;
@@ -350,7 +380,7 @@ impl AppState {
         }
         let new_app_path = new_app_path.context("no .app found in DMG")?;
 
-        // Copy new app over the current bundle using shell cp -R
+        // Copy new app over the current bundle
         let cp_output = Command::new("cp")
             .args(["-Rf"])
             .arg(&new_app_path)
@@ -359,7 +389,6 @@ impl AppState {
             .context("failed to copy new app bundle")?;
 
         if !cp_output.status.success() {
-            // Detach before bailing
             let _ = Command::new("hdiutil")
                 .args(["detach", "-quiet"])
                 .arg(&mount_point)
@@ -370,14 +399,14 @@ impl AppState {
             );
         }
 
-        // Detach DMG
+        // Detach DMG & clean up
         let _ = Command::new("hdiutil")
             .args(["detach", "-quiet"])
             .arg(&mount_point)
             .output();
-
-        // Clean up temp
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+
+        tx.send(UpdateProgress::step("Restarting...")).await.ok();
 
         // Launch the new app and exit
         let _ = Command::new("open")
@@ -385,15 +414,12 @@ impl AppState {
             .arg(&app_bundle)
             .spawn();
 
-        let version = release.tag_name.clone();
-
-        // Give the new process time to start, then exit
         tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(1)).await;
             std::process::exit(0);
         });
 
-        Ok(version)
+        Ok(())
     }
 
     /// Resolve the `.app` bundle directory from the current executable path.
@@ -513,6 +539,32 @@ struct GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+    size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UpdateProgress {
+    pub step: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloaded: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
+impl UpdateProgress {
+    fn step(msg: &str) -> Self {
+        Self { step: msg.to_string(), percent: None, downloaded: None, total: None }
+    }
+    fn download(pct: u8, downloaded: u64, total: u64) -> Self {
+        Self {
+            step: "Downloading update...".to_string(),
+            percent: Some(pct),
+            downloaded: Some(downloaded),
+            total: Some(total),
+        }
+    }
 }
 
 fn normalize_version_text(value: &str) -> String {

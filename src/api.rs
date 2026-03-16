@@ -72,7 +72,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/fonts/Bungee-Regular.ttf", get(bungee_font))
         .route("/api/settings", get(get_settings))
         .route("/api/app-version", get(get_app_version))
-        .route("/api/self-update", post(self_update))
+        .route("/api/self-update", get(self_update))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/:id/activate", post(activate_session))
         .route(
@@ -181,16 +181,28 @@ async fn get_app_version(State(state): State<Arc<AppState>>) -> Json<crate::stat
 
 async fn self_update(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match state.self_update().await {
-        Ok(version) => Ok(Json(
-            serde_json::json!({ "ok": true, "version": version }),
-        )),
-        Err(err) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Update failed: {err:#}"),
-        )),
-    }
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::state::UpdateProgress>(32);
+
+    tokio::spawn(async move {
+        if let Err(err) = state.self_update(tx.clone()).await {
+            let _ = tx
+                .send(crate::state::UpdateProgress {
+                    step: format!("error:{err:#}"),
+                    percent: None,
+                    downloaded: None,
+                    total: None,
+                })
+                .await;
+        }
+    });
+
+    Sse::new(stream! {
+        while let Some(progress) = rx.recv().await {
+            let data = serde_json::to_string(&progress).unwrap_or_default();
+            yield Ok(Event::default().data(data));
+        }
+    })
 }
 
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
