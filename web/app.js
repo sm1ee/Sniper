@@ -354,6 +354,7 @@ const els = {
   websocketResponseView: document.getElementById("websocketResponseView"),
   websocketFramesBody: document.getElementById("websocketFramesBody"),
   frameDetailPanel: document.getElementById("frameDetailPanel"),
+  frameDetailResizer: document.getElementById("frameDetailResizer"),
   frameDetailMeta: document.getElementById("frameDetailMeta"),
   frameDetailBody: document.getElementById("frameDetailBody"),
   frameDetailClose: document.getElementById("frameDetailClose"),
@@ -710,6 +711,7 @@ function bindEvents() {
     loadWebsockets(true).catch((error) => console.error(error));
   });
   els.frameDetailClose.addEventListener("click", hideFrameDetail);
+  initFrameDetailResizer();
   document.querySelectorAll(".ws-sort").forEach((btn) => {
     btn.addEventListener("click", () => toggleWebsocketSort(btn.dataset.wsSortKey));
   });
@@ -1474,7 +1476,9 @@ async function loadWebsockets(preserveSelection = true) {
 }
 
 async function loadWebsocketDetail(id) {
-  hideFrameDetail();
+  if (state.selectedWebsocketId !== id) {
+    hideFrameDetail();
+  }
   const response = await fetch(`/api/websockets/${id}`);
   if (!response.ok) {
     if (state.selectedWebsocketId !== id) {
@@ -4587,12 +4591,47 @@ function showFrameDetail(frame) {
   }
 
   els.frameDetailBody.textContent = body;
+  els.frameDetailResizer.classList.remove("hidden");
   els.frameDetailPanel.classList.remove("hidden");
 }
 
 function hideFrameDetail() {
+  els.frameDetailResizer.classList.add("hidden");
   els.frameDetailPanel.classList.add("hidden");
   els.websocketFramesBody.querySelectorAll(".frame-selected").forEach((r) => r.classList.remove("frame-selected"));
+}
+
+function initFrameDetailResizer() {
+  const resizer = els.frameDetailResizer;
+  if (!resizer) return;
+  const container = resizer.parentElement;
+
+  let startY = 0;
+  let startHeight = 0;
+
+  resizer.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    startY = e.clientY;
+    startHeight = els.frameDetailPanel.getBoundingClientRect().height;
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+  });
+
+  function onMouseMove(e) {
+    const delta = startY - e.clientY;
+    const newHeight = Math.max(120, startHeight + delta);
+    const maxHeight = container.getBoundingClientRect().height * 0.8;
+    container.style.setProperty("--frame-detail-height", Math.min(newHeight, maxHeight) + "px");
+  }
+
+  function onMouseUp() {
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }
 }
 
 function toHexDump(text) {
