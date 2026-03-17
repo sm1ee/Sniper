@@ -641,6 +641,7 @@ function bindEvents() {
   });
 
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
+  els.openUpdateButton.addEventListener("click", performSelfUpdate);
   els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
   els.displaySettingsModal.addEventListener("click", (event) => {
@@ -1095,16 +1096,61 @@ async function loadAppVersionInfo() {
   els.appVersionLabel.textContent = `v${state.appVersion.current_version}`;
   els.appVersionLabel.title = `Current version ${state.appVersion.current_version}`;
 
-  const updateUrl = state.appVersion.latest_release_url || state.appVersion.releases_url;
-  if (state.appVersion.update_available && updateUrl) {
-    els.openUpdateButton.href = updateUrl;
+  if (state.appVersion.update_available) {
     els.openUpdateButton.title = state.appVersion.latest_version
-      ? `Open latest release (${state.appVersion.latest_version})`
-      : "Open latest release";
+      ? `Update to ${state.appVersion.latest_version}`
+      : "Update available";
     els.openUpdateButton.classList.remove("hidden");
   } else {
     els.openUpdateButton.classList.add("hidden");
   }
+}
+
+async function performSelfUpdate() {
+  if (els.openUpdateButton.disabled) return;
+  els.openUpdateButton.disabled = true;
+
+  // Show inline progress bar
+  els.openUpdateButton.innerHTML =
+    '<span class="update-label">Updating...</span>' +
+    '<span class="update-bar"><span class="update-bar-fill"></span></span>';
+
+  const fill = els.openUpdateButton.querySelector(".update-bar-fill");
+  const label = els.openUpdateButton.querySelector(".update-label");
+
+  const es = new EventSource("/api/self-update");
+  es.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.step.startsWith("error:")) {
+        es.close();
+        label.textContent = "Update failed";
+        fill.style.width = "0%";
+        els.openUpdateButton.disabled = false;
+        setTimeout(() => {
+          els.openUpdateButton.textContent = "Update";
+        }, 3000);
+        console.error("Self-update failed:", data.step);
+        return;
+      }
+      if (data.percent != null) {
+        fill.style.width = data.percent + "%";
+        const mb = (data.downloaded / 1048576).toFixed(1);
+        const totalMb = (data.total / 1048576).toFixed(1);
+        label.textContent = `${mb} / ${totalMb} MB`;
+      } else {
+        label.textContent = data.step;
+        if (data.step === "Installing update...") fill.style.width = "90%";
+        if (data.step === "Restarting...") fill.style.width = "100%";
+      }
+    } catch (_) {}
+  };
+  es.onerror = () => {
+    es.close();
+    // Connection lost probably means the app is restarting — that's OK
+    label.textContent = "Restarting...";
+    fill.style.width = "100%";
+  };
 }
 
 async function loadSessions() {
