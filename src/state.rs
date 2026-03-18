@@ -406,6 +406,22 @@ impl AppState {
             .output();
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
 
+        // Re-sign the app bundle so macOS accepts the replaced binary.
+        // Without this the system kills the process with SIGKILL
+        // (Code Signature Invalid / Taskgated Invalid Signature).
+        tx.send(UpdateProgress::step("Signing...")).await.ok();
+        let sign_output = Command::new("codesign")
+            .args(["--force", "--deep", "--sign", "-"])
+            .arg(&app_bundle)
+            .output()
+            .context("failed to run codesign")?;
+        if !sign_output.status.success() {
+            tracing::warn!(
+                "codesign failed (non-fatal): {}",
+                String::from_utf8_lossy(&sign_output.stderr)
+            );
+        }
+
         tx.send(UpdateProgress::step("Restarting...")).await.ok();
 
         // Launch the new app and exit
