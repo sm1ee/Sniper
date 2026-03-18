@@ -36,7 +36,7 @@ flowchart LR
     Proxy --> Capture["Transaction Normalizer"]
     Capture --> Store["Active Session Stores"]
     SessionRegistry["Session Registry + Disk Snapshots"] --> Store
-    Store --> API["UI/API Listener (:3000)"]
+    Store --> API["UI/API Listener (:23001)"]
     API --> UI["Desktop UI + Session Workspace"]
     Proxy -. bootstrap .-> SpecialHost["sniper / certificate portal"]
     SpecialHost --> CA["Persistent Root CA"]

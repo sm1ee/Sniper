@@ -24,7 +24,7 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
-        Self::from_env_with_defaults("127.0.0.1:8080", "127.0.0.1:3000")
+        Self::from_env_with_defaults("127.0.0.1:8080", "127.0.0.1:23001")
     }
 
     pub fn from_env_for_desktop() -> Result<Self> {

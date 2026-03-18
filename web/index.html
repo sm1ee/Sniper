@@ -339,22 +339,12 @@
 
           <section class="proxy-panel hidden" id="websocketPanel">
             <div class="stack-panel">
-              <section class="panel-card panel-card-top">
-                <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Web Socket</p>
-                    <h2>Captured sessions</h2>
-                  </div>
-                  <div class="toolbar-actions">
-                    <button class="secondary-action" id="refreshWebsocketsButton" type="button">Refresh</button>
-                  </div>
-                </header>
+              <section class="panel-card panel-card-top ws-sessions-card">
                 <div class="filter-bar websocket-filter-bar">
                   <div class="filter-summary websocket-filter-summary" id="websocketMeta" aria-live="polite">
                     Loading captured WebSocket sessions.
                   </div>
                   <label class="search-box" for="websocketSearchInput">
-                    <span>Filter</span>
                     <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" />
                   </label>
                 </div>
@@ -376,6 +366,7 @@
                 </div>
               </section>
 
+              <div class="stack-resizer" id="websocketStackResizer" aria-hidden="true"></div>
               <section class="websocket-workbench" id="websocketWorkbench">
                 <section class="panel-card websocket-handshake-column" id="websocketHandshakeColumn">
                   <header class="panel-toolbar">

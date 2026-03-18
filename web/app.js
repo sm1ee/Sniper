@@ -190,6 +190,8 @@ const state = {
   websocketSortDirection: "desc",
   selectedWebsocketId: null,
   selectedWebsocketRecord: null,
+  selectedFrameIdx: null,
+  wsKeyboardFocus: "sessions",
   replayTabs: [],
   activeReplayTabId: null,
   replayTabSequence: 0,
@@ -363,6 +365,7 @@ const els = {
   websocketHandshakeColumn: document.getElementById("websocketHandshakeColumn"),
   websocketFramesColumn: document.getElementById("websocketFramesColumn"),
   websocketSplitResizer: document.getElementById("websocketSplitResizer"),
+  websocketStackResizer: document.getElementById("websocketStackResizer"),
   proxySettingIntercept: document.getElementById("proxySettingIntercept"),
   proxySettingWebsocketCapture: document.getElementById("proxySettingWebsocketCapture"),
   proxySettingScopePatterns: document.getElementById("proxySettingScopePatterns"),
@@ -453,6 +456,11 @@ const WEBSOCKET_WORKBENCH_BREAKPOINT = "(max-width: 980px)";
 const WEBSOCKET_WORKBENCH_MIN_WIDTHS = {
   handshake: 360,
   frames: 320,
+};
+
+const WEBSOCKET_STACK_MIN_HEIGHTS = {
+  sessions: 160,
+  workbench: 220,
 };
 
 const LAYOUT_TEXTAREA_IDS = [
@@ -707,9 +715,11 @@ function bindEvents() {
   els.refreshInterceptsButton.addEventListener("click", () => {
     loadIntercepts(true).catch((error) => console.error(error));
   });
-  els.refreshWebsocketsButton.addEventListener("click", () => {
-    loadWebsockets(true).catch((error) => console.error(error));
-  });
+  if (els.refreshWebsocketsButton) {
+    els.refreshWebsocketsButton.addEventListener("click", () => {
+      loadWebsockets(true).catch((error) => console.error(error));
+    });
+  }
   els.frameDetailClose.addEventListener("click", hideFrameDetail);
   initFrameDetailResizer();
   document.querySelectorAll(".ws-sort").forEach((btn) => {
@@ -797,10 +807,20 @@ function bindEvents() {
   // native text selection works over syntax-highlighted text (WKWebView renders
   // textarea selection in an opaque native layer that cannot be hidden).
   // The hidden <textarea> is kept as a data store only.
+  state._replayUndoStack = [];
+  state._replayRedoStack = [];
+  state._replayLastSnapshot = null;
+
   els.replayRequestHighlight.addEventListener("input", () => {
     const tab = getActiveReplayTab();
     if (!tab) return;
-    const text = els.replayRequestHighlight.textContent || "";
+    const text = els.replayRequestHighlight.innerText || "";
+    if (state._replayLastSnapshot !== null && state._replayLastSnapshot !== text) {
+      state._replayUndoStack.push(state._replayLastSnapshot);
+      if (state._replayUndoStack.length > 200) state._replayUndoStack.shift();
+      state._replayRedoStack.length = 0;
+    }
+    state._replayLastSnapshot = text;
     els.replayRequestEditor.value = text;
     tab.requestText = text;
     // Debounce re-render so syntax highlighting refreshes without losing cursor
@@ -812,6 +832,25 @@ function bindEvents() {
     syncReplayToolbar(tab);
     renderReplayTabs();
     scheduleWorkspaceStateSave();
+  });
+  els.replayRequestHighlight.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && !e.altKey) {
+      e.preventDefault();
+      const stack = e.shiftKey ? state._replayRedoStack : state._replayUndoStack;
+      const opposite = e.shiftKey ? state._replayUndoStack : state._replayRedoStack;
+      if (!stack.length) return;
+      opposite.push(state._replayLastSnapshot || els.replayRequestHighlight.innerText || "");
+      const restored = stack.pop();
+      state._replayLastSnapshot = restored;
+      els.replayRequestHighlight.innerHTML = renderCodeHtml(restored, "pretty", "request");
+      els.replayRequestEditor.value = restored;
+      const tab = getActiveReplayTab();
+      if (tab) tab.requestText = restored;
+      updateReplaySearchPane("request", restored);
+      syncReplayToolbar(tab);
+      renderReplayTabs();
+      scheduleWorkspaceStateSave();
+    }
   });
   els.replayRequestHighlight.addEventListener("paste", (e) => {
     e.preventDefault();
@@ -936,6 +975,27 @@ function bindEvents() {
       return;
     }
 
+    // Cmd+1~6: color tag selected HTTP item
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      state.activeTool === "proxy" &&
+      state.activeProxyTab === "http-history" &&
+      state.selectedId &&
+      event.key >= "1" && event.key <= "6"
+    ) {
+      event.preventDefault();
+      const colors = ["red", "orange", "yellow", "green", "blue", "purple"];
+      const color = colors[parseInt(event.key) - 1];
+      const item = state.items.find((i) => i.id === state.selectedId);
+      const newColor = item?.color_tag === color ? null : color;
+      if (item) item.color_tag = newColor;
+      renderHistory();
+      updateAnnotations(state.selectedId, { color_tag: newColor });
+      return;
+    }
+
     if (
       !event.metaKey &&
       !event.ctrlKey &&
@@ -961,13 +1021,21 @@ function bindEvents() {
       if (state.activeProxyTab === "websockets-history") {
         if (event.key === "ArrowUp") {
           event.preventDefault();
-          moveWebsocketSelection(-1).catch((error) => console.error(error));
+          if (state.wsKeyboardFocus === "frames") {
+            moveFrameSelection(-1);
+          } else {
+            moveWebsocketSelection(-1).catch((error) => console.error(error));
+          }
           return;
         }
 
         if (event.key === "ArrowDown") {
           event.preventDefault();
-          moveWebsocketSelection(1).catch((error) => console.error(error));
+          if (state.wsKeyboardFocus === "frames") {
+            moveFrameSelection(1);
+          } else {
+            moveWebsocketSelection(1).catch((error) => console.error(error));
+          }
           return;
         }
       }
@@ -1010,6 +1078,19 @@ function bindEvents() {
       event.preventDefault();
       openFuzzerFromSelection().catch((error) => console.error(error));
     }
+
+    // Cmd+F: switch to Fuzzer tab
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "f" &&
+      !isEditableTarget(event.target)
+    ) {
+      event.preventDefault();
+      state.activeTool = "fuzzer";
+      renderToolPanels();
+    }
   });
 
   document.addEventListener("copy", (event) => {
@@ -1033,6 +1114,7 @@ function bindEvents() {
   bindPaneResizer(els.responseInspectorResizer, "response-inspector");
   bindWorkbenchStackResizer(els.historyWorkbenchResizer);
   bindWebsocketPaneResizer(els.websocketSplitResizer);
+  bindWebsocketStackResizer(els.websocketStackResizer);
   bindHistoryColumnResizers();
   window.addEventListener("resize", () => {
     normalizeWorkbenchPaneWidths();
@@ -1411,7 +1493,16 @@ async function loadRuntimeSettings() {
 async function loadTransactions(preserveSelection = true) {
   const limit = state.settings?.max_entries ?? 500;
   const response = await fetch(`/api/transactions?limit=${limit}`);
-  state.items = await response.json();
+  const freshItems = await response.json();
+
+  // Preserve in-flight annotation changes (optimistic updates)
+  if (state._pendingAnnotations) {
+    for (const [id, patch] of state._pendingAnnotations) {
+      const item = freshItems.find((i) => i.id === id);
+      if (item) Object.assign(item, patch);
+    }
+  }
+  state.items = freshItems;
 
   const visibleItems = getVisibleItems();
   if (!preserveSelection || !visibleItems.some((item) => item.id === state.selectedId)) {
@@ -2073,6 +2164,33 @@ function scrollSelectedWebsocketRowIntoView() {
   selectedRow?.scrollIntoView({ block: "nearest" });
 }
 
+function moveFrameSelection(offset) {
+  const session = state.selectedWebsocketRecord;
+  if (!session || !session.frames || !session.frames.length) return;
+
+  const current = state.selectedFrameIdx;
+  const fallback = offset > 0 ? 0 : session.frames.length - 1;
+  const nextIdx = clamp(
+    current == null ? fallback : current + offset,
+    0,
+    session.frames.length - 1,
+  );
+
+  state.selectedFrameIdx = nextIdx;
+  const frame = session.frames[nextIdx];
+  if (!frame) return;
+
+  // Update selection highlight
+  els.websocketFramesBody.querySelectorAll(".frame-selected").forEach((r) => r.classList.remove("frame-selected"));
+  const rows = els.websocketFramesBody.querySelectorAll(".history-row");
+  if (rows[nextIdx]) {
+    rows[nextIdx].classList.add("frame-selected");
+    rows[nextIdx].scrollIntoView({ block: "nearest" });
+  }
+
+  showFrameDetail(frame);
+}
+
 function isEditableTarget(target) {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -2457,6 +2575,7 @@ function renderWebsocketSessions() {
 
   Array.from(els.websocketTableBody.querySelectorAll(".history-row")).forEach((row) => {
     row.addEventListener("click", () => {
+      state.wsKeyboardFocus = "sessions";
       state.selectedWebsocketId = row.dataset.id;
       loadWebsocketDetail(row.dataset.id).catch((error) => console.error(error));
     });
@@ -2481,14 +2600,14 @@ function renderWebsocketSessions() {
   }
 
   const session = state.selectedWebsocketRecord;
-  els.websocketDetailTitle.textContent = `${session.host}${session.path}`;
+  els.websocketDetailTitle.textContent = session.host;
   els.websocketRequestView.innerHTML = renderHttpHtml(buildRawWebsocketRequest(session), "request");
   els.websocketResponseView.innerHTML = renderHttpHtml(buildRawWebsocketResponse(session), "response");
   els.websocketFramesBody.innerHTML = session.frames.length
     ? session.frames
         .map((frame, idx) => `
-          <tr class="history-row" data-frame-idx="${idx}">
-            <td>${frame.index}</td>
+          <tr class="history-row${idx === state.selectedFrameIdx ? ' frame-selected' : ''}" data-frame-idx="${idx}">
+            <td>${idx + 1}</td>
             <td>${frame.direction.replaceAll("_", " ")}</td>
             <td>${frame.kind}</td>
             <td>${escapeHtml(formatSize(frame.body_size))}</td>
@@ -2508,6 +2627,9 @@ function renderWebsocketSessions() {
       const idx = parseInt(row.dataset.frameIdx, 10);
       const frame = session.frames[idx];
       if (!frame) return;
+
+      state.selectedFrameIdx = idx;
+      state.wsKeyboardFocus = "frames";
 
       // Highlight selected row
       els.websocketFramesBody.querySelectorAll(".frame-selected").forEach((r) => r.classList.remove("frame-selected"));
@@ -2709,6 +2831,10 @@ function renderReplayRequestHighlight(text) {
     return;
   }
   els.replayRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
+  // Reset undo history when switching tabs
+  state._replayUndoStack = [];
+  state._replayRedoStack = [];
+  state._replayLastSnapshot = text;
 }
 
 // Re-render syntax highlighting while preserving cursor position in the
@@ -3558,7 +3684,7 @@ function renderReplayTabs() {
     .join("");
 
   Array.from(els.replayTabStrip.querySelectorAll(".replay-tab")).forEach((tabElement) => {
-    const id = tabElement.dataset.repeaterTabId;
+    const id = tabElement.dataset.replayTabId;
     tabElement.querySelector(".replay-tab-button")?.addEventListener("click", () => {
       state.activeReplayTabId = id;
       scheduleWorkspaceStateSave();
@@ -4206,7 +4332,7 @@ function snapshotUiSettings() {
     },
     history_column_widths: { ...state.historyColumnWidths },
     history_column_order: [...state.historyColumnOrder],
-    workbench_height: state.workbenchHeight,
+    workbench_height: state.workbenchHeight > 0 ? state.workbenchHeight : null,
   };
 }
 
@@ -4378,11 +4504,27 @@ function buildRawRequest(record) {
   const startLine = record.kind === "tunnel"
     ? `CONNECT ${record.host} HTTP/1.1`
     : `${record.method} ${record.path || "/"} HTTP/1.1`;
-  const headers = record.request.headers
+  const headers = mergeHeaders(record.request.headers)
     .map((header) => `${header.name}: ${header.value}`)
     .join("\n");
   const body = renderBody(record.request);
   return `${startLine}\n${headers}\n\n${body}`.trim();
+}
+
+function mergeHeaders(headers) {
+  const merged = [];
+  const cookieParts = [];
+  for (const h of headers) {
+    if (h.name.toLowerCase() === "cookie") {
+      cookieParts.push(h.value);
+    } else {
+      merged.push(h);
+    }
+  }
+  if (cookieParts.length) {
+    merged.push({ name: "cookie", value: cookieParts.join("; ") });
+  }
+  return merged;
 }
 
 function buildRawResponse(record) {
@@ -4398,7 +4540,7 @@ function buildRawResponse(record) {
 }
 
 function buildRawWebsocketRequest(session) {
-  const headers = session.request.headers
+  const headers = mergeHeaders(session.request.headers)
     .map((header) => `${header.name}: ${header.value}`)
     .join("\n");
   return `GET ${session.path || "/"} HTTP/1.1\n${headers}`.trim();
@@ -4484,7 +4626,7 @@ function buildEditableRawRequest(request) {
     headers.unshift({ name: "host", value: request.host });
   }
   const head = `${request.method} ${request.path || "/"} HTTP/1.1`;
-  const headerBlock = headers.map((header) => `${header.name}: ${header.value}`).join("\n");
+  const headerBlock = mergeHeaders(headers).map((header) => `${header.name}: ${header.value}`).join("\n");
   const body = request.body || "";
   return `${head}\n${headerBlock}\n\n${body}`.trimEnd();
 }
@@ -4567,7 +4709,7 @@ function renderFramePreview(frame) {
 function showFrameDetail(frame) {
   const dir = frame.direction.replaceAll("_", " ");
   els.frameDetailMeta.innerHTML = `
-    <span>#${frame.index}</span>
+    <span>#${(frame.index ?? 0) + 1}</span>
     <span>${escapeHtml(dir)}</span>
     <span>${escapeHtml(frame.kind)}</span>
     <span>${escapeHtml(formatSize(frame.body_size))}</span>
@@ -4590,7 +4732,12 @@ function showFrameDetail(frame) {
     // not JSON, keep as-is
   }
 
-  els.frameDetailBody.textContent = body;
+  // Syntax-highlight the body (auto-detect per line)
+  const highlighted = body
+    .split("\n")
+    .map((line) => highlightBodyLine(line))
+    .join("\n");
+  els.frameDetailBody.innerHTML = highlighted;
   els.frameDetailResizer.classList.remove("hidden");
   els.frameDetailPanel.classList.remove("hidden");
 }
@@ -4623,7 +4770,8 @@ function initFrameDetailResizer() {
     const delta = startY - e.clientY;
     const newHeight = Math.max(120, startHeight + delta);
     const maxHeight = container.getBoundingClientRect().height * 0.8;
-    container.style.setProperty("--frame-detail-height", Math.min(newHeight, maxHeight) + "px");
+    const h = Math.min(newHeight, maxHeight);
+    els.frameDetailPanel.style.flex = "0 0 " + h + "px";
   }
 
   function onMouseUp() {
@@ -5098,6 +5246,55 @@ function normalizeWebsocketPaneWidth() {
 
 function resetWebsocketPaneWidth() {
   els.websocketWorkbench?.style.removeProperty("--websocket-left-pane-width");
+}
+
+function bindWebsocketStackResizer(handle) {
+  if (!handle) return;
+  const stackPanel = handle.parentElement;
+  if (!stackPanel) return;
+
+  const sessionsCard = stackPanel.querySelector(".panel-card-top");
+
+  handle.addEventListener("dblclick", () => {
+    if (sessionsCard) {
+      sessionsCard.style.flex = "";
+      sessionsCard.style.height = "";
+    }
+  });
+
+  handle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    const workbench = els.websocketWorkbench;
+    if (!sessionsCard || !workbench) return;
+
+    const startY = event.clientY;
+    const startSessions = sessionsCard.getBoundingClientRect().height;
+    const combinedHeight = startSessions + workbench.getBoundingClientRect().height;
+
+    document.body.classList.add("pane-resizing-y");
+    handle.classList.add("active");
+
+    const onMove = (moveEvent) => {
+      const delta = moveEvent.clientY - startY;
+      const nextSessions = clamp(
+        startSessions + delta,
+        WEBSOCKET_STACK_MIN_HEIGHTS.sessions,
+        combinedHeight - WEBSOCKET_STACK_MIN_HEIGHTS.workbench,
+      );
+      sessionsCard.style.flex = "none";
+      sessionsCard.style.height = `${Math.round(nextSessions)}px`;
+    };
+
+    const onUp = () => {
+      document.body.classList.remove("pane-resizing-y");
+      handle.classList.remove("active");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
 }
 
 function applyWorkbenchStackHeight(height, persist = true) {
@@ -6039,6 +6236,10 @@ async function loadUserNote(transactionId) {
 }
 
 async function updateAnnotations(transactionId, payload) {
+  if (!state._pendingAnnotations) state._pendingAnnotations = new Map();
+  const pending = state._pendingAnnotations;
+  pending.set(transactionId, { ...pending.get(transactionId), ...payload });
+
   try {
     const response = await fetch(`/api/transactions/${transactionId}/annotations`, {
       method: "PATCH",
@@ -6063,6 +6264,8 @@ async function updateAnnotations(transactionId, payload) {
     }
   } catch (error) {
     console.error("Failed to update annotations:", error);
+  } finally {
+    pending.delete(transactionId);
   }
 }
 

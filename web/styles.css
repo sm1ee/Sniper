@@ -2324,7 +2324,8 @@ body.pane-resizing-y {
   line-height: 1;
 }
 
-.fuzzer-shell .request-editor {
+.fuzzer-shell .request-editor,
+.fuzzer-shell .replay-highlight-view {
   font-size: var(--font-sm);
   line-height: 1.5;
 }
@@ -2522,14 +2523,15 @@ body.pane-resizing-y {
   min-width: 0;
 }
 
-.websocket-frames-column {
+.panel-card.websocket-frames-column {
   display: flex;
   flex-direction: column;
 }
 
 .websocket-frames-column .history-table-shell {
-  flex: 1;
-  min-height: 0;
+  flex: 1 1 0;
+  min-height: 80px;
+  overflow: auto;
 }
 
 .frame-detail-resizer {
@@ -2548,9 +2550,7 @@ body.pane-resizing-y {
   border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  height: var(--frame-detail-height, 45%);
-  flex-shrink: 0;
-  min-height: 120px;
+  flex: 0 0 240px;
   overflow: hidden;
 }
 
@@ -2579,8 +2579,18 @@ body.pane-resizing-y {
   word-break: break-all;
 }
 
+.websocket-frames-column tr.frame-selected {
+  outline: 1px solid var(--point-border);
+  outline-offset: -1px;
+}
 .websocket-frames-column tr.frame-selected td {
-  background: var(--accent-dim);
+  background: var(--point-soft);
+}
+.websocket-frames-column .mini-table tr.frame-selected td:first-child {
+  box-shadow: inset 1px 0 0 var(--point-border);
+}
+.websocket-frames-column .mini-table tr.frame-selected td:last-child {
+  box-shadow: inset -1px 0 0 var(--point-border);
 }
 
 .websocket-handshake-column .panel-toolbar h2 {
@@ -2596,7 +2606,35 @@ body.pane-resizing-y {
 }
 
 .stack-panel {
-  grid-template-rows: minmax(220px, 0.95fr) minmax(240px, 1.05fr);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.stack-panel > .panel-card-top {
+  flex: 0 1 35%;
+  min-height: 160px;
+  overflow: hidden;
+}
+
+.stack-panel > .stack-resizer {
+  flex: 0 0 6px;
+}
+
+.stack-panel > .websocket-workbench {
+  flex: 1 1 65%;
+  min-height: 220px;
+}
+
+.stack-resizer {
+  cursor: row-resize;
+  background: transparent;
+  transition: background 0.15s;
+  z-index: 2;
+}
+.stack-resizer:hover,
+.stack-resizer:active {
+  background: var(--accent);
 }
 
 .panel-card {
@@ -2611,6 +2649,11 @@ body.pane-resizing-y {
 
 .panel-card-top {
   min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.ws-sessions-card {
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .panel-toolbar,
@@ -2629,6 +2672,10 @@ body.pane-resizing-y {
 .filter-group h3 {
   margin: 0;
   font-size: 16px;
+}
+
+.panel-toolbar-compact {
+  padding: 8px 16px 6px;
 }
 
 .panel-toolbar p,
@@ -2892,14 +2939,22 @@ body.pane-resizing-y {
   word-break: break-word;
 }
 
-/* Original overlay (intercept/fuzzer) — still behind a textarea */
+/* Original overlay (intercept/fuzzer) — still behind a textarea.
+   Must use overflow:auto + scrollbar-gutter:stable (matching the textarea)
+   so that line-wrapping happens at the same width.  The scrollbar itself
+   is hidden so it never shows through. */
 .replay-highlight-view {
   position: absolute;
   inset: 0;
-  overflow: hidden;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: none;          /* Firefox */
   pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
+}
+.replay-highlight-view::-webkit-scrollbar {
+  display: none;                  /* Chrome / Safari / WKWebView */
 }
 
 .request-editor-highlighted {

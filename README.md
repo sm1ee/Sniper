@@ -58,7 +58,7 @@ cargo run --bin sniper
 
 Default listeners:
 - Proxy: `127.0.0.1:8080`
-- UI: `127.0.0.1:3000`
+- UI: `127.0.0.1:23001`
 
 Then:
 1. Point your browser at the proxy

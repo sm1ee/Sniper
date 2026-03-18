@@ -167,8 +167,17 @@ struct CreateSessionPayload {
 
 #[derive(Debug, Deserialize)]
 struct AnnotationsPayload {
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     color_tag: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     user_note: Option<Option<String>>,
+}
+
+fn deserialize_double_option<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 async fn get_settings(State(state): State<Arc<AppState>>) -> Json<crate::state::RuntimeInfo> {
