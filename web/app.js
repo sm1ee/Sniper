@@ -1041,6 +1041,25 @@ function bindEvents() {
       }
     }
 
+    // Ctrl+Tab / Ctrl+Shift+Tab: cycle through Replay tabs
+    if (
+      event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      event.key === "Tab" &&
+      state.activeTool === "replay" &&
+      state.replayTabs.length > 1
+    ) {
+      event.preventDefault();
+      const idx = state.replayTabs.findIndex((t) => t.id === state.activeReplayTabId);
+      const len = state.replayTabs.length;
+      const next = event.shiftKey ? (idx - 1 + len) % len : (idx + 1) % len;
+      state.activeReplayTabId = state.replayTabs[next].id;
+      scheduleWorkspaceStateSave();
+      renderReplay();
+      return;
+    }
+
     if (
       (event.metaKey || event.ctrlKey) &&
       !event.shiftKey &&
@@ -5338,67 +5357,108 @@ function resetWorkbenchStackHeight() {
 }
 
 function applyCodeSearch(viewElement, query) {
+  // Remove any previous search highlights first
+  clearSearchHighlights(viewElement);
+
   const normalizedQuery = String(query || "").trim();
   if (!normalizedQuery) {
     return { count: 0, firstMatch: null };
   }
 
+  // Build a flat text map across all text nodes so we can match across
+  // element boundaries (e.g. "<span>accept-encoding</span>: gzip").
   const lowerQuery = normalizedQuery.toLowerCase();
-  const walker = document.createTreeWalker(
-    viewElement,
-    NodeFilter.SHOW_TEXT,
-    {
-      acceptNode(node) {
-        if (!node.nodeValue || !node.nodeValue.trim()) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    },
-  );
-
+  const walker = document.createTreeWalker(viewElement, NodeFilter.SHOW_TEXT, null);
   const textNodes = [];
+  let fullText = "";
+  const nodeOffsets = []; // { node, start }
   while (walker.nextNode()) {
-    textNodes.push(walker.currentNode);
+    const node = walker.currentNode;
+    nodeOffsets.push({ node, start: fullText.length });
+    fullText += node.nodeValue;
+    textNodes.push(node);
   }
 
-  let count = 0;
+  const lowerFull = fullText.toLowerCase();
+  const matches = []; // { start, end } in fullText coordinates
+  let cursor = 0;
+  while (true) {
+    const idx = lowerFull.indexOf(lowerQuery, cursor);
+    if (idx === -1) break;
+    matches.push({ start: idx, end: idx + normalizedQuery.length });
+    cursor = idx + 1;
+  }
+
+  if (!matches.length) {
+    return { count: 0, firstMatch: null };
+  }
+
+  // Wrap each match in <mark class="search-hit"> using Range API.
+  // Process matches in reverse order to preserve earlier node offsets.
   let firstMatch = null;
+  for (let m = matches.length - 1; m >= 0; m--) {
+    const match = matches[m];
 
-  textNodes.forEach((node) => {
-    const value = node.nodeValue;
-    const haystack = value.toLowerCase();
-    let cursor = 0;
-    let matchIndex = haystack.indexOf(lowerQuery, cursor);
-    if (matchIndex === -1 || !node.parentNode) {
-      return;
-    }
-
-    const fragment = document.createDocumentFragment();
-    while (matchIndex !== -1) {
-      if (matchIndex > cursor) {
-        fragment.appendChild(document.createTextNode(value.slice(cursor, matchIndex)));
+    // Find start node/offset
+    let startNode = null, startOffset = 0;
+    let endNode = null, endOffset = 0;
+    for (let i = 0; i < nodeOffsets.length; i++) {
+      const entry = nodeOffsets[i];
+      const nodeEnd = entry.start + entry.node.nodeValue.length;
+      if (!startNode && match.start < nodeEnd) {
+        startNode = entry.node;
+        startOffset = match.start - entry.start;
       }
-      const mark = document.createElement("mark");
-      mark.className = "search-hit";
-      mark.textContent = value.slice(matchIndex, matchIndex + normalizedQuery.length);
-      fragment.appendChild(mark);
-      if (!firstMatch) {
-        firstMatch = mark;
+      if (match.end <= nodeEnd) {
+        endNode = entry.node;
+        endOffset = match.end - entry.start;
+        break;
       }
-      count += 1;
-      cursor = matchIndex + normalizedQuery.length;
-      matchIndex = haystack.indexOf(lowerQuery, cursor);
     }
+    if (!startNode || !endNode) continue;
 
-    if (cursor < value.length) {
-      fragment.appendChild(document.createTextNode(value.slice(cursor)));
+    const range = document.createRange();
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+
+    const mark = document.createElement("mark");
+    mark.className = "search-hit";
+    try {
+      range.surroundContents(mark);
+    } catch (_) {
+      // surroundContents fails when the range spans partial elements.
+      // Fall back to extractContents + insertion.
+      const fragment = range.extractContents();
+      mark.appendChild(fragment);
+      range.insertNode(mark);
     }
+    firstMatch = mark;
 
-    node.parentNode.replaceChild(fragment, node);
+    // Rebuild nodeOffsets after DOM mutation for earlier matches
+    if (m > 0) {
+      nodeOffsets.length = 0;
+      fullText = "";
+      const w2 = document.createTreeWalker(viewElement, NodeFilter.SHOW_TEXT, null);
+      while (w2.nextNode()) {
+        nodeOffsets.push({ node: w2.currentNode, start: fullText.length });
+        fullText += w2.currentNode.nodeValue;
+      }
+    }
+  }
+
+  return { count: matches.length, firstMatch };
+}
+
+function clearSearchHighlights(viewElement) {
+  const marks = viewElement.querySelectorAll("mark.search-hit");
+  marks.forEach((mark) => {
+    const parent = mark.parentNode;
+    while (mark.firstChild) {
+      parent.insertBefore(mark.firstChild, mark);
+    }
+    parent.removeChild(mark);
+    parent.normalize(); // merge adjacent text nodes back together
   });
-
-  return { count, firstMatch };
 }
 
 function buildSearchMeta(lineCount, mode, matchCount) {
