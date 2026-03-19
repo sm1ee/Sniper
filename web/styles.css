@@ -1346,11 +1346,12 @@ code {
 .toggle-pill {
   min-height: 40px;
   padding: 0 14px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--danger);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-soft);
+  background: rgba(200, 80, 80, 0.1);
+  color: var(--danger);
   cursor: pointer;
+  font-weight: 600;
   transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
 
@@ -1829,16 +1830,45 @@ code {
   font-weight: 600;
 }
 
-.view-tab.diff-tab {
-  color: var(--point);
+.pane-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.view-tab.diff-tab.active {
-  color: var(--point);
+.mr-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 4px;
+  padding: 1px 2px;
 }
 
-.view-tab.diff-tab.active::after {
-  background: linear-gradient(90deg, var(--point) 0%, var(--point-border) 100%);
+.mr-btn {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--muted);
+  transition: color 0.15s, background 0.15s;
+}
+
+.mr-btn:hover {
+  color: var(--text);
+}
+
+.mr-btn.active[data-mr="modified"] {
+  color: var(--point);
+  background: rgba(218, 165, 32, 0.12);
+}
+
+.mr-btn.active[data-mr="original"] {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .editor-shell {
@@ -2023,6 +2053,20 @@ code {
   background: rgba(132, 151, 173, 0.2);
   box-shadow: inset 0 0 0 1px rgba(132, 151, 173, 0.42);
   color: #f5f8fb;
+}
+
+.search-hit.search-hit-active {
+  background: rgba(218, 165, 32, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(218, 165, 32, 0.7);
+}
+
+.search-hit-count {
+  color: var(--point);
+  cursor: pointer;
+}
+
+.search-hit-count:hover {
+  text-decoration: none;
 }
 
 body.pane-resizing,
@@ -2476,7 +2520,7 @@ body.pane-resizing-y {
 .target-path-item {
   display: grid;
   gap: 4px;
-  padding: 12px 14px;
+  padding: 12px 14px 12px 32px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
@@ -2811,8 +2855,22 @@ body.pane-resizing-y {
 .toolbar-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
+}
+
+.toolbar-actions .primary-action,
+.toolbar-actions .secondary-action {
+  min-height: unset;
+  padding: 6px 14px;
+  font-size: var(--font-xs);
+  border-radius: 6px;
+}
+
+.toolbar-actions .toggle-pill {
+  min-height: unset;
+  padding: 6px 14px;
+  font-size: var(--font-xs);
 }
 
 .mini-table {
@@ -3165,7 +3223,10 @@ body.pane-resizing-y {
 .settings-status {
   justify-content: flex-start;
   min-width: 0;
-  padding-right: 10px;
+  min-height: unset;
+  padding: 4px 10px;
+  font-size: var(--font-xs);
+  width: fit-content;
 }
 
 .modal-grid {
@@ -3202,8 +3263,16 @@ body.pane-resizing-y {
 .filter-group-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   flex-wrap: wrap;
+}
+
+.filter-group-actions .primary-action,
+.filter-group-actions .secondary-action {
+  min-height: unset;
+  padding: 6px 14px;
+  font-size: var(--font-xs);
+  border-radius: 6px;
 }
 
 .placeholder-card {
@@ -3324,6 +3393,45 @@ body.pane-resizing-y {
 .danger-action:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.accent-action {
+  padding: 6px 14px;
+  border: 1px solid var(--point-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--point);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.accent-action:hover {
+  background: rgba(218, 165, 32, 0.1);
+}
+
+.primary-action,
+.secondary-action,
+.danger-action,
+.accent-action,
+.toggle-pill,
+.utility-button,
+.modal-close,
+.sub-tab,
+.view-tab {
+  transition: transform 0.08s, background 0.08s, border-color 0.15s, color 0.15s;
+}
+
+.primary-action:active,
+.secondary-action:active,
+.danger-action:active,
+.accent-action:active,
+.toggle-pill:active,
+.utility-button:active,
+.modal-close:active,
+.sub-tab:active,
+.view-tab:active {
+  transform: scale(0.92);
 }
 
 .mini-toggle {

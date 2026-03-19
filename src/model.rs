@@ -61,12 +61,25 @@ impl EditableRequest {
             BodyEncoding::Base64
         };
 
+        let host = host.into();
+        let mut headers = header_records(headers);
+        // HTTP/2 sends the host as the :authority pseudo-header which hyper
+        // places in the URI authority rather than in the headers map.  Ensure a
+        // Host header is always present so match-replace rules and UI display
+        // work consistently.
+        if !headers.iter().any(|h| h.name.eq_ignore_ascii_case("host")) && !host.is_empty() {
+            headers.insert(0, HeaderRecord {
+                name: "host".to_string(),
+                value: host.clone(),
+            });
+        }
+
         Self {
             scheme: scheme.into(),
-            host: host.into(),
+            host,
             method: method.into(),
             path: path.into(),
-            headers: header_records(headers),
+            headers,
             body: match body_encoding {
                 BodyEncoding::Utf8 => String::from_utf8_lossy(body).into_owned(),
                 BodyEncoding::Base64 => STANDARD.encode(body),

@@ -8,6 +8,12 @@ pub struct RuntimeSettingsSnapshot {
     pub scope_patterns: Vec<String>,
     #[serde(default)]
     pub passthrough_hosts: Vec<String>,
+    #[serde(default = "default_upstream_insecure")]
+    pub upstream_insecure: bool,
+}
+
+fn default_upstream_insecure() -> bool {
+    true
 }
 
 impl Default for RuntimeSettingsSnapshot {
@@ -17,6 +23,7 @@ impl Default for RuntimeSettingsSnapshot {
             websocket_capture_enabled: true,
             scope_patterns: Vec::new(),
             passthrough_hosts: Vec::new(),
+            upstream_insecure: true,
         }
     }
 }
@@ -27,6 +34,7 @@ pub struct RuntimeSettingsUpdate {
     pub websocket_capture_enabled: Option<bool>,
     pub scope_patterns: Option<Vec<String>>,
     pub passthrough_hosts: Option<Vec<String>>,
+    pub upstream_insecure: Option<bool>,
 }
 
 pub struct RuntimeSettings {
@@ -67,6 +75,10 @@ impl RuntimeSettings {
             current.passthrough_hosts = normalize_scope_patterns(passthrough_hosts);
         }
 
+        if let Some(upstream_insecure) = update.upstream_insecure {
+            current.upstream_insecure = upstream_insecure;
+        }
+
         current.clone()
     }
 
@@ -85,6 +97,10 @@ impl RuntimeSettings {
 
     pub async fn websocket_capture_enabled(&self) -> bool {
         self.inner.read().await.websocket_capture_enabled
+    }
+
+    pub async fn upstream_insecure(&self) -> bool {
+        self.inner.read().await.upstream_insecure
     }
 
     pub async fn is_in_scope(&self, host: &str) -> bool {

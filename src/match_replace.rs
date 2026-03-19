@@ -155,15 +155,6 @@ fn apply_request_rules(request: EditableRequest, rules: Vec<MatchReplaceRule>) -
             }
         }
 
-        if let Some(host) = request
-            .headers
-            .iter()
-            .find(|header| header.name.eq_ignore_ascii_case("host"))
-            .map(|header| header.value.clone())
-        {
-            request.host = host;
-        }
-
         if matched {
             notes.push(format!(
                 "Match and replace applied request rule: {}",

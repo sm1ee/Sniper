@@ -165,6 +165,10 @@ const state = {
     request: "pretty",
     response: "pretty",
   },
+  showOriginal: {
+    request: false,
+    response: false,
+  },
   messageSearch: {
     request: "",
     response: "",
@@ -273,6 +277,8 @@ const els = {
   responseSearchInput: document.getElementById("responseSearchInput"),
   requestSearchMeta: document.getElementById("requestSearchMeta"),
   responseSearchMeta: document.getElementById("responseSearchMeta"),
+  requestMrToggle: document.getElementById("requestMrToggle"),
+  responseMrToggle: document.getElementById("responseMrToggle"),
   requestResponseResizer: document.getElementById("requestResponseResizer"),
   responseInspectorResizer: document.getElementById("responseInspectorResizer"),
   detailTitle: document.getElementById("detailTitle"),
@@ -345,7 +351,6 @@ const els = {
   interceptRequestHighlight: document.getElementById("interceptRequestHighlight"),
   interceptRequestEditor: document.getElementById("interceptRequestEditor"),
   interceptMeta: document.getElementById("interceptMeta"),
-  refreshInterceptsButton: document.getElementById("refreshInterceptsButton"),
   forwardInterceptButton: document.getElementById("forwardInterceptButton"),
   dropInterceptButton: document.getElementById("dropInterceptButton"),
   websocketMeta: document.getElementById("websocketMeta"),
@@ -368,6 +373,7 @@ const els = {
   websocketStackResizer: document.getElementById("websocketStackResizer"),
   proxySettingIntercept: document.getElementById("proxySettingIntercept"),
   proxySettingWebsocketCapture: document.getElementById("proxySettingWebsocketCapture"),
+  proxySettingUpstreamInsecure: document.getElementById("proxySettingUpstreamInsecure"),
   proxySettingScopePatterns: document.getElementById("proxySettingScopePatterns"),
   proxySettingPassthroughHosts: document.getElementById("proxySettingPassthroughHosts"),
   proxySettingBindHost: document.getElementById("proxySettingBindHost"),
@@ -375,8 +381,7 @@ const els = {
   proxySettingListenerHelp: document.getElementById("proxySettingListenerHelp"),
   saveProxySettingsButton: document.getElementById("saveProxySettingsButton"),
   reloadProxySettingsButton: document.getElementById("reloadProxySettingsButton"),
-  proxySettingsPemButton: document.getElementById("proxySettingsPemButton"),
-  proxySettingsDerButton: document.getElementById("proxySettingsDerButton"),
+  openCertFolderButton: document.getElementById("openCertFolderButton"),
   proxySettingsProxyAddr: document.getElementById("proxySettingsProxyAddr"),
   proxySettingsNextProxyAddr: document.getElementById("proxySettingsNextProxyAddr"),
   proxySettingsUiAddr: document.getElementById("proxySettingsUiAddr"),
@@ -400,12 +405,12 @@ const els = {
   resetReplayButton: document.getElementById("resetReplayButton"),
   replayBackButton: document.getElementById("replayBackButton"),
   replayForwardButton: document.getElementById("replayForwardButton"),
+  replayFollowRedirectButton: document.getElementById("replayFollowRedirectButton"),
   eventLogTableBody: document.getElementById("eventLogTableBody"),
   clearEventLogButton: document.getElementById("clearEventLogButton"),
   matchReplaceTableBody: document.getElementById("matchReplaceTableBody"),
   matchReplaceEditorPath: document.getElementById("matchReplaceEditorPath"),
   matchReplaceEditorTitle: document.getElementById("matchReplaceEditorTitle"),
-  matchReplaceEnabled: document.getElementById("matchReplaceEnabled"),
   matchReplaceDescription: document.getElementById("matchReplaceDescription"),
   matchReplaceScope: document.getElementById("matchReplaceScope"),
   matchReplaceTarget: document.getElementById("matchReplaceTarget"),
@@ -414,6 +419,7 @@ const els = {
   matchReplaceRegex: document.getElementById("matchReplaceRegex"),
   matchReplaceCaseSensitive: document.getElementById("matchReplaceCaseSensitive"),
   saveMatchReplaceRuleButton: document.getElementById("saveMatchReplaceRuleButton"),
+  addMatchReplaceRuleButton: document.getElementById("addMatchReplaceRuleButton"),
   deleteMatchReplaceRuleButton: document.getElementById("deleteMatchReplaceRuleButton"),
   targetScopeEditor: document.getElementById("targetScopeEditor"),
   saveTargetScopeButton: document.getElementById("saveTargetScopeButton"),
@@ -586,6 +592,15 @@ function bindEvents() {
     });
   });
 
+  document.querySelectorAll(".mr-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.target;
+      state.showOriginal[target] = btn.dataset.mr === "original";
+      renderViewTabs();
+      renderMessagePanes();
+    });
+  });
+
   railTabs.forEach((tab) => {
     tab.addEventListener("click", () => {
       state.activeInspectorTab = tab.dataset.inspectorTab;
@@ -624,6 +639,12 @@ function bindEvents() {
     state.replayMessageSearch.response = els.replayResponseSearchInput.value;
     updateReplaySearchPane("response", els.replayResponseView.textContent || "");
   });
+
+  // Search hit navigation: click counter to cycle through matches
+  initSearchHitNavigation(els.requestSearchMeta, () => els.requestView);
+  initSearchHitNavigation(els.responseSearchMeta, () => els.responseView);
+  initSearchHitNavigation(els.replayRequestSearchMeta, () => els.replayRequestHighlight);
+  initSearchHitNavigation(els.replayResponseSearchMeta, () => els.replayResponseView);
 
   els.websocketSearchInput.addEventListener("input", () => {
     state.websocketQuery = els.websocketSearchInput.value.trim();
@@ -688,10 +709,7 @@ function bindEvents() {
   els.displaySizeInput.addEventListener("input", previewDisplaySettingsFromForm);
   els.displaySizeInput.addEventListener("change", previewDisplaySettingsFromForm);
 
-  els.downloadPemButton.addEventListener("click", () => downloadCertificate("pem"));
-  els.downloadDerButton.addEventListener("click", () => downloadCertificate("der"));
-  els.proxySettingsPemButton.addEventListener("click", () => downloadCertificate("pem"));
-  els.proxySettingsDerButton.addEventListener("click", () => downloadCertificate("der"));
+  els.openCertFolderButton.addEventListener("click", () => openCertificateFolder());
   els.openEventLogButton.addEventListener("click", async () => {
     state.activeTool = "logger";
     await loadEventLog();
@@ -712,9 +730,6 @@ function bindEvents() {
     renderInspectorPanels();
   });
 
-  els.refreshInterceptsButton.addEventListener("click", () => {
-    loadIntercepts(true).catch((error) => console.error(error));
-  });
   if (els.refreshWebsocketsButton) {
     els.refreshWebsocketsButton.addEventListener("click", () => {
       loadWebsockets(true).catch((error) => console.error(error));
@@ -765,6 +780,9 @@ function bindEvents() {
   els.replayForwardButton.addEventListener("click", () => {
     navigateReplayHistory(1);
   });
+  els.replayFollowRedirectButton.addEventListener("click", () => {
+    followRedirect().catch((error) => console.error(error));
+  });
   els.saveMatchReplaceRuleButton.addEventListener("click", () => {
     if (!state.selectedMatchReplaceRuleId) {
       createNewMatchReplaceRule();
@@ -773,9 +791,14 @@ function bindEvents() {
       .then(() => showToast("Rule saved"))
       .catch((error) => { console.error(error); showToast("Failed to save rule", "error"); });
   });
+  els.addMatchReplaceRuleButton.addEventListener("click", () => {
+    createNewMatchReplaceRule();
+    saveMatchReplaceRules()
+      .then(() => showToast("Rule added"))
+      .catch((error) => { console.error(error); showToast("Failed to add rule", "error"); });
+  });
   els.deleteMatchReplaceRuleButton.addEventListener("click", deleteSelectedMatchReplaceRule);
   [
-    els.matchReplaceEnabled,
     els.matchReplaceDescription,
     els.matchReplaceScope,
     els.matchReplaceTarget,
@@ -2056,7 +2079,7 @@ function renderInspectorPanels() {
 
 function renderInterceptStatus() {
   const enabled = Boolean(state.runtime?.intercept_enabled);
-  els.interceptStatus.textContent = enabled ? "Intercept is on" : "Intercept is off";
+  els.interceptStatus.textContent = enabled ? "On" : "Off";
   els.interceptStatus.classList.toggle("online", enabled);
 }
 
@@ -2378,6 +2401,8 @@ function selectCodePaneContents(targetPane) {
 
 function renderDetail(record) {
   if (!els.detailTitle) return;
+  state.showOriginal.request = false;
+  state.showOriginal.response = false;
   els.detailTitle.textContent = "Inspector";
   els.detailTags.innerHTML = "";
 
@@ -2419,6 +2444,7 @@ function renderDetail(record) {
     ? noteParts.join("")
     : "<p>No anomalies were recorded for this transaction.</p>";
 
+  renderViewTabs();
   renderMessagePanes();
 }
 
@@ -2436,15 +2462,23 @@ function renderEmptyDetail() {
   els.requestHeadersBody.innerHTML = "<p class=\"empty-copy\">Select a transaction from HTTP.</p>";
   els.responseHeadersBody.innerHTML = "<p class=\"empty-copy\">No response selected.</p>";
   els.notesCard.innerHTML = "<p>No anomalies were recorded for this transaction.</p>";
+  renderViewTabs();
   renderMessagePanes();
 }
 
 function renderMessagePanes() {
-  const requestText = state.selectedRecord
-    ? buildMessagePresentation("request", state.selectedRecord)
+  const record = state.selectedRecord;
+  const requestRecord = record && state.showOriginal.request && record.original_request
+    ? { ...record, request: record.original_request }
+    : record;
+  const responseRecord = record && state.showOriginal.response && record.original_response
+    ? { ...record, response: record.original_response }
+    : record;
+  const requestText = requestRecord
+    ? buildMessagePresentation("request", requestRecord)
     : "Select a transaction from HTTP.";
-  const responseText = state.selectedRecord
-    ? buildMessagePresentation("response", state.selectedRecord)
+  const responseText = responseRecord
+    ? buildMessagePresentation("response", responseRecord)
     : "No response selected.";
 
   const requestPane = updateCodePane(
@@ -2467,12 +2501,12 @@ function renderMessagePanes() {
   if (els.responseSearchInput.value !== state.messageSearch.response) {
     els.responseSearchInput.value = state.messageSearch.response;
   }
-  els.requestSearchMeta.textContent = buildSearchMeta(
+  els.requestSearchMeta.innerHTML = buildSearchMeta(
     requestPane.lineCount,
     state.messageViews.request,
     requestPane.matchCount,
   );
-  els.responseSearchMeta.textContent = buildSearchMeta(
+  els.responseSearchMeta.innerHTML = buildSearchMeta(
     responsePane.lineCount,
     state.messageViews.response,
     responsePane.matchCount,
@@ -2486,11 +2520,19 @@ function renderViewTabs() {
   viewTabs.forEach((tab) => {
     const target = tab.dataset.target;
     tab.classList.toggle("active", state.messageViews[target] === tab.dataset.view);
-    if (tab.dataset.view === "diff") {
-      const hasDiff = target === "request" ? hasRequestDiff : hasResponseDiff;
-      tab.classList.toggle("hidden", !hasDiff);
-    }
   });
+  els.requestMrToggle.classList.toggle("hidden", !hasRequestDiff);
+  els.responseMrToggle.classList.toggle("hidden", !hasResponseDiff);
+  // sync active states on mr-toggle buttons
+  document.querySelectorAll(".mr-btn").forEach((btn) => {
+    const target = btn.dataset.target;
+    const showOriginal = state.showOriginal?.[target] || false;
+    const isOriginal = btn.dataset.mr === "original";
+    btn.classList.toggle("active", isOriginal === showOriginal);
+  });
+  // reset showOriginal when no diff
+  if (!hasRequestDiff && state.showOriginal) state.showOriginal.request = false;
+  if (!hasResponseDiff && state.showOriginal) state.showOriginal.response = false;
 }
 
 function renderIntercepts() {
@@ -2770,6 +2812,7 @@ function renderProxySettings() {
   const startup = state.settings.startup;
   els.proxySettingIntercept.checked = Boolean(state.runtime.intercept_enabled);
   els.proxySettingWebsocketCapture.checked = Boolean(state.runtime.websocket_capture_enabled);
+  els.proxySettingUpstreamInsecure.checked = state.runtime.upstream_insecure !== false;
   els.proxySettingScopePatterns.value = (state.runtime.scope_patterns || []).join("\n");
   els.proxySettingPassthroughHosts.value = (state.runtime.passthrough_hosts || []).join("\n");
   if (startup && document.activeElement !== els.proxySettingBindHost) {
@@ -2813,6 +2856,7 @@ function renderReplay() {
     updateReplaySearchPane("response", "Send a request from Replay to capture the response here.");
     els.replayBackButton.disabled = true;
     els.replayForwardButton.disabled = true;
+    els.replayFollowRedirectButton.classList.add("hidden");
     return;
   }
 
@@ -2828,8 +2872,14 @@ function renderReplay() {
     els.replayResponseMeta.textContent = tab.notice || "No response yet.";
     renderReplayResponseView(notice);
     updateReplaySearchPane("response", notice);
+    els.replayFollowRedirectButton.classList.add("hidden");
     return;
   }
+
+  // Show/hide Follow button for redirect responses
+  const isRedirect = [301, 302, 303, 307, 308].includes(tab.responseRecord.status);
+  const hasLocation = tab.responseRecord.response?.headers?.some((h) => h.name.toLowerCase() === "location");
+  els.replayFollowRedirectButton.classList.toggle("hidden", !(isRedirect && hasLocation));
 
   els.replayResponseMeta.textContent = [
     `${formatStatus(tab.responseRecord.status)}`,
@@ -2963,7 +3013,7 @@ function updateReplaySearchPane(target, text) {
   }
 
   const searchResult = applyCodeSearch(view, query);
-  meta.textContent = buildSearchMeta(countLines(text), "pretty", searchResult.count);
+  meta.innerHTML = buildSearchMeta(countLines(text), "pretty", searchResult.count);
 }
 
 function syncReplayToolbar(tab) {
@@ -3048,7 +3098,6 @@ function renderMatchReplaceRules() {
   if (!selected) {
     els.matchReplaceEditorPath.textContent = "Rule";
     els.matchReplaceEditorTitle.textContent = "New rule";
-    els.matchReplaceEnabled.checked = true;
     els.matchReplaceDescription.value = "";
     els.matchReplaceScope.value = "request";
     els.matchReplaceTarget.value = "any";
@@ -3057,13 +3106,12 @@ function renderMatchReplaceRules() {
     els.matchReplaceRegex.checked = false;
     els.matchReplaceCaseSensitive.checked = false;
     els.deleteMatchReplaceRuleButton.disabled = true;
-    els.saveMatchReplaceRuleButton.textContent = "Add";
+    els.saveMatchReplaceRuleButton.textContent = "Save";
     return;
   }
 
   els.matchReplaceEditorPath.textContent = `${selected.scope} / ${selected.target}`;
   els.matchReplaceEditorTitle.textContent = selected.description || "Edit rule";
-  els.matchReplaceEnabled.checked = Boolean(selected.enabled);
   els.matchReplaceDescription.value = selected.description || "";
   els.matchReplaceScope.value = selected.scope;
   els.matchReplaceTarget.value = selected.target;
@@ -3209,7 +3257,6 @@ function syncMatchReplaceEditor() {
     return;
   }
 
-  rule.enabled = els.matchReplaceEnabled.checked;
   rule.description = els.matchReplaceDescription.value.trim();
   rule.scope = els.matchReplaceScope.value;
   rule.target = els.matchReplaceTarget.value;
@@ -3386,6 +3433,7 @@ async function saveProxySettings() {
     body: JSON.stringify({
       intercept_enabled: els.proxySettingIntercept.checked,
       websocket_capture_enabled: els.proxySettingWebsocketCapture.checked,
+      upstream_insecure: els.proxySettingUpstreamInsecure.checked,
       scope_patterns: scopePatterns,
       passthrough_hosts: passthroughHosts,
     }),
@@ -3581,6 +3629,143 @@ async function sendReplay() {
     notice: "",
     target,
   });
+  scheduleWorkspaceStateSave();
+  renderReplay();
+  scheduleRefresh();
+}
+
+async function followRedirect() {
+  const tab = getActiveReplayTab();
+  if (!tab || !tab.responseRecord) return;
+
+  const resp = tab.responseRecord.response;
+  if (!resp) return;
+
+  const status = tab.responseRecord.status;
+  const locationHeader = resp.headers.find((h) => h.name.toLowerCase() === "location");
+  if (!locationHeader) return;
+
+  // Parse location URL
+  const location = locationHeader.value;
+  let newScheme = tab.targetScheme;
+  let newHost = tab.targetHost;
+  let newPort = tab.targetPort;
+  let newPath = location;
+
+  if (/^https?:\/\//i.test(location)) {
+    try {
+      const url = new URL(location);
+      newScheme = url.protocol.replace(":", "");
+      newHost = url.hostname;
+      newPort = url.port || (newScheme === "https" ? "443" : "80");
+      newPath = `${url.pathname || "/"}${url.search || ""}`;
+    } catch (_) {
+      newPath = location;
+    }
+  } else if (location.startsWith("/")) {
+    newPath = location;
+  } else {
+    // Relative path
+    const currentPath = tab.baseRequest?.path || "/";
+    const base = currentPath.substring(0, currentPath.lastIndexOf("/") + 1);
+    newPath = base + location;
+  }
+
+  // Build new request from current request
+  const fallback = tab.baseRequest || createDefaultEditableRequest();
+  const currentRequest = parseEditableRawRequest(els.replayRequestEditor.value, fallback);
+
+  // 301/302/303 → GET (drop body), 307/308 → keep method
+  const useGet = status === 301 || status === 302 || status === 303;
+  const newMethod = useGet ? "GET" : currentRequest.method;
+  const newBody = useGet ? "" : currentRequest.body;
+
+  // Collect Set-Cookie from response
+  const setCookies = resp.headers
+    .filter((h) => h.name.toLowerCase() === "set-cookie")
+    .map((h) => {
+      // Extract just the cookie name=value (before ;)
+      const raw = h.value.split(";")[0].trim();
+      return raw;
+    })
+    .filter(Boolean);
+
+  // Merge with existing cookies
+  let existingCookies = [];
+  const cookieHeader = currentRequest.headers.find((h) => h.name.toLowerCase() === "cookie");
+  if (cookieHeader) {
+    existingCookies = cookieHeader.value.split(";").map((c) => c.trim()).filter(Boolean);
+  }
+
+  // Override existing cookies with new ones (by name)
+  const cookieMap = new Map();
+  for (const c of existingCookies) {
+    const eqIdx = c.indexOf("=");
+    const name = eqIdx > 0 ? c.substring(0, eqIdx) : c;
+    cookieMap.set(name, c);
+  }
+  for (const c of setCookies) {
+    const eqIdx = c.indexOf("=");
+    const name = eqIdx > 0 ? c.substring(0, eqIdx) : c;
+    cookieMap.set(name, c);
+  }
+
+  // Build new headers
+  const newHeaders = currentRequest.headers
+    .filter((h) => h.name.toLowerCase() !== "cookie" && h.name.toLowerCase() !== "host")
+    .map((h) => ({ name: h.name, value: h.value }));
+
+  // Add updated host
+  newHeaders.unshift({ name: "host", value: newHost + (newPort && newPort !== "443" && newPort !== "80" ? `:${newPort}` : "") });
+
+  // Add merged cookies
+  if (cookieMap.size > 0) {
+    newHeaders.push({ name: "cookie", value: Array.from(cookieMap.values()).join("; ") });
+  }
+
+  const newRequest = {
+    scheme: newScheme,
+    host: newHost,
+    method: newMethod,
+    path: newPath,
+    headers: newHeaders,
+    body: newBody,
+    body_encoding: "utf8",
+    preview_truncated: false,
+  };
+
+  // Update tab target
+  tab.targetScheme = newScheme;
+  tab.targetHost = newHost;
+  tab.targetPort = newPort;
+
+  // Build raw request text and set in editor
+  const requestText = buildEditableRawRequest(newRequest);
+  tab.requestText = requestText;
+  tab.baseRequest = cloneEditableRequest(newRequest);
+  els.replayRequestEditor.value = requestText;
+  renderReplayRequestHighlight(requestText);
+
+  // Send the follow request
+  const target = { scheme: newScheme, host: newHost, port: newPort };
+  const response = await fetch("/api/replay/send", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ request: newRequest, target, source_transaction_id: tab.sourceTransactionId }),
+  });
+
+  if (!response.ok) {
+    tab.responseRecord = null;
+    tab.notice = await response.text();
+    recordRepeaterHistory(tab, { request: newRequest, requestText, responseRecord: null, notice: tab.notice, target });
+    scheduleWorkspaceStateSave();
+    renderReplay();
+    return;
+  }
+
+  tab.notice = "";
+  tab.responseRecord = await response.json();
+  recordRepeaterHistory(tab, { request: newRequest, requestText, responseRecord: tab.responseRecord, notice: "", target });
   scheduleWorkspaceStateSave();
   renderReplay();
   scheduleRefresh();
@@ -4441,30 +4626,16 @@ function applyFilterSettings() {
   scheduleRefresh();
 }
 
-async function downloadCertificate(format) {
-  const path = format === "pem"
-    ? state.settings.certificate.pem_download_path
-    : state.settings.certificate.der_download_path;
-  const filename = format === "pem" ? "sniper-root-ca.pem" : "sniper-root-ca.der";
-  const response = await fetch(path);
-  const blob = await response.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = objectUrl;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(objectUrl);
+async function openCertificateFolder() {
+  try {
+    await fetch("/api/certificates/reveal", { method: "POST" });
+  } catch (error) {
+    console.error("Failed to open certificate folder:", error);
+  }
 }
 
 function buildMessagePresentation(target, record) {
   const mode = state.messageViews[target];
-
-  if (mode === "diff") {
-    return buildDiffPresentation(target, record);
-  }
-
   const text = target === "request" ? buildRawRequest(record) : buildRawResponse(record);
 
   if (mode === "hex") {
@@ -4493,37 +4664,20 @@ function buildDiffPresentation(target, record) {
   } else {
     fakeOriginal.response = original;
   }
-  const originalText = target === "request" ? buildRawRequest(fakeOriginal) : buildRawResponse(fakeOriginal);
-  const modifiedText = target === "request" ? buildRawRequest(record) : buildRawResponse(record);
-
-  const originalLines = originalText.split("\n");
-  const modifiedLines = modifiedText.split("\n");
-  const result = [];
-  const maxLen = Math.max(originalLines.length, modifiedLines.length);
-
-  result.push("--- Original");
-  result.push("+++ Modified");
-  result.push("");
-
-  for (let i = 0; i < maxLen; i++) {
-    const oLine = i < originalLines.length ? originalLines[i] : undefined;
-    const mLine = i < modifiedLines.length ? modifiedLines[i] : undefined;
-    if (oLine === mLine) {
-      result.push("  " + (oLine ?? ""));
-    } else {
-      if (oLine !== undefined) result.push("- " + oLine);
-      if (mLine !== undefined) result.push("+ " + mLine);
-    }
-  }
-
-  return result.join("\n");
+  return target === "request" ? buildRawRequest(fakeOriginal) : buildRawResponse(fakeOriginal);
 }
 
 function buildRawRequest(record) {
   const startLine = record.kind === "tunnel"
     ? `CONNECT ${record.host} HTTP/1.1`
     : `${record.method} ${record.path || "/"} HTTP/1.1`;
-  const headers = mergeHeaders(record.request.headers)
+  const merged = mergeHeaders(record.request.headers);
+  // Ensure a host header is present — the proxy stores the host separately
+  // and some tunnelled HTTPS requests omit Host from the captured headers.
+  if (record.host && !merged.some((h) => h.name.toLowerCase() === "host")) {
+    merged.unshift({ name: "host", value: record.host });
+  }
+  const headers = merged
     .map((header) => `${header.name}: ${header.value}`)
     .join("\n");
   const body = renderBody(record.request);
@@ -5462,8 +5616,35 @@ function clearSearchHighlights(viewElement) {
 }
 
 function buildSearchMeta(lineCount, mode, matchCount) {
-  const searchCopy = matchCount ? `${matchCount} highlight${matchCount === 1 ? "" : "s"}` : "No highlights";
+  const searchCopy = matchCount
+    ? `<span class="search-hit-count">${matchCount} highlight${matchCount === 1 ? "" : "s"}</span>`
+    : "No highlights";
   return `${searchCopy} · ${lineCount} lines · ${titleCase(mode)} view`;
+}
+
+function initSearchHitNavigation(metaElement, getViewFn) {
+  if (!metaElement) return;
+  let currentIndex = -1;
+  metaElement.addEventListener("click", (e) => {
+    if (!e.target.closest(".search-hit-count")) return;
+    const view = getViewFn();
+    if (!view) return;
+    const marks = view.querySelectorAll("mark.search-hit");
+    if (!marks.length) return;
+    // Remove active class from previous
+    const prev = view.querySelector("mark.search-hit-active");
+    if (prev) prev.classList.remove("search-hit-active");
+    // Advance to next
+    currentIndex = (currentIndex + 1) % marks.length;
+    const target = marks[currentIndex];
+    target.classList.add("search-hit-active");
+    // Scroll the view container to bring the match into view
+    const container = target.closest(".code-view, .simple-code-view, .replay-highlight-editable, .replay-response-view") || view;
+    const targetTop = target.offsetTop - container.offsetTop;
+    container.scrollTop = Math.max(targetTop - 40, 0);
+  });
+  // Reset index when search changes (observer on innerHTML changes)
+  new MutationObserver(() => { currentIndex = -1; }).observe(metaElement, { childList: true, subtree: true });
 }
 
 function clamp(value, min, max) {

@@ -97,6 +97,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/certificates/root.pem", get(download_root_pem))
         .route("/api/certificates/root.der", get(download_root_der))
+        .route("/api/certificates/reveal", post(reveal_certificate_folder))
         .route(
             "/api/match-replace",
             get(list_match_replace_rules).post(update_match_replace_rules),
@@ -394,6 +395,16 @@ async fn download_root_der(State(state): State<Arc<AppState>>) -> Response {
         "application/pkix-cert",
         "attachment; filename=\"sniper-root-ca.der\"",
     )
+}
+
+async fn reveal_certificate_folder(
+    State(state): State<Arc<AppState>>,
+) -> StatusCode {
+    let export = state.certificates.export();
+    let _ = std::process::Command::new("open")
+        .args(["-R", &export.pem_path])
+        .spawn();
+    StatusCode::NO_CONTENT
 }
 
 async fn list_match_replace_rules(
@@ -940,7 +951,6 @@ mod tests {
             ui_addr: "127.0.0.1:0".parse().unwrap(),
             max_entries: 100,
             body_preview_bytes: 4096,
-            upstream_insecure: false,
             data_dir: std::env::temp_dir()
                 .join(format!("sniper-test-target-notes-{}", uuid::Uuid::new_v4())),
         };

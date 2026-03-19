@@ -186,12 +186,17 @@
           <section class="lower-workbench" id="lowerWorkbench">
             <section class="message-column request-column" id="requestColumn">
               <header class="pane-header">
-                <strong>Request</strong>
+                <span class="pane-title-group">
+                  <strong>Request</strong>
+                  <span class="mr-toggle hidden" id="requestMrToggle">
+                    <button class="mr-btn active" data-target="request" data-mr="modified">Modified</button>
+                    <button class="mr-btn" data-target="request" data-mr="original">Original</button>
+                  </span>
+                </span>
                 <div class="view-tabs">
                   <button class="view-tab active" data-target="request" data-view="pretty">Pretty</button>
                   <button class="view-tab" data-target="request" data-view="raw">Raw</button>
                   <button class="view-tab" data-target="request" data-view="hex">Hex</button>
-                  <button class="view-tab diff-tab hidden" data-target="request" data-view="diff">Diff</button>
                 </div>
               </header>
               <div class="editor-shell">
@@ -210,12 +215,17 @@
 
             <section class="message-column response-column" id="responseColumn">
               <header class="pane-header">
-                <strong>Response</strong>
+                <span class="pane-title-group">
+                  <strong>Response</strong>
+                  <span class="mr-toggle hidden" id="responseMrToggle">
+                    <button class="mr-btn active" data-target="response" data-mr="modified">Modified</button>
+                    <button class="mr-btn" data-target="response" data-mr="original">Original</button>
+                  </span>
+                </span>
                 <div class="view-tabs">
                   <button class="view-tab active" data-target="response" data-view="pretty">Pretty</button>
                   <button class="view-tab" data-target="response" data-view="raw">Raw</button>
                   <button class="view-tab" data-target="response" data-view="hex">Hex</button>
-                  <button class="view-tab diff-tab hidden" data-target="response" data-view="diff">Diff</button>
                 </div>
               </header>
               <div class="editor-shell">
@@ -288,13 +298,12 @@
                 <header class="panel-toolbar">
                   <div>
                     <p class="placeholder-kicker">Request hold</p>
-                    <h2>Held requests</h2>
+                    <h2>Requests</h2>
                   </div>
                   <div class="toolbar-actions">
                     <button class="toggle-pill" id="interceptStatus" type="button">
-                      Intercept is off
+                      Off
                     </button>
-                    <button class="secondary-action" id="refreshInterceptsButton" type="button">Refresh</button>
                   </div>
                 </header>
                 <div class="history-table-shell">
@@ -431,6 +440,7 @@
                     <h2>Replace rules</h2>
                   </div>
                   <div class="toolbar-actions">
+                    <button class="accent-action" id="addMatchReplaceRuleButton" type="button">Add</button>
                     <button class="danger-action" id="deleteMatchReplaceRuleButton" type="button" disabled>Delete</button>
                   </div>
                 </header>
@@ -460,10 +470,6 @@
                   </div>
                 </header>
                 <div class="settings-form">
-                  <label class="settings-toggle">
-                    <input id="matchReplaceEnabled" type="checkbox" />
-                    <span>Rule enabled</span>
-                  </label>
                   <label class="settings-field">
                     <span>Description</span>
                     <input id="matchReplaceDescription" type="text" placeholder="Rewrite a staging hostname or remove a debug header" />
@@ -528,6 +534,10 @@
                     <input id="proxySettingWebsocketCapture" type="checkbox" />
                     <span>Capture WebSocket sessions and frames</span>
                   </label>
+                  <label class="settings-toggle">
+                    <input id="proxySettingUpstreamInsecure" type="checkbox" />
+                    <span>Accept invalid upstream TLS certificates</span>
+                  </label>
                   <label class="settings-field">
                     <span>Scope patterns</span>
                     <textarea id="proxySettingScopePatterns" rows="6" placeholder="*.example.com&#10;api.example.com"></textarea>
@@ -563,8 +573,7 @@
                     <h2>Runtime details</h2>
                   </div>
                   <div class="toolbar-actions">
-                    <button class="secondary-action" id="proxySettingsPemButton" type="button">Export PEM</button>
-                    <button class="secondary-action" id="proxySettingsDerButton" type="button">Export DER</button>
+                    <button class="secondary-action" id="openCertFolderButton" type="button">Root CA</button>
                   </div>
                 </header>
                 <dl class="modal-list runtime-list">
@@ -612,6 +621,7 @@
               <button class="secondary-action" id="resetReplayButton" type="button">Reset</button>
               <button class="secondary-action replay-history-button" id="replayBackButton" type="button" aria-label="Previous replay history">&lt;</button>
               <button class="secondary-action replay-history-button" id="replayForwardButton" type="button" aria-label="Next replay history">&gt;</button>
+              <button class="accent-action hidden" id="replayFollowRedirectButton" type="button">Follow</button>
             </div>
             <div class="replay-target-cluster">
               <div class="replay-target-bar">
@@ -1038,8 +1048,6 @@
               <div class="filter-group-header">
                 <h3>Certificate authority</h3>
                 <div class="filter-group-actions">
-                  <button class="secondary-action" id="downloadPemButton" type="button">Export PEM</button>
-                  <button class="secondary-action" id="downloadDerButton" type="button">Export DER</button>
                 </div>
               </div>
               <p class="modal-copy" id="certificateNote">

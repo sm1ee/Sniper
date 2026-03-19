@@ -18,7 +18,6 @@ pub struct AppConfig {
     pub ui_addr: SocketAddr,
     pub max_entries: usize,
     pub body_preview_bytes: usize,
-    pub upstream_insecure: bool,
     pub data_dir: PathBuf,
 }
 
@@ -43,7 +42,6 @@ impl AppConfig {
             ui_addr: parse_socket_addr("SNIPER_UI_ADDR", ui_default)?,
             max_entries: parse_usize("SNIPER_MAX_ENTRIES", 500)?,
             body_preview_bytes: parse_usize("SNIPER_BODY_PREVIEW_BYTES", 65_536)?,
-            upstream_insecure: parse_bool("SNIPER_UPSTREAM_INSECURE", false)?,
             data_dir,
         })
     }
@@ -161,17 +159,6 @@ fn parse_usize(name: &str, default: usize) -> Result<usize> {
     value
         .parse()
         .with_context(|| format!("failed to parse {name}={value} as usize"))
-}
-
-fn parse_bool(name: &str, default: bool) -> Result<bool> {
-    let value = env::var(name).unwrap_or_else(|_| default.to_string());
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => Err(anyhow::anyhow!(
-            "failed to parse {name}={value} as bool (expected true/false)"
-        )),
-    }
 }
 
 fn resolve_proxy_addr(data_dir: &Path, startup: &StartupSettingsSnapshot) -> Result<SocketAddr> {

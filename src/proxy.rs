@@ -205,17 +205,14 @@ pub async fn rebind_proxy(
 }
 
 pub async fn serve_proxy(listener: TcpListener, state: Arc<AppState>) -> Result<()> {
-    let client = build_client(state.config.upstream_insecure);
-
     loop {
         let (stream, peer_addr) = listener.accept().await.context("proxy accept failed")?;
         let io = TokioIo::new(stream);
         let state = state.clone();
-        let client = client.clone();
 
         tokio::spawn(async move {
             let service = service_fn(move |request| {
-                handle_request(request, state.clone(), client.clone(), peer_addr)
+                handle_request(request, state.clone(), peer_addr)
             });
 
             if let Err(error) = http1::Builder::new()
@@ -250,8 +247,9 @@ pub async fn send_replay_request(
     let started = Instant::now();
     let (request, mut notes, original_request_capture) = apply_request_match_replace(session.as_ref(), request, state.config.body_preview_bytes).await;
     let request = build_replay_exchange_request(&request, target.as_ref())?;
+    let upstream_insecure = session.runtime.upstream_insecure().await;
     let client =
-        build_replay_client(state.config.upstream_insecure, &request, target.as_ref()).await?;
+        build_replay_client(upstream_insecure, &request, target.as_ref()).await?;
     notes.push("Sent from Replay.".to_string());
     let exchange = execute_http_exchange(
         state.clone(),
@@ -412,14 +410,13 @@ struct ParsedAuthority {
 async fn handle_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
-    client: ProxyClient,
     peer_addr: SocketAddr,
 ) -> Result<Response<Body>, Infallible> {
     let session = state.session().await;
     let response = if request.method() == Method::CONNECT {
-        handle_connect(request, state, session, client, peer_addr).await
+        handle_connect(request, state, session, peer_addr).await
     } else {
-        handle_http(request, state, session, client, peer_addr).await
+        handle_http(request, state, session, peer_addr).await
     };
 
     Ok(response)
@@ -429,7 +426,6 @@ async fn handle_connect(
     request: Request<Incoming>,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
-    client: ProxyClient,
     peer_addr: SocketAddr,
 ) -> Response<Body> {
     let started_at = Utc::now();
@@ -497,7 +493,6 @@ async fn handle_connect(
                 upgrade,
                 state.clone(),
                 session.clone(),
-                client,
                 target,
                 request_capture,
                 started_at,
@@ -538,11 +533,10 @@ async fn handle_http(
     request: Request<Incoming>,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
-    client: ProxyClient,
     peer_addr: SocketAddr,
 ) -> Response<Body> {
     handle_forwardable_request(
-        request, state, session, client, peer_addr, "http", None, false,
+        request, state, session, peer_addr, "http", None, false,
     )
     .await
 }
@@ -551,7 +545,6 @@ async fn handle_forwardable_request(
     mut request: Request<Incoming>,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
-    client: ProxyClient,
     peer_addr: SocketAddr,
     default_scheme: &str,
     authority_override: Option<String>,
@@ -601,7 +594,6 @@ async fn handle_forwardable_request(
         absolute_uri,
         state,
         session,
-        client,
         peer_addr,
         started_at,
         started,
@@ -855,7 +847,6 @@ async fn serve_https_mitm(
     upgrade: hyper::upgrade::OnUpgrade,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
-    client: ProxyClient,
     target: String,
     connect_capture: MessageRecord,
     started_at: chrono::DateTime<Utc>,
@@ -901,7 +892,6 @@ async fn serve_https_mitm(
             request,
             state.clone(),
             session.clone(),
-            client.clone(),
             peer_addr,
             connect_authority.clone(),
         )
@@ -970,7 +960,6 @@ async fn handle_https_mitm_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
-    client: ProxyClient,
     peer_addr: SocketAddr,
     connect_authority: String,
 ) -> Result<Response<Body>, Infallible> {
@@ -978,7 +967,6 @@ async fn handle_https_mitm_request(
         request,
         state,
         session,
-        client,
         peer_addr,
         "https",
         Some(connect_authority),
@@ -993,7 +981,6 @@ async fn forward_http_request(
     absolute_uri: Uri,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
-    client: ProxyClient,
     peer_addr: SocketAddr,
     started_at: chrono::DateTime<Utc>,
     started: Instant,
@@ -1026,6 +1013,7 @@ async fn forward_http_request(
     let (forwarded_request, notes, original_request_capture) =
         apply_request_match_replace(session.as_ref(), intercepted_request, state.config.body_preview_bytes).await;
 
+    let client = build_client(session.runtime.upstream_insecure().await);
     let exchange = execute_http_exchange(
         state.clone(),
         session.clone(),
@@ -1088,7 +1076,7 @@ async fn forward_websocket_request(
         apply_request_match_replace(session.as_ref(), forwarded_request, state.config.body_preview_bytes).await;
 
     if !is_websocket_upgrade_editable(&forwarded_request) {
-        let client = build_client(state.config.upstream_insecure);
+        let client = build_client(session.runtime.upstream_insecure().await);
         let exchange = execute_http_exchange(
             state.clone(),
             session.clone(),
@@ -1117,7 +1105,7 @@ async fn forward_websocket_request(
         let exchange = execute_http_exchange(
             state.clone(),
             session.clone(),
-            &build_client(state.config.upstream_insecure),
+            &build_client(session.runtime.upstream_insecure().await),
             forwarded_request,
             started_at,
             started,
