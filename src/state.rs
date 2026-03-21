@@ -245,6 +245,7 @@ impl AppState {
                 env!("CARGO_PKG_VERSION"),
                 APP_RELEASES_URL
             ))
+            .no_proxy()
             .build()
             .context("failed to build GitHub releases client")?;
 
@@ -293,6 +294,7 @@ impl AppState {
                 env!("CARGO_PKG_VERSION"),
                 APP_RELEASES_URL
             ))
+            .no_proxy()
             .build()
             .context("failed to build HTTP client")?;
 
