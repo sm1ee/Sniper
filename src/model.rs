@@ -138,8 +138,14 @@ impl MessageRecord {
         let content_type = headers
             .get(http::header::CONTENT_TYPE)
             .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
-        let preview_len = max_preview.min(body.len());
-        let preview_bytes = &body[..preview_len];
+
+        // Decompress body based on Content-Encoding header
+        let decoded_body = decode_content_encoding(headers, body);
+        let body_ref = decoded_body.as_deref().unwrap_or(body);
+        let original_size = body_ref.len();
+
+        let preview_len = max_preview.min(body_ref.len());
+        let preview_bytes = &body_ref[..preview_len];
         let textual = is_textual_body(content_type.as_deref(), preview_bytes);
         let body_preview = if textual {
             String::from_utf8_lossy(preview_bytes).into_owned()
@@ -155,8 +161,8 @@ impl MessageRecord {
             } else {
                 BodyEncoding::Base64
             },
-            body_size: body.len(),
-            preview_truncated: body.len() > max_preview,
+            body_size: original_size,
+            preview_truncated: original_size > max_preview,
             content_type,
         }
     }
@@ -433,6 +439,45 @@ fn header_records(headers: &HeaderMap) -> Vec<HeaderRecord> {
             value: String::from_utf8_lossy(value.as_bytes()).into_owned(),
         })
         .collect()
+}
+
+fn decode_content_encoding(headers: &HeaderMap, body: &[u8]) -> Option<Vec<u8>> {
+    if body.is_empty() {
+        return None;
+    }
+    let encoding = headers
+        .get(http::header::CONTENT_ENCODING)?
+        .to_str()
+        .ok()?
+        .to_ascii_lowercase();
+
+    let result = match encoding.as_str() {
+        "gzip" | "x-gzip" => {
+            use std::io::Read;
+            let mut decoder = flate2::read::GzDecoder::new(body);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).ok()?;
+            out
+        }
+        "deflate" => {
+            use std::io::Read;
+            let mut decoder = flate2::read::DeflateDecoder::new(body);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).ok()?;
+            out
+        }
+        "br" => {
+            let mut out = Vec::new();
+            brotli::BrotliDecompress(&mut std::io::Cursor::new(body), &mut out).ok()?;
+            out
+        }
+        "zstd" | "zstandard" => {
+            zstd::decode_all(std::io::Cursor::new(body)).ok()?
+        }
+        _ => return None,
+    };
+
+    Some(result)
 }
 
 fn is_textual_body(content_type: Option<&str>, sample: &[u8]) -> bool {

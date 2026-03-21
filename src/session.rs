@@ -106,7 +106,6 @@ impl SessionContext {
             storage_dir,
             max_entries,
             store: Arc::new(TransactionStore::from_records(
-                max_entries,
                 snapshot.transactions,
             )),
             runtime: Arc::new(RuntimeSettings::from_snapshot(snapshot.runtime)),
@@ -327,6 +326,34 @@ impl SessionRegistry {
         };
         *existing = metadata;
         write_json(&self.registry_path, &*registry)
+    }
+
+    pub fn delete_session(&self, id: Uuid) -> Result<()> {
+        let mut registry = self.inner.write().expect("session registry lock poisoned");
+        if registry.active_session_id == id {
+            return Err(anyhow!("cannot delete the active session"));
+        }
+        let index = registry
+            .sessions
+            .iter()
+            .position(|session| session.id == id)
+            .ok_or_else(|| anyhow!("session {id} was not found"))?;
+        registry.sessions.remove(index);
+        write_json(&self.registry_path, &*registry)?;
+
+        let storage_dir = session_dir(&self.root_dir, id);
+        if storage_dir.exists() {
+            let _ = fs::remove_dir_all(&storage_dir);
+        }
+        Ok(())
+    }
+
+    pub fn session_storage_path(&self, id: Uuid) -> Result<PathBuf> {
+        let registry = self.inner.read().expect("session registry lock poisoned");
+        if !registry.sessions.iter().any(|s| s.id == id) {
+            return Err(anyhow!("session {id} was not found"));
+        }
+        Ok(session_dir(&self.root_dir, id))
     }
 
     pub fn load_context(&self, id: Uuid) -> Result<Arc<SessionContext>> {

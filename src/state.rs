@@ -21,9 +21,10 @@ use crate::{
     event_log::EventLevel,
     session::{SessionContext, SessionRegistry, SessionSummary},
     ui_settings::AppUiSettingsStore,
+    ws_replay::WsReplayStore,
 };
 
-const MAX_WEBSOCKET_FRAMES_PER_SESSION: usize = 200;
+const MAX_WEBSOCKET_FRAMES_PER_SESSION: usize = 50_000;
 const APP_RELEASES_URL: &str = "https://github.com/sm1ee/Sniper/releases";
 const APP_LATEST_RELEASE_API_URL: &str =
     "https://api.github.com/repos/sm1ee/Sniper/releases/latest";
@@ -44,6 +45,8 @@ pub struct AppState {
     pub active_proxy_addr: Arc<RwLock<SocketAddr>>,
     /// Handle for the running proxy task so it can be aborted on rebind.
     proxy_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// WebSocket replay connections.
+    pub ws_replay: Arc<WsReplayStore>,
 }
 
 impl AppState {
@@ -72,6 +75,7 @@ impl AppState {
             app_version_cache: Arc::new(RwLock::new(None)),
             active_proxy_addr: Arc::new(RwLock::new(active_proxy_addr)),
             proxy_task: Arc::new(RwLock::new(None)),
+            ws_replay: Arc::new(WsReplayStore::new()),
         })
     }
 
@@ -114,6 +118,14 @@ impl AppState {
         let session = self.sessions.load_context(id)?;
         *self.active_session.write().await = session.clone();
         Ok(session.summary(metadata.id == self.sessions.active_session_id()))
+    }
+
+    pub fn delete_session(&self, id: uuid::Uuid) -> Result<()> {
+        self.sessions.delete_session(id)
+    }
+
+    pub fn session_storage_path(&self, id: uuid::Uuid) -> Result<std::path::PathBuf> {
+        self.sessions.session_storage_path(id)
     }
 
     pub async fn persist_active_session(&self) -> Result<SessionSummary> {
@@ -424,14 +436,25 @@ impl AppState {
 
         tx.send(UpdateProgress::step("Restarting...")).await.ok();
 
-        // Launch the new app and exit
-        let _ = Command::new("open")
-            .args(["-n", "-a"])
-            .arg(&app_bundle)
+        // Spawn a background shell that waits for this process to exit,
+        // then launches the updated app. This avoids port conflicts where
+        // the new process starts while the old one still holds the port.
+        let pid = std::process::id();
+        let bundle = app_bundle.display().to_string();
+        let _ = Command::new("sh")
+            .args([
+                "-c",
+                &format!(
+                    "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; sleep 0.5; open -a '{bundle}'"
+                ),
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn();
 
         tokio::spawn(async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
             std::process::exit(0);
         });
 

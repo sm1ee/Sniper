@@ -14,25 +14,22 @@ pub struct ListFilters {
 }
 
 pub struct TransactionStore {
-    max_entries: usize,
     entries: RwLock<VecDeque<TransactionRecord>>,
     events: broadcast::Sender<TransactionSummary>,
     next_sequence: AtomicU64,
 }
 
 impl TransactionStore {
-    pub fn new(max_entries: usize) -> Self {
-        Self::from_records(max_entries, Vec::new())
+    pub fn new() -> Self {
+        Self::from_records(Vec::new())
     }
 
-    pub fn from_records(max_entries: usize, records: Vec<TransactionRecord>) -> Self {
-        let (events, _) = broadcast::channel(max_entries.max(32));
-        let mut entries = VecDeque::with_capacity(max_entries);
-        entries.extend(records.into_iter().take(max_entries));
+    pub fn from_records(records: Vec<TransactionRecord>) -> Self {
+        let (events, _) = broadcast::channel(256);
+        let mut entries = VecDeque::from(records);
         // Resume sequence from the highest existing number.
         let max_seq = entries.iter().map(|r| r.sequence).max().unwrap_or(0);
         Self {
-            max_entries,
             entries: RwLock::new(entries),
             events,
             next_sequence: AtomicU64::new(max_seq + 1),
@@ -44,11 +41,6 @@ impl TransactionStore {
         let summary = record.summary();
         let mut entries = self.entries.write().await;
         entries.push_front(record);
-
-        while entries.len() > self.max_entries {
-            entries.pop_back();
-        }
-
         let _ = self.events.send(summary);
     }
 
@@ -61,15 +53,19 @@ impl TransactionStore {
             .method
             .as_ref()
             .map(|value| value.to_ascii_uppercase());
-        let limit = filters.limit.unwrap_or(100).min(self.max_entries);
+        let limit = filters.limit.unwrap_or(5000);
         let entries = self.entries.read().await;
 
-        entries
+        let filtered = entries
             .iter()
-            .filter(|record| matches_filters(record, query.as_deref(), method.as_deref()))
-            .take(limit)
-            .map(TransactionRecord::summary)
-            .collect()
+            .filter(|record| matches_filters(record, query.as_deref(), method.as_deref()));
+
+        if limit == 0 {
+            // limit=0 means unlimited
+            filtered.map(TransactionRecord::summary).collect()
+        } else {
+            filtered.take(limit).map(TransactionRecord::summary).collect()
+        }
     }
 
     pub async fn get(&self, id: Uuid) -> Option<TransactionRecord> {
@@ -79,11 +75,10 @@ impl TransactionStore {
 
     pub async fn snapshot(&self, limit: Option<usize>) -> Vec<TransactionRecord> {
         let entries = self.entries.read().await;
-        entries
-            .iter()
-            .take(limit.unwrap_or(self.max_entries).min(self.max_entries))
-            .cloned()
-            .collect()
+        match limit {
+            Some(n) => entries.iter().take(n).cloned().collect(),
+            None => entries.iter().cloned().collect(),
+        }
     }
 
     pub async fn update_annotations(
@@ -106,7 +101,7 @@ impl TransactionStore {
     pub async fn replace_all(&self, records: Vec<TransactionRecord>) {
         let mut entries = self.entries.write().await;
         entries.clear();
-        entries.extend(records.into_iter().take(self.max_entries));
+        entries.extend(records);
         let max_seq = entries.iter().map(|r| r.sequence).max().unwrap_or(0);
         self.next_sequence.store(max_seq + 1, Ordering::Relaxed);
     }
@@ -141,7 +136,7 @@ mod tests {
 
     #[tokio::test]
     async fn store_respects_capacity_and_filters() {
-        let store = TransactionStore::new(2);
+        let store = TransactionStore::new();
         let empty_message = MessageRecord {
             headers: Vec::new(),
             body_preview: String::new(),

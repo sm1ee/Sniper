@@ -14,7 +14,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use indexmap::IndexMap;
@@ -37,6 +37,7 @@ use crate::{
     target::{TargetHostNode, TargetPathNode},
     ui_settings::AppUiSettingsSnapshot,
     workspace::WorkspaceStateSnapshot,
+    ws_replay::{WsReplaySnapshot, WsReplayStatus},
 };
 
 #[derive(RustEmbed)]
@@ -75,6 +76,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/self-update", get(self_update))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/:id/activate", post(activate_session))
+        .route("/api/sessions/:id", delete(delete_session))
+        .route("/api/sessions/:id/reveal", post(reveal_session_folder))
         .route(
             "/api/runtime",
             get(get_runtime_settings).post(update_runtime_settings),
@@ -122,6 +125,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/fuzzer/attacks/:id", get(get_fuzzer_attack))
         .route("/api/websockets", get(list_websockets))
         .route("/api/websockets/:id", get(get_websocket))
+        .route("/api/replay/ws-connect", post(ws_replay_connect))
+        .route("/api/replay/ws-send", post(ws_replay_send))
+        .route("/api/replay/ws-disconnect", post(ws_replay_disconnect))
+        .route("/api/replay/ws-snapshot/:id", get(ws_replay_snapshot))
+        .route("/api/replay/ws-frames/:id", get(ws_replay_frames))
         .route("/api/events", get(events))
         .fallback(get(index))
         .with_state(state)
@@ -240,6 +248,37 @@ async fn activate_session(State(state): State<Arc<AppState>>, Path(id): Path<Str
 
     match state.activate_session(id).await {
         Ok(summary) => Json(summary).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
+}
+
+async fn delete_session(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    match state.delete_session(id) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
+}
+
+async fn reveal_session_folder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    match state.session_storage_path(id) {
+        Ok(path) => {
+            let _ = std::process::Command::new("open").arg(&path).spawn();
+            Json(serde_json::json!({ "ok": true, "path": path.display().to_string() }))
+                .into_response()
+        }
         Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
 }
@@ -718,6 +757,136 @@ async fn get_websocket(
         .await
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+// --- WebSocket Replay handlers ---
+
+#[derive(Debug, Deserialize)]
+struct WsReplayConnectPayload {
+    id: Uuid,
+    scheme: String,
+    host: String,
+    port: u16,
+    path: String,
+    headers: Vec<crate::model::HeaderRecord>,
+}
+
+async fn ws_replay_connect(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<WsReplayConnectPayload>,
+) -> Response {
+    let ws_scheme = if payload.scheme == "wss" || payload.scheme == "https" {
+        "wss"
+    } else {
+        "ws"
+    };
+    let url = format!(
+        "{}://{}:{}{}",
+        ws_scheme, payload.host, payload.port, payload.path
+    );
+    let extra_headers: Vec<(String, String)> = payload
+        .headers
+        .iter()
+        .filter(|h| {
+            let lower = h.name.to_lowercase();
+            lower != "connection"
+                && lower != "upgrade"
+                && lower != "sec-websocket-version"
+                && lower != "sec-websocket-key"
+                && lower != "sec-websocket-extensions"
+                && lower != "sec-websocket-accept"
+        })
+        .map(|h| (h.name.clone(), h.value.clone()))
+        .collect();
+
+    match state
+        .ws_replay
+        .connect(payload.id, &url, extra_headers)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WsReplaySendPayload {
+    id: Uuid,
+    body: String,
+    #[serde(default)]
+    binary: bool,
+}
+
+async fn ws_replay_send(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<WsReplaySendPayload>,
+) -> Response {
+    let result = if payload.binary {
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(&payload.body) {
+            Ok(data) => state.ws_replay.send_binary(payload.id, data).await,
+            Err(e) => Err(anyhow::anyhow!("invalid base64: {}", e)),
+        }
+    } else {
+        state.ws_replay.send_text(payload.id, payload.body).await
+    };
+
+    match result {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WsReplayDisconnectPayload {
+    id: Uuid,
+}
+
+async fn ws_replay_disconnect(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<WsReplayDisconnectPayload>,
+) -> Response {
+    match state.ws_replay.disconnect(payload.id).await {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WsFramesSinceQuery {
+    #[serde(default)]
+    since: usize,
+}
+
+async fn ws_replay_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match state.ws_replay.snapshot(id).await {
+        Some(snapshot) => Json(snapshot).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn ws_replay_frames(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<WsFramesSinceQuery>,
+) -> Response {
+    let id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    match state.ws_replay.frames_since(id, query.since).await {
+        Some((status, frames)) => {
+            Json(serde_json::json!({"status": status, "frames": frames})).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn events(

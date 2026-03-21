@@ -39,6 +39,8 @@ pub struct ReplayHistoryEntryState {
 #[serde(default)]
 pub struct ReplayTabState {
     pub id: String,
+    #[serde(rename = "type", default)]
+    pub tab_type: String,
     pub sequence: usize,
     pub base_request: Option<EditableRequest>,
     pub source_transaction_id: Option<Uuid>,
@@ -50,6 +52,23 @@ pub struct ReplayTabState {
     pub target_port: String,
     pub history_entries: Vec<ReplayHistoryEntryState>,
     pub history_index: Option<usize>,
+    #[serde(default)]
+    pub pinned: bool,
+    // WebSocket tab fields
+    #[serde(default)]
+    pub ws_scheme: String,
+    #[serde(default)]
+    pub ws_host: String,
+    #[serde(default)]
+    pub ws_port: serde_json::Value,
+    #[serde(default)]
+    pub ws_path: String,
+    #[serde(default)]
+    pub ws_headers: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub ws_handshake_text: String,
+    #[serde(default)]
+    pub ws_setup_queue: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

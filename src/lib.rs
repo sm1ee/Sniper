@@ -18,6 +18,7 @@ pub mod target;
 pub mod ui_settings;
 pub mod websocket;
 pub mod workspace;
+pub mod ws_replay;
 
 use std::sync::Arc;
 

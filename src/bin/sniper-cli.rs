@@ -944,6 +944,7 @@ async fn open_replay_tab(
         target_port: normalized.port,
         history_entries: Vec::new(),
         history_index: None,
+        ..Default::default()
     };
     workspace.replay.tab_sequence = sequence;
     workspace.replay.active_tab_id = Some(tab.id.clone());

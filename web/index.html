@@ -54,7 +54,7 @@
               </header>
               <dl class="modal-list runtime-list">
                 <dt>Storage path</dt>
-                <dd id="dashboardCurrentSessionPath">Loading...</dd>
+                <dd><span id="dashboardCurrentSessionPath">Loading...</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></dd>
                 <dt>Requests</dt>
                 <dd id="dashboardCurrentSessionRequests">0</dd>
                 <dt>WebSockets</dt>
@@ -107,16 +107,16 @@
               </div>
             </header>
             <div class="history-table-shell">
-              <table class="mini-table">
+              <table class="history-table session-table" id="dashboardSessionsTable">
                 <thead>
                   <tr>
-                    <th>Name</th>
-                    <th>Requests</th>
-                    <th>WebSockets</th>
-                    <th>Events</th>
-                    <th>Rules</th>
-                    <th>Last opened</th>
-                    <th>Status</th>
+                    <th data-sort-key="name">Name</th>
+                    <th data-sort-key="request_count">Requests</th>
+                    <th data-sort-key="websocket_count">WebSockets</th>
+                    <th data-sort-key="event_count">Events</th>
+                    <th data-sort-key="rule_count">Rules</th>
+                    <th data-sort-key="created_at">Created</th>
+                    <th data-sort-key="last_opened_at">Last opened</th>
                     <th>Action</th>
                   </tr>
                 </thead>
@@ -149,7 +149,7 @@
             </button>
 
             <label class="search-box" aria-label="Search history">
-              <input id="searchInput" type="search" placeholder="Host, path, method" />
+              <input id="searchInput" type="search" placeholder="Search" />
             </label>
 
             <label class="select-box select-box-compact" aria-label="Filter method">
@@ -361,13 +361,13 @@
                   <table class="mini-table" id="websocketTable">
                     <thead>
                       <tr>
-                        <th><button class="sort-header ws-sort" data-ws-sort-key="index" type="button">#<span class="sort-indicator">↕</span></button></th>
-                        <th><button class="sort-header ws-sort" data-ws-sort-key="host" type="button">Host<span class="sort-indicator">↕</span></button></th>
-                        <th><button class="sort-header ws-sort" data-ws-sort-key="path" type="button">Path<span class="sort-indicator">↕</span></button></th>
-                        <th><button class="sort-header ws-sort" data-ws-sort-key="status" type="button">Status<span class="sort-indicator">↕</span></button></th>
-                        <th><button class="sort-header ws-sort" data-ws-sort-key="frame_count" type="button">Frames<span class="sort-indicator">↕</span></button></th>
-                        <th><button class="sort-header ws-sort" data-ws-sort-key="duration_ms" type="button">Duration<span class="sort-indicator">↕</span></button></th>
-                        <th><button class="sort-header ws-sort" data-ws-sort-key="started_at" type="button">Time<span class="sort-indicator">↕</span></button></th>
+                        <th class="ws-col-index"><button class="sort-header ws-sort" data-ws-sort-key="index" type="button">#<span class="sort-indicator">↕</span></button><span class="ws-col-resize-handle" data-ws-col-key="index" aria-hidden="true"></span></th>
+                        <th class="ws-col-host"><button class="sort-header ws-sort" data-ws-sort-key="host" type="button">Host<span class="sort-indicator">↕</span></button><span class="ws-col-resize-handle" data-ws-col-key="host" aria-hidden="true"></span></th>
+                        <th class="ws-col-path"><button class="sort-header ws-sort" data-ws-sort-key="path" type="button">Path<span class="sort-indicator">↕</span></button><span class="ws-col-resize-handle" data-ws-col-key="path" aria-hidden="true"></span></th>
+                        <th class="ws-col-status"><button class="sort-header ws-sort" data-ws-sort-key="status" type="button">Status<span class="sort-indicator">↕</span></button><span class="ws-col-resize-handle" data-ws-col-key="status" aria-hidden="true"></span></th>
+                        <th class="ws-col-frame_count"><button class="sort-header ws-sort" data-ws-sort-key="frame_count" type="button">Frames<span class="sort-indicator">↕</span></button><span class="ws-col-resize-handle" data-ws-col-key="frame_count" aria-hidden="true"></span></th>
+                        <th class="ws-col-duration_ms"><button class="sort-header ws-sort" data-ws-sort-key="duration_ms" type="button">Duration<span class="sort-indicator">↕</span></button><span class="ws-col-resize-handle" data-ws-col-key="duration_ms" aria-hidden="true"></span></th>
+                        <th class="ws-col-started_at"><button class="sort-header ws-sort" data-ws-sort-key="started_at" type="button">Time<span class="sort-indicator">↕</span></button><span class="ws-col-resize-handle" data-ws-col-key="started_at" aria-hidden="true"></span></th>
                       </tr>
                     </thead>
                     <tbody id="websocketTableBody"></tbody>
@@ -378,40 +378,40 @@
               <div class="stack-resizer" id="websocketStackResizer" aria-hidden="true"></div>
               <section class="websocket-workbench" id="websocketWorkbench">
                 <section class="panel-card websocket-handshake-column" id="websocketHandshakeColumn">
-                  <header class="panel-toolbar">
-                    <div>
-                      <p class="placeholder-kicker">Handshake</p>
-                      <h2 id="websocketDetailTitle">No session selected</h2>
+                  <header class="panel-toolbar panel-toolbar-compact">
+                    <p class="placeholder-kicker">Handshake</p>
+                    <div class="ws-handshake-tabs">
+                      <button class="ws-tab active" id="wsHandshakeReqBtn" type="button">Request</button>
+                      <button class="ws-tab" id="wsHandshakeResBtn" type="button">Response</button>
                     </div>
+                    <button class="ws-swap-btn" id="wsSwapPanes" type="button" title="Swap panels">⇄</button>
                   </header>
-                  <div class="dual-code-panel">
-                    <div class="simple-code-card">
-                      <h3>Request</h3>
-                      <pre id="websocketRequestView" class="simple-code-view">Select a WebSocket session.</pre>
-                    </div>
-                    <div class="simple-code-card">
-                      <h3>Response</h3>
-                      <pre id="websocketResponseView" class="simple-code-view">No response selected.</pre>
-                    </div>
+                  <div class="editor-shell" style="flex:1;min-height:0">
+                    <div class="code-gutter" id="wsHandshakeLines"></div>
+                    <pre class="code-view" id="websocketRequestView" tabindex="0">Select a WebSocket session.</pre>
+                    <pre class="code-view hidden" id="websocketResponseView" tabindex="0">No response selected.</pre>
                   </div>
+                  <footer class="pane-footer">
+                    <label class="pane-search" aria-label="Search handshake">
+                      <input id="wsHandshakeSearchInput" type="search" placeholder="Search handshake" />
+                    </label>
+                    <span id="wsHandshakeSearchMeta">No highlights</span>
+                  </footer>
                 </section>
                 <div class="pane-resizer" id="websocketSplitResizer" aria-hidden="true"></div>
 
                 <section class="panel-card websocket-frames-column" id="websocketFramesColumn">
-                  <header class="panel-toolbar">
-                    <div>
-                      <p class="placeholder-kicker">Frames</p>
-                      <h2>Captured frames</h2>
-                    </div>
+                  <header class="panel-toolbar panel-toolbar-compact">
+                    <p class="placeholder-kicker">Frames</p>
                   </header>
                   <div class="history-table-shell">
                     <table class="mini-table frame-table">
                       <thead>
                         <tr>
-                          <th>#</th>
-                          <th>Direction</th>
-                          <th>Kind</th>
-                          <th>Size</th>
+                          <th class="cell-narrow">#</th>
+                          <th class="cell-narrow"></th>
+                          <th class="cell-narrow">Kind</th>
+                          <th class="cell-narrow">Size</th>
                           <th>Preview</th>
                         </tr>
                       </thead>
@@ -422,7 +422,7 @@
                   <div class="frame-detail-panel hidden" id="frameDetailPanel">
                     <header class="frame-detail-header">
                       <div class="frame-detail-meta" id="frameDetailMeta"></div>
-                      <button class="icon-button" id="frameDetailClose" type="button" title="Close">&times;</button>
+                      <button class="frame-detail-close" id="frameDetailClose" type="button" title="Close">&times;</button>
                     </header>
                     <pre class="simple-code-view frame-detail-body" id="frameDetailBody"></pre>
                   </div>
@@ -615,7 +615,7 @@
             <button class="utility-button replay-tab-add" id="newReplayTabButton" type="button" aria-label="New replay tab">+</button>
           </div>
 
-          <header class="replay-toolbar">
+          <header class="replay-toolbar" id="httpReplayToolbar">
             <div class="replay-toolbar-actions">
               <button class="primary-action replay-send-button" id="sendReplayButton" type="button">Send</button>
               <button class="secondary-action" id="resetReplayButton" type="button">Reset</button>
@@ -644,7 +644,7 @@
             </div>
           </header>
 
-          <section class="split-panel replay-workbench">
+          <section class="split-panel replay-workbench" id="httpReplayWorkbench">
             <section class="panel-card">
               <header class="panel-toolbar replay-panel-toolbar">
                 <h2>Request</h2>
@@ -679,6 +679,78 @@
               </footer>
             </section>
           </section>
+
+          <div id="wsReplayPanel" class="ws-replay-panel hidden">
+            <div class="ws-replay-left">
+              <div class="ws-connection-section">
+                <div class="ws-connection-bar">
+                  <select id="wsSchemeSelect" class="compact-field-inline">
+                    <option value="wss">WSS</option>
+                    <option value="ws">WS</option>
+                  </select>
+                  <input id="wsHostInput" class="compact-field-inline ws-host-field" type="text" placeholder="host" />
+                  <input id="wsPortInput" class="compact-field-inline ws-port-field" type="number" placeholder="443" />
+                </div>
+                <div class="ws-path-bar">
+                  <input id="wsPathInput" class="compact-field-inline ws-path-field" type="text" placeholder="/path" />
+                </div>
+                <div class="ws-action-bar">
+                  <div class="ws-action-buttons">
+                    <button class="accent-action" id="wsConnectButton" type="button">Connect</button>
+                    <button class="danger-action" id="wsDisconnectButton" type="button" disabled>Disconnect</button>
+                  </div>
+                  <div class="ws-status-bar">
+                    <span id="wsStatusIndicator" class="ws-status-dot disconnected"></span>
+                    <span id="wsStatusText">Disconnected</span>
+                  </div>
+                </div>
+              </div>
+              <div class="ws-editor-section">
+                <label class="ws-editor-label">MESSAGE</label>
+                <div class="ws-message-highlight-shell">
+                  <textarea id="wsMessageEditor" class="ws-message-editor-hidden" rows="6" spellcheck="false"></textarea>
+                  <pre id="wsMessageHighlight" class="ws-message-highlight" contenteditable="plaintext-only" spellcheck="false" data-placeholder="Type a message..."></pre>
+                </div>
+                <div class="ws-editor-actions">
+                  <button class="primary-action ws-send-button" id="wsSendButton" type="button" disabled>Send</button>
+                  <select id="wsMessageType" class="compact-field-inline ws-type-field">
+                    <option value="text">Text</option>
+                    <option value="binary">Binary</option>
+                  </select>
+                </div>
+              </div>
+              <div id="wsSetupQueue" class="ws-setup-queue hidden">
+                <div class="ws-setup-header">
+                  <span class="field-label">SETUP QUEUE</span>
+                </div>
+                <div id="wsSetupQueueList" class="ws-setup-list"></div>
+              </div>
+              <details class="ws-handshake-section">
+                <summary>Handshake headers</summary>
+                <textarea id="wsHandshakeHeaders" class="ws-handshake-editor" rows="4" placeholder="header-name: value" spellcheck="false"></textarea>
+              </details>
+            </div>
+            <div class="pane-resizer" id="wsReplayPaneResizer" aria-hidden="true"></div>
+            <div class="ws-replay-right">
+              <div class="ws-conversation">
+                <div class="ws-conversation-header">
+                  <span class="ws-conversation-title">Frames</span>
+                  <span id="wsFrameCount" class="search-hit-count">0 frames</span>
+                </div>
+                <div class="ws-frame-list" id="wsFrameList">
+                  <div class="empty-copy">Connect to start a WebSocket conversation.</div>
+                </div>
+              </div>
+              <div class="ws-replay-frame-resizer" id="wsReplayFrameResizer"></div>
+              <div class="ws-frame-detail">
+                <div class="ws-frame-detail-header">
+                  <span id="wsFrameDetailPath" class="ws-frame-detail-meta">DETAIL</span>
+                  <span id="wsFrameDetailTitle" class="ws-frame-detail-title">Select a frame</span>
+                </div>
+                <pre class="code-view" id="wsFrameDetailView"></pre>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section class="tools-shell hidden" id="toolsShell">
@@ -688,25 +760,21 @@
                 <div class="panel-toolbar">
                   <div>
                     <h2>Tools</h2>
-                    <p class="inline-copy" id="toolsMeta">Loading decoder tools...</p>
-                  </div>
-                  <div class="toolbar-actions">
-                    <button class="secondary-action" id="toolsClearButton" type="button">Clear</button>
                   </div>
                 </div>
                 <div class="tools-tool-strip">
                   <ul id="tabs" class="tools-tool-list">
-                    <li id="hash" class="on">Hash</li>
+                    <li id="encode" class="on">Encode</li>
+                    <li id="string">Strings</li>
+                    <li id="number">Num</li>
+                    <li id="json">JSON</li>
+                    <li id="jwt">JWT</li>
+                    <li id="hash">Hash</li>
                     <li id="hmac">HMAC</li>
                     <li id="crc">CRC</li>
                     <li id="cipher">Cipher</li>
                     <li id="net">Net</li>
                     <li id="time">Time</li>
-                    <li id="number">Num</li>
-                    <li id="string">Strings</li>
-                    <li id="encode">Encode</li>
-                    <li id="jwt">JWT</li>
-                    <li id="json">JSON</li>
                     <li id="morse">Morse</li>
                     <li id="password">Password</li>
                   </ul>
@@ -752,8 +820,7 @@
             <section class="panel-card tools-output-card">
               <header class="panel-toolbar tools-output-toolbar">
                 <div>
-                  <h2 id="toolsActiveToolTitle">Hash outputs</h2>
-                  <p class="inline-copy" id="toolsOutputMeta">Click any result to copy it.</p>
+                  <h2 id="toolsActiveToolTitle">Hash output</h2>
                 </div>
               </header>
               <div id="output" class="tools-output-list">
@@ -1127,6 +1194,10 @@
         <span class="context-menu-label">Note</span>
         <input class="context-menu-note" id="contextMenuNote" type="text" placeholder="Add a note..." />
       </div>
+    </div>
+
+    <div class="context-menu hidden" id="wsFrameContextMenu">
+      <button class="context-menu-item" id="wsFrameToReplayBtn" type="button">Send to Replay</button>
     </div>
 
     <script src="/app.js" defer></script>

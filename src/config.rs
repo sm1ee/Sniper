@@ -40,7 +40,7 @@ impl AppConfig {
         Ok(Self {
             proxy_addr: resolve_proxy_addr(&data_dir, &startup)?,
             ui_addr: parse_socket_addr("SNIPER_UI_ADDR", ui_default)?,
-            max_entries: parse_usize("SNIPER_MAX_ENTRIES", 500)?,
+            max_entries: parse_usize("SNIPER_MAX_ENTRIES", 500_000)?,
             body_preview_bytes: parse_usize("SNIPER_BODY_PREVIEW_BYTES", 65_536)?,
             data_dir,
         })

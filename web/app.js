@@ -44,6 +44,12 @@ function createDefaultHistoryColumnWidths() {
   );
 }
 
+function createDefaultWsColumnWidths() {
+  return Object.fromEntries(
+    Object.entries(WS_COLUMN_RULES).filter(([, r]) => r.max > 0).map(([key, r]) => [key, r.default]),
+  );
+}
+
 const DISPLAY_THEME_OPTIONS = new Set([
   "charcoal",
   "black",
@@ -89,11 +95,23 @@ const HISTORY_COLUMN_DEFS = {
   started_at: { label: "Time", cssClass: "col-time", sortKey: "started_at" },
 };
 const DEFAULT_HISTORY_COLUMN_ORDER = ["index", "host", "method", "path", "status", "length", "mime", "notes", "tls", "started_at"];
+const WS_COLUMN_RULES = {
+  index:       { default: 48,  min: 36,  max: 80 },
+  host:        { default: 260, min: 120, max: 600 },
+  path:        { default: 0,   min: 0,   max: 0 },   // flex column, not resizable
+  status:      { default: 62,  min: 50,  max: 120 },
+  frame_count: { default: 72,  min: 50,  max: 140 },
+  duration_ms: { default: 90,  min: 60,  max: 180 },
+  started_at:  { default: 150, min: 110, max: 260 },
+};
+
 const WORKBENCH_STACK_MIN_HEIGHTS = {
   history: 140,
   messages: 180,
 };
 const REPEATER_HISTORY_LIMIT = 30;
+const HISTORY_ROW_HEIGHT = 27;
+const HISTORY_BUFFER_ROWS = 30;
 const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "fuzzer", "replay", "tools", "logger"]);
 const DECODER_SCRIPT_SOURCES = [
   "/decoder/lib/jquery-1.7.2.min.js",
@@ -150,6 +168,9 @@ const state = {
   selectedRecord: null,
   sessions: [],
   activeSession: null,
+  selectedSessionId: null,
+  sessionSortKey: "created_at",
+  sessionSortDir: "desc",
   activeTool: "proxy",
   activeProxyTab: "http-history",
   activeInspectorTab: "inspector",
@@ -181,6 +202,7 @@ const state = {
   displaySettings: createDefaultDisplaySettings(),
   historyColumnWidths: createDefaultHistoryColumnWidths(),
   historyColumnOrder: [...DEFAULT_HISTORY_COLUMN_ORDER],
+  wsColumnWidths: createDefaultWsColumnWidths(),
   filterSettings: createDefaultFilterSettings(),
   targetScopeDraft: "",
   targetScopeDirty: false,
@@ -210,6 +232,8 @@ const state = {
   fuzzerRequestText: "",
   fuzzerPayloadsText: "",
   fuzzerAttackRecord: null,
+  _cachedVisibleEntries: null,
+  _historyEntries: null,
   toolsReady: false,
   workbenchHeight: null,
 };
@@ -219,6 +243,7 @@ const els = {
   dashboardCurrentSessionName: document.getElementById("dashboardCurrentSessionName"),
   dashboardCurrentSessionStatus: document.getElementById("dashboardCurrentSessionStatus"),
   dashboardCurrentSessionPath: document.getElementById("dashboardCurrentSessionPath"),
+  dashboardOpenStorageBtn: document.getElementById("dashboardOpenStorageBtn"),
   dashboardCurrentSessionRequests: document.getElementById("dashboardCurrentSessionRequests"),
   dashboardCurrentSessionWebsockets: document.getElementById("dashboardCurrentSessionWebsockets"),
   dashboardCurrentSessionEvents: document.getElementById("dashboardCurrentSessionEvents"),
@@ -245,10 +270,7 @@ const els = {
   proxyShell: document.getElementById("proxyShell"),
   replayShell: document.getElementById("replayShell"),
   toolsShell: document.getElementById("toolsShell"),
-  toolsMeta: document.getElementById("toolsMeta"),
-  toolsClearButton: document.getElementById("toolsClearButton"),
   toolsActiveToolTitle: document.getElementById("toolsActiveToolTitle"),
-  toolsOutputMeta: document.getElementById("toolsOutputMeta"),
   replayTabStrip: document.getElementById("replayTabStrip"),
   newReplayTabButton: document.getElementById("newReplayTabButton"),
   fuzzerShell: document.getElementById("fuzzerShell"),
@@ -434,6 +456,33 @@ const els = {
   resetFuzzerButton: document.getElementById("resetFuzzerButton"),
   contextMenu: document.getElementById("contextMenu"),
   contextMenuNote: document.getElementById("contextMenuNote"),
+  wsFrameContextMenu: document.getElementById("wsFrameContextMenu"),
+  httpReplayToolbar: document.getElementById("httpReplayToolbar"),
+  httpReplayWorkbench: document.getElementById("httpReplayWorkbench"),
+  wsReplayPanel: document.getElementById("wsReplayPanel"),
+  wsSchemeSelect: document.getElementById("wsSchemeSelect"),
+  wsHostInput: document.getElementById("wsHostInput"),
+  wsPortInput: document.getElementById("wsPortInput"),
+  wsPathInput: document.getElementById("wsPathInput"),
+  wsConnectButton: document.getElementById("wsConnectButton"),
+  wsDisconnectButton: document.getElementById("wsDisconnectButton"),
+  wsStatusIndicator: document.getElementById("wsStatusIndicator"),
+  wsStatusText: document.getElementById("wsStatusText"),
+  wsMessageEditor: document.getElementById("wsMessageEditor"),
+  wsSendButton: document.getElementById("wsSendButton"),
+  wsMessageType: document.getElementById("wsMessageType"),
+  wsHandshakeHeaders: document.getElementById("wsHandshakeHeaders"),
+  wsFrameList: document.getElementById("wsFrameList"),
+  wsFrameCount: document.getElementById("wsFrameCount"),
+  wsFrameDetailPath: document.getElementById("wsFrameDetailPath"),
+  wsFrameDetailTitle: document.getElementById("wsFrameDetailTitle"),
+  wsFrameDetailView: document.getElementById("wsFrameDetailView"),
+  wsReplayPaneResizer: document.getElementById("wsReplayPaneResizer"),
+  wsReplayFrameResizer: document.getElementById("wsReplayFrameResizer"),
+  wsHandshakeLines: document.getElementById("wsHandshakeLines"),
+  wsHandshakeSearchInput: document.getElementById("wsHandshakeSearchInput"),
+  wsHandshakeSearchMeta: document.getElementById("wsHandshakeSearchMeta"),
+  wsMessageHighlight: document.getElementById("wsMessageHighlight"),
 };
 
 const mainTabs = Array.from(document.querySelectorAll(".main-tab"));
@@ -475,6 +524,8 @@ const LAYOUT_TEXTAREA_IDS = [
   "proxySettingPassthroughHosts",
   "fuzzerPayloadsEditor",
   "targetScopeEditor",
+  "wsMessageEditor",
+  "wsHandshakeHeaders",
 ];
 
 init().catch((error) => {
@@ -615,6 +666,37 @@ function bindEvents() {
     });
   });
 
+  // Virtual scroll for HTTP history table
+  const historyShell = els.historyTable.closest(".history-table-shell");
+  if (historyShell) {
+    let historyScrollRaf = 0;
+    historyShell.addEventListener("scroll", () => {
+      if (historyScrollRaf) return;
+      historyScrollRaf = requestAnimationFrame(() => {
+        historyScrollRaf = 0;
+        renderHistoryVirtual();
+      });
+    });
+  }
+
+  // Event delegation for HTTP history table rows (click & contextmenu)
+  els.historyTableBody.addEventListener("click", (event) => {
+    const row = event.target.closest(".history-row");
+    if (!row) return;
+    state.selectedId = row.dataset.id;
+    updateHistorySelection(state.selectedId);
+    scrollSelectedHistoryRowIntoView();
+    loadTransactionDetail(state.selectedId).catch((error) => console.error(error));
+  });
+  els.historyTableBody.addEventListener("contextmenu", (event) => {
+    const row = event.target.closest(".history-row");
+    if (!row) return;
+    event.preventDefault();
+    state.selectedId = row.dataset.id;
+    updateHistorySelection(state.selectedId);
+    openContextMenu(event.clientX, event.clientY, row.dataset.id);
+  });
+
   els.searchInput.addEventListener("input", () => {
     state.query = els.searchInput.value.trim();
     scheduleRefresh();
@@ -672,7 +754,6 @@ function bindEvents() {
 
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
   els.openUpdateButton.addEventListener("click", performSelfUpdate);
-  els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
   els.displaySettingsModal.addEventListener("click", (event) => {
     if (event.target === els.displaySettingsModal) {
@@ -721,6 +802,27 @@ function bindEvents() {
   els.dashboardCreateSessionButton?.addEventListener("click", () => {
     createSession().catch((error) => console.error(error));
   });
+  els.dashboardOpenStorageBtn?.addEventListener("click", () => {
+    const sessionId = state.selectedSessionId || state.activeSession?.id || state.sessions.find((s) => s.active)?.id;
+    if (sessionId) {
+      fetch(`/api/sessions/${encodeURIComponent(sessionId)}/reveal`, { method: "POST" }).catch(console.error);
+    }
+  });
+
+  // Session table sort headers
+  document.querySelectorAll("#dashboardSessionsTable thead th[data-sort-key]").forEach((th) => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.sortKey;
+      if (state.sessionSortKey === key) {
+        state.sessionSortDir = state.sessionSortDir === "asc" ? "desc" : "asc";
+      } else {
+        state.sessionSortKey = key;
+        state.sessionSortDir = key === "name" ? "asc" : "desc";
+      }
+      renderDashboard();
+    });
+  });
+
   els.clearEventLogButton.addEventListener("click", () => {
     clearEventLog().catch((error) => console.error(error));
   });
@@ -882,6 +984,7 @@ function bindEvents() {
   });
   els.replayRequestHighlight.addEventListener("contextmenu", showReplayContextMenu);
   initReplayContextMenu();
+  bindWsReplayEvents();
   els.replaySchemeSelect.addEventListener("change", () => {
     applyReplayTargetFields().catch((error) => console.error(error));
   });
@@ -1064,6 +1167,50 @@ function bindEvents() {
       }
     }
 
+    // Arrow keys in Dashboard: navigate session rows
+    if (
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.shiftKey &&
+      state.activeTool === "dashboard" &&
+      !isEditableTarget(event.target)
+    ) {
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        moveSessionSelection(-1);
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        moveSessionSelection(1);
+        return;
+      }
+    }
+
+    // Arrow keys in WS Replay: navigate frames
+    if (
+      (event.key === "ArrowUp" || event.key === "ArrowDown") &&
+      !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
+      state.activeTool === "replay" &&
+      !isEditableTarget(event.target)
+    ) {
+      const tab = state.replayTabs.find(t => t.id === state.activeReplayTabId);
+      if (tab && tab.type === "websocket" && tab.wsFrames.length > 0) {
+        event.preventDefault();
+        const cur = tab.wsSelectedFrameIndex ?? -1;
+        const next = event.key === "ArrowDown"
+          ? Math.min(cur + 1, tab.wsFrames.length - 1)
+          : Math.max(cur - 1, 0);
+        tab.wsSelectedFrameIndex = next;
+        els.wsFrameList.querySelectorAll(".ws-frame-bubble").forEach(b => b.classList.remove("selected"));
+        const target = els.wsFrameList.querySelector(`[data-frame-index="${next}"]`);
+        if (target) { target.classList.add("selected"); target.scrollIntoView({ block: "nearest" }); }
+        renderWsFrameDetail();
+        return;
+      }
+    }
+
     // Ctrl+Tab / Ctrl+Shift+Tab: cycle through Replay tabs
     if (
       event.ctrlKey &&
@@ -1074,10 +1221,11 @@ function bindEvents() {
       state.replayTabs.length > 1
     ) {
       event.preventDefault();
-      const idx = state.replayTabs.findIndex((t) => t.id === state.activeReplayTabId);
-      const len = state.replayTabs.length;
+      const visualOrder = getReplayTabVisualOrder();
+      const idx = visualOrder.findIndex((t) => t.id === state.activeReplayTabId);
+      const len = visualOrder.length;
       const next = event.shiftKey ? (idx - 1 + len) % len : (idx + 1) % len;
-      state.activeReplayTabId = state.replayTabs[next].id;
+      state.activeReplayTabId = visualOrder[next].id;
       scheduleWorkspaceStateSave();
       renderReplay();
       return;
@@ -1106,6 +1254,20 @@ function bindEvents() {
     ) {
       event.preventDefault();
       openReplayFromSelection().catch((error) => console.error(error));
+    }
+
+    // Cmd+R on WebSocket tab — send selected frame to WS Replay
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "r" &&
+      state.activeTool === "proxy" &&
+      state.activeProxyTab === "websockets-history" &&
+      state.selectedWebsocketRecord
+    ) {
+      event.preventDefault();
+      sendWsFrameToReplay(state.selectedFrameIdx ?? 0);
     }
 
     if (
@@ -1151,6 +1313,21 @@ function bindEvents() {
 
   bindCodePaneScroll(els.requestView, els.requestLines);
   bindCodePaneScroll(els.responseView, els.responseLines);
+  // WS Handshake scroll sync
+  if (els.wsHandshakeLines) {
+    bindCodePaneScroll(els.websocketRequestView, els.wsHandshakeLines);
+    bindCodePaneScroll(els.websocketResponseView, els.wsHandshakeLines);
+  }
+  // WS Handshake search
+  if (els.wsHandshakeSearchInput) {
+    els.wsHandshakeSearchInput.addEventListener("input", () => {
+      updateWsHandshakeSearch();
+    });
+    initSearchHitNavigation(els.wsHandshakeSearchMeta, () => {
+      const resBtn = document.getElementById("wsHandshakeResBtn");
+      return resBtn?.classList.contains("active") ? els.websocketResponseView : els.websocketRequestView;
+    });
+  }
   bindMessagePaneActivation();
   bindPaneResizer(els.requestResponseResizer, "request-response");
   bindPaneResizer(els.responseInspectorResizer, "response-inspector");
@@ -1158,6 +1335,39 @@ function bindEvents() {
   bindWebsocketPaneResizer(els.websocketSplitResizer);
   bindWebsocketStackResizer(els.websocketStackResizer);
   bindHistoryColumnResizers();
+  applyWsColumnWidths();
+  bindWsColumnResizers();
+
+  // WS Handshake Request/Response tab toggle
+  const wsReqBtn = document.getElementById("wsHandshakeReqBtn");
+  const wsResBtn = document.getElementById("wsHandshakeResBtn");
+  if (wsReqBtn && wsResBtn) {
+    wsReqBtn.addEventListener("click", () => {
+      wsReqBtn.classList.add("active");
+      wsResBtn.classList.remove("active");
+      els.websocketRequestView.classList.remove("hidden");
+      els.websocketResponseView.classList.add("hidden");
+      updateWsHandshakeLineNumbers();
+      updateWsHandshakeSearch();
+    });
+    wsResBtn.addEventListener("click", () => {
+      wsResBtn.classList.add("active");
+      wsReqBtn.classList.remove("active");
+      els.websocketResponseView.classList.remove("hidden");
+      els.websocketRequestView.classList.add("hidden");
+      updateWsHandshakeLineNumbers();
+      updateWsHandshakeSearch();
+    });
+  }
+
+  // WS pane swap button
+  const wsSwapBtn = document.getElementById("wsSwapPanes");
+  if (wsSwapBtn && els.websocketWorkbench) {
+    wsSwapBtn.addEventListener("click", () => {
+      els.websocketWorkbench.classList.toggle("ws-swapped");
+    });
+  }
+
   window.addEventListener("resize", () => {
     normalizeWorkbenchPaneWidths();
     normalizeWebsocketPaneWidth();
@@ -1326,6 +1536,35 @@ function hydrateReplayTab(tab) {
     return null;
   }
 
+  if (tab.type === "websocket") {
+    return {
+      id: typeof tab.id === "string" && tab.id ? tab.id : crypto.randomUUID(),
+      type: "websocket",
+      sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
+      pinned: !!tab.pinned,
+      label: `WS ${tab.ws_host || "draft"}`,
+      wsScheme: tab.ws_scheme || "wss",
+      wsHost: tab.ws_host || "",
+      wsPort: tab.ws_port || 443,
+      wsPath: tab.ws_path || "/",
+      wsHeaders: tab.ws_headers || [],
+      wsHandshakeText: tab.ws_handshake_text || "",
+      wsSetupQueue: Array.isArray(tab.ws_setup_queue)
+        ? tab.ws_setup_queue.map((item) => ({
+            label: item.label || "",
+            body: item.body || "",
+            autoSend: !!item.autoSend,
+          }))
+        : [],
+      wsStatus: "disconnected",
+      wsFrames: [],
+      wsSelectedFrameIndex: -1,
+      wsEditorText: "",
+      wsError: null,
+      wsPollTimer: null,
+    };
+  }
+
   const fallbackRequest = tab.base_request ? cloneEditableRequest(tab.base_request) : createDefaultEditableRequest();
   const fallbackTarget = authorityToTargetState(fallbackRequest.host, fallbackRequest.scheme);
   const historyEntries = Array.isArray(tab.history_entries)
@@ -1340,6 +1579,7 @@ function hydrateReplayTab(tab) {
   return {
     id: typeof tab.id === "string" && tab.id ? tab.id : crypto.randomUUID(),
     sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
+    pinned: !!tab.pinned,
     baseRequest: fallbackRequest,
     sourceTransactionId: tab.source_transaction_id || null,
     notice: tab.notice || "",
@@ -1379,28 +1619,50 @@ function hydrateRepeaterHistoryEntry(entry, fallbackRequest) {
 function snapshotWorkspaceState() {
   return {
     replay: {
-      tabs: state.replayTabs.map((tab) => ({
-        id: tab.id,
-        sequence: tab.sequence,
-        base_request: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : null,
-        source_transaction_id: tab.sourceTransactionId || null,
-        notice: tab.notice || "",
-        request_text: tab.requestText || "",
-        response_record: tab.responseRecord || null,
-        target_scheme: tab.targetScheme || "https",
-        target_host: tab.targetHost || "",
-        target_port: normalizePortValue(tab.targetPort),
-        history_entries: (tab.historyEntries || []).map((entry) => ({
-          request: cloneEditableRequest(entry.request),
-          request_text: entry.requestText || "",
-          response_record: entry.responseRecord || null,
-          notice: entry.notice || "",
-          target_scheme: entry.targetScheme || "https",
-          target_host: entry.targetHost || "",
-          target_port: normalizePortValue(entry.targetPort),
-        })),
-        history_index: normalizeRepeaterHistoryIndex(tab.historyIndex, (tab.historyEntries || []).length),
-      })),
+      tabs: state.replayTabs.map((tab) => {
+        if (tab.type === "websocket") {
+          return {
+            id: tab.id,
+            type: "websocket",
+            sequence: tab.sequence,
+            pinned: !!tab.pinned,
+            ws_scheme: tab.wsScheme || "wss",
+            ws_host: tab.wsHost || "",
+            ws_port: tab.wsPort || 443,
+            ws_path: tab.wsPath || "/",
+            ws_headers: tab.wsHeaders || [],
+            ws_handshake_text: tab.wsHandshakeText || "",
+            ws_setup_queue: (tab.wsSetupQueue || []).map((item) => ({
+              label: item.label || "",
+              body: item.body || "",
+              autoSend: !!item.autoSend,
+            })),
+          };
+        }
+        return {
+          id: tab.id,
+          sequence: tab.sequence,
+          pinned: !!tab.pinned,
+          base_request: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : null,
+          source_transaction_id: tab.sourceTransactionId || null,
+          notice: tab.notice || "",
+          request_text: tab.requestText || "",
+          response_record: tab.responseRecord || null,
+          target_scheme: tab.targetScheme || "https",
+          target_host: tab.targetHost || "",
+          target_port: normalizePortValue(tab.targetPort),
+          history_entries: (tab.historyEntries || []).map((entry) => ({
+            request: cloneEditableRequest(entry.request),
+            request_text: entry.requestText || "",
+            response_record: entry.responseRecord || null,
+            notice: entry.notice || "",
+            target_scheme: entry.targetScheme || "https",
+            target_host: entry.targetHost || "",
+            target_port: normalizePortValue(entry.targetPort),
+          })),
+          history_index: normalizeRepeaterHistoryIndex(tab.historyIndex, (tab.historyEntries || []).length),
+        };
+      }),
       active_tab_id: state.activeReplayTabId,
       tab_sequence: state.replayTabSequence,
     },
@@ -1471,6 +1733,9 @@ function resetSessionScopedUiState() {
   state.targetScopeDraft = "";
   state.targetScopeDirty = false;
   state.targetExpandedHosts = new Set();
+  state.replayTabs.forEach((tab) => {
+    if (tab.type === "websocket") stopWsPoll(tab);
+  });
   state.replayTabs = [];
   state.activeReplayTabId = null;
   state.replayTabSequence = 0;
@@ -1533,8 +1798,7 @@ async function loadRuntimeSettings() {
 }
 
 async function loadTransactions(preserveSelection = true) {
-  const limit = state.settings?.max_entries ?? 500;
-  const response = await fetch(`/api/transactions?limit=${limit}`);
+  const response = await fetch("/api/transactions?limit=0");
   const freshItems = await response.json();
 
   // Preserve in-flight annotation changes (optimistic updates)
@@ -1603,7 +1867,7 @@ async function loadInterceptDetail(id) {
 }
 
 async function loadWebsockets(preserveSelection = true) {
-  const response = await fetch("/api/websockets?limit=200");
+  const response = await fetch("/api/websockets?limit=5000");
   state.websocketSessions = await response.json();
   await syncVisibleWebsocketSelection(preserveSelection);
 }
@@ -1801,7 +2065,7 @@ function renderToolPanels() {
   if (decoderVisible) {
     ensureDecoderWorkbench().catch((error) => {
       console.error(error);
-      els.toolsMeta.textContent = "Failed to load decoder tools.";
+      // Tools load failed
     });
     els.footerMode.textContent = "Tools active";
     return;
@@ -1840,8 +2104,6 @@ async function ensureDecoderWorkbench() {
 }
 
 async function bootToolsWorkbench() {
-  els.toolsMeta.textContent = "Loading decoder tools...";
-
   for (const source of DECODER_SCRIPT_SOURCES) {
     await loadScriptOnce(source);
   }
@@ -1879,14 +2141,12 @@ async function bootToolsWorkbench() {
     window.autoScroll(els.toolsShell);
   }
   state.toolsReady = true;
-  els.toolsMeta.textContent = "Core decoder tools are ready. Click any result to copy it.";
 }
 
 function syncDecoderToolMeta() {
   const activeTab = document.querySelector("#tabs li.on");
   const activeLabel = activeTab?.textContent?.trim() || "Decoder";
-  els.toolsActiveToolTitle.textContent = `${activeLabel} outputs`;
-  els.toolsOutputMeta.textContent = "Click any result to copy it.";
+  els.toolsActiveToolTitle.textContent = `${activeLabel} output`;
 }
 
 function clearToolsInputs() {
@@ -1928,7 +2188,7 @@ async function pasteIntoDecoder() {
     }
   } catch (error) {
     console.error(error);
-    els.toolsMeta.textContent = "Clipboard paste failed. Paste directly into the input field.";
+    console.warn("Clipboard paste failed. Paste directly into the input field.");
   }
 }
 
@@ -1965,10 +2225,16 @@ function loadScriptOnce(source) {
 }
 
 function renderDashboard() {
-  const current = state.activeSession || state.sessions.find((session) => session.active) || null;
+  // Ensure selectedSessionId defaults to active session
+  const activeSession = state.activeSession || state.sessions.find((session) => session.active) || null;
+  if (!state.selectedSessionId && activeSession) {
+    state.selectedSessionId = activeSession.id;
+  }
+  const current = state.sessions.find((s) => s.id === state.selectedSessionId) || activeSession;
   els.dashboardCurrentSessionName.textContent = current?.name || "No active session";
-  els.dashboardCurrentSessionStatus.textContent = current?.active ? "Active" : "Unavailable";
-  els.dashboardCurrentSessionStatus.className = `detail-chip ${current?.active ? "info" : "none"}`;
+  const isActive = current?.active || current?.id === activeSession?.id;
+  els.dashboardCurrentSessionStatus.textContent = isActive ? "Active" : "Stored";
+  els.dashboardCurrentSessionStatus.className = `detail-chip ${isActive ? "active-badge" : "none"}`;
   els.dashboardCurrentSessionPath.textContent = current?.storage_path || "No storage path";
   els.dashboardCurrentSessionRequests.textContent = String(current?.request_count ?? 0);
   els.dashboardCurrentSessionWebsockets.textContent = String(current?.websocket_count ?? 0);
@@ -1978,21 +2244,42 @@ function renderDashboard() {
   els.dashboardCurrentSessionCreated.textContent = current ? formatTimestamp(current.created_at) : "-";
   els.dashboardCurrentSessionOpened.textContent = current ? formatTimestamp(current.last_opened_at) : "-";
 
-  els.dashboardSessionsBody.innerHTML = state.sessions.length
-    ? state.sessions
+  // Sort sessions
+  const sortedSessions = getSortedSessions();
+
+  // Render sort arrows in headers
+  const sessTable = document.getElementById("dashboardSessionsTable");
+  if (sessTable) {
+    sessTable.querySelectorAll("thead th[data-sort-key]").forEach((th) => {
+      const existing = th.querySelector(".sort-arrow");
+      if (existing) existing.remove();
+      if (th.dataset.sortKey === state.sessionSortKey) {
+        const arrow = document.createElement("span");
+        arrow.className = "sort-arrow";
+        arrow.textContent = state.sessionSortDir === "asc" ? "\u25B2" : "\u25BC";
+        th.appendChild(arrow);
+      }
+    });
+  }
+
+  els.dashboardSessionsBody.innerHTML = sortedSessions.length
+    ? sortedSessions
         .map((session) => `
-          <tr class="history-row ${session.active ? "selected" : ""}" data-id="${session.id}">
+          <tr class="history-row ${session.id === state.selectedSessionId ? "selected" : ""}" data-id="${session.id}">
             <td>${escapeHtml(session.name)}</td>
             <td>${session.request_count}</td>
             <td>${session.websocket_count}</td>
             <td>${session.event_count}</td>
             <td>${session.rule_count}</td>
+            <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
             <td>${escapeHtml(formatTimestamp(session.last_opened_at))}</td>
-            <td>${session.active ? "<span class=\"detail-chip info\">Active</span>" : "<span class=\"detail-chip none\">Stored</span>"}</td>
             <td>
-              <button class="secondary-action session-open-button" type="button" ${session.active ? "disabled" : ""}>
-                ${session.active ? "Open" : "Activate"}
-              </button>
+              <div class="session-actions">
+                ${session.active
+                  ? `<button class="session-active-badge" type="button" disabled>Active</button>`
+                  : `<button class="secondary-action session-open-button" type="button">Open</button>`}
+                <button class="session-delete-button" type="button" ${session.active ? "disabled" : ""}>Delete</button>
+              </div>
             </td>
           </tr>
         `)
@@ -2003,14 +2290,178 @@ function renderDashboard() {
         </tr>
       `;
 
+  // Row click = select (update workspace info panel)
   Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]")).forEach((row) => {
     row.addEventListener("click", () => {
       const { id } = row.dataset;
-      if (!id || row.classList.contains("selected")) {
-        return;
-      }
+      if (!id) return;
+      state.selectedSessionId = id;
+      renderDashboard();
+    });
+  });
+
+  // Activate button = switch session
+  Array.from(els.dashboardSessionsBody.querySelectorAll(".session-open-button")).forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const row = btn.closest("tr[data-id]");
+      if (!row) return;
+      const { id } = row.dataset;
+      if (!id) return;
       activateSessionById(id).catch((error) => console.error(error));
     });
+  });
+
+  // Right-click context menu on session rows
+  Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]")).forEach((row) => {
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const { id } = row.dataset;
+      if (!id) return;
+      state.selectedSessionId = id;
+      renderDashboard();
+      showSessionContextMenu(event, id);
+    });
+  });
+
+  // Delete button
+  Array.from(els.dashboardSessionsBody.querySelectorAll(".session-delete-button")).forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const row = btn.closest("tr[data-id]");
+      if (!row) return;
+      const { id } = row.dataset;
+      if (!id) return;
+      deleteSessionById(id);
+    });
+  });
+}
+
+// ── Session context menu ──
+let sessionContextMenuEl = null;
+
+function showSessionContextMenu(event, sessionId) {
+  closeSessionContextMenu();
+  const session = state.sessions.find((s) => s.id === sessionId);
+  if (!session) return;
+
+  const menu = document.createElement("div");
+  menu.className = "context-menu session-context-menu";
+  menu.innerHTML = `
+    <button class="context-menu-item" data-action="folder">Open session folder</button>
+    ${session.active ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
+  `;
+  document.body.appendChild(menu);
+
+  const rect = menu.getBoundingClientRect();
+  let x = event.clientX;
+  let y = event.clientY;
+  if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 4;
+  if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4;
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  sessionContextMenuEl = menu;
+
+  menu.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    const action = btn.dataset.action;
+    if (action === "folder") {
+      fetch(`/api/sessions/${encodeURIComponent(sessionId)}/reveal`, { method: "POST" }).catch(console.error);
+    } else if (action === "delete") {
+      deleteSessionById(sessionId);
+    }
+    closeSessionContextMenu();
+  });
+}
+
+function closeSessionContextMenu() {
+  if (sessionContextMenuEl) {
+    sessionContextMenuEl.remove();
+    sessionContextMenuEl = null;
+  }
+}
+
+document.addEventListener("click", () => closeSessionContextMenu());
+document.addEventListener("contextmenu", () => closeSessionContextMenu());
+
+function showConfirmDialog(message, onConfirm) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop confirm-dialog-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal-card" style="width: min(400px, 90%);">
+      <div class="modal-header" style="padding: 16px 20px;">
+        <h3 style="margin:0; font-size: var(--font-md);">Confirm</h3>
+      </div>
+      <div class="modal-body" style="padding: 16px 20px;">
+        <p style="margin:0; white-space: pre-line; color: var(--text-dim);">${escapeHtml(message)}</p>
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:8px; padding: 12px 20px; border-top: 1px solid var(--line);">
+        <button class="secondary-action confirm-dialog-cancel" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">Cancel</button>
+        <button class="danger-action confirm-dialog-ok" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">Delete</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.querySelector(".confirm-dialog-cancel").addEventListener("click", close);
+  backdrop.querySelector(".confirm-dialog-ok").addEventListener("click", () => { close(); onConfirm(); });
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+}
+
+async function deleteSessionById(id) {
+  const session = state.sessions.find((s) => s.id === id);
+  const name = session ? session.name : id;
+  showConfirmDialog(`Delete session "${name}"?\nThis will permanently remove all session data.`, async () => {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      state.sessions = state.sessions.filter((s) => s.id !== id);
+      if (state.selectedSessionId === id) state.selectedSessionId = null;
+      renderDashboard();
+    } catch (error) {
+      console.error("Failed to delete session:", error);
+    }
+  });
+}
+
+function moveSessionSelection(offset) {
+  const sortedSessions = getSortedSessions();
+  if (!sortedSessions.length) return;
+  const currentIndex = sortedSessions.findIndex((s) => s.id === state.selectedSessionId);
+  const fallbackIndex = offset > 0 ? 0 : sortedSessions.length - 1;
+  const nextIndex = clamp(
+    currentIndex === -1 ? fallbackIndex : currentIndex + offset,
+    0,
+    sortedSessions.length - 1,
+  );
+  state.selectedSessionId = sortedSessions[nextIndex].id;
+  renderDashboard();
+  const selectedRow = els.dashboardSessionsBody.querySelector(`tr[data-id="${state.selectedSessionId}"]`);
+  if (selectedRow) selectedRow.scrollIntoView({ block: "nearest" });
+}
+
+function getSortedSessions() {
+  return [...state.sessions].sort((a, b) => {
+    const key = state.sessionSortKey || "created_at";
+    const dir = state.sessionSortDir || "desc";
+    let va = a[key], vb = b[key];
+    if (key === "name") {
+      va = (va || "").toLowerCase();
+      vb = (vb || "").toLowerCase();
+      const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+      return dir === "asc" ? cmp : -cmp;
+    }
+    if (key === "last_opened_at" || key === "created_at") {
+      va = va ? new Date(va).getTime() : 0;
+      vb = vb ? new Date(vb).getTime() : 0;
+    }
+    if (key === "active") {
+      va = va ? 1 : 0;
+      vb = vb ? 1 : 0;
+    }
+    const diff = (va ?? 0) - (vb ?? 0);
+    return dir === "asc" ? diff : -diff;
   });
 }
 
@@ -2095,11 +2546,13 @@ function updateProxyStatusIndicator(online) {
 }
 
 function renderHistory() {
+  invalidateVisibleEntriesCache();
   const visibleEntries = getVisibleEntries();
   const visibleItems = visibleEntries.map((entry) => entry.item);
   const hiddenConnectCount = countHiddenConnectItems();
   const summary = [];
-  summary.push(`${visibleItems.length} item(s) visible`);
+  const totalCount = visibleItems.length;
+  summary.push(`${totalCount} item(s) visible`);
   if (hiddenConnectCount) summary.push(`${hiddenConnectCount} CONNECT tunnel(s) hidden`);
   if (state.query) summary.push(`search: "${state.query}"`);
   if (state.method) summary.push(`method: ${state.method}`);
@@ -2113,39 +2566,82 @@ function renderHistory() {
   els.historyMeta.textContent = `Filter settings: ${summary.join(" | ")}`;
   renderSortHeaders();
 
+  // Store entries for virtual scroll
+  state._historyEntries = visibleEntries;
+
   if (!visibleItems.length) {
     els.historyTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="10">${hiddenConnectCount ? "Only CONNECT tunnels were captured, and they are hidden from HTTP history. Trust the Sniper Root CA and retry the HTTPS client if you expect decrypted traffic." : "No traffic matches the current filter settings."}</td>
+        <td colspan="${state.historyColumnOrder.length}">${hiddenConnectCount ? "Only CONNECT tunnels were captured, and they are hidden from HTTP history. Trust the Sniper Root CA and retry the HTTPS client if you expect decrypted traffic." : "No traffic matches the current filter settings."}</td>
       </tr>
     `;
     return;
   }
 
-  els.historyTableBody.innerHTML = visibleEntries
-    .map((entry) => {
-      const item = entry.item;
-      const selected = item.id === state.selectedId ? "selected" : "";
-      const tagClass = item.color_tag ? ` tagged-${escapeHtml(item.color_tag)}` : "";
-      const cells = state.historyColumnOrder.map((colKey) => renderHistoryCell(colKey, item, entry)).join("");
-      return `<tr class="history-row ${selected}${tagClass}" data-id="${item.id}">${cells}</tr>`;
-    })
-    .join("");
+  renderHistoryVirtual();
+}
 
-  Array.from(els.historyTableBody.querySelectorAll(".history-row")).forEach((row) => {
-    row.addEventListener("click", () => {
-      state.selectedId = row.dataset.id;
-      renderHistory();
-      scrollSelectedHistoryRowIntoView();
-      loadTransactionDetail(state.selectedId).catch((error) => console.error(error));
-    });
-    row.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      state.selectedId = row.dataset.id;
-      renderHistory();
-      openContextMenu(event.clientX, event.clientY, row.dataset.id);
-    });
-  });
+function renderHistoryVirtual() {
+  const entries = state._historyEntries;
+  if (!entries || !entries.length) return;
+
+  const shell = els.historyTable.closest(".history-table-shell");
+  if (!shell) return;
+
+  const scrollTop = shell.scrollTop;
+  const viewportHeight = shell.clientHeight;
+  const totalCount = entries.length;
+  const colCount = state.historyColumnOrder.length;
+
+  const startIdx = Math.max(0, Math.floor(scrollTop / HISTORY_ROW_HEIGHT) - HISTORY_BUFFER_ROWS);
+  const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / HISTORY_ROW_HEIGHT) + HISTORY_BUFFER_ROWS);
+
+  const topPadding = startIdx * HISTORY_ROW_HEIGHT;
+  const bottomPadding = Math.max(0, (totalCount - endIdx) * HISTORY_ROW_HEIGHT);
+
+  const rows = [];
+  for (let i = startIdx; i < endIdx; i++) {
+    const entry = entries[i];
+    const item = entry.item;
+    const selected = item.id === state.selectedId ? "selected" : "";
+    const tagClass = item.color_tag ? ` tagged-${escapeHtml(item.color_tag)}` : "";
+    const cells = state.historyColumnOrder.map((colKey) => renderHistoryCell(colKey, item, entry)).join("");
+    rows.push(`<tr class="history-row ${selected}${tagClass}" data-id="${item.id}">${cells}</tr>`);
+  }
+
+  els.historyTableBody.innerHTML =
+    (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
+    rows.join("") +
+    (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
+}
+
+function updateHistorySelection(newId) {
+  const prev = els.historyTableBody.querySelector(".history-row.selected");
+  if (prev) prev.classList.remove("selected");
+  if (newId) {
+    const next = els.historyTableBody.querySelector(`.history-row[data-id="${newId}"]`);
+    if (next) {
+      next.classList.add("selected");
+    } else {
+      // Row not in DOM (outside virtual scroll window) — scroll to it
+      scrollHistoryToId(newId);
+    }
+  }
+}
+
+function scrollHistoryToId(targetId) {
+  const entries = state._historyEntries;
+  if (!entries) return;
+  const idx = entries.findIndex((e) => e.item.id === targetId);
+  if (idx === -1) return;
+
+  const shell = els.historyTable.closest(".history-table-shell");
+  if (!shell) return;
+
+  // Scroll so that target row is near center of viewport
+  const targetTop = idx * HISTORY_ROW_HEIGHT;
+  shell.scrollTop = Math.max(0, targetTop - shell.clientHeight / 2);
+  // renderHistoryVirtual will be called by scroll event
 }
 
 async function moveHistorySelection(offset) {
@@ -2167,33 +2663,47 @@ async function moveHistorySelection(offset) {
   }
 
   state.selectedId = nextId;
-  renderHistory();
+  updateHistorySelection(nextId);
   scrollSelectedHistoryRowIntoView();
   await loadTransactionDetail(nextId);
 }
 
 function scrollSelectedHistoryRowIntoView() {
   const selectedRow = els.historyTableBody.querySelector(".history-row.selected");
-  selectedRow?.scrollIntoView({ block: "nearest" });
+  if (selectedRow) {
+    selectedRow.scrollIntoView({ block: "nearest" });
+    return;
+  }
+  // Row not in DOM — use virtual scroll position
+  if (!state.selectedId || !state._historyEntries) return;
+  const idx = state._historyEntries.findIndex((e) => e.item.id === state.selectedId);
+  if (idx === -1) return;
+  const shell = els.historyTable.closest(".history-table-shell");
+  if (!shell) return;
+  const rowTop = idx * HISTORY_ROW_HEIGHT;
+  const rowBottom = rowTop + HISTORY_ROW_HEIGHT;
+  const viewTop = shell.scrollTop;
+  const viewBottom = viewTop + shell.clientHeight;
+  if (rowTop < viewTop) {
+    shell.scrollTop = rowTop;
+  } else if (rowBottom > viewBottom) {
+    shell.scrollTop = rowBottom - shell.clientHeight;
+  }
 }
 
 async function moveWebsocketSelection(offset) {
-  const visibleSessions = getVisibleWebsocketSessions();
-  if (!visibleSessions.length) {
-    return;
-  }
+  const sortedEntries = getSortedWebsocketEntries();
+  if (!sortedEntries.length) return;
 
-  const currentIndex = visibleSessions.findIndex((session) => session.id === state.selectedWebsocketId);
-  const fallbackIndex = offset > 0 ? 0 : visibleSessions.length - 1;
+  const currentIndex = sortedEntries.findIndex(({ session }) => session.id === state.selectedWebsocketId);
+  const fallbackIndex = offset > 0 ? 0 : sortedEntries.length - 1;
   const nextIndex = clamp(
     currentIndex === -1 ? fallbackIndex : currentIndex + offset,
     0,
-    visibleSessions.length - 1,
+    sortedEntries.length - 1,
   );
-  const nextId = visibleSessions[nextIndex]?.id;
-  if (!nextId) {
-    return;
-  }
+  const nextId = sortedEntries[nextIndex]?.session?.id;
+  if (!nextId) return;
 
   state.selectedWebsocketId = nextId;
   renderWebsocketSessions();
@@ -2222,12 +2732,12 @@ function moveFrameSelection(offset) {
   const frame = session.frames[nextIdx];
   if (!frame) return;
 
-  // Update selection highlight
+  // Update selection highlight — find by data attribute, not DOM index
   els.websocketFramesBody.querySelectorAll(".frame-selected").forEach((r) => r.classList.remove("frame-selected"));
-  const rows = els.websocketFramesBody.querySelectorAll(".history-row");
-  if (rows[nextIdx]) {
-    rows[nextIdx].classList.add("frame-selected");
-    rows[nextIdx].scrollIntoView({ block: "nearest" });
+  const target = els.websocketFramesBody.querySelector(`.history-row[data-frame-idx="${nextIdx}"]`);
+  if (target) {
+    target.classList.add("frame-selected");
+    target.scrollIntoView({ block: "nearest" });
   }
 
   showFrameDetail(frame);
@@ -2608,14 +3118,14 @@ function renderWebsocketSessions() {
   updateWebsocketSortIndicators();
 
   els.websocketTableBody.innerHTML = sortedEntries.length
-    ? sortedEntries
+    ? sortedEntries.slice(0, 500)
         .map(({ session, index }) => {
           const selected = session.id === state.selectedWebsocketId ? "selected" : "";
           return `
             <tr class="history-row ${selected}" data-id="${session.id}">
               <td>${index + 1}</td>
-              <td class="cell-host">${escapeHtml(session.host)}</td>
-              <td class="cell-url">${escapeHtml(session.path)}</td>
+              <td>${escapeHtml(session.host)}</td>
+              <td>${escapeHtml(session.path)}</td>
               <td>${escapeHtml(formatStatus(session.status))}</td>
               <td>${session.frame_count}</td>
               <td>${session.duration_ms == null ? "live" : `${session.duration_ms} ms`}</td>
@@ -2643,7 +3153,6 @@ function renderWebsocketSessions() {
   });
 
   if (!state.selectedWebsocketRecord) {
-    els.websocketDetailTitle.textContent = "No session selected";
     els.websocketRequestView.textContent = state.websocketSessions.length && !sortedEntries.length
       ? "No WebSocket session matches the current filter."
       : "Select a WebSocket session.";
@@ -2661,24 +3170,41 @@ function renderWebsocketSessions() {
   }
 
   const session = state.selectedWebsocketRecord;
-  els.websocketDetailTitle.textContent = session.host;
-  els.websocketRequestView.innerHTML = renderHttpHtml(buildRawWebsocketRequest(session), "request");
-  els.websocketResponseView.innerHTML = renderHttpHtml(buildRawWebsocketResponse(session), "response");
+  const reqText = buildRawWebsocketRequest(session);
+  const resText = buildRawWebsocketResponse(session);
+  els.websocketRequestView.innerHTML = renderHttpHtml(reqText, "request");
+  els.websocketResponseView.innerHTML = renderHttpHtml(resText, "response");
+  // Preserve current handshake tab selection (default to Request)
+  const resBtn = document.getElementById("wsHandshakeResBtn");
+  const showingResponse = resBtn?.classList.contains("active");
+  els.websocketRequestView.classList.toggle("hidden", !!showingResponse);
+  els.websocketResponseView.classList.toggle("hidden", !showingResponse);
+  // Update line numbers for active handshake view
+  const activeHandshakeText = showingResponse ? resText : reqText;
+  const hsLineCount = countLines(activeHandshakeText);
+  if (els.wsHandshakeLines) {
+    els.wsHandshakeLines.textContent = buildLineNumbers(hsLineCount);
+  }
+  // Apply handshake search
+  updateWsHandshakeSearch();
   els.websocketFramesBody.innerHTML = session.frames.length
     ? session.frames
-        .map((frame, idx) => `
+        .map((frame, idx) => {
+          const dir = frame.direction === "client_to_server" ? "\u2192" : "\u2190";
+          const dirClass = frame.direction === "client_to_server" ? "dir-client" : "dir-server";
+          return `
           <tr class="history-row${idx === state.selectedFrameIdx ? ' frame-selected' : ''}" data-frame-idx="${idx}">
-            <td>${idx + 1}</td>
-            <td>${frame.direction.replaceAll("_", " ")}</td>
-            <td>${frame.kind}</td>
-            <td>${escapeHtml(formatSize(frame.body_size))}</td>
+            <td class="cell-narrow">${idx + 1}</td>
+            <td class="cell-narrow ${dirClass}">${dir}</td>
+            <td class="cell-narrow">${frame.kind}</td>
+            <td class="cell-narrow">${escapeHtml(formatSize(frame.body_size))}</td>
             <td class="cell-url">${escapeHtml(renderFramePreview(frame))}</td>
-          </tr>
-        `)
+          </tr>`;
+        })
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="5">Handshake captured, but no frames have been recorded yet.</td>
+          <td colspan="5">No frames recorded yet.</td>
         </tr>
       `;
 
@@ -2698,6 +3224,15 @@ function renderWebsocketSessions() {
 
       // Show detail panel
       showFrameDetail(frame);
+    });
+
+    // Right-click on frame → show context menu
+    row.addEventListener("contextmenu", (e) => {
+      const idx = parseInt(row.dataset.frameIdx, 10);
+      if (isNaN(idx)) return;
+      e.preventDefault();
+      state.selectedFrameIdx = idx;
+      openWsFrameContextMenu(e.clientX, e.clientY);
     });
   });
 }
@@ -2843,6 +3378,18 @@ function renderProxySettings() {
 function renderReplay() {
   const tab = ensureRepeaterTab();
   renderReplayTabs();
+
+  const isWsTab = tab && tab.type === "websocket";
+
+  // Toggle HTTP vs WS panels
+  if (els.httpReplayToolbar) els.httpReplayToolbar.classList.toggle("hidden", isWsTab);
+  if (els.httpReplayWorkbench) els.httpReplayWorkbench.classList.toggle("hidden", isWsTab);
+  if (els.wsReplayPanel) els.wsReplayPanel.classList.toggle("hidden", !isWsTab);
+
+  if (isWsTab) {
+    renderWsReplay();
+    return;
+  }
 
   if (!tab) {
     els.replayRequestEditor.value = "";
@@ -3532,6 +4079,24 @@ async function openReplayFromSelection() {
     return;
   }
 
+  // If this is a WebSocket upgrade (status 101), open as WS Replay
+  if (record.status === 101 || record.request?.headers?.some(
+    (h) => h.name.toLowerCase() === "upgrade" && h.value.toLowerCase() === "websocket"
+  )) {
+    const scheme = record.scheme === "https" ? "wss" : record.scheme === "http" ? "ws" : record.scheme || "wss";
+    createWsReplayTab({
+      scheme,
+      host: record.host?.replace(/:443$|:80$/, "") || "",
+      port: record.host?.includes(":") ? parseInt(record.host.split(":").pop()) : (scheme === "wss" ? 443 : 80),
+      path: record.path || "/",
+      headers: record.request?.headers || [],
+    });
+    state.activeTool = "replay";
+    scheduleWorkspaceStateSave();
+    renderToolPanels();
+    return;
+  }
+
   const request = editableRequestFromRecord(record);
   const tab = createReplayTab({
     baseRequest: request,
@@ -3548,7 +4113,7 @@ async function openReplayFromSelection() {
 
 function resetReplay() {
   const tab = getActiveReplayTab();
-  if (!tab) {
+  if (!tab || tab.type === "websocket") {
     return;
   }
 
@@ -3571,7 +4136,7 @@ function resetReplay() {
 
 async function sendReplay() {
   const tab = getActiveReplayTab();
-  if (!tab) {
+  if (!tab || tab.type === "websocket") {
     return;
   }
 
@@ -3786,6 +4351,18 @@ function duplicateActiveReplayTab() {
     return;
   }
 
+  if (tab.type === "websocket") {
+    createWsReplayTab({
+      scheme: tab.wsScheme,
+      host: tab.wsHost,
+      port: tab.wsPort,
+      path: tab.wsPath,
+      headers: [...(tab.wsHeaders || [])],
+      handshakeText: tab.wsHandshakeText || "",
+    });
+    return;
+  }
+
   const fallback = tab.baseRequest || createDefaultEditableRequest();
   const requestText = els.replayRequestEditor?.value || tab.requestText || buildEditableRawRequest(fallback);
   let request = cloneEditableRequest(fallback);
@@ -3841,6 +4418,7 @@ function createReplayTab(seed = {}) {
   return {
     id: crypto.randomUUID(),
     sequence: state.replayTabSequence,
+    pinned: !!seed.pinned,
     baseRequest,
     sourceTransactionId: seed.sourceTransactionId || null,
     notice: seed.notice || "",
@@ -3874,14 +4452,29 @@ function getActiveReplayTab() {
   return state.replayTabs.find((tab) => tab.id === state.activeReplayTabId) || null;
 }
 
+function getReplayTabVisualOrder() {
+  return [...state.replayTabs].sort((a, b) => {
+    if (a.pinned && !b.pinned) return -1;
+    if (!a.pinned && b.pinned) return 1;
+    return 0;
+  });
+}
+
 function renderReplayTabs() {
-  els.replayTabStrip.innerHTML = state.replayTabs
+  const sortedTabs = getReplayTabVisualOrder();
+
+  els.replayTabStrip.innerHTML = sortedTabs
     .map((tab) => {
-      const active = tab.id === state.activeReplayTabId ? "active" : "";
+      const isActive = tab.id === state.activeReplayTabId;
+      const active = isActive ? "active" : "";
+      const pinned = tab.pinned ? "pinned" : "";
+      const showPinBtn = isActive || tab.pinned;
+      const pinBtn = showPinBtn ? `<button class="replay-tab-pin-btn ${tab.pinned ? "on" : ""}" type="button" aria-label="Pin tab">\uD83D\uDCCC</button>` : "";
       return `
-        <div class="replay-tab ${active}" data-replay-tab-id="${tab.id}">
+        <div class="replay-tab ${active} ${pinned}" data-replay-tab-id="${tab.id}">
+          ${pinBtn}
           <button class="replay-tab-button" type="button">${escapeHtml(replayTabLabel(tab))}</button>
-          <button class="replay-tab-close" type="button" aria-label="Close replay tab">×</button>
+          <button class="replay-tab-close" type="button" aria-label="Close replay tab">\u00d7</button>
         </div>
       `;
     })
@@ -3894,17 +4487,46 @@ function renderReplayTabs() {
       scheduleWorkspaceStateSave();
       renderReplay();
     });
+    tabElement.querySelector(".replay-tab-pin-btn")?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleReplayTabPin(id);
+    });
     tabElement.querySelector(".replay-tab-close")?.addEventListener("click", (event) => {
       event.stopPropagation();
       closeRepeaterTab(id);
     });
   });
+
+  // Scroll active tab into view
+  scrollActiveReplayTabIntoView();
+}
+
+function toggleReplayTabPin(id) {
+  const tab = state.replayTabs.find((t) => t.id === id);
+  if (!tab) return;
+  tab.pinned = !tab.pinned;
+  // Flush immediately so pin state survives quick app quit
+  saveWorkspaceState().catch((error) => console.error(error));
+  renderReplayTabs();
+}
+
+
+function scrollActiveReplayTabIntoView() {
+  const activeTab = els.replayTabStrip.querySelector(".replay-tab.active");
+  if (activeTab) {
+    activeTab.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
+  }
 }
 
 function closeRepeaterTab(id) {
   const index = state.replayTabs.findIndex((tab) => tab.id === id);
   if (index === -1) {
     return;
+  }
+
+  const closingTab = state.replayTabs[index];
+  if (closingTab.type === "websocket") {
+    stopWsPoll(closingTab);
   }
 
   state.replayTabs.splice(index, 1);
@@ -3921,6 +4543,10 @@ function closeRepeaterTab(id) {
 }
 
 function replayTabLabel(tab) {
+  if (tab.type === "websocket") {
+    const host = tab.wsHost || "draft";
+    return `${tab.sequence}. WS ${host}`;
+  }
   const request = deriveRepeaterRequest(tab);
   const target = getRepeaterTargetConfig(tab, request);
   const authority = joinAuthority(target.host, target.port) || "draft";
@@ -4514,10 +5140,18 @@ function applyUiSettingsSnapshot(snapshot) {
   });
   state.historyColumnWidths = sanitizeHistoryColumnWidths(snapshot?.history_column_widths);
   state.historyColumnOrder = sanitizeHistoryColumnOrder(snapshot?.history_column_order);
+  if (snapshot?.ws_column_widths && typeof snapshot.ws_column_widths === "object") {
+    Object.entries(snapshot.ws_column_widths).forEach(([k, v]) => {
+      if (WS_COLUMN_RULES[k] && WS_COLUMN_RULES[k].max > 0 && typeof v === "number") {
+        state.wsColumnWidths[k] = clamp(v, WS_COLUMN_RULES[k].min, WS_COLUMN_RULES[k].max);
+      }
+    });
+  }
   state.workbenchHeight = sanitizeWorkbenchHeight(snapshot?.workbench_height);
   applyDisplaySettingsState();
   renderHistoryHeader();
   applyHistoryColumnWidths();
+  applyWsColumnWidths();
 
   if (state.workbenchHeight) {
     applyWorkbenchStackHeight(state.workbenchHeight, false);
@@ -4536,6 +5170,7 @@ function snapshotUiSettings() {
     },
     history_column_widths: { ...state.historyColumnWidths },
     history_column_order: [...state.historyColumnOrder],
+    ws_column_widths: { ...state.wsColumnWidths },
     workbench_height: state.workbenchHeight > 0 ? state.workbenchHeight : null,
   };
 }
@@ -4880,10 +5515,12 @@ function renderFramePreview(frame) {
 }
 
 function showFrameDetail(frame) {
-  const dir = frame.direction.replaceAll("_", " ");
+  const isClient = frame.direction === "client_to_server";
+  const dirClass = isClient ? "dir-client" : "dir-server";
+  const dirLabel = isClient ? "client \u2192" : "\u2190 server";
   els.frameDetailMeta.innerHTML = `
     <span>#${(frame.index ?? 0) + 1}</span>
-    <span>${escapeHtml(dir)}</span>
+    <span class="${dirClass}">${dirLabel}</span>
     <span>${escapeHtml(frame.kind)}</span>
     <span>${escapeHtml(formatSize(frame.body_size))}</span>
   `;
@@ -5112,6 +5749,60 @@ function bindMessagePaneActivation() {
 
   els.responseView?.addEventListener("focus", () => {
     state.activeMessagePane = "response";
+  });
+}
+
+function applyWsColumnWidths() {
+  const table = document.getElementById("websocketTable");
+  if (!table) return;
+  Object.entries(state.wsColumnWidths).forEach(([key, width]) => {
+    table.style.setProperty(`--ws-col-${key}`, `${width}px`);
+  });
+}
+
+function bindWsColumnResizers() {
+  const handles = document.querySelectorAll("#websocketTable .ws-col-resize-handle");
+  handles.forEach((handle) => {
+    handle.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = handle.dataset.wsColKey;
+      if (!key || !WS_COLUMN_RULES[key] || WS_COLUMN_RULES[key].max === 0) return;
+      state.wsColumnWidths[key] = WS_COLUMN_RULES[key].default;
+      applyWsColumnWidths();
+      scheduleUiSettingsSave();
+    });
+
+    handle.addEventListener("mousedown", (event) => {
+      const key = handle.dataset.wsColKey;
+      const limits = WS_COLUMN_RULES[key];
+      if (!key || !limits || limits.max === 0) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const header = handle.closest("th");
+      const startWidth = header?.getBoundingClientRect().width ?? limits.default;
+      document.body.classList.add("pane-resizing-x");
+      handle.classList.add("active");
+
+      const onMove = (moveEvent) => {
+        const delta = moveEvent.clientX - event.clientX;
+        state.wsColumnWidths[key] = clamp(Math.round(startWidth + delta), limits.min, limits.max);
+        applyWsColumnWidths();
+      };
+
+      const onUp = () => {
+        document.body.classList.remove("pane-resizing-x");
+        handle.classList.remove("active");
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        scheduleUiSettingsSave();
+      };
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
   });
 }
 
@@ -6019,6 +6710,92 @@ function countLines(text) {
   return String(text || "").split("\n").length;
 }
 
+function updateWsHandshakeLineNumbers() {
+  if (!els.wsHandshakeLines) return;
+  const resBtn = document.getElementById("wsHandshakeResBtn");
+  const showingResponse = resBtn?.classList.contains("active");
+  const activeView = showingResponse ? els.websocketResponseView : els.websocketRequestView;
+  const lineCount = activeView.querySelectorAll(".code-line").length || 1;
+  els.wsHandshakeLines.textContent = buildLineNumbers(lineCount);
+}
+
+function updateWsHandshakeSearch() {
+  const resBtn = document.getElementById("wsHandshakeResBtn");
+  const showingResponse = resBtn?.classList.contains("active");
+  const activeView = showingResponse ? els.websocketResponseView : els.websocketRequestView;
+  const query = els.wsHandshakeSearchInput?.value || "";
+  const result = applyCodeSearch(activeView, query);
+  const lineCount = activeView.querySelectorAll(".code-line").length || 1;
+  if (els.wsHandshakeSearchMeta) {
+    els.wsHandshakeSearchMeta.innerHTML = buildSearchMeta(lineCount, "pretty", result.count);
+  }
+}
+
+function setWsMessageHighlightText(text) {
+  if (!els.wsMessageHighlight) return;
+  els.wsMessageHighlight.textContent = text;
+  applyWsMessageJsonHighlight();
+}
+
+function applyWsMessageJsonHighlight() {
+  if (!els.wsMessageHighlight) return;
+  const text = els.wsMessageHighlight.innerText || "";
+  // Only apply JSON highlighting if it looks like JSON
+  const trimmed = text.trim();
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    // Save cursor position
+    const sel = window.getSelection();
+    let cursorOffset = 0;
+    if (sel.rangeCount > 0 && els.wsMessageHighlight.contains(sel.anchorNode)) {
+      const range = document.createRange();
+      range.selectNodeContents(els.wsMessageHighlight);
+      range.setEnd(sel.anchorNode, sel.anchorOffset);
+      cursorOffset = range.toString().length;
+    }
+
+    els.wsMessageHighlight.innerHTML = highlightJson(text);
+
+    // Restore cursor position
+    if (document.activeElement === els.wsMessageHighlight && cursorOffset > 0) {
+      restoreCursorPosition(els.wsMessageHighlight, cursorOffset);
+    }
+  }
+}
+
+function highlightJson(text) {
+  // Tokenize and highlight JSON
+  return text.replace(
+    /("(?:[^"\\]|\\.)*")\s*:|("(?:[^"\\]|\\.)*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b|(true|false)\b|(null)\b|([{}[\]:,])/g,
+    (match, key, str, num, bool, nul, punct) => {
+      if (key) return `<span class="json-key">${escapeHtml(key)}</span>:`;
+      if (str) return `<span class="json-string">${escapeHtml(str)}</span>`;
+      if (num) return `<span class="json-number">${escapeHtml(num)}</span>`;
+      if (bool) return `<span class="json-bool">${escapeHtml(bool)}</span>`;
+      if (nul) return `<span class="json-null">${escapeHtml(nul)}</span>`;
+      if (punct) return `<span class="json-punct">${escapeHtml(punct)}</span>`;
+      return escapeHtml(match);
+    }
+  );
+}
+
+function restoreCursorPosition(element, offset) {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
+  let remaining = offset;
+  let node;
+  while ((node = walker.nextNode())) {
+    if (remaining <= node.textContent.length) {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.setStart(node, remaining);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return;
+    }
+    remaining -= node.textContent.length;
+  }
+}
+
 function renderHeaderList(headers) {
   if (!headers.length) {
     return "<p class=\"empty-copy\">No headers were captured.</p>";
@@ -6096,10 +6873,16 @@ function getVisibleItems() {
   return getVisibleEntries().map((entry) => entry.item);
 }
 
+function invalidateVisibleEntriesCache() {
+  state._cachedVisibleEntries = null;
+}
+
 function getVisibleEntries() {
+  if (state._cachedVisibleEntries) return state._cachedVisibleEntries;
+
   const direction = state.sortDirection === "asc" ? 1 : -1;
 
-  return state.items
+  state._cachedVisibleEntries = state.items
     .filter((item) => item.method !== "CONNECT")
     .filter(matchesQuickFilters)
     .filter(matchesAdvancedFilters)
@@ -6122,7 +6905,9 @@ function getVisibleEntries() {
       }
 
       return leftSeq - rightSeq;
-    })
+    });
+
+  return state._cachedVisibleEntries;
 }
 
 function matchesQuickFilters(item) {
@@ -6135,8 +6920,9 @@ function matchesQuickFilters(item) {
     return true;
   }
 
-  const haystack = `${item.host} ${item.method} ${item.path || ""}`.toLowerCase();
-  return haystack.includes(state.query.toLowerCase());
+  const q = state.query.toLowerCase();
+  const haystack = `${item.host} ${item.method} ${item.path || ""} ${item.status || ""} ${inferMimeType(item)} ${formatSize((item.request_bytes ?? 0) + (item.response_bytes ?? 0))} ${item.sequence != null ? item.sequence + 1 : ""} ${formatTimestamp(item.started_at || "")}`.toLowerCase();
+  return haystack.includes(q);
 }
 
 function matchesAdvancedFilters(item) {
@@ -6430,6 +7216,633 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+/* ─── WebSocket Replay ─── */
+
+function createWsReplayTab(seed = {}) {
+  state.replayTabSequence += 1;
+  const tab = {
+    id: crypto.randomUUID(),
+    type: "websocket",
+    sequence: state.replayTabSequence,
+    label: `WS ${seed.host || "draft"}`,
+    wsScheme: seed.scheme || "wss",
+    wsHost: seed.host || "",
+    wsPort: seed.port || (seed.scheme === "ws" ? 80 : 443),
+    wsPath: seed.path || "/",
+    wsHeaders: seed.headers || [],
+    wsHandshakeText: seed.handshakeText || "",
+    wsStatus: "disconnected",
+    wsFrames: [],
+    wsSelectedFrameIndex: -1,
+    wsEditorText: "",
+    wsError: null,
+    wsPollTimer: null,
+    wsSetupQueue: (seed.capturedFrames || [])
+      .filter((f) => f.direction === "client_to_server" && f.kind === "text")
+      .map((f) => {
+        const text = f.body_encoding === "base64" ? atob(f.body_preview || f.body || "") : (f.body_preview || f.body || "");
+        return { body: text, autoSend: true, sent: false, label: truncateSetupLabel(text) };
+      }),
+  };
+  state.replayTabs.push(tab);
+  state.activeReplayTabId = tab.id;
+  scheduleWorkspaceStateSave();
+  renderReplay();
+  return tab;
+}
+
+function truncateSetupLabel(body) {
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed.event) return parsed.event;
+    if (parsed.topic) return parsed.topic;
+    if (parsed.type) return parsed.type;
+  } catch (e) {}
+  return body.length > 30 ? body.substring(0, 30) + "…" : body;
+}
+
+async function wsConnect() {
+  const tab = getActiveReplayTab();
+  if (!tab || tab.type !== "websocket") return;
+
+  // Sync fields from UI
+  tab.wsScheme = els.wsSchemeSelect.value;
+  tab.wsHost = els.wsHostInput.value;
+  tab.wsPort = parseInt(els.wsPortInput.value) || (tab.wsScheme === "wss" ? 443 : 80);
+  tab.wsPath = els.wsPathInput.value;
+
+  tab.wsStatus = "connecting";
+  tab.wsFrames = [];
+  tab.wsSelectedFrameIndex = -1;
+  tab.wsError = null;
+  renderWsStatus();
+  renderWsFrameList();
+
+  try {
+    const headers = parseWsHandshakeHeaders(tab);
+    const resp = await fetch("/api/replay/ws-connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: tab.id,
+        scheme: tab.wsScheme,
+        host: tab.wsHost,
+        port: Number(tab.wsPort),
+        path: tab.wsPath,
+        headers,
+      }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "Connection failed");
+      throw new Error(text);
+    }
+    startWsPoll(tab);
+    renderReplayTabs();
+
+    // Auto-send setup queue after connection
+    await runSetupQueue(tab);
+  } catch (e) {
+    tab.wsStatus = "error";
+    tab.wsError = e.message;
+    renderWsStatus();
+  }
+}
+
+async function runSetupQueue(tab) {
+  if (!tab.wsSetupQueue || !tab.wsSetupQueue.length) return;
+
+  // Wait for connection to be established
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 150));
+    if (tab.wsStatus === "connected") break;
+    if (tab.wsStatus === "error" || tab.wsStatus === "disconnected") return;
+  }
+  if (tab.wsStatus !== "connected") return;
+
+  for (const item of tab.wsSetupQueue) {
+    if (!item.autoSend || item.sent) continue;
+    if (tab.wsStatus !== "connected") break;
+
+    try {
+      const resp = await fetch("/api/replay/ws-send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: tab.id, body: item.body, binary: false }),
+      });
+      if (resp.ok) {
+        item.sent = true;
+        renderWsSetupQueue();
+      }
+    } catch (e) {
+      break;
+    }
+    // Small delay between messages
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+function parseWsHandshakeHeaders(tab) {
+  const headers = [];
+  const text = els.wsHandshakeHeaders ? els.wsHandshakeHeaders.value : (tab.wsHandshakeText || "");
+  if (text.trim()) {
+    for (const line of text.split("\n")) {
+      const colonIdx = line.indexOf(":");
+      if (colonIdx > 0) {
+        headers.push({
+          name: line.slice(0, colonIdx).trim(),
+          value: line.slice(colonIdx + 1).trim(),
+        });
+      }
+    }
+  }
+  // Merge with any pre-set headers from seed
+  const merged = [...headers];
+  for (const h of (tab.wsHeaders || [])) {
+    if (!merged.some(m => m.name.toLowerCase() === h.name.toLowerCase())) {
+      merged.push(h);
+    }
+  }
+  return merged;
+}
+
+async function wsSend() {
+  const tab = getActiveReplayTab();
+  if (!tab || tab.type !== "websocket" || tab.wsStatus !== "connected") return;
+
+  const body = els.wsMessageEditor.value;
+  if (!body.trim()) return;
+
+  const binary = els.wsMessageType.value === "binary";
+
+  try {
+    const resp = await fetch("/api/replay/ws-send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: tab.id, body, binary }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "Send failed");
+      showToast(text, "error");
+    }
+  } catch (e) {
+    showToast(`Send failed: ${e.message}`, "error");
+  }
+}
+
+async function wsDisconnect() {
+  const tab = getActiveReplayTab();
+  if (!tab || tab.type !== "websocket") return;
+
+  stopWsPoll(tab);
+  try {
+    await fetch("/api/replay/ws-disconnect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: tab.id }),
+    });
+  } catch (e) {
+    // ignore disconnect errors
+  }
+  tab.wsStatus = "disconnected";
+  renderWsStatus();
+}
+
+function startWsPoll(tab) {
+  stopWsPoll(tab);
+  let sinceIndex = 0;
+  tab.wsPollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch(`/api/replay/ws-frames/${tab.id}?since=${sinceIndex}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+
+      if (data.frames && data.frames.length > 0) {
+        tab.wsFrames.push(...data.frames);
+        sinceIndex = tab.wsFrames.length;
+        // Only re-render if this tab is still active
+        if (state.activeReplayTabId === tab.id) {
+          renderWsFrameList();
+        }
+      }
+
+      if (data.status && data.status !== tab.wsStatus) {
+        tab.wsStatus = data.status;
+        if (data.error) tab.wsError = data.error;
+        if (state.activeReplayTabId === tab.id) {
+          renderWsStatus();
+        }
+        if (data.status === "disconnected" || data.status === "error") {
+          stopWsPoll(tab);
+        }
+      }
+    } catch (_e) {
+      // ignore poll errors
+    }
+  }, 200);
+}
+
+function stopWsPoll(tab) {
+  if (tab && tab.wsPollTimer) {
+    clearInterval(tab.wsPollTimer);
+    tab.wsPollTimer = null;
+  }
+}
+
+function renderWsReplay() {
+  const tab = getActiveReplayTab();
+  if (!tab || tab.type !== "websocket") return;
+
+  els.wsSchemeSelect.value = tab.wsScheme;
+  els.wsHostInput.value = tab.wsHost;
+  els.wsPortInput.value = tab.wsPort;
+  els.wsPathInput.value = tab.wsPath;
+
+  // Restore handshake headers
+  if (els.wsHandshakeHeaders) {
+    if (tab.wsHandshakeText) {
+      els.wsHandshakeHeaders.value = tab.wsHandshakeText;
+    } else if (tab.wsHeaders && tab.wsHeaders.length > 0) {
+      els.wsHandshakeHeaders.value = tab.wsHeaders
+        .map(h => `${h.name}: ${h.value}`)
+        .join("\n");
+    } else {
+      els.wsHandshakeHeaders.value = "";
+    }
+  }
+
+  // Restore editor text
+  els.wsMessageEditor.value = tab.wsEditorText || "";
+  setWsMessageHighlightText(tab.wsEditorText || "");
+
+  renderWsStatus();
+  renderWsSetupQueue();
+  renderWsFrameList();
+}
+
+function renderWsSetupQueue() {
+  const container = document.getElementById("wsSetupQueue");
+  if (!container) return;
+  const tab = getActiveReplayTab();
+  if (!tab || tab.type !== "websocket" || !tab.wsSetupQueue || !tab.wsSetupQueue.length) {
+    container.classList.add("hidden");
+    return;
+  }
+  container.classList.remove("hidden");
+
+  const listEl = document.getElementById("wsSetupQueueList");
+  if (!listEl) return;
+
+  listEl.innerHTML = tab.wsSetupQueue.map((item, i) => {
+    const sentClass = item.sent ? "sent" : "";
+    const checked = item.autoSend ? "checked" : "";
+    return `<div class="ws-setup-row ${sentClass}" data-idx="${i}">
+      <input type="checkbox" class="ws-setup-check" data-idx="${i}" ${checked} />
+      <span class="ws-setup-index">#${i + 1}</span>
+      <span class="ws-setup-label">${escapeHtml(item.label)}</span>
+      <button class="ws-setup-send" data-idx="${i}" title="Send this message">▶</button>
+      ${item.sent ? '<span class="ws-setup-sent-badge">✓</span>' : ""}
+    </div>`;
+  }).join("");
+
+  // Checkbox toggle
+  listEl.querySelectorAll(".ws-setup-check").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const idx = parseInt(cb.dataset.idx);
+      tab.wsSetupQueue[idx].autoSend = cb.checked;
+      scheduleWorkspaceStateSave();
+    });
+  });
+
+  // Individual send button
+  listEl.querySelectorAll(".ws-setup-send").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const idx = parseInt(btn.dataset.idx);
+      const item = tab.wsSetupQueue[idx];
+      if (!item || tab.wsStatus !== "connected") return;
+      try {
+        const resp = await fetch("/api/replay/ws-send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: tab.id, body: item.body, binary: false }),
+        });
+        if (resp.ok) {
+          item.sent = true;
+          renderWsSetupQueue();
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    });
+  });
+
+  // Click row to load into editor
+  listEl.querySelectorAll(".ws-setup-row").forEach((row) => {
+    row.addEventListener("dblclick", () => {
+      const idx = parseInt(row.dataset.idx);
+      const item = tab.wsSetupQueue[idx];
+      if (item) {
+        els.wsMessageEditor.value = item.body;
+        tab.wsEditorText = item.body;
+        setWsMessageHighlightText(item.body);
+      }
+    });
+  });
+}
+
+function renderWsStatus() {
+  const tab = getActiveReplayTab();
+  if (!tab || tab.type !== "websocket") return;
+
+  const status = tab.wsStatus;
+  els.wsStatusIndicator.className = `ws-status-dot ${status}`;
+  els.wsStatusText.textContent = status === "connected" ? "Connected"
+    : status === "connecting" ? "Connecting..."
+    : status === "error" ? `Error: ${tab.wsError || "unknown"}`
+    : "Disconnected";
+
+  els.wsConnectButton.disabled = status === "connected" || status === "connecting";
+  els.wsDisconnectButton.disabled = status !== "connected";
+  els.wsSendButton.disabled = status !== "connected";
+}
+
+function renderWsFrameList() {
+  const tab = getActiveReplayTab();
+  if (!tab || tab.type !== "websocket") return;
+
+  const frames = tab.wsFrames;
+  els.wsFrameCount.textContent = `${frames.length} frame${frames.length === 1 ? "" : "s"}`;
+
+  if (!frames.length) {
+    els.wsFrameList.innerHTML = '<div class="empty-copy">Connect to start a WebSocket conversation.</div>';
+    renderWsFrameDetail();
+    return;
+  }
+
+  els.wsFrameList.innerHTML = frames.map((frame) => {
+    const isClient = frame.direction === "client_to_server";
+    const dirClass = isClient ? "client" : "server";
+    const dirLabel = isClient ? "you" : "server";
+    const selected = tab.wsSelectedFrameIndex === frame.index ? "selected" : "";
+    const rawBody = frame.body_encoding === "base64"
+      ? `[binary ${formatWsFrameSize(frame.body_size)}]`
+      : (frame.body || "").substring(0, 120);
+    const time = frame.captured_at
+      ? new Date(frame.captured_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+      : "";
+    const size = formatWsFrameSize(frame.body_size);
+
+    return `<div class="ws-frame-bubble ${dirClass} ${selected}" data-frame-index="${frame.index}">
+      <div class="ws-frame-bubble-meta"><span>${dirLabel}</span><span>${size} · ${time}</span></div>
+      <div class="ws-frame-bubble-body">${escapeHtml(rawBody)}</div>
+    </div>`;
+  }).join("");
+
+  // Auto-scroll to bottom
+  els.wsFrameList.scrollTop = els.wsFrameList.scrollHeight;
+
+  // Add click handlers
+  els.wsFrameList.querySelectorAll(".ws-frame-bubble").forEach((bubble) => {
+    bubble.addEventListener("click", () => {
+      const idx = parseInt(bubble.dataset.frameIndex);
+      tab.wsSelectedFrameIndex = idx;
+      els.wsFrameList.querySelectorAll(".ws-frame-bubble").forEach(b => b.classList.remove("selected"));
+      bubble.classList.add("selected");
+      renderWsFrameDetail();
+    });
+    bubble.addEventListener("dblclick", () => {
+      const idx = parseInt(bubble.dataset.frameIndex);
+      const frame = tab.wsFrames.find(f => f.index === idx);
+      if (frame && frame.direction === "client_to_server") {
+        const decoded = decodeWsFrameBody(frame);
+        els.wsMessageEditor.value = decoded;
+        tab.wsEditorText = decoded;
+        setWsMessageHighlightText(decoded);
+      }
+    });
+  });
+
+  renderWsFrameDetail();
+}
+
+function renderWsFrameDetail() {
+  const tab = getActiveReplayTab();
+  if (!tab || tab.type !== "websocket") return;
+
+  const frame = tab.wsFrames.find(f => f.index === tab.wsSelectedFrameIndex);
+  if (!frame) {
+    els.wsFrameDetailPath.textContent = "DETAIL";
+    els.wsFrameDetailTitle.textContent = "Select a frame";
+    els.wsFrameDetailView.innerHTML = "";
+    return;
+  }
+
+  const isClient = frame.direction === "client_to_server";
+  const sizeStr = formatWsFrameSize(frame.body_size);
+  const dirClass = isClient ? "dir-client" : "dir-server";
+  const dirLabel = isClient ? "client \u2192" : "\u2190 server";
+  els.wsFrameDetailPath.innerHTML = `<span class="${dirClass}">${dirLabel}</span> · ${escapeHtml(frame.kind || "")} · ${escapeHtml(sizeStr)}`;
+  els.wsFrameDetailTitle.textContent = `Frame #${frame.index + 1}`;
+
+  let text = decodeWsFrameBody(frame);
+
+  // Try to pretty-print JSON
+  try {
+    const parsed = JSON.parse(text);
+    text = JSON.stringify(parsed, null, 2);
+  } catch (_e) { /* not JSON */ }
+
+  els.wsFrameDetailView.innerHTML = renderCodeHtml(text, "pretty", "response");
+}
+
+function decodeWsFrameBody(frame) {
+  if (!frame || !frame.body) return "";
+  if (frame.body_encoding === "base64") {
+    try {
+      return atob(frame.body);
+    } catch (_e) {
+      return frame.body;
+    }
+  }
+  return frame.body;
+}
+
+function formatWsFrameSize(bytes) {
+  if (bytes == null) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function bindWsReplayEvents() {
+  if (!els.wsConnectButton) return;
+
+  els.wsConnectButton.addEventListener("click", () => {
+    wsConnect().catch((error) => console.error(error));
+  });
+  els.wsDisconnectButton.addEventListener("click", () => {
+    wsDisconnect().catch((error) => console.error(error));
+  });
+  els.wsSendButton.addEventListener("click", () => {
+    wsSend().catch((error) => console.error(error));
+  });
+
+  els.wsSchemeSelect.addEventListener("change", () => {
+    const tab = getActiveReplayTab();
+    if (tab && tab.type === "websocket") {
+      tab.wsScheme = els.wsSchemeSelect.value;
+      tab.wsPort = tab.wsScheme === "wss" ? 443 : 80;
+      els.wsPortInput.value = tab.wsPort;
+      renderReplayTabs();
+      scheduleWorkspaceStateSave();
+    }
+  });
+  els.wsHostInput.addEventListener("input", () => {
+    const tab = getActiveReplayTab();
+    if (tab && tab.type === "websocket") {
+      tab.wsHost = els.wsHostInput.value;
+      renderReplayTabs();
+      scheduleWorkspaceStateSave();
+    }
+  });
+  els.wsPortInput.addEventListener("change", () => {
+    const tab = getActiveReplayTab();
+    if (tab && tab.type === "websocket") {
+      tab.wsPort = parseInt(els.wsPortInput.value) || (tab.wsScheme === "wss" ? 443 : 80);
+      scheduleWorkspaceStateSave();
+    }
+  });
+  els.wsPathInput.addEventListener("input", () => {
+    const tab = getActiveReplayTab();
+    if (tab && tab.type === "websocket") {
+      tab.wsPath = els.wsPathInput.value;
+      scheduleWorkspaceStateSave();
+    }
+  });
+  els.wsHandshakeHeaders.addEventListener("input", () => {
+    const tab = getActiveReplayTab();
+    if (tab && tab.type === "websocket") {
+      tab.wsHandshakeText = els.wsHandshakeHeaders.value;
+      scheduleWorkspaceStateSave();
+    }
+  });
+  // WS Message highlight editor: input → sync to hidden textarea + JSON highlight
+  els.wsMessageHighlight.addEventListener("input", () => {
+    const plainText = els.wsMessageHighlight.innerText || "";
+    els.wsMessageEditor.value = plainText;
+    const tab = getActiveReplayTab();
+    if (tab && tab.type === "websocket") {
+      tab.wsEditorText = plainText;
+    }
+    applyWsMessageJsonHighlight();
+  });
+
+  // Cmd+Enter to send in WS editor
+  els.wsMessageHighlight.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      wsSend().catch((error) => console.error(error));
+    }
+  });
+
+  // WS Replay pane resizer (left/right)
+  if (els.wsReplayPaneResizer) {
+    let startX = 0;
+    let startW = 0;
+    const onMove = (e) => {
+      const delta = e.clientX - startX;
+      const panel = els.wsReplayPanel;
+      const total = panel.getBoundingClientRect().width - 10;
+      const newW = Math.max(280, Math.min(total - 280, startW + delta));
+      panel.style.setProperty("--ws-replay-left-width", `${newW}px`);
+    };
+    const onUp = () => {
+      document.body.classList.remove("pane-resizing-x");
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    els.wsReplayPaneResizer.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      startX = e.clientX;
+      const left = els.wsReplayPanel.querySelector(".ws-replay-left");
+      startW = left ? left.getBoundingClientRect().width : 400;
+      document.body.classList.add("pane-resizing-x");
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    });
+    els.wsReplayPaneResizer.addEventListener("dblclick", () => {
+      els.wsReplayPanel.style.removeProperty("--ws-replay-left-width");
+    });
+  }
+
+  // WS Replay frame detail resizer (vertical)
+  if (els.wsReplayFrameResizer) {
+    let startY = 0;
+    let startH = 0;
+    const onMove = (e) => {
+      const delta = startY - e.clientY;
+      const right = els.wsReplayPanel.querySelector(".ws-replay-right");
+      const total = right ? right.getBoundingClientRect().height : 600;
+      const newH = Math.max(120, Math.min(total * 0.8, startH + delta));
+      const detail = right.querySelector(".ws-frame-detail");
+      if (detail) detail.style.flex = `0 0 ${newH}px`;
+    };
+    const onUp = () => {
+      document.body.classList.remove("pane-resizing-y");
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    els.wsReplayFrameResizer.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      startY = e.clientY;
+      const detail = els.wsReplayPanel.querySelector(".ws-frame-detail");
+      startH = detail ? detail.getBoundingClientRect().height : 200;
+      document.body.classList.add("pane-resizing-y");
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    });
+  }
+
+}
+
+/* ─── WS Send to Replay (from captured frame) ─── */
+
+function sendWsFrameToReplay(frameIdx) {
+  const session = state.selectedWebsocketRecord;
+  if (!session) return;
+
+  const frame = session.frames[frameIdx];
+  const rawBody = frame ? (frame.body_preview || frame.body || "") : "";
+  const editorText = frame
+    ? (frame.body_encoding === "base64" ? atob(rawBody) : rawBody)
+    : "";
+
+  // Try JSON pretty-print for editor
+  let prettyText = editorText;
+  try { prettyText = JSON.stringify(JSON.parse(editorText), null, 2); } catch (e) {}
+
+  // Detect scheme: wss/ws from session, or infer from https/host:443
+  let scheme = session.scheme || "";
+  if (scheme === "wss" || scheme === "ws") { /* keep */ }
+  else if (scheme === "https" || session.host?.endsWith(":443")) scheme = "wss";
+  else scheme = "wss"; // default safe
+
+  const hostRaw = session.host || "";
+  const hostClean = hostRaw.replace(/:443$|:80$/, "");
+  const port = hostRaw.includes(":") ? parseInt(hostRaw.split(":").pop()) : (scheme === "ws" ? 80 : 443);
+
+  const tab = createWsReplayTab({
+    scheme,
+    host: hostClean,
+    port,
+    path: session.path || "/",
+    headers: session.request?.headers || [],
+    capturedFrames: session.frames || [],
+  });
+  tab.wsEditorText = prettyText;
+  state.activeTool = "replay";
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
+}
+
 /* ─── Context menu (color tags & notes) ─── */
 let contextMenuTargetId = null;
 let contextMenuNoteTimer = null;
@@ -6462,6 +7875,35 @@ function openContextMenu(x, y, transactionId) {
 function closeContextMenu() {
   els.contextMenu.classList.add("hidden");
   contextMenuTargetId = null;
+}
+
+/* ─── WS Frame Context Menu ─── */
+
+function openWsFrameContextMenu(x, y) {
+  const menu = els.wsFrameContextMenu;
+  if (!menu) return;
+  menu.classList.remove("hidden");
+  const maxX = window.innerWidth - menu.offsetWidth - 8;
+  const maxY = window.innerHeight - menu.offsetHeight - 8;
+  menu.style.left = `${Math.min(x, maxX)}px`;
+  menu.style.top = `${Math.min(y, maxY)}px`;
+}
+
+function closeWsFrameContextMenu() {
+  if (els.wsFrameContextMenu) els.wsFrameContextMenu.classList.add("hidden");
+}
+
+if (els.wsFrameContextMenu) {
+  document.getElementById("wsFrameToReplayBtn").addEventListener("click", () => {
+    closeWsFrameContextMenu();
+    sendWsFrameToReplay(state.selectedFrameIdx ?? 0);
+  });
+  document.addEventListener("click", (e) => {
+    if (!els.wsFrameContextMenu.contains(e.target)) closeWsFrameContextMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeWsFrameContextMenu();
+  });
 }
 
 async function loadUserNote(transactionId) {
