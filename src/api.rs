@@ -105,6 +105,13 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/match-replace",
             get(list_match_replace_rules).post(update_match_replace_rules),
         )
+        .route("/api/findings", get(list_findings))
+        .route("/api/findings/:id", get(get_finding))
+        .route("/api/findings/clear", post(clear_findings))
+        .route(
+            "/api/scanner-config",
+            get(get_scanner_config).post(update_scanner_config),
+        )
         .route("/api/target/site-map", get(get_target_site_map))
         .route("/api/transactions", get(list_transactions))
         .route("/api/transactions/:id", get(get_transaction))
@@ -417,6 +424,56 @@ async fn clear_event_log(State(state): State<Arc<AppState>>) -> StatusCode {
     let session = state.session().await;
     session.event_log.clear().await;
     persist_session_quiet(&state).await;
+    StatusCode::NO_CONTENT
+}
+
+// ── Scanner findings ──
+
+#[derive(Debug, Deserialize)]
+struct FindingsQuery {
+    limit: Option<usize>,
+}
+
+async fn list_findings(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FindingsQuery>,
+) -> Json<Vec<crate::scanner::FindingSummary>> {
+    let session = state.session().await;
+    Json(session.scanner.list(query.limit).await)
+}
+
+async fn get_finding(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let session = state.session().await;
+    match session.scanner.get(id).await {
+        Some(finding) => Json(finding).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn clear_findings(State(state): State<Arc<AppState>>) -> StatusCode {
+    let session = state.session().await;
+    session.scanner.clear().await;
+    StatusCode::NO_CONTENT
+}
+
+async fn get_scanner_config(State(state): State<Arc<AppState>>) -> Json<crate::scanner::ScannerConfig> {
+    let session = state.session().await;
+    Json(session.scanner.get_config().await)
+}
+
+async fn update_scanner_config(
+    State(state): State<Arc<AppState>>,
+    Json(config): Json<crate::scanner::ScannerConfig>,
+) -> StatusCode {
+    let session = state.session().await;
+    session.scanner.update_config(config).await;
     StatusCode::NO_CONTENT
 }
 

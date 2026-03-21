@@ -132,6 +132,7 @@
             <button class="sub-tab active" data-proxy-tab="http-history">HTTP</button>
             <button class="sub-tab" data-proxy-tab="websockets-history">Web Socket</button>
             <button class="sub-tab" data-proxy-tab="replace">Replace</button>
+            <button class="sub-tab" data-proxy-tab="findings">Findings <span class="findings-badge" id="findingsBadge"></span></button>
             <button class="sub-tab" data-proxy-tab="proxy-settings">Settings</button>
             <div class="color-tag-filter" id="colorTagFilter">
               <button class="color-dot-btn" data-color="red" title="Red"><span class="color-dot color-dot-red"></span></button>
@@ -511,6 +512,123 @@
               </section>
             </div>
           </section>
+
+          <section class="proxy-panel hidden" id="findingsPanel">
+            <div class="findings-toolbar">
+              <!-- Filter controls -->
+              <div class="findings-filter-bar">
+                <select id="findingsFilterSeverity" class="findings-filter-select">
+                  <option value="">All Severity</option>
+                  <option value="critical">Critical</option>
+                  <option value="high">High+</option>
+                  <option value="medium">Medium+</option>
+                  <option value="low">Low+</option>
+                  <option value="info">Info+</option>
+                </select>
+                <select id="findingsFilterCategory" class="findings-filter-select">
+                  <option value="">All Categories</option>
+                  <option value="jwt">JWT</option>
+                  <option value="header">Headers</option>
+                  <option value="cookie">Cookie</option>
+                  <option value="disclosure">Disclosure</option>
+                  <option value="cors">CORS</option>
+                  <option value="error">Error</option>
+                </select>
+                <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search..." />
+              </div>
+              <div class="findings-toolbar-actions">
+                <label class="scanner-quick-toggle" title="Show only in-scope findings">
+                  <input id="findingsInScopeOnly" type="checkbox" />
+                  <span class="scanner-quick-toggle-label">In Scope</span>
+                </label>
+                <label class="scanner-quick-toggle" title="Toggle Passive Scan">
+                  <input id="scannerQuickToggle" type="checkbox" checked />
+                  <span class="scanner-quick-toggle-label">Passive Scan</span>
+                </label>
+                <button class="secondary-action" id="findingsSettingsButton" type="button" title="Detection Rules">&#9881;</button>
+                <button class="secondary-action" id="findingsClearButton" type="button">Clear</button>
+              </div>
+            </div>
+            <div class="history-table-shell">
+              <table class="history-table findings-table" id="findingsTable">
+                <thead>
+                  <tr>
+                    <th class="findings-col findings-col-severity findings-sortable" data-findings-sort="severity">Severity <span class="findings-sort-indicator">↕</span><span class="findings-col-resize" data-findings-col="severity"></span></th>
+                    <th class="findings-col findings-col-category findings-sortable" data-findings-sort="category">Category <span class="findings-sort-indicator">↕</span><span class="findings-col-resize" data-findings-col="category"></span></th>
+                    <th class="findings-col findings-col-title findings-sortable" data-findings-sort="title">Title <span class="findings-sort-indicator">↕</span><span class="findings-col-resize" data-findings-col="title"></span></th>
+                    <th class="findings-col findings-col-host findings-sortable" data-findings-sort="host">Host <span class="findings-sort-indicator">↕</span><span class="findings-col-resize" data-findings-col="host"></span></th>
+                    <th class="findings-col findings-col-path findings-sortable" data-findings-sort="path">Path <span class="findings-sort-indicator">↕</span><span class="findings-col-resize" data-findings-col="path"></span></th>
+                    <th class="findings-col findings-col-time findings-sortable active" data-findings-sort="found_at">Time <span class="findings-sort-indicator">↓</span></th>
+                  </tr>
+                </thead>
+                <tbody id="findingsBody"></tbody>
+              </table>
+            </div>
+            <div class="findings-detail-resizer" id="findingsDetailResizer"></div>
+            <div class="findings-detail-panel" id="findingsDetailPanel">
+              <div class="findings-detail-placeholder" id="findingsDetailPlaceholder">
+                <span class="text-muted">Select a finding to view details</span>
+              </div>
+              <div class="findings-detail-content hidden" id="findingsDetailContent">
+                <div class="findings-detail-header">
+                  <div class="findings-detail-info">
+                    <span class="severity-badge" id="findingsDetailSeverity"></span>
+                    <span class="detail-chip" id="findingsDetailCategory"></span>
+                    <h4 id="findingsDetailTitle"></h4>
+                  </div>
+                  <div class="findings-detail-actions">
+                    <button class="secondary-action findings-jump-btn" id="findingsDetailJump" type="button">Jump</button>
+                    <button class="utility-button" id="findingsDetailClose" type="button">&times;</button>
+                  </div>
+                </div>
+                <div class="findings-detail-desc" id="findingsDetailDesc"></div>
+                <div class="findings-detail-panes">
+                <section class="findings-pane">
+                  <header class="pane-header"><strong>Request</strong></header>
+                  <div class="editor-shell">
+                    <div class="code-gutter" id="findingsReqLines"></div>
+                    <pre class="code-view" id="findingsReqView"></pre>
+                  </div>
+                </section>
+                <section class="findings-pane">
+                  <header class="pane-header"><strong>Response</strong></header>
+                  <div class="editor-shell">
+                    <div class="code-gutter" id="findingsResLines"></div>
+                    <pre class="code-view" id="findingsResView"></pre>
+                  </div>
+                </section>
+              </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Passive Scan Settings Modal -->
+          <div class="modal-backdrop hidden" id="scannerSettingsBackdrop">
+            <div class="modal-card scanner-settings-modal">
+              <header class="modal-header">
+                <h3>Detection Rules</h3>
+                <button class="utility-button" id="scannerSettingsClose" type="button">&times;</button>
+              </header>
+              <div class="scanner-settings-body">
+                <!-- Built-in rules -->
+                <div class="scanner-rules-section">
+                  <h4>Detection Rules</h4>
+                  <div id="scannerBuiltinRules" class="scanner-rules-list"></div>
+                </div>
+
+                <!-- Custom rules -->
+                <div class="scanner-rules-section">
+                  <h4>Custom Rules</h4>
+                  <div id="scannerCustomRules" class="scanner-custom-rules-list"></div>
+                  <button class="secondary-action" id="scannerAddCustomRule" type="button">+ Add Custom Rule</button>
+                </div>
+              </div>
+              <footer class="modal-footer">
+                <button class="secondary-action" id="scannerSettingsCancel" type="button">Cancel</button>
+                <button class="primary-action" id="scannerSettingsSave" type="button">Save</button>
+              </footer>
+            </div>
+          </div>
 
           <section class="proxy-panel hidden" id="proxySettingsPanel">
             <div class="split-panel split-panel-tight">

@@ -9,6 +9,7 @@ pub mod model;
 pub mod proxy;
 pub mod runtime;
 pub mod runtime_state;
+pub mod scanner;
 pub mod session;
 pub mod skills;
 pub mod special_host;

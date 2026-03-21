@@ -1027,7 +1027,19 @@ async fn forward_http_request(
     )
     .await;
     let record = exchange.record.clone();
-    session.store.insert(record).await;
+    session.store.insert(record.clone()).await;
+    // Passive scanner: analyze transaction asynchronously
+    {
+        let scanner = session.scanner.clone();
+        let scan_record = record;
+        tokio::spawn(async move {
+            let config = scanner.get_config().await;
+            let findings = crate::scanner::scan_transaction(&scan_record, &config);
+            for finding in findings {
+                scanner.push(finding).await;
+            }
+        });
+    }
     persist_session_quiet(&state, &session).await;
 
     match exchange.response {

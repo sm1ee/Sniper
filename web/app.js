@@ -105,6 +105,17 @@ const WS_COLUMN_RULES = {
   started_at:  { default: 150, min: 110, max: 260 },
 };
 
+const FINDINGS_COL_RULES = {
+  severity: { default: 88, min: 60, max: 150 },
+  category: { default: 96, min: 60, max: 180 },
+  title:    { default: 200, min: 100, max: 600 },
+  host:     { default: 180, min: 80, max: 500 },
+  path:     { default: 260, min: 80, max: 700 },
+  time:     { default: 120, min: 80, max: 260 },
+};
+let findingsColWidths = Object.fromEntries(
+  Object.entries(FINDINGS_COL_RULES).map(([k, v]) => [k, v.default])
+);
 const WORKBENCH_STACK_MIN_HEIGHTS = {
   history: 140,
   messages: 180,
@@ -182,6 +193,7 @@ const state = {
   settings: null,
   appVersion: null,
   runtime: null,
+  _settingsLoadPending: false,
   messageViews: {
     request: "pretty",
     response: "pretty",
@@ -290,6 +302,38 @@ const els = {
   interceptPanel: document.getElementById("interceptPanel"),
   websocketPanel: document.getElementById("websocketPanel"),
   matchReplacePanel: document.getElementById("matchReplacePanel"),
+  findingsPanel: document.getElementById("findingsPanel"),
+  findingsBody: document.getElementById("findingsBody"),
+  findingsBadge: document.getElementById("findingsBadge"),
+  findingsDetailResizer: document.getElementById("findingsDetailResizer"),
+  findingsDetailPanel: document.getElementById("findingsDetailPanel"),
+  findingsDetailContent: document.getElementById("findingsDetailContent"),
+  findingsDetailPlaceholder: document.getElementById("findingsDetailPlaceholder"),
+  findingsDetailTitle: document.getElementById("findingsDetailTitle"),
+  findingsDetailSeverity: document.getElementById("findingsDetailSeverity"),
+  findingsDetailCategory: document.getElementById("findingsDetailCategory"),
+  findingsDetailDesc: document.getElementById("findingsDetailDesc"),
+  findingsDetailJump: document.getElementById("findingsDetailJump"),
+  findingsDetailClose: document.getElementById("findingsDetailClose"),
+  findingsReqView: document.getElementById("findingsReqView"),
+  findingsReqLines: document.getElementById("findingsReqLines"),
+  findingsResView: document.getElementById("findingsResView"),
+  findingsResLines: document.getElementById("findingsResLines"),
+  findingsClearButton: document.getElementById("findingsClearButton"),
+  findingsSettingsButton: document.getElementById("findingsSettingsButton"),
+  findingsFilterSeverity: document.getElementById("findingsFilterSeverity"),
+  findingsFilterCategory: document.getElementById("findingsFilterCategory"),
+  findingsFilterSearch: document.getElementById("findingsFilterSearch"),
+  scannerSettingsBackdrop: document.getElementById("scannerSettingsBackdrop"),
+  scannerSettingsClose: document.getElementById("scannerSettingsClose"),
+  scannerSettingsCancel: document.getElementById("scannerSettingsCancel"),
+  scannerSettingsSave: document.getElementById("scannerSettingsSave"),
+  scannerEnabledToggle: document.getElementById("scannerEnabledToggle"),
+  scannerBuiltinRules: document.getElementById("scannerBuiltinRules"),
+  scannerCustomRules: document.getElementById("scannerCustomRules"),
+  scannerAddCustomRule: document.getElementById("scannerAddCustomRule"),
+  scannerQuickToggle: document.getElementById("scannerQuickToggle"),
+  findingsInScopeOnly: document.getElementById("findingsInScopeOnly"),
   proxySettingsPanel: document.getElementById("proxySettingsPanel"),
   requestView: document.getElementById("requestView"),
   requestLines: document.getElementById("requestLines"),
@@ -567,12 +611,25 @@ async function init() {
   auxTimer = window.setInterval(() => {
     pollAuxiliaryData().catch((error) => console.error(error));
   }, 1200);
+  // Sync active tabs from DOM in case WKWebView restored a cached page state
+  const domActiveTool = document.querySelector(".tool-tab.active");
+  if (domActiveTool?.dataset?.tool && domActiveTool.dataset.tool !== state.activeTool) {
+    state.activeTool = domActiveTool.dataset.tool;
+  }
+  const domActiveProxyTab = document.querySelector(".sub-tab.active");
+  if (domActiveProxyTab?.dataset?.proxyTab && domActiveProxyTab.dataset.proxyTab !== state.activeProxyTab) {
+    state.activeProxyTab = domActiveProxyTab.dataset.proxyTab;
+  }
   renderToolPanels();
   renderProxyPanels();
   renderInspectorPanels();
   renderViewTabs();
   renderSortHeaders();
   renderProxySettings();
+  // Ensure Settings tab data loads on startup if it's the active tab
+  if (state.activeProxyTab === "proxy-settings") {
+    loadRuntimeSettings().catch((error) => console.error(error));
+  }
   renderIntercepts();
   renderWebsocketSessions();
   renderReplay();
@@ -582,6 +639,12 @@ async function init() {
   renderTarget();
   renderFuzzer();
   normalizeWorkbenchStackHeight();
+  // Safety: re-render settings after a short delay to cover WKWebView timing issues
+  setTimeout(() => {
+    if (state.settings && state.runtime) {
+      renderProxySettings();
+    }
+  }, 800);
 }
 
 function resetLayoutTextareas() {
@@ -985,6 +1048,7 @@ function bindEvents() {
   els.replayRequestHighlight.addEventListener("contextmenu", showReplayContextMenu);
   initReplayContextMenu();
   bindWsReplayEvents();
+  bindFindingsEvents();
   els.replaySchemeSelect.addEventListener("change", () => {
     applyReplayTargetFields().catch((error) => console.error(error));
   });
@@ -1978,6 +2042,13 @@ async function pollAuxiliaryData() {
     tasks.push(loadTargetSiteMap());
   }
 
+  if (state.activeTool === "proxy" && state.activeProxyTab === "findings") {
+    tasks.push(loadFindings());
+  } else {
+    // Always update badge count even when not on Findings tab
+    tasks.push(updateFindingsBadgeOnly());
+  }
+
   if (!tasks.length) {
     return;
   }
@@ -2465,6 +2536,715 @@ function getSortedSessions() {
   });
 }
 
+// ── Findings (Passive Scanner) ──
+
+let findingsData = [];
+let scannerConfigCache = null;
+let findingsSortKey = "found_at";
+let findingsSortDir = "desc";
+
+const BUILTIN_RULE_LABELS = {
+  jwt: "JWT Analysis",
+  header: "Security Headers",
+  cookie: "Cookie Flags",
+  disclosure: "Sensitive Data Exposure",
+  cors: "CORS Misconfiguration",
+  server: "Server Disclosure",
+  error: "Error Messages",
+};
+
+let selectedFindingId = null;
+
+async function loadFindings() {
+  try {
+    const response = await fetch("/api/findings?limit=5000");
+    if (!response.ok) return;
+    findingsData = await response.json();
+    renderFindings();
+    updateFindingsBadge();
+  } catch (error) {
+    console.error("Failed to load findings:", error);
+  }
+}
+
+async function updateFindingsBadgeOnly() {
+  try {
+    const response = await fetch("/api/findings?limit=5000");
+    if (!response.ok) return;
+    findingsData = await response.json();
+    updateFindingsBadge();
+  } catch (e) { /* silent */ }
+}
+
+function updateFindingsBadge() {
+  if (!els.findingsBadge) return;
+  const count = findingsData.length;
+  els.findingsBadge.textContent = count > 0 ? String(count) : "";
+  els.findingsBadge.classList.toggle("hidden", count === 0);
+}
+
+function severityClass(severity) {
+  switch (severity) {
+    case "critical": return "severity-critical";
+    case "high": return "severity-high";
+    case "medium": return "severity-medium";
+    case "low": return "severity-low";
+    default: return "severity-info";
+  }
+}
+
+function severityLabel(severity) {
+  switch (severity) {
+    case "critical": return "Critical";
+    case "high": return "High";
+    case "medium": return "Medium";
+    case "low": return "Low";
+    default: return "Info";
+  }
+}
+
+const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+
+function getFilteredFindings() {
+  const sevFilter = els.findingsFilterSeverity ? els.findingsFilterSeverity.value : "";
+  const catFilter = els.findingsFilterCategory ? els.findingsFilterCategory.value : "";
+  const searchTerm = els.findingsFilterSearch ? els.findingsFilterSearch.value.toLowerCase().trim() : "";
+  const inScopeOnly = els.findingsInScopeOnly ? els.findingsInScopeOnly.checked : false;
+
+  let filtered = findingsData.filter((f) => {
+    if (inScopeOnly && !isInScopeHost(f.host)) return false;
+    if (sevFilter) {
+      const threshold = SEVERITY_ORDER[sevFilter] ?? 5;
+      const fLevel = SEVERITY_ORDER[f.severity] ?? 5;
+      if (fLevel > threshold) return false;
+    }
+    if (catFilter && f.category !== catFilter) return false;
+    if (searchTerm) {
+      const haystack = `${f.title} ${f.host} ${f.path} ${f.category}`.toLowerCase();
+      if (!haystack.includes(searchTerm)) return false;
+    }
+    return true;
+  });
+
+  // Sort
+  const dir = findingsSortDir === "asc" ? 1 : -1;
+  filtered.sort((a, b) => {
+    let va, vb;
+    if (findingsSortKey === "severity") {
+      va = SEVERITY_ORDER[a.severity] ?? 5;
+      vb = SEVERITY_ORDER[b.severity] ?? 5;
+    } else if (findingsSortKey === "found_at") {
+      va = a.found_at || "";
+      vb = b.found_at || "";
+    } else {
+      va = (a[findingsSortKey] || "").toLowerCase();
+      vb = (b[findingsSortKey] || "").toLowerCase();
+    }
+    if (va < vb) return -1 * dir;
+    if (va > vb) return 1 * dir;
+    return 0;
+  });
+
+  return filtered;
+}
+
+function toggleFindingsSort(key) {
+  if (findingsSortKey === key) {
+    findingsSortDir = findingsSortDir === "asc" ? "desc" : "asc";
+  } else {
+    findingsSortKey = key;
+    findingsSortDir = key === "severity" ? "asc" : (key === "found_at" ? "desc" : "asc");
+  }
+  updateFindingsSortHeaders();
+  renderFindings();
+}
+
+function updateFindingsSortHeaders() {
+  document.querySelectorAll(".findings-sortable").forEach((th) => {
+    const key = th.dataset.findingsSort;
+    const active = key === findingsSortKey;
+    th.classList.toggle("active", active);
+    const indicator = th.querySelector(".findings-sort-indicator");
+    if (indicator) {
+      indicator.textContent = active ? (findingsSortDir === "asc" ? "↑" : "↓") : "↕";
+    }
+  });
+}
+
+function updateCategoryFilter() {
+  if (!els.findingsFilterCategory) return;
+  const current = els.findingsFilterCategory.value;
+  const builtinCats = new Set(["jwt", "header", "cookie", "disclosure", "cors", "error"]);
+  const extraCats = new Set();
+  for (const f of findingsData) {
+    if (!builtinCats.has(f.category)) extraCats.add(f.category);
+  }
+  // Remove old custom options
+  Array.from(els.findingsFilterCategory.options).forEach((opt) => {
+    if (opt.dataset.custom) opt.remove();
+  });
+  for (const cat of extraCats) {
+    const opt = document.createElement("option");
+    opt.value = cat;
+    opt.textContent = cat;
+    opt.dataset.custom = "1";
+    els.findingsFilterCategory.appendChild(opt);
+  }
+  els.findingsFilterCategory.value = current;
+}
+
+function renderFindings() {
+  if (!els.findingsBody) return;
+  updateCategoryFilter();
+  const filtered = getFilteredFindings();
+  els.findingsBody.innerHTML = filtered.length
+    ? filtered
+        .map((f) => `
+          <tr class="history-row${f.id === selectedFindingId ? " selected" : ""}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
+            <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
+            <td class="findings-col-category"><span class="detail-chip">${escapeHtml(f.category)}</span></td>
+            <td class="findings-col-title">${escapeHtml(f.title)}</td>
+            <td class="findings-col-host">${escapeHtml(f.host)}</td>
+            <td class="findings-col-path">${escapeHtml(f.path)}</td>
+            <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
+          </tr>
+        `)
+        .join("")
+    : `<tr class="empty-row"><td colspan="6">No findings yet. Browse with the proxy to start scanning.</td></tr>`;
+
+  // Row click → load detail
+  Array.from(els.findingsBody.querySelectorAll("tr[data-finding-id]")).forEach((row) => {
+    row.addEventListener("click", () => {
+      const id = row.dataset.findingId;
+      selectedFindingId = id;
+      loadFindingDetail(id);
+      Array.from(els.findingsBody.querySelectorAll(".selected")).forEach((r) => r.classList.remove("selected"));
+      row.classList.add("selected");
+    });
+    row.addEventListener("dblclick", () => {
+      const recordId = row.dataset.recordId;
+      if (recordId) jumpToTransaction(recordId);
+    });
+  });
+}
+
+async function loadFindingDetail(id) {
+  try {
+    const res = await fetch(`/api/findings/${encodeURIComponent(id)}`);
+    if (!res.ok) return;
+    const finding = await res.json();
+    // Also fetch the transaction record for request/response
+    let record = null;
+    try {
+      const tRes = await fetch(`/api/transactions/${encodeURIComponent(finding.record_id)}`);
+      if (tRes.ok) record = await tRes.json();
+    } catch (_) { /* silent */ }
+    showFindingDetail(finding, record);
+  } catch (error) {
+    console.error("Failed to load finding detail:", error);
+  }
+}
+
+function showFindingDetail(finding, record) {
+  if (!els.findingsDetailPanel) return;
+  if (els.findingsDetailPlaceholder) els.findingsDetailPlaceholder.classList.add("hidden");
+  if (els.findingsDetailContent) els.findingsDetailContent.classList.remove("hidden");
+
+  // Header info
+  els.findingsDetailSeverity.className = `severity-badge ${severityClass(finding.severity)}`;
+  els.findingsDetailSeverity.textContent = severityLabel(finding.severity);
+  els.findingsDetailCategory.textContent = finding.category;
+  els.findingsDetailTitle.textContent = finding.title;
+
+  // Description + evidence
+  els.findingsDetailDesc.innerHTML = `<span class="findings-desc-text">${escapeHtml(finding.detail)}</span>`;
+
+  // Jump button — store record_id
+  els.findingsDetailJump.dataset.recordId = finding.record_id;
+
+  // Render request/response with highlight
+  const evidence = finding.evidence || "";
+  if (record) {
+    const reqText = buildFindingsRawMessage(record, "request");
+    const resText = buildFindingsRawMessage(record, "response");
+    renderFindingsCodePane(els.findingsReqView, els.findingsReqLines, reqText, evidence, "request", finding);
+    renderFindingsCodePane(els.findingsResView, els.findingsResLines, resText, evidence, "response", finding);
+  } else {
+    els.findingsReqView.innerHTML = '<span class="code-line code-line-empty">Transaction not available.</span>';
+    els.findingsReqLines.textContent = "";
+    els.findingsResView.innerHTML = '<span class="code-line code-line-empty">Transaction not available.</span>';
+    els.findingsResLines.textContent = "";
+  }
+}
+
+function renderFindingsCodePane(viewEl, lineEl, text, evidence, target, finding) {
+  if (!text) {
+    viewEl.innerHTML = '<span class="code-line code-line-empty">&nbsp;</span>';
+    lineEl.textContent = "";
+    return;
+  }
+  const html = renderHttpHtml(text, target);
+  viewEl.innerHTML = html;
+  lineEl.textContent = buildLineNumbers(countLines(text));
+
+  // Highlight evidence — line background + inline mark
+  highlightFindingLines(viewEl, evidence, finding);
+
+  // Scroll sync
+  viewEl.addEventListener("scroll", () => { lineEl.scrollTop = viewEl.scrollTop; });
+}
+
+function highlightFindingLines(container, evidence, finding) {
+  const codeLines = container.querySelectorAll(".code-line");
+  let scrollTarget = null;
+
+  // 1) If evidence exists, highlight lines containing the evidence text
+  if (evidence && evidence.length >= 3) {
+    const escapedEvidence = evidence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    let pattern;
+    try { pattern = new RegExp(`(${escapedEvidence})`, "gi"); } catch (_) { pattern = null; }
+
+    if (pattern) {
+      codeLines.forEach((line) => {
+        pattern.lastIndex = 0;
+        if (pattern.test(line.textContent)) {
+          line.classList.add("findings-line-hit");
+          if (!scrollTarget) scrollTarget = line;
+
+          // Also inline-mark the exact text
+          const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT, null);
+          const textNodes = [];
+          while (walker.nextNode()) textNodes.push(walker.currentNode);
+          textNodes.forEach((node) => {
+            const txt = node.nodeValue;
+            pattern.lastIndex = 0;
+            if (!pattern.test(txt)) return;
+            pattern.lastIndex = 0;
+            const frag = document.createDocumentFragment();
+            let lastIdx = 0;
+            let m;
+            while ((m = pattern.exec(txt)) !== null) {
+              if (m.index > lastIdx) frag.appendChild(document.createTextNode(txt.slice(lastIdx, m.index)));
+              const mark = document.createElement("mark");
+              mark.className = "findings-highlight";
+              mark.textContent = m[1];
+              frag.appendChild(mark);
+              lastIdx = pattern.lastIndex;
+            }
+            if (lastIdx < txt.length) frag.appendChild(document.createTextNode(txt.slice(lastIdx)));
+            node.parentNode.replaceChild(frag, node);
+          });
+        }
+      });
+    }
+  }
+
+  // 2) For "missing" findings (no evidence), highlight related header lines
+  if (!scrollTarget && finding) {
+    const keywords = extractFindingKeywords(finding);
+    if (keywords.length) {
+      codeLines.forEach((line) => {
+        const text = line.textContent.toLowerCase();
+        if (keywords.some((kw) => text.includes(kw))) {
+          line.classList.add("findings-line-related");
+          if (!scrollTarget) scrollTarget = line;
+        }
+      });
+    }
+  }
+
+  // Scroll to first highlighted line
+  if (scrollTarget) {
+    setTimeout(() => scrollTarget.scrollIntoView({ block: "center", behavior: "smooth" }), 50);
+  }
+}
+
+function extractFindingKeywords(finding) {
+  const title = (finding.title || "").toLowerCase();
+  const keywords = [];
+
+  // Missing header findings → highlight related headers
+  if (title.includes("content-security-policy")) keywords.push("content-security-policy");
+  if (title.includes("strict-transport-security")) keywords.push("strict-transport-security");
+  if (title.includes("x-content-type-options")) keywords.push("x-content-type-options");
+  if (title.includes("x-frame-options")) keywords.push("x-frame-options", "frame-ancestors");
+  if (title.includes("httponly")) keywords.push("set-cookie", "httponly");
+  if (title.includes("secure flag")) keywords.push("set-cookie", "secure");
+  if (title.includes("samesite")) keywords.push("set-cookie", "samesite");
+  if (title.includes("cors")) keywords.push("access-control-allow-origin", "access-control-allow-credentials");
+  if (title.includes("server version")) keywords.push("server:", "x-powered-by:");
+  if (title.includes("jwt")) keywords.push("authorization:", "bearer");
+  if (title.includes("cookie") && !keywords.length) keywords.push("set-cookie", "cookie");
+
+  return keywords;
+}
+
+function jumpToTransaction(recordId) {
+  state.activeProxyTab = "http-history";
+  state.selectedTransactionId = recordId;
+  renderProxyPanels();
+  loadTransactionDetail(recordId);
+}
+
+// ── Scanner Settings Modal ──
+
+async function loadScannerConfig() {
+  try {
+    const res = await fetch("/api/scanner-config");
+    if (!res.ok) return null;
+    scannerConfigCache = await res.json();
+    return scannerConfigCache;
+  } catch (e) {
+    console.error("Failed to load scanner config:", e);
+    return null;
+  }
+}
+
+async function saveScannerConfig(config) {
+  try {
+    await fetch("/api/scanner-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+    scannerConfigCache = config;
+  } catch (e) {
+    console.error("Failed to save scanner config:", e);
+  }
+}
+
+async function openScannerSettings() {
+  const config = await loadScannerConfig();
+  if (!config) return;
+
+  // Render built-in rules
+  els.scannerBuiltinRules.innerHTML = Object.entries(BUILTIN_RULE_LABELS)
+    .map(([id, label]) => {
+      const checked = config.rules[id] !== false ? "checked" : "";
+      return `<div class="scanner-rule-item">
+        <label><input type="checkbox" data-rule-id="${id}" ${checked} /> ${escapeHtml(label)}</label>
+      </div>`;
+    })
+    .join("");
+
+  // Render custom rules
+  renderCustomRulesEditor(config.custom_rules || []);
+
+  els.scannerSettingsBackdrop.classList.remove("hidden");
+}
+
+function renderCustomRulesEditor(customRules) {
+  els.scannerCustomRules.innerHTML = customRules
+    .map((rule, idx) => `
+      <div class="scanner-custom-rule-card" data-custom-idx="${idx}">
+        <div class="scanner-custom-rule-header">
+          <label><input type="checkbox" class="custom-rule-enabled" ${rule.enabled ? "checked" : ""} /></label>
+          <input type="text" class="custom-rule-name" value="${escapeHtml(rule.name)}" placeholder="Rule name" style="margin: 0 6px;" />
+          <button class="secondary-action scanner-custom-rule-delete" type="button" data-del-idx="${idx}">&times;</button>
+        </div>
+        <div class="scanner-custom-rule-fields">
+          <select class="custom-rule-target">
+            <option value="response_body" ${rule.target === "response_body" ? "selected" : ""}>Response Body</option>
+            <option value="response_header" ${rule.target === "response_header" ? "selected" : ""}>Response Header</option>
+            <option value="request_header" ${rule.target === "request_header" ? "selected" : ""}>Request Header</option>
+          </select>
+          <input type="text" class="custom-rule-header-name" value="${escapeHtml(rule.header_name || "")}" placeholder="Header name (optional)" />
+          <input type="text" class="custom-rule-pattern scanner-custom-rule-fullrow" value="${escapeHtml(rule.pattern)}" placeholder="Regex pattern" />
+          <select class="custom-rule-severity">
+            <option value="critical" ${rule.severity === "critical" ? "selected" : ""}>Critical</option>
+            <option value="high" ${rule.severity === "high" ? "selected" : ""}>High</option>
+            <option value="medium" ${rule.severity === "medium" ? "selected" : ""}>Medium</option>
+            <option value="low" ${rule.severity === "low" ? "selected" : ""}>Low</option>
+            <option value="info" ${rule.severity === "info" ? "selected" : ""}>Info</option>
+          </select>
+          <input type="text" class="custom-rule-category" value="${escapeHtml(rule.category)}" placeholder="Category" />
+          <input type="text" class="custom-rule-description scanner-custom-rule-fullrow" value="${escapeHtml(rule.description)}" placeholder="Description" />
+        </div>
+      </div>
+    `)
+    .join("");
+
+  // Delete button events
+  els.scannerCustomRules.querySelectorAll(".scanner-custom-rule-delete").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const rules = collectCustomRulesFromEditor();
+      rules.splice(parseInt(btn.dataset.delIdx, 10), 1);
+      renderCustomRulesEditor(rules);
+    });
+  });
+}
+
+function collectCustomRulesFromEditor() {
+  const cards = els.scannerCustomRules.querySelectorAll(".scanner-custom-rule-card");
+  return Array.from(cards).map((card, idx) => ({
+    id: `custom_${idx}_${Date.now()}`,
+    enabled: card.querySelector(".custom-rule-enabled").checked,
+    name: card.querySelector(".custom-rule-name").value.trim() || `Custom Rule ${idx + 1}`,
+    target: card.querySelector(".custom-rule-target").value,
+    header_name: card.querySelector(".custom-rule-header-name").value.trim(),
+    pattern: card.querySelector(".custom-rule-pattern").value,
+    severity: card.querySelector(".custom-rule-severity").value,
+    category: card.querySelector(".custom-rule-category").value.trim() || "custom",
+    description: card.querySelector(".custom-rule-description").value.trim(),
+  }));
+}
+
+function collectScannerConfig() {
+  const rules = {};
+  els.scannerBuiltinRules.querySelectorAll("input[data-rule-id]").forEach((input) => {
+    rules[input.dataset.ruleId] = input.checked;
+  });
+  return {
+    enabled: els.scannerQuickToggle ? els.scannerQuickToggle.checked : true,
+    rules,
+    custom_rules: collectCustomRulesFromEditor(),
+  };
+}
+
+function closeScannerSettings() {
+  els.scannerSettingsBackdrop.classList.add("hidden");
+}
+
+async function saveScannerSettingsFromModal() {
+  const config = collectScannerConfig();
+  await saveScannerConfig(config);
+  syncQuickToggle(config.enabled);
+  closeScannerSettings();
+}
+
+function syncQuickToggle(enabled) {
+  if (els.scannerQuickToggle) {
+    els.scannerQuickToggle.checked = enabled;
+  }
+}
+
+function findingsArrowNav(direction) {
+  const rows = Array.from(els.findingsBody.querySelectorAll("tr[data-finding-id]"));
+  if (!rows.length) return;
+  const currentIdx = rows.findIndex((r) => r.dataset.findingId === selectedFindingId);
+  let nextIdx;
+  if (currentIdx < 0) {
+    nextIdx = 0;
+  } else {
+    nextIdx = currentIdx + direction;
+    if (nextIdx < 0) nextIdx = 0;
+    if (nextIdx >= rows.length) nextIdx = rows.length - 1;
+  }
+  const row = rows[nextIdx];
+  const id = row.dataset.findingId;
+  selectedFindingId = id;
+  rows.forEach((r) => r.classList.remove("selected"));
+  row.classList.add("selected");
+  row.scrollIntoView({ block: "nearest" });
+  loadFindingDetail(id);
+}
+
+function bindFindingsEvents() {
+  // Sort headers
+  document.querySelectorAll(".findings-sortable").forEach((th) => {
+    th.addEventListener("click", () => toggleFindingsSort(th.dataset.findingsSort));
+  });
+
+  if (els.findingsDetailClose) {
+    els.findingsDetailClose.addEventListener("click", () => {
+      if (els.findingsDetailContent) els.findingsDetailContent.classList.add("hidden");
+      if (els.findingsDetailPlaceholder) els.findingsDetailPlaceholder.classList.remove("hidden");
+      selectedFindingId = null;
+    });
+  }
+  if (els.findingsDetailJump) {
+    els.findingsDetailJump.addEventListener("click", () => {
+      const recordId = els.findingsDetailJump.dataset.recordId;
+      if (recordId) jumpToTransaction(recordId);
+    });
+  }
+  if (els.findingsClearButton) {
+    els.findingsClearButton.addEventListener("click", async () => {
+      await fetch("/api/findings/clear", { method: "POST" });
+      findingsData = [];
+      selectedFindingId = null;
+      renderFindings();
+      updateFindingsBadge();
+      if (els.findingsDetailContent) els.findingsDetailContent.classList.add("hidden");
+      if (els.findingsDetailPlaceholder) els.findingsDetailPlaceholder.classList.remove("hidden");
+    });
+  }
+
+  // Filters
+  if (els.findingsFilterSeverity) {
+    els.findingsFilterSeverity.addEventListener("change", () => renderFindings());
+  }
+  if (els.findingsFilterCategory) {
+    els.findingsFilterCategory.addEventListener("change", () => renderFindings());
+  }
+  if (els.findingsFilterSearch) {
+    let debounce = null;
+    els.findingsFilterSearch.addEventListener("input", () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => renderFindings(), 200);
+    });
+  }
+  if (els.findingsInScopeOnly) {
+    els.findingsInScopeOnly.addEventListener("change", () => renderFindings());
+  }
+
+  // Arrow key navigation
+  document.addEventListener("keydown", (e) => {
+    // Skip if scanner settings modal is open
+    if (els.scannerSettingsBackdrop && !els.scannerSettingsBackdrop.classList.contains("hidden")) {
+      if (e.key === "Escape") { e.preventDefault(); closeScannerSettings(); }
+      if (e.key === "Enter" && !e.target.matches("input, textarea, select")) { e.preventDefault(); saveScannerSettingsFromModal(); }
+      return;
+    }
+    // Only handle when findings tab is active and not focused on input
+    if (state.activeTool !== "proxy" || state.activeProxyTab !== "findings") return;
+    if (e.target.matches("input, textarea, select")) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); findingsArrowNav(1); }
+    if (e.key === "ArrowUp") { e.preventDefault(); findingsArrowNav(-1); }
+  });
+
+  // Quick toggle (on/off in toolbar)
+  if (els.scannerQuickToggle) {
+    els.scannerQuickToggle.addEventListener("change", async () => {
+      const enabled = els.scannerQuickToggle.checked;
+      const config = await loadScannerConfig();
+      if (config) {
+        config.enabled = enabled;
+        await saveScannerConfig(config);
+      }
+    });
+    // Sync initial state from server
+    loadScannerConfig().then((config) => {
+      if (config) syncQuickToggle(config.enabled);
+    });
+  }
+
+  // Scanner settings modal
+  if (els.findingsSettingsButton) {
+    els.findingsSettingsButton.addEventListener("click", () => openScannerSettings());
+  }
+  if (els.scannerSettingsClose) {
+    els.scannerSettingsClose.addEventListener("click", () => closeScannerSettings());
+  }
+  if (els.scannerSettingsCancel) {
+    els.scannerSettingsCancel.addEventListener("click", () => closeScannerSettings());
+  }
+  if (els.scannerSettingsSave) {
+    els.scannerSettingsSave.addEventListener("click", () => saveScannerSettingsFromModal());
+  }
+  if (els.scannerAddCustomRule) {
+    els.scannerAddCustomRule.addEventListener("click", () => {
+      const rules = collectCustomRulesFromEditor();
+      rules.push({
+        id: `custom_${Date.now()}`,
+        enabled: true,
+        name: "",
+        target: "response_body",
+        header_name: "",
+        pattern: "",
+        severity: "medium",
+        category: "custom",
+        description: "",
+      });
+      renderCustomRulesEditor(rules);
+    });
+  }
+  if (els.scannerSettingsBackdrop) {
+    els.scannerSettingsBackdrop.addEventListener("click", (e) => {
+      if (e.target === els.scannerSettingsBackdrop) closeScannerSettings();
+    });
+  }
+
+  initFindingsResizer();
+  applyFindingsColumnWidths();
+  bindFindingsColumnResizers();
+}
+
+function applyFindingsColumnWidths() {
+  const table = document.getElementById("findingsTable");
+  if (!table) return;
+  let total = 0;
+  for (const [key, w] of Object.entries(findingsColWidths)) {
+    table.style.setProperty(`--fc-${key}`, `${w}px`);
+    total += w;
+  }
+  table.style.setProperty("--findings-table-width", `${Math.max(total, 800)}px`);
+}
+
+function bindFindingsColumnResizers() {
+  document.querySelectorAll(".findings-col-resize").forEach((handle) => {
+    handle.addEventListener("mousedown", (event) => {
+      const key = handle.dataset.findingsCol;
+      const limits = FINDINGS_COL_RULES[key];
+      if (!key || !limits) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const header = handle.closest("th");
+      const startWidth = header?.getBoundingClientRect().width ?? limits.default;
+      document.body.classList.add("pane-resizing-x");
+      handle.classList.add("active");
+
+      const onMove = (moveEvent) => {
+        const delta = moveEvent.clientX - event.clientX;
+        findingsColWidths[key] = Math.max(limits.min, Math.min(Math.round(startWidth + delta), limits.max));
+        applyFindingsColumnWidths();
+      };
+
+      const onUp = () => {
+        document.body.classList.remove("pane-resizing-x");
+        handle.classList.remove("active");
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  });
+}
+
+function initFindingsResizer() {
+  const resizer = els.findingsDetailResizer;
+  if (!resizer) return;
+
+  resizer.addEventListener("mousedown", (event) => {
+    if (!els.findingsPanel || !els.findingsDetailPanel || resizer.classList.contains("hidden")) {
+      return;
+    }
+
+    event.preventDefault();
+    const tableShell = els.findingsPanel.querySelector(".history-table-shell");
+    const start = {
+      table: tableShell.getBoundingClientRect().height,
+      detail: els.findingsDetailPanel.getBoundingClientRect().height,
+    };
+    const combinedHeight = start.table + start.detail;
+
+    document.body.classList.add("pane-resizing-y");
+    resizer.classList.add("active");
+
+    const onMove = (moveEvent) => {
+      const delta = moveEvent.clientY - event.clientY;
+      const nextDetail = Math.max(120, Math.min(start.detail - delta, combinedHeight - 60));
+      const nextTable = combinedHeight - nextDetail;
+      tableShell.style.flex = "0 0 " + Math.round(nextTable) + "px";
+      els.findingsDetailPanel.style.flex = "0 0 " + Math.round(nextDetail) + "px";
+    };
+
+    const onUp = () => {
+      document.body.classList.remove("pane-resizing-y");
+      resizer.classList.remove("active");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
 function renderProxyPanels() {
   proxyTabs.forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.proxyTab === state.activeProxyTab);
@@ -2474,8 +3254,9 @@ function renderProxyPanels() {
   const showIntercept = state.activeProxyTab === "intercept";
   const showWebsockets = state.activeProxyTab === "websockets-history";
   const showMatchReplace = state.activeProxyTab === "replace";
+  const showFindings = state.activeProxyTab === "findings";
   const showProxySettings = state.activeProxyTab === "proxy-settings";
-  const showPlaceholder = !showHistory && !showIntercept && !showWebsockets && !showMatchReplace && !showProxySettings;
+  const showPlaceholder = !showHistory && !showIntercept && !showWebsockets && !showMatchReplace && !showFindings && !showProxySettings;
 
   els.colorTagFilter.classList.toggle("hidden", !showHistory);
   els.filterBar.classList.toggle("hidden", !showHistory);
@@ -2485,6 +3266,7 @@ function renderProxyPanels() {
   els.interceptPanel.classList.toggle("hidden", !showIntercept);
   els.websocketPanel.classList.toggle("hidden", !showWebsockets);
   els.matchReplacePanel.classList.toggle("hidden", !showMatchReplace);
+  els.findingsPanel.classList.toggle("hidden", !showFindings);
   els.proxySettingsPanel.classList.toggle("hidden", !showProxySettings);
   els.proxySubPlaceholder.classList.toggle("hidden", !showPlaceholder);
 
@@ -2506,6 +3288,12 @@ function renderProxyPanels() {
   if (showMatchReplace) {
     renderMatchReplaceRules();
     els.footerMode.textContent = "Replace active";
+    return;
+  }
+
+  if (showFindings) {
+    loadFindings();
+    els.footerMode.textContent = "Findings active";
     return;
   }
 
@@ -3341,6 +4129,13 @@ async function syncVisibleWebsocketSelection(preserveSelection = true) {
 
 function renderProxySettings() {
   if (!state.settings || !state.runtime) {
+    // Data not ready — schedule a background load to self-heal
+    if (!state._settingsLoadPending) {
+      state._settingsLoadPending = true;
+      loadSettings()
+        .then(() => { state._settingsLoadPending = false; renderProxySettings(); })
+        .catch(() => { state._settingsLoadPending = false; });
+    }
     return;
   }
 
@@ -5345,6 +6140,40 @@ function buildRawResponse(record) {
     .join("\n");
   const body = renderBody(record.response);
   return `HTTP/1.1 ${record.status ?? 0}\n${headers}\n\n${body}`.trim();
+}
+
+function buildFindingsRawMessage(record, side) {
+  const msg = side === "request" ? record.request : record.response;
+  if (side === "request") {
+    const startLine = record.kind === "tunnel"
+      ? `CONNECT ${record.host} HTTP/1.1`
+      : `${record.method} ${record.path || "/"} HTTP/1.1`;
+    const merged = mergeHeaders(record.request.headers);
+    if (record.host && !merged.some((h) => h.name.toLowerCase() === "host")) {
+      merged.unshift({ name: "host", value: record.host });
+    }
+    const headers = merged.map((h) => `${h.name}: ${h.value}`).join("\n");
+    const body = findingsBodyPlaceholder(msg);
+    return `${startLine}\n${headers}\n\n${body}`.trim();
+  }
+  if (!msg) return "No response was captured for this exchange.";
+  const headers = msg.headers.map((h) => `${h.name}: ${h.value}`).join("\n");
+  const body = findingsBodyPlaceholder(msg);
+  return `HTTP/1.1 ${record.status ?? 0}\n${headers}\n\n${body}`.trim();
+}
+
+function findingsBodyPlaceholder(msg) {
+  if (!msg || !msg.body_preview) return "";
+  if (msg.body_encoding === "base64") {
+    const ct = msg.content_type || "binary";
+    return `[${ct}, ${formatSize(msg.body_size)}]`;
+  }
+  if (msg.body_preview.length > 16000) {
+    return msg.body_preview.slice(0, 16000) + "\n\n[preview truncated for performance]";
+  }
+  return msg.preview_truncated
+    ? `${msg.body_preview}\n\n[preview truncated]`
+    : msg.body_preview;
 }
 
 function buildRawWebsocketRequest(session) {

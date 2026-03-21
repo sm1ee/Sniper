@@ -16,6 +16,7 @@ use crate::{
     match_replace::{MatchReplaceRule, MatchReplaceStore},
     model::{TransactionRecord, WebSocketSessionRecord},
     runtime::{RuntimeSettings, RuntimeSettingsSnapshot},
+    scanner::{ScannerFinding, ScannerStore},
     store::TransactionStore,
     websocket::WebSocketStore,
     workspace::{WorkspaceStateSnapshot, WorkspaceStateStore},
@@ -75,6 +76,8 @@ struct StoredSessionSnapshot {
     match_replace_rules: Vec<MatchReplaceRule>,
     #[serde(alias = "intruder_attacks")]
     fuzzer_attacks: Vec<FuzzerAttackRecord>,
+    #[serde(default)]
+    scanner_findings: Vec<ScannerFinding>,
     workspace: WorkspaceStateSnapshot,
 }
 
@@ -89,6 +92,7 @@ pub struct SessionContext {
     pub event_log: Arc<EventLogStore>,
     pub match_replace: Arc<MatchReplaceStore>,
     pub fuzzer: Arc<FuzzerStore>,
+    pub scanner: Arc<ScannerStore>,
     pub workspace: Arc<WorkspaceStateStore>,
     metadata: RwLock<SessionMetadata>,
 }
@@ -121,6 +125,7 @@ impl SessionContext {
                 max_entries,
                 snapshot.fuzzer_attacks,
             )),
+            scanner: Arc::new(ScannerStore::from_findings(max_entries, snapshot.scanner_findings)),
             workspace: Arc::new(WorkspaceStateStore::from_snapshot(snapshot.workspace)),
             metadata: RwLock::new(metadata),
         }
@@ -151,6 +156,7 @@ impl SessionContext {
             event_log: self.event_log.snapshot(Some(self.max_entries)).await,
             match_replace_rules: self.match_replace.snapshot().await,
             fuzzer_attacks: self.fuzzer.snapshot(Some(self.max_entries)).await,
+            scanner_findings: self.scanner.snapshot(Some(self.max_entries)).await,
             workspace: self.workspace.snapshot().await,
         };
 
@@ -564,6 +570,7 @@ mod tests {
                             target_port: "443".to_string(),
                         }],
                         history_index: Some(0),
+                        ..Default::default()
                     }],
                     active_tab_id: Some("tab-1".to_string()),
                     tab_sequence: 1,

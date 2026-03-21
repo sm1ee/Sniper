@@ -11,7 +11,7 @@ pub enum TrafficKind {
     Tunnel,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BodyEncoding {
     Utf8,
