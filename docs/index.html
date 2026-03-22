@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sniper — Open-Source Web Proxy for macOS</title>
+<meta name="description" content="Sniper is a lightweight, fast, open-source web security proxy for macOS. Intercept HTTP/HTTPS traffic, replay requests, fuzz parameters, and scan for vulnerabilities. A modern alternative to Burp Suite built in Rust." />
+<meta name="keywords" content="web proxy, MITM proxy, HTTP proxy, HTTPS proxy, security testing, penetration testing, bug bounty, Burp Suite alternative, macOS proxy, Rust proxy, open source proxy, vulnerability scanner, web security, OWASP, intercept proxy, API testing" />
+<meta property="og:title" content="Sniper — Open-Source Web Proxy for macOS" />
+<meta property="og:description" content="Lightweight, fast web security proxy built in Rust. Capture, replay, fuzz, and scan — without the Java overhead." />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://sm1ee.github.io/Sniper/" />
+<meta property="og:image" content="https://raw.githubusercontent.com/sm1ee/Sniper/main/web/screenshot.png" />
+<link rel="canonical" href="https://sm1ee.github.io/Sniper/" />
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;line-height:1.6}
+a{color:#d4a017;text-decoration:none}
+a:hover{text-decoration:underline}
+.container{max-width:900px;margin:0 auto;padding:0 24px}
+header{text-align:center;padding:60px 0 40px}
+header img{width:280px;margin-bottom:16px}
+header h1{font-size:1.1rem;font-weight:400;color:#8b949e;margin-bottom:24px}
+.badges{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:32px}
+.badges img{height:22px}
+.cta{display:inline-block;padding:12px 32px;background:#d4a017;color:#0d1117;font-weight:600;border-radius:8px;font-size:1rem;transition:opacity .2s}
+.cta:hover{opacity:.85;text-decoration:none}
+.cta-secondary{background:transparent;border:1px solid #30363d;color:#c9d1d9;margin-left:12px}
+.cta-secondary:hover{border-color:#d4a017}
+.screenshot{text-align:center;padding:40px 0}
+.screenshot img{width:100%;max-width:860px;border-radius:12px;border:1px solid #21262d;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+section{padding:48px 0;border-top:1px solid #21262d}
+h2{font-size:1.5rem;margin-bottom:16px;color:#f0f6fc}
+h3{font-size:1.1rem;margin-bottom:8px;color:#f0f6fc}
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:24px;margin-top:24px}
+.feature{background:#161b22;border:1px solid #21262d;border-radius:10px;padding:20px}
+.feature h3{margin-bottom:6px}
+.feature p{color:#8b949e;font-size:.9rem}
+table{width:100%;border-collapse:collapse;margin-top:16px;font-size:.9rem}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #21262d}
+th{color:#d4a017;font-weight:600}
+td:first-child{font-weight:500;color:#f0f6fc}
+.highlight{color:#d4a017}
+code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:.85rem}
+pre{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:16px;overflow-x:auto;font-size:.85rem;margin-top:12px}
+footer{text-align:center;padding:40px 0;color:#484f58;font-size:.85rem;border-top:1px solid #21262d}
+@media(max-width:600px){header{padding:40px 0 24px}.features{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<header>
+  <img src="https://raw.githubusercontent.com/sm1ee/Sniper/main/web/sniper-logo-wide.png" alt="Sniper" />
+  <h1>Lightweight, fast, open-source web security proxy for macOS</h1>
+  <div class="badges">
+    <img src="https://img.shields.io/github/v/release/sm1ee/Sniper?style=flat-square&color=goldenrod" alt="Release" />
+    <img src="https://img.shields.io/github/downloads/sm1ee/Sniper/total?style=flat-square&color=goldenrod" alt="Downloads" />
+    <img src="https://img.shields.io/badge/lang-Rust-orange?style=flat-square&logo=rust" alt="Rust" />
+    <img src="https://img.shields.io/badge/platform-macOS-blue?style=flat-square&logo=apple" alt="macOS" />
+    <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT" />
+  </div>
+  <a class="cta" href="https://github.com/sm1ee/Sniper/releases/latest">Download DMG</a>
+  <a class="cta cta-secondary" href="https://github.com/sm1ee/Sniper">View on GitHub</a>
+</header>
+
+<div class="screenshot container">
+  <img src="https://raw.githubusercontent.com/sm1ee/Sniper/main/web/screenshot.png" alt="Sniper proxy UI — HTTP capture, replay, fuzzer, findings" />
+</div>
+
+<div class="container">
+
+<section>
+  <h2>What is Sniper?</h2>
+  <p>Sniper is an <strong>open-source MITM proxy</strong> that intercepts and modifies HTTP/HTTPS traffic between your browser and the internet. Built in Rust as a native macOS app, it provides the core workflow for web application security testing, penetration testing, and bug bounty hunting — without the overhead of Java-based tools.</p>
+</section>
+
+<section>
+  <h2>Features</h2>
+  <div class="features">
+    <div class="feature">
+      <h3>HTTP/HTTPS Capture</h3>
+      <p>Full MITM proxy with persistent root CA. Inspect every request and response in real time. WebSocket support included.</p>
+    </div>
+    <div class="feature">
+      <h3>Intercept & Modify</h3>
+      <p>Hold requests before they reach the server. Edit headers, body, and parameters on the fly. Auto match & replace rules.</p>
+    </div>
+    <div class="feature">
+      <h3>Passive Scanner</h3>
+      <p>Automatically detect sensitive data leaks, CORS misconfigurations, missing security headers, JWT weaknesses, and more.</p>
+    </div>
+    <div class="feature">
+      <h3>Replay</h3>
+      <p>Resend any captured request with modifications. Override target host and port. Follow redirects.</p>
+    </div>
+    <div class="feature">
+      <h3>Fuzzer</h3>
+      <p>Mark insertion points and run payload lists. Test for injection vulnerabilities with a simple marker-based interface.</p>
+    </div>
+    <div class="feature">
+      <h3>CLI & AI Automation</h3>
+      <p>JSON-first CLI for scripting. Built-in Claude and Codex skill templates let AI agents drive the full workflow.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Why Sniper?</h2>
+  <table>
+    <thead><tr><th></th><th>Sniper</th><th>Burp Suite</th><th>OWASP ZAP</th><th>Caido</th></tr></thead>
+    <tbody>
+      <tr><td>Runtime</td><td class="highlight">Native (Rust)</td><td>JVM</td><td>JVM</td><td>Rust + Electron</td></tr>
+      <tr><td>Startup</td><td class="highlight">&lt; 1 sec</td><td>10+ sec</td><td>10+ sec</td><td>~3 sec</td></tr>
+      <tr><td>Memory</td><td class="highlight">~80 MB</td><td>500+ MB</td><td>400+ MB</td><td>~200 MB</td></tr>
+      <tr><td>Price</td><td class="highlight">Free</td><td>$449/yr</td><td>Free</td><td>Freemium</td></tr>
+      <tr><td>AI integration</td><td class="highlight">Built-in</td><td>No</td><td>No</td><td>No</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Quick Start</h2>
+  <ol style="margin-top:12px;padding-left:20px;color:#8b949e">
+    <li>Download and open <a href="https://github.com/sm1ee/Sniper/releases/latest">Sniper.dmg</a></li>
+    <li>Set your browser proxy to <code>127.0.0.1:8080</code></li>
+    <li>Visit <code>https://sniper</code> to trust the root CA</li>
+    <li>Start capturing traffic</li>
+  </ol>
+  <p style="margin-top:16px">Or build from source:</p>
+  <pre><code>git clone https://github.com/sm1ee/Sniper.git
+cd Sniper
+cargo run --bin sniper-desktop</code></pre>
+</section>
+
+</div>
+
+<footer>
+  <p>MIT License &middot; <a href="https://github.com/sm1ee/Sniper">GitHub</a></p>
+</footer>
+
+</body>
+</html>
