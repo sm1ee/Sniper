@@ -949,11 +949,7 @@ function bindEvents() {
     renderInspectorPanels();
   });
 
-  els.refreshInterceptsButton.addEventListener("click", () => {
-    loadIntercepts(true).catch((error) => console.error(error));
-    loadResponseIntercepts(true).catch((error) => console.error(error));
-  });
-  document.getElementById("addInterceptRuleButton").addEventListener("click", () => {
+  document.getElementById("addInterceptRuleButton")?.addEventListener("click", () => {
     addInterceptRule().catch((error) => console.error(error));
   });
   document.getElementById("interceptRulesList").addEventListener("click", (event) => {
