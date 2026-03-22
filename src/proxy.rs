@@ -44,9 +44,9 @@ use uuid::Uuid;
 
 use crate::{
     event_log::EventLevel,
-    intercept::{InterceptRecord, InterceptResolution},
+    intercept::{InterceptRecord, InterceptResolution, ResponseInterceptRecord, ResponseInterceptResolution},
     model::{
-        BodyEncoding, EditableRequest, HeaderRecord, MessageRecord, RequestTargetOverride,
+        BodyEncoding, EditableRequest, EditableResponse, HeaderRecord, MessageRecord, RequestTargetOverride,
         TransactionRecord, WebSocketFrameDirection, WebSocketFrameKind, WebSocketFrameRecord,
         WebSocketSessionRecord,
     },
@@ -1031,7 +1031,7 @@ async fn forward_http_request(
     // Passive scanner: analyze transaction asynchronously
     {
         let scanner = session.scanner.clone();
-        let scan_record = record;
+        let scan_record = record.clone();
         tokio::spawn(async move {
             let config = scanner.get_config().await;
             let findings = crate::scanner::scan_transaction(&scan_record, &config);
@@ -1043,7 +1043,29 @@ async fn forward_http_request(
     persist_session_quiet(&state, &session).await;
 
     match exchange.response {
-        Ok(response) => rebuild_response(response.headers, response.status, response.body),
+        Ok(response) => {
+            let intercepted = maybe_intercept_response(
+                state.clone(),
+                session.clone(),
+                &record,
+                response.status,
+                &response.headers,
+                &response.body,
+            )
+            .await;
+            match intercepted {
+                ResponseInterceptResolution::Forward(edited) => {
+                    let headers = header_map_from_records(&edited.headers);
+                    let body = Bytes::from(edited.body_bytes());
+                    let status = StatusCode::from_u16(edited.status)
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    rebuild_response(headers, status, body)
+                }
+                ResponseInterceptResolution::Drop => {
+                    text_response(StatusCode::BAD_GATEWAY, "Response dropped in intercept.".to_string())
+                }
+            }
+        }
         Err(error) => text_response(error.status, error.message),
     }
 }
@@ -1332,6 +1354,10 @@ async fn maybe_intercept_request(
         return InterceptResolution::Forward(request);
     }
 
+    if !session.intercept_rules.matches_any(&request).await {
+        return InterceptResolution::Forward(request);
+    }
+
     session
         .event_log
         .push(
@@ -1353,6 +1379,70 @@ async fn maybe_intercept_request(
             peer_addr: peer_addr.to_string(),
             request,
             is_websocket,
+        })
+        .await;
+    persist_session_quiet(&state, &session).await;
+    resolution
+}
+
+async fn maybe_intercept_response(
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+    record: &TransactionRecord,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> ResponseInterceptResolution {
+    if !session.runtime.intercept_enabled().await {
+        return ResponseInterceptResolution::Forward(
+            EditableResponse::from_status_headers_body(status.as_u16(), headers, body),
+        );
+    }
+
+    if special_host::is_special_host(&record.host)
+        || !session.runtime.is_in_scope(&record.host).await
+    {
+        return ResponseInterceptResolution::Forward(
+            EditableResponse::from_status_headers_body(status.as_u16(), headers, body),
+        );
+    }
+
+    let editable_request = record.editable_request();
+    if !session
+        .intercept_rules
+        .matches_any_response(&editable_request)
+        .await
+    {
+        return ResponseInterceptResolution::Forward(
+            EditableResponse::from_status_headers_body(status.as_u16(), headers, body),
+        );
+    }
+
+    session
+        .event_log
+        .push(
+            EventLevel::Info,
+            "intercept",
+            "Response queued",
+            format!(
+                "{} {} {}{} → {}",
+                record.method, status.as_u16(), record.host, record.path, record.id
+            ),
+        )
+        .await;
+
+    let editable = EditableResponse::from_status_headers_body(status.as_u16(), headers, body);
+    let resolution = session
+        .response_intercepts
+        .enqueue(ResponseInterceptRecord {
+            id: Uuid::new_v4(),
+            started_at: Utc::now(),
+            scheme: record.scheme.clone(),
+            host: record.host.clone(),
+            method: record.method.clone(),
+            path: record.path.clone(),
+            status: status.as_u16(),
+            response: editable.clone(),
         })
         .await;
     persist_session_quiet(&state, &session).await;

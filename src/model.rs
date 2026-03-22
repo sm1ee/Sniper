@@ -36,6 +36,48 @@ pub struct EditableRequest {
     pub preview_truncated: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EditableResponse {
+    pub status: u16,
+    pub headers: Vec<HeaderRecord>,
+    pub body: String,
+    pub body_encoding: BodyEncoding,
+}
+
+impl EditableResponse {
+    pub fn from_status_headers_body(
+        status: u16,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Self {
+        let content_type = headers
+            .get(http::header::CONTENT_TYPE)
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
+        let body_encoding = if is_textual_body(content_type.as_deref(), body) {
+            BodyEncoding::Utf8
+        } else {
+            BodyEncoding::Base64
+        };
+
+        Self {
+            status,
+            headers: header_records(headers),
+            body: match body_encoding {
+                BodyEncoding::Utf8 => String::from_utf8_lossy(body).into_owned(),
+                BodyEncoding::Base64 => STANDARD.encode(body),
+            },
+            body_encoding,
+        }
+    }
+
+    pub fn body_bytes(&self) -> Vec<u8> {
+        match self.body_encoding {
+            BodyEncoding::Utf8 => self.body.as_bytes().to_vec(),
+            BodyEncoding::Base64 => STANDARD.decode(self.body.as_bytes()).unwrap_or_default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RequestTargetOverride {
     pub scheme: String,

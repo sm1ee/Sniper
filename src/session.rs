@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use crate::{
     event_log::{EventLogEntry, EventLogStore},
-    intercept::InterceptQueue,
+    intercept::{InterceptQueue, ResponseInterceptQueue},
     fuzzer::{FuzzerAttackRecord, FuzzerStore},
+    sequence::{SequenceDefinition, SequenceRunRecord, SequenceStore},
     match_replace::{MatchReplaceRule, MatchReplaceStore},
     model::{TransactionRecord, WebSocketSessionRecord},
     runtime::{RuntimeSettings, RuntimeSettingsSnapshot},
@@ -78,6 +79,12 @@ struct StoredSessionSnapshot {
     fuzzer_attacks: Vec<FuzzerAttackRecord>,
     #[serde(default)]
     scanner_findings: Vec<ScannerFinding>,
+    #[serde(default)]
+    intercept_rules: Vec<crate::intercept::InterceptRule>,
+    #[serde(default)]
+    sequence_definitions: Vec<SequenceDefinition>,
+    #[serde(default)]
+    sequence_runs: Vec<SequenceRunRecord>,
     workspace: WorkspaceStateSnapshot,
 }
 
@@ -88,11 +95,14 @@ pub struct SessionContext {
     pub store: Arc<TransactionStore>,
     pub runtime: Arc<RuntimeSettings>,
     pub intercepts: Arc<InterceptQueue>,
+    pub response_intercepts: Arc<ResponseInterceptQueue>,
+    pub intercept_rules: Arc<crate::intercept::InterceptRuleStore>,
     pub websockets: Arc<WebSocketStore>,
     pub event_log: Arc<EventLogStore>,
     pub match_replace: Arc<MatchReplaceStore>,
     pub fuzzer: Arc<FuzzerStore>,
     pub scanner: Arc<ScannerStore>,
+    pub sequence: Arc<SequenceStore>,
     pub workspace: Arc<WorkspaceStateStore>,
     metadata: RwLock<SessionMetadata>,
 }
@@ -114,6 +124,10 @@ impl SessionContext {
             )),
             runtime: Arc::new(RuntimeSettings::from_snapshot(snapshot.runtime)),
             intercepts: Arc::new(InterceptQueue::new()),
+            response_intercepts: Arc::new(ResponseInterceptQueue::new()),
+            intercept_rules: Arc::new(crate::intercept::InterceptRuleStore::from_rules(
+                snapshot.intercept_rules,
+            )),
             websockets: Arc::new(WebSocketStore::from_sessions(
                 max_entries,
                 max_frames_per_session,
@@ -126,6 +140,11 @@ impl SessionContext {
                 snapshot.fuzzer_attacks,
             )),
             scanner: Arc::new(ScannerStore::from_findings(max_entries, snapshot.scanner_findings)),
+            sequence: Arc::new(SequenceStore::from_data(
+                max_entries,
+                snapshot.sequence_definitions,
+                snapshot.sequence_runs,
+            )),
             workspace: Arc::new(WorkspaceStateStore::from_snapshot(snapshot.workspace)),
             metadata: RwLock::new(metadata),
         }
@@ -157,6 +176,9 @@ impl SessionContext {
             match_replace_rules: self.match_replace.snapshot().await,
             fuzzer_attacks: self.fuzzer.snapshot(Some(self.max_entries)).await,
             scanner_findings: self.scanner.snapshot(Some(self.max_entries)).await,
+            intercept_rules: self.intercept_rules.snapshot().await,
+            sequence_definitions: self.sequence.snapshot_definitions().await,
+            sequence_runs: self.sequence.snapshot_runs(Some(self.max_entries)).await,
             workspace: self.workspace.snapshot().await,
         };
 

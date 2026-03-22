@@ -16,6 +16,7 @@
           <button class="main-tab" data-tool="target">Scope</button>
           <button class="main-tab active" data-tool="proxy">Capture</button>
           <button class="main-tab" data-tool="fuzzer">Fuzzer</button>
+          <button class="main-tab" data-tool="sequence">Sequence</button>
           <button class="main-tab" data-tool="replay">Replay</button>
           <button class="main-tab" data-tool="tools">Tools</button>
           <button class="main-tab" data-tool="logger">Logger</button>
@@ -295,11 +296,11 @@
 
           <section class="proxy-panel hidden" id="interceptPanel">
             <div class="split-panel">
-              <section class="panel-card">
+              <section class="panel-card intercept-left-panel">
                 <header class="panel-toolbar">
                   <div>
-                    <p class="placeholder-kicker">Request hold</p>
-                    <h2>Requests</h2>
+                    <p class="placeholder-kicker">Intercept</p>
+                    <h2>Held items</h2>
                   </div>
                   <div class="toolbar-actions">
                     <button class="toggle-pill" id="interceptStatus" type="button">
@@ -307,8 +308,12 @@
                     </button>
                   </div>
                 </header>
-                <div class="history-table-shell">
-                  <table class="mini-table">
+                <nav class="intercept-queue-tabs">
+                  <button class="intercept-queue-tab active" data-queue="request" id="interceptQueueTabRequest">Request Queue</button>
+                  <button class="intercept-queue-tab" data-queue="response" id="interceptQueueTabResponse">Response Queue</button>
+                </nav>
+                <div class="history-table-shell" style="flex:1 1 auto;min-height:80px">
+                  <table class="mini-table" id="interceptRequestTable">
                     <thead>
                       <tr>
                         <th>Method</th>
@@ -320,24 +325,56 @@
                     </thead>
                     <tbody id="interceptTableBody"></tbody>
                   </table>
+                  <table class="mini-table hidden" id="responseInterceptTable">
+                    <thead>
+                      <tr>
+                        <th>Status</th>
+                        <th>Method</th>
+                        <th>Host</th>
+                        <th>Path</th>
+                        <th>Time</th>
+                      </tr>
+                    </thead>
+                    <tbody id="responseInterceptTableBody"></tbody>
+                  </table>
                 </div>
+                <header class="panel-toolbar intercept-rules-header">
+                  <div>
+                    <p class="placeholder-kicker">Conditions</p>
+                    <h2>Intercept Rules</h2>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="secondary-action" id="addInterceptRuleButton" type="button">+ Rule</button>
+                  </div>
+                </header>
+                <div class="intercept-rules-list" id="interceptRulesList"></div>
               </section>
 
-              <section class="panel-card">
+              <section class="panel-card" id="interceptDetailPanel">
                 <header class="panel-toolbar">
                   <div>
                     <p class="placeholder-kicker" id="interceptDetailPath">Intercept</p>
                     <h2 id="interceptDetailTitle">No request selected</h2>
                   </div>
-                  <div class="toolbar-actions">
+                  <div class="toolbar-actions" id="interceptRequestActions">
                     <button class="secondary-action" id="dropInterceptButton" type="button">Drop</button>
                     <button class="primary-action" id="forwardInterceptButton" type="button">Forward</button>
                   </div>
+                  <div class="toolbar-actions hidden" id="responseInterceptActions">
+                    <button class="secondary-action" id="dropResponseInterceptButton" type="button">Drop</button>
+                    <button class="primary-action" id="forwardResponseInterceptButton" type="button">Forward</button>
+                  </div>
                 </header>
-                <div class="editor-panel">
+                <div class="editor-panel" id="interceptRequestEditorPanel">
                   <div class="replay-highlight-shell">
                     <pre id="interceptRequestHighlight" class="simple-code-view replay-highlight-view" aria-hidden="true"></pre>
                     <textarea id="interceptRequestEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Select an intercepted request to edit and forward it."></textarea>
+                  </div>
+                </div>
+                <div class="editor-panel hidden" id="interceptResponseEditorPanel">
+                  <div class="replay-highlight-shell">
+                    <pre id="interceptResponseHighlight" class="simple-code-view replay-highlight-view" aria-hidden="true"></pre>
+                    <textarea id="interceptResponseEditor" class="request-editor request-editor-highlighted" spellcheck="false" placeholder="Select an intercepted response to edit and forward it."></textarea>
                   </div>
                 </div>
                 <footer class="pane-footer">
@@ -375,6 +412,7 @@
                   </table>
                 </div>
               </section>
+              <div class="stack-resizer" id="websocketStackResizer" role="separator" aria-orientation="horizontal" aria-label="Resize sessions and workbench panes"></div>
 
               <div class="stack-resizer" id="websocketStackResizer" aria-hidden="true"></div>
               <section class="websocket-workbench" id="websocketWorkbench">
@@ -419,7 +457,7 @@
                       <tbody id="websocketFramesBody"></tbody>
                     </table>
                   </div>
-                  <div class="frame-detail-resizer hidden" id="frameDetailResizer"></div>
+                  <div class="frame-detail-resizer hidden" id="frameDetailResizer" aria-hidden="true"></div>
                   <div class="frame-detail-panel hidden" id="frameDetailPanel">
                     <header class="frame-detail-header">
                       <div class="frame-detail-meta" id="frameDetailMeta"></div>
@@ -1019,6 +1057,88 @@
           </section>
         </section>
 
+        <section class="sequence-shell hidden" id="sequenceShell">
+          <header class="panel-toolbar replay-header">
+            <div>
+              <p class="inline-copy">Chain requests with variable extraction. Use <code>{{variable}}</code> in subsequent steps.</p>
+            </div>
+            <div class="toolbar-actions">
+              <button class="secondary-action" id="newSequenceButton" type="button">New Sequence</button>
+            </div>
+          </header>
+
+          <section class="sequence-layout">
+            <section class="panel-card sequence-list-card">
+              <header class="panel-toolbar">
+                <h2>Sequences</h2>
+              </header>
+              <div class="history-table-shell" style="flex:1 1 auto;min-height:60px">
+                <table class="mini-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Steps</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sequenceListBody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel-card sequence-editor-card">
+              <header class="panel-toolbar">
+                <div>
+                  <h2 id="sequenceEditorTitle">No sequence selected</h2>
+                </div>
+                <div class="toolbar-actions">
+                  <button class="secondary-action" id="addSequenceStepButton" type="button" disabled>+ Step</button>
+                  <button class="secondary-action" id="saveSequenceButton" type="button" disabled>Save</button>
+                  <button class="primary-action" id="runSequenceButton" type="button" disabled>Run</button>
+                </div>
+              </header>
+              <div id="sequenceStepsContainer" class="sequence-steps-container"></div>
+            </section>
+
+            <section class="panel-card sequence-results-card">
+              <header class="panel-toolbar">
+                <div>
+                  <h2>Run results</h2>
+                  <p class="inline-copy" id="sequenceRunMeta">No sequence run yet.</p>
+                </div>
+              </header>
+              <div class="history-table-shell">
+                <table class="mini-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Step</th>
+                      <th>Status</th>
+                      <th>Duration</th>
+                      <th>Extracted</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sequenceRunResultsBody"></tbody>
+                </table>
+              </div>
+              <div class="history-table-shell" style="margin-top:8px">
+                <header class="panel-toolbar"><h2>Past runs</h2></header>
+                <table class="mini-table">
+                  <thead>
+                    <tr>
+                      <th>Sequence</th>
+                      <th>Status</th>
+                      <th>Steps</th>
+                      <th>Time</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sequencePastRunsBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+        </section>
+
         <section class="target-shell hidden" id="targetShell">
           <section class="split-panel split-panel-tight">
             <section class="panel-card target-scope-card">
@@ -1276,6 +1396,42 @@
       </div>
     </div>
 
+    <div class="modal-backdrop hidden" id="compareModal">
+      <div class="modal-card modal-card-wide">
+        <header class="modal-header">
+          <div>
+            <p class="placeholder-kicker" id="compareKicker">Compare</p>
+            <h2 id="compareTitle">Request Diff</h2>
+          </div>
+          <div class="compare-tabs">
+            <button class="sub-tab active" data-compare-tab="request" type="button">Request</button>
+            <button class="sub-tab" data-compare-tab="response" type="button">Response</button>
+          </div>
+        </header>
+        <div class="modal-body compare-body">
+          <pre id="compareDiffView" class="simple-code-view compare-diff-view"></pre>
+        </div>
+        <footer class="modal-footer">
+          <button class="secondary-action" id="closeCompareButton" type="button">Close</button>
+        </footer>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="curlImportModal">
+      <div class="modal-card">
+        <header class="modal-header">
+          <h2>Import cURL</h2>
+        </header>
+        <div class="modal-body">
+          <textarea id="curlImportInput" class="curl-import-textarea" rows="10" spellcheck="false" placeholder="Paste a cURL command here...&#10;&#10;curl -X POST https://api.example.com/login \&#10;  -H 'Content-Type: application/json' \&#10;  -d '{&quot;user&quot;:&quot;admin&quot;}'"></textarea>
+        </div>
+        <footer class="modal-footer">
+          <button class="secondary-action" id="closeCurlImportButton" type="button">Cancel</button>
+          <button class="primary-action" id="applyCurlImportButton" type="button">Import</button>
+        </footer>
+      </div>
+    </div>
+
     <div class="context-menu hidden" id="replayContextMenu">
       <div class="context-menu-section">
         <span class="context-menu-label">Change method</span>
@@ -1298,6 +1454,13 @@
       <div class="context-menu-divider"></div>
       <div class="context-menu-section">
         <button class="context-menu-item" data-replay-action="copy-as-curl" type="button">Copy as cURL</button>
+        <button class="context-menu-item" data-replay-action="copy-as-python" type="button">Copy as Python</button>
+        <button class="context-menu-item" data-replay-action="copy-as-fetch" type="button">Copy as fetch</button>
+        <button class="context-menu-item" data-replay-action="copy-as-powershell" type="button">Copy as PowerShell</button>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-replay-action="import-curl" type="button">Import cURL</button>
       </div>
     </div>
 
@@ -1305,6 +1468,19 @@
       <div class="context-menu-section">
         <button class="context-menu-item" data-action="send-to-replay" type="button">Send to Replay</button>
         <button class="context-menu-item" data-action="send-to-fuzzer" type="button">Send to Fuzzer</button>
+        <button class="context-menu-item" data-action="send-to-sequence" type="button">Send to Sequence</button>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-action="copy-as-curl" type="button">Copy as cURL</button>
+        <button class="context-menu-item" data-action="copy-as-python" type="button">Copy as Python</button>
+        <button class="context-menu-item" data-action="copy-as-fetch" type="button">Copy as fetch</button>
+        <button class="context-menu-item" data-action="copy-as-powershell" type="button">Copy as PowerShell</button>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-action="compare-set-base" type="button">Set as compare base</button>
+        <button class="context-menu-item" data-action="compare-with-base" type="button" id="compareWithBaseBtn" disabled>Compare with base</button>
       </div>
       <div class="context-menu-divider"></div>
       <div class="context-menu-section">

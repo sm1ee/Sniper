@@ -25,10 +25,11 @@ use uuid::Uuid;
 use crate::{
     config::{StartupSettingsUpdate, StartupSettingsView},
     event_log::EventLogEntry,
-    intercept::{InterceptRecord, InterceptSummary},
+    intercept::{InterceptRecord, InterceptSummary, ResponseInterceptRecord, ResponseInterceptSummary},
     fuzzer::{self, FuzzerAttackPayload, FuzzerAttackRecord, FuzzerAttackSummary},
+    sequence::{self, SequenceDefinition, SequenceRunRecord, SequenceRunSummary},
     match_replace::{MatchReplaceRule, MatchReplaceRulesPayload},
-    model::{EditableRequest, RequestTargetOverride},
+    model::{EditableRequest, EditableResponse, RequestTargetOverride},
     proxy,
     runtime::{RuntimeSettingsSnapshot, RuntimeSettingsUpdate},
     session::SessionSummary,
@@ -120,16 +121,31 @@ pub fn router(state: Arc<AppState>) -> Router {
             patch(update_transaction_annotations),
         )
         .route("/api/intercepts", get(list_intercepts))
-        .route("/api/intercepts/:id", get(get_intercept))
         .route("/api/intercepts/forward-all", post(forward_all_intercepts))
+        .route("/api/intercepts/:id", get(get_intercept))
         .route("/api/intercepts/:id/forward", post(forward_intercept))
         .route("/api/intercepts/:id/drop", post(drop_intercept))
+        .route("/api/intercept-rules", get(list_intercept_rules).post(upsert_intercept_rule))
+        .route("/api/intercept-rules/:id", delete(delete_intercept_rule))
+        .route("/api/response-intercepts", get(list_response_intercepts))
+        .route("/api/response-intercepts/forward-all", post(forward_all_response_intercepts))
+        .route("/api/response-intercepts/:id", get(get_response_intercept))
+        .route("/api/response-intercepts/:id/forward", post(forward_response_intercept))
+        .route("/api/response-intercepts/:id/drop", post(drop_response_intercept))
         .route("/api/replay/send", post(send_replay))
         .route(
             "/api/fuzzer/attacks",
             get(list_fuzzer_attacks).post(run_fuzzer_attack),
         )
         .route("/api/fuzzer/attacks/:id", get(get_fuzzer_attack))
+        .route(
+            "/api/sequences",
+            get(list_sequences).post(upsert_sequence),
+        )
+        .route("/api/sequences/:id", get(get_sequence).delete(delete_sequence))
+        .route("/api/sequences/:id/run", post(run_sequence))
+        .route("/api/sequence-runs", get(list_sequence_runs))
+        .route("/api/sequence-runs/:id", get(get_sequence_run))
         .route("/api/websockets", get(list_websockets))
         .route("/api/websockets/:id", get(get_websocket))
         .route("/api/replay/ws-connect", post(ws_replay_connect))
@@ -167,6 +183,11 @@ struct FuzzerQuery {
 #[derive(Debug, Deserialize)]
 struct InterceptForwardPayload {
     request: EditableRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseInterceptForwardPayload {
+    response: EditableResponse,
 }
 
 #[derive(Debug, Deserialize)]
@@ -740,6 +761,230 @@ async fn forward_all_intercepts(State(state): State<Arc<AppState>>) -> StatusCod
         persist_session_quiet(&state).await;
     }
     StatusCode::NO_CONTENT
+}
+
+async fn list_intercept_rules(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<crate::intercept::InterceptRule>> {
+    let session = state.session().await;
+    Json(session.intercept_rules.list().await)
+}
+
+async fn upsert_intercept_rule(
+    State(state): State<Arc<AppState>>,
+    Json(rule): Json<crate::intercept::InterceptRule>,
+) -> StatusCode {
+    let session = state.session().await;
+    session.intercept_rules.upsert(rule).await;
+    persist_session_quiet(&state).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn delete_intercept_rule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    let id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+    let session = state.session().await;
+    if session.intercept_rules.delete(id).await {
+        persist_session_quiet(&state).await;
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+// ── Response Intercepts ──
+
+async fn list_response_intercepts(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<ResponseInterceptSummary>> {
+    let session = state.session().await;
+    Json(session.response_intercepts.list().await)
+}
+
+async fn get_response_intercept(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ResponseInterceptRecord>, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let session = state.session().await;
+    session
+        .response_intercepts
+        .get(id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn forward_response_intercept(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<ResponseInterceptForwardPayload>,
+) -> Result<StatusCode, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let session = state.session().await;
+    if session.response_intercepts.get(id).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    session
+        .response_intercepts
+        .forward(id, payload.response)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .log_info(
+            "intercept",
+            "Response forwarded",
+            format!("Response intercept item {id} forwarded"),
+        )
+        .await;
+    persist_session_quiet(&state).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn drop_response_intercept(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let session = state.session().await;
+    if session.response_intercepts.get(id).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    session
+        .response_intercepts
+        .drop_response(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .log_warn(
+            "intercept",
+            "Response dropped",
+            format!("Response intercept item {id} dropped"),
+        )
+        .await;
+    persist_session_quiet(&state).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn forward_all_response_intercepts(State(state): State<Arc<AppState>>) -> StatusCode {
+    let session = state.session().await;
+    let count = session.response_intercepts.forward_all().await;
+    if count > 0 {
+        state
+            .log_info(
+                "intercept",
+                "All responses forwarded",
+                format!("{count} intercepted response(s) forwarded"),
+            )
+            .await;
+        persist_session_quiet(&state).await;
+    }
+    StatusCode::NO_CONTENT
+}
+
+// ── Sequences ──
+
+#[derive(Debug, Deserialize)]
+struct SequenceQuery {
+    limit: Option<usize>,
+}
+
+async fn list_sequences(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<SequenceDefinition>> {
+    let session = state.session().await;
+    Json(session.sequence.list_definitions().await)
+}
+
+async fn get_sequence(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<SequenceDefinition>, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let session = state.session().await;
+    session
+        .sequence
+        .get_definition(id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn upsert_sequence(
+    State(state): State<Arc<AppState>>,
+    Json(definition): Json<SequenceDefinition>,
+) -> StatusCode {
+    let session = state.session().await;
+    session.sequence.upsert_definition(definition).await;
+    persist_session_quiet(&state).await;
+    StatusCode::NO_CONTENT
+}
+
+async fn delete_sequence(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    let id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+    let session = state.session().await;
+    if session.sequence.delete_definition(id).await {
+        persist_session_quiet(&state).await;
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+async fn run_sequence(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid sequence ID").into_response(),
+    };
+    let session = state.session().await;
+    let definition = match session.sequence.get_definition(id).await {
+        Some(def) => def,
+        None => return (StatusCode::NOT_FOUND, "Sequence not found").into_response(),
+    };
+    drop(session);
+
+    match sequence::run_sequence(state, definition).await {
+        Ok(record) => Json(record).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
+}
+
+async fn list_sequence_runs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SequenceQuery>,
+) -> Json<Vec<SequenceRunSummary>> {
+    let session = state.session().await;
+    Json(session.sequence.list_runs(query.limit).await)
+}
+
+async fn get_sequence_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<SequenceRunRecord>, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let session = state.session().await;
+    session
+        .sequence
+        .get_run(id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn send_replay(

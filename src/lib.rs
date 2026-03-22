@@ -10,6 +10,7 @@ pub mod proxy;
 pub mod runtime;
 pub mod runtime_state;
 pub mod scanner;
+pub mod sequence;
 pub mod session;
 pub mod skills;
 pub mod special_host;
