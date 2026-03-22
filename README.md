@@ -8,8 +8,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sm1ee/Sniper/releases/latest"><img src="https://img.shields.io/github/v/release/sm1ee/Sniper?style=flat-square&color=goldenrod" alt="Release" /></a>
-  <a href="https://github.com/sm1ee/Sniper/releases/latest"><img src="https://img.shields.io/github/downloads/sm1ee/Sniper/total?style=flat-square&color=goldenrod" alt="Downloads" /></a>
+  <a href="https://github.com/sm1ee/Sniper/releases/latest"><img src="https://img.shields.io/github/v/release/sm1ee/Sniper?style=flat-square&labelColor=1c1c1c&color=d4a017" alt="Release" /></a>
+  <a href="https://github.com/sm1ee/Sniper/releases/latest"><img src="https://img.shields.io/github/downloads/sm1ee/Sniper/total?style=flat-square&label=downloads&labelColor=1c1c1c&color=d4a017" alt="Downloads" /></a>
   <img src="https://img.shields.io/badge/lang-Rust-orange?style=flat-square&logo=rust" alt="Rust" />
   <img src="https://img.shields.io/badge/platform-macOS-blue?style=flat-square&logo=apple" alt="macOS" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License" /></a>
