@@ -182,7 +182,7 @@ impl ScannerStore {
 
     pub async fn clear(&self) {
         self.entries.write().await.clear();
-        self.seen.write().await.clear();
+        // Keep `seen` intact so cleared findings are not re-detected from new traffic.
     }
 
     pub async fn count(&self) -> usize {
@@ -235,6 +235,35 @@ impl ScannerStore {
 /// rules because regex hits on raw base64 are almost always false positives.
 fn is_binary_body(msg: &MessageRecord) -> bool {
     msg.body_encoding == BodyEncoding::Base64
+}
+
+/// Returns true if the regex match appears to be embedded inside a larger base64
+/// string (e.g., base64-encoded ad payloads in JSON responses). Such matches are
+/// almost always false positives — the token pattern coincidentally appears within
+/// base64-encoded binary data.
+fn is_embedded_in_base64(body: &str, m: &regex::Match) -> bool {
+    let bytes = body.as_bytes();
+    let start = m.start();
+    let end = m.end();
+
+    // Count continuous base64 chars before the match
+    let pre = (0..start)
+        .rev()
+        .take_while(|&i| is_base64_char(bytes[i]))
+        .count();
+
+    // Count continuous base64 chars after the match
+    let post = (end..bytes.len())
+        .take_while(|&i| is_base64_char(bytes[i]))
+        .count();
+
+    // If 20+ base64 chars on each side, the match is embedded in base64 data
+    pre >= 20 && post >= 20
+}
+
+#[inline]
+fn is_base64_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
 }
 
 /// Run all passive scan rules against a transaction record, respecting config.
@@ -963,6 +992,11 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
     for &(pattern, label, ref severity) in PATTERNS {
         if let Ok(re) = Regex::new(pattern) {
             if let Some(m) = re.find(body) {
+                // Skip matches embedded inside base64 strings (false positives from
+                // base64-encoded ad payloads, tracking pixels, etc. in JSON responses)
+                if is_embedded_in_base64(body, &m) {
+                    continue;
+                }
                 findings.push(make_finding(
                     record,
                     severity.clone(),

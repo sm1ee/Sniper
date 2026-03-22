@@ -460,6 +460,10 @@ async fn get_finding(
 async fn clear_findings(State(state): State<Arc<AppState>>) -> StatusCode {
     let session = state.session().await;
     session.scanner.clear().await;
+    // Persist immediately so cleared state survives app restart
+    if let Err(error) = state.persist_session_context(&session).await {
+        tracing::warn!(?error, "failed to persist session after findings clear");
+    }
     StatusCode::NO_CONTENT
 }
 

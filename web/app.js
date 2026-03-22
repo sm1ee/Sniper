@@ -123,6 +123,8 @@ const WORKBENCH_STACK_MIN_HEIGHTS = {
 const REPEATER_HISTORY_LIMIT = 30;
 const HISTORY_ROW_HEIGHT = 27;
 const HISTORY_BUFFER_ROWS = 30;
+const FINDINGS_ROW_HEIGHT = 27;
+const FINDINGS_BUFFER_ROWS = 20;
 const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "fuzzer", "replay", "tools", "logger"]);
 const DECODER_SCRIPT_SOURCES = [
   "/decoder/lib/jquery-1.7.2.min.js",
@@ -319,6 +321,10 @@ const els = {
   findingsReqLines: document.getElementById("findingsReqLines"),
   findingsResView: document.getElementById("findingsResView"),
   findingsResLines: document.getElementById("findingsResLines"),
+  findingsReqSearchInput: document.getElementById("findingsReqSearchInput"),
+  findingsReqSearchMeta: document.getElementById("findingsReqSearchMeta"),
+  findingsResSearchInput: document.getElementById("findingsResSearchInput"),
+  findingsResSearchMeta: document.getElementById("findingsResSearchMeta"),
   findingsClearButton: document.getElementById("findingsClearButton"),
   findingsSettingsButton: document.getElementById("findingsSettingsButton"),
   findingsFilterSeverity: document.getElementById("findingsFilterSeverity"),
@@ -2696,36 +2702,51 @@ function updateCategoryFilter() {
 function renderFindings() {
   if (!els.findingsBody) return;
   updateCategoryFilter();
-  const filtered = getFilteredFindings();
-  els.findingsBody.innerHTML = filtered.length
-    ? filtered
-        .map((f) => `
-          <tr class="history-row${f.id === selectedFindingId ? " selected" : ""}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
-            <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
-            <td class="findings-col-category"><span class="detail-chip">${escapeHtml(f.category)}</span></td>
-            <td class="findings-col-title">${escapeHtml(f.title)}</td>
-            <td class="findings-col-host">${escapeHtml(f.host)}</td>
-            <td class="findings-col-path">${escapeHtml(f.path)}</td>
-            <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
-          </tr>
-        `)
-        .join("")
-    : `<tr class="empty-row"><td colspan="6">No findings yet. Browse with the proxy to start scanning.</td></tr>`;
+  state._findingsEntries = getFilteredFindings();
 
-  // Row click → load detail
-  Array.from(els.findingsBody.querySelectorAll("tr[data-finding-id]")).forEach((row) => {
-    row.addEventListener("click", () => {
-      const id = row.dataset.findingId;
-      selectedFindingId = id;
-      loadFindingDetail(id);
-      Array.from(els.findingsBody.querySelectorAll(".selected")).forEach((r) => r.classList.remove("selected"));
-      row.classList.add("selected");
-    });
-    row.addEventListener("dblclick", () => {
-      const recordId = row.dataset.recordId;
-      if (recordId) jumpToTransaction(recordId);
-    });
-  });
+  if (!state._findingsEntries.length) {
+    els.findingsBody.innerHTML = `<tr class="empty-row"><td colspan="6">No findings yet. Browse with the proxy to start scanning.</td></tr>`;
+    return;
+  }
+
+  renderFindingsVirtual();
+}
+
+function renderFindingsVirtual() {
+  const entries = state._findingsEntries;
+  if (!entries || !entries.length) return;
+
+  const shell = els.findingsBody.closest(".history-table-shell");
+  if (!shell) return;
+
+  const scrollTop = shell.scrollTop;
+  const viewportHeight = shell.clientHeight;
+  const totalCount = entries.length;
+
+  const startIdx = Math.max(0, Math.floor(scrollTop / FINDINGS_ROW_HEIGHT) - FINDINGS_BUFFER_ROWS);
+  const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / FINDINGS_ROW_HEIGHT) + FINDINGS_BUFFER_ROWS);
+
+  const topPadding = startIdx * FINDINGS_ROW_HEIGHT;
+  const bottomPadding = Math.max(0, (totalCount - endIdx) * FINDINGS_ROW_HEIGHT);
+
+  const rows = [];
+  for (let i = startIdx; i < endIdx; i++) {
+    const f = entries[i];
+    const selected = f.id === selectedFindingId ? " selected" : "";
+    rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
+      <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
+      <td class="findings-col-category"><span class="detail-chip">${escapeHtml(f.category)}</span></td>
+      <td class="findings-col-title">${escapeHtml(f.title)}</td>
+      <td class="findings-col-host">${escapeHtml(f.host)}</td>
+      <td class="findings-col-path">${escapeHtml(f.path)}</td>
+      <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
+    </tr>`);
+  }
+
+  els.findingsBody.innerHTML =
+    (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
+    rows.join("") +
+    (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
 }
 
 async function loadFindingDetail(id) {
@@ -2789,6 +2810,13 @@ function renderFindingsCodePane(viewEl, lineEl, text, evidence, target, finding)
 
   // Highlight evidence — line background + inline mark
   highlightFindingLines(viewEl, evidence, finding);
+
+  // Clear search when new finding is loaded
+  const isReq = (viewEl === els.findingsReqView);
+  const searchInput = isReq ? els.findingsReqSearchInput : els.findingsResSearchInput;
+  const searchMeta = isReq ? els.findingsReqSearchMeta : els.findingsResSearchMeta;
+  if (searchInput) searchInput.value = "";
+  if (searchMeta) searchMeta.innerHTML = buildSearchMeta(countLines(text), "raw", 0);
 
   // Scroll sync
   viewEl.addEventListener("scroll", () => { lineEl.scrollTop = viewEl.scrollTop; });
@@ -3018,25 +3046,59 @@ function syncQuickToggle(enabled) {
   }
 }
 
+function updateFindingsSelection(newId) {
+  const prev = els.findingsBody.querySelector(".history-row.selected");
+  if (prev) prev.classList.remove("selected");
+  if (newId) {
+    const next = els.findingsBody.querySelector(`tr[data-finding-id="${newId}"]`);
+    if (next) {
+      next.classList.add("selected");
+    } else {
+      scrollFindingsToId(newId);
+    }
+  }
+}
+
+function scrollFindingsToId(targetId) {
+  const entries = state._findingsEntries;
+  if (!entries) return;
+  const idx = entries.findIndex((f) => f.id === targetId);
+  if (idx === -1) return;
+  const shell = els.findingsBody.closest(".history-table-shell");
+  if (!shell) return;
+  shell.scrollTop = Math.max(0, idx * FINDINGS_ROW_HEIGHT - shell.clientHeight / 2);
+}
+
 function findingsArrowNav(direction) {
-  const rows = Array.from(els.findingsBody.querySelectorAll("tr[data-finding-id]"));
-  if (!rows.length) return;
-  const currentIdx = rows.findIndex((r) => r.dataset.findingId === selectedFindingId);
+  const entries = state._findingsEntries;
+  if (!entries || !entries.length) return;
+  const currentIdx = entries.findIndex((f) => f.id === selectedFindingId);
   let nextIdx;
   if (currentIdx < 0) {
     nextIdx = 0;
   } else {
     nextIdx = currentIdx + direction;
     if (nextIdx < 0) nextIdx = 0;
-    if (nextIdx >= rows.length) nextIdx = rows.length - 1;
+    if (nextIdx >= entries.length) nextIdx = entries.length - 1;
   }
-  const row = rows[nextIdx];
-  const id = row.dataset.findingId;
-  selectedFindingId = id;
-  rows.forEach((r) => r.classList.remove("selected"));
-  row.classList.add("selected");
-  row.scrollIntoView({ block: "nearest" });
-  loadFindingDetail(id);
+  const f = entries[nextIdx];
+  selectedFindingId = f.id;
+  updateFindingsSelection(f.id);
+
+  // Scroll into view
+  const shell = els.findingsBody.closest(".history-table-shell");
+  if (shell) {
+    const rowTop = nextIdx * FINDINGS_ROW_HEIGHT;
+    const rowBottom = rowTop + FINDINGS_ROW_HEIGHT;
+    const viewTop = shell.scrollTop;
+    const viewBottom = viewTop + shell.clientHeight;
+    if (rowTop < viewTop) {
+      shell.scrollTop = rowTop;
+    } else if (rowBottom > viewBottom) {
+      shell.scrollTop = rowBottom - shell.clientHeight;
+    }
+  }
+  loadFindingDetail(f.id);
 }
 
 function bindFindingsEvents() {
@@ -3044,6 +3106,37 @@ function bindFindingsEvents() {
   document.querySelectorAll(".findings-sortable").forEach((th) => {
     th.addEventListener("click", () => toggleFindingsSort(th.dataset.findingsSort));
   });
+
+  // Virtual scroll for findings table
+  const findingsShell = els.findingsBody ? els.findingsBody.closest(".history-table-shell") : null;
+  if (findingsShell) {
+    let findingsScrollRaf = 0;
+    findingsShell.addEventListener("scroll", () => {
+      if (findingsScrollRaf) return;
+      findingsScrollRaf = requestAnimationFrame(() => {
+        findingsScrollRaf = 0;
+        renderFindingsVirtual();
+      });
+    });
+  }
+
+  // Event delegation for findings table rows
+  if (els.findingsBody) {
+    els.findingsBody.addEventListener("click", (event) => {
+      const row = event.target.closest("tr[data-finding-id]");
+      if (!row) return;
+      const id = row.dataset.findingId;
+      selectedFindingId = id;
+      updateFindingsSelection(id);
+      loadFindingDetail(id);
+    });
+    els.findingsBody.addEventListener("dblclick", (event) => {
+      const row = event.target.closest("tr[data-finding-id]");
+      if (!row) return;
+      const recordId = row.dataset.recordId;
+      if (recordId) jumpToTransaction(recordId);
+    });
+  }
 
   if (els.findingsDetailClose) {
     els.findingsDetailClose.addEventListener("click", () => {
@@ -3102,6 +3195,26 @@ function bindFindingsEvents() {
     if (e.key === "ArrowDown") { e.preventDefault(); findingsArrowNav(1); }
     if (e.key === "ArrowUp") { e.preventDefault(); findingsArrowNav(-1); }
   });
+
+  // Findings detail search
+  if (els.findingsReqSearchInput) {
+    els.findingsReqSearchInput.addEventListener("input", () => {
+      const query = els.findingsReqSearchInput.value;
+      const { count } = applyCodeSearch(els.findingsReqView, query);
+      const lines = els.findingsReqView.querySelectorAll(".code-line").length;
+      els.findingsReqSearchMeta.innerHTML = buildSearchMeta(lines, "raw", count);
+    });
+  }
+  if (els.findingsResSearchInput) {
+    els.findingsResSearchInput.addEventListener("input", () => {
+      const query = els.findingsResSearchInput.value;
+      const { count } = applyCodeSearch(els.findingsResView, query);
+      const lines = els.findingsResView.querySelectorAll(".code-line").length;
+      els.findingsResSearchMeta.innerHTML = buildSearchMeta(lines, "raw", count);
+    });
+  }
+  initSearchHitNavigation(els.findingsReqSearchMeta, () => els.findingsReqView);
+  initSearchHitNavigation(els.findingsResSearchMeta, () => els.findingsResView);
 
   // Quick toggle (on/off in toolbar)
   if (els.scannerQuickToggle) {
