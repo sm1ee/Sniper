@@ -10040,9 +10040,16 @@ function replayRequestToCurl() {
   const parts = [`curl -X ${method}`];
 
   // Separate headers and body
-  const bodyIdx = rest.indexOf("");
-  const headerLines = bodyIdx === -1 ? rest.filter((l) => l.includes(":")) : rest.slice(0, bodyIdx).filter((l) => l.includes(":"));
-  const body = bodyIdx === -1 ? "" : rest.slice(bodyIdx + 1).join("\n");
+  let bodyIdx = rest.indexOf("");
+  if (bodyIdx === -1) {
+    for (let i = 0; i < rest.length; i++) {
+      const c = rest[i].charAt(0);
+      if (c === "{" || c === "[" || c === "<" || c === '"') { bodyIdx = i; break; }
+      if (!rest[i].includes(":")) { bodyIdx = i; break; }
+    }
+  }
+  const headerLines = (bodyIdx === -1 ? rest : rest.slice(0, bodyIdx)).filter((l) => l.includes(":"));
+  const body = bodyIdx === -1 ? "" : (rest[bodyIdx] === "" ? rest.slice(bodyIdx + 1) : rest.slice(bodyIdx)).join("\n");
 
   for (const h of headerLines) {
     const idx = h.indexOf(":");
@@ -10069,9 +10076,16 @@ function parseRequestForExport(rawText, scheme, host, port) {
   const path = match[2];
   const portSuffix = port && !(scheme === "https" && port === "443") && !(scheme === "http" && port === "80") ? `:${port}` : "";
   const url = `${scheme}://${host}${portSuffix}${path}`;
-  const bodyIdx = rest.indexOf("");
-  const headerLines = bodyIdx === -1 ? rest.filter((l) => l.includes(":")) : rest.slice(0, bodyIdx).filter((l) => l.includes(":"));
-  const body = bodyIdx === -1 ? "" : rest.slice(bodyIdx + 1).join("\n");
+  let bodyIdx = rest.indexOf("");
+  if (bodyIdx === -1) {
+    for (let i = 0; i < rest.length; i++) {
+      const c = rest[i].charAt(0);
+      if (c === "{" || c === "[" || c === "<" || c === '"') { bodyIdx = i; break; }
+      if (!rest[i].includes(":")) { bodyIdx = i; break; }
+    }
+  }
+  const headerLines = bodyIdx === -1 ? rest : rest.slice(0, bodyIdx);
+  const body = bodyIdx === -1 ? "" : (rest[bodyIdx] === "" ? rest.slice(bodyIdx + 1) : rest.slice(bodyIdx)).join("\n");
   const headers = headerLines.map((h) => {
     const idx = h.indexOf(":");
     return idx === -1 ? null : { name: h.slice(0, idx).trim(), value: h.slice(idx + 1).trim() };
