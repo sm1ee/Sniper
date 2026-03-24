@@ -796,7 +796,14 @@ function bindEvents() {
     openContextMenu(event.clientX, event.clientY, row.dataset.id);
   });
 
-  els.searchInput.addEventListener("input", () => {
+  els.searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      state.query = els.searchInput.value.trim();
+      scheduleRefresh();
+    }
+  });
+  els.searchInput.addEventListener("search", () => {
+    // Triggered when user clears the search field via the X button
     state.query = els.searchInput.value.trim();
     scheduleRefresh();
   });
