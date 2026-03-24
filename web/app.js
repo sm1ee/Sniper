@@ -10526,6 +10526,9 @@ function setReplayHeader(name, value) {
   } else {
     initAllReadonlyCarets();
   }
+  // Re-apply when innerHTML is updated (MutationObserver)
+  const caretObserver = new MutationObserver(() => initAllReadonlyCarets());
+  caretObserver.observe(document.body, { childList: true, subtree: true });
 
   function isReadonlyView(el) {
     return el && el.getAttribute(READONLY_ATTR) === "1";
@@ -10562,20 +10565,26 @@ function setReplayHeader(name, value) {
     return lines.findIndex((l) => l.classList.contains("line-focus"));
   }
 
-  // Click: set line focus
+  // Click: set line focus and ensure the view has keyboard focus
   document.addEventListener("click", (event) => {
     const view = event.target.closest(".code-view, .simple-code-view");
     if (!view || !isReadonlyView(view)) return;
     const line = event.target.closest(".code-line");
     if (line && view.contains(line)) {
       setFocus(view, line);
+      // Ensure this view is the activeElement so ArrowUp/Down work
+      if (document.activeElement !== view) view.focus({ preventScroll: true });
     }
   });
 
   // ArrowUp/Down: line navigation
   document.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-    const view = document.activeElement;
+    let view = document.activeElement;
+    // Walk up to the code-view if focus is on an inner element
+    if (view && !isReadonlyView(view)) {
+      view = view.closest?.(".code-view, .simple-code-view");
+    }
     if (!view || !isReadonlyView(view)) return;
     const lines = getCodeLines(view);
     if (!lines.length) return;
@@ -10594,7 +10603,10 @@ function setReplayHeader(name, value) {
   // Cmd+C / Ctrl+C: copy focused line when no text selection
   document.addEventListener("keydown", (event) => {
     if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "c") return;
-    const view = document.activeElement;
+    let view = document.activeElement;
+    if (view && !isReadonlyView(view)) {
+      view = view.closest?.(".code-view, .simple-code-view");
+    }
     if (!view || !isReadonlyView(view)) return;
     const sel = window.getSelection();
     if (sel && sel.toString().length > 0) return; // native copy handles selected text
