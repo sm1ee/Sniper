@@ -9823,6 +9823,8 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
       openFuzzerFromSelection().catch((error) => console.error(error));
     } else if (action === "send-to-sequence") {
       sendToSequenceFromSelection().catch((error) => console.error(error));
+    } else if (action === "copy-url") {
+      copyTransactionUrl(contextMenuTargetId);
     } else if (action?.startsWith("copy-as-")) {
       const format = action.replace("copy-as-", "");
       historyRequestToFormat(contextMenuTargetId, format).then((text) => {
@@ -10186,6 +10188,30 @@ async function historyRequestToFormat(transactionId, format) {
   return "";
 }
 
+function copyTransactionUrl(transactionId) {
+  const item = state.items.find((i) => i.id === transactionId);
+  if (!item) return;
+  const scheme = item.scheme || "https";
+  const host = item.host || "";
+  const path = item.path || "/";
+  const url = `${scheme}://${host}${path}`;
+  navigator.clipboard.writeText(url).catch(() => {});
+}
+
+function copyReplayUrl() {
+  const tab = getActiveReplayTab();
+  if (!tab) return;
+  const scheme = tab.targetScheme || "https";
+  const host = tab.targetHost || "localhost";
+  const port = tab.targetPort || "";
+  const portSuffix = port && !(scheme === "https" && port === "443") && !(scheme === "http" && port === "80") ? `:${port}` : "";
+  const text = tab.requestText || "";
+  const match = text.match(/^[A-Z]+\s+(\S+)/i);
+  const path = match ? match[1] : "/";
+  const url = `${scheme}://${host}${portSuffix}${path}`;
+  navigator.clipboard.writeText(url).catch(() => {});
+}
+
 function parseCurlCommand(text) {
   const normalized = text.replace(/\\\s*\n/g, " ").trim();
   if (!normalized.toLowerCase().startsWith("curl")) return null;
@@ -10317,6 +10343,8 @@ function initReplayContextMenu() {
         setReplayHeader("Content-Type", "application/json");
       } else if (action === "add-content-type-form") {
         setReplayHeader("Content-Type", "application/x-www-form-urlencoded");
+      } else if (action === "copy-url") {
+        copyReplayUrl();
       } else if (action === "copy-as-curl" || action === "copy-as-python" || action === "copy-as-fetch" || action === "copy-as-powershell") {
         const format = action.replace("copy-as-", "");
         const text = replayRequestToFormat(format);
