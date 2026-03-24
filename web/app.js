@@ -619,6 +619,7 @@ async function init() {
   bindEvents();
   resetLayoutTextareas();
   hydrateFilterForm();
+  syncHttpInScopePill();
   await loadUiSettings();
   hydrateDisplaySettingsForm();
   const loads = [
@@ -838,11 +839,18 @@ function bindEvents() {
     state.websocketQuery = els.websocketSearchInput.value.trim();
     syncVisibleWebsocketSelection(true).catch((error) => console.error(error));
   });
-  document.getElementById("wsInScopeOnly")?.addEventListener("change", () => {
+  document.getElementById("wsInScopeOnly")?.addEventListener("click", (e) => {
+    e.currentTarget.classList.toggle("active");
     syncVisibleWebsocketSelection(true).catch((error) => console.error(error));
   });
-  document.getElementById("wsHideClosed")?.addEventListener("change", () => {
+  document.getElementById("wsHideClosed")?.addEventListener("click", (e) => {
+    e.currentTarget.classList.toggle("active");
     syncVisibleWebsocketSelection(true).catch((error) => console.error(error));
+  });
+  document.getElementById("httpInScopeToggle")?.addEventListener("click", (e) => {
+    e.currentTarget.classList.toggle("active");
+    state.filterSettings.inScopeOnly = e.currentTarget.classList.contains("active");
+    scheduleRefresh();
   });
 
   els.methodFilter.addEventListener("change", () => {
@@ -4494,8 +4502,8 @@ function renderWebsocketSessions() {
 function buildWebsocketFilterSummary(visibleCount, totalCount, query) {
   const parts = [`${visibleCount} session(s) visible`];
   const filters = [];
-  if (document.getElementById("wsInScopeOnly")?.checked) filters.push("in scope");
-  if (document.getElementById("wsHideClosed")?.checked) filters.push("live only");
+  if (document.getElementById("wsInScopeOnly")?.classList.contains("active")) filters.push("in scope");
+  if (document.getElementById("wsHideClosed")?.classList.contains("active")) filters.push("live only");
   if (query) filters.push(query);
   if (filters.length) parts.push(`filter: ${filters.join(", ")}`);
   parts.push(totalCount ? `${totalCount} total captured` : "No sessions captured yet");
@@ -4504,8 +4512,8 @@ function buildWebsocketFilterSummary(visibleCount, totalCount, query) {
 
 function getVisibleWebsocketSessions() {
   const normalizedQuery = state.websocketQuery.trim().toLowerCase();
-  const inScopeOnly = document.getElementById("wsInScopeOnly")?.checked ?? false;
-  const liveOnly = document.getElementById("wsHideClosed")?.checked ?? false;
+  const inScopeOnly = document.getElementById("wsInScopeOnly")?.classList.contains("active") ?? false;
+  const liveOnly = document.getElementById("wsHideClosed")?.classList.contains("active") ?? false;
 
   return state.websocketSessions.filter((session) => {
     if (inScopeOnly && !isInScopeHost(session.host)) return false;
@@ -6984,6 +6992,11 @@ function sanitizeWorkbenchHeight(candidate) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
 }
 
+function syncHttpInScopePill() {
+  const pill = document.getElementById("httpInScopeToggle");
+  if (pill) pill.classList.toggle("active", !!state.filterSettings.inScopeOnly);
+}
+
 function hydrateFilterForm() {
   const filters = state.filterSettings;
   els.filterInScopeOnly.checked = filters.inScopeOnly;
@@ -7040,6 +7053,7 @@ function applyFilterSettings() {
     colorTags: state.filterSettings.colorTags,
   };
   closeFilterModal();
+  syncHttpInScopePill();
   scheduleRefresh();
 }
 

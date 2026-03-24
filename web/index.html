@@ -166,6 +166,7 @@
             </label>
 
             <div class="filter-actions">
+              <button class="scope-pill" id="httpInScopeToggle" type="button" title="Show only in-scope hosts">In scope</button>
               <button class="secondary-action" id="openFilterSettingsButton" type="button">
                 Filter
               </button>
@@ -391,17 +392,13 @@
                   <div class="filter-summary websocket-filter-summary" id="websocketMeta" aria-live="polite">
                     Loading captured WebSocket sessions.
                   </div>
-                  <label class="filter-toggle-label" title="Show only in-scope hosts">
-                    <input type="checkbox" id="wsInScopeOnly" />
-                    <span>In scope</span>
-                  </label>
-                  <label class="filter-toggle-label" title="Hide completed sessions">
-                    <input type="checkbox" id="wsHideClosed" />
-                    <span>Live only</span>
-                  </label>
                   <label class="search-box" for="websocketSearchInput">
                     <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" />
                   </label>
+                  <div class="filter-actions">
+                    <button class="scope-pill" id="wsInScopeOnly" type="button" title="Show only in-scope hosts">In scope</button>
+                    <button class="scope-pill" id="wsHideClosed" type="button" title="Show only live sessions">Live only</button>
+                  </div>
                 </div>
                 <div class="history-table-shell">
                   <table class="mini-table" id="websocketTable">
