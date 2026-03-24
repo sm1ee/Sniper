@@ -304,6 +304,7 @@
                     <h2>Held items</h2>
                   </div>
                   <div class="toolbar-actions">
+                    <button class="scope-pill" id="interceptInScopeToggle" type="button" title="Only intercept in-scope hosts">In scope</button>
                     <button class="toggle-pill" id="interceptStatus" type="button">
                       Off
                     </button>
@@ -492,10 +493,13 @@
                   <table class="mini-table">
                     <thead>
                       <tr>
-                        <th>On</th>
-                        <th>Name</th>
+                        <th style="width:40px">On</th>
                         <th>Scope</th>
                         <th>Target</th>
+                        <th>Search</th>
+                        <th>Replace</th>
+                        <th style="width:32px">Re</th>
+                        <th style="width:32px">Cs</th>
                       </tr>
                     </thead>
                     <tbody id="matchReplaceTableBody"></tbody>

@@ -242,6 +242,7 @@ const state = {
   activeReplayTabId: null,
   replayTabSequence: 0,
   interceptEditorSeedId: null,
+  interceptInScopeOnly: false,
   eventLog: [],
   matchReplaceRules: [],
   selectedMatchReplaceRuleId: null,
@@ -852,6 +853,10 @@ function bindEvents() {
     state.filterSettings.inScopeOnly = e.currentTarget.classList.contains("active");
     scheduleRefresh();
   });
+  document.getElementById("interceptInScopeToggle")?.addEventListener("click", (e) => {
+    e.currentTarget.classList.toggle("active");
+    state.interceptInScopeOnly = e.currentTarget.classList.contains("active");
+  });
 
   els.methodFilter.addEventListener("change", () => {
     state.method = els.methodFilter.value;
@@ -1056,15 +1061,16 @@ function bindEvents() {
     if (!state.selectedMatchReplaceRuleId) {
       createNewMatchReplaceRule();
     }
+    syncMatchReplaceEditor();
     saveMatchReplaceRules()
       .then(() => showToast("Rule saved"))
       .catch((error) => { console.error(error); showToast("Failed to save rule", "error"); });
   });
   els.addMatchReplaceRuleButton.addEventListener("click", () => {
+    syncMatchReplaceEditor();
     createNewMatchReplaceRule();
-    saveMatchReplaceRules()
-      .then(() => showToast("Rule added"))
-      .catch((error) => { console.error(error); showToast("Failed to add rule", "error"); });
+    // Don't save immediately — let user fill in fields first
+    renderMatchReplaceRules();
   });
   els.deleteMatchReplaceRuleButton.addEventListener("click", deleteSelectedMatchReplaceRule);
   [
@@ -4311,8 +4317,11 @@ function renderViewTabs() {
 }
 
 function renderIntercepts() {
-  els.interceptTableBody.innerHTML = state.intercepts.length
-    ? state.intercepts
+  const filteredIntercepts = state.interceptInScopeOnly
+    ? state.intercepts.filter((item) => isInScopeHost(item.host))
+    : state.intercepts;
+  els.interceptTableBody.innerHTML = filteredIntercepts.length
+    ? filteredIntercepts
         .map((item) => {
           const selected = item.id === state.selectedInterceptId ? "selected" : "";
           return `
@@ -4897,16 +4906,19 @@ function renderMatchReplaceRules() {
           return `
             <tr class="history-row ${active}" data-id="${rule.id}">
               <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${rule.enabled ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
-              <td>${escapeHtml(rule.description || "Untitled rule")}</td>
               <td>${escapeHtml(rule.scope)}</td>
               <td>${escapeHtml(rule.target)}</td>
+              <td class="text-truncate">${escapeHtml(rule.search || "—")}</td>
+              <td class="text-truncate">${escapeHtml(rule.replace || "—")}</td>
+              <td>${rule.regex ? "✓" : ""}</td>
+              <td>${rule.case_sensitive ? "✓" : ""}</td>
             </tr>
           `;
         })
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="4">No replace rules are configured.</td>
+          <td colspan="7">No replace rules are configured.</td>
         </tr>
       `;
 
@@ -5747,8 +5759,11 @@ function parseEditableRawResponse(text, original) {
 }
 
 function renderResponseIntercepts() {
-  els.responseInterceptTableBody.innerHTML = state.responseIntercepts.length
-    ? state.responseIntercepts
+  const filteredResponseIntercepts = state.interceptInScopeOnly
+    ? state.responseIntercepts.filter((item) => isInScopeHost(item.host))
+    : state.responseIntercepts;
+  els.responseInterceptTableBody.innerHTML = filteredResponseIntercepts.length
+    ? filteredResponseIntercepts
         .map((item) => {
           const selected = item.id === state.selectedResponseInterceptId ? "selected" : "";
           return `
