@@ -10482,9 +10482,41 @@ function setReplayHeader(name, value) {
   scheduleWorkspaceStateSave();
 }
 
-/* ─── Code-view line keyboard navigation ─── */
+/* ─── Code-view line keyboard navigation + cursor + Cmd+C ─── */
 
 (function initCodeViewLineNav() {
+  const READONLY_ATTR = "data-readonly-editable";
+
+  // Make read-only code-views show a text cursor by enabling contenteditable
+  // but blocking all mutations so the content stays untouched.
+  function enableReadonlyCaret(view) {
+    if (view.getAttribute(READONLY_ATTR)) return;
+    // Skip views that are already editable for editing purposes (replay editor, ws message)
+    if (view.dataset.placeholder) return;
+    view.setAttribute("contenteditable", "true");
+    view.setAttribute(READONLY_ATTR, "1");
+    view.addEventListener("beforeinput", (e) => e.preventDefault());
+    view.addEventListener("paste", (e) => e.preventDefault());
+    view.addEventListener("drop", (e) => e.preventDefault());
+  }
+
+  // Auto-enable for all code-view / simple-code-view with tabindex
+  function initAllReadonlyCarets() {
+    document.querySelectorAll(".code-view[tabindex], .simple-code-view[tabindex]").forEach((v) => {
+      if (!v.dataset.placeholder) enableReadonlyCaret(v);
+    });
+  }
+  // Run once at load and observe DOM for late-added panels
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initAllReadonlyCarets);
+  } else {
+    initAllReadonlyCarets();
+  }
+
+  function isReadonlyView(el) {
+    return el && el.getAttribute(READONLY_ATTR) === "1";
+  }
+
   function getCodeLines(view) {
     return Array.from(view.querySelectorAll(".code-line"));
   }
@@ -10504,24 +10536,21 @@ function setReplayHeader(name, value) {
     return lines.findIndex((l) => l.classList.contains("line-focus"));
   }
 
+  // Click: set line focus
   document.addEventListener("click", (event) => {
     const view = event.target.closest(".code-view, .simple-code-view");
-    if (!view || view.isContentEditable) return;
+    if (!view || !isReadonlyView(view)) return;
     const line = event.target.closest(".code-line");
     if (line && view.contains(line)) {
       setFocus(view, line);
-    } else {
-      const lines = getCodeLines(view);
-      if (lines.length) setFocus(view, lines[0]);
     }
   });
 
+  // ArrowUp/Down: line navigation
   document.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     const view = document.activeElement;
-    if (!view) return;
-    if (!view.classList.contains("code-view") && !view.classList.contains("simple-code-view")) return;
-    if (view.isContentEditable) return;
+    if (!view || !isReadonlyView(view)) return;
     const lines = getCodeLines(view);
     if (!lines.length) return;
     event.preventDefault();
@@ -10534,5 +10563,18 @@ function setReplayHeader(name, value) {
     if (next >= 0 && next < lines.length) {
       setFocus(view, lines[next]);
     }
+  });
+
+  // Cmd+C / Ctrl+C: copy focused line when no text selection
+  document.addEventListener("keydown", (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "c") return;
+    const view = document.activeElement;
+    if (!view || !isReadonlyView(view)) return;
+    const sel = window.getSelection();
+    if (sel && sel.toString().length > 0) return; // native copy handles selected text
+    const focused = view.querySelector(".code-line.line-focus");
+    if (!focused) return;
+    event.preventDefault();
+    navigator.clipboard.writeText(focused.textContent).catch(() => {});
   });
 })();

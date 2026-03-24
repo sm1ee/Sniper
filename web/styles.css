@@ -1950,8 +1950,10 @@ code {
   scrollbar-gutter: stable;
 }
 
-.code-view:focus {
+.code-view:focus,
+.simple-code-view:focus {
   outline: none;
+  caret-color: var(--accent, #e0a050);
 }
 
 .response-column .code-view {
