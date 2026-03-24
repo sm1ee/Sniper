@@ -1453,6 +1453,22 @@ function bindEvents() {
       sendWsFrameToReplay(state.selectedFrameIdx ?? 0);
     }
 
+    // Cmd+R on Findings tab — send selected finding to Replay
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "r" &&
+      state.activeTool === "proxy" &&
+      state.activeProxyTab === "findings"
+    ) {
+      const recordId = els.findingsDetailJump?.dataset.recordId;
+      if (recordId) {
+        event.preventDefault();
+        sendFindingToReplay(recordId).catch((error) => console.error(error));
+      }
+    }
+
     if (
       event.metaKey &&
       !event.shiftKey &&
@@ -3178,9 +3194,49 @@ function extractFindingKeywords(finding) {
 
 function jumpToTransaction(recordId) {
   state.activeProxyTab = "http-history";
-  state.selectedTransactionId = recordId;
+  state.selectedId = recordId;
   renderProxyPanels();
-  loadTransactionDetail(recordId);
+  loadTransactionDetail(recordId).then(() => {
+    const row = document.querySelector(`.history-row[data-id="${recordId}"]`);
+    if (row) {
+      updateHistorySelection(recordId);
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }).catch((error) => console.error(error));
+}
+
+async function sendFindingToReplay(recordId) {
+  const response = await fetch(`/api/transactions/${recordId}`);
+  if (!response.ok) return;
+  const record = await response.json();
+  if (!record || record.kind === "tunnel") return;
+  const request = editableRequestFromRecord(record);
+  const tab = createReplayTab({
+    baseRequest: request,
+    sourceTransactionId: record.id,
+    notice: record.request.preview_truncated ? buildTruncatedBodyNotice(record, "Replay") : "",
+    requestText: buildEditableRawRequest(request),
+  });
+  state.replayTabs.push(tab);
+  state.activeReplayTabId = tab.id;
+  state.activeTool = "replay";
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
+}
+
+async function sendFindingToFuzzer(recordId) {
+  const response = await fetch(`/api/transactions/${recordId}`);
+  if (!response.ok) return;
+  const record = await response.json();
+  if (!record || record.kind === "tunnel") return;
+  const request = editableRequestFromRecord(record);
+  state.fuzzerBaseRequest = request;
+  state.fuzzerSourceTransactionId = record.id;
+  state.fuzzerRequestText = buildEditableRawRequest(request);
+  state.fuzzerNotice = record.request.preview_truncated ? buildTruncatedBodyNotice(record, "Fuzzer") : "";
+  state.activeTool = "fuzzer";
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
 }
 
 // ── Scanner Settings Modal ──
@@ -3418,6 +3474,20 @@ function bindFindingsEvents() {
     els.findingsDetailJump.addEventListener("click", () => {
       const recordId = els.findingsDetailJump.dataset.recordId;
       if (recordId) jumpToTransaction(recordId);
+    });
+  }
+  const findingsReplayBtn = document.getElementById("findingsDetailSendReplay");
+  if (findingsReplayBtn) {
+    findingsReplayBtn.addEventListener("click", () => {
+      const recordId = els.findingsDetailJump?.dataset.recordId;
+      if (recordId) sendFindingToReplay(recordId);
+    });
+  }
+  const findingsFuzzerBtn = document.getElementById("findingsDetailSendFuzzer");
+  if (findingsFuzzerBtn) {
+    findingsFuzzerBtn.addEventListener("click", () => {
+      const recordId = els.findingsDetailJump?.dataset.recordId;
+      if (recordId) sendFindingToFuzzer(recordId);
     });
   }
   if (els.findingsClearButton) {
