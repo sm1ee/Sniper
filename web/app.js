@@ -2093,6 +2093,7 @@ async function loadIntercepts(preserveSelection = true) {
   }
 
   renderIntercepts();
+  updateInterceptQueueBadges();
   if (state.selectedInterceptId) {
     await loadInterceptDetail(state.selectedInterceptId);
   } else {
@@ -5683,6 +5684,7 @@ async function loadResponseIntercepts(preserveSelection = true) {
   }
 
   renderResponseIntercepts();
+  updateInterceptQueueBadges();
   if (state.selectedResponseInterceptId) {
     await loadResponseInterceptDetail(state.selectedResponseInterceptId);
   } else {
@@ -5853,6 +5855,13 @@ async function dropSelectedResponseIntercept() {
   state.responseInterceptEditorSeedId = null;
   await loadResponseIntercepts(false);
   scheduleRefresh();
+}
+
+function updateInterceptQueueBadges() {
+  const reqCount = state.intercepts.length;
+  const resCount = state.responseIntercepts.length;
+  els.interceptQueueTabRequest.textContent = reqCount > 0 ? `Request Queue (${reqCount})` : "Request Queue";
+  els.interceptQueueTabResponse.textContent = resCount > 0 ? `Response Queue (${resCount})` : "Response Queue";
 }
 
 function switchInterceptQueueTab(tab) {
