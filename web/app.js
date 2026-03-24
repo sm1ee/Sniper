@@ -10481,3 +10481,58 @@ function setReplayHeader(name, value) {
   updateReplaySearchPane("request", tab.requestText);
   scheduleWorkspaceStateSave();
 }
+
+/* ─── Code-view line keyboard navigation ─── */
+
+(function initCodeViewLineNav() {
+  function getCodeLines(view) {
+    return Array.from(view.querySelectorAll(".code-line"));
+  }
+
+  function clearFocus(view) {
+    const prev = view.querySelector(".code-line.line-focus");
+    if (prev) prev.classList.remove("line-focus");
+  }
+
+  function setFocus(view, line) {
+    clearFocus(view);
+    line.classList.add("line-focus");
+    line.scrollIntoView({ block: "nearest" });
+  }
+
+  function focusedIndex(lines) {
+    return lines.findIndex((l) => l.classList.contains("line-focus"));
+  }
+
+  document.addEventListener("click", (event) => {
+    const view = event.target.closest(".code-view, .simple-code-view");
+    if (!view || view.isContentEditable) return;
+    const line = event.target.closest(".code-line");
+    if (line && view.contains(line)) {
+      setFocus(view, line);
+    } else {
+      const lines = getCodeLines(view);
+      if (lines.length) setFocus(view, lines[0]);
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    const view = document.activeElement;
+    if (!view) return;
+    if (!view.classList.contains("code-view") && !view.classList.contains("simple-code-view")) return;
+    if (view.isContentEditable) return;
+    const lines = getCodeLines(view);
+    if (!lines.length) return;
+    event.preventDefault();
+    let idx = focusedIndex(lines);
+    if (idx === -1) {
+      setFocus(view, lines[0]);
+      return;
+    }
+    const next = event.key === "ArrowDown" ? idx + 1 : idx - 1;
+    if (next >= 0 && next < lines.length) {
+      setFocus(view, lines[next]);
+    }
+  });
+})();

@@ -1964,6 +1964,18 @@ code {
   line-height: inherit;
 }
 
+.code-line.line-focus {
+  background: rgba(255, 255, 255, 0.07);
+  outline: 1px solid rgba(255, 255, 255, 0.12);
+  outline-offset: -1px;
+  border-radius: 2px;
+}
+
+.code-view:not(:focus) .code-line.line-focus {
+  background: transparent;
+  outline: none;
+}
+
 .code-line-gap {
   opacity: 0.3;
 }
