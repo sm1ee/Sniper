@@ -10544,6 +10544,18 @@ function setReplayHeader(name, value) {
     clearFocus(view);
     line.classList.add("line-focus");
     line.scrollIntoView({ block: "nearest" });
+    // Move the text caret to the beginning of this line
+    try {
+      const sel = window.getSelection();
+      const textNode = line.firstChild;
+      if (sel && textNode) {
+        const range = document.createRange();
+        range.setStart(textNode, 0);
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    } catch (_) { /* ignore if range fails */ }
   }
 
   function focusedIndex(lines) {
