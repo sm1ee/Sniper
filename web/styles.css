@@ -1285,7 +1285,23 @@ code {
 }
 
 .websocket-filter-bar {
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 360px);
+  grid-template-columns: minmax(0, 1fr) auto auto minmax(240px, 360px);
+}
+
+.filter-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: var(--size-sm);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.filter-toggle-label input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .websocket-filter-summary {

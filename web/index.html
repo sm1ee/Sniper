@@ -391,6 +391,14 @@
                   <div class="filter-summary websocket-filter-summary" id="websocketMeta" aria-live="polite">
                     Loading captured WebSocket sessions.
                   </div>
+                  <label class="filter-toggle-label" title="Show only in-scope hosts">
+                    <input type="checkbox" id="wsInScopeOnly" />
+                    <span>In scope</span>
+                  </label>
+                  <label class="filter-toggle-label" title="Hide completed sessions">
+                    <input type="checkbox" id="wsHideClosed" />
+                    <span>Live only</span>
+                  </label>
                   <label class="search-box" for="websocketSearchInput">
                     <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" />
                   </label>

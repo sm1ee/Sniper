@@ -831,6 +831,12 @@ function bindEvents() {
     state.websocketQuery = els.websocketSearchInput.value.trim();
     syncVisibleWebsocketSelection(true).catch((error) => console.error(error));
   });
+  document.getElementById("wsInScopeOnly")?.addEventListener("change", () => {
+    syncVisibleWebsocketSelection(true).catch((error) => console.error(error));
+  });
+  document.getElementById("wsHideClosed")?.addEventListener("change", () => {
+    syncVisibleWebsocketSelection(true).catch((error) => console.error(error));
+  });
 
   els.methodFilter.addEventListener("change", () => {
     state.method = els.methodFilter.value;
@@ -4409,33 +4415,39 @@ function renderWebsocketSessions() {
 }
 
 function buildWebsocketFilterSummary(visibleCount, totalCount, query) {
-  const summary = `${visibleCount} session(s) visible`;
-  const total = totalCount ? `${totalCount} total captured` : "No sessions captured yet";
-  if (!query) {
-    return `${summary} · ${total}`;
-  }
-  return `${summary} · filter: ${query} · ${total}`;
+  const parts = [`${visibleCount} session(s) visible`];
+  const filters = [];
+  if (document.getElementById("wsInScopeOnly")?.checked) filters.push("in scope");
+  if (document.getElementById("wsHideClosed")?.checked) filters.push("live only");
+  if (query) filters.push(query);
+  if (filters.length) parts.push(`filter: ${filters.join(", ")}`);
+  parts.push(totalCount ? `${totalCount} total captured` : "No sessions captured yet");
+  return parts.join(" · ");
 }
 
 function getVisibleWebsocketSessions() {
   const normalizedQuery = state.websocketQuery.trim().toLowerCase();
-  if (!normalizedQuery) {
-    return state.websocketSessions;
-  }
+  const inScopeOnly = document.getElementById("wsInScopeOnly")?.checked ?? false;
+  const liveOnly = document.getElementById("wsHideClosed")?.checked ?? false;
 
   return state.websocketSessions.filter((session) => {
-    const haystack = [
-      session.host,
-      session.path,
-      formatStatus(session.status),
-      String(session.frame_count),
-      session.duration_ms == null ? "live" : `${session.duration_ms} ms`,
-      formatTimestamp(session.started_at),
-    ]
-      .filter(Boolean)
-      .join("\n")
-      .toLowerCase();
-    return haystack.includes(normalizedQuery);
+    if (inScopeOnly && !isInScopeHost(session.host)) return false;
+    if (liveOnly && session.duration_ms != null) return false;
+    if (normalizedQuery) {
+      const haystack = [
+        session.host,
+        session.path,
+        formatStatus(session.status),
+        String(session.frame_count),
+        session.duration_ms == null ? "live" : `${session.duration_ms} ms`,
+        formatTimestamp(session.started_at),
+      ]
+        .filter(Boolean)
+        .join("\n")
+        .toLowerCase();
+      if (!haystack.includes(normalizedQuery)) return false;
+    }
+    return true;
   });
 }
 
