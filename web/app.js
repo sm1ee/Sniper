@@ -3107,6 +3107,7 @@ function renderFindingsCodePane(viewEl, lineEl, text, evidence, target, finding)
   const html = renderHttpHtml(text, target);
   viewEl.innerHTML = html;
   lineEl.textContent = buildLineNumbers(countLines(text));
+  if (window._enableReadonlyCaret) window._enableReadonlyCaret(viewEl);
 
   // Highlight evidence — line background + inline mark
   highlightFindingLines(viewEl, evidence, finding);
@@ -4434,8 +4435,12 @@ function renderWebsocketSessions() {
   const session = state.selectedWebsocketRecord;
   const reqText = buildRawWebsocketRequest(session);
   const resText = buildRawWebsocketResponse(session);
+  const savedReqFocus = window._saveCodeViewFocus?.(els.websocketRequestView);
+  const savedResFocus = window._saveCodeViewFocus?.(els.websocketResponseView);
   els.websocketRequestView.innerHTML = renderHttpHtml(reqText, "request");
   els.websocketResponseView.innerHTML = renderHttpHtml(resText, "response");
+  window._restoreCodeViewFocus?.(els.websocketRequestView, savedReqFocus);
+  window._restoreCodeViewFocus?.(els.websocketResponseView, savedResFocus);
   // Preserve current handshake tab selection (default to Request)
   const resBtn = document.getElementById("wsHandshakeResBtn");
   const showingResponse = resBtn?.classList.contains("active");
@@ -7478,10 +7483,13 @@ function toHexDump(text) {
 
 function updateCodePane(viewElement, lineElement, text, mode, target) {
   const lineCount = countLines(text);
+  const savedFocus = window._saveCodeViewFocus?.(viewElement);
   viewElement.innerHTML = renderCodeHtml(text, mode, target);
   lineElement.textContent = buildLineNumbers(lineCount);
   const searchResult = applyCodeSearch(viewElement, state.messageSearch[target]);
-  if (searchResult.firstMatch) {
+  if (savedFocus) {
+    window._restoreCodeViewFocus?.(viewElement, savedFocus);
+  } else if (searchResult.firstMatch) {
     viewElement.scrollTop = Math.max(searchResult.firstMatch.offsetTop - 24, 0);
   } else {
     viewElement.scrollTop = 0;
@@ -10526,9 +10534,31 @@ function setReplayHeader(name, value) {
   } else {
     initAllReadonlyCarets();
   }
-  // Re-apply when innerHTML is updated (MutationObserver)
-  const caretObserver = new MutationObserver(() => initAllReadonlyCarets());
-  caretObserver.observe(document.body, { childList: true, subtree: true });
+  // Expose helpers so render functions can re-enable after innerHTML swap
+  // and preserve line focus across re-renders.
+  window._enableReadonlyCaret = enableReadonlyCaret;
+
+  // Save current focus state for a code-view (call before innerHTML swap)
+  window._saveCodeViewFocus = function(view) {
+    if (!view) return null;
+    const focused = view.querySelector(".code-line.line-focus");
+    if (!focused) return null;
+    const lines = getCodeLines(view);
+    const idx = lines.indexOf(focused);
+    const wasActive = (document.activeElement === view);
+    return { viewId: view.id, lineIndex: idx, wasActive };
+  };
+
+  // Restore focus state after innerHTML swap
+  window._restoreCodeViewFocus = function(view, saved) {
+    if (!view || !saved || saved.lineIndex < 0) return;
+    enableReadonlyCaret(view);
+    const lines = getCodeLines(view);
+    if (saved.lineIndex < lines.length) {
+      setFocus(view, lines[saved.lineIndex]);
+      if (saved.wasActive) view.focus({ preventScroll: true });
+    }
+  };
 
   function isReadonlyView(el) {
     return el && el.getAttribute(READONLY_ATTR) === "1";
