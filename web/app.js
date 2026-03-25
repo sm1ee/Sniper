@@ -3811,7 +3811,7 @@ function renderInspectorPanels() {
 function renderInterceptStatus() {
   const enabled = Boolean(state.runtime?.intercept_enabled);
   els.interceptStatus.textContent = enabled ? "On" : "Off";
-  els.interceptStatus.classList.toggle("active", enabled);
+  els.interceptStatus.classList.toggle("online", enabled);
 }
 
 function updateProxyStatusIndicator(online) {
