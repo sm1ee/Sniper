@@ -1316,9 +1316,9 @@ code {
 }
 
 .scope-pill.active {
-  background: var(--accent-soft, rgba(224, 160, 80, 0.15));
-  color: var(--accent, #e0a050);
-  border-color: var(--accent, #e0a050);
+  background: rgba(80, 180, 220, 0.15);
+  color: #50b4dc;
+  border-color: #50b4dc;
 }
 
 .websocket-filter-summary {

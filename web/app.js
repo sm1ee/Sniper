@@ -5555,29 +5555,24 @@ async function toggleIntercept() {
   }
 
   const turningOff = state.runtime.intercept_enabled;
+  // Optimistic UI update — render immediately, sync in background
+  state.runtime.intercept_enabled = !state.runtime.intercept_enabled;
+  renderInterceptStatus();
 
-  const response = await fetch("/api/runtime", {
+  fetch("/api/runtime", {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      intercept_enabled: !state.runtime.intercept_enabled,
-    }),
-  });
-  state.runtime = await response.json();
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ intercept_enabled: state.runtime.intercept_enabled }),
+  }).then((r) => r.json()).then((rt) => { state.runtime = rt; }).catch(console.error);
 
   if (turningOff) {
-    await Promise.all([
+    Promise.all([
       fetch("/api/intercepts/forward-all", { method: "POST" }),
       fetch("/api/response-intercepts/forward-all", { method: "POST" }),
-    ]);
-    await Promise.all([loadIntercepts(false), loadResponseIntercepts(false)]);
-    scheduleRefresh();
+    ]).then(() => Promise.all([loadIntercepts(false), loadResponseIntercepts(false)]))
+      .then(() => scheduleRefresh())
+      .catch(console.error);
   }
-
-  renderInterceptStatus();
-  renderProxySettings();
 }
 
 async function saveProxySettings() {
@@ -5646,26 +5641,26 @@ async function forwardSelectedIntercept() {
     return;
   }
 
+  const id = state.selectedInterceptRecord.id;
   const request = parseEditableRawRequest(
     els.interceptRequestEditor.value,
     state.selectedInterceptRecord.request,
   );
-  const response = await fetch(`/api/intercepts/${state.selectedInterceptRecord.id}/forward`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ request }),
-  });
 
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-
+  // Optimistic: remove from UI immediately
+  state.intercepts = state.intercepts.filter((i) => i.id !== id);
   state.selectedInterceptRecord = null;
   state.interceptEditorSeedId = null;
-  await loadIntercepts(false);
-  scheduleRefresh();
+  state.selectedInterceptId = state.intercepts[0]?.id ?? null;
+  renderIntercepts();
+  updateInterceptQueueBadges();
+
+  fetch(`/api/intercepts/${id}/forward`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ request }),
+  }).then(() => { loadIntercepts(true).catch(console.error); scheduleRefresh(); })
+    .catch((e) => { console.error(e); loadIntercepts(false).catch(console.error); });
 }
 
 async function dropSelectedIntercept() {
@@ -5673,18 +5668,19 @@ async function dropSelectedIntercept() {
     return;
   }
 
-  const response = await fetch(`/api/intercepts/${state.selectedInterceptRecord.id}/drop`, {
-    method: "POST",
-  });
+  const id = state.selectedInterceptRecord.id;
 
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-
+  // Optimistic: remove from UI immediately
+  state.intercepts = state.intercepts.filter((i) => i.id !== id);
   state.selectedInterceptRecord = null;
   state.interceptEditorSeedId = null;
-  await loadIntercepts(false);
-  scheduleRefresh();
+  state.selectedInterceptId = state.intercepts[0]?.id ?? null;
+  renderIntercepts();
+  updateInterceptQueueBadges();
+
+  fetch(`/api/intercepts/${id}/drop`, { method: "POST" })
+    .then(() => { loadIntercepts(true).catch(console.error); scheduleRefresh(); })
+    .catch((e) => { console.error(e); loadIntercepts(false).catch(console.error); });
 }
 
 /* ─── Response Intercept ─── */
@@ -5844,35 +5840,44 @@ function renderResponseIntercepts() {
 async function forwardSelectedResponseIntercept() {
   if (!state.selectedResponseInterceptRecord) return;
 
+  const id = state.selectedResponseInterceptRecord.id;
   const editedResponse = parseEditableRawResponse(
     els.interceptResponseEditor.value,
     state.selectedResponseInterceptRecord.response,
   );
-  const resp = await fetch(`/api/response-intercepts/${state.selectedResponseInterceptRecord.id}/forward`, {
+
+  // Optimistic UI
+  state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
+  state.selectedResponseInterceptRecord = null;
+  state.responseInterceptEditorSeedId = null;
+  state.selectedResponseInterceptId = state.responseIntercepts[0]?.id ?? null;
+  renderResponseIntercepts();
+  updateInterceptQueueBadges();
+
+  fetch(`/api/response-intercepts/${id}/forward`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ response: editedResponse }),
-  });
-  if (!resp.ok) throw new Error(await resp.text());
-
-  state.selectedResponseInterceptRecord = null;
-  state.responseInterceptEditorSeedId = null;
-  await loadResponseIntercepts(false);
-  scheduleRefresh();
+  }).then(() => { loadResponseIntercepts(true).catch(console.error); scheduleRefresh(); })
+    .catch((e) => { console.error(e); loadResponseIntercepts(false).catch(console.error); });
 }
 
 async function dropSelectedResponseIntercept() {
   if (!state.selectedResponseInterceptRecord) return;
 
-  const resp = await fetch(`/api/response-intercepts/${state.selectedResponseInterceptRecord.id}/drop`, {
-    method: "POST",
-  });
-  if (!resp.ok) throw new Error(await resp.text());
+  const id = state.selectedResponseInterceptRecord.id;
 
+  // Optimistic UI
+  state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
   state.selectedResponseInterceptRecord = null;
   state.responseInterceptEditorSeedId = null;
-  await loadResponseIntercepts(false);
-  scheduleRefresh();
+  state.selectedResponseInterceptId = state.responseIntercepts[0]?.id ?? null;
+  renderResponseIntercepts();
+  updateInterceptQueueBadges();
+
+  fetch(`/api/response-intercepts/${id}/drop`, { method: "POST" })
+    .then(() => { loadResponseIntercepts(true).catch(console.error); scheduleRefresh(); })
+    .catch((e) => { console.error(e); loadResponseIntercepts(false).catch(console.error); });
 }
 
 function updateInterceptQueueBadges() {
