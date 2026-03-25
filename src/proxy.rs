@@ -1348,8 +1348,11 @@ async fn maybe_intercept_request(
         return InterceptResolution::Forward(request);
     }
 
-    if special_host::is_special_host(&request.host)
-        || !session.runtime.is_in_scope(&request.host).await
+    if special_host::is_special_host(&request.host) {
+        return InterceptResolution::Forward(request);
+    }
+    if session.runtime.intercept_scope_only().await
+        && !session.runtime.is_in_scope(&request.host).await
     {
         return InterceptResolution::Forward(request);
     }
@@ -1399,8 +1402,13 @@ async fn maybe_intercept_response(
         );
     }
 
-    if special_host::is_special_host(&record.host)
-        || !session.runtime.is_in_scope(&record.host).await
+    if special_host::is_special_host(&record.host) {
+        return ResponseInterceptResolution::Forward(
+            EditableResponse::from_status_headers_body(status.as_u16(), headers, body),
+        );
+    }
+    if session.runtime.intercept_scope_only().await
+        && !session.runtime.is_in_scope(&record.host).await
     {
         return ResponseInterceptResolution::Forward(
             EditableResponse::from_status_headers_body(status.as_u16(), headers, body),

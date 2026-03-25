@@ -10,6 +10,12 @@ pub struct RuntimeSettingsSnapshot {
     pub passthrough_hosts: Vec<String>,
     #[serde(default = "default_upstream_insecure")]
     pub upstream_insecure: bool,
+    #[serde(default = "default_true")]
+    pub intercept_scope_only: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_upstream_insecure() -> bool {
@@ -24,6 +30,7 @@ impl Default for RuntimeSettingsSnapshot {
             scope_patterns: Vec::new(),
             passthrough_hosts: Vec::new(),
             upstream_insecure: true,
+            intercept_scope_only: true,
         }
     }
 }
@@ -35,6 +42,7 @@ pub struct RuntimeSettingsUpdate {
     pub scope_patterns: Option<Vec<String>>,
     pub passthrough_hosts: Option<Vec<String>>,
     pub upstream_insecure: Option<bool>,
+    pub intercept_scope_only: Option<bool>,
 }
 
 pub struct RuntimeSettings {
@@ -79,6 +87,10 @@ impl RuntimeSettings {
             current.upstream_insecure = upstream_insecure;
         }
 
+        if let Some(intercept_scope_only) = update.intercept_scope_only {
+            current.intercept_scope_only = intercept_scope_only;
+        }
+
         current.clone()
     }
 
@@ -101,6 +113,10 @@ impl RuntimeSettings {
 
     pub async fn upstream_insecure(&self) -> bool {
         self.inner.read().await.upstream_insecure
+    }
+
+    pub async fn intercept_scope_only(&self) -> bool {
+        self.inner.read().await.intercept_scope_only
     }
 
     pub async fn is_in_scope(&self, host: &str) -> bool {

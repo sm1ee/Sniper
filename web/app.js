@@ -855,7 +855,14 @@ function bindEvents() {
   });
   document.getElementById("interceptInScopeToggle")?.addEventListener("click", (e) => {
     e.currentTarget.classList.toggle("active");
-    state.interceptInScopeOnly = e.currentTarget.classList.contains("active");
+    const scopeOnly = e.currentTarget.classList.contains("active");
+    state.interceptInScopeOnly = scopeOnly;
+    // Sync to server so intercept engine respects scope setting
+    fetch("/api/runtime", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ intercept_scope_only: scopeOnly }),
+    }).catch((err) => console.error("Failed to update intercept scope:", err));
   });
 
   els.methodFilter.addEventListener("change", () => {
@@ -1636,6 +1643,13 @@ async function _applySettings(response) {
   state.settings = await response.json();
   state.runtime = state.settings.runtime;
   state.activeSession = state.settings.active_session;
+  // Sync intercept scope pill with server state
+  const interceptScopePill = document.getElementById("interceptInScopeToggle");
+  if (interceptScopePill) {
+    const scopeOnly = state.runtime?.intercept_scope_only ?? true;
+    interceptScopePill.classList.toggle("active", scopeOnly);
+    state.interceptInScopeOnly = scopeOnly;
+  }
 
   els.proxyAddr.textContent = state.settings.proxy_addr;
   els.uiAddr.textContent = state.settings.ui_addr;

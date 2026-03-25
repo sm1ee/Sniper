@@ -1380,14 +1380,16 @@ code {
 }
 
 .toggle-pill {
-  min-height: 40px;
-  padding: 0 14px;
+  padding: 6px 14px;
   border: 1px solid var(--danger);
-  border-radius: 999px;
+  border-radius: var(--radius-md);
   background: rgba(200, 80, 80, 0.1);
   color: var(--danger);
   cursor: pointer;
+  font-size: var(--font-xs);
+  font-family: var(--sans);
   font-weight: 600;
+  white-space: nowrap;
   transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
 
@@ -4771,11 +4773,11 @@ body.pane-resizing-y {
   text-overflow: ellipsis;
 }
 
-.iq-col-method { width: 52px; max-width: 52px; }
-.iq-col-status { width: 48px; max-width: 48px; }
-.iq-col-host { width: 35%; max-width: 0; }
-.iq-col-path { width: 35%; max-width: 0; }
-.iq-col-time { width: 130px; max-width: 130px; }
+.iq-col-method { width: 44px; max-width: 44px; }
+.iq-col-status { width: 40px; max-width: 40px; }
+.iq-col-host { width: 40%; max-width: 0; }
+.iq-col-path { width: 40%; max-width: 0; }
+.iq-col-time { width: 120px; max-width: 120px; }
 
 .intercept-rules-header {
   border-top: 1px solid var(--border-default);
