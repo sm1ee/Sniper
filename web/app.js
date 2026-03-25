@@ -10602,7 +10602,7 @@ function setReplayHeader(name, value) {
     enableReadonlyCaret(view);
     const lines = getCodeLines(view);
     if (saved.lineIndex < lines.length) {
-      setFocus(view, lines[saved.lineIndex]);
+      setFocus(view, lines[saved.lineIndex], true);
       if (saved.wasActive) view.focus({ preventScroll: true });
     }
   };
@@ -10620,22 +10620,24 @@ function setReplayHeader(name, value) {
     if (prev) prev.classList.remove("line-focus");
   }
 
-  function setFocus(view, line) {
+  function setFocus(view, line, moveCaret) {
     clearFocus(view);
     line.classList.add("line-focus");
     line.scrollIntoView({ block: "nearest" });
-    // Move the text caret to the beginning of this line
-    try {
-      const sel = window.getSelection();
-      const textNode = line.firstChild;
-      if (sel && textNode) {
-        const range = document.createRange();
-        range.setStart(textNode, 0);
-        range.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(range);
-      }
-    } catch (_) { /* ignore if range fails */ }
+    // Only move caret on arrow-key navigation or restore; clicks keep natural position
+    if (moveCaret) {
+      try {
+        const sel = window.getSelection();
+        const textNode = line.firstChild;
+        if (sel && textNode) {
+          const range = document.createRange();
+          range.setStart(textNode, 0);
+          range.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      } catch (_) { /* ignore if range fails */ }
+    }
   }
 
   function focusedIndex(lines) {
@@ -10648,8 +10650,7 @@ function setReplayHeader(name, value) {
     if (!view || !isReadonlyView(view)) return;
     const line = event.target.closest(".code-line");
     if (line && view.contains(line)) {
-      setFocus(view, line);
-      // Ensure this view is the activeElement so ArrowUp/Down work
+      setFocus(view, line, false);
       if (document.activeElement !== view) view.focus({ preventScroll: true });
     }
   });
@@ -10668,12 +10669,12 @@ function setReplayHeader(name, value) {
     event.preventDefault();
     let idx = focusedIndex(lines);
     if (idx === -1) {
-      setFocus(view, lines[0]);
+      setFocus(view, lines[0], true);
       return;
     }
     const next = event.key === "ArrowDown" ? idx + 1 : idx - 1;
     if (next >= 0 && next < lines.length) {
-      setFocus(view, lines[next]);
+      setFocus(view, lines[next], true);
     }
   });
 
