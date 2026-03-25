@@ -305,9 +305,7 @@
                   </div>
                   <div class="toolbar-actions">
                     <button class="scope-pill" id="interceptInScopeToggle" type="button" title="Only intercept in-scope hosts">In scope</button>
-                    <button class="toggle-pill" id="interceptStatus" type="button">
-                      Off
-                    </button>
+                    <button class="scope-pill" id="interceptStatus" type="button">Off</button>
                   </div>
                 </header>
                 <nav class="intercept-queue-tabs">
@@ -315,26 +313,25 @@
                   <button class="intercept-queue-tab" data-queue="response" id="interceptQueueTabResponse">Response Queue</button>
                 </nav>
                 <div class="history-table-shell" style="flex:1 1 auto;min-height:80px">
-                  <table class="mini-table" id="interceptRequestTable">
+                  <table class="mini-table intercept-queue-table" id="interceptRequestTable">
                     <thead>
                       <tr>
-                        <th>Method</th>
-                        <th>Host</th>
-                        <th>Path</th>
-                        <th>Type</th>
-                        <th>Time</th>
+                        <th class="iq-col-method">Method</th>
+                        <th class="iq-col-host">Host</th>
+                        <th class="iq-col-path">Path</th>
+                        <th class="iq-col-time">Time</th>
                       </tr>
                     </thead>
                     <tbody id="interceptTableBody"></tbody>
                   </table>
-                  <table class="mini-table hidden" id="responseInterceptTable">
+                  <table class="mini-table intercept-queue-table hidden" id="responseInterceptTable">
                     <thead>
                       <tr>
-                        <th>Status</th>
-                        <th>Method</th>
-                        <th>Host</th>
-                        <th>Path</th>
-                        <th>Time</th>
+                        <th class="iq-col-status">Status</th>
+                        <th class="iq-col-method">Method</th>
+                        <th class="iq-col-host">Host</th>
+                        <th class="iq-col-path">Path</th>
+                        <th class="iq-col-time">Time</th>
                       </tr>
                     </thead>
                     <tbody id="responseInterceptTableBody"></tbody>

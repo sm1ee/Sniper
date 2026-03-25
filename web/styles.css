@@ -4760,6 +4760,23 @@ body.pane-resizing-y {
   border-bottom-color: var(--accent);
 }
 
+.intercept-queue-table {
+  font-size: var(--font-xs);
+}
+
+.intercept-queue-table td,
+.intercept-queue-table th {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.iq-col-method { width: 52px; max-width: 52px; }
+.iq-col-status { width: 48px; max-width: 48px; }
+.iq-col-host { width: 35%; max-width: 0; }
+.iq-col-path { width: 35%; max-width: 0; }
+.iq-col-time { width: 130px; max-width: 130px; }
+
 .intercept-rules-header {
   border-top: 1px solid var(--border-default);
   flex: 0 0 auto;

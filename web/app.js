@@ -3797,7 +3797,7 @@ function renderInspectorPanels() {
 function renderInterceptStatus() {
   const enabled = Boolean(state.runtime?.intercept_enabled);
   els.interceptStatus.textContent = enabled ? "On" : "Off";
-  els.interceptStatus.classList.toggle("online", enabled);
+  els.interceptStatus.classList.toggle("active", enabled);
 }
 
 function updateProxyStatusIndicator(online) {
@@ -4330,18 +4330,17 @@ function renderIntercepts() {
           const selected = item.id === state.selectedInterceptId ? "selected" : "";
           return `
             <tr class="history-row ${selected}" data-id="${item.id}">
-              <td>${escapeHtml(item.method)}</td>
-              <td>${escapeHtml(item.host)}</td>
-              <td>${escapeHtml(item.path || "/")}</td>
-              <td>${item.is_websocket ? "WebSocket" : "HTTP"}</td>
-              <td>${escapeHtml(formatTimestamp(item.started_at))}</td>
+              <td class="iq-col-method">${escapeHtml(item.method)}</td>
+              <td class="iq-col-host text-truncate">${escapeHtml(item.host)}</td>
+              <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
+              <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
             </tr>
           `;
         })
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="5">Intercept queue is empty.</td>
+          <td colspan="4">Intercept queue is empty.</td>
         </tr>
       `;
 
@@ -5775,11 +5774,11 @@ function renderResponseIntercepts() {
           const selected = item.id === state.selectedResponseInterceptId ? "selected" : "";
           return `
             <tr class="history-row ${selected}" data-id="${item.id}">
-              <td>${escapeHtml(String(item.status))}</td>
-              <td>${escapeHtml(item.method)}</td>
-              <td>${escapeHtml(item.host)}</td>
-              <td>${escapeHtml(item.path || "/")}</td>
-              <td>${escapeHtml(formatTimestamp(item.started_at))}</td>
+              <td class="iq-col-status">${escapeHtml(String(item.status))}</td>
+              <td class="iq-col-method">${escapeHtml(item.method)}</td>
+              <td class="iq-col-host text-truncate">${escapeHtml(item.host)}</td>
+              <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
+              <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
             </tr>
           `;
         })
