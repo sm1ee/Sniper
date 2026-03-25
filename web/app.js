@@ -1074,7 +1074,6 @@ function bindEvents() {
   });
   els.deleteMatchReplaceRuleButton.addEventListener("click", deleteSelectedMatchReplaceRule);
   [
-    els.matchReplaceDescription,
     els.matchReplaceScope,
     els.matchReplaceTarget,
     els.matchReplaceSearch,
@@ -4945,7 +4944,6 @@ function renderMatchReplaceRules() {
   if (!selected) {
     els.matchReplaceEditorPath.textContent = "Rule";
     els.matchReplaceEditorTitle.textContent = "New rule";
-    els.matchReplaceDescription.value = "";
     els.matchReplaceScope.value = "request";
     els.matchReplaceTarget.value = "any";
     els.matchReplaceSearch.value = "";
@@ -4958,8 +4956,7 @@ function renderMatchReplaceRules() {
   }
 
   els.matchReplaceEditorPath.textContent = `${selected.scope} / ${selected.target}`;
-  els.matchReplaceEditorTitle.textContent = selected.description || "Edit rule";
-  els.matchReplaceDescription.value = selected.description || "";
+  els.matchReplaceEditorTitle.textContent = selected.search ? `${selected.search} → ${selected.replace || "∅"}` : "Edit rule";
   els.matchReplaceScope.value = selected.scope;
   els.matchReplaceTarget.value = selected.target;
   els.matchReplaceSearch.value = selected.search;
@@ -5104,7 +5101,7 @@ function syncMatchReplaceEditor() {
     return;
   }
 
-  rule.description = els.matchReplaceDescription.value.trim();
+  rule.description = "";
   rule.scope = els.matchReplaceScope.value;
   rule.target = els.matchReplaceTarget.value;
   rule.search = els.matchReplaceSearch.value;

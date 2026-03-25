@@ -4692,6 +4692,10 @@ body.pane-resizing-y {
   text-transform: none;
 }
 
+#matchReplacePanel .settings-field span {
+  text-transform: none;
+}
+
 .modal-body {
   flex: 1 1 auto;
   min-height: 0;
