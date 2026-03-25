@@ -4680,12 +4680,16 @@ body.pane-resizing-y {
 }
 
 .mini-toggle input:checked + .mini-toggle-track {
-  background: var(--point-soft);
+  background: rgba(80, 200, 120, 0.3);
 }
 
 .mini-toggle input:checked + .mini-toggle-track::after {
   transform: translateX(14px);
-  background: var(--point);
+  background: #50c878;
+}
+
+#matchReplacePanel .mini-table thead th {
+  text-transform: none;
 }
 
 .modal-body {
