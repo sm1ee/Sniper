@@ -2093,6 +2093,10 @@ async function loadIntercepts(preserveSelection = true) {
 
   renderIntercepts();
   updateInterceptQueueBadges();
+  // Auto-switch to Request Queue when requests arrive and Response Queue is empty
+  if (state.intercepts.length > 0 && state.responseIntercepts.length === 0 && state.interceptQueueTab === "response") {
+    switchInterceptQueueTab("request");
+  }
   if (state.selectedInterceptId) {
     await loadInterceptDetail(state.selectedInterceptId);
   } else {
@@ -5682,6 +5686,10 @@ async function loadResponseIntercepts(preserveSelection = true) {
 
   renderResponseIntercepts();
   updateInterceptQueueBadges();
+  // Auto-switch to Response Queue when responses arrive and Request Queue is empty
+  if (state.responseIntercepts.length > 0 && state.intercepts.length === 0 && state.interceptQueueTab === "request") {
+    switchInterceptQueueTab("response");
+  }
   if (state.selectedResponseInterceptId) {
     await loadResponseInterceptDetail(state.selectedResponseInterceptId);
   } else {
