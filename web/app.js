@@ -621,6 +621,8 @@ async function init() {
   resetLayoutTextareas();
   hydrateFilterForm();
   syncHttpInScopePill();
+  const aclInit = document.getElementById("proxySettingAutoContentLength");
+  if (aclInit) aclInit.checked = localStorage.getItem("sniper_auto_content_length") !== "false";
   await loadUiSettings();
   hydrateDisplaySettingsForm();
   const loads = [
@@ -1046,6 +1048,9 @@ function bindEvents() {
   });
   els.reloadProxySettingsButton.addEventListener("click", () => {
     loadSettings().catch((error) => console.error(error));
+  });
+  document.getElementById("proxySettingAutoContentLength")?.addEventListener("change", (e) => {
+    localStorage.setItem("sniper_auto_content_length", e.target.checked);
   });
 
   els.sendReplayButton.addEventListener("click", () => {
@@ -4674,6 +4679,10 @@ function renderProxySettings() {
   els.proxySettingsUiAddr.textContent = state.settings.ui_addr;
   els.proxySettingsCaptureCap.textContent = `${formatSize(state.settings.body_preview_bytes)} preview / ${state.settings.max_entries} entries`;
   els.proxySettingsBootstrap.textContent = state.settings.certificate.special_host_https;
+  // Auto Content-Length (local UI setting, not server-side)
+  const aclEl = document.getElementById("proxySettingAutoContentLength");
+  if (aclEl) aclEl.checked = localStorage.getItem("sniper_auto_content_length") !== "false";
+
   els.proxySettingsDataDir.textContent = state.settings.data_dir;
   els.proxySettingsStartupPath.textContent = startup?.file_path || state.settings.data_dir;
   els.proxySettingsCertificateName.textContent = `${state.settings.certificate.common_name} · expires ${formatTimestamp(state.settings.certificate.expires_at)}`;
@@ -5773,6 +5782,16 @@ function parseEditableRawResponse(text, original) {
 
   const bodyText = lines.slice(bodyStart).join("\n");
   const isText = !original || original.body_encoding === "utf8";
+
+  // Auto-update Content-Length if enabled
+  if (document.getElementById("proxySettingAutoContentLength")?.checked && bodyText) {
+    const bodyBytes = new TextEncoder().encode(bodyText).length;
+    const clIdx = headers.findIndex((h) => h.name.toLowerCase() === "content-length");
+    if (clIdx !== -1) {
+      headers[clIdx].value = String(bodyBytes);
+    }
+  }
+
   return {
     status,
     headers,
@@ -7376,6 +7395,15 @@ function parseEditableRawRequest(text, fallback) {
 
   if (!host) {
     throw new Error("Request is missing a Host header");
+  }
+
+  // Auto-update Content-Length if enabled
+  if (document.getElementById("proxySettingAutoContentLength")?.checked && body) {
+    const bodyBytes = new TextEncoder().encode(body).length;
+    const clIdx = headers.findIndex((h) => h.name.toLowerCase() === "content-length");
+    if (clIdx !== -1) {
+      headers[clIdx].value = String(bodyBytes);
+    }
   }
 
   return {
