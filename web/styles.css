@@ -1380,6 +1380,7 @@ code {
 }
 
 .toggle-pill {
+  min-width: 48px;
   padding: 6px 14px;
   border: 1px solid var(--danger);
   border-radius: var(--radius-md);
@@ -1390,6 +1391,7 @@ code {
   font-family: var(--sans);
   font-weight: 600;
   white-space: nowrap;
+  text-align: center;
   transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
 
