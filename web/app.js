@@ -4037,7 +4037,9 @@ function isEditableTarget(target) {
     return false;
   }
 
-  if (target.isContentEditable) {
+  // Readonly code-view panels have contenteditable for caret display only —
+  // they should NOT block table keyboard navigation.
+  if (target.isContentEditable && !target.hasAttribute("data-readonly-caret")) {
     return true;
   }
 
@@ -4046,7 +4048,12 @@ function isEditableTarget(target) {
     return true;
   }
 
-  return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+  const editableParent = target.closest("input, textarea, select, [contenteditable='true']");
+  if (editableParent && !editableParent.hasAttribute("data-readonly-caret")) {
+    return true;
+  }
+
+  return false;
 }
 
 function isSelectableTextTarget(target) {
@@ -10603,7 +10610,7 @@ function setReplayHeader(name, value) {
     const lines = getCodeLines(view);
     if (saved.lineIndex < lines.length) {
       setFocus(view, lines[saved.lineIndex], true);
-      if (saved.wasActive) view.focus({ preventScroll: true });
+      // Don't re-focus the view — it would steal focus from the history table
     }
   };
 
