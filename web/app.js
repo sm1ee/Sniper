@@ -4039,7 +4039,7 @@ function isEditableTarget(target) {
 
   // Readonly code-view panels have contenteditable for caret display only —
   // they should NOT block table keyboard navigation.
-  if (target.isContentEditable && !target.hasAttribute("data-readonly-caret")) {
+  if (target.isContentEditable && !target.hasAttribute("data-readonly-editable")) {
     return true;
   }
 
@@ -4049,7 +4049,7 @@ function isEditableTarget(target) {
   }
 
   const editableParent = target.closest("input, textarea, select, [contenteditable='true']");
-  if (editableParent && !editableParent.hasAttribute("data-readonly-caret")) {
+  if (editableParent && !editableParent.hasAttribute("data-readonly-editable")) {
     return true;
   }
 
