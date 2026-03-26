@@ -125,7 +125,7 @@ const HISTORY_ROW_HEIGHT = 27;
 const HISTORY_BUFFER_ROWS = 30;
 const FINDINGS_ROW_HEIGHT = 27;
 const FINDINGS_BUFFER_ROWS = 20;
-const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "fuzzer", "replay", "tools", "logger"]);
+const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "fuzzer", "sequence", "replay", "tools", "logger"]);
 const DECODER_SCRIPT_SOURCES = [
   "/decoder/lib/jquery-1.7.2.min.js",
   "/decoder/lib/cryptojs/components/core-min.js",
@@ -222,8 +222,14 @@ const state = {
   targetScopeDirty: false,
   targetExpandedHosts: new Set(),
   intercepts: [],
+  responseIntercepts: [],
+  interceptRules: [],
+  interceptQueueTab: "request",
   selectedInterceptId: null,
   selectedInterceptRecord: null,
+  selectedResponseInterceptId: null,
+  selectedResponseInterceptRecord: null,
+  responseInterceptEditorSeedId: null,
   websocketSessions: [],
   websocketQuery: "",
   websocketSortKey: "started_at",
@@ -236,10 +242,16 @@ const state = {
   activeReplayTabId: null,
   replayTabSequence: 0,
   interceptEditorSeedId: null,
+  interceptInScopeOnly: false,
   eventLog: [],
   matchReplaceRules: [],
   selectedMatchReplaceRuleId: null,
   targetSiteMap: [],
+  sequenceDefinitions: [],
+  selectedSequenceId: null,
+  editingSequence: null,
+  sequenceRunResult: null,
+  sequencePastRuns: [],
   fuzzerBaseRequest: null,
   fuzzerSourceTransactionId: null,
   fuzzerNotice: "",
@@ -250,6 +262,7 @@ const state = {
   _historyEntries: null,
   toolsReady: false,
   workbenchHeight: null,
+  _cachedVisibleEntries: null,
 };
 
 const els = {
@@ -288,6 +301,7 @@ const els = {
   replayTabStrip: document.getElementById("replayTabStrip"),
   newReplayTabButton: document.getElementById("newReplayTabButton"),
   fuzzerShell: document.getElementById("fuzzerShell"),
+  sequenceShell: document.getElementById("sequenceShell"),
   targetShell: document.getElementById("targetShell"),
   loggerShell: document.getElementById("loggerShell"),
   filterBar: document.getElementById("filterBar"),
@@ -425,6 +439,19 @@ const els = {
   interceptMeta: document.getElementById("interceptMeta"),
   forwardInterceptButton: document.getElementById("forwardInterceptButton"),
   dropInterceptButton: document.getElementById("dropInterceptButton"),
+  interceptRequestTable: document.getElementById("interceptRequestTable"),
+  responseInterceptTable: document.getElementById("responseInterceptTable"),
+  responseInterceptTableBody: document.getElementById("responseInterceptTableBody"),
+  interceptRequestEditorPanel: document.getElementById("interceptRequestEditorPanel"),
+  interceptResponseEditorPanel: document.getElementById("interceptResponseEditorPanel"),
+  interceptResponseHighlight: document.getElementById("interceptResponseHighlight"),
+  interceptResponseEditor: document.getElementById("interceptResponseEditor"),
+  interceptRequestActions: document.getElementById("interceptRequestActions"),
+  responseInterceptActions: document.getElementById("responseInterceptActions"),
+  forwardResponseInterceptButton: document.getElementById("forwardResponseInterceptButton"),
+  dropResponseInterceptButton: document.getElementById("dropResponseInterceptButton"),
+  interceptQueueTabRequest: document.getElementById("interceptQueueTabRequest"),
+  interceptQueueTabResponse: document.getElementById("interceptQueueTabResponse"),
   websocketMeta: document.getElementById("websocketMeta"),
   websocketSearchInput: document.getElementById("websocketSearchInput"),
   websocketTableBody: document.getElementById("websocketTableBody"),
@@ -593,6 +620,7 @@ async function init() {
   bindEvents();
   resetLayoutTextareas();
   hydrateFilterForm();
+  syncHttpInScopePill();
   await loadUiSettings();
   hydrateDisplaySettingsForm();
   const loads = [
@@ -601,9 +629,11 @@ async function init() {
     loadWorkspaceState(),
     loadTransactions(false),
     loadIntercepts(false),
+    loadResponseIntercepts(false),
     loadWebsockets(false),
     loadEventLog(),
     loadMatchReplaceRules(),
+    loadSequences(),
     loadTargetSiteMap(),
   ];
   loadAppVersionInfo().catch((error) => console.error(error));
@@ -690,6 +720,8 @@ function bindEvents() {
       renderProxyPanels();
       if (state.activeProxyTab === "intercept") {
         loadIntercepts(true).catch((error) => console.error(error));
+        loadResponseIntercepts(true).catch((error) => console.error(error));
+        loadInterceptRules().catch((error) => console.error(error));
       }
       if (state.activeProxyTab === "websockets-history") {
         loadWebsockets(true).catch((error) => console.error(error));
@@ -766,7 +798,14 @@ function bindEvents() {
     openContextMenu(event.clientX, event.clientY, row.dataset.id);
   });
 
-  els.searchInput.addEventListener("input", () => {
+  els.searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      state.query = els.searchInput.value.trim();
+      scheduleRefresh();
+    }
+  });
+  els.searchInput.addEventListener("search", () => {
+    // Triggered when user clears the search field via the X button
     state.query = els.searchInput.value.trim();
     scheduleRefresh();
   });
@@ -801,6 +840,30 @@ function bindEvents() {
     state.websocketQuery = els.websocketSearchInput.value.trim();
     syncVisibleWebsocketSelection(true).catch((error) => console.error(error));
   });
+  document.getElementById("wsInScopeOnly")?.addEventListener("click", (e) => {
+    e.currentTarget.classList.toggle("active");
+    syncVisibleWebsocketSelection(true).catch((error) => console.error(error));
+  });
+  document.getElementById("wsHideClosed")?.addEventListener("click", (e) => {
+    e.currentTarget.classList.toggle("active");
+    syncVisibleWebsocketSelection(true).catch((error) => console.error(error));
+  });
+  document.getElementById("httpInScopeToggle")?.addEventListener("click", (e) => {
+    e.currentTarget.classList.toggle("active");
+    state.filterSettings.inScopeOnly = e.currentTarget.classList.contains("active");
+    scheduleRefresh();
+  });
+  document.getElementById("interceptInScopeToggle")?.addEventListener("click", (e) => {
+    e.currentTarget.classList.toggle("active");
+    const scopeOnly = e.currentTarget.classList.contains("active");
+    state.interceptInScopeOnly = scopeOnly;
+    // Sync to server so intercept engine respects scope setting
+    fetch("/api/runtime", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ intercept_scope_only: scopeOnly }),
+    }).catch((err) => console.error("Failed to update intercept scope:", err));
+  });
 
   els.methodFilter.addEventListener("change", () => {
     state.method = els.methodFilter.value;
@@ -823,6 +886,7 @@ function bindEvents() {
 
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
   els.openUpdateButton.addEventListener("click", performSelfUpdate);
+  if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
   els.displaySettingsModal.addEventListener("click", (event) => {
     if (event.target === els.displaySettingsModal) {
@@ -844,6 +908,23 @@ function bindEvents() {
     hydrateFilterForm();
     scheduleRefresh();
   });
+  document.getElementById("closeCompareButton").addEventListener("click", closeCompareModal);
+  document.getElementById("compareModal").addEventListener("click", (event) => {
+    if (event.target.id === "compareModal") closeCompareModal();
+  });
+  document.querySelectorAll("[data-compare-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      compareActiveTab = btn.dataset.compareTab;
+      renderCompareModal();
+    });
+  });
+
+  document.getElementById("closeCurlImportButton").addEventListener("click", closeCurlImportModal);
+  document.getElementById("applyCurlImportButton").addEventListener("click", applyCurlImport);
+  document.getElementById("curlImportModal").addEventListener("click", (event) => {
+    if (event.target.id === "curlImportModal") closeCurlImportModal();
+  });
+
   els.applyDisplaySettingsButton.addEventListener("click", saveDisplaySettingsFromForm);
   els.resetDisplaySettingsButton.addEventListener("click", () => {
     const defaults = createDefaultDisplaySettings();
@@ -901,6 +982,27 @@ function bindEvents() {
     renderInspectorPanels();
   });
 
+  document.getElementById("addInterceptRuleButton")?.addEventListener("click", () => {
+    addInterceptRule().catch((error) => console.error(error));
+  });
+  document.getElementById("interceptRulesList").addEventListener("click", (event) => {
+    const deleteBtn = event.target.closest("[data-rule-delete]");
+    if (deleteBtn) { deleteInterceptRule(deleteBtn.dataset.ruleDelete).catch((e) => console.error(e)); return; }
+    const saveBtn = event.target.closest("[data-rule-save]");
+    if (saveBtn) { saveInterceptRuleFromRow(saveBtn.dataset.ruleSave).catch((e) => console.error(e)); return; }
+    const row = event.target.closest("[data-rule-id]");
+    if (row && !event.target.closest("input") && !event.target.closest("button")) { editInterceptRule(row.dataset.ruleId); }
+  });
+  document.getElementById("interceptRulesList").addEventListener("change", (event) => {
+    const toggle = event.target.closest("[data-rule-toggle]");
+    if (toggle) { toggleInterceptRuleEnabled(toggle.dataset.ruleToggle, toggle.checked).catch((e) => console.error(e)); }
+  });
+  document.getElementById("interceptRulesList").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      const row = event.target.closest("[data-rule-id]");
+      if (row) { saveInterceptRuleFromRow(row.dataset.ruleId).catch((e) => console.error(e)); }
+    }
+  });
   if (els.refreshWebsocketsButton) {
     els.refreshWebsocketsButton.addEventListener("click", () => {
       loadWebsockets(true).catch((error) => console.error(error));
@@ -917,6 +1019,14 @@ function bindEvents() {
   els.dropInterceptButton.addEventListener("click", () => {
     dropSelectedIntercept().catch((error) => console.error(error));
   });
+  els.forwardResponseInterceptButton.addEventListener("click", () => {
+    forwardSelectedResponseIntercept().catch((error) => console.error(error));
+  });
+  els.dropResponseInterceptButton.addEventListener("click", () => {
+    dropSelectedResponseIntercept().catch((error) => console.error(error));
+  });
+  els.interceptQueueTabRequest.addEventListener("click", () => switchInterceptQueueTab("request"));
+  els.interceptQueueTabResponse.addEventListener("click", () => switchInterceptQueueTab("response"));
 
   els.interceptStatus.addEventListener("click", () => {
     toggleIntercept().catch((error) => console.error(error));
@@ -958,19 +1068,19 @@ function bindEvents() {
     if (!state.selectedMatchReplaceRuleId) {
       createNewMatchReplaceRule();
     }
+    syncMatchReplaceEditor();
     saveMatchReplaceRules()
       .then(() => showToast("Rule saved"))
       .catch((error) => { console.error(error); showToast("Failed to save rule", "error"); });
   });
   els.addMatchReplaceRuleButton.addEventListener("click", () => {
+    syncMatchReplaceEditor();
     createNewMatchReplaceRule();
-    saveMatchReplaceRules()
-      .then(() => showToast("Rule added"))
-      .catch((error) => { console.error(error); showToast("Failed to add rule", "error"); });
+    // Don't save immediately — let user fill in fields first
+    renderMatchReplaceRules();
   });
   els.deleteMatchReplaceRuleButton.addEventListener("click", deleteSelectedMatchReplaceRule);
   [
-    els.matchReplaceDescription,
     els.matchReplaceScope,
     els.matchReplaceTarget,
     els.matchReplaceSearch,
@@ -997,6 +1107,18 @@ function bindEvents() {
     runFuzzerAttack().catch((error) => console.error(error));
   });
   els.resetFuzzerButton.addEventListener("click", resetFuzzer);
+
+  document.getElementById("newSequenceButton").addEventListener("click", () => {
+    createNewSequence().catch((e) => console.error(e));
+  });
+  document.getElementById("addSequenceStepButton").addEventListener("click", addSequenceStep);
+  document.getElementById("saveSequenceButton").addEventListener("click", () => {
+    saveCurrentSequence().catch((e) => console.error(e));
+  });
+  document.getElementById("runSequenceButton").addEventListener("click", () => {
+    runCurrentSequence().catch((e) => console.error(e));
+  });
+
   // The replay request editor uses a contenteditable <pre> for editing so that
   // native text selection works over syntax-highlighted text (WKWebView renders
   // textarea selection in an opaque native layer that cannot be hidden).
@@ -1081,6 +1203,16 @@ function bindEvents() {
     renderInterceptRequestHighlight(els.interceptRequestEditor.value);
   });
   els.interceptRequestEditor.addEventListener("scroll", syncInterceptRequestHighlightScroll);
+  els.interceptResponseEditor.addEventListener("input", () => {
+    if (state.selectedResponseInterceptRecord) {
+      state.responseInterceptEditorSeedId = state.selectedResponseInterceptRecord.id;
+    }
+    renderInterceptResponseHighlight(els.interceptResponseEditor.value);
+  });
+  els.interceptResponseEditor.addEventListener("scroll", () => {
+    els.interceptResponseHighlight.scrollTop = els.interceptResponseEditor.scrollTop;
+    els.interceptResponseHighlight.scrollLeft = els.interceptResponseEditor.scrollLeft;
+  });
 
   document.addEventListener("keydown", (event) => {
     const activeModalAction = getActiveModalAction();
@@ -1187,6 +1319,7 @@ function bindEvents() {
       const item = state.items.find((i) => i.id === state.selectedId);
       const newColor = item?.color_tag === color ? null : color;
       if (item) item.color_tag = newColor;
+      invalidateVisibleEntriesCache();
       renderHistory();
       updateAnnotations(state.selectedId, { color_tag: newColor });
       return;
@@ -1215,6 +1348,13 @@ function bindEvents() {
       }
 
       if (state.activeProxyTab === "websockets-history") {
+        if (event.key === "Escape" && state.wsKeyboardFocus === "frames") {
+          event.preventDefault();
+          state.wsKeyboardFocus = "sessions";
+          hideFrameDetail();
+          return;
+        }
+
         if (event.key === "ArrowUp") {
           event.preventDefault();
           if (state.wsKeyboardFocus === "frames") {
@@ -1340,6 +1480,22 @@ function bindEvents() {
       sendWsFrameToReplay(state.selectedFrameIdx ?? 0);
     }
 
+    // Cmd+R on Findings tab — send selected finding to Replay
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "r" &&
+      state.activeTool === "proxy" &&
+      state.activeProxyTab === "findings"
+    ) {
+      const recordId = els.findingsDetailJump?.dataset.recordId;
+      if (recordId) {
+        event.preventDefault();
+        sendFindingToReplay(recordId).catch((error) => console.error(error));
+      }
+    }
+
     if (
       event.metaKey &&
       !event.shiftKey &&
@@ -1443,6 +1599,26 @@ function bindEvents() {
     normalizeWebsocketPaneWidth();
     normalizeWorkbenchStackHeight();
   });
+
+  // Event delegation for history table rows (Phase 1 perf optimization)
+  els.historyTableBody.addEventListener("click", (event) => {
+    const row = event.target.closest(".history-row");
+    if (!row || !row.dataset.id) return;
+    const id = row.dataset.id;
+    state.selectedId = id;
+    updateHistorySelection(id);
+    scrollSelectedHistoryRowIntoView();
+    loadTransactionDetail(id).catch((error) => console.error(error));
+  });
+  els.historyTableBody.addEventListener("contextmenu", (event) => {
+    const row = event.target.closest(".history-row");
+    if (!row || !row.dataset.id) return;
+    event.preventDefault();
+    const id = row.dataset.id;
+    state.selectedId = id;
+    updateHistorySelection(id);
+    openContextMenu(event.clientX, event.clientY, id);
+  });
 }
 
 async function loadSettings(retries = 5) {
@@ -1467,6 +1643,13 @@ async function _applySettings(response) {
   state.settings = await response.json();
   state.runtime = state.settings.runtime;
   state.activeSession = state.settings.active_session;
+  // Sync intercept scope pill with server state
+  const interceptScopePill = document.getElementById("interceptInScopeToggle");
+  if (interceptScopePill) {
+    const scopeOnly = state.runtime?.intercept_scope_only ?? true;
+    interceptScopePill.classList.toggle("active", scopeOnly);
+    state.interceptInScopeOnly = scopeOnly;
+  }
 
   els.proxyAddr.textContent = state.settings.proxy_addr;
   els.uiAddr.textContent = state.settings.ui_addr;
@@ -1791,8 +1974,12 @@ function resetSessionScopedUiState() {
   state.selectedId = null;
   state.selectedRecord = null;
   state.intercepts = [];
+  state.responseIntercepts = [];
   state.selectedInterceptId = null;
   state.selectedInterceptRecord = null;
+  state.selectedResponseInterceptId = null;
+  state.selectedResponseInterceptRecord = null;
+  state.responseInterceptEditorSeedId = null;
   state.websocketSessions = [];
   state.selectedWebsocketId = null;
   state.selectedWebsocketRecord = null;
@@ -1824,9 +2011,11 @@ async function reloadSessionWorkspace() {
   await loadWorkspaceState();
   await loadTransactions(false);
   await loadIntercepts(false);
+  await loadResponseIntercepts(false);
   await loadWebsockets(false);
   await loadEventLog();
   await loadMatchReplaceRules();
+  await loadSequences();
   await loadTargetSiteMap(true);
   connectEvents();
   renderToolPanels();
@@ -1879,6 +2068,7 @@ async function loadTransactions(preserveSelection = true) {
     }
   }
   state.items = freshItems;
+  invalidateVisibleEntriesCache();
 
   const visibleItems = getVisibleItems();
   if (!preserveSelection || !visibleItems.some((item) => item.id === state.selectedId)) {
@@ -1916,6 +2106,11 @@ async function loadIntercepts(preserveSelection = true) {
   }
 
   renderIntercepts();
+  updateInterceptQueueBadges();
+  // Auto-switch to Request Queue when requests arrive and Response Queue is empty
+  if (state.intercepts.length > 0 && state.responseIntercepts.length === 0 && state.interceptQueueTab === "response") {
+    switchInterceptQueueTab("request");
+  }
   if (state.selectedInterceptId) {
     await loadInterceptDetail(state.selectedInterceptId);
   } else {
@@ -1934,6 +2129,125 @@ async function loadInterceptDetail(id) {
 
   state.selectedInterceptRecord = await response.json();
   renderIntercepts();
+}
+
+/* ─── Intercept Rules ─── */
+
+async function loadInterceptRules() {
+  const response = await fetch("/api/intercept-rules");
+  state.interceptRules = await response.json();
+  renderInterceptRules();
+}
+
+function renderInterceptRules() {
+  const container = document.getElementById("interceptRulesList");
+  if (!container) return;
+  const rules = state.interceptRules || [];
+  if (!rules.length) {
+    container.innerHTML = `<div class="intercept-rules-empty">No rules — all in-scope requests &amp; responses will be intercepted.</div>`;
+    return;
+  }
+  container.innerHTML = rules.map((rule) => {
+    const methods = rule.method_filter?.length ? rule.method_filter.join(", ") : "Any";
+    const host = rule.host_pattern || "*";
+    const path = rule.path_pattern || "*";
+    const scope = rule.scope || "request";
+    const scopeLabel = scope === "both" ? "Req+Res" : scope === "response" ? "Res" : "Req";
+    return `<div class="intercept-rule-row${rule.enabled ? "" : " disabled"}" data-rule-id="${rule.id}">
+      <label class="intercept-rule-toggle" title="Enable/disable">
+        <input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" />
+      </label>
+      <span class="intercept-rule-scope">${escapeHtml(scopeLabel)}</span>
+      <span class="intercept-rule-methods">${escapeHtml(methods)}</span>
+      <span class="intercept-rule-host">${escapeHtml(host)}</span>
+      <span class="intercept-rule-path">${escapeHtml(path)}</span>
+      <button class="intercept-rule-delete" data-rule-delete="${rule.id}" title="Delete rule">&times;</button>
+    </div>`;
+  }).join("");
+}
+
+async function addInterceptRule() {
+  const rule = {
+    id: crypto.randomUUID(),
+    enabled: true,
+    scope: "request",
+    host_pattern: "",
+    path_pattern: "",
+    method_filter: [],
+  };
+  await fetch("/api/intercept-rules", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(rule),
+  });
+  await loadInterceptRules();
+  editInterceptRule(rule.id);
+}
+
+function editInterceptRule(ruleId) {
+  const rule = (state.interceptRules || []).find((r) => r.id === ruleId);
+  if (!rule) return;
+  const container = document.getElementById("interceptRulesList");
+  const row = container.querySelector(`[data-rule-id="${ruleId}"]`);
+  if (!row) return;
+  const scope = rule.scope || "request";
+  row.innerHTML = `
+    <label class="intercept-rule-toggle"><input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" /></label>
+    <select class="intercept-rule-input intercept-rule-scope-select" data-field="scope">
+      <option value="request"${scope === "request" ? " selected" : ""}>Request</option>
+      <option value="response"${scope === "response" ? " selected" : ""}>Response</option>
+      <option value="both"${scope === "both" ? " selected" : ""}>Both</option>
+    </select>
+    <input class="intercept-rule-input" data-field="method_filter" placeholder="Methods (e.g. GET,POST)" value="${escapeHtml((rule.method_filter || []).join(", "))}" />
+    <input class="intercept-rule-input" data-field="host_pattern" placeholder="Host (e.g. *.example.com)" value="${escapeHtml(rule.host_pattern || "")}" />
+    <input class="intercept-rule-input" data-field="path_pattern" placeholder="Path contains (e.g. /api/)" value="${escapeHtml(rule.path_pattern || "")}" />
+    <button class="intercept-rule-save" data-rule-save="${rule.id}">&#10003;</button>
+    <button class="intercept-rule-delete" data-rule-delete="${rule.id}">&times;</button>
+  `;
+}
+
+async function saveInterceptRuleFromRow(ruleId) {
+  const container = document.getElementById("interceptRulesList");
+  const row = container.querySelector(`[data-rule-id="${ruleId}"]`);
+  if (!row) return;
+  const rule = (state.interceptRules || []).find((r) => r.id === ruleId);
+  if (!rule) return;
+  const methodInput = row.querySelector('[data-field="method_filter"]');
+  const hostInput = row.querySelector('[data-field="host_pattern"]');
+  const pathInput = row.querySelector('[data-field="path_pattern"]');
+  const scopeInput = row.querySelector('[data-field="scope"]');
+  const toggleInput = row.querySelector(`[data-rule-toggle="${ruleId}"]`);
+  const updated = {
+    id: ruleId,
+    enabled: toggleInput?.checked ?? rule.enabled,
+    scope: scopeInput?.value || rule.scope || "request",
+    host_pattern: hostInput?.value?.trim() || "",
+    path_pattern: pathInput?.value?.trim() || "",
+    method_filter: (methodInput?.value || "").split(",").map((m) => m.trim().toUpperCase()).filter(Boolean),
+  };
+  await fetch("/api/intercept-rules", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(updated),
+  });
+  await loadInterceptRules();
+}
+
+async function deleteInterceptRule(ruleId) {
+  await fetch(`/api/intercept-rules/${ruleId}`, { method: "DELETE" });
+  await loadInterceptRules();
+}
+
+async function toggleInterceptRuleEnabled(ruleId, enabled) {
+  const rule = (state.interceptRules || []).find((r) => r.id === ruleId);
+  if (!rule) return;
+  rule.enabled = enabled;
+  await fetch("/api/intercept-rules", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(rule),
+  });
+  await loadInterceptRules();
 }
 
 async function loadWebsockets(preserveSelection = true) {
@@ -2030,6 +2344,7 @@ async function pollAuxiliaryData() {
 
   if (state.activeTool === "proxy" && state.activeProxyTab === "intercept") {
     tasks.push(loadIntercepts(true));
+    tasks.push(loadResponseIntercepts(true));
   }
 
   if (state.activeTool === "proxy" && state.activeProxyTab === "websockets-history") {
@@ -2089,6 +2404,7 @@ function connectEvents() {
 }
 
 function scheduleRefresh() {
+  invalidateVisibleEntriesCache();
   if (refreshTimer) {
     return;
   }
@@ -2112,6 +2428,7 @@ function renderToolPanels() {
   const replayVisible = state.activeTool === "replay";
   const decoderVisible = state.activeTool === "tools";
   const fuzzerVisible = state.activeTool === "fuzzer";
+  const sequenceVisible = state.activeTool === "sequence";
   const targetVisible = state.activeTool === "target";
   const loggerVisible = state.activeTool === "logger";
   els.dashboardShell.classList.toggle("hidden", !dashboardVisible);
@@ -2119,6 +2436,7 @@ function renderToolPanels() {
   els.replayShell.classList.toggle("hidden", !replayVisible);
   els.toolsShell.classList.toggle("hidden", !decoderVisible);
   els.fuzzerShell.classList.toggle("hidden", !fuzzerVisible);
+  els.sequenceShell.classList.toggle("hidden", !sequenceVisible);
   els.targetShell.classList.toggle("hidden", !targetVisible);
   els.loggerShell.classList.toggle("hidden", !loggerVisible);
 
@@ -2151,6 +2469,12 @@ function renderToolPanels() {
   if (fuzzerVisible) {
     renderFuzzer();
     els.footerMode.textContent = "Fuzzer active";
+    return;
+  }
+
+  if (sequenceVisible) {
+    renderSequencePanel();
+    els.footerMode.textContent = "Sequence active";
     return;
   }
 
@@ -2807,6 +3131,7 @@ function renderFindingsCodePane(viewEl, lineEl, text, evidence, target, finding)
   const html = renderHttpHtml(text, target);
   viewEl.innerHTML = html;
   lineEl.textContent = buildLineNumbers(countLines(text));
+  if (window._enableReadonlyCaret) window._enableReadonlyCaret(viewEl);
 
   // Highlight evidence — line background + inline mark
   highlightFindingLines(viewEl, evidence, finding);
@@ -2909,9 +3234,49 @@ function extractFindingKeywords(finding) {
 
 function jumpToTransaction(recordId) {
   state.activeProxyTab = "http-history";
-  state.selectedTransactionId = recordId;
+  state.selectedId = recordId;
   renderProxyPanels();
-  loadTransactionDetail(recordId);
+  loadTransactionDetail(recordId).then(() => {
+    const row = document.querySelector(`.history-row[data-id="${recordId}"]`);
+    if (row) {
+      updateHistorySelection(recordId);
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }).catch((error) => console.error(error));
+}
+
+async function sendFindingToReplay(recordId) {
+  const response = await fetch(`/api/transactions/${recordId}`);
+  if (!response.ok) return;
+  const record = await response.json();
+  if (!record || record.kind === "tunnel") return;
+  const request = editableRequestFromRecord(record);
+  const tab = createReplayTab({
+    baseRequest: request,
+    sourceTransactionId: record.id,
+    notice: record.request.preview_truncated ? buildTruncatedBodyNotice(record, "Replay") : "",
+    requestText: buildEditableRawRequest(request),
+  });
+  state.replayTabs.push(tab);
+  state.activeReplayTabId = tab.id;
+  state.activeTool = "replay";
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
+}
+
+async function sendFindingToFuzzer(recordId) {
+  const response = await fetch(`/api/transactions/${recordId}`);
+  if (!response.ok) return;
+  const record = await response.json();
+  if (!record || record.kind === "tunnel") return;
+  const request = editableRequestFromRecord(record);
+  state.fuzzerBaseRequest = request;
+  state.fuzzerSourceTransactionId = record.id;
+  state.fuzzerRequestText = buildEditableRawRequest(request);
+  state.fuzzerNotice = record.request.preview_truncated ? buildTruncatedBodyNotice(record, "Fuzzer") : "";
+  state.activeTool = "fuzzer";
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
 }
 
 // ── Scanner Settings Modal ──
@@ -3149,6 +3514,20 @@ function bindFindingsEvents() {
     els.findingsDetailJump.addEventListener("click", () => {
       const recordId = els.findingsDetailJump.dataset.recordId;
       if (recordId) jumpToTransaction(recordId);
+    });
+  }
+  const findingsReplayBtn = document.getElementById("findingsDetailSendReplay");
+  if (findingsReplayBtn) {
+    findingsReplayBtn.addEventListener("click", () => {
+      const recordId = els.findingsDetailJump?.dataset.recordId;
+      if (recordId) sendFindingToReplay(recordId);
+    });
+  }
+  const findingsFuzzerBtn = document.getElementById("findingsDetailSendFuzzer");
+  if (findingsFuzzerBtn) {
+    findingsFuzzerBtn.addEventListener("click", () => {
+      const recordId = els.findingsDetailJump?.dataset.recordId;
+      if (recordId) sendFindingToFuzzer(recordId);
     });
   }
   if (els.findingsClearButton) {
@@ -3446,6 +3825,15 @@ function updateProxyStatusIndicator(online) {
     : `Proxy failed to bind on ${state.settings?.proxy_addr || "..."}. Restart the app after freeing the port.`;
 }
 
+function updateHistorySelection(newId) {
+  const prev = els.historyTableBody.querySelector(".history-row.selected");
+  if (prev) prev.classList.remove("selected");
+  if (newId) {
+    const next = els.historyTableBody.querySelector(`.history-row[data-id="${newId}"]`);
+    if (next) next.classList.add("selected");
+  }
+}
+
 function renderHistory() {
   invalidateVisibleEntriesCache();
   const visibleEntries = getVisibleEntries();
@@ -3649,7 +4037,9 @@ function isEditableTarget(target) {
     return false;
   }
 
-  if (target.isContentEditable) {
+  // Readonly code-view panels have contenteditable for caret display only —
+  // they should NOT block table keyboard navigation.
+  if (target.isContentEditable && !target.hasAttribute("data-readonly-editable")) {
     return true;
   }
 
@@ -3658,7 +4048,12 @@ function isEditableTarget(target) {
     return true;
   }
 
-  return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+  const editableParent = target.closest("input, textarea, select, [contenteditable='true']");
+  if (editableParent && !editableParent.hasAttribute("data-readonly-editable")) {
+    return true;
+  }
+
+  return false;
 }
 
 function isSelectableTextTarget(target) {
@@ -3947,24 +4342,26 @@ function renderViewTabs() {
 }
 
 function renderIntercepts() {
-  els.interceptTableBody.innerHTML = state.intercepts.length
-    ? state.intercepts
+  const filteredIntercepts = state.interceptInScopeOnly
+    ? state.intercepts.filter((item) => isInScopeHost(item.host))
+    : state.intercepts;
+  els.interceptTableBody.innerHTML = filteredIntercepts.length
+    ? filteredIntercepts
         .map((item) => {
           const selected = item.id === state.selectedInterceptId ? "selected" : "";
           return `
             <tr class="history-row ${selected}" data-id="${item.id}">
-              <td>${escapeHtml(item.method)}</td>
-              <td>${escapeHtml(item.host)}</td>
-              <td>${escapeHtml(item.path || "/")}</td>
-              <td>${item.is_websocket ? "WebSocket" : "HTTP"}</td>
-              <td>${escapeHtml(formatTimestamp(item.started_at))}</td>
+              <td class="iq-col-method">${escapeHtml(item.method)}</td>
+              <td class="iq-col-host text-truncate">${escapeHtml(item.host)}</td>
+              <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
+              <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
             </tr>
           `;
         })
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="5">Intercept queue is empty.</td>
+          <td colspan="4">Intercept queue is empty.</td>
         </tr>
       `;
 
@@ -4059,13 +4456,11 @@ function renderWebsocketSessions() {
       : "Select a WebSocket session.";
     els.websocketResponseView.textContent = "No response selected.";
     els.websocketFramesBody.innerHTML = `
-      <tr class="empty-row">
-        <td colspan="5">${
-          state.websocketSessions.length && !sortedEntries.length
-            ? "Clear or adjust the filter to inspect captured frames."
-            : "Frame capture will appear here after a WebSocket handshake completes."
-        }</td>
-      </tr>
+      <div class="ws-frame-empty">${
+        state.websocketSessions.length && !sortedEntries.length
+          ? "Clear or adjust the filter to inspect captured frames."
+          : "Frame capture will appear here after a WebSocket handshake completes."
+      }</div>
     `;
     return;
   }
@@ -4073,8 +4468,12 @@ function renderWebsocketSessions() {
   const session = state.selectedWebsocketRecord;
   const reqText = buildRawWebsocketRequest(session);
   const resText = buildRawWebsocketResponse(session);
+  const savedReqFocus = window._saveCodeViewFocus?.(els.websocketRequestView);
+  const savedResFocus = window._saveCodeViewFocus?.(els.websocketResponseView);
   els.websocketRequestView.innerHTML = renderHttpHtml(reqText, "request");
   els.websocketResponseView.innerHTML = renderHttpHtml(resText, "response");
+  window._restoreCodeViewFocus?.(els.websocketRequestView, savedReqFocus);
+  window._restoreCodeViewFocus?.(els.websocketResponseView, savedResFocus);
   // Preserve current handshake tab selection (default to Request)
   const resBtn = document.getElementById("wsHandshakeResBtn");
   const showingResponse = resBtn?.classList.contains("active");
@@ -4109,8 +4508,8 @@ function renderWebsocketSessions() {
         </tr>
       `;
 
-  // Frame click handlers
-  Array.from(els.websocketFramesBody.querySelectorAll(".history-row")).forEach((row) => {
+  // Frame click + context menu handlers
+  Array.from(els.websocketFramesBody.querySelectorAll(".history-row[data-frame-idx]")).forEach((row) => {
     row.addEventListener("click", () => {
       const idx = parseInt(row.dataset.frameIdx, 10);
       const frame = session.frames[idx];
@@ -4139,33 +4538,39 @@ function renderWebsocketSessions() {
 }
 
 function buildWebsocketFilterSummary(visibleCount, totalCount, query) {
-  const summary = `${visibleCount} session(s) visible`;
-  const total = totalCount ? `${totalCount} total captured` : "No sessions captured yet";
-  if (!query) {
-    return `${summary} · ${total}`;
-  }
-  return `${summary} · filter: ${query} · ${total}`;
+  const parts = [`${visibleCount} session(s) visible`];
+  const filters = [];
+  if (document.getElementById("wsInScopeOnly")?.classList.contains("active")) filters.push("in scope");
+  if (document.getElementById("wsHideClosed")?.classList.contains("active")) filters.push("live only");
+  if (query) filters.push(query);
+  if (filters.length) parts.push(`filter: ${filters.join(", ")}`);
+  parts.push(totalCount ? `${totalCount} total captured` : "No sessions captured yet");
+  return parts.join(" · ");
 }
 
 function getVisibleWebsocketSessions() {
   const normalizedQuery = state.websocketQuery.trim().toLowerCase();
-  if (!normalizedQuery) {
-    return state.websocketSessions;
-  }
+  const inScopeOnly = document.getElementById("wsInScopeOnly")?.classList.contains("active") ?? false;
+  const liveOnly = document.getElementById("wsHideClosed")?.classList.contains("active") ?? false;
 
   return state.websocketSessions.filter((session) => {
-    const haystack = [
-      session.host,
-      session.path,
-      formatStatus(session.status),
-      String(session.frame_count),
-      session.duration_ms == null ? "live" : `${session.duration_ms} ms`,
-      formatTimestamp(session.started_at),
-    ]
-      .filter(Boolean)
-      .join("\n")
-      .toLowerCase();
-    return haystack.includes(normalizedQuery);
+    if (inScopeOnly && !isInScopeHost(session.host)) return false;
+    if (liveOnly && session.duration_ms != null) return false;
+    if (normalizedQuery) {
+      const haystack = [
+        session.host,
+        session.path,
+        formatStatus(session.status),
+        String(session.frame_count),
+        session.duration_ms == null ? "live" : `${session.duration_ms} ms`,
+        formatTimestamp(session.started_at),
+      ]
+        .filter(Boolean)
+        .join("\n")
+        .toLowerCase();
+      if (!haystack.includes(normalizedQuery)) return false;
+    }
+    return true;
   });
 }
 
@@ -4430,6 +4835,13 @@ function syncInterceptRequestHighlightScroll() {
   els.interceptRequestHighlight.scrollLeft = els.interceptRequestEditor.scrollLeft;
 }
 
+function renderInterceptResponseHighlight(text) {
+  if (!els.interceptResponseHighlight) return;
+  els.interceptResponseHighlight.innerHTML = renderCodeHtml(text, "pretty", "response");
+  els.interceptResponseHighlight.scrollTop = els.interceptResponseEditor.scrollTop;
+  els.interceptResponseHighlight.scrollLeft = els.interceptResponseEditor.scrollLeft;
+}
+
 function renderFuzzerRequestHighlight(text) {
   if (!els.fuzzerRequestHighlight) {
     return;
@@ -4518,16 +4930,19 @@ function renderMatchReplaceRules() {
           return `
             <tr class="history-row ${active}" data-id="${rule.id}">
               <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${rule.enabled ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
-              <td>${escapeHtml(rule.description || "Untitled rule")}</td>
               <td>${escapeHtml(rule.scope)}</td>
               <td>${escapeHtml(rule.target)}</td>
+              <td class="text-truncate">${escapeHtml(rule.search || "—")}</td>
+              <td class="text-truncate">${escapeHtml(rule.replace || "—")}</td>
+              <td>${rule.regex ? "✓" : ""}</td>
+              <td>${rule.case_sensitive ? "✓" : ""}</td>
             </tr>
           `;
         })
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="4">No replace rules are configured.</td>
+          <td colspan="7">No replace rules are configured.</td>
         </tr>
       `;
 
@@ -4553,7 +4968,6 @@ function renderMatchReplaceRules() {
   if (!selected) {
     els.matchReplaceEditorPath.textContent = "Rule";
     els.matchReplaceEditorTitle.textContent = "New rule";
-    els.matchReplaceDescription.value = "";
     els.matchReplaceScope.value = "request";
     els.matchReplaceTarget.value = "any";
     els.matchReplaceSearch.value = "";
@@ -4566,8 +4980,7 @@ function renderMatchReplaceRules() {
   }
 
   els.matchReplaceEditorPath.textContent = `${selected.scope} / ${selected.target}`;
-  els.matchReplaceEditorTitle.textContent = selected.description || "Edit rule";
-  els.matchReplaceDescription.value = selected.description || "";
+  els.matchReplaceEditorTitle.textContent = selected.search ? `${selected.search} → ${selected.replace || "∅"}` : "Edit rule";
   els.matchReplaceScope.value = selected.scope;
   els.matchReplaceTarget.value = selected.target;
   els.matchReplaceSearch.value = selected.search;
@@ -4712,7 +5125,7 @@ function syncMatchReplaceEditor() {
     return;
   }
 
-  rule.description = els.matchReplaceDescription.value.trim();
+  rule.description = "";
   rule.scope = els.matchReplaceScope.value;
   rule.target = els.matchReplaceTarget.value;
   rule.search = els.matchReplaceSearch.value;
@@ -4789,6 +5202,29 @@ async function openFuzzerFromSelection() {
   renderToolPanels();
 }
 
+async function sendToSequenceFromSelection() {
+  let record = state.selectedRecord;
+  if (!record && state.selectedId) {
+    const response = await fetch(`/api/transactions/${state.selectedId}`);
+    if (response.ok) record = await response.json();
+  }
+  if (!record || record.kind === "tunnel") return;
+
+  const request = editableRequestFromRecord(record);
+  if (!state.editingSequence) {
+    await createNewSequence();
+  }
+  state.editingSequence.steps.push({
+    id: crypto.randomUUID(),
+    label: `${request.method} ${request.path}`,
+    request,
+    target: null,
+    extractions: [],
+  });
+  state.activeTool = "sequence";
+  renderToolPanels();
+}
+
 function resetFuzzer() {
   state.fuzzerRequestText = state.fuzzerBaseRequest
     ? buildEditableRawRequest(state.fuzzerBaseRequest)
@@ -4839,32 +5275,311 @@ async function runFuzzerAttack() {
   scheduleRefresh();
 }
 
+/* ─── Sequence/Macro ─── */
+
+async function loadSequences() {
+  const [defsResp, runsResp] = await Promise.all([
+    fetch("/api/sequences"),
+    fetch("/api/sequence-runs?limit=20"),
+  ]);
+  state.sequenceDefinitions = await defsResp.json();
+  state.sequencePastRuns = await runsResp.json();
+}
+
+async function createNewSequence() {
+  const def = {
+    id: crypto.randomUUID(),
+    name: "New Sequence",
+    steps: [],
+  };
+  await fetch("/api/sequences", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(def),
+  });
+  await loadSequences();
+  state.selectedSequenceId = def.id;
+  state.editingSequence = JSON.parse(JSON.stringify(def));
+  renderSequencePanel();
+}
+
+function selectSequence(id) {
+  state.selectedSequenceId = id;
+  const def = state.sequenceDefinitions.find((d) => d.id === id);
+  state.editingSequence = def ? JSON.parse(JSON.stringify(def)) : null;
+  state.sequenceRunResult = null;
+  renderSequencePanel();
+}
+
+function addSequenceStep() {
+  if (!state.editingSequence) return;
+  state.editingSequence.steps.push({
+    id: crypto.randomUUID(),
+    label: `Step ${state.editingSequence.steps.length + 1}`,
+    request: {
+      scheme: "https", host: "", method: "GET", path: "/",
+      headers: [], body: "", body_encoding: "utf8", preview_truncated: false,
+    },
+    target: null,
+    extractions: [],
+  });
+  renderSequencePanel();
+}
+
+function removeSequenceStep(index) {
+  if (!state.editingSequence) return;
+  state.editingSequence.steps.splice(index, 1);
+  renderSequencePanel();
+}
+
+function addExtractionRule(stepIndex) {
+  if (!state.editingSequence) return;
+  const step = state.editingSequence.steps[stepIndex];
+  if (!step) return;
+  step.extractions.push({
+    variable_name: "",
+    source: "response_body",
+    pattern: "",
+    group: 1,
+  });
+  renderSequencePanel();
+}
+
+function removeExtractionRule(stepIndex, ruleIndex) {
+  if (!state.editingSequence) return;
+  const step = state.editingSequence.steps[stepIndex];
+  if (!step) return;
+  step.extractions.splice(ruleIndex, 1);
+  renderSequencePanel();
+}
+
+function syncSequenceStepFromDom() {
+  if (!state.editingSequence) return;
+  const container = document.getElementById("sequenceStepsContainer");
+  if (!container) return;
+  const cards = container.querySelectorAll(".sequence-step-card");
+  cards.forEach((card, i) => {
+    const step = state.editingSequence.steps[i];
+    if (!step) return;
+    const labelInput = card.querySelector(".step-label");
+    if (labelInput) step.label = labelInput.value;
+    const reqTextarea = card.querySelector(".step-request-text");
+    if (reqTextarea) {
+      const parsed = parseEditableRawRequest(reqTextarea.value, step.request);
+      Object.assign(step.request, parsed);
+    }
+    card.querySelectorAll(".extraction-row").forEach((row, j) => {
+      const rule = step.extractions[j];
+      if (!rule) return;
+      const varInput = row.querySelector(".ext-var");
+      const sourceSelect = row.querySelector(".ext-source");
+      const patternInput = row.querySelector(".ext-pattern");
+      if (varInput) rule.variable_name = varInput.value;
+      if (sourceSelect) rule.source = sourceSelect.value;
+      if (patternInput) rule.pattern = patternInput.value;
+    });
+  });
+}
+
+async function saveCurrentSequence() {
+  if (!state.editingSequence) return;
+  syncSequenceStepFromDom();
+  await fetch("/api/sequences", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(state.editingSequence),
+  });
+  await loadSequences();
+  renderSequencePanel();
+}
+
+async function deleteSequence(id) {
+  await fetch(`/api/sequences/${id}`, { method: "DELETE" });
+  if (state.selectedSequenceId === id) {
+    state.selectedSequenceId = null;
+    state.editingSequence = null;
+  }
+  await loadSequences();
+  renderSequencePanel();
+}
+
+async function runCurrentSequence() {
+  if (!state.editingSequence) return;
+  syncSequenceStepFromDom();
+  await saveCurrentSequence();
+
+  const runBtn = document.getElementById("runSequenceButton");
+  runBtn.disabled = true;
+  runBtn.textContent = "Running...";
+
+  try {
+    const response = await fetch(`/api/sequences/${state.editingSequence.id}/run`, {
+      method: "POST",
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      showToast(`Sequence failed: ${errText}`, "error");
+      return;
+    }
+    state.sequenceRunResult = await response.json();
+    await loadSequences();
+    scheduleRefresh();
+  } catch (err) {
+    showToast(`Sequence error: ${err.message}`, "error");
+  } finally {
+    runBtn.disabled = false;
+    runBtn.textContent = "Run";
+    renderSequencePanel();
+  }
+}
+
+function renderSequencePanel() {
+  const listBody = document.getElementById("sequenceListBody");
+  const editorTitle = document.getElementById("sequenceEditorTitle");
+  const stepsContainer = document.getElementById("sequenceStepsContainer");
+  const addStepBtn = document.getElementById("addSequenceStepButton");
+  const saveBtn = document.getElementById("saveSequenceButton");
+  const runBtn = document.getElementById("runSequenceButton");
+  const runMeta = document.getElementById("sequenceRunMeta");
+  const resultsBody = document.getElementById("sequenceRunResultsBody");
+  const pastBody = document.getElementById("sequencePastRunsBody");
+
+  // List
+  listBody.innerHTML = state.sequenceDefinitions.length
+    ? state.sequenceDefinitions.map((def) => {
+        const selected = def.id === state.selectedSequenceId ? "selected" : "";
+        return `<tr class="history-row ${selected}" data-seq-id="${def.id}">
+          <td>${escapeHtml(def.name)}</td>
+          <td>${def.steps.length}</td>
+          <td><button class="secondary-action seq-delete" data-seq-delete="${def.id}" style="font-size:0.7rem;padding:2px 6px">&times;</button></td>
+        </tr>`;
+      }).join("")
+    : `<tr class="empty-row"><td colspan="3">No sequences yet.</td></tr>`;
+
+  listBody.querySelectorAll(".history-row").forEach((row) => {
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".seq-delete")) return;
+      selectSequence(row.dataset.seqId);
+    });
+  });
+  listBody.querySelectorAll(".seq-delete").forEach((btn) => {
+    btn.addEventListener("click", () => deleteSequence(btn.dataset.seqDelete).catch((e) => console.error(e)));
+  });
+
+  // Editor
+  const editing = state.editingSequence;
+  const hasSequence = !!editing;
+  addStepBtn.disabled = !hasSequence;
+  saveBtn.disabled = !hasSequence;
+  runBtn.disabled = !hasSequence || !editing?.steps?.length;
+  editorTitle.textContent = hasSequence ? editing.name : "No sequence selected";
+
+  if (hasSequence) {
+    stepsContainer.innerHTML = editing.steps.map((step, idx) => {
+      const reqText = buildEditableRawRequest(step.request);
+      const extractionsHtml = step.extractions.map((rule, rIdx) => `
+        <div class="extraction-row">
+          <input class="ext-var" placeholder="Variable name" value="${escapeHtml(rule.variable_name)}" />
+          <select class="ext-source">
+            <option value="response_body"${rule.source === "response_body" ? " selected" : ""}>Body</option>
+            <option value="response_header"${rule.source === "response_header" ? " selected" : ""}>Header</option>
+          </select>
+          <input class="ext-pattern" placeholder="Regex / header name" value="${escapeHtml(rule.pattern)}" />
+          <button class="ext-remove" data-step="${idx}" data-rule="${rIdx}" title="Remove">&times;</button>
+        </div>
+      `).join("");
+
+      return `<div class="sequence-step-card" data-step-idx="${idx}">
+        <div class="step-header">
+          <span class="step-number">#${idx + 1}</span>
+          <input class="step-label" value="${escapeHtml(step.label)}" placeholder="Step label" />
+          <button class="step-remove" data-remove-step="${idx}" title="Remove step">&times;</button>
+        </div>
+        <textarea class="step-request-text" spellcheck="false">${escapeHtml(reqText)}</textarea>
+        <details class="step-extractions">
+          <summary>Extractions (${step.extractions.length}) <button class="ext-add" data-add-ext="${idx}" style="font-size:0.7rem;margin-left:8px">+ Extract</button></summary>
+          ${extractionsHtml}
+        </details>
+      </div>`;
+    }).join("");
+
+    stepsContainer.querySelectorAll(".step-remove").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        syncSequenceStepFromDom();
+        removeSequenceStep(parseInt(btn.dataset.removeStep, 10));
+      });
+    });
+    stepsContainer.querySelectorAll(".ext-add").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        syncSequenceStepFromDom();
+        addExtractionRule(parseInt(btn.dataset.addExt, 10));
+      });
+    });
+    stepsContainer.querySelectorAll(".ext-remove").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        syncSequenceStepFromDom();
+        removeExtractionRule(parseInt(btn.dataset.step, 10), parseInt(btn.dataset.rule, 10));
+      });
+    });
+  } else {
+    stepsContainer.innerHTML = `<div style="padding:20px;color:var(--text-muted);font-size:0.85rem">Select or create a sequence to start building steps.</div>`;
+  }
+
+  // Run results
+  const run = state.sequenceRunResult;
+  if (run) {
+    runMeta.textContent = `${run.sequence_name} — ${run.status} — ${run.step_results.length} steps`;
+    resultsBody.innerHTML = run.step_results.map((sr, i) => {
+      const extracted = Object.entries(sr.extracted || {}).map(([k, v]) => `${k}=${v}`).join(", ");
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${escapeHtml(sr.label)}</td>
+        <td>${sr.error ? `<span style="color:var(--danger)">${escapeHtml(sr.error)}</span>` : escapeHtml(String(sr.status ?? "-"))}</td>
+        <td>${sr.duration_ms != null ? `${sr.duration_ms} ms` : "-"}</td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(extracted || "-")}</td>
+      </tr>`;
+    }).join("");
+  } else {
+    runMeta.textContent = "No sequence run yet.";
+    resultsBody.innerHTML = `<tr class="empty-row"><td colspan="5">Run a sequence to see results.</td></tr>`;
+  }
+
+  // Past runs
+  pastBody.innerHTML = state.sequencePastRuns.length
+    ? state.sequencePastRuns.map((r) => `<tr>
+        <td>${escapeHtml(r.sequence_name)}</td>
+        <td>${escapeHtml(r.status)}</td>
+        <td>${r.step_count}</td>
+        <td>${escapeHtml(formatTimestamp(r.started_at))}</td>
+      </tr>`).join("")
+    : `<tr class="empty-row"><td colspan="4">No past runs.</td></tr>`;
+}
+
 async function toggleIntercept() {
   if (!state.runtime) {
     return;
   }
 
   const turningOff = state.runtime.intercept_enabled;
+  // Optimistic UI update — render immediately, sync in background
+  state.runtime.intercept_enabled = !state.runtime.intercept_enabled;
+  renderInterceptStatus();
 
-  const response = await fetch("/api/runtime", {
+  fetch("/api/runtime", {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      intercept_enabled: !state.runtime.intercept_enabled,
-    }),
-  });
-  state.runtime = await response.json();
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ intercept_enabled: state.runtime.intercept_enabled }),
+  }).then((r) => r.json()).then((rt) => { state.runtime = rt; }).catch(console.error);
 
   if (turningOff) {
-    await fetch("/api/intercepts/forward-all", { method: "POST" });
-    await loadIntercepts(false);
-    scheduleRefresh();
+    Promise.all([
+      fetch("/api/intercepts/forward-all", { method: "POST" }),
+      fetch("/api/response-intercepts/forward-all", { method: "POST" }),
+    ]).then(() => Promise.all([loadIntercepts(false), loadResponseIntercepts(false)]))
+      .then(() => scheduleRefresh())
+      .catch(console.error);
   }
-
-  renderInterceptStatus();
-  renderProxySettings();
 }
 
 async function saveProxySettings() {
@@ -4933,26 +5648,26 @@ async function forwardSelectedIntercept() {
     return;
   }
 
+  const id = state.selectedInterceptRecord.id;
   const request = parseEditableRawRequest(
     els.interceptRequestEditor.value,
     state.selectedInterceptRecord.request,
   );
-  const response = await fetch(`/api/intercepts/${state.selectedInterceptRecord.id}/forward`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ request }),
-  });
 
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-
+  // Optimistic: remove from UI immediately
+  state.intercepts = state.intercepts.filter((i) => i.id !== id);
   state.selectedInterceptRecord = null;
   state.interceptEditorSeedId = null;
-  await loadIntercepts(false);
-  scheduleRefresh();
+  state.selectedInterceptId = state.intercepts[0]?.id ?? null;
+  renderIntercepts();
+  updateInterceptQueueBadges();
+
+  fetch(`/api/intercepts/${id}/forward`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ request }),
+  }).then(() => { loadIntercepts(true).catch(console.error); scheduleRefresh(); })
+    .catch((e) => { console.error(e); loadIntercepts(false).catch(console.error); });
 }
 
 async function dropSelectedIntercept() {
@@ -4960,18 +5675,244 @@ async function dropSelectedIntercept() {
     return;
   }
 
-  const response = await fetch(`/api/intercepts/${state.selectedInterceptRecord.id}/drop`, {
-    method: "POST",
-  });
+  const id = state.selectedInterceptRecord.id;
 
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-
+  // Optimistic: remove from UI immediately
+  state.intercepts = state.intercepts.filter((i) => i.id !== id);
   state.selectedInterceptRecord = null;
   state.interceptEditorSeedId = null;
-  await loadIntercepts(false);
-  scheduleRefresh();
+  state.selectedInterceptId = state.intercepts[0]?.id ?? null;
+  renderIntercepts();
+  updateInterceptQueueBadges();
+
+  fetch(`/api/intercepts/${id}/drop`, { method: "POST" })
+    .then(() => { loadIntercepts(true).catch(console.error); scheduleRefresh(); })
+    .catch((e) => { console.error(e); loadIntercepts(false).catch(console.error); });
+}
+
+/* ─── Response Intercept ─── */
+
+async function loadResponseIntercepts(preserveSelection = true) {
+  const response = await fetch("/api/response-intercepts");
+  state.responseIntercepts = await response.json();
+
+  if (!preserveSelection || !state.responseIntercepts.some((item) => item.id === state.selectedResponseInterceptId)) {
+    state.selectedResponseInterceptId = state.responseIntercepts[0]?.id ?? null;
+  }
+
+  renderResponseIntercepts();
+  updateInterceptQueueBadges();
+  // Auto-switch to Response Queue when responses arrive and Request Queue is empty
+  if (state.responseIntercepts.length > 0 && state.intercepts.length === 0 && state.interceptQueueTab === "request") {
+    switchInterceptQueueTab("response");
+  }
+  if (state.selectedResponseInterceptId) {
+    await loadResponseInterceptDetail(state.selectedResponseInterceptId);
+  } else {
+    state.selectedResponseInterceptRecord = null;
+    renderResponseIntercepts();
+  }
+}
+
+async function loadResponseInterceptDetail(id) {
+  const response = await fetch(`/api/response-intercepts/${id}`);
+  if (!response.ok) {
+    state.selectedResponseInterceptRecord = null;
+    renderResponseIntercepts();
+    return;
+  }
+
+  state.selectedResponseInterceptRecord = await response.json();
+  renderResponseIntercepts();
+}
+
+function buildEditableRawResponse(resp) {
+  let text = `HTTP/1.1 ${resp.status}\r\n`;
+  for (const h of resp.headers || []) {
+    text += `${h.name}: ${h.value}\r\n`;
+  }
+  text += "\r\n";
+  if (resp.body_encoding === "base64") {
+    try {
+      text += atob(resp.body);
+    } catch {
+      text += resp.body;
+    }
+  } else {
+    text += resp.body || "";
+  }
+  return text;
+}
+
+function parseEditableRawResponse(text, original) {
+  const lines = text.split(/\r?\n/);
+  const statusLine = lines[0] || "";
+  const statusMatch = statusLine.match(/^HTTP\/[\d.]+ (\d+)/);
+  const status = statusMatch ? parseInt(statusMatch[1], 10) : (original?.status || 200);
+
+  const headers = [];
+  let bodyStart = 1;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === "" || line === "\r") {
+      bodyStart = i + 1;
+      break;
+    }
+    const colonIdx = line.indexOf(":");
+    if (colonIdx > 0) {
+      headers.push({
+        name: line.substring(0, colonIdx).trim(),
+        value: line.substring(colonIdx + 1).trim(),
+      });
+      bodyStart = i + 1;
+    } else {
+      bodyStart = i;
+      break;
+    }
+  }
+
+  const bodyText = lines.slice(bodyStart).join("\n");
+  const isText = !original || original.body_encoding === "utf8";
+  return {
+    status,
+    headers,
+    body: isText ? bodyText : btoa(bodyText),
+    body_encoding: isText ? "utf8" : "base64",
+  };
+}
+
+function renderResponseIntercepts() {
+  const filteredResponseIntercepts = state.interceptInScopeOnly
+    ? state.responseIntercepts.filter((item) => isInScopeHost(item.host))
+    : state.responseIntercepts;
+  els.responseInterceptTableBody.innerHTML = filteredResponseIntercepts.length
+    ? filteredResponseIntercepts
+        .map((item) => {
+          const selected = item.id === state.selectedResponseInterceptId ? "selected" : "";
+          return `
+            <tr class="history-row ${selected}" data-id="${item.id}">
+              <td class="iq-col-status">${escapeHtml(String(item.status))}</td>
+              <td class="iq-col-method">${escapeHtml(item.method)}</td>
+              <td class="iq-col-host text-truncate">${escapeHtml(item.host)}</td>
+              <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
+              <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
+            </tr>
+          `;
+        })
+        .join("")
+    : `
+        <tr class="empty-row">
+          <td colspan="5">Response intercept queue is empty.</td>
+        </tr>
+      `;
+
+  Array.from(els.responseInterceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
+    row.addEventListener("click", () => {
+      state.selectedResponseInterceptId = row.dataset.id;
+      loadResponseInterceptDetail(row.dataset.id).catch((error) => console.error(error));
+    });
+  });
+
+  if (!state.selectedResponseInterceptRecord) {
+    state.responseInterceptEditorSeedId = null;
+    if (state.interceptQueueTab === "response") {
+      els.interceptDetailPath.textContent = "Response Intercept";
+      els.interceptDetailTitle.textContent = "No response selected";
+      els.interceptResponseEditor.value = "";
+      renderInterceptResponseHighlight("");
+      els.interceptMeta.textContent = state.runtime?.intercept_enabled
+        ? "Intercept is on. Matched responses will queue here."
+        : "Intercept is off. Toggle it on to pause responses before forwarding.";
+    }
+    els.forwardResponseInterceptButton.disabled = true;
+    els.dropResponseInterceptButton.disabled = true;
+    return;
+  }
+
+  const rec = state.selectedResponseInterceptRecord;
+  if (state.interceptQueueTab === "response") {
+    els.interceptDetailPath.textContent = `${rec.scheme.toUpperCase()} / ${rec.method} ${rec.host}${rec.path}`;
+    els.interceptDetailTitle.textContent = `${rec.status} Response`;
+    if (state.responseInterceptEditorSeedId !== rec.id || document.activeElement !== els.interceptResponseEditor) {
+      els.interceptResponseEditor.value = buildEditableRawResponse(rec.response);
+      state.responseInterceptEditorSeedId = rec.id;
+    }
+    renderInterceptResponseHighlight(els.interceptResponseEditor.value);
+    els.interceptMeta.textContent = `Response queued at ${formatTimestamp(rec.started_at)}`;
+  }
+  els.forwardResponseInterceptButton.disabled = false;
+  els.dropResponseInterceptButton.disabled = false;
+}
+
+async function forwardSelectedResponseIntercept() {
+  if (!state.selectedResponseInterceptRecord) return;
+
+  const id = state.selectedResponseInterceptRecord.id;
+  const editedResponse = parseEditableRawResponse(
+    els.interceptResponseEditor.value,
+    state.selectedResponseInterceptRecord.response,
+  );
+
+  // Optimistic UI
+  state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
+  state.selectedResponseInterceptRecord = null;
+  state.responseInterceptEditorSeedId = null;
+  state.selectedResponseInterceptId = state.responseIntercepts[0]?.id ?? null;
+  renderResponseIntercepts();
+  updateInterceptQueueBadges();
+
+  fetch(`/api/response-intercepts/${id}/forward`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ response: editedResponse }),
+  }).then(() => { loadResponseIntercepts(true).catch(console.error); scheduleRefresh(); })
+    .catch((e) => { console.error(e); loadResponseIntercepts(false).catch(console.error); });
+}
+
+async function dropSelectedResponseIntercept() {
+  if (!state.selectedResponseInterceptRecord) return;
+
+  const id = state.selectedResponseInterceptRecord.id;
+
+  // Optimistic UI
+  state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
+  state.selectedResponseInterceptRecord = null;
+  state.responseInterceptEditorSeedId = null;
+  state.selectedResponseInterceptId = state.responseIntercepts[0]?.id ?? null;
+  renderResponseIntercepts();
+  updateInterceptQueueBadges();
+
+  fetch(`/api/response-intercepts/${id}/drop`, { method: "POST" })
+    .then(() => { loadResponseIntercepts(true).catch(console.error); scheduleRefresh(); })
+    .catch((e) => { console.error(e); loadResponseIntercepts(false).catch(console.error); });
+}
+
+function updateInterceptQueueBadges() {
+  const reqCount = state.intercepts.length;
+  const resCount = state.responseIntercepts.length;
+  els.interceptQueueTabRequest.textContent = reqCount > 0 ? `Request Queue (${reqCount})` : "Request Queue";
+  els.interceptQueueTabResponse.textContent = resCount > 0 ? `Response Queue (${resCount})` : "Response Queue";
+}
+
+function switchInterceptQueueTab(tab) {
+  state.interceptQueueTab = tab;
+  els.interceptQueueTabRequest.classList.toggle("active", tab === "request");
+  els.interceptQueueTabResponse.classList.toggle("active", tab === "response");
+
+  els.interceptRequestTable.classList.toggle("hidden", tab !== "request");
+  els.responseInterceptTable.classList.toggle("hidden", tab !== "response");
+
+  els.interceptRequestEditorPanel.classList.toggle("hidden", tab !== "request");
+  els.interceptResponseEditorPanel.classList.toggle("hidden", tab !== "response");
+
+  els.interceptRequestActions.classList.toggle("hidden", tab !== "request");
+  els.responseInterceptActions.classList.toggle("hidden", tab !== "response");
+
+  if (tab === "request") {
+    renderIntercepts();
+  } else {
+    renderResponseIntercepts();
+  }
 }
 
 async function openReplayFromSelection() {
@@ -6110,6 +7051,11 @@ function sanitizeWorkbenchHeight(candidate) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
 }
 
+function syncHttpInScopePill() {
+  const pill = document.getElementById("httpInScopeToggle");
+  if (pill) pill.classList.toggle("active", !!state.filterSettings.inScopeOnly);
+}
+
 function hydrateFilterForm() {
   const filters = state.filterSettings;
   els.filterInScopeOnly.checked = filters.inScopeOnly;
@@ -6166,6 +7112,7 @@ function applyFilterSettings() {
     colorTags: state.filterSettings.colorTags,
   };
   closeFilterModal();
+  syncHttpInScopePill();
   scheduleRefresh();
 }
 
@@ -6497,7 +7444,41 @@ function showFrameDetail(frame) {
 function hideFrameDetail() {
   els.frameDetailResizer.classList.add("hidden");
   els.frameDetailPanel.classList.add("hidden");
-  els.websocketFramesBody.querySelectorAll(".frame-selected").forEach((r) => r.classList.remove("frame-selected"));
+  els.websocketFramesBody.querySelectorAll(".ws-frame-bubble.selected").forEach((r) => r.classList.remove("selected"));
+}
+
+function initFrameDetailResizer() {
+  const resizer = els.frameDetailResizer;
+  if (!resizer) return;
+  const container = resizer.parentElement;
+
+  let startY = 0;
+  let startHeight = 0;
+
+  resizer.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    startY = e.clientY;
+    startHeight = els.frameDetailPanel.getBoundingClientRect().height;
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+  });
+
+  function onMouseMove(e) {
+    const delta = startY - e.clientY;
+    const newHeight = Math.max(120, startHeight + delta);
+    const maxHeight = container.getBoundingClientRect().height * 0.8;
+    const h = Math.min(newHeight, maxHeight);
+    els.frameDetailPanel.style.flex = "0 0 " + h + "px";
+  }
+
+  function onMouseUp() {
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }
 }
 
 function initFrameDetailResizer() {
@@ -6556,10 +7537,13 @@ function toHexDump(text) {
 
 function updateCodePane(viewElement, lineElement, text, mode, target) {
   const lineCount = countLines(text);
+  const savedFocus = window._saveCodeViewFocus?.(viewElement);
   viewElement.innerHTML = renderCodeHtml(text, mode, target);
   lineElement.textContent = buildLineNumbers(lineCount);
   const searchResult = applyCodeSearch(viewElement, state.messageSearch[target]);
-  if (searchResult.firstMatch) {
+  if (savedFocus) {
+    window._restoreCodeViewFocus?.(viewElement, savedFocus);
+  } else if (searchResult.firstMatch) {
     viewElement.scrollTop = Math.max(searchResult.firstMatch.offsetTop - 24, 0);
   } else {
     viewElement.scrollTop = 0;
@@ -7292,6 +8276,7 @@ function toggleSort(key) {
     state.sortDirection = defaultSortDirection(key);
   }
 
+  invalidateVisibleEntriesCache();
   renderHistory();
 }
 
@@ -8785,6 +9770,79 @@ function sendWsFrameToReplay(frameIdx) {
   renderToolPanels();
 }
 
+/* ─── Compare / Diff ─── */
+let compareBaseId = null;
+let compareActiveTab = "request";
+let compareBaseRecord = null;
+let compareTargetRecord = null;
+
+function computeUnifiedDiff(linesA, linesB, labelA, labelB) {
+  const result = [`--- ${labelA}`, `+++ ${labelB}`];
+  const maxLen = Math.max(linesA.length, linesB.length);
+  for (let i = 0; i < maxLen; i++) {
+    const a = i < linesA.length ? linesA[i] : undefined;
+    const b = i < linesB.length ? linesB[i] : undefined;
+    if (a === b) {
+      result.push(`  ${a}`);
+    } else {
+      if (a !== undefined) result.push(`- ${a}`);
+      if (b !== undefined) result.push(`+ ${b}`);
+    }
+  }
+  return result.join("\n");
+}
+
+async function setCompareBase(transactionId) {
+  compareBaseId = transactionId;
+  const btn = document.getElementById("compareWithBaseBtn");
+  if (btn) btn.disabled = false;
+  const item = state.items.find((i) => i.id === transactionId);
+  if (btn && item) btn.textContent = `Compare with #${item.index ?? "?"}`;
+}
+
+async function openCompareModal(targetId) {
+  if (!compareBaseId || compareBaseId === targetId) return;
+  const [baseRes, targetRes] = await Promise.all([
+    fetch(`/api/transactions/${compareBaseId}`).then((r) => r.ok ? r.json() : null),
+    fetch(`/api/transactions/${targetId}`).then((r) => r.ok ? r.json() : null),
+  ]);
+  if (!baseRes || !targetRes) return;
+  compareBaseRecord = baseRes;
+  compareTargetRecord = targetRes;
+  compareActiveTab = "request";
+  renderCompareModal();
+  document.getElementById("compareModal").classList.remove("hidden");
+}
+
+function renderCompareModal() {
+  if (!compareBaseRecord || !compareTargetRecord) return;
+  const baseItem = state.items.find((i) => i.id === compareBaseRecord.id);
+  const targetItem = state.items.find((i) => i.id === compareTargetRecord.id);
+  const baseLabel = `#${baseItem?.index ?? "?"} ${compareBaseRecord.method} ${compareBaseRecord.host}${compareBaseRecord.path}`;
+  const targetLabel = `#${targetItem?.index ?? "?"} ${compareTargetRecord.method} ${compareTargetRecord.host}${compareTargetRecord.path}`;
+  document.getElementById("compareKicker").textContent = `${baseLabel}  vs  ${targetLabel}`;
+  document.getElementById("compareTitle").textContent = compareActiveTab === "request" ? "Request Diff" : "Response Diff";
+  document.querySelectorAll("[data-compare-tab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.compareTab === compareActiveTab);
+  });
+  let textA, textB;
+  if (compareActiveTab === "request") {
+    textA = buildRawRequest(compareBaseRecord);
+    textB = buildRawRequest(compareTargetRecord);
+  } else {
+    textA = buildRawResponse(compareBaseRecord);
+    textB = buildRawResponse(compareTargetRecord);
+  }
+  const linesA = textA.split("\n");
+  const linesB = textB.split("\n");
+  const diff = computeUnifiedDiff(linesA, linesB, "base", "target");
+  document.getElementById("compareDiffView").innerHTML = renderDiffHtml(diff);
+}
+
+function closeCompareModal() {
+  document.getElementById("compareModal").classList.add("hidden");
+}
+
 /* ─── Context menu (color tags & notes) ─── */
 let contextMenuTargetId = null;
 let contextMenuNoteTimer = null;
@@ -8876,6 +9934,7 @@ async function updateAnnotations(transactionId, payload) {
       const index = state.items.findIndex((i) => i.id === transactionId);
       if (index !== -1) {
         Object.assign(state.items[index], summary);
+        invalidateVisibleEntriesCache();
         renderHistory();
       }
       if (state.selectedRecord && state.selectedRecord.id === transactionId) {
@@ -8927,6 +9986,19 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
       openReplayFromSelection().catch((error) => console.error(error));
     } else if (action === "send-to-fuzzer") {
       openFuzzerFromSelection().catch((error) => console.error(error));
+    } else if (action === "send-to-sequence") {
+      sendToSequenceFromSelection().catch((error) => console.error(error));
+    } else if (action === "copy-url") {
+      copyTransactionUrl(contextMenuTargetId);
+    } else if (action?.startsWith("copy-as-")) {
+      const format = action.replace("copy-as-", "");
+      historyRequestToFormat(contextMenuTargetId, format).then((text) => {
+        if (text) navigator.clipboard.writeText(text).catch(() => {});
+      });
+    } else if (action === "compare-set-base") {
+      setCompareBase(contextMenuTargetId);
+    } else if (action === "compare-with-base") {
+      openCompareModal(contextMenuTargetId).catch((error) => console.error(error));
     }
   });
 });
@@ -8952,6 +10024,119 @@ els.contextMenuNote.addEventListener("keydown", (event) => {
   }
   event.stopPropagation();
 });
+
+/* ─── WS Frame context menu ─── */
+
+function openWsFrameContextMenu(x, y) {
+  const menu = els.wsFrameContextMenu;
+  menu.classList.remove("hidden");
+  const menuWidth = menu.offsetWidth;
+  const menuHeight = menu.offsetHeight;
+  const maxX = window.innerWidth - menuWidth - 8;
+  const maxY = window.innerHeight - menuHeight - 8;
+  menu.style.left = `${Math.min(x, maxX)}px`;
+  menu.style.top = `${Math.min(y, maxY)}px`;
+}
+
+function closeWsFrameContextMenu() {
+  els.wsFrameContextMenu.classList.add("hidden");
+}
+
+document.getElementById("wsFrameToReplayBtn").addEventListener("click", () => {
+  closeWsFrameContextMenu();
+  sendWsFrameToReplay(state.selectedFrameIdx);
+});
+
+document.addEventListener("click", (event) => {
+  if (!els.wsFrameContextMenu.contains(event.target)) {
+    closeWsFrameContextMenu();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.wsFrameContextMenu.classList.contains("hidden")) {
+    closeWsFrameContextMenu();
+  }
+});
+
+function sendWsFrameToReplay(frameIdx) {
+  const session = state.selectedWebsocketRecord;
+  if (!session || frameIdx == null) return;
+  const frame = session.frames[frameIdx];
+  if (!frame) return;
+
+  // Determine WS scheme
+  let wsScheme;
+  if (session.scheme === "wss" || session.scheme === "ws") {
+    wsScheme = session.scheme;
+  } else if (session.scheme === "https" || (session.host && session.host.endsWith(":443"))) {
+    wsScheme = "wss";
+  } else {
+    wsScheme = "ws";
+  }
+
+  // Build frame body
+  let body = frame.body_preview || "";
+  if (frame.body_encoding === "base64") {
+    try {
+      body = atob(frame.body_preview);
+    } catch {
+      body = frame.body_preview;
+    }
+  }
+
+  // Try to pretty-print JSON
+  try {
+    const parsed = JSON.parse(body);
+    body = JSON.stringify(parsed, null, 2);
+  } catch {
+    // not JSON, keep as-is
+  }
+
+  createWsReplayTab(session, wsScheme, body);
+}
+
+function createWsReplayTab(session, wsScheme, messageBody) {
+  const tab = {
+    id: `ws-replay-${Date.now()}`,
+    type: "websocket",
+    label: session.host,
+    targetHost: session.host.split(":")[0],
+    targetPort: session.host.includes(":") ? session.host.split(":")[1] : (wsScheme === "wss" ? "443" : "80"),
+    wsScheme: wsScheme,
+    path: session.path || "/",
+    requestText: messageBody,
+    requestHeaders: session.request?.headers || [],
+  };
+
+  state.replayTabs.push(tab);
+  state.activeReplayTabId = tab.id;
+  state.activeTool = "replay";
+  renderToolPanels();
+  renderReplayTabs();
+  renderWsReplay(tab);
+  scheduleWorkspaceStateSave();
+}
+
+function renderWsReplay(tab) {
+  if (!tab || tab.type !== "websocket") return;
+  // Sync the scheme dropdown if it exists
+  if (els.replaySchemeSelect) {
+    els.replaySchemeSelect.value = tab.wsScheme || "wss";
+  }
+  if (els.replayHostInput) {
+    els.replayHostInput.value = tab.targetHost || "";
+  }
+  if (els.replayPortInput) {
+    els.replayPortInput.value = tab.targetPort || "";
+  }
+  if (els.replayRequestEditor) {
+    els.replayRequestEditor.value = tab.requestText || "";
+  }
+  if (els.replayRequestHighlight) {
+    els.replayRequestHighlight.innerHTML = renderCodeHtml(tab.requestText || "", "pretty", "request");
+  }
+}
 
 /* ─── Replay request context menu ─── */
 
@@ -9022,9 +10207,16 @@ function replayRequestToCurl() {
   const parts = [`curl -X ${method}`];
 
   // Separate headers and body
-  const bodyIdx = rest.indexOf("");
-  const headerLines = bodyIdx === -1 ? rest.filter((l) => l.includes(":")) : rest.slice(0, bodyIdx).filter((l) => l.includes(":"));
-  const body = bodyIdx === -1 ? "" : rest.slice(bodyIdx + 1).join("\n");
+  let bodyIdx = rest.indexOf("");
+  if (bodyIdx === -1) {
+    for (let i = 0; i < rest.length; i++) {
+      const c = rest[i].charAt(0);
+      if (c === "{" || c === "[" || c === "<" || c === '"') { bodyIdx = i; break; }
+      if (!rest[i].includes(":")) { bodyIdx = i; break; }
+    }
+  }
+  const headerLines = (bodyIdx === -1 ? rest : rest.slice(0, bodyIdx)).filter((l) => l.includes(":"));
+  const body = bodyIdx === -1 ? "" : (rest[bodyIdx] === "" ? rest.slice(bodyIdx + 1) : rest.slice(bodyIdx)).join("\n");
 
   for (const h of headerLines) {
     const idx = h.indexOf(":");
@@ -9040,6 +10232,248 @@ function replayRequestToCurl() {
 
   parts.push(`'${url}'`);
   return parts.join(" \\\n  ");
+}
+
+function parseRequestForExport(rawText, scheme, host, port) {
+  const lines = String(rawText || "").replace(/\r\n/g, "\n").split("\n");
+  const [startLine = "GET / HTTP/1.1", ...rest] = lines;
+  const match = startLine.match(/^([A-Z]+)\s+(\S+)/i);
+  if (!match) return null;
+  const method = match[1];
+  const path = match[2];
+  const portSuffix = port && !(scheme === "https" && port === "443") && !(scheme === "http" && port === "80") ? `:${port}` : "";
+  const url = `${scheme}://${host}${portSuffix}${path}`;
+  let bodyIdx = rest.indexOf("");
+  if (bodyIdx === -1) {
+    for (let i = 0; i < rest.length; i++) {
+      const c = rest[i].charAt(0);
+      if (c === "{" || c === "[" || c === "<" || c === '"') { bodyIdx = i; break; }
+      if (!rest[i].includes(":")) { bodyIdx = i; break; }
+    }
+  }
+  const headerLines = bodyIdx === -1 ? rest : rest.slice(0, bodyIdx);
+  const body = bodyIdx === -1 ? "" : (rest[bodyIdx] === "" ? rest.slice(bodyIdx + 1) : rest.slice(bodyIdx)).join("\n");
+  const headers = headerLines.map((h) => {
+    const idx = h.indexOf(":");
+    return idx === -1 ? null : { name: h.slice(0, idx).trim(), value: h.slice(idx + 1).trim() };
+  }).filter(Boolean);
+  return { method, url, headers, body };
+}
+
+function requestToPython(parsed) {
+  if (!parsed) return "";
+  const esc = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const lines = [`import requests`, ""];
+  const hasBody = parsed.body.trim();
+  const headerObj = parsed.headers.filter((h) => h.name.toLowerCase() !== "host" && h.name.toLowerCase() !== "content-length");
+  if (headerObj.length) {
+    lines.push("headers = {");
+    for (const h of headerObj) lines.push(`    "${esc(h.name)}": "${esc(h.value)}",`);
+    lines.push("}");
+    lines.push("");
+  }
+  if (hasBody) {
+    lines.push(`data = """${parsed.body}"""`);
+    lines.push("");
+  }
+  const args = [`"${esc(parsed.url)}"`];
+  if (headerObj.length) args.push("headers=headers");
+  if (hasBody) args.push("data=data");
+  lines.push(`response = requests.${parsed.method.toLowerCase()}(${args.join(", ")})`);
+  lines.push(`print(response.status_code)`);
+  lines.push(`print(response.text)`);
+  return lines.join("\n");
+}
+
+function requestToFetch(parsed) {
+  if (!parsed) return "";
+  const esc = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const headerObj = parsed.headers.filter((h) => h.name.toLowerCase() !== "host" && h.name.toLowerCase() !== "content-length");
+  const opts = [];
+  if (parsed.method !== "GET") opts.push(`  method: "${parsed.method}"`);
+  if (headerObj.length) {
+    const hLines = headerObj.map((h) => `    "${esc(h.name)}": "${esc(h.value)}"`).join(",\n");
+    opts.push(`  headers: {\n${hLines}\n  }`);
+  }
+  if (parsed.body.trim()) {
+    opts.push(`  body: ${JSON.stringify(parsed.body)}`);
+  }
+  if (!opts.length) return `fetch("${esc(parsed.url)}")\n  .then(res => res.text())\n  .then(console.log);`;
+  return `fetch("${esc(parsed.url)}", {\n${opts.join(",\n")}\n})\n  .then(res => res.text())\n  .then(console.log);`;
+}
+
+function requestToPowerShell(parsed) {
+  if (!parsed) return "";
+  const esc = (s) => s.replace(/'/g, "''");
+  const parts = [`Invoke-WebRequest -Uri '${esc(parsed.url)}'`];
+  if (parsed.method !== "GET") parts.push(`-Method ${parsed.method}`);
+  const headerObj = parsed.headers.filter((h) => h.name.toLowerCase() !== "host" && h.name.toLowerCase() !== "content-length");
+  if (headerObj.length) {
+    const hLines = headerObj.map((h) => `'${esc(h.name)}'='${esc(h.value)}'`).join("; ");
+    parts.push(`-Headers @{${hLines}}`);
+  }
+  if (parsed.body.trim()) {
+    parts.push(`-Body '${esc(parsed.body)}'`);
+  }
+  return parts.join(" `\n  ");
+}
+
+function replayRequestToFormat(format) {
+  const tab = getActiveReplayTab();
+  if (!tab) return "";
+  const parsed = parseRequestForExport(tab.requestText, tab.targetScheme || "https", tab.targetHost || "localhost", tab.targetPort || "");
+  if (format === "curl") return replayRequestToCurl();
+  if (format === "python") return requestToPython(parsed);
+  if (format === "fetch") return requestToFetch(parsed);
+  if (format === "powershell") return requestToPowerShell(parsed);
+  return "";
+}
+
+async function historyRequestToFormat(transactionId, format) {
+  const response = await fetch(`/api/transactions/${transactionId}`);
+  if (!response.ok) return "";
+  const record = await response.json();
+  const rawText = buildRawRequest(record);
+  const scheme = record.scheme || "https";
+  const hostHeader = record.request?.headers?.find((h) => h.name.toLowerCase() === "host");
+  const host = hostHeader?.value || record.host || "";
+  const parsed = parseRequestForExport(rawText, scheme, host, "");
+  if (!parsed) return "";
+  if (format === "curl") {
+    const esc = (s) => s.replace(/'/g, "'\\''");
+    const parts = [`curl -X ${parsed.method}`];
+    for (const h of parsed.headers) parts.push(`-H '${h.name}: ${esc(h.value)}'`);
+    if (parsed.body.trim()) parts.push(`-d '${esc(parsed.body)}'`);
+    parts.push(`'${parsed.url}'`);
+    return parts.join(" \\\n  ");
+  }
+  if (format === "python") return requestToPython(parsed);
+  if (format === "fetch") return requestToFetch(parsed);
+  if (format === "powershell") return requestToPowerShell(parsed);
+  return "";
+}
+
+function copyTransactionUrl(transactionId) {
+  const item = state.items.find((i) => i.id === transactionId);
+  if (!item) return;
+  const scheme = item.scheme || "https";
+  const host = item.host || "";
+  const path = item.path || "/";
+  const url = `${scheme}://${host}${path}`;
+  navigator.clipboard.writeText(url).catch(() => {});
+}
+
+function copyReplayUrl() {
+  const tab = getActiveReplayTab();
+  if (!tab) return;
+  const scheme = tab.targetScheme || "https";
+  const host = tab.targetHost || "localhost";
+  const port = tab.targetPort || "";
+  const portSuffix = port && !(scheme === "https" && port === "443") && !(scheme === "http" && port === "80") ? `:${port}` : "";
+  const text = tab.requestText || "";
+  const match = text.match(/^[A-Z]+\s+(\S+)/i);
+  const path = match ? match[1] : "/";
+  const url = `${scheme}://${host}${portSuffix}${path}`;
+  navigator.clipboard.writeText(url).catch(() => {});
+}
+
+function parseCurlCommand(text) {
+  const normalized = text.replace(/\\\s*\n/g, " ").trim();
+  if (!normalized.toLowerCase().startsWith("curl")) return null;
+  const tokens = [];
+  let i = 4; // skip "curl"
+  while (i < normalized.length) {
+    while (i < normalized.length && normalized[i] === " ") i++;
+    if (i >= normalized.length) break;
+    let token = "";
+    const ch = normalized[i];
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      i++;
+      while (i < normalized.length && normalized[i] !== quote) {
+        if (normalized[i] === "\\" && quote === '"') { i++; token += normalized[i] || ""; }
+        else token += normalized[i];
+        i++;
+      }
+      i++; // skip closing quote
+    } else {
+      while (i < normalized.length && normalized[i] !== " ") { token += normalized[i]; i++; }
+    }
+    tokens.push(token);
+  }
+  let method = "GET";
+  let url = "";
+  const headers = [];
+  let body = "";
+  for (let t = 0; t < tokens.length; t++) {
+    const tok = tokens[t];
+    if (tok === "-X" || tok === "--request") { method = (tokens[++t] || "GET").toUpperCase(); }
+    else if (tok === "-H" || tok === "--header") {
+      const hVal = tokens[++t] || "";
+      const ci = hVal.indexOf(":");
+      if (ci > 0) headers.push({ name: hVal.slice(0, ci).trim(), value: hVal.slice(ci + 1).trim() });
+    }
+    else if (tok === "-d" || tok === "--data" || tok === "--data-raw" || tok === "--data-binary") { body = tokens[++t] || ""; if (!method || method === "GET") method = "POST"; }
+    else if (tok === "-u" || tok === "--user") {
+      const cred = tokens[++t] || "";
+      headers.push({ name: "Authorization", value: `Basic ${btoa(cred)}` });
+    }
+    else if (tok === "--compressed" || tok === "-k" || tok === "--insecure" || tok === "-s" || tok === "--silent" || tok === "-v" || tok === "--verbose" || tok === "-L" || tok === "--location") { /* skip flags */ }
+    else if (!tok.startsWith("-") && !url) { url = tok; }
+  }
+  if (!url) return null;
+  let scheme = "https";
+  let host = "";
+  let path = "/";
+  try {
+    const parsed = new URL(url);
+    scheme = parsed.protocol.replace(":", "");
+    host = parsed.host;
+    path = `${parsed.pathname || "/"}${parsed.search || ""}`;
+  } catch (_) { return null; }
+  const hasHost = headers.some((h) => h.name.toLowerCase() === "host");
+  if (!hasHost) headers.unshift({ name: "Host", value: host });
+  const headerText = headers.map((h) => `${h.name}: ${h.value}`).join("\n");
+  const requestText = body ? `${method} ${path} HTTP/1.1\n${headerText}\n\n${body}` : `${method} ${path} HTTP/1.1\n${headerText}`;
+  return { scheme, host, port: "", method, path, headers, body, requestText };
+}
+
+function openCurlImportModal() {
+  const modal = document.getElementById("curlImportModal");
+  document.getElementById("curlImportInput").value = "";
+  modal.classList.remove("hidden");
+  document.getElementById("curlImportInput").focus();
+}
+
+function closeCurlImportModal() {
+  document.getElementById("curlImportModal").classList.add("hidden");
+}
+
+function applyCurlImport() {
+  const text = document.getElementById("curlImportInput").value;
+  const result = parseCurlCommand(text);
+  if (!result) return;
+  const tab = createReplayTab();
+  tab.requestText = result.requestText;
+  tab.targetScheme = result.scheme;
+  tab.targetHost = result.host.replace(/:\d+$/, "");
+  tab.targetPort = result.host.includes(":") ? result.host.split(":").pop() : "";
+  tab.baseRequest = {
+    scheme: result.scheme,
+    host: result.host,
+    method: result.method,
+    path: result.path,
+    headers: result.headers,
+    body: result.body,
+    body_encoding: "utf8",
+    preview_truncated: false,
+  };
+  state.replayTabs.push(tab);
+  state.activeReplayTabId = tab.id;
+  state.activeTool = "replay";
+  closeCurlImportModal();
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
 }
 
 function initReplayContextMenu() {
@@ -9074,9 +10508,14 @@ function initReplayContextMenu() {
         setReplayHeader("Content-Type", "application/json");
       } else if (action === "add-content-type-form") {
         setReplayHeader("Content-Type", "application/x-www-form-urlencoded");
-      } else if (action === "copy-as-curl") {
-        const curl = replayRequestToCurl();
-        navigator.clipboard.writeText(curl).catch(() => {});
+      } else if (action === "copy-url") {
+        copyReplayUrl();
+      } else if (action === "copy-as-curl" || action === "copy-as-python" || action === "copy-as-fetch" || action === "copy-as-powershell") {
+        const format = action.replace("copy-as-", "");
+        const text = replayRequestToFormat(format);
+        navigator.clipboard.writeText(text).catch(() => {});
+      } else if (action === "import-curl") {
+        openCurlImportModal();
       }
 
       closeReplayContextMenu();
@@ -9118,3 +10557,147 @@ function setReplayHeader(name, value) {
   updateReplaySearchPane("request", tab.requestText);
   scheduleWorkspaceStateSave();
 }
+
+/* ─── Code-view line keyboard navigation + cursor + Cmd+C ─── */
+
+(function initCodeViewLineNav() {
+  const READONLY_ATTR = "data-readonly-editable";
+
+  // Make read-only code-views show a text cursor by enabling contenteditable
+  // but blocking all mutations so the content stays untouched.
+  function enableReadonlyCaret(view) {
+    if (view.getAttribute(READONLY_ATTR)) return;
+    // Skip views that are already editable for editing purposes (replay editor, ws message)
+    if (view.dataset.placeholder) return;
+    view.setAttribute("contenteditable", "true");
+    view.setAttribute(READONLY_ATTR, "1");
+    view.addEventListener("beforeinput", (e) => e.preventDefault());
+    view.addEventListener("paste", (e) => e.preventDefault());
+    view.addEventListener("drop", (e) => e.preventDefault());
+  }
+
+  // Auto-enable for all code-view / simple-code-view with tabindex
+  function initAllReadonlyCarets() {
+    document.querySelectorAll(".code-view[tabindex], .simple-code-view[tabindex]").forEach((v) => {
+      if (!v.dataset.placeholder) enableReadonlyCaret(v);
+    });
+  }
+  // Run once at load and observe DOM for late-added panels
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initAllReadonlyCarets);
+  } else {
+    initAllReadonlyCarets();
+  }
+  // Expose helpers so render functions can re-enable after innerHTML swap
+  // and preserve line focus across re-renders.
+  window._enableReadonlyCaret = enableReadonlyCaret;
+
+  // Save current focus state for a code-view (call before innerHTML swap)
+  window._saveCodeViewFocus = function(view) {
+    if (!view) return null;
+    const focused = view.querySelector(".code-line.line-focus");
+    if (!focused) return null;
+    const lines = getCodeLines(view);
+    const idx = lines.indexOf(focused);
+    const wasActive = (document.activeElement === view);
+    return { viewId: view.id, lineIndex: idx, wasActive };
+  };
+
+  // Restore focus state after innerHTML swap
+  window._restoreCodeViewFocus = function(view, saved) {
+    if (!view || !saved || saved.lineIndex < 0) return;
+    enableReadonlyCaret(view);
+    const lines = getCodeLines(view);
+    if (saved.lineIndex < lines.length) {
+      setFocus(view, lines[saved.lineIndex], true);
+      // Don't re-focus the view — it would steal focus from the history table
+    }
+  };
+
+  function isReadonlyView(el) {
+    return el && el.getAttribute(READONLY_ATTR) === "1";
+  }
+
+  function getCodeLines(view) {
+    return Array.from(view.querySelectorAll(".code-line"));
+  }
+
+  function clearFocus(view) {
+    const prev = view.querySelector(".code-line.line-focus");
+    if (prev) prev.classList.remove("line-focus");
+  }
+
+  function setFocus(view, line, moveCaret) {
+    clearFocus(view);
+    line.classList.add("line-focus");
+    line.scrollIntoView({ block: "nearest" });
+    // Only move caret on arrow-key navigation or restore; clicks keep natural position
+    if (moveCaret) {
+      try {
+        const sel = window.getSelection();
+        const textNode = line.firstChild;
+        if (sel && textNode) {
+          const range = document.createRange();
+          range.setStart(textNode, 0);
+          range.collapse(true);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      } catch (_) { /* ignore if range fails */ }
+    }
+  }
+
+  function focusedIndex(lines) {
+    return lines.findIndex((l) => l.classList.contains("line-focus"));
+  }
+
+  // Click: set line focus and ensure the view has keyboard focus
+  document.addEventListener("click", (event) => {
+    const view = event.target.closest(".code-view, .simple-code-view");
+    if (!view || !isReadonlyView(view)) return;
+    const line = event.target.closest(".code-line");
+    if (line && view.contains(line)) {
+      setFocus(view, line, false);
+      if (document.activeElement !== view) view.focus({ preventScroll: true });
+    }
+  });
+
+  // ArrowUp/Down: line navigation
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    let view = document.activeElement;
+    // Walk up to the code-view if focus is on an inner element
+    if (view && !isReadonlyView(view)) {
+      view = view.closest?.(".code-view, .simple-code-view");
+    }
+    if (!view || !isReadonlyView(view)) return;
+    const lines = getCodeLines(view);
+    if (!lines.length) return;
+    event.preventDefault();
+    let idx = focusedIndex(lines);
+    if (idx === -1) {
+      setFocus(view, lines[0], true);
+      return;
+    }
+    const next = event.key === "ArrowDown" ? idx + 1 : idx - 1;
+    if (next >= 0 && next < lines.length) {
+      setFocus(view, lines[next], true);
+    }
+  });
+
+  // Cmd+C / Ctrl+C: copy focused line when no text selection
+  document.addEventListener("keydown", (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "c") return;
+    let view = document.activeElement;
+    if (view && !isReadonlyView(view)) {
+      view = view.closest?.(".code-view, .simple-code-view");
+    }
+    if (!view || !isReadonlyView(view)) return;
+    const sel = window.getSelection();
+    if (sel && sel.toString().length > 0) return; // native copy handles selected text
+    const focused = view.querySelector(".code-line.line-focus");
+    if (!focused) return;
+    event.preventDefault();
+    navigator.clipboard.writeText(focused.textContent).catch(() => {});
+  });
+})();

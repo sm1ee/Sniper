@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sniper-ui",
+      "runtimeExecutable": "/Users/kakao/Desktop/git/Sniper/.claude/worktrees/reverent-pike/target/release/sniper-preview",
+      "runtimeArgs": [],
+      "port": 3000,
+      "autoPort": false
+    }
+  ]
+}
