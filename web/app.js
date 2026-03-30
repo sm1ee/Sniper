@@ -1053,6 +1053,44 @@ function bindEvents() {
     localStorage.setItem("sniper_auto_content_length", e.target.checked);
   });
 
+  // Copy dropdown toggles
+  document.querySelectorAll(".copy-trigger").forEach((trigger) => {
+    trigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const menu = trigger.nextElementSibling;
+      const wasHidden = menu.classList.contains("hidden");
+      document.querySelectorAll(".copy-dropdown-menu").forEach((m) => m.classList.add("hidden"));
+      if (wasHidden) menu.classList.remove("hidden");
+    });
+  });
+  document.addEventListener("click", () => {
+    document.querySelectorAll(".copy-dropdown-menu").forEach((m) => m.classList.add("hidden"));
+  });
+
+  // Request copy actions
+  document.getElementById("requestCopyMenu")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-copy-format]");
+    if (!btn || !state.selectedId) return;
+    const format = btn.dataset.copyFormat;
+    if (format === "url") {
+      copySelectedTransactionUrl();
+    } else {
+      historyRequestToFormat(state.selectedId, format).then((text) => {
+        if (text) { navigator.clipboard.writeText(text).catch(() => {}); showToast(`Copied as ${format}`); }
+      });
+    }
+    document.getElementById("requestCopyMenu").classList.add("hidden");
+  });
+
+  // Response copy actions
+  document.getElementById("responseCopyMenu")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-copy-format]");
+    if (!btn || !state.selectedRecord) return;
+    const format = btn.dataset.copyFormat;
+    copyResponseContent(format);
+    document.getElementById("responseCopyMenu").classList.add("hidden");
+  });
+
   els.sendReplayButton.addEventListener("click", () => {
     sendReplay().catch((error) => console.error(error));
   });
@@ -10355,6 +10393,35 @@ function replayRequestToFormat(format) {
   if (format === "fetch") return requestToFetch(parsed);
   if (format === "powershell") return requestToPowerShell(parsed);
   return "";
+}
+
+function copySelectedTransactionUrl() {
+  const record = state.selectedRecord;
+  if (!record) return;
+  const scheme = record.scheme || "https";
+  const host = record.host || "";
+  const path = record.path || "/";
+  const url = `${scheme}://${host}${path}`;
+  navigator.clipboard.writeText(url).catch(() => {});
+  showToast("Copied URL");
+}
+
+function copyResponseContent(format) {
+  const record = state.selectedRecord;
+  if (!record?.response) return;
+  let text = "";
+  if (format === "response-headers") {
+    text = `HTTP/1.1 ${record.status || 200}\r\n`;
+    for (const h of record.response.headers || []) text += `${h.name}: ${h.value}\r\n`;
+  } else if (format === "response-body") {
+    text = record.response.body_encoding === "base64"
+      ? atob(record.response.body_preview || "")
+      : (record.response.body_preview || "");
+  } else {
+    text = buildRawResponse(record);
+  }
+  navigator.clipboard.writeText(text).catch(() => {});
+  showToast(format === "response-headers" ? "Copied headers" : format === "response-body" ? "Copied body" : "Copied raw response");
 }
 
 async function historyRequestToFormat(transactionId, format) {

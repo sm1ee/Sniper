@@ -200,6 +200,16 @@
                   <button class="view-tab active" data-target="request" data-view="pretty">Pretty</button>
                   <button class="view-tab" data-target="request" data-view="raw">Raw</button>
                   <button class="view-tab" data-target="request" data-view="hex">Hex</button>
+                  <div class="copy-dropdown" id="requestCopyDropdown">
+                    <button class="view-tab copy-trigger" type="button">Copy ▾</button>
+                    <div class="copy-dropdown-menu hidden" id="requestCopyMenu">
+                      <button type="button" data-copy-format="url">Copy URL</button>
+                      <button type="button" data-copy-format="curl">Copy as cURL</button>
+                      <button type="button" data-copy-format="python">Copy as Python</button>
+                      <button type="button" data-copy-format="fetch">Copy as fetch</button>
+                      <button type="button" data-copy-format="powershell">Copy as PowerShell</button>
+                    </div>
+                  </div>
                 </div>
               </header>
               <div class="editor-shell">
@@ -229,6 +239,14 @@
                   <button class="view-tab active" data-target="response" data-view="pretty">Pretty</button>
                   <button class="view-tab" data-target="response" data-view="raw">Raw</button>
                   <button class="view-tab" data-target="response" data-view="hex">Hex</button>
+                  <div class="copy-dropdown" id="responseCopyDropdown">
+                    <button class="view-tab copy-trigger" type="button">Copy ▾</button>
+                    <div class="copy-dropdown-menu hidden" id="responseCopyMenu">
+                      <button type="button" data-copy-format="response-headers">Copy Headers</button>
+                      <button type="button" data-copy-format="response-body">Copy Body</button>
+                      <button type="button" data-copy-format="response-raw">Copy Raw</button>
+                    </div>
+                  </div>
                 </div>
               </header>
               <div class="editor-shell">
