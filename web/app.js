@@ -1079,7 +1079,7 @@ function bindEvents() {
       else if (action.startsWith("copy-response-")) copyResponseContent(action.replace("copy-", ""));
       else if (action.startsWith("copy-as-")) {
         const fmt = action.replace("copy-as-", "");
-        historyRequestToFormat(state.selectedId, fmt).then(t => { if (t) { navigator.clipboard.writeText(t); showToast(`Copied as ${fmt}`); } });
+        historyRequestToFormat(state.selectedId, fmt).then(t => { if (t) { copyTextToClipboard(t).then(() => showToast(`Copied as ${fmt}`)); } });
       }
     });
   }
@@ -10052,7 +10052,7 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
     } else if (action?.startsWith("copy-as-")) {
       const format = action.replace("copy-as-", "");
       historyRequestToFormat(contextMenuTargetId, format).then((text) => {
-        if (text) navigator.clipboard.writeText(text).catch(() => {});
+        if (text) copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => {});
       });
     } else if (action === "compare-set-base") {
       setCompareBase(contextMenuTargetId);
@@ -10395,8 +10395,7 @@ function copySelectedTransactionUrl() {
   const host = record.host || "";
   const path = record.path || "/";
   const url = `${scheme}://${host}${path}`;
-  navigator.clipboard.writeText(url).catch(() => {});
-  showToast("Copied URL");
+  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => {});
 }
 
 function copyResponseContent(format) {
@@ -10413,8 +10412,8 @@ function copyResponseContent(format) {
   } else {
     text = buildRawResponse(record);
   }
-  navigator.clipboard.writeText(text).catch(() => {});
-  showToast(format === "response-headers" ? "Copied headers" : format === "response-body" ? "Copied body" : "Copied raw response");
+  const label = format === "response-headers" ? "Copied headers" : format === "response-body" ? "Copied body" : "Copied raw response";
+  copyTextToClipboard(text).then(() => showToast(label)).catch(() => {});
 }
 
 async function historyRequestToFormat(transactionId, format) {
@@ -10448,7 +10447,7 @@ function copyTransactionUrl(transactionId) {
   const host = item.host || "";
   const path = item.path || "/";
   const url = `${scheme}://${host}${path}`;
-  navigator.clipboard.writeText(url).catch(() => {});
+  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => {});
 }
 
 function copyReplayUrl() {
@@ -10462,7 +10461,7 @@ function copyReplayUrl() {
   const match = text.match(/^[A-Z]+\s+(\S+)/i);
   const path = match ? match[1] : "/";
   const url = `${scheme}://${host}${portSuffix}${path}`;
-  navigator.clipboard.writeText(url).catch(() => {});
+  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => {});
 }
 
 function parseCurlCommand(text) {
@@ -10601,7 +10600,7 @@ function initReplayContextMenu() {
       } else if (action === "copy-as-curl" || action === "copy-as-python" || action === "copy-as-fetch" || action === "copy-as-powershell") {
         const format = action.replace("copy-as-", "");
         const text = replayRequestToFormat(format);
-        navigator.clipboard.writeText(text).catch(() => {});
+        copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => {});
       } else if (action === "import-curl") {
         openCurlImportModal();
       }
