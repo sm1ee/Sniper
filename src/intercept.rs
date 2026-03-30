@@ -315,6 +315,7 @@ pub struct ResponseInterceptSummary {
 
 #[derive(Clone, Debug)]
 pub enum ResponseInterceptResolution {
+    PassThrough,
     Forward(EditableResponse),
     Drop,
 }

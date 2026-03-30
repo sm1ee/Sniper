@@ -1516,6 +1516,27 @@
       <button class="context-menu-item" id="wsFrameToReplayBtn" type="button">Send to Replay</button>
     </div>
 
+    <div class="context-menu hidden" id="paneContextMenu">
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-pane-action="copy-url">Copy URL</button>
+        <button class="context-menu-item" data-pane-action="copy-as-curl">Copy as cURL</button>
+        <button class="context-menu-item" data-pane-action="copy-as-python">Copy as Python</button>
+        <button class="context-menu-item" data-pane-action="copy-as-fetch">Copy as fetch</button>
+        <button class="context-menu-item" data-pane-action="copy-as-powershell">Copy as PowerShell</button>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-pane-action="send-to-replay">Send to Replay</button>
+        <button class="context-menu-item" data-pane-action="send-to-fuzzer">Send to Fuzzer</button>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-pane-action="copy-response-headers">Copy Response Headers</button>
+        <button class="context-menu-item" data-pane-action="copy-response-body">Copy Response Body</button>
+        <button class="context-menu-item" data-pane-action="copy-response-raw">Copy Response Raw</button>
+      </div>
+    </div>
+
     <script src="/app.js" defer></script>
   </body>
 </html>

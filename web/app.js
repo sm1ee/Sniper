@@ -1053,6 +1053,37 @@ function bindEvents() {
     localStorage.setItem("sniper_auto_content_length", e.target.checked);
   });
 
+  // Pane context menu (right-click on Request/Response code-view)
+  const paneCtx = document.getElementById("paneContextMenu");
+  if (paneCtx) {
+    [els.requestView, els.responseView].forEach((view) => {
+      if (!view) return;
+      view.addEventListener("contextmenu", (e) => {
+        if (!state.selectedId) return;
+        e.preventDefault();
+        paneCtx.classList.remove("hidden");
+        const mw = paneCtx.offsetWidth, mh = paneCtx.offsetHeight;
+        paneCtx.style.left = `${Math.min(e.clientX, window.innerWidth - mw - 8)}px`;
+        paneCtx.style.top = `${Math.min(e.clientY, window.innerHeight - mh - 8)}px`;
+      });
+    });
+    document.addEventListener("click", () => paneCtx.classList.add("hidden"));
+    paneCtx.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-pane-action]");
+      if (!btn || !state.selectedId) return;
+      const action = btn.dataset.paneAction;
+      paneCtx.classList.add("hidden");
+      if (action === "copy-url") copySelectedTransactionUrl();
+      else if (action === "send-to-replay") openReplayFromSelection().catch(console.error);
+      else if (action === "send-to-fuzzer") openFuzzerFromSelection().catch(console.error);
+      else if (action.startsWith("copy-response-")) copyResponseContent(action.replace("copy-", ""));
+      else if (action.startsWith("copy-as-")) {
+        const fmt = action.replace("copy-as-", "");
+        historyRequestToFormat(state.selectedId, fmt).then(t => { if (t) { navigator.clipboard.writeText(t); showToast(`Copied as ${fmt}`); } });
+      }
+    });
+  }
+
   els.sendReplayButton.addEventListener("click", () => {
     sendReplay().catch((error) => console.error(error));
   });
@@ -10355,6 +10386,35 @@ function replayRequestToFormat(format) {
   if (format === "fetch") return requestToFetch(parsed);
   if (format === "powershell") return requestToPowerShell(parsed);
   return "";
+}
+
+function copySelectedTransactionUrl() {
+  const record = state.selectedRecord;
+  if (!record) return;
+  const scheme = record.scheme || "https";
+  const host = record.host || "";
+  const path = record.path || "/";
+  const url = `${scheme}://${host}${path}`;
+  navigator.clipboard.writeText(url).catch(() => {});
+  showToast("Copied URL");
+}
+
+function copyResponseContent(format) {
+  const record = state.selectedRecord;
+  if (!record?.response) return;
+  let text = "";
+  if (format === "response-headers") {
+    text = `HTTP/1.1 ${record.status || 200}\r\n`;
+    for (const h of record.response.headers || []) text += `${h.name}: ${h.value}\r\n`;
+  } else if (format === "response-body") {
+    text = record.response.body_encoding === "base64"
+      ? atob(record.response.body_preview || "")
+      : (record.response.body_preview || "");
+  } else {
+    text = buildRawResponse(record);
+  }
+  navigator.clipboard.writeText(text).catch(() => {});
+  showToast(format === "response-headers" ? "Copied headers" : format === "response-body" ? "Copied body" : "Copied raw response");
 }
 
 async function historyRequestToFormat(transactionId, format) {

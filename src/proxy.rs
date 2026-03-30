@@ -1054,6 +1054,11 @@ async fn forward_http_request(
             )
             .await;
             match intercepted {
+                ResponseInterceptResolution::PassThrough => {
+                    // No intercept — use original raw bytes directly to avoid
+                    // lossy UTF-8 conversion that corrupts gzip/br bodies.
+                    rebuild_response(response.headers, response.status, response.body)
+                }
                 ResponseInterceptResolution::Forward(edited) => {
                     let headers = header_map_from_records(&edited.headers);
                     let body = Bytes::from(edited.body_bytes());
@@ -1397,22 +1402,13 @@ async fn maybe_intercept_response(
     body: &Bytes,
 ) -> ResponseInterceptResolution {
     if !session.runtime.intercept_enabled().await {
-        return ResponseInterceptResolution::Forward(
-            EditableResponse::from_status_headers_body(status.as_u16(), headers, body),
-        );
+        return ResponseInterceptResolution::PassThrough;
     }
 
-    if special_host::is_special_host(&record.host) {
-        return ResponseInterceptResolution::Forward(
-            EditableResponse::from_status_headers_body(status.as_u16(), headers, body),
-        );
-    }
-    if session.runtime.intercept_scope_only().await
-        && !session.runtime.is_in_scope(&record.host).await
+    if special_host::is_special_host(&record.host)
+        || !session.runtime.is_in_scope(&record.host).await
     {
-        return ResponseInterceptResolution::Forward(
-            EditableResponse::from_status_headers_body(status.as_u16(), headers, body),
-        );
+        return ResponseInterceptResolution::PassThrough;
     }
 
     let editable_request = record.editable_request();
@@ -1421,9 +1417,7 @@ async fn maybe_intercept_response(
         .matches_any_response(&editable_request)
         .await
     {
-        return ResponseInterceptResolution::Forward(
-            EditableResponse::from_status_headers_body(status.as_u16(), headers, body),
-        );
+        return ResponseInterceptResolution::PassThrough;
     }
 
     session
