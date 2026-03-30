@@ -1053,43 +1053,36 @@ function bindEvents() {
     localStorage.setItem("sniper_auto_content_length", e.target.checked);
   });
 
-  // Copy dropdown toggles
-  document.querySelectorAll(".copy-trigger").forEach((trigger) => {
-    trigger.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const menu = trigger.nextElementSibling;
-      const wasHidden = menu.classList.contains("hidden");
-      document.querySelectorAll(".copy-dropdown-menu").forEach((m) => m.classList.add("hidden"));
-      if (wasHidden) menu.classList.remove("hidden");
-    });
-  });
-  document.addEventListener("click", () => {
-    document.querySelectorAll(".copy-dropdown-menu").forEach((m) => m.classList.add("hidden"));
-  });
-
-  // Request copy actions
-  document.getElementById("requestCopyMenu")?.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-copy-format]");
-    if (!btn || !state.selectedId) return;
-    const format = btn.dataset.copyFormat;
-    if (format === "url") {
-      copySelectedTransactionUrl();
-    } else {
-      historyRequestToFormat(state.selectedId, format).then((text) => {
-        if (text) { navigator.clipboard.writeText(text).catch(() => {}); showToast(`Copied as ${format}`); }
+  // Pane context menu (right-click on Request/Response code-view)
+  const paneCtx = document.getElementById("paneContextMenu");
+  if (paneCtx) {
+    [els.requestView, els.responseView].forEach((view) => {
+      if (!view) return;
+      view.addEventListener("contextmenu", (e) => {
+        if (!state.selectedId) return;
+        e.preventDefault();
+        paneCtx.classList.remove("hidden");
+        const mw = paneCtx.offsetWidth, mh = paneCtx.offsetHeight;
+        paneCtx.style.left = `${Math.min(e.clientX, window.innerWidth - mw - 8)}px`;
+        paneCtx.style.top = `${Math.min(e.clientY, window.innerHeight - mh - 8)}px`;
       });
-    }
-    document.getElementById("requestCopyMenu").classList.add("hidden");
-  });
-
-  // Response copy actions
-  document.getElementById("responseCopyMenu")?.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-copy-format]");
-    if (!btn || !state.selectedRecord) return;
-    const format = btn.dataset.copyFormat;
-    copyResponseContent(format);
-    document.getElementById("responseCopyMenu").classList.add("hidden");
-  });
+    });
+    document.addEventListener("click", () => paneCtx.classList.add("hidden"));
+    paneCtx.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-pane-action]");
+      if (!btn || !state.selectedId) return;
+      const action = btn.dataset.paneAction;
+      paneCtx.classList.add("hidden");
+      if (action === "copy-url") copySelectedTransactionUrl();
+      else if (action === "send-to-replay") openReplayFromSelection().catch(console.error);
+      else if (action === "send-to-fuzzer") openFuzzerFromSelection().catch(console.error);
+      else if (action.startsWith("copy-response-")) copyResponseContent(action.replace("copy-", ""));
+      else if (action.startsWith("copy-as-")) {
+        const fmt = action.replace("copy-as-", "");
+        historyRequestToFormat(state.selectedId, fmt).then(t => { if (t) { navigator.clipboard.writeText(t); showToast(`Copied as ${fmt}`); } });
+      }
+    });
+  }
 
   els.sendReplayButton.addEventListener("click", () => {
     sendReplay().catch((error) => console.error(error));

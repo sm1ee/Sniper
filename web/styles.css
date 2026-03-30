@@ -1844,47 +1844,6 @@ code {
   gap: 10px;
 }
 
-.copy-dropdown {
-  position: relative;
-  margin-left: 4px;
-}
-
-.copy-trigger {
-  font-size: var(--font-xs);
-}
-
-.copy-dropdown-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 50;
-  min-width: 180px;
-  margin-top: 4px;
-  padding: 4px 0;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--panel);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-}
-
-.copy-dropdown-menu button {
-  display: block;
-  width: 100%;
-  padding: 7px 14px;
-  border: none;
-  background: transparent;
-  color: var(--text-soft);
-  font-size: var(--font-sm);
-  font-family: var(--sans);
-  text-align: left;
-  cursor: pointer;
-}
-
-.copy-dropdown-menu button:hover {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text);
-}
-
 .view-tab {
   position: relative;
   padding: 6px 0;
