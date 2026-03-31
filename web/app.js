@@ -4209,9 +4209,14 @@ async function copyTextToClipboard(text) {
     return;
   }
 
+  // Try modern Clipboard API first, fall back to textarea+execCommand
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_) {
+      // Clipboard API rejected (common in WKWebView) — fall through to fallback
+    }
   }
 
   const textarea = document.createElement("textarea");
