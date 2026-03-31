@@ -10785,6 +10785,6 @@ function setReplayHeader(name, value) {
     const focused = view.querySelector(".code-line.line-focus");
     if (!focused) return;
     event.preventDefault();
-    navigator.clipboard.writeText(focused.textContent).catch(() => {});
+    copyTextToClipboard(focused.textContent).catch(() => {});
   });
 })();
