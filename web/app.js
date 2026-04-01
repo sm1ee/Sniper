@@ -1079,7 +1079,8 @@ function bindEvents() {
       else if (action.startsWith("copy-response-")) copyResponseContent(action.replace("copy-", ""));
       else if (action.startsWith("copy-as-")) {
         const fmt = action.replace("copy-as-", "");
-        historyRequestToFormat(state.selectedId, fmt).then(t => { if (t) { copyTextToClipboard(t).then(() => showToast(`Copied as ${fmt}`)); } });
+        const text = selectedRecordToFormat(fmt);
+        if (text) { copyTextToClipboard(text); showToast(`Copied as ${fmt}`); }
       }
     });
   }
@@ -10056,9 +10057,15 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
       copyTransactionUrl(contextMenuTargetId);
     } else if (action?.startsWith("copy-as-")) {
       const format = action.replace("copy-as-", "");
-      historyRequestToFormat(contextMenuTargetId, format).then((text) => {
-        if (text) copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => {});
-      });
+      // Use selectedRecord if available (sync, preserves user gesture for clipboard)
+      if (state.selectedRecord && state.selectedRecord.id === contextMenuTargetId) {
+        const text = selectedRecordToFormat(format);
+        if (text) { copyTextToClipboard(text); showToast(`Copied as ${format}`); }
+      } else {
+        historyRequestToFormat(contextMenuTargetId, format).then((text) => {
+          if (text) { copyTextToClipboard(text); showToast(`Copied as ${format}`); }
+        });
+      }
     } else if (action === "compare-set-base") {
       setCompareBase(contextMenuTargetId);
     } else if (action === "compare-with-base") {
@@ -10400,7 +10407,8 @@ function copySelectedTransactionUrl() {
   const host = record.host || "";
   const path = record.path || "/";
   const url = `${scheme}://${host}${path}`;
-  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => {});
+  copyTextToClipboard(url);
+  showToast("Copied URL");
 }
 
 function copyResponseContent(format) {
@@ -10418,7 +10426,32 @@ function copyResponseContent(format) {
     text = buildRawResponse(record);
   }
   const label = format === "response-headers" ? "Copied headers" : format === "response-body" ? "Copied body" : "Copied raw response";
-  copyTextToClipboard(text).then(() => showToast(label)).catch(() => {});
+  copyTextToClipboard(text);
+  showToast(label);
+}
+
+// Synchronous version using already-loaded selectedRecord (preserves user gesture for clipboard)
+function selectedRecordToFormat(format) {
+  const record = state.selectedRecord;
+  if (!record) return "";
+  const rawText = buildRawRequest(record);
+  const scheme = record.scheme || "https";
+  const hostHeader = record.request?.headers?.find((h) => h.name.toLowerCase() === "host");
+  const host = hostHeader?.value || record.host || "";
+  const parsed = parseRequestForExport(rawText, scheme, host, "");
+  if (!parsed) return "";
+  if (format === "curl") {
+    const esc = (s) => s.replace(/'/g, "'\\''");
+    const parts = [`curl -X ${parsed.method}`];
+    for (const h of parsed.headers) parts.push(`-H '${h.name}: ${esc(h.value)}'`);
+    if (parsed.body.trim()) parts.push(`-d '${esc(parsed.body)}'`);
+    parts.push(`'${parsed.url}'`);
+    return parts.join(" \\\n  ");
+  }
+  if (format === "python") return requestToPython(parsed);
+  if (format === "fetch") return requestToFetch(parsed);
+  if (format === "powershell") return requestToPowerShell(parsed);
+  return "";
 }
 
 async function historyRequestToFormat(transactionId, format) {
