@@ -10177,25 +10177,7 @@ function sendWsFrameToReplay(frameIdx) {
   renderToolPanels();
 }
 
-function renderWsReplay(tab) {
-  if (!tab || tab.type !== "websocket") return;
-  // Sync the scheme dropdown if it exists
-  if (els.replaySchemeSelect) {
-    els.replaySchemeSelect.value = tab.wsScheme || "wss";
-  }
-  if (els.replayHostInput) {
-    els.replayHostInput.value = tab.targetHost || "";
-  }
-  if (els.replayPortInput) {
-    els.replayPortInput.value = tab.targetPort || "";
-  }
-  if (els.replayRequestEditor) {
-    els.replayRequestEditor.value = tab.requestText || "";
-  }
-  if (els.replayRequestHighlight) {
-    els.replayRequestHighlight.innerHTML = renderCodeHtml(tab.requestText || "", "pretty", "request");
-  }
-}
+// duplicate removed — renderWsReplay() at line ~9443 is the canonical version
 
 /* ─── Replay request context menu ─── */
 
