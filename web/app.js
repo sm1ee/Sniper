@@ -1079,7 +1079,8 @@ function bindEvents() {
       else if (action.startsWith("copy-response-")) copyResponseContent(action.replace("copy-", ""));
       else if (action.startsWith("copy-as-")) {
         const fmt = action.replace("copy-as-", "");
-        historyRequestToFormat(state.selectedId, fmt).then(t => { if (t) { navigator.clipboard.writeText(t); showToast(`Copied as ${fmt}`); } });
+        const text = selectedRecordToFormat(fmt);
+        if (text) { copyTextToClipboard(text); showToast(`Copied as ${fmt}`); }
       }
     });
   }
@@ -4209,9 +4210,14 @@ async function copyTextToClipboard(text) {
     return;
   }
 
+  // Try modern Clipboard API first, fall back to textarea+execCommand
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_) {
+      // Clipboard API rejected (common in WKWebView) — fall through to fallback
+    }
   }
 
   const textarea = document.createElement("textarea");
@@ -10051,9 +10057,15 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
       copyTransactionUrl(contextMenuTargetId);
     } else if (action?.startsWith("copy-as-")) {
       const format = action.replace("copy-as-", "");
-      historyRequestToFormat(contextMenuTargetId, format).then((text) => {
-        if (text) navigator.clipboard.writeText(text).catch(() => {});
-      });
+      // Use selectedRecord if available (sync, preserves user gesture for clipboard)
+      if (state.selectedRecord && state.selectedRecord.id === contextMenuTargetId) {
+        const text = selectedRecordToFormat(format);
+        if (text) { copyTextToClipboard(text); showToast(`Copied as ${format}`); }
+      } else {
+        historyRequestToFormat(contextMenuTargetId, format).then((text) => {
+          if (text) { copyTextToClipboard(text); showToast(`Copied as ${format}`); }
+        });
+      }
     } else if (action === "compare-set-base") {
       setCompareBase(contextMenuTargetId);
     } else if (action === "compare-with-base") {
@@ -10152,50 +10164,20 @@ function sendWsFrameToReplay(frameIdx) {
     // not JSON, keep as-is
   }
 
-  createWsReplayTab(session, wsScheme, body);
-}
-
-function createWsReplayTab(session, wsScheme, messageBody) {
-  const tab = {
-    id: `ws-replay-${Date.now()}`,
-    type: "websocket",
-    label: session.host,
-    targetHost: session.host.split(":")[0],
-    targetPort: session.host.includes(":") ? session.host.split(":")[1] : (wsScheme === "wss" ? "443" : "80"),
-    wsScheme: wsScheme,
+  const host = session.host?.replace(/:443$|:80$/, "") || "";
+  const port = session.host?.includes(":") ? parseInt(session.host.split(":").pop()) : (wsScheme === "wss" ? 443 : 80);
+  createWsReplayTab({
+    scheme: wsScheme,
+    host,
+    port,
     path: session.path || "/",
-    requestText: messageBody,
-    requestHeaders: session.request?.headers || [],
-  };
-
-  state.replayTabs.push(tab);
-  state.activeReplayTabId = tab.id;
+    headers: session.request?.headers || [],
+  });
   state.activeTool = "replay";
   renderToolPanels();
-  renderReplayTabs();
-  renderWsReplay(tab);
-  scheduleWorkspaceStateSave();
 }
 
-function renderWsReplay(tab) {
-  if (!tab || tab.type !== "websocket") return;
-  // Sync the scheme dropdown if it exists
-  if (els.replaySchemeSelect) {
-    els.replaySchemeSelect.value = tab.wsScheme || "wss";
-  }
-  if (els.replayHostInput) {
-    els.replayHostInput.value = tab.targetHost || "";
-  }
-  if (els.replayPortInput) {
-    els.replayPortInput.value = tab.targetPort || "";
-  }
-  if (els.replayRequestEditor) {
-    els.replayRequestEditor.value = tab.requestText || "";
-  }
-  if (els.replayRequestHighlight) {
-    els.replayRequestHighlight.innerHTML = renderCodeHtml(tab.requestText || "", "pretty", "request");
-  }
-}
+// duplicate removed — renderWsReplay() at line ~9443 is the canonical version
 
 /* ─── Replay request context menu ─── */
 
@@ -10395,7 +10377,7 @@ function copySelectedTransactionUrl() {
   const host = record.host || "";
   const path = record.path || "/";
   const url = `${scheme}://${host}${path}`;
-  navigator.clipboard.writeText(url).catch(() => {});
+  copyTextToClipboard(url);
   showToast("Copied URL");
 }
 
@@ -10413,8 +10395,33 @@ function copyResponseContent(format) {
   } else {
     text = buildRawResponse(record);
   }
-  navigator.clipboard.writeText(text).catch(() => {});
-  showToast(format === "response-headers" ? "Copied headers" : format === "response-body" ? "Copied body" : "Copied raw response");
+  const label = format === "response-headers" ? "Copied headers" : format === "response-body" ? "Copied body" : "Copied raw response";
+  copyTextToClipboard(text);
+  showToast(label);
+}
+
+// Synchronous version using already-loaded selectedRecord (preserves user gesture for clipboard)
+function selectedRecordToFormat(format) {
+  const record = state.selectedRecord;
+  if (!record) return "";
+  const rawText = buildRawRequest(record);
+  const scheme = record.scheme || "https";
+  const hostHeader = record.request?.headers?.find((h) => h.name.toLowerCase() === "host");
+  const host = hostHeader?.value || record.host || "";
+  const parsed = parseRequestForExport(rawText, scheme, host, "");
+  if (!parsed) return "";
+  if (format === "curl") {
+    const esc = (s) => s.replace(/'/g, "'\\''");
+    const parts = [`curl -X ${parsed.method}`];
+    for (const h of parsed.headers) parts.push(`-H '${h.name}: ${esc(h.value)}'`);
+    if (parsed.body.trim()) parts.push(`-d '${esc(parsed.body)}'`);
+    parts.push(`'${parsed.url}'`);
+    return parts.join(" \\\n  ");
+  }
+  if (format === "python") return requestToPython(parsed);
+  if (format === "fetch") return requestToFetch(parsed);
+  if (format === "powershell") return requestToPowerShell(parsed);
+  return "";
 }
 
 async function historyRequestToFormat(transactionId, format) {
@@ -10448,7 +10455,7 @@ function copyTransactionUrl(transactionId) {
   const host = item.host || "";
   const path = item.path || "/";
   const url = `${scheme}://${host}${path}`;
-  navigator.clipboard.writeText(url).catch(() => {});
+  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => {});
 }
 
 function copyReplayUrl() {
@@ -10462,7 +10469,7 @@ function copyReplayUrl() {
   const match = text.match(/^[A-Z]+\s+(\S+)/i);
   const path = match ? match[1] : "/";
   const url = `${scheme}://${host}${portSuffix}${path}`;
-  navigator.clipboard.writeText(url).catch(() => {});
+  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => {});
 }
 
 function parseCurlCommand(text) {
@@ -10601,7 +10608,7 @@ function initReplayContextMenu() {
       } else if (action === "copy-as-curl" || action === "copy-as-python" || action === "copy-as-fetch" || action === "copy-as-powershell") {
         const format = action.replace("copy-as-", "");
         const text = replayRequestToFormat(format);
-        navigator.clipboard.writeText(text).catch(() => {});
+        copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => {});
       } else if (action === "import-curl") {
         openCurlImportModal();
       }
@@ -10697,8 +10704,16 @@ function setReplayHeader(name, value) {
     enableReadonlyCaret(view);
     const lines = getCodeLines(view);
     if (saved.lineIndex < lines.length) {
-      setFocus(view, lines[saved.lineIndex], true);
-      // Don't re-focus the view — it would steal focus from the history table
+      // Only restore visual highlight — never steal focus from inputs/textareas
+      const ae = document.activeElement;
+      const isInput = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT");
+      if (isInput) {
+        // Just restore the highlight class, no scrollIntoView or caret move
+        clearFocus(view);
+        lines[saved.lineIndex].classList.add("line-focus");
+      } else {
+        setFocus(view, lines[saved.lineIndex], true);
+      }
     }
   };
 
@@ -10786,6 +10801,6 @@ function setReplayHeader(name, value) {
     const focused = view.querySelector(".code-line.line-focus");
     if (!focused) return;
     event.preventDefault();
-    navigator.clipboard.writeText(focused.textContent).catch(() => {});
+    copyTextToClipboard(focused.textContent).catch(() => {});
   });
 })();
