@@ -10164,29 +10164,17 @@ function sendWsFrameToReplay(frameIdx) {
     // not JSON, keep as-is
   }
 
-  createWsReplayTab(session, wsScheme, body);
-}
-
-function createWsReplayTab(session, wsScheme, messageBody) {
-  const tab = {
-    id: `ws-replay-${Date.now()}`,
-    type: "websocket",
-    label: session.host,
-    targetHost: session.host.split(":")[0],
-    targetPort: session.host.includes(":") ? session.host.split(":")[1] : (wsScheme === "wss" ? "443" : "80"),
-    wsScheme: wsScheme,
+  const host = session.host?.replace(/:443$|:80$/, "") || "";
+  const port = session.host?.includes(":") ? parseInt(session.host.split(":").pop()) : (wsScheme === "wss" ? 443 : 80);
+  createWsReplayTab({
+    scheme: wsScheme,
+    host,
+    port,
     path: session.path || "/",
-    requestText: messageBody,
-    requestHeaders: session.request?.headers || [],
-  };
-
-  state.replayTabs.push(tab);
-  state.activeReplayTabId = tab.id;
+    headers: session.request?.headers || [],
+  });
   state.activeTool = "replay";
   renderToolPanels();
-  renderReplayTabs();
-  renderWsReplay(tab);
-  scheduleWorkspaceStateSave();
 }
 
 function renderWsReplay(tab) {
