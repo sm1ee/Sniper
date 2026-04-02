@@ -2098,6 +2098,23 @@ code {
   font-weight: 700;
 }
 
+.token-cookie-name {
+  color: #c49adf;
+}
+
+.token-cookie-value {
+  color: var(--text-soft);
+}
+
+.token-cookie-sep {
+  color: #888;
+}
+
+.token-cookie-flag {
+  color: #7cb8a0;
+  font-style: italic;
+}
+
 .token-punctuation,
 .token-plain,
 .token-hex-ascii {

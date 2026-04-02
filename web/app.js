@@ -8427,6 +8427,10 @@ function highlightHeaderLine(line) {
 
   const name = line.slice(0, separator);
   const value = line.slice(separator + 1).trimStart();
+  const lowerName = name.trim().toLowerCase();
+  if (lowerName === "cookie" || lowerName === "set-cookie") {
+    return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span> ${highlightCookieValue(value)}`;
+  }
   return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span> ${highlightHeaderValue(value)}`;
 }
 
@@ -8444,6 +8448,22 @@ function highlightHeaderValue(value) {
   }
 
   return `<span class="token-plain">${escapeHtml(value)}</span>`;
+}
+
+function highlightCookieValue(value) {
+  // Cookie: name1=val1; name2=val2  OR  Set-Cookie: name=val; Path=/; HttpOnly
+  const parts = value.split(";");
+  return parts.map((part, i) => {
+    const eqIdx = part.indexOf("=");
+    const sep = i < parts.length - 1 ? `<span class="token-cookie-sep">;</span>` : "";
+    if (eqIdx === -1) {
+      // Flags like HttpOnly, Secure
+      return `<span class="token-cookie-flag">${escapeHtml(part)}</span>${sep}`;
+    }
+    const name = part.slice(0, eqIdx);
+    const val = part.slice(eqIdx + 1);
+    return `<span class="token-cookie-name">${escapeHtml(name)}</span><span class="token-punctuation">=</span><span class="token-cookie-value">${escapeHtml(val)}</span>${sep}`;
+  }).join("");
 }
 
 function inferBodyHighlightMode(contentType) {
