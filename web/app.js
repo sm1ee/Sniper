@@ -6050,10 +6050,14 @@ async function sendReplay() {
   const requestText = els.replayRequestEditor.value;
   const target = getRepeaterTargetConfig(tab, request);
 
-  // Extract HTTP version from the request line (e.g. "GET /path HTTP/2")
-  const firstLine = (requestText || "").split(/\r?\n/)[0] || "";
-  const verMatch = firstLine.match(/^[A-Z]+\s+\S+\s+(HTTP\/[0-9.]+)$/i);
-  const httpVersion = verMatch ? verMatch[1] : undefined;
+  // HTTP version: prefer dropdown selection, fall back to request line
+  const versionDropdown = document.getElementById("replayHttpVersionSelect")?.value;
+  let httpVersion = versionDropdown || undefined;
+  if (!httpVersion) {
+    const firstLine = (requestText || "").split(/\r?\n/)[0] || "";
+    const verMatch = firstLine.match(/^[A-Z]+\s+\S+\s+(HTTP\/[0-9.]+)$/i);
+    httpVersion = verMatch ? verMatch[1] : undefined;
+  }
 
   const response = await fetch("/api/replay/send", {
     method: "POST",
@@ -10777,11 +10781,10 @@ function setReplayHeader(name, value) {
     }
   });
 
-  // ArrowUp/Down: line navigation
+  // ArrowUp/Down/Home/End: line navigation
   document.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && event.key !== "Home" && event.key !== "End") return;
     let view = document.activeElement;
-    // Walk up to the code-view if focus is on an inner element
     if (view && !isReadonlyView(view)) {
       view = view.closest?.(".code-view, .simple-code-view");
     }
@@ -10789,6 +10792,14 @@ function setReplayHeader(name, value) {
     const lines = getCodeLines(view);
     if (!lines.length) return;
     event.preventDefault();
+    if (event.key === "Home") {
+      setFocus(view, lines[0], true);
+      return;
+    }
+    if (event.key === "End") {
+      setFocus(view, lines[lines.length - 1], true);
+      return;
+    }
     let idx = focusedIndex(lines);
     if (idx === -1) {
       setFocus(view, lines[0], true);

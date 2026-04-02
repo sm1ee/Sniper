@@ -1459,6 +1459,12 @@ code {
   vertical-align: middle;
 }
 
+.history-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .history-table th:last-child,
 .history-table td:last-child {
   border-right: none;
