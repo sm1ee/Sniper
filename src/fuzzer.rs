@@ -183,7 +183,7 @@ pub async fn run_attack(
 
     for (index, payload) in normalized_payloads.iter().enumerate() {
         let request = apply_payload_to_request(&template, payload)?;
-        match proxy::send_replay_request(state.clone(), request, None, source_transaction_id)
+        match proxy::send_replay_request(state.clone(), request, None, source_transaction_id, None)
             .await
         {
             Ok(record) => {

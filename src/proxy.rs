@@ -233,6 +233,7 @@ pub async fn send_replay_request(
     request: EditableRequest,
     target: Option<RequestTargetOverride>,
     source_transaction_id: Option<Uuid>,
+    http_version: Option<String>,
 ) -> Result<TransactionRecord> {
     let session = state.session().await;
     if is_websocket_upgrade_editable(&request) {
@@ -249,7 +250,7 @@ pub async fn send_replay_request(
     let request = build_replay_exchange_request(&request, target.as_ref())?;
     let upstream_insecure = session.runtime.upstream_insecure().await;
     let client =
-        build_replay_client(upstream_insecure, &request, target.as_ref()).await?;
+        build_replay_client(upstream_insecure, &request, target.as_ref(), http_version.as_deref()).await?;
     notes.push("Sent from Replay.".to_string());
     let exchange = execute_http_exchange(
         state.clone(),
@@ -293,10 +294,25 @@ async fn build_replay_client(
     upstream_insecure: bool,
     request: &EditableRequest,
     target: Option<&RequestTargetOverride>,
+    http_version: Option<&str>,
 ) -> Result<ProxyClient> {
     let mut builder = Client::builder()
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure);
+
+    // Force HTTP version if specified
+    match http_version.map(|v| v.trim()) {
+        Some("HTTP/1.1") | Some("HTTP/1.0") | Some("1.1") | Some("1.0") => {
+            builder = builder.http1_only();
+        }
+        Some("HTTP/2") | Some("2") | Some("2.0") => {
+            // For HTTPS, HTTP/2 is negotiated via ALPN (default behavior).
+            // For cleartext HTTP, h2c would need the http2 feature — skip for now.
+        }
+        _ => {
+            // Auto-negotiate (default)
+        }
+    }
 
     if let Some(target) = target {
         let request_authority = parse_request_authority(&request.host, &request.scheme)?;
@@ -1583,6 +1599,7 @@ async fn execute_http_exchange(
     match request_builder.send().await {
         Ok(response) => {
             let status = response.status();
+            let resp_version = response.version();
             let response_headers = response.headers().clone();
             match response.bytes().await {
                 Ok(response_bytes) => {
@@ -1634,7 +1651,7 @@ async fn execute_http_exchange(
                             notes,
                             original_request_capture,
                             original_response_capture,
-                        ),
+                        ).with_http_version(resp_version),
                         response: Ok(UpstreamResponse {
                             status,
                             headers: applied_response.headers,
