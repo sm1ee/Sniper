@@ -6049,6 +6049,12 @@ async function sendReplay() {
   const request = parseEditableRawRequest(els.replayRequestEditor.value, fallback);
   const requestText = els.replayRequestEditor.value;
   const target = getRepeaterTargetConfig(tab, request);
+
+  // Extract HTTP version from the request line (e.g. "GET /path HTTP/2")
+  const firstLine = (requestText || "").split(/\r?\n/)[0] || "";
+  const verMatch = firstLine.match(/^[A-Z]+\s+\S+\s+(HTTP\/[0-9.]+)$/i);
+  const httpVersion = verMatch ? verMatch[1] : undefined;
+
   const response = await fetch("/api/replay/send", {
     method: "POST",
     headers: {
@@ -6062,6 +6068,7 @@ async function sendReplay() {
         port: target.port,
       },
       source_transaction_id: tab.sourceTransactionId,
+      http_version: httpVersion,
     }),
   });
 
@@ -7214,9 +7221,10 @@ function buildDiffPresentation(target, record) {
 }
 
 function buildRawRequest(record) {
+  const httpVer = record.http_version || "HTTP/1.1";
   const startLine = record.kind === "tunnel"
-    ? `CONNECT ${record.host} HTTP/1.1`
-    : `${record.method} ${record.path || "/"} HTTP/1.1`;
+    ? `CONNECT ${record.host} ${httpVer}`
+    : `${record.method} ${record.path || "/"} ${httpVer}`;
   const merged = mergeHeaders(record.request.headers);
   // Ensure a host header is present — the proxy stores the host separately
   // and some tunnelled HTTPS requests omit Host from the captured headers.
@@ -7255,15 +7263,17 @@ function buildRawResponse(record) {
     .map((header) => `${header.name}: ${header.value}`)
     .join("\n");
   const body = renderBody(record.response);
-  return `HTTP/1.1 ${record.status ?? 0}\n${headers}\n\n${body}`.trim();
+  const httpVer = record.http_version || "HTTP/1.1";
+  return `${httpVer} ${record.status ?? 0}\n${headers}\n\n${body}`.trim();
 }
 
 function buildFindingsRawMessage(record, side) {
   const msg = side === "request" ? record.request : record.response;
+  const httpVer = record.http_version || "HTTP/1.1";
   if (side === "request") {
     const startLine = record.kind === "tunnel"
-      ? `CONNECT ${record.host} HTTP/1.1`
-      : `${record.method} ${record.path || "/"} HTTP/1.1`;
+      ? `CONNECT ${record.host} ${httpVer}`
+      : `${record.method} ${record.path || "/"} ${httpVer}`;
     const merged = mergeHeaders(record.request.headers);
     if (record.host && !merged.some((h) => h.name.toLowerCase() === "host")) {
       merged.unshift({ name: "host", value: record.host });
@@ -7275,7 +7285,7 @@ function buildFindingsRawMessage(record, side) {
   if (!msg) return "No response was captured for this exchange.";
   const headers = msg.headers.map((h) => `${h.name}: ${h.value}`).join("\n");
   const body = findingsBodyPlaceholder(msg);
-  return `HTTP/1.1 ${record.status ?? 0}\n${headers}\n\n${body}`.trim();
+  return `${httpVer} ${record.status ?? 0}\n${headers}\n\n${body}`.trim();
 }
 
 function findingsBodyPlaceholder(msg) {
@@ -7366,6 +7376,7 @@ function editableRequestFromRecord(record) {
     host: record.host,
     method: record.method,
     path: record.path || "/",
+    http_version: record.http_version,
     headers: [...record.request.headers],
     body: record.request.body_preview || "",
     body_encoding: record.request.body_encoding,
@@ -7378,7 +7389,8 @@ function buildEditableRawRequest(request) {
   if (!headers.some((header) => header.name.toLowerCase() === "host") && request.host) {
     headers.unshift({ name: "host", value: request.host });
   }
-  const head = `${request.method} ${request.path || "/"} HTTP/1.1`;
+  const httpVer = request.http_version || "HTTP/1.1";
+  const head = `${request.method} ${request.path || "/"} ${httpVer}`;
   const headerBlock = mergeHeaders(headers).map((header) => `${header.name}: ${header.value}`).join("\n");
   const body = request.body || "";
   return `${head}\n${headerBlock}\n\n${body}`.trimEnd();

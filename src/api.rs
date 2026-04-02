@@ -195,6 +195,7 @@ struct ReplaySendPayload {
     request: EditableRequest,
     target: Option<RequestTargetOverride>,
     source_transaction_id: Option<Uuid>,
+    http_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -996,6 +997,7 @@ async fn send_replay(
         payload.request,
         payload.target,
         payload.source_transaction_id,
+        payload.http_version,
     )
     .await
     {

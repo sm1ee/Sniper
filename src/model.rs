@@ -251,6 +251,8 @@ pub struct TransactionRecord {
     pub original_request: Option<MessageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_response: Option<MessageRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_version: Option<String>,
 }
 
 impl TransactionRecord {
@@ -286,7 +288,13 @@ impl TransactionRecord {
             user_note: None,
             original_request,
             original_response,
+            http_version: None,
         }
+    }
+
+    pub fn with_http_version(mut self, version: http::Version) -> Self {
+        self.http_version = Some(format_http_version(version));
+        self
     }
 
     pub fn tunnel(
@@ -315,6 +323,7 @@ impl TransactionRecord {
             user_note: None,
             original_request: None,
             original_response: None,
+            http_version: None,
         }
     }
 
@@ -471,6 +480,17 @@ pub struct WebSocketSessionSummary {
     pub status: Option<u16>,
     pub frame_count: usize,
     pub note_count: usize,
+}
+
+pub fn format_http_version(version: http::Version) -> String {
+    match version {
+        http::Version::HTTP_09 => "HTTP/0.9".to_string(),
+        http::Version::HTTP_10 => "HTTP/1.0".to_string(),
+        http::Version::HTTP_11 => "HTTP/1.1".to_string(),
+        http::Version::HTTP_2 => "HTTP/2".to_string(),
+        http::Version::HTTP_3 => "HTTP/3".to_string(),
+        _ => format!("{version:?}"),
+    }
 }
 
 fn header_records(headers: &HeaderMap) -> Vec<HeaderRecord> {

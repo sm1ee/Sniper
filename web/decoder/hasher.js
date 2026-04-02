@@ -62,7 +62,7 @@ function bytesToUtf8String(bytes) {
 
 var hasher = {
   ipcalc : new ipCalc(),
-  tab : tabs.hash,
+  tab : tabs.encode,
   elements: {
     h1 : {
       id : tabs.hash+"md5",
