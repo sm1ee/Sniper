@@ -11,15 +11,16 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
 use sniper::{
     certificate::default_data_dir,
-    intercept::{InterceptRecord, InterceptSummary},
+    intercept::{InterceptRecord, InterceptRule, InterceptSummary, ResponseInterceptRecord, ResponseInterceptSummary},
     fuzzer::FuzzerAttackRecord,
     match_replace::{MatchReplaceRule, MatchReplaceRulesPayload},
     model::{
-        BodyEncoding, EditableRequest, HeaderRecord, RequestTargetOverride, TransactionRecord,
-        TransactionSummary, WebSocketSessionRecord, WebSocketSessionSummary,
+        BodyEncoding, EditableRequest, EditableResponse, HeaderRecord, RequestTargetOverride,
+        TransactionRecord, TransactionSummary, WebSocketSessionRecord, WebSocketSessionSummary,
     },
     runtime::RuntimeSettingsSnapshot,
     runtime_state::load_runtime_state,
+    sequence::{SequenceDefinition, SequenceRunSummary},
     session::SessionSummary,
     skills,
     workspace::{
@@ -63,6 +64,10 @@ enum Command {
         #[command(subcommand)]
         command: FuzzerCommand,
     },
+    Sequence {
+        #[command(subcommand)]
+        command: SequenceCommand,
+    },
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
@@ -99,6 +104,16 @@ enum CaptureCommand {
     Intercept {
         #[command(subcommand)]
         command: InterceptCommand,
+    },
+    #[command(name = "response-intercept")]
+    ResponseIntercept {
+        #[command(subcommand)]
+        command: ResponseInterceptCommand,
+    },
+    #[command(name = "intercept-rule")]
+    InterceptRule {
+        #[command(subcommand)]
+        command: InterceptRuleCommand,
     },
     #[command(name = "web-socket", visible_alias = "websocket")]
     WebSocket {
@@ -357,6 +372,112 @@ struct AutoReplaceSetArgs {
     stdin: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum ResponseInterceptCommand {
+    List,
+    Get(ResponseInterceptGetArgs),
+    Forward(ResponseInterceptForwardArgs),
+    Drop(ResponseInterceptDropArgs),
+    #[command(name = "forward-all")]
+    ForwardAll,
+}
+
+#[derive(Args, Debug)]
+struct ResponseInterceptGetArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug)]
+struct ResponseInterceptForwardArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long)]
+    response_file: Option<PathBuf>,
+    #[arg(long)]
+    stdin: bool,
+}
+
+#[derive(Args, Debug)]
+struct ResponseInterceptDropArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Subcommand, Debug)]
+enum InterceptRuleCommand {
+    List,
+    Create(InterceptRuleCreateArgs),
+    Delete(InterceptRuleDeleteArgs),
+}
+
+#[derive(Args, Debug)]
+struct InterceptRuleCreateArgs {
+    #[arg(long, default_value = "both")]
+    scope: String,
+    #[arg(long)]
+    host_pattern: Option<String>,
+    #[arg(long)]
+    path_pattern: Option<String>,
+    #[arg(long = "method", action = ArgAction::Append)]
+    method_filter: Vec<String>,
+    #[arg(long)]
+    enabled: Option<bool>,
+}
+
+#[derive(Args, Debug)]
+struct InterceptRuleDeleteArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Subcommand, Debug)]
+enum SequenceCommand {
+    List,
+    Get(SequenceGetArgs),
+    Create(SequenceCreateArgs),
+    Run(SequenceRunArgs),
+    Delete(SequenceDeleteArgs),
+    Runs(SequenceRunsArgs),
+}
+
+#[derive(Args, Debug)]
+struct SequenceGetArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug)]
+struct SequenceCreateArgs {
+    #[arg(long)]
+    file: Option<PathBuf>,
+    #[arg(long)]
+    stdin: bool,
+}
+
+#[derive(Args, Debug)]
+struct SequenceRunArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug)]
+struct SequenceDeleteArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug, Default)]
+struct SequenceRunsArgs {
+    #[arg(long)]
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ResponseInterceptForwardPayload {
+    response: EditableResponse,
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum AutoReplaceInput {
@@ -516,10 +637,17 @@ async fn run(cli: Cli) -> Result<()> {
                     CaptureCommand::AutoReplace { command } => {
                         handle_auto_replace(api, command).await
                     }
+                    CaptureCommand::ResponseIntercept { command } => {
+                        handle_response_intercept(api, command).await
+                    }
+                    CaptureCommand::InterceptRule { command } => {
+                        handle_intercept_rule(api, command).await
+                    }
                 },
                 Command::Scope { command } => handle_target(api, command).await,
                 Command::Replay { command } => handle_replay(api, command).await,
                 Command::Fuzzer { command } => handle_fuzzer(api, command).await,
+                Command::Sequence { command } => handle_sequence(api, command).await,
                 Command::Skills { .. } => unreachable!(),
                 Command::History { command } => handle_history(api, command).await,
                 Command::Intercept { command } => handle_intercept(api, command).await,
@@ -913,6 +1041,152 @@ async fn handle_auto_replace(api: ApiClient, command: AutoReplaceCommand) -> Res
             let rules: Vec<MatchReplaceRule> =
                 api.post_json("/api/match-replace", &payload).await?;
             print_json(&rules)
+        }
+    }
+}
+
+async fn handle_response_intercept(
+    api: ApiClient,
+    command: ResponseInterceptCommand,
+) -> Result<()> {
+    match command {
+        ResponseInterceptCommand::List => {
+            let items: Vec<ResponseInterceptSummary> =
+                api.get_json("/api/response-intercepts").await?;
+            print_json(&items)
+        }
+        ResponseInterceptCommand::Get(args) => {
+            let item: ResponseInterceptRecord = api
+                .get_json(&format!("/api/response-intercepts/{}", args.id))
+                .await?;
+            print_json(&item)
+        }
+        ResponseInterceptCommand::Forward(args) => {
+            let item: ResponseInterceptRecord = api
+                .get_json(&format!("/api/response-intercepts/{}", args.id))
+                .await?;
+            let response = if args.response_file.is_some() || args.stdin {
+                let text = read_text_input(args.response_file, args.stdin)?;
+                parse_editable_raw_response(&text, Some(&item.response))?
+            } else {
+                item.response
+            };
+            api.post_status(
+                &format!("/api/response-intercepts/{}/forward", args.id),
+                &ResponseInterceptForwardPayload { response },
+            )
+            .await?;
+            print_json(&InterceptActionResult {
+                ok: true,
+                action: "forward",
+                id: args.id,
+            })
+        }
+        ResponseInterceptCommand::Drop(args) => {
+            api.post_status(
+                &format!("/api/response-intercepts/{}/drop", args.id),
+                &json!({}),
+            )
+            .await?;
+            print_json(&InterceptActionResult {
+                ok: true,
+                action: "drop",
+                id: args.id,
+            })
+        }
+        ResponseInterceptCommand::ForwardAll => {
+            api.post_status("/api/response-intercepts/forward-all", &json!({}))
+                .await?;
+            print_json(&json!({ "ok": true, "action": "forward-all" }))
+        }
+    }
+}
+
+async fn handle_intercept_rule(api: ApiClient, command: InterceptRuleCommand) -> Result<()> {
+    match command {
+        InterceptRuleCommand::List => {
+            let rules: Vec<InterceptRule> = api.get_json("/api/intercept-rules").await?;
+            print_json(&rules)
+        }
+        InterceptRuleCommand::Create(args) => {
+            let rule = json!({
+                "id": Uuid::new_v4(),
+                "enabled": args.enabled.unwrap_or(true),
+                "scope": args.scope,
+                "host_pattern": args.host_pattern.unwrap_or_default(),
+                "path_pattern": args.path_pattern.unwrap_or_default(),
+                "method_filter": if args.method_filter.is_empty() { vec![] } else { args.method_filter },
+            });
+            api.post_status("/api/intercept-rules", &rule).await?;
+            print_json(&rule)
+        }
+        InterceptRuleCommand::Delete(args) => {
+            let status = api
+                .client
+                .delete(api.url(&format!("/api/intercept-rules/{}", args.id)))
+                .send()
+                .await?
+                .status();
+            if !status.is_success() {
+                bail!("failed to delete intercept rule: {}", status);
+            }
+            print_json(&json!({ "ok": true, "deleted": args.id }))
+        }
+    }
+}
+
+async fn handle_sequence(api: ApiClient, command: SequenceCommand) -> Result<()> {
+    match command {
+        SequenceCommand::List => {
+            let defs: Vec<SequenceDefinition> = api.get_json("/api/sequences").await?;
+            print_json(&defs)
+        }
+        SequenceCommand::Get(args) => {
+            let def: SequenceDefinition =
+                api.get_json(&format!("/api/sequences/{}", args.id)).await?;
+            print_json(&def)
+        }
+        SequenceCommand::Create(args) => {
+            let raw = read_text_input(args.file, args.stdin)?;
+            let def: SequenceDefinition =
+                serde_json::from_str(&raw).context("failed to parse sequence JSON")?;
+            api.post_status("/api/sequences", &def).await?;
+            print_json(&def)
+        }
+        SequenceCommand::Run(args) => {
+            let result: serde_json::Value = api
+                .post_json(
+                    &format!("/api/sequences/{}/run", args.id),
+                    &json!({}),
+                )
+                .await?;
+            print_json(&result)
+        }
+        SequenceCommand::Delete(args) => {
+            let status = api
+                .client
+                .delete(api.url(&format!("/api/sequences/{}", args.id)))
+                .send()
+                .await?
+                .status();
+            if !status.is_success() {
+                bail!("failed to delete sequence: {}", status);
+            }
+            print_json(&json!({ "ok": true, "deleted": args.id }))
+        }
+        SequenceCommand::Runs(args) => {
+            let mut params = Vec::new();
+            if let Some(limit) = args.limit {
+                params.push(("limit".to_string(), limit.to_string()));
+            }
+            let query = encode_query(params);
+            let path = if query.is_empty() {
+                "/api/sequence-runs".to_string()
+            } else {
+                format!("/api/sequence-runs?{query}")
+            };
+            let runs: Vec<SequenceRunSummary> = api.get_json(&path).await?;
+            print_json(&runs)
         }
     }
 }
@@ -1408,6 +1682,42 @@ struct NormalizedTarget {
     scheme: String,
     host: String,
     port: String,
+}
+
+fn parse_editable_raw_response(
+    text: &str,
+    fallback: Option<&EditableResponse>,
+) -> Result<EditableResponse> {
+    let normalized = text.replace("\r\n", "\n");
+    let (head, body) = match normalized.split_once("\n\n") {
+        Some((head, body)) => (head, body.to_string()),
+        None => (normalized.as_str(), String::new()),
+    };
+    let mut lines = head.lines();
+    let status_line = lines.next().unwrap_or("HTTP/1.1 200");
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .or(fallback.map(|f| f.status))
+        .unwrap_or(200);
+    let headers: Vec<HeaderRecord> = lines
+        .filter_map(|line| {
+            let idx = line.find(':')?;
+            Some(HeaderRecord {
+                name: line[..idx].trim().to_string(),
+                value: line[idx + 1..].trim().to_string(),
+            })
+        })
+        .collect();
+    Ok(EditableResponse {
+        status,
+        headers,
+        body,
+        body_encoding: fallback
+            .map(|f| f.body_encoding.clone())
+            .unwrap_or(BodyEncoding::Utf8),
+    })
 }
 
 #[cfg(test)]
