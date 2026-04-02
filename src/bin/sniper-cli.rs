@@ -495,7 +495,7 @@ impl ApiClient {
     async fn discover(cli_api: Option<String>) -> Result<Self> {
         let base_url = discover_api_base_url(cli_api)?;
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
             .build()
             .context("failed to build sniper-cli HTTP client")?;
         Ok(Self { base_url, client })
@@ -1412,7 +1412,23 @@ fn discover_api_base_url(cli_api: Option<String>) -> Result<String> {
 
     let data_dir = default_data_dir();
     if let Some(runtime_state) = load_runtime_state(&data_dir)? {
-        return Ok(runtime_state.api_base_url());
+        let url = runtime_state.api_base_url();
+        // Probe the discovered address to verify it's live
+        if let Ok(probe) = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+        {
+            if probe.get(format!("{url}/api/runtime")).send().is_ok() {
+                return Ok(url);
+            }
+        }
+        // Probe failed — stale runtime-state
+        bail!(
+            "Sniper API at {} is not responding (stale runtime-state from {}). \
+             Either start Sniper Desktop or pass --api http://HOST:PORT explicitly.",
+            runtime_state.ui_addr,
+            runtime_state.updated_at.format("%Y-%m-%d %H:%M:%S")
+        )
     }
 
     bail!("could not discover Sniper API address; pass --api or start sniper-desktop first")
