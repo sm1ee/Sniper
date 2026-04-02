@@ -2099,7 +2099,7 @@ code {
 }
 
 .token-cookie-name {
-  color: #e0a050;
+  color: #e06c88;
 }
 
 .token-cookie-value {
@@ -2107,11 +2107,11 @@ code {
 }
 
 .token-cookie-sep {
-  color: #b08040;
+  color: #6cb6d9;
 }
 
 .token-cookie-flag {
-  color: #6cb6d9;
+  color: #7cb8a0;
 }
 
 .token-punctuation,
