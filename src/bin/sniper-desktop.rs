@@ -1,7 +1,7 @@
-use std::{env, path::PathBuf, sync::Arc};
+use std::{env, fs, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
-use sniper::{api, config::AppConfig, proxy, runtime_state::RuntimeStateSnapshot, skills, state::AppState};
+use sniper::{api, config::AppConfig, proxy, runtime_state::{self, RuntimeStateSnapshot}, skills, state::AppState};
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -157,6 +157,9 @@ fn main() -> Result<()> {
         {
             runtime.block_on(close_state.abort_proxy_task());
             ui_task.abort();
+            // Clean up runtime-state so CLI doesn't connect to a stale port
+            let state_path = runtime_state::runtime_state_path(&close_state.config.data_dir);
+            let _ = fs::remove_file(&state_path);
             *control_flow = ControlFlow::Exit;
         }
     })
