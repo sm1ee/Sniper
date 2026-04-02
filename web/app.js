@@ -1195,7 +1195,9 @@ function bindEvents() {
       opposite.push(state._replayLastSnapshot || els.replayRequestHighlight.innerText || "");
       const restored = stack.pop();
       state._replayLastSnapshot = restored;
+      const savedCaret = saveContentEditableCaret(els.replayRequestHighlight);
       els.replayRequestHighlight.innerHTML = renderCodeHtml(restored, "pretty", "request");
+      restoreContentEditableCaret(els.replayRequestHighlight, savedCaret);
       els.replayRequestEditor.value = restored;
       const tab = getActiveReplayTab();
       if (tab) tab.requestText = restored;
@@ -1216,6 +1218,22 @@ function bindEvents() {
   bindFindingsEvents();
   els.replaySchemeSelect.addEventListener("change", () => {
     applyReplayTargetFields().catch((error) => console.error(error));
+  });
+  document.getElementById("replayHttpVersionSelect")?.addEventListener("change", (e) => {
+    const ver = e.target.value;
+    if (!ver) return; // "Auto" selected — don't modify request text
+    const hl = els.replayRequestHighlight;
+    if (!hl) return;
+    const text = hl.innerText || "";
+    const lines = text.split("\n");
+    if (lines.length > 0) {
+      // Replace HTTP version in first line: "GET /path HTTP/1.1" → "GET /path HTTP/2"
+      lines[0] = lines[0].replace(/\s+HTTP\/[0-9.]+\s*$/i, ` ${ver}`);
+      if (!lines[0].match(/HTTP\//i)) lines[0] += ` ${ver}`;
+      const newText = lines.join("\n");
+      hl.innerText = newText;
+      hl.dispatchEvent(new Event("input"));
+    }
   });
   els.replayHostInput.addEventListener("input", () => {
     applyReplayTargetFields().catch((error) => console.error(error));

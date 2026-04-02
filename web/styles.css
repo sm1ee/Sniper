@@ -4163,10 +4163,10 @@ body.pane-resizing-y {
 
 .replay-target-bar {
   display: grid;
-  grid-template-columns: 96px minmax(220px, 1fr) 96px;
+  grid-template-columns: 96px minmax(180px, 1fr) 72px 88px;
   gap: 10px;
   min-width: 0;
-  width: min(100%, 588px);
+  width: min(100%, 680px);
 }
 
 .compact-field {
