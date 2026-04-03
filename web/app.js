@@ -7707,17 +7707,17 @@ function toHexDump(text) {
 
   for (let offset = 0; offset < bytes.length; offset += 16) {
     const chunk = Array.from(bytes.slice(offset, offset + 16));
-    const hex = chunk
-      .map((value) => value.toString(16).padStart(2, "0"))
-      .join(" ")
-      .padEnd(47, " ");
+    // Group bytes: first 8 | space | next 8
+    const left = chunk.slice(0, 8).map((v) => v.toString(16).padStart(2, "0")).join(" ");
+    const right = chunk.slice(8).map((v) => v.toString(16).padStart(2, "0")).join(" ");
+    const hex = (left + "  " + right).padEnd(49, " ");
     const ascii = chunk
       .map((value) => (value >= 32 && value <= 126 ? String.fromCharCode(value) : "."))
       .join("");
-    rows.push(`${offset.toString(16).padStart(4, "0")}  ${hex}  ${ascii}`);
+    rows.push(`${offset.toString(16).padStart(8, "0")}  ${hex} ${ascii}`);
   }
 
-  return rows.join("\n") || "0000";
+  return rows.join("\n") || "00000000";
 }
 
 function updateCodePane(viewElement, lineElement, text, mode, target) {
@@ -7751,6 +7751,12 @@ function renderCodeHtml(text, mode, target) {
 
   if (mode === "diff") {
     return renderDiffHtml(text);
+  }
+
+  if (mode === "raw") {
+    return String(text).split("\n").map((line) =>
+      wrapCodeLine(escapeHtml(line) || "&nbsp;", "code-line")
+    ).join("");
   }
 
   return renderHttpHtml(text, target);
@@ -7811,7 +7817,7 @@ function renderHexHtml(text) {
   return String(text)
     .split("\n")
     .map((line) => {
-      const match = line.match(/^([0-9a-f]{4})\s{2}(.{47})\s{2}(.*)$/i);
+      const match = line.match(/^([0-9a-f]{4,8})\s{2}(.{23,49})\s(.*)$/i);
       if (!match) {
         return wrapCodeLine(escapeHtml(line), "code-line");
       }
