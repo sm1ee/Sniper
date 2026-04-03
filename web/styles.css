@@ -1410,6 +1410,10 @@ code {
   overflow: hidden;
 }
 
+.traffic-region:focus {
+  outline: none;
+}
+
 .stack-resizer {
   grid-row: 4;
   position: relative;
