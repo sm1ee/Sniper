@@ -2135,15 +2135,32 @@ code {
 }
 
 .code-line-hex {
-  white-space: pre;
+  white-space: nowrap;
   font-family: 'Menlo', 'Monaco', 'Cascadia Mono', 'Courier New', monospace;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0em;
-  word-spacing: 0em;
-  -webkit-font-smoothing: antialiased;
-  -webkit-text-size-adjust: none;
-  font-feature-settings: "tnum" 1, "zero" 1;
-  text-rendering: geometricPrecision;
+  font-size: 11px;
+}
+
+.hex-col {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: top;
+  white-space: pre;
+}
+
+.hex-col-offset {
+  width: 70px;
+  padding-right: 12px;
+  color: var(--token-info-color);
+}
+
+.hex-col-bytes {
+  width: 355px;
+  padding-right: 8px;
+  color: var(--token-string-color);
+}
+
+.hex-col-ascii {
+  color: var(--token-plain-color);
 }
 
 .token-json-string,

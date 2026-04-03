@@ -7823,8 +7823,6 @@ function renderHexHtml(text) {
   return String(text)
     .split("\n")
     .map((line) => {
-      // Format: "00000000  xx xx xx xx xx xx xx xx  xx xx xx xx xx xx xx xx aaaaaaaaaaaaaaaa"
-      // offset=8, gap=2, hex=49, gap=1, ascii=up to 16
       if (line.length < 10) {
         return wrapCodeLine(escapeHtml(line), "code-line code-line-hex");
       }
@@ -7832,7 +7830,7 @@ function renderHexHtml(text) {
       const hex = line.substring(10, 59);
       const ascii = line.substring(60);
       return wrapCodeLine(
-        `<span class="token-hex-offset">${escapeHtml(offset)}</span>  ${escapeHtml(hex)} <span class="token-hex-ascii">${escapeHtml(ascii)}</span>`,
+        `<span class="hex-col hex-col-offset">${escapeHtml(offset)}</span><span class="hex-col hex-col-bytes">${escapeHtml(hex)}</span><span class="hex-col hex-col-ascii">${escapeHtml(ascii)}</span>`,
         "code-line code-line-hex",
       );
     })
