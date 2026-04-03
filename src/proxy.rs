@@ -286,6 +286,7 @@ fn build_client(upstream_insecure: bool) -> ProxyClient {
     Client::builder()
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure)
+        .http1_only()
         .build()
         .expect("failed to build upstream HTTP client")
 }

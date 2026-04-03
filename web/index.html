@@ -832,6 +832,11 @@
             <section class="panel-card">
               <header class="panel-toolbar replay-panel-toolbar">
                 <h2>Request</h2>
+                <div class="view-tabs">
+                  <button class="replay-view-tab active" data-replay-target="request" data-replay-view="pretty">Pretty</button>
+                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="raw">Raw</button>
+                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="hex">Hex</button>
+                </div>
               </header>
               <div class="editor-panel">
                 <div class="replay-highlight-shell">
@@ -851,6 +856,11 @@
               <header class="panel-toolbar replay-panel-toolbar">
                 <h2>Response</h2>
                 <p class="inline-copy replay-response-copy" id="replayResponseMeta">No response yet.</p>
+                <div class="view-tabs">
+                  <button class="replay-view-tab active" data-replay-target="response" data-replay-view="pretty">Pretty</button>
+                  <button class="replay-view-tab" data-replay-target="response" data-replay-view="raw">Raw</button>
+                  <button class="replay-view-tab" data-replay-target="response" data-replay-view="hex">Hex</button>
+                </div>
               </header>
               <div class="editor-panel">
                 <pre id="replayResponseView" class="simple-code-view replay-response-view" tabindex="0">Send a request from Replay to capture the response here.</pre>
