@@ -790,6 +790,8 @@ function bindEvents() {
     updateHistorySelection(state.selectedId);
     scrollSelectedHistoryRowIntoView();
     loadTransactionDetail(state.selectedId).catch((error) => console.error(error));
+    // Keep focus on the table so arrow keys navigate rows, not code-view lines
+    els.trafficRegion.focus({ preventScroll: true });
   });
   els.historyTableBody.addEventListener("contextmenu", (event) => {
     const row = event.target.closest(".history-row");
@@ -4092,9 +4094,10 @@ function isEditableTarget(target) {
     return false;
   }
 
-  // Readonly code-view panels have contenteditable for caret display only —
-  // they should NOT block table keyboard navigation.
-  if (target.isContentEditable && !target.hasAttribute("data-readonly-editable")) {
+  // Truly editable elements (replay editor, ws message editor) block table nav.
+  // Readonly code-view panels with data-readonly-editable also block table nav
+  // when they have focus — arrow keys should navigate lines, not history rows.
+  if (target.isContentEditable) {
     return true;
   }
 
@@ -4104,7 +4107,7 @@ function isEditableTarget(target) {
   }
 
   const editableParent = target.closest("input, textarea, select, [contenteditable='true']");
-  if (editableParent && !editableParent.hasAttribute("data-readonly-editable")) {
+  if (editableParent) {
     return true;
   }
 
