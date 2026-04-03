@@ -2136,7 +2136,11 @@ code {
 
 .code-line-hex {
   white-space: pre;
+  font-family: 'Menlo', 'Monaco', 'Cascadia Mono', 'Courier New', monospace;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  -webkit-font-smoothing: none;
+  font-feature-settings: "tnum" 1, "zero" 1;
 }
 
 .token-json-string,
