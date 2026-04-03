@@ -10761,14 +10761,10 @@ function setReplayHeader(name, value) {
     enableReadonlyCaret(view);
     const lines = getCodeLines(view);
     if (saved.lineIndex < lines.length) {
-      // Only restore visual highlight — never steal focus from inputs/textareas
-      const ae = document.activeElement;
-      const isInput = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT");
-      if (isInput) {
-        // Just restore the highlight class, no scrollIntoView or caret move
-        clearFocus(view);
-        lines[saved.lineIndex].classList.add("line-focus");
-      } else {
+      // Only restore visual highlight — never steal focus from other elements
+      clearFocus(view);
+      lines[saved.lineIndex].classList.add("line-focus");
+      if (saved.wasActive) {
         setFocus(view, lines[saved.lineIndex], true);
       }
     }
