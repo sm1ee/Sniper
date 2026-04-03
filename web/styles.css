@@ -1854,7 +1854,8 @@ code {
   gap: 10px;
 }
 
-.view-tab {
+.view-tab,
+.replay-view-tab {
   position: relative;
   padding: 6px 0;
   border: none;
@@ -1863,12 +1864,14 @@ code {
   cursor: pointer;
 }
 
-.view-tab.active {
+.view-tab.active,
+.replay-view-tab.active {
   color: var(--text);
   font-weight: 700;
 }
 
-.view-tab.active::after {
+.view-tab.active::after,
+.replay-view-tab.active::after {
   content: "";
   position: absolute;
   right: 0;

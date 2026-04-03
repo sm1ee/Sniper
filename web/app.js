@@ -241,6 +241,7 @@ const state = {
   replayTabs: [],
   activeReplayTabId: null,
   replayTabSequence: 0,
+  replayMessageViews: { request: "pretty", response: "pretty" },
   interceptEditorSeedId: null,
   interceptInScopeOnly: false,
   eventLog: [],
@@ -1167,6 +1168,7 @@ function bindEvents() {
   state._replayLastSnapshot = null;
 
   els.replayRequestHighlight.addEventListener("input", () => {
+    if (state.replayMessageViews.request === "hex") return;
     const tab = getActiveReplayTab();
     if (!tab) return;
     const text = els.replayRequestHighlight.innerText || "";
@@ -1189,6 +1191,7 @@ function bindEvents() {
     scheduleWorkspaceStateSave();
   });
   els.replayRequestHighlight.addEventListener("keydown", (e) => {
+    if (state.replayMessageViews.request === "hex") return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && !e.altKey) {
       e.preventDefault();
       const stack = e.shiftKey ? state._replayRedoStack : state._replayUndoStack;
@@ -1198,7 +1201,7 @@ function bindEvents() {
       const restored = stack.pop();
       state._replayLastSnapshot = restored;
       const savedCaret = saveContentEditableCaret(els.replayRequestHighlight);
-      els.replayRequestHighlight.innerHTML = renderCodeHtml(restored, "pretty", "request");
+      els.replayRequestHighlight.innerHTML = renderCodeHtml(restored, state.replayMessageViews.request, "request");
       restoreContentEditableCaret(els.replayRequestHighlight, savedCaret);
       els.replayRequestEditor.value = restored;
       const tab = getActiveReplayTab();
@@ -1216,6 +1219,17 @@ function bindEvents() {
   });
   els.replayRequestHighlight.addEventListener("contextmenu", showReplayContextMenu);
   initReplayContextMenu();
+  // Replay Pretty/Raw/Hex view tabs
+  document.querySelectorAll(".replay-view-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.replayTarget;
+      const view = btn.dataset.replayView;
+      state.replayMessageViews[target] = view;
+      renderReplayViewTabs();
+      renderReplayViewContent(target);
+    });
+  });
+
   bindWsReplayEvents();
   bindFindingsEvents();
   els.replaySchemeSelect.addEventListener("change", () => {
@@ -4788,14 +4802,24 @@ function renderReplay() {
   }
 
   syncReplayToolbar(tab);
-  if (els.replayRequestEditor.value !== tab.requestText) {
-    els.replayRequestEditor.value = tab.requestText;
-    renderReplayRequestHighlight(tab.requestText);
+  const reqMode = state.replayMessageViews.request;
+  if (reqMode === "hex") {
+    els.replayRequestHighlight.removeAttribute("contenteditable");
+    const hexText = toHexDump(tab.requestText);
+    els.replayRequestHighlight.innerHTML = renderCodeHtml(hexText, "hex", "request");
+    updateReplaySearchPane("request", hexText);
   } else {
-    // Same text (e.g. after Send) — preserve cursor position
-    replayHighlightRerender(tab.requestText);
+    if (!els.replayRequestHighlight.isContentEditable) {
+      els.replayRequestHighlight.setAttribute("contenteditable", "plaintext-only");
+    }
+    if (els.replayRequestEditor.value !== tab.requestText) {
+      els.replayRequestEditor.value = tab.requestText;
+      renderReplayRequestHighlight(tab.requestText);
+    } else {
+      replayHighlightRerender(tab.requestText);
+    }
+    updateReplaySearchPane("request", tab.requestText);
   }
-  updateReplaySearchPane("request", tab.requestText);
 
   if (!tab.responseRecord) {
     const notice = tab.notice || "Send a request from Replay to capture the response here.";
@@ -4817,19 +4841,27 @@ function renderReplay() {
     tab.responseRecord.response?.content_type || tab.responseRecord.request.content_type || "n/a",
   ].join(" · ");
 
-  const responseText = prettyFormat(
-    buildRawResponse(tab.responseRecord),
-    tab.responseRecord.response,
-  );
+  const rawResponseText = buildRawResponse(tab.responseRecord);
+  const respMode = state.replayMessageViews.response;
+  let responseText;
+  if (respMode === "hex") {
+    responseText = toHexDump(rawResponseText);
+  } else if (respMode === "pretty") {
+    responseText = prettyFormat(rawResponseText, tab.responseRecord.response);
+  } else {
+    responseText = rawResponseText;
+  }
   renderReplayResponseView(responseText);
   updateReplaySearchPane("response", responseText);
+  renderReplayViewTabs();
 }
 
 function renderReplayRequestHighlight(text) {
   if (!els.replayRequestHighlight) {
     return;
   }
-  els.replayRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
+  const mode = state.replayMessageViews.request;
+  els.replayRequestHighlight.innerHTML = renderCodeHtml(text, mode, "request");
   // Reset undo history when switching tabs
   state._replayUndoStack = [];
   state._replayRedoStack = [];
@@ -4840,8 +4872,9 @@ function renderReplayRequestHighlight(text) {
 // contenteditable replay editor.
 function replayHighlightRerender(text) {
   if (!els.replayRequestHighlight) return;
+  const mode = state.replayMessageViews.request;
   const saved = saveContentEditableCaret(els.replayRequestHighlight);
-  els.replayRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
+  els.replayRequestHighlight.innerHTML = renderCodeHtml(text, mode, "request");
   restoreContentEditableCaret(els.replayRequestHighlight, saved);
 }
 
@@ -4931,7 +4964,53 @@ function syncFuzzerRequestHighlightScroll() {
 }
 
 function renderReplayResponseView(text) {
-  els.replayResponseView.innerHTML = renderCodeHtml(text, "pretty", "response");
+  const mode = state.replayMessageViews.response;
+  els.replayResponseView.innerHTML = renderCodeHtml(text, mode, "response");
+}
+
+function renderReplayViewTabs() {
+  document.querySelectorAll(".replay-view-tab").forEach((btn) => {
+    const target = btn.dataset.replayTarget;
+    const view = btn.dataset.replayView;
+    btn.classList.toggle("active", state.replayMessageViews[target] === view);
+  });
+}
+
+function renderReplayViewContent(target) {
+  const tab = getActiveReplayTab();
+  if (!tab || tab.type === "websocket") return;
+
+  if (target === "request") {
+    const mode = state.replayMessageViews.request;
+    if (mode === "hex") {
+      els.replayRequestHighlight.removeAttribute("contenteditable");
+      const hexText = toHexDump(tab.requestText);
+      els.replayRequestHighlight.innerHTML = renderCodeHtml(hexText, "hex", "request");
+      updateReplaySearchPane("request", hexText);
+    } else {
+      if (!els.replayRequestHighlight.isContentEditable) {
+        els.replayRequestHighlight.setAttribute("contenteditable", "plaintext-only");
+      }
+      renderReplayRequestHighlight(tab.requestText);
+      updateReplaySearchPane("request", tab.requestText);
+    }
+  }
+
+  if (target === "response") {
+    if (!tab.responseRecord) return;
+    const mode = state.replayMessageViews.response;
+    const rawText = buildRawResponse(tab.responseRecord);
+    let displayText;
+    if (mode === "hex") {
+      displayText = toHexDump(rawText);
+    } else if (mode === "pretty") {
+      displayText = prettyFormat(rawText, tab.responseRecord.response);
+    } else {
+      displayText = rawText;
+    }
+    renderReplayResponseView(displayText);
+    updateReplaySearchPane("response", displayText);
+  }
 }
 
 function updateReplaySearchPane(target, text) {
@@ -4950,7 +5029,8 @@ function updateReplaySearchPane(target, text) {
   }
 
   const searchResult = applyCodeSearch(view, query);
-  meta.innerHTML = buildSearchMeta(countLines(text), "pretty", searchResult.count);
+  const mode = state.replayMessageViews[target] || "pretty";
+  meta.innerHTML = buildSearchMeta(countLines(text), mode, searchResult.count);
 }
 
 function syncReplayToolbar(tab) {
