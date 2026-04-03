@@ -4790,8 +4790,11 @@ function renderReplay() {
   syncReplayToolbar(tab);
   if (els.replayRequestEditor.value !== tab.requestText) {
     els.replayRequestEditor.value = tab.requestText;
+    renderReplayRequestHighlight(tab.requestText);
+  } else {
+    // Same text (e.g. after Send) — preserve cursor position
+    replayHighlightRerender(tab.requestText);
   }
-  renderReplayRequestHighlight(tab.requestText);
   updateReplaySearchPane("request", tab.requestText);
 
   if (!tab.responseRecord) {
