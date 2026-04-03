@@ -2127,6 +2127,32 @@ code {
   color: var(--token-plain-color);
 }
 
+.token-hex-offset,
+.token-hex-bytes,
+.token-hex-ascii {
+  display: inline-block;
+  font-family: var(--mono);
+}
+
+.token-hex-offset {
+  width: 4ch;
+  text-align: right;
+}
+
+.token-hex-bytes {
+  width: 48ch;
+  letter-spacing: 0;
+}
+
+.token-hex-ascii {
+  width: 16ch;
+}
+
+.code-line-hex {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
 .token-json-string,
 .token-hex-bytes,
 .token-markup-string,

@@ -7817,8 +7817,8 @@ function renderHexHtml(text) {
       }
 
       return wrapCodeLine(
-        `<span class="token-hex-offset">${escapeHtml(match[1])}</span>  <span class="token-hex-bytes">${escapeHtml(match[2])}</span>  <span class="token-hex-ascii">${escapeHtml(match[3])}</span>`,
-        "code-line",
+        `<span class="token-hex-offset">${escapeHtml(match[1])}</span> <span class="token-hex-bytes">${escapeHtml(match[2])}</span> <span class="token-hex-ascii">${escapeHtml(match[3])}</span>`,
+        "code-line code-line-hex",
       );
     })
     .join("");
