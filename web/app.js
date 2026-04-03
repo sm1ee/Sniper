@@ -4814,20 +4814,12 @@ function renderReplay() {
     }
     let displayText = tab.requestText;
     if (reqMode === "pretty") {
-      // Format JSON body in Pretty mode
       const fakeMsg = { content_type: headerValue(tab.baseRequest?.headers || [], "content-type") };
       displayText = prettyFormat(tab.requestText, fakeMsg);
-      if (displayText !== tab.requestText) {
-        tab.requestText = displayText;
-        els.replayRequestEditor.value = displayText;
-      }
     }
-    if (els.replayRequestEditor.value !== displayText) {
-      els.replayRequestEditor.value = displayText;
-      renderReplayRequestHighlight(displayText);
-    } else {
-      replayHighlightRerender(displayText);
-    }
+    // Always render with displayText (may differ from requestText in Pretty mode)
+    els.replayRequestEditor.value = tab.requestText; // keep raw text in hidden textarea
+    renderReplayRequestHighlight(displayText);
     updateReplaySearchPane("request", displayText);
   }
 
