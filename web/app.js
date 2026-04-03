@@ -7753,12 +7753,8 @@ function renderCodeHtml(text, mode, target) {
     return renderDiffHtml(text);
   }
 
-  if (mode === "raw") {
-    return String(text).split("\n").map((line) =>
-      wrapCodeLine(escapeHtml(line) || "&nbsp;", "code-line")
-    ).join("");
-  }
-
+  // Both "pretty" and "raw" use the same HTTP syntax highlighting.
+  // The difference is in data preparation: "pretty" applies prettyFormat (JSON body formatting).
   return renderHttpHtml(text, target);
 }
 

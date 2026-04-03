@@ -2135,26 +2135,24 @@ code {
 }
 
 .token-hex-offset {
+  display: inline-block;
   width: 8ch;
-  text-align: right;
   margin-right: 2ch;
-  color: var(--text-dim);
 }
 
 .token-hex-bytes {
+  display: inline-block;
   width: 50ch;
-  letter-spacing: 0.05em;
   margin-right: 2ch;
 }
 
 .token-hex-ascii {
-  width: 16ch;
-  color: var(--text-soft);
+  display: inline-block;
 }
 
 .code-line-hex {
-  font-variant-numeric: tabular-nums;
   white-space: pre;
+  font-variant-numeric: tabular-nums;
 }
 
 .token-json-string,
