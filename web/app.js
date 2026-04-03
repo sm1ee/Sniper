@@ -790,6 +790,8 @@ function bindEvents() {
     updateHistorySelection(state.selectedId);
     scrollSelectedHistoryRowIntoView();
     loadTransactionDetail(state.selectedId).catch((error) => console.error(error));
+    // Keep focus on the table so arrow keys navigate rows, not code-view lines
+    els.trafficRegion.focus({ preventScroll: true });
   });
   els.historyTableBody.addEventListener("contextmenu", (event) => {
     const row = event.target.closest(".history-row");
@@ -1195,7 +1197,9 @@ function bindEvents() {
       opposite.push(state._replayLastSnapshot || els.replayRequestHighlight.innerText || "");
       const restored = stack.pop();
       state._replayLastSnapshot = restored;
+      const savedCaret = saveContentEditableCaret(els.replayRequestHighlight);
       els.replayRequestHighlight.innerHTML = renderCodeHtml(restored, "pretty", "request");
+      restoreContentEditableCaret(els.replayRequestHighlight, savedCaret);
       els.replayRequestEditor.value = restored;
       const tab = getActiveReplayTab();
       if (tab) tab.requestText = restored;
@@ -1216,6 +1220,22 @@ function bindEvents() {
   bindFindingsEvents();
   els.replaySchemeSelect.addEventListener("change", () => {
     applyReplayTargetFields().catch((error) => console.error(error));
+  });
+  document.getElementById("replayHttpVersionSelect")?.addEventListener("change", (e) => {
+    const ver = e.target.value;
+    if (!ver) return; // "Auto" selected — don't modify request text
+    const hl = els.replayRequestHighlight;
+    if (!hl) return;
+    const text = hl.innerText || "";
+    const lines = text.split("\n");
+    if (lines.length > 0) {
+      // Replace HTTP version in first line: "GET /path HTTP/1.1" → "GET /path HTTP/2"
+      lines[0] = lines[0].replace(/\s+HTTP\/[0-9.]+\s*$/i, ` ${ver}`);
+      if (!lines[0].match(/HTTP\//i)) lines[0] += ` ${ver}`;
+      const newText = lines.join("\n");
+      hl.innerText = newText;
+      hl.dispatchEvent(new Event("input"));
+    }
   });
   els.replayHostInput.addEventListener("input", () => {
     applyReplayTargetFields().catch((error) => console.error(error));
@@ -4074,9 +4094,10 @@ function isEditableTarget(target) {
     return false;
   }
 
-  // Readonly code-view panels have contenteditable for caret display only —
-  // they should NOT block table keyboard navigation.
-  if (target.isContentEditable && !target.hasAttribute("data-readonly-editable")) {
+  // Truly editable elements (replay editor, ws message editor) block table nav.
+  // Readonly code-view panels with data-readonly-editable also block table nav
+  // when they have focus — arrow keys should navigate lines, not history rows.
+  if (target.isContentEditable) {
     return true;
   }
 
@@ -4086,7 +4107,7 @@ function isEditableTarget(target) {
   }
 
   const editableParent = target.closest("input, textarea, select, [contenteditable='true']");
-  if (editableParent && !editableParent.hasAttribute("data-readonly-editable")) {
+  if (editableParent) {
     return true;
   }
 
@@ -4769,8 +4790,11 @@ function renderReplay() {
   syncReplayToolbar(tab);
   if (els.replayRequestEditor.value !== tab.requestText) {
     els.replayRequestEditor.value = tab.requestText;
+    renderReplayRequestHighlight(tab.requestText);
+  } else {
+    // Same text (e.g. after Send) — preserve cursor position
+    replayHighlightRerender(tab.requestText);
   }
-  renderReplayRequestHighlight(tab.requestText);
   updateReplaySearchPane("request", tab.requestText);
 
   if (!tab.responseRecord) {
@@ -6050,10 +6074,14 @@ async function sendReplay() {
   const requestText = els.replayRequestEditor.value;
   const target = getRepeaterTargetConfig(tab, request);
 
-  // Extract HTTP version from the request line (e.g. "GET /path HTTP/2")
-  const firstLine = (requestText || "").split(/\r?\n/)[0] || "";
-  const verMatch = firstLine.match(/^[A-Z]+\s+\S+\s+(HTTP\/[0-9.]+)$/i);
-  const httpVersion = verMatch ? verMatch[1] : undefined;
+  // HTTP version: prefer dropdown selection, fall back to request line
+  const versionDropdown = document.getElementById("replayHttpVersionSelect")?.value;
+  let httpVersion = versionDropdown || undefined;
+  if (!httpVersion) {
+    const firstLine = (requestText || "").split(/\r?\n/)[0] || "";
+    const verMatch = firstLine.match(/^[A-Z]+\s+\S+\s+(HTTP\/[0-9.]+)$/i);
+    httpVersion = verMatch ? verMatch[1] : undefined;
+  }
 
   const response = await fetch("/api/replay/send", {
     method: "POST",
@@ -8405,6 +8433,10 @@ function highlightHeaderLine(line) {
 
   const name = line.slice(0, separator);
   const value = line.slice(separator + 1).trimStart();
+  const lowerName = name.trim().toLowerCase();
+  if (lowerName === "cookie" || lowerName === "set-cookie") {
+    return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span> ${highlightCookieValue(value)}`;
+  }
   return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span> ${highlightHeaderValue(value)}`;
 }
 
@@ -8422,6 +8454,22 @@ function highlightHeaderValue(value) {
   }
 
   return `<span class="token-plain">${escapeHtml(value)}</span>`;
+}
+
+function highlightCookieValue(value) {
+  // Cookie: name1=val1; name2=val2  OR  Set-Cookie: name=val; Path=/; HttpOnly
+  const parts = value.split(";");
+  return parts.map((part, i) => {
+    const eqIdx = part.indexOf("=");
+    const sep = i < parts.length - 1 ? `<span class="token-cookie-sep">;</span>` : "";
+    if (eqIdx === -1) {
+      // Flags like HttpOnly, Secure
+      return `<span class="token-cookie-flag">${escapeHtml(part)}</span>${sep}`;
+    }
+    const name = part.slice(0, eqIdx);
+    const val = part.slice(eqIdx + 1);
+    return `<span class="token-cookie-name">${escapeHtml(name)}</span><span class="token-punctuation">=</span><span class="token-cookie-value">${escapeHtml(val)}</span>${sep}`;
+  }).join("");
 }
 
 function inferBodyHighlightMode(contentType) {
@@ -10716,14 +10764,10 @@ function setReplayHeader(name, value) {
     enableReadonlyCaret(view);
     const lines = getCodeLines(view);
     if (saved.lineIndex < lines.length) {
-      // Only restore visual highlight — never steal focus from inputs/textareas
-      const ae = document.activeElement;
-      const isInput = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT");
-      if (isInput) {
-        // Just restore the highlight class, no scrollIntoView or caret move
-        clearFocus(view);
-        lines[saved.lineIndex].classList.add("line-focus");
-      } else {
+      // Only restore visual highlight — never steal focus from other elements
+      clearFocus(view);
+      lines[saved.lineIndex].classList.add("line-focus");
+      if (saved.wasActive) {
         setFocus(view, lines[saved.lineIndex], true);
       }
     }
@@ -10777,11 +10821,10 @@ function setReplayHeader(name, value) {
     }
   });
 
-  // ArrowUp/Down: line navigation
+  // ArrowUp/Down/Home/End: line navigation
   document.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && event.key !== "Home" && event.key !== "End") return;
     let view = document.activeElement;
-    // Walk up to the code-view if focus is on an inner element
     if (view && !isReadonlyView(view)) {
       view = view.closest?.(".code-view, .simple-code-view");
     }
@@ -10789,6 +10832,14 @@ function setReplayHeader(name, value) {
     const lines = getCodeLines(view);
     if (!lines.length) return;
     event.preventDefault();
+    if (event.key === "Home") {
+      setFocus(view, lines[0], true);
+      return;
+    }
+    if (event.key === "End") {
+      setFocus(view, lines[lines.length - 1], true);
+      return;
+    }
     let idx = focusedIndex(lines);
     if (idx === -1) {
       setFocus(view, lines[0], true);

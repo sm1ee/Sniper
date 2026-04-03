@@ -1459,6 +1459,12 @@ code {
   vertical-align: middle;
 }
 
+.history-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .history-table th:last-child,
 .history-table td:last-child {
   border-right: none;
@@ -2090,6 +2096,22 @@ code {
 
 .token-status {
   font-weight: 700;
+}
+
+.token-cookie-name {
+  color: #e06c88;
+}
+
+.token-cookie-value {
+  color: var(--text-soft);
+}
+
+.token-cookie-sep {
+  color: #6cb6d9;
+}
+
+.token-cookie-flag {
+  color: #7cb8a0;
 }
 
 .token-punctuation,
@@ -4157,10 +4179,10 @@ body.pane-resizing-y {
 
 .replay-target-bar {
   display: grid;
-  grid-template-columns: 96px minmax(220px, 1fr) 96px;
+  grid-template-columns: 96px minmax(180px, 1fr) 72px 88px;
   gap: 10px;
   min-width: 0;
-  width: min(100%, 588px);
+  width: min(100%, 680px);
 }
 
 .compact-field {

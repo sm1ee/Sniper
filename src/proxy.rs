@@ -306,8 +306,13 @@ async fn build_replay_client(
             builder = builder.http1_only();
         }
         Some("HTTP/2") | Some("2") | Some("2.0") => {
-            // For HTTPS, HTTP/2 is negotiated via ALPN (default behavior).
-            // For cleartext HTTP, h2c would need the http2 feature — skip for now.
+            if request.scheme.eq_ignore_ascii_case("https") {
+                // HTTPS: default ALPN includes h2, so don't force http1_only.
+                // If server supports h2, it will negotiate HTTP/2 automatically.
+            } else {
+                // Cleartext h2c (HTTP without TLS)
+                builder = builder.http2_prior_knowledge();
+            }
         }
         _ => {
             // Auto-negotiate (default)
