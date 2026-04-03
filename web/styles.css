@@ -2138,9 +2138,12 @@ code {
   white-space: pre;
   font-family: 'Menlo', 'Monaco', 'Cascadia Mono', 'Courier New', monospace;
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0;
-  -webkit-font-smoothing: none;
+  letter-spacing: 0em;
+  word-spacing: 0em;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: none;
   font-feature-settings: "tnum" 1, "zero" 1;
+  text-rendering: geometricPrecision;
 }
 
 .token-json-string,
