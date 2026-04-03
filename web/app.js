@@ -4816,9 +4816,10 @@ function renderReplay() {
     if (reqMode === "pretty") {
       const fakeMsg = { content_type: headerValue(tab.baseRequest?.headers || [], "content-type") };
       displayText = prettyFormat(tab.requestText, fakeMsg);
+    } else if (reqMode === "raw") {
+      displayText = compactFormat(tab.requestText);
     }
-    // Always render with displayText (may differ from requestText in Pretty mode)
-    els.replayRequestEditor.value = tab.requestText; // keep raw text in hidden textarea
+    els.replayRequestEditor.value = tab.requestText;
     renderReplayRequestHighlight(displayText);
     updateReplaySearchPane("request", displayText);
   }
@@ -4851,7 +4852,7 @@ function renderReplay() {
   } else if (respMode === "pretty") {
     responseText = prettyFormat(rawResponseText, tab.responseRecord.response);
   } else {
-    responseText = rawResponseText;
+    responseText = compactFormat(rawResponseText);
   }
   renderReplayResponseView(responseText);
   updateReplaySearchPane("response", responseText);
@@ -7477,6 +7478,21 @@ function prettyFormat(text, message) {
     }
   }
 
+  return text;
+}
+
+function compactFormat(text) {
+  const divider = "\n\n";
+  const boundary = text.indexOf(divider);
+  if (boundary === -1) return text;
+  const head = text.slice(0, boundary);
+  const body = text.slice(boundary + divider.length);
+  const trimmed = body.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return `${head}${divider}${JSON.stringify(JSON.parse(body))}`;
+    } catch (_) { /* not valid JSON */ }
+  }
   return text;
 }
 
