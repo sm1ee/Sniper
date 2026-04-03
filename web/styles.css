@@ -2134,22 +2134,6 @@ code {
   font-family: var(--mono);
 }
 
-.token-hex-offset {
-  display: inline-block;
-  width: 8ch;
-  margin-right: 2ch;
-}
-
-.token-hex-bytes {
-  display: inline-block;
-  width: 50ch;
-  margin-right: 2ch;
-}
-
-.token-hex-ascii {
-  display: inline-block;
-}
-
 .code-line-hex {
   white-space: pre;
   font-variant-numeric: tabular-nums;

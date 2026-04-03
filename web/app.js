@@ -4812,13 +4812,23 @@ function renderReplay() {
     if (!els.replayRequestHighlight.isContentEditable) {
       els.replayRequestHighlight.setAttribute("contenteditable", "plaintext-only");
     }
-    if (els.replayRequestEditor.value !== tab.requestText) {
-      els.replayRequestEditor.value = tab.requestText;
-      renderReplayRequestHighlight(tab.requestText);
-    } else {
-      replayHighlightRerender(tab.requestText);
+    let displayText = tab.requestText;
+    if (reqMode === "pretty") {
+      // Format JSON body in Pretty mode
+      const fakeMsg = { content_type: headerValue(tab.baseRequest?.headers || [], "content-type") };
+      displayText = prettyFormat(tab.requestText, fakeMsg);
+      if (displayText !== tab.requestText) {
+        tab.requestText = displayText;
+        els.replayRequestEditor.value = displayText;
+      }
     }
-    updateReplaySearchPane("request", tab.requestText);
+    if (els.replayRequestEditor.value !== displayText) {
+      els.replayRequestEditor.value = displayText;
+      renderReplayRequestHighlight(displayText);
+    } else {
+      replayHighlightRerender(displayText);
+    }
+    updateReplaySearchPane("request", displayText);
   }
 
   if (!tab.responseRecord) {
@@ -7813,13 +7823,16 @@ function renderHexHtml(text) {
   return String(text)
     .split("\n")
     .map((line) => {
-      const match = line.match(/^([0-9a-f]{4,8})\s{2}(.{23,49})\s(.*)$/i);
-      if (!match) {
-        return wrapCodeLine(escapeHtml(line), "code-line");
+      // Format: "00000000  xx xx xx xx xx xx xx xx  xx xx xx xx xx xx xx xx aaaaaaaaaaaaaaaa"
+      // offset=8, gap=2, hex=49, gap=1, ascii=up to 16
+      if (line.length < 10) {
+        return wrapCodeLine(escapeHtml(line), "code-line code-line-hex");
       }
-
+      const offset = line.substring(0, 8);
+      const hex = line.substring(10, 59);
+      const ascii = line.substring(60);
       return wrapCodeLine(
-        `<span class="token-hex-offset">${escapeHtml(match[1])}</span> <span class="token-hex-bytes">${escapeHtml(match[2])}</span> <span class="token-hex-ascii">${escapeHtml(match[3])}</span>`,
+        `<span class="token-hex-offset">${escapeHtml(offset)}</span>  ${escapeHtml(hex)} <span class="token-hex-ascii">${escapeHtml(ascii)}</span>`,
         "code-line code-line-hex",
       );
     })
