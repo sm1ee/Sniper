@@ -4994,8 +4994,15 @@ function renderReplayViewContent(target) {
       if (!els.replayRequestHighlight.isContentEditable) {
         els.replayRequestHighlight.setAttribute("contenteditable", "plaintext-only");
       }
-      renderReplayRequestHighlight(tab.requestText);
-      updateReplaySearchPane("request", tab.requestText);
+      let displayText = tab.requestText;
+      if (mode === "pretty") {
+        const fakeMsg = { content_type: headerValue(tab.baseRequest?.headers || [], "content-type") };
+        displayText = prettyFormat(tab.requestText, fakeMsg);
+      } else if (mode === "raw") {
+        displayText = compactFormat(tab.requestText);
+      }
+      renderReplayRequestHighlight(displayText);
+      updateReplaySearchPane("request", displayText);
     }
   }
 
