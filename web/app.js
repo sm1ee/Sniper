@@ -502,7 +502,7 @@ const els = {
   replayResponseSearchInput: document.getElementById("replayResponseSearchInput"),
   replayResponseSearchMeta: document.getElementById("replayResponseSearchMeta"),
   sendReplayButton: document.getElementById("sendReplayButton"),
-  resetReplayButton: document.getElementById("resetReplayButton"),
+  cancelReplayButton: document.getElementById("cancelReplayButton"),
   replayBackButton: document.getElementById("replayBackButton"),
   replayForwardButton: document.getElementById("replayForwardButton"),
   replayFollowRedirectButton: document.getElementById("replayFollowRedirectButton"),
@@ -1094,7 +1094,7 @@ function bindEvents() {
   els.newReplayTabButton.addEventListener("click", () => {
     openBlankReplayTab();
   });
-  els.resetReplayButton.addEventListener("click", resetReplay);
+  els.cancelReplayButton.addEventListener("click", cancelReplaySend);
   els.replayBackButton.addEventListener("click", () => {
     navigateReplayHistory(-1);
   });
@@ -6170,16 +6170,50 @@ function resetReplay() {
   renderReplay();
 }
 
+let _replayAbortController = null;
+
+function setReplaySending(sending) {
+  els.sendReplayButton.disabled = sending;
+  els.cancelReplayButton.disabled = !sending;
+  els.replayBackButton.disabled = sending;
+  els.replayForwardButton.disabled = sending;
+}
+
+function cancelReplaySend() {
+  if (_replayAbortController) {
+    _replayAbortController.abort();
+    _replayAbortController = null;
+  }
+  setReplaySending(false);
+  els.replayResponseMeta.textContent = "Cancelled.";
+  renderReplayResponseView("");
+}
+
 async function sendReplay() {
   const tab = getActiveReplayTab();
   if (!tab || tab.type === "websocket") {
     return;
   }
 
-  const fallback = tab.baseRequest || createDefaultEditableRequest();
-  const request = parseEditableRawRequest(els.replayRequestEditor.value, fallback);
-  const requestText = els.replayRequestEditor.value;
-  const target = getRepeaterTargetConfig(tab, request);
+  // Enter sending state immediately
+  tab.responseRecord = null;
+  tab.notice = "";
+  els.replayResponseMeta.textContent = "";
+  renderReplayResponseView("");
+  setReplaySending(true);
+
+  let request, requestText, target;
+  try {
+    const fallback = tab.baseRequest || createDefaultEditableRequest();
+    request = parseEditableRawRequest(els.replayRequestEditor.value, fallback);
+    requestText = els.replayRequestEditor.value;
+    target = getRepeaterTargetConfig(tab, request);
+  } catch (e) {
+    setReplaySending(false);
+    els.replayResponseMeta.textContent = "Error";
+    renderReplayResponseView(e.message || "Failed to parse request.");
+    return;
+  }
 
   // HTTP version: prefer dropdown selection, fall back to request line
   const versionDropdown = document.getElementById("replayHttpVersionSelect")?.value;
@@ -6190,31 +6224,34 @@ async function sendReplay() {
     httpVersion = verMatch ? verMatch[1] : undefined;
   }
 
-  // Clear response immediately to show loading state
-  tab.responseRecord = null;
-  tab.notice = "";
-  els.replayResponseMeta.textContent = "Sending...";
-  renderReplayResponseView("Waiting for server response...");
-  els.sendReplayButton.disabled = true;
+  _replayAbortController = new AbortController();
 
-  const response = await fetch("/api/replay/send", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      request,
-      target: {
-        scheme: target.scheme,
-        host: target.host,
-        port: target.port,
+  let response;
+  try {
+    response = await fetch("/api/replay/send", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
       },
-      source_transaction_id: tab.sourceTransactionId,
-      http_version: httpVersion,
-    }),
-  });
-
-  els.sendReplayButton.disabled = false;
+      body: JSON.stringify({
+        request,
+        target: {
+          scheme: target.scheme,
+          host: target.host,
+          port: target.port,
+        },
+        source_transaction_id: tab.sourceTransactionId,
+        http_version: httpVersion,
+      }),
+      signal: _replayAbortController.signal,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") return; // cancelled
+    throw e;
+  } finally {
+    _replayAbortController = null;
+    setReplaySending(false);
+  }
 
   if (!response.ok) {
     tab.responseRecord = null;
