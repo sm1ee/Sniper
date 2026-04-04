@@ -19,7 +19,7 @@ use axum::{
 };
 use indexmap::IndexMap;
 use rust_embed::RustEmbed;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -113,6 +113,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/scanner-config",
             get(get_scanner_config).post(update_scanner_config),
         )
+        .route("/api/oast/callbacks", get(list_oast_callbacks))
+        .route("/api/oast/callbacks/:id", get(get_oast_callback))
+        .route("/api/oast/callbacks/clear", post(clear_oast_callbacks))
+        .route("/api/oast/generate", post(generate_oast_payload))
         .route("/api/target/site-map", get(get_target_site_map))
         .route("/api/transactions", get(list_transactions))
         .route("/api/transactions/:id", get(get_transaction))
@@ -350,6 +354,14 @@ async fn update_runtime_settings(
             ),
         )
         .await;
+    // Sync OAST config when runtime settings change
+    session.oast.update_config(crate::oast::OastConfig {
+        enabled: snapshot.oast_enabled,
+        server_url: snapshot.oast_server_url.clone(),
+        token: snapshot.oast_token.clone(),
+        polling_interval_secs: snapshot.oast_polling_interval_secs,
+    }).await;
+
     persist_session_quiet(&state).await;
     Json(snapshot)
 }
@@ -1405,6 +1417,52 @@ async fn persist_session_quiet(state: &Arc<AppState>) {
     if let Err(error) = state.persist_active_session().await {
         tracing::warn!(?error, "failed to persist active session");
     }
+}
+
+// ── OAST ──
+
+async fn list_oast_callbacks(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<crate::oast::OastCallbackSummary>> {
+    let session = state.session().await;
+    Json(session.oast.list(None).await)
+}
+
+async fn get_oast_callback(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::oast::OastCallback>, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let session = state.session().await;
+    session.oast.get(id).await.map(Json).ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn clear_oast_callbacks(
+    State(state): State<Arc<AppState>>,
+) -> StatusCode {
+    let session = state.session().await;
+    session.oast.clear().await;
+    persist_session_quiet(&state).await;
+    StatusCode::NO_CONTENT
+}
+
+#[derive(Serialize)]
+struct OastPayloadResponse {
+    correlation_id: String,
+    payload: String,
+}
+
+async fn generate_oast_payload(
+    State(state): State<Arc<AppState>>,
+) -> Json<OastPayloadResponse> {
+    let session = state.session().await;
+    let config = session.runtime.snapshot().await;
+    let correlation_id = crate::oast::generate_correlation_id();
+    let payload = crate::oast::build_oast_payload(&config.oast_server_url, &correlation_id);
+    Json(OastPayloadResponse {
+        correlation_id,
+        payload,
+    })
 }
 
 #[cfg(test)]

@@ -115,6 +115,23 @@ fn main() -> Result<()> {
         }
     });
 
+    // Start OAST polling background task
+    {
+        let oast_state = state.clone();
+        runtime.spawn(async move {
+            let session = oast_state.session().await;
+            // Sync OAST config from runtime settings
+            let runtime_snap = session.runtime.snapshot().await;
+            session.oast.update_config(sniper::oast::OastConfig {
+                enabled: runtime_snap.oast_enabled,
+                server_url: runtime_snap.oast_server_url.clone(),
+                token: runtime_snap.oast_token.clone(),
+                polling_interval_secs: runtime_snap.oast_polling_interval_secs,
+            }).await;
+            sniper::oast::start_oast_poller(session.oast.clone()).await;
+        });
+    }
+
     let event_loop = EventLoop::new();
     install_platform_app_menu();
     let window = WindowBuilder::new()

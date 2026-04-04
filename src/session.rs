@@ -85,6 +85,8 @@ struct StoredSessionSnapshot {
     sequence_definitions: Vec<SequenceDefinition>,
     #[serde(default)]
     sequence_runs: Vec<SequenceRunRecord>,
+    #[serde(default)]
+    oast_callbacks: Option<Vec<crate::oast::OastCallback>>,
     workspace: WorkspaceStateSnapshot,
 }
 
@@ -103,6 +105,7 @@ pub struct SessionContext {
     pub fuzzer: Arc<FuzzerStore>,
     pub scanner: Arc<ScannerStore>,
     pub sequence: Arc<SequenceStore>,
+    pub oast: Arc<crate::oast::OastStore>,
     pub workspace: Arc<WorkspaceStateStore>,
     metadata: RwLock<SessionMetadata>,
 }
@@ -145,6 +148,14 @@ impl SessionContext {
                 snapshot.sequence_definitions,
                 snapshot.sequence_runs,
             )),
+            oast: {
+                let store = Arc::new(crate::oast::OastStore::new(max_entries));
+                if let Some(callbacks) = snapshot.oast_callbacks {
+                    let s = store.clone();
+                    tokio::spawn(async move { s.restore(callbacks).await });
+                }
+                store
+            },
             workspace: Arc::new(WorkspaceStateStore::from_snapshot(snapshot.workspace)),
             metadata: RwLock::new(metadata),
         }
@@ -179,6 +190,7 @@ impl SessionContext {
             intercept_rules: self.intercept_rules.snapshot().await,
             sequence_definitions: self.sequence.snapshot_definitions().await,
             sequence_runs: self.sequence.snapshot_runs(Some(self.max_entries)).await,
+            oast_callbacks: Some(self.oast.snapshot().await),
             workspace: self.workspace.snapshot().await,
         };
 

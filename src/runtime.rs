@@ -12,6 +12,18 @@ pub struct RuntimeSettingsSnapshot {
     pub upstream_insecure: bool,
     #[serde(default = "default_true")]
     pub intercept_scope_only: bool,
+    #[serde(default)]
+    pub oast_enabled: bool,
+    #[serde(default)]
+    pub oast_server_url: String,
+    #[serde(default)]
+    pub oast_token: String,
+    #[serde(default = "default_oast_interval")]
+    pub oast_polling_interval_secs: u64,
+}
+
+fn default_oast_interval() -> u64 {
+    5
 }
 
 fn default_true() -> bool {
@@ -31,6 +43,10 @@ impl Default for RuntimeSettingsSnapshot {
             passthrough_hosts: Vec::new(),
             upstream_insecure: true,
             intercept_scope_only: true,
+            oast_enabled: false,
+            oast_server_url: String::new(),
+            oast_token: String::new(),
+            oast_polling_interval_secs: 5,
         }
     }
 }
@@ -43,6 +59,10 @@ pub struct RuntimeSettingsUpdate {
     pub passthrough_hosts: Option<Vec<String>>,
     pub upstream_insecure: Option<bool>,
     pub intercept_scope_only: Option<bool>,
+    pub oast_enabled: Option<bool>,
+    pub oast_server_url: Option<String>,
+    pub oast_token: Option<String>,
+    pub oast_polling_interval_secs: Option<u64>,
 }
 
 pub struct RuntimeSettings {
@@ -89,6 +109,19 @@ impl RuntimeSettings {
 
         if let Some(intercept_scope_only) = update.intercept_scope_only {
             current.intercept_scope_only = intercept_scope_only;
+        }
+
+        if let Some(oast_enabled) = update.oast_enabled {
+            current.oast_enabled = oast_enabled;
+        }
+        if let Some(oast_server_url) = update.oast_server_url {
+            current.oast_server_url = oast_server_url;
+        }
+        if let Some(oast_token) = update.oast_token {
+            current.oast_token = oast_token;
+        }
+        if let Some(oast_polling_interval_secs) = update.oast_polling_interval_secs {
+            current.oast_polling_interval_secs = oast_polling_interval_secs;
         }
 
         current.clone()

@@ -7,6 +7,7 @@ pub mod fuzzer;
 pub mod match_replace;
 pub mod model;
 pub mod proxy;
+pub mod oast;
 pub mod runtime;
 pub mod runtime_state;
 pub mod scanner;
