@@ -2142,6 +2142,34 @@ code {
   font-size: 11px;
 }
 
+.hex-byte {
+  cursor: pointer;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.hex-byte:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.hex-byte.editing {
+  background: var(--accent-soft, rgba(224, 160, 80, 0.3));
+}
+
+.hex-byte-input {
+  width: 2ch;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--accent, #c9a96e);
+  border-radius: 2px;
+  background: var(--panel-code);
+  color: var(--text);
+  font-family: inherit;
+  font-size: inherit;
+  text-align: center;
+  outline: none;
+}
+
 .hex-col {
   display: inline-block;
   overflow: hidden;
