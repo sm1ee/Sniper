@@ -6190,6 +6190,13 @@ async function sendReplay() {
     httpVersion = verMatch ? verMatch[1] : undefined;
   }
 
+  // Clear response immediately to show loading state
+  tab.responseRecord = null;
+  tab.notice = "";
+  els.replayResponseMeta.textContent = "Sending...";
+  renderReplayResponseView("Waiting for server response...");
+  els.sendReplayButton.disabled = true;
+
   const response = await fetch("/api/replay/send", {
     method: "POST",
     headers: {
@@ -6206,6 +6213,8 @@ async function sendReplay() {
       http_version: httpVersion,
     }),
   });
+
+  els.sendReplayButton.disabled = false;
 
   if (!response.ok) {
     tab.responseRecord = null;
