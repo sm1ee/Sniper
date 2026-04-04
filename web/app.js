@@ -502,7 +502,7 @@ const els = {
   replayResponseSearchInput: document.getElementById("replayResponseSearchInput"),
   replayResponseSearchMeta: document.getElementById("replayResponseSearchMeta"),
   sendReplayButton: document.getElementById("sendReplayButton"),
-  resetReplayButton: document.getElementById("resetReplayButton"),
+  cancelReplayButton: document.getElementById("cancelReplayButton"),
   replayBackButton: document.getElementById("replayBackButton"),
   replayForwardButton: document.getElementById("replayForwardButton"),
   replayFollowRedirectButton: document.getElementById("replayFollowRedirectButton"),
@@ -1094,7 +1094,7 @@ function bindEvents() {
   els.newReplayTabButton.addEventListener("click", () => {
     openBlankReplayTab();
   });
-  els.resetReplayButton.addEventListener("click", resetReplay);
+  els.cancelReplayButton.addEventListener("click", cancelReplaySend);
   els.replayBackButton.addEventListener("click", () => {
     navigateReplayHistory(-1);
   });
@@ -4805,10 +4805,21 @@ function renderReplay() {
   const reqMode = state.replayMessageViews.request;
   if (reqMode === "hex") {
     els.replayRequestHighlight.removeAttribute("contenteditable");
-    const hexText = toHexDump(tab.requestText);
-    els.replayRequestHighlight.innerHTML = renderCodeHtml(hexText, "hex", "request");
-    updateReplaySearchPane("request", hexText);
+    if (!tab.requestBytes) {
+      tab.requestBytes = new TextEncoder().encode(tab.requestText);
+      tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
+    }
+    els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
+    bindHexByteHandlers(els.replayRequestHighlight, tab);
+    updateReplaySearchPane("request", toHexDumpFromBytes(tab.requestBytes));
   } else {
+    // Sync bytes back to text when leaving hex mode
+    if (tab.requestBytes) {
+      tab.requestText = new TextDecoder().decode(tab.requestBytes);
+      els.replayRequestEditor.value = tab.requestText;
+      tab.requestBytes = null;
+      tab.requestOriginalBytes = null;
+    }
     if (!els.replayRequestHighlight.isContentEditable) {
       els.replayRequestHighlight.setAttribute("contenteditable", "plaintext-only");
     }
@@ -4987,10 +4998,20 @@ function renderReplayViewContent(target) {
     const mode = state.replayMessageViews.request;
     if (mode === "hex") {
       els.replayRequestHighlight.removeAttribute("contenteditable");
-      const hexText = toHexDump(tab.requestText);
-      els.replayRequestHighlight.innerHTML = renderCodeHtml(hexText, "hex", "request");
-      updateReplaySearchPane("request", hexText);
+      if (!tab.requestBytes) {
+        tab.requestBytes = new TextEncoder().encode(tab.requestText);
+        tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
+      }
+      els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
+      bindHexByteHandlers(els.replayRequestHighlight, tab);
+      updateReplaySearchPane("request", toHexDumpFromBytes(tab.requestBytes));
     } else {
+      if (tab.requestBytes) {
+        tab.requestText = new TextDecoder().decode(tab.requestBytes);
+        els.replayRequestEditor.value = tab.requestText;
+        tab.requestBytes = null;
+      tab.requestOriginalBytes = null;
+      }
       if (!els.replayRequestHighlight.isContentEditable) {
         els.replayRequestHighlight.setAttribute("contenteditable", "plaintext-only");
       }
@@ -6153,16 +6174,50 @@ function resetReplay() {
   renderReplay();
 }
 
+let _replayAbortController = null;
+
+function setReplaySending(sending) {
+  els.sendReplayButton.disabled = sending;
+  els.cancelReplayButton.disabled = !sending;
+  els.replayBackButton.disabled = sending;
+  els.replayForwardButton.disabled = sending;
+}
+
+function cancelReplaySend() {
+  if (_replayAbortController) {
+    _replayAbortController.abort();
+    _replayAbortController = null;
+  }
+  setReplaySending(false);
+  els.replayResponseMeta.textContent = "Cancelled.";
+  renderReplayResponseView("");
+}
+
 async function sendReplay() {
   const tab = getActiveReplayTab();
   if (!tab || tab.type === "websocket") {
     return;
   }
 
-  const fallback = tab.baseRequest || createDefaultEditableRequest();
-  const request = parseEditableRawRequest(els.replayRequestEditor.value, fallback);
-  const requestText = els.replayRequestEditor.value;
-  const target = getRepeaterTargetConfig(tab, request);
+  // Enter sending state immediately
+  tab.responseRecord = null;
+  tab.notice = "";
+  els.replayResponseMeta.textContent = "";
+  renderReplayResponseView("");
+  setReplaySending(true);
+
+  let request, requestText, target;
+  try {
+    const fallback = tab.baseRequest || createDefaultEditableRequest();
+    request = parseEditableRawRequest(els.replayRequestEditor.value, fallback);
+    requestText = els.replayRequestEditor.value;
+    target = getRepeaterTargetConfig(tab, request);
+  } catch (e) {
+    setReplaySending(false);
+    els.replayResponseMeta.textContent = "Error";
+    renderReplayResponseView(e.message || "Failed to parse request.");
+    return;
+  }
 
   // HTTP version: prefer dropdown selection, fall back to request line
   const versionDropdown = document.getElementById("replayHttpVersionSelect")?.value;
@@ -6173,22 +6228,34 @@ async function sendReplay() {
     httpVersion = verMatch ? verMatch[1] : undefined;
   }
 
-  const response = await fetch("/api/replay/send", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      request,
-      target: {
-        scheme: target.scheme,
-        host: target.host,
-        port: target.port,
+  _replayAbortController = new AbortController();
+
+  let response;
+  try {
+    response = await fetch("/api/replay/send", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
       },
-      source_transaction_id: tab.sourceTransactionId,
-      http_version: httpVersion,
-    }),
-  });
+      body: JSON.stringify({
+        request,
+        target: {
+          scheme: target.scheme,
+          host: target.host,
+          port: target.port,
+        },
+        source_transaction_id: tab.sourceTransactionId,
+        http_version: httpVersion,
+      }),
+      signal: _replayAbortController.signal,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") return; // cancelled
+    throw e;
+  } finally {
+    _replayAbortController = null;
+    setReplaySending(false);
+  }
 
   if (!response.ok) {
     tab.responseRecord = null;
@@ -6771,6 +6838,9 @@ function restoreRepeaterHistoryEntry(tab, entry) {
   tab.targetScheme = normalizedTarget.scheme;
   tab.targetHost = normalizedTarget.host;
   tab.targetPort = normalizedTarget.port;
+  // Clear hex state so it re-generates from the new requestText
+  tab.requestBytes = null;
+  tab.requestOriginalBytes = null;
 }
 
 function canNavigateReplayHistory(tab, direction) {
@@ -7743,6 +7813,138 @@ function toHexDump(text) {
   }
 
   return rows.join("\n") || "00000000";
+}
+
+function toHexDumpFromBytes(bytes) {
+  const rows = [];
+  for (let offset = 0; offset < bytes.length; offset += 16) {
+    const chunk = Array.from(bytes.slice(offset, offset + 16));
+    const left = chunk.slice(0, 8).map((v) => v.toString(16).padStart(2, "0")).join(" ");
+    const right = chunk.slice(8).map((v) => v.toString(16).padStart(2, "0")).join(" ");
+    const hex = (left + "  " + right).padEnd(49, " ");
+    const ascii = chunk
+      .map((value) => (value >= 32 && value <= 126 ? String.fromCharCode(value) : "."))
+      .join("");
+    rows.push(`${offset.toString(16).padStart(8, "0")}  ${hex} ${ascii}`);
+  }
+  return rows.join("\n") || "00000000";
+}
+
+function renderEditableHexHtml(bytes, originalBytes) {
+  const lines = [];
+  for (let offset = 0; offset < bytes.length; offset += 16) {
+    const chunk = Array.from(bytes.slice(offset, offset + 16));
+    const offsetStr = offset.toString(16).padStart(8, "0");
+
+    // Build hex bytes as individual clickable spans, highlight modified
+    const hexSpans = chunk.map((b, i) => {
+      const globalIdx = offset + i;
+      const gap = (i === 8) ? " " : "";
+      const modified = originalBytes && globalIdx < originalBytes.length && b !== originalBytes[globalIdx] ? " hex-byte-modified" : "";
+      return `${gap}<span class="hex-byte${modified}" data-idx="${globalIdx}" tabindex="0">${b.toString(16).padStart(2, "0")}</span>`;
+    }).join(" ");
+
+    // Pad if less than 16 bytes
+    const totalChars = chunk.length * 3 - 1 + (chunk.length > 8 ? 1 : 0);
+    const pad = " ".repeat(Math.max(0, 49 - totalChars));
+
+    const ascii = chunk
+      .map((v) => (v >= 32 && v <= 126 ? escapeHtml(String.fromCharCode(v)) : "."))
+      .join("");
+
+    lines.push(wrapCodeLine(
+      `<span class="hex-col hex-col-offset">${offsetStr}</span><span class="hex-col hex-col-bytes">${hexSpans}${pad}</span><span class="hex-col hex-col-ascii">${ascii}</span>`,
+      "code-line code-line-hex",
+    ));
+  }
+  return lines.join("") || wrapCodeLine("00000000", "code-line code-line-hex");
+}
+
+function bindHexByteHandlers(container, tab) {
+  container.querySelectorAll(".hex-byte").forEach((span) => {
+    span.addEventListener("click", (e) => {
+      e.stopPropagation();
+      startHexByteEdit(span, tab, container);
+    });
+  });
+}
+
+function startHexByteEdit(span, tab, container) {
+  // Remove any existing edit input
+  container.querySelectorAll(".hex-byte-input").forEach((el) => el.remove());
+  container.querySelectorAll(".hex-byte.editing").forEach((el) => el.classList.remove("editing"));
+
+  const idx = parseInt(span.dataset.idx, 10);
+  if (isNaN(idx) || !tab.requestBytes) return;
+
+  span.classList.add("editing");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "hex-byte-input";
+  input.maxLength = 2;
+  input.value = tab.requestBytes[idx].toString(16).padStart(2, "0");
+  input.size = 2;
+
+  span.textContent = "";
+  span.appendChild(input);
+  input.focus();
+  input.select();
+
+  function commit() {
+    const val = parseInt(input.value, 16);
+    if (!isNaN(val) && val >= 0 && val <= 255) {
+      tab.requestBytes[idx] = val;
+    }
+    // Re-render the entire hex view with modification highlights
+    container.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
+    bindHexByteHandlers(container, tab);
+    // Sync text
+    tab.requestText = new TextDecoder().decode(tab.requestBytes);
+    if (els.replayRequestEditor) els.replayRequestEditor.value = tab.requestText;
+  }
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      commit();
+      // Move to next/prev byte
+      const nextIdx = e.shiftKey ? idx - 1 : idx + 1;
+      const nextSpan = container.querySelector(`.hex-byte[data-idx="${nextIdx}"]`);
+      if (nextSpan) startHexByteEdit(nextSpan, tab, container);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      commit();
+      const nextSpan = container.querySelector(`.hex-byte[data-idx="${idx + 1}"]`);
+      if (nextSpan) startHexByteEdit(nextSpan, tab, container);
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      commit();
+      const prevSpan = container.querySelector(`.hex-byte[data-idx="${idx - 1}"]`);
+      if (prevSpan) startHexByteEdit(prevSpan, tab, container);
+    }
+  });
+
+  input.addEventListener("input", () => {
+    // Only allow hex characters
+    input.value = input.value.replace(/[^0-9a-fA-F]/g, "").substring(0, 2);
+    // Auto-advance after 2 chars
+    if (input.value.length === 2) {
+      commit();
+      const nextSpan = container.querySelector(`.hex-byte[data-idx="${idx + 1}"]`);
+      if (nextSpan) startHexByteEdit(nextSpan, tab, container);
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    // Delay to allow click on another byte
+    setTimeout(() => {
+      if (!container.querySelector(".hex-byte-input")) return;
+      commit();
+    }, 100);
+  });
 }
 
 function updateCodePane(viewElement, lineElement, text, mode, target) {
