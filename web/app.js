@@ -4807,8 +4807,9 @@ function renderReplay() {
     els.replayRequestHighlight.removeAttribute("contenteditable");
     if (!tab.requestBytes) {
       tab.requestBytes = new TextEncoder().encode(tab.requestText);
+      tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
     }
-    els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes);
+    els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
     bindHexByteHandlers(els.replayRequestHighlight, tab);
     updateReplaySearchPane("request", toHexDumpFromBytes(tab.requestBytes));
   } else {
@@ -4817,6 +4818,7 @@ function renderReplay() {
       tab.requestText = new TextDecoder().decode(tab.requestBytes);
       els.replayRequestEditor.value = tab.requestText;
       tab.requestBytes = null;
+      tab.requestOriginalBytes = null;
     }
     if (!els.replayRequestHighlight.isContentEditable) {
       els.replayRequestHighlight.setAttribute("contenteditable", "plaintext-only");
@@ -4998,8 +5000,9 @@ function renderReplayViewContent(target) {
       els.replayRequestHighlight.removeAttribute("contenteditable");
       if (!tab.requestBytes) {
         tab.requestBytes = new TextEncoder().encode(tab.requestText);
+        tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
       }
-      els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes);
+      els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
       bindHexByteHandlers(els.replayRequestHighlight, tab);
       updateReplaySearchPane("request", toHexDumpFromBytes(tab.requestBytes));
     } else {
@@ -5007,6 +5010,7 @@ function renderReplayViewContent(target) {
         tab.requestText = new TextDecoder().decode(tab.requestBytes);
         els.replayRequestEditor.value = tab.requestText;
         tab.requestBytes = null;
+      tab.requestOriginalBytes = null;
       }
       if (!els.replayRequestHighlight.isContentEditable) {
         els.replayRequestHighlight.setAttribute("contenteditable", "plaintext-only");
@@ -6834,6 +6838,9 @@ function restoreRepeaterHistoryEntry(tab, entry) {
   tab.targetScheme = normalizedTarget.scheme;
   tab.targetHost = normalizedTarget.host;
   tab.targetPort = normalizedTarget.port;
+  // Clear hex state so it re-generates from the new requestText
+  tab.requestBytes = null;
+  tab.requestOriginalBytes = null;
 }
 
 function canNavigateReplayHistory(tab, direction) {
@@ -7823,17 +7830,18 @@ function toHexDumpFromBytes(bytes) {
   return rows.join("\n") || "00000000";
 }
 
-function renderEditableHexHtml(bytes) {
+function renderEditableHexHtml(bytes, originalBytes) {
   const lines = [];
   for (let offset = 0; offset < bytes.length; offset += 16) {
     const chunk = Array.from(bytes.slice(offset, offset + 16));
     const offsetStr = offset.toString(16).padStart(8, "0");
 
-    // Build hex bytes as individual clickable spans
+    // Build hex bytes as individual clickable spans, highlight modified
     const hexSpans = chunk.map((b, i) => {
       const globalIdx = offset + i;
       const gap = (i === 8) ? " " : "";
-      return `${gap}<span class="hex-byte" data-idx="${globalIdx}" tabindex="0">${b.toString(16).padStart(2, "0")}</span>`;
+      const modified = originalBytes && globalIdx < originalBytes.length && b !== originalBytes[globalIdx] ? " hex-byte-modified" : "";
+      return `${gap}<span class="hex-byte${modified}" data-idx="${globalIdx}" tabindex="0">${b.toString(16).padStart(2, "0")}</span>`;
     }).join(" ");
 
     // Pad if less than 16 bytes
@@ -7887,8 +7895,8 @@ function startHexByteEdit(span, tab, container) {
     if (!isNaN(val) && val >= 0 && val <= 255) {
       tab.requestBytes[idx] = val;
     }
-    // Re-render the entire hex view
-    container.innerHTML = renderEditableHexHtml(tab.requestBytes);
+    // Re-render the entire hex view with modification highlights
+    container.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
     bindHexByteHandlers(container, tab);
     // Sync text
     tab.requestText = new TextDecoder().decode(tab.requestBytes);

@@ -2156,6 +2156,11 @@ code {
   background: var(--accent-soft, rgba(224, 160, 80, 0.3));
 }
 
+.hex-byte-modified {
+  color: #e06c88;
+  font-weight: 700;
+}
+
 .hex-byte-input {
   width: 2ch;
   padding: 0;
