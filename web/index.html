@@ -133,7 +133,8 @@
             <button class="sub-tab active" data-proxy-tab="http-history">HTTP</button>
             <button class="sub-tab" data-proxy-tab="websockets-history">Web Socket</button>
             <button class="sub-tab" data-proxy-tab="replace">Replace</button>
-            <button class="sub-tab" data-proxy-tab="findings">Findings <span class="findings-badge" id="findingsBadge"></span></button>
+            <button class="sub-tab" data-proxy-tab="findings">Findings <span class="findings-badge hidden" id="findingsBadge"></span></button>
+            <button class="sub-tab" data-proxy-tab="oast">OAST <span class="findings-badge hidden" id="oastBadge"></span></button>
             <button class="sub-tab" data-proxy-tab="proxy-settings">Settings</button>
             <div class="color-tag-filter" id="colorTagFilter">
               <button class="color-dot-btn" data-color="red" title="Red"><span class="color-dot color-dot-red"></span></button>
@@ -684,6 +685,53 @@
             </div>
           </div>
 
+          <section class="proxy-panel hidden" id="oastPanel">
+            <div class="stack-panel">
+              <section class="panel-card panel-card-top">
+                <header class="panel-toolbar">
+                  <div>
+                    <p class="placeholder-kicker">Out-of-Band — <span id="oastStatusText" class="oast-status-text">Not configured</span></p>
+                    <h2>OAST Callbacks</h2>
+                  </div>
+                  <div class="toolbar-actions">
+                    <button class="primary-action" id="oastGenerateButton" type="button">Generate Payload</button>
+                    <button class="secondary-action" id="oastClearButton" type="button">Clear</button>
+                  </div>
+                </header>
+                <div id="oastPayloadDisplay" class="oast-payload-display hidden">
+                  <span class="oast-payload-label">Payload:</span>
+                  <code id="oastPayloadText" class="oast-payload-code"></code>
+                  <button class="utility-button" id="oastCopyPayloadButton" type="button" title="Copy">📋</button>
+                </div>
+                <div class="history-table-shell">
+                  <table class="mini-table" id="oastTable">
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>Protocol</th>
+                        <th>Remote</th>
+                        <th>Correlation ID</th>
+                      </tr>
+                    </thead>
+                    <tbody id="oastTableBody"></tbody>
+                  </table>
+                </div>
+              </section>
+              <div class="stack-resizer" aria-hidden="true"></div>
+              <section class="panel-card">
+                <header class="panel-toolbar">
+                  <div>
+                    <p class="placeholder-kicker">Detail</p>
+                    <h2 id="oastDetailTitle">Select a callback</h2>
+                  </div>
+                </header>
+                <div class="editor-panel">
+                  <pre class="simple-code-view" id="oastDetailView" tabindex="0">Select an OAST callback to view details.</pre>
+                </div>
+              </section>
+            </div>
+          </section>
+
           <section class="proxy-panel hidden" id="proxySettingsPanel">
             <div class="split-panel split-panel-tight">
               <section class="panel-card">
@@ -724,6 +772,33 @@
                     <textarea id="proxySettingPassthroughHosts" rows="4" placeholder="*.pinned-app.com&#10;banking.example.com"></textarea>
                     <small>Hosts listed here bypass TLS interception entirely. Use for certificate-pinned apps that reject the proxy CA. Wildcards supported.</small>
                   </label>
+                  <div class="settings-divider"></div>
+                  <label class="settings-toggle">
+                    <input id="proxySettingOastEnabled" type="checkbox" />
+                    <span>Enable OAST (Out-of-Band Testing)</span>
+                  </label>
+                  <label class="settings-field">
+                    <span>Provider</span>
+                    <select id="proxySettingOastProvider">
+                      <option value="interactsh">Interactsh</option>
+                      <option value="boast">BOAST</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    <span>OAST server URL</span>
+                    <input id="proxySettingOastServerUrl" type="text" placeholder="https://interact.sh" />
+                    <small id="oastServerUrlHint">Interactsh-compatible server. Sniper auto-registers and polls for callbacks.</small>
+                  </label>
+                  <label class="settings-field" id="oastTokenField">
+                    <span>OAST token</span>
+                    <input id="proxySettingOastToken" type="text" placeholder="Server authentication token (optional)" />
+                  </label>
+                  <label class="settings-field">
+                    <span>Polling interval (seconds)</span>
+                    <input id="proxySettingOastInterval" type="number" min="1" max="300" value="5" />
+                  </label>
+                  <div class="settings-divider"></div>
                   <label class="settings-field">
                     <span>Proxy bind host</span>
                     <input id="proxySettingBindHost" type="text" list="proxyBindHostPresets" placeholder="127.0.0.1 or 0.0.0.0" />

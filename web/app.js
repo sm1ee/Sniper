@@ -248,6 +248,8 @@ const state = {
   matchReplaceRules: [],
   selectedMatchReplaceRuleId: null,
   targetSiteMap: [],
+  oastCallbacks: [],
+  selectedOastId: null,
   sequenceDefinitions: [],
   selectedSequenceId: null,
   editingSequence: null,
@@ -355,6 +357,16 @@ const els = {
   scannerAddCustomRule: document.getElementById("scannerAddCustomRule"),
   scannerQuickToggle: document.getElementById("scannerQuickToggle"),
   findingsInScopeOnly: document.getElementById("findingsInScopeOnly"),
+  oastPanel: document.getElementById("oastPanel"),
+  oastTableBody: document.getElementById("oastTableBody"),
+  oastBadge: document.getElementById("oastBadge"),
+  oastGenerateButton: document.getElementById("oastGenerateButton"),
+  oastClearButton: document.getElementById("oastClearButton"),
+  oastPayloadDisplay: document.getElementById("oastPayloadDisplay"),
+  oastPayloadText: document.getElementById("oastPayloadText"),
+  oastCopyPayloadButton: document.getElementById("oastCopyPayloadButton"),
+  oastDetailTitle: document.getElementById("oastDetailTitle"),
+  oastDetailView: document.getElementById("oastDetailView"),
   proxySettingsPanel: document.getElementById("proxySettingsPanel"),
   requestView: document.getElementById("requestView"),
   requestLines: document.getElementById("requestLines"),
@@ -1232,6 +1244,37 @@ function bindEvents() {
 
   bindWsReplayEvents();
   bindFindingsEvents();
+
+  // OAST
+  const oastProviderSelect = document.getElementById("proxySettingOastProvider");
+  if (oastProviderSelect) {
+    oastProviderSelect.addEventListener("change", () => renderProxySettings());
+  }
+  if (els.oastGenerateButton) {
+    els.oastGenerateButton.addEventListener("click", () => {
+      generateOastPayload().catch(console.error);
+    });
+  }
+  if (els.oastClearButton) {
+    els.oastClearButton.addEventListener("click", () => {
+      clearOastCallbacks().catch(console.error);
+    });
+  }
+  if (els.oastCopyPayloadButton) {
+    els.oastCopyPayloadButton.addEventListener("click", () => {
+      const text = els.oastPayloadText?.textContent;
+      if (text) { copyTextToClipboard(text); showToast("Copied OAST payload"); }
+    });
+  }
+  if (els.oastTableBody) {
+    els.oastTableBody.addEventListener("click", (event) => {
+      const row = event.target.closest("tr[data-oast-id]");
+      if (!row) return;
+      state.selectedOastId = row.dataset.oastId;
+      loadOastDetail(row.dataset.oastId).catch(console.error);
+      renderOastCallbacks();
+    });
+  }
   els.replaySchemeSelect.addEventListener("change", () => {
     applyReplayTargetFields().catch((error) => console.error(error));
   });
@@ -2441,6 +2484,10 @@ async function pollAuxiliaryData() {
     tasks.push(updateFindingsBadgeOnly());
   }
 
+  if (state.activeTool === "proxy" && state.activeProxyTab === "oast") {
+    tasks.push(loadOastCallbacks());
+  }
+
   if (!tasks.length) {
     return;
   }
@@ -3537,6 +3584,96 @@ function findingsArrowNav(direction) {
   loadFindingDetail(f.id);
 }
 
+async function loadOastCallbacks() {
+  const [cbRes, statusRes] = await Promise.all([
+    fetch("/api/oast/callbacks"),
+    fetch("/api/oast/status"),
+  ]);
+  state.oastCallbacks = await cbRes.json();
+  renderOastCallbacks();
+  updateOastBadge();
+  // Update registration status display
+  try {
+    const status = await statusRes.json();
+    const el = document.getElementById("oastStatusText");
+    if (el) {
+      if (status.registered) {
+        el.textContent = `${status.provider} · Registered (${status.payload_domain || status.correlation_id || ""})`;
+        el.className = "oast-status-text registered";
+      } else if (status.provider && status.provider !== "custom") {
+        el.textContent = `${status.provider} · Not registered`;
+        el.className = "oast-status-text not-registered";
+      } else {
+        el.textContent = status.provider || "Not configured";
+        el.className = "oast-status-text not-registered";
+      }
+    }
+  } catch (_) { /* ignore status fetch errors */ }
+}
+
+function renderOastCallbacks() {
+  if (!els.oastTableBody) return;
+  els.oastTableBody.innerHTML = state.oastCallbacks.length
+    ? state.oastCallbacks.map((cb) => {
+        const selected = cb.id === state.selectedOastId ? "selected" : "";
+        return `<tr class="history-row ${selected}" data-oast-id="${cb.id}">
+          <td>${escapeHtml(formatTimestamp(cb.received_at))}</td>
+          <td>${escapeHtml(cb.protocol)}</td>
+          <td>${escapeHtml(cb.remote_addr)}</td>
+          <td>${escapeHtml(cb.correlation_id)}</td>
+        </tr>`;
+      }).join("")
+    : '<tr class="empty-row"><td colspan="4">No OAST callbacks received yet. Generate a payload and use it in your tests.</td></tr>';
+}
+
+function updateOastBadge() {
+  if (!els.oastBadge) return;
+  const count = state.oastCallbacks.length;
+  els.oastBadge.textContent = count > 0 ? String(count) : "";
+  els.oastBadge.classList.toggle("hidden", count === 0);
+}
+
+async function loadOastDetail(id) {
+  const response = await fetch(`/api/oast/callbacks/${id}`);
+  if (!response.ok) return;
+  const cb = await response.json();
+  if (els.oastDetailTitle) els.oastDetailTitle.textContent = `${cb.protocol} from ${cb.remote_addr}`;
+  if (els.oastDetailView) {
+    els.oastDetailView.textContent = [
+      `Protocol: ${cb.protocol}`,
+      `Remote: ${cb.remote_addr}`,
+      `Correlation ID: ${cb.correlation_id}`,
+      `Received: ${cb.received_at}`,
+      '',
+      '--- Raw Data ---',
+      cb.raw_data || '(empty)',
+    ].join('\n');
+  }
+}
+
+async function generateOastPayload() {
+  const serverUrl = (state.runtime.oast_server_url || "").trim();
+  if (!serverUrl) {
+    showToast("Set an OAST server URL in Settings first", "error");
+    return;
+  }
+  const response = await fetch("/api/oast/generate", { method: "POST" });
+  const data = await response.json();
+  if (els.oastPayloadDisplay) els.oastPayloadDisplay.classList.remove("hidden");
+  if (els.oastPayloadText) els.oastPayloadText.textContent = data.payload;
+  showToast(`OAST payload: ${data.payload}`);
+}
+
+async function clearOastCallbacks() {
+  await fetch("/api/oast/callbacks/clear", { method: "POST" });
+  state.oastCallbacks = [];
+  state.selectedOastId = null;
+  renderOastCallbacks();
+  updateOastBadge();
+  if (els.oastDetailView) els.oastDetailView.textContent = "Select an OAST callback to view details.";
+  if (els.oastDetailTitle) els.oastDetailTitle.textContent = "Select a callback";
+}
+
 function bindFindingsEvents() {
   // Sort headers
   document.querySelectorAll(".findings-sortable").forEach((th) => {
@@ -3818,8 +3955,9 @@ function renderProxyPanels() {
   const showWebsockets = state.activeProxyTab === "websockets-history";
   const showMatchReplace = state.activeProxyTab === "replace";
   const showFindings = state.activeProxyTab === "findings";
+  const showOast = state.activeProxyTab === "oast";
   const showProxySettings = state.activeProxyTab === "proxy-settings";
-  const showPlaceholder = !showHistory && !showIntercept && !showWebsockets && !showMatchReplace && !showFindings && !showProxySettings;
+  const showPlaceholder = !showHistory && !showIntercept && !showWebsockets && !showMatchReplace && !showFindings && !showOast && !showProxySettings;
 
   els.colorTagFilter.classList.toggle("hidden", !showHistory);
   els.filterBar.classList.toggle("hidden", !showHistory);
@@ -3830,6 +3968,7 @@ function renderProxyPanels() {
   els.websocketPanel.classList.toggle("hidden", !showWebsockets);
   els.matchReplacePanel.classList.toggle("hidden", !showMatchReplace);
   els.findingsPanel.classList.toggle("hidden", !showFindings);
+  if (els.oastPanel) els.oastPanel.classList.toggle("hidden", state.activeProxyTab !== "oast");
   els.proxySettingsPanel.classList.toggle("hidden", !showProxySettings);
   els.proxySubPlaceholder.classList.toggle("hidden", !showPlaceholder);
 
@@ -4754,6 +4893,36 @@ function renderProxySettings() {
   // Auto Content-Length (local UI setting, not server-side)
   const aclEl = document.getElementById("proxySettingAutoContentLength");
   if (aclEl) aclEl.checked = localStorage.getItem("sniper_auto_content_length") !== "false";
+
+  const oastEnabled = document.getElementById("proxySettingOastEnabled");
+  const oastProvider = document.getElementById("proxySettingOastProvider");
+  const oastUrl = document.getElementById("proxySettingOastServerUrl");
+  const oastToken = document.getElementById("proxySettingOastToken");
+  const oastInterval = document.getElementById("proxySettingOastInterval");
+  const oastUrlHint = document.getElementById("oastServerUrlHint");
+  const oastTokenField = document.getElementById("oastTokenField");
+  if (oastEnabled) oastEnabled.checked = Boolean(state.runtime.oast_enabled);
+  if (oastProvider && document.activeElement !== oastProvider) oastProvider.value = state.runtime.oast_provider || "custom";
+  if (oastUrl && document.activeElement !== oastUrl) oastUrl.value = state.runtime.oast_server_url || "";
+  if (oastToken && document.activeElement !== oastToken) oastToken.value = state.runtime.oast_token || "";
+  if (oastInterval && document.activeElement !== oastInterval) oastInterval.value = state.runtime.oast_polling_interval_secs || 5;
+  // Update UI based on provider
+  const prov = oastProvider?.value || "custom";
+  if (oastUrl) {
+    const placeholders = { interactsh: "https://oast.fun", boast: "https://your-boast:1337", custom: "https://your-server" };
+    oastUrl.placeholder = placeholders[prov] || placeholders.custom;
+  }
+  if (oastUrlHint) {
+    const hints = {
+      interactsh: "Interactsh server. Sniper auto-registers with RSA encryption and polls for callbacks.",
+      boast: "BOAST server. Sniper polls the /events endpoint for callbacks.",
+      custom: "Custom OAST server. Sniper polls {url}/poll for JSON callbacks.",
+    };
+    oastUrlHint.textContent = hints[prov] || hints.custom;
+  }
+  if (oastTokenField) {
+    oastTokenField.style.display = prov === "boast" ? "none" : "";
+  }
 
   els.proxySettingsDataDir.textContent = state.settings.data_dir;
   els.proxySettingsStartupPath.textContent = startup?.file_path || state.settings.data_dir;
@@ -5787,6 +5956,11 @@ async function saveProxySettings() {
       upstream_insecure: els.proxySettingUpstreamInsecure.checked,
       scope_patterns: scopePatterns,
       passthrough_hosts: passthroughHosts,
+      oast_enabled: document.getElementById("proxySettingOastEnabled")?.checked ?? false,
+      oast_provider: document.getElementById("proxySettingOastProvider")?.value || "custom",
+      oast_server_url: document.getElementById("proxySettingOastServerUrl")?.value?.trim() || "",
+      oast_token: document.getElementById("proxySettingOastToken")?.value?.trim() || "",
+      oast_polling_interval_secs: parseInt(document.getElementById("proxySettingOastInterval")?.value) || 5,
     }),
   });
 
