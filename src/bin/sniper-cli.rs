@@ -125,6 +125,10 @@ enum CaptureCommand {
         #[command(subcommand)]
         command: AutoReplaceCommand,
     },
+    Oast {
+        #[command(subcommand)]
+        command: OastCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -331,6 +335,56 @@ enum WebSocketCommand {
 enum AutoReplaceCommand {
     List,
     Set(AutoReplaceSetArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum OastCommand {
+    /// Show OAST registration status and provider info
+    Status,
+    /// List received OAST callbacks
+    List(OastListArgs),
+    /// Get full details of a specific callback
+    Get(OastGetArgs),
+    /// Generate a new OAST payload
+    Generate,
+    /// Clear all OAST callbacks
+    Clear,
+    /// Configure OAST provider settings
+    Configure(OastConfigureArgs),
+}
+
+#[derive(Args, Debug, Default)]
+struct OastListArgs {
+    #[arg(long)]
+    limit: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+struct OastGetArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug, Default)]
+struct OastConfigureArgs {
+    /// Provider: interactsh, boast, or custom
+    #[arg(long)]
+    provider: Option<String>,
+    /// OAST server URL
+    #[arg(long)]
+    url: Option<String>,
+    /// Authentication token
+    #[arg(long)]
+    token: Option<String>,
+    /// Polling interval in seconds
+    #[arg(long)]
+    interval: Option<u64>,
+    /// Enable OAST
+    #[arg(long)]
+    enable: bool,
+    /// Disable OAST
+    #[arg(long)]
+    disable: bool,
 }
 
 #[derive(Args, Debug, Default)]
@@ -643,6 +697,7 @@ async fn run(cli: Cli) -> Result<()> {
                     CaptureCommand::InterceptRule { command } => {
                         handle_intercept_rule(api, command).await
                     }
+                    CaptureCommand::Oast { command } => handle_oast(api, command).await,
                 },
                 Command::Scope { command } => handle_target(api, command).await,
                 Command::Replay { command } => handle_replay(api, command).await,
@@ -1187,6 +1242,80 @@ async fn handle_sequence(api: ApiClient, command: SequenceCommand) -> Result<()>
             };
             let runs: Vec<SequenceRunSummary> = api.get_json(&path).await?;
             print_json(&runs)
+        }
+    }
+}
+
+async fn handle_oast(api: ApiClient, command: OastCommand) -> Result<()> {
+    match command {
+        OastCommand::Status => {
+            let status: serde_json::Value = api.get_json("/api/oast/status").await?;
+            print_json(&status)
+        }
+        OastCommand::List(args) => {
+            let callbacks: Vec<serde_json::Value> = api.get_json("/api/oast/callbacks").await?;
+            let limited = if let Some(limit) = args.limit {
+                callbacks.into_iter().take(limit).collect()
+            } else {
+                callbacks
+            };
+            print_json(&limited)
+        }
+        OastCommand::Get(args) => {
+            let cb: serde_json::Value =
+                api.get_json(&format!("/api/oast/callbacks/{}", args.id)).await?;
+            print_json(&cb)
+        }
+        OastCommand::Generate => {
+            let result: serde_json::Value =
+                api.request_json::<(), serde_json::Value>(reqwest::Method::POST, "/api/oast/generate", None).await?;
+            print_json(&result)
+        }
+        OastCommand::Clear => {
+            api.post_status("/api/oast/callbacks/clear", &serde_json::json!({})).await?;
+            print_json(&serde_json::json!({"status": "cleared"}))
+        }
+        OastCommand::Configure(args) => {
+            let mut update = serde_json::Map::new();
+            if let Some(provider) = args.provider {
+                update.insert("oast_provider".into(), serde_json::Value::String(provider));
+            }
+            if let Some(url) = args.url {
+                update.insert("oast_server_url".into(), serde_json::Value::String(url));
+            }
+            if let Some(token) = args.token {
+                update.insert("oast_token".into(), serde_json::Value::String(token));
+            }
+            if let Some(interval) = args.interval {
+                update.insert("oast_polling_interval_secs".into(), serde_json::json!(interval));
+            }
+            if args.enable {
+                update.insert("oast_enabled".into(), serde_json::Value::Bool(true));
+            }
+            if args.disable {
+                update.insert("oast_enabled".into(), serde_json::Value::Bool(false));
+            }
+            if update.is_empty() {
+                // Just show current settings
+                let runtime: serde_json::Value = api.get_json("/api/runtime").await?;
+                let oast_fields: serde_json::Map<String, serde_json::Value> = runtime.as_object()
+                    .map(|o| o.iter()
+                        .filter(|(k, _)| k.starts_with("oast_"))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect())
+                    .unwrap_or_default();
+                print_json(&oast_fields)
+            } else {
+                let result: serde_json::Value =
+                    api.post_json("/api/runtime", &serde_json::Value::Object(update)).await?;
+                let oast_fields: serde_json::Map<String, serde_json::Value> = result.as_object()
+                    .map(|o| o.iter()
+                        .filter(|(k, _)| k.starts_with("oast_"))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect())
+                    .unwrap_or_default();
+                print_json(&oast_fields)
+            }
         }
     }
 }
