@@ -5475,17 +5475,24 @@ body.pane-resizing-y {
   flex-shrink: 0;
 }
 
-.oast-payload-code {
+.oast-payload-input {
   font-family: var(--font-mono);
   font-size: var(--font-sm);
   color: var(--accent);
   background: var(--panel-elevated);
-  padding: 4px 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  user-select: all;
-  word-break: break-all;
   flex: 1;
   min-width: 0;
+  outline: none;
+}
+.oast-payload-input:focus {
+  border-color: var(--accent);
+}
+.oast-payload-input::placeholder {
+  color: var(--text-soft);
+  font-style: italic;
 }
 
 .oast-status-text {
