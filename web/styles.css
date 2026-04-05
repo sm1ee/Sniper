@@ -5450,6 +5450,54 @@ body.pane-resizing-y {
   }
 }
 
+/* ─── Settings divider ─── */
+.settings-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 0;
+}
+
+/* ─── OAST panel ─── */
+.oast-payload-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--panel-code);
+  border-bottom: 1px solid var(--line);
+}
+
+.oast-payload-label {
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.oast-payload-code {
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  color: var(--accent);
+  background: var(--panel-elevated);
+  padding: 4px 10px;
+  border-radius: var(--radius);
+  user-select: all;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+
+.oast-status-text {
+  font-weight: 400;
+}
+.oast-status-text.registered {
+  color: #22863a;
+}
+.oast-status-text.not-registered {
+  color: var(--text-soft);
+}
+
 /* Toast notifications */
 .toast-container {
   position: fixed;

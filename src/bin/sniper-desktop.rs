@@ -127,8 +127,9 @@ fn main() -> Result<()> {
                 server_url: runtime_snap.oast_server_url.clone(),
                 token: runtime_snap.oast_token.clone(),
                 polling_interval_secs: runtime_snap.oast_polling_interval_secs,
+                provider: runtime_snap.oast_provider.clone(),
             }).await;
-            sniper::oast::start_oast_poller(session.oast.clone()).await;
+            let _ = sniper::oast::start_oast_poller(session.oast.clone()).await;
         });
     }
 

@@ -20,6 +20,8 @@ pub struct RuntimeSettingsSnapshot {
     pub oast_token: String,
     #[serde(default = "default_oast_interval")]
     pub oast_polling_interval_secs: u64,
+    #[serde(default)]
+    pub oast_provider: crate::oast::OastProvider,
 }
 
 fn default_oast_interval() -> u64 {
@@ -47,6 +49,7 @@ impl Default for RuntimeSettingsSnapshot {
             oast_server_url: String::new(),
             oast_token: String::new(),
             oast_polling_interval_secs: 5,
+            oast_provider: crate::oast::OastProvider::default(),
         }
     }
 }
@@ -63,6 +66,7 @@ pub struct RuntimeSettingsUpdate {
     pub oast_server_url: Option<String>,
     pub oast_token: Option<String>,
     pub oast_polling_interval_secs: Option<u64>,
+    pub oast_provider: Option<crate::oast::OastProvider>,
 }
 
 pub struct RuntimeSettings {
@@ -122,6 +126,9 @@ impl RuntimeSettings {
         }
         if let Some(oast_polling_interval_secs) = update.oast_polling_interval_secs {
             current.oast_polling_interval_secs = oast_polling_interval_secs;
+        }
+        if let Some(oast_provider) = update.oast_provider {
+            current.oast_provider = oast_provider;
         }
 
         current.clone()

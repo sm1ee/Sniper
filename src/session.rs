@@ -151,8 +151,9 @@ impl SessionContext {
             oast: {
                 let store = Arc::new(crate::oast::OastStore::new(max_entries));
                 if let Some(callbacks) = snapshot.oast_callbacks {
-                    let s = store.clone();
-                    tokio::spawn(async move { s.restore(callbacks).await });
+                    // Restore synchronously — VecDeque assignment doesn't need async
+                    let entries: std::collections::VecDeque<_> = callbacks.into();
+                    *store.entries_mut_blocking() = entries;
                 }
                 store
             },
