@@ -891,13 +891,13 @@ code {
 }
 
 .main-tab {
-  padding: 2px 8px;
-  font-size: var(--font-xs);
+  padding: 10px 11px 9px;
+  font-size: var(--font-sm);
 }
 
 .sub-tab {
-  padding: 2px 8px;
-  font-size: var(--font-xs);
+  padding: 8px 10px 7px;
+  font-size: var(--font-sm);
 }
 
 .main-tab:hover,
@@ -5326,11 +5326,11 @@ body.pane-resizing-y {
   }
 
   .main-tab {
-    padding: 12px 11px 11px;
+    padding: 8px 10px 7px;
   }
 
   .sub-tab {
-    padding: 10px 11px 9px;
+    padding: 6px 8px 5px;
   }
 
   .proxy-shell {
