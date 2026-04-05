@@ -1262,7 +1262,7 @@ function bindEvents() {
   }
   if (els.oastCopyPayloadButton) {
     els.oastCopyPayloadButton.addEventListener("click", () => {
-      const text = els.oastPayloadText?.textContent;
+      const text = els.oastPayloadText?.value;
       if (text) { copyTextToClipboard(text); showToast("Copied OAST payload"); }
     });
   }
@@ -3659,8 +3659,7 @@ async function generateOastPayload() {
   }
   const response = await fetch("/api/oast/generate", { method: "POST" });
   const data = await response.json();
-  if (els.oastPayloadDisplay) els.oastPayloadDisplay.classList.remove("hidden");
-  if (els.oastPayloadText) els.oastPayloadText.textContent = data.payload;
+  if (els.oastPayloadText) els.oastPayloadText.value = data.payload;
   showToast(`OAST payload: ${data.payload}`);
 }
 
