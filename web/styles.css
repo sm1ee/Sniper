@@ -5028,11 +5028,6 @@ body.pane-resizing-y {
 }
 
 @media (max-width: 1480px) {
-  .top-strip {
-    padding-top: 10px;
-    padding-bottom: 10px;
-  }
-
   .top-utilities {
     justify-self: end;
   }
@@ -5309,20 +5304,12 @@ body.pane-resizing-y {
     padding: 0;
   }
 
-  .top-strip {
-    min-height: 50px;
+  .main-tab {
+    padding: 6px 10px 5px;
   }
 
-  .metric-pill,
-  .utility-button,
-  .status-pill {
-    min-height: 34px;
-  }
-
-  .utility-button.icon-button {
-    width: 34px;
-    min-width: 34px;
-    height: 34px;
+  .sub-tab {
+    padding: 4px 8px 3px;
   }
 
   .proxy-shell {
@@ -5363,10 +5350,6 @@ body.pane-resizing-y {
   .status-bar {
     padding-left: 10px;
     padding-right: 10px;
-  }
-
-  .top-strip {
-    min-height: 46px;
   }
 
   .proxy-shell {
