@@ -5325,14 +5325,6 @@ body.pane-resizing-y {
     height: 34px;
   }
 
-  .main-tab {
-    padding: 8px 10px 7px;
-  }
-
-  .sub-tab {
-    padding: 6px 8px 5px;
-  }
-
   .proxy-shell {
     grid-template-rows:
       auto
