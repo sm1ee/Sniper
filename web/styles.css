@@ -891,12 +891,12 @@ code {
 }
 
 .main-tab {
-  padding: 10px 11px 9px;
+  padding: 12px 12px 11px;
   font-size: var(--font-sm);
 }
 
 .sub-tab {
-  padding: 8px 10px 7px;
+  padding: 10px 11px 9px;
   font-size: var(--font-sm);
 }
 
