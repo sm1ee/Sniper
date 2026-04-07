@@ -417,8 +417,6 @@
                 </div>
               </section>
               <div class="stack-resizer" id="websocketStackResizer" role="separator" aria-orientation="horizontal" aria-label="Resize sessions and workbench panes"></div>
-
-              <div class="stack-resizer" id="websocketStackResizer" aria-hidden="true"></div>
               <section class="websocket-workbench" id="websocketWorkbench">
                 <section class="panel-card websocket-handshake-column" id="websocketHandshakeColumn">
                   <header class="panel-toolbar panel-toolbar-compact">
@@ -1286,7 +1284,14 @@
               </div>
             </header>
             <div class="history-table-shell">
-              <table class="mini-table">
+              <table class="mini-table event-log-table">
+                <colgroup>
+                  <col style="width: 140px" />
+                  <col style="width: 60px" />
+                  <col style="width: 80px" />
+                  <col style="width: 160px" />
+                  <col />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Time</th>

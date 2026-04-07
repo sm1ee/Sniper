@@ -1614,26 +1614,33 @@ function bindEvents() {
       event.metaKey &&
       !event.shiftKey &&
       !event.altKey &&
-      event.key.toLowerCase() === "i" &&
-      state.activeTool === "proxy" &&
-      state.activeProxyTab === "http-history" &&
-      state.selectedId
+      event.key.toLowerCase() === "i"
     ) {
-      event.preventDefault();
-      openFuzzerFromSelection().catch((error) => console.error(error));
+      if (state.activeTool === "proxy" && state.activeProxyTab === "http-history" && state.selectedId) {
+        event.preventDefault();
+        openFuzzerFromSelection().catch(console.error);
+      } else if (state.activeTool === "replay" && state.activeReplayTabId) {
+        event.preventDefault();
+        openFuzzerFromReplay().catch(console.error);
+      }
     }
 
-    // Cmd+F: switch to Fuzzer tab
+    // Cmd+Shift+F: send to Fuzzer (with content if in HTTP history or Replay)
     if (
       (event.metaKey || event.ctrlKey) &&
-      !event.shiftKey &&
+      event.shiftKey &&
       !event.altKey &&
-      event.key.toLowerCase() === "f" &&
-      !isEditableTarget(event.target)
+      event.key.toLowerCase() === "f"
     ) {
       event.preventDefault();
-      state.activeTool = "fuzzer";
-      renderToolPanels();
+      if (state.activeTool === "proxy" && state.activeProxyTab === "http-history" && state.selectedId) {
+        openFuzzerFromSelection().catch(console.error);
+      } else if (state.activeTool === "replay" && state.activeReplayTabId) {
+        openFuzzerFromReplay().catch(console.error);
+      } else {
+        state.activeTool = "fuzzer";
+        renderToolPanels();
+      }
     }
   });
 
@@ -5132,7 +5139,10 @@ function renderFuzzerRequestHighlight(text) {
     return;
   }
 
-  els.fuzzerRequestHighlight.innerHTML = renderCodeHtml(text, "pretty", "request");
+  let html = renderCodeHtml(text, "pretty", "request");
+  // Highlight payload placeholders: $payload$ and {{PAYLOAD}}
+  html = html.replace(/(\$payload\$|\{\{PAYLOAD\}\})/gi, '<span class="hl-payload-placeholder">$1</span>');
+  els.fuzzerRequestHighlight.innerHTML = html;
   syncFuzzerRequestHighlightScroll();
 }
 
@@ -5148,6 +5158,38 @@ function syncFuzzerRequestHighlightScroll() {
 function renderReplayResponseView(text) {
   const mode = state.replayMessageViews.response;
   els.replayResponseView.innerHTML = renderCodeHtml(text, mode, "response");
+}
+
+/** Update only the response pane + meta after a send — preserves request cursor/scroll. */
+function renderReplayResponseOnly(tab) {
+  if (!tab.responseRecord) {
+    const notice = tab.notice || "Send a request from Replay to capture the response here.";
+    els.replayResponseMeta.textContent = tab.notice || "No response yet.";
+    renderReplayResponseView(notice);
+    updateReplaySearchPane("response", notice);
+    els.replayFollowRedirectButton.classList.add("hidden");
+    return;
+  }
+  const isRedirect = [301, 302, 303, 307, 308].includes(tab.responseRecord.status);
+  const hasLocation = tab.responseRecord.response?.headers?.some((h) => h.name.toLowerCase() === "location");
+  els.replayFollowRedirectButton.classList.toggle("hidden", !(isRedirect && hasLocation));
+  els.replayResponseMeta.textContent = [
+    `${formatStatus(tab.responseRecord.status)}`,
+    `${tab.responseRecord.duration_ms} ms`,
+    tab.responseRecord.response?.content_type || tab.responseRecord.request.content_type || "n/a",
+  ].join(" · ");
+  const rawResponseText = buildRawResponse(tab.responseRecord);
+  const respMode = state.replayMessageViews.response;
+  let responseText;
+  if (respMode === "hex") {
+    responseText = toHexDump(rawResponseText);
+  } else if (respMode === "pretty") {
+    responseText = prettyFormat(rawResponseText, tab.responseRecord.response);
+  } else {
+    responseText = compactFormat(rawResponseText);
+  }
+  renderReplayResponseView(responseText);
+  updateReplaySearchPane("response", responseText);
 }
 
 function renderReplayViewTabs() {
@@ -5522,6 +5564,21 @@ async function saveTargetScope() {
   renderProxySettings();
   await loadTargetSiteMap();
   renderHistory();
+}
+
+async function openFuzzerFromReplay() {
+  const tab = getActiveReplayTab();
+  if (!tab) return;
+  const request = parseEditableRawRequest(tab.requestText, tab.baseRequest);
+  state.fuzzerBaseRequest = request;
+  state.fuzzerSourceTransactionId = tab.sourceTransactionId || null;
+  state.fuzzerNotice = "";
+  state.fuzzerRequestText = tab.requestText;
+  state.fuzzerPayloadsText = "";
+  state.fuzzerAttackRecord = null;
+  state.activeTool = "fuzzer";
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
 }
 
 async function openFuzzerFromSelection() {
@@ -6446,7 +6503,8 @@ async function sendReplay() {
       target,
     });
     scheduleWorkspaceStateSave();
-    renderReplay();
+    renderReplayResponseOnly(tab);
+    syncReplayToolbar(tab);
     return;
   }
 
@@ -6465,7 +6523,10 @@ async function sendReplay() {
     target,
   });
   scheduleWorkspaceStateSave();
-  renderReplay();
+  // Only update response side — don't re-render request to preserve cursor/scroll
+  renderReplayResponseOnly(tab);
+  syncReplayToolbar(tab);
+  renderReplayViewTabs();
   scheduleRefresh();
 }
 
