@@ -896,7 +896,7 @@ code {
 }
 
 .sub-tab {
-  padding: 10px 11px 9px;
+  padding: 10px 14px 9px;
   font-size: var(--font-sm);
 }
 
@@ -2513,13 +2513,11 @@ body.pane-resizing-y {
 }
 
 .sequence-shell .panel-toolbar h2 {
-  font-size: var(--font-xl);
+  font-size: var(--font-md);
   line-height: 1.22;
 }
 .sequence-shell .panel-toolbar {
   align-items: center;
-  padding-top: 16px;
-  padding-bottom: 16px;
 }
 .sequence-shell .inline-copy {
   display: flex;
@@ -2639,14 +2637,12 @@ body.pane-resizing-y {
 }
 
 .fuzzer-shell .panel-toolbar h2 {
-  font-size: var(--font-xl);
+  font-size: var(--font-md);
   line-height: 1.22;
 }
 
 .fuzzer-shell .panel-toolbar {
   align-items: center;
-  padding-top: 16px;
-  padding-bottom: 16px;
 }
 
 .fuzzer-shell .inline-copy {
@@ -3066,7 +3062,7 @@ body.pane-resizing-y {
 }
 
 .websocket-handshake-column .panel-toolbar h2 {
-  font-size: var(--font-xl);
+  font-size: var(--font-md);
   line-height: 1.28;
   word-break: break-word;
 }
@@ -3133,6 +3129,18 @@ body.pane-resizing-y {
 .panel-card-top {
   min-height: 0;
   grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+#websocketPanel {
+  padding: 0;
+}
+
+.ws-sessions-card,
+.websocket-handshake-column,
+.websocket-frames-column {
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
 .ws-sessions-card {
@@ -3219,8 +3227,8 @@ body.pane-resizing-y {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px 12px;
+  gap: 10px;
+  padding: 10px 14px 8px;
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.02);
 }
@@ -3229,7 +3237,7 @@ body.pane-resizing-y {
 .replay-header h2,
 .filter-group h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--font-md);
 }
 
 .panel-toolbar-compact {
@@ -5478,6 +5486,15 @@ body.pane-resizing-y {
 }
 .oast-status-text.not-registered {
   color: var(--text-soft);
+}
+
+/* Fuzzer payload placeholder highlight */
+.hl-payload-placeholder {
+  background: rgba(255, 180, 50, 0.25);
+  color: #ffb432;
+  border-radius: 2px;
+  padding: 0 1px;
+  font-weight: 600;
 }
 
 /* Toast notifications */
