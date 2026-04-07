@@ -160,6 +160,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/replay/ws-frames/:id", get(ws_replay_frames))
         .route("/api/events", get(events))
         .fallback(get(index))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)) // 64 MB
         .with_state(state)
 }
 
