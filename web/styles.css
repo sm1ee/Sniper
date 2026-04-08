@@ -5502,6 +5502,34 @@ body.pane-resizing-y {
   font-weight: 600;
 }
 
+/* Whitespace toggle button */
+.whitespace-toggle {
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: var(--font-2xs);
+  cursor: pointer;
+  line-height: 1.2;
+  opacity: 0.6;
+}
+.whitespace-toggle:hover {
+  opacity: 1;
+  border-color: var(--line-strong);
+}
+.whitespace-toggle.active {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Whitespace markers in code view */
+.ws-cr { color: #6b5b3a; font-size: 0.8em; }
+.ws-lf { color: #6b5b3a; font-size: 0.8em; }
+
 /* Toast notifications */
 .toast-container {
   position: fixed;

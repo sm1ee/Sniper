@@ -242,6 +242,7 @@ const state = {
   activeReplayTabId: null,
   replayTabSequence: 0,
   replayMessageViews: { request: "pretty", response: "pretty" },
+  showWhitespace: { request: false, response: false },
   interceptEditorSeedId: null,
   interceptInScopeOnly: false,
   eventLog: [],
@@ -1251,6 +1252,24 @@ function bindEvents() {
   bindFindingsEvents();
 
   // OAST
+  // Whitespace toggle buttons
+  const reqWsToggle = document.getElementById("reqWhitespaceToggle");
+  const respWsToggle = document.getElementById("respWhitespaceToggle");
+  if (reqWsToggle) {
+    reqWsToggle.addEventListener("click", () => {
+      state.showWhitespace.request = !state.showWhitespace.request;
+      reqWsToggle.classList.toggle("active", state.showWhitespace.request);
+      renderReplay();
+    });
+  }
+  if (respWsToggle) {
+    respWsToggle.addEventListener("click", () => {
+      state.showWhitespace.response = !state.showWhitespace.response;
+      respWsToggle.classList.toggle("active", state.showWhitespace.response);
+      renderReplay();
+    });
+  }
+
   const oastProviderSelect = document.getElementById("proxySettingOastProvider");
   if (oastProviderSelect) {
     oastProviderSelect.addEventListener("change", () => renderProxySettings());
@@ -5050,12 +5069,19 @@ function renderReplay() {
   renderReplayViewTabs();
 }
 
+function injectWhitespaceMarkers(html) {
+  // Insert \r\n markers at the end of each code-line span (before closing tag)
+  return html.replace(/<\/span>/g, '<span class="ws-lf">\\n</span></span>');
+}
+
 function renderReplayRequestHighlight(text) {
   if (!els.replayRequestHighlight) {
     return;
   }
   const mode = state.replayMessageViews.request;
-  els.replayRequestHighlight.innerHTML = renderCodeHtml(text, mode, "request");
+  let html = renderCodeHtml(text, mode, "request");
+  if (state.showWhitespace.request) html = injectWhitespaceMarkers(html);
+  els.replayRequestHighlight.innerHTML = html;
   // Reset undo history when switching tabs
   state._replayUndoStack = [];
   state._replayRedoStack = [];
@@ -5068,7 +5094,9 @@ function replayHighlightRerender(text) {
   if (!els.replayRequestHighlight) return;
   const mode = state.replayMessageViews.request;
   const saved = saveContentEditableCaret(els.replayRequestHighlight);
-  els.replayRequestHighlight.innerHTML = renderCodeHtml(text, mode, "request");
+  let html = renderCodeHtml(text, mode, "request");
+  if (state.showWhitespace.request) html = injectWhitespaceMarkers(html);
+  els.replayRequestHighlight.innerHTML = html;
   restoreContentEditableCaret(els.replayRequestHighlight, saved);
 }
 
@@ -5162,7 +5190,9 @@ function syncFuzzerRequestHighlightScroll() {
 
 function renderReplayResponseView(text) {
   const mode = state.replayMessageViews.response;
-  els.replayResponseView.innerHTML = renderCodeHtml(text, mode, "response");
+  let html = renderCodeHtml(text, mode, "response");
+  if (state.showWhitespace.response) html = injectWhitespaceMarkers(html);
+  els.replayResponseView.innerHTML = html;
 }
 
 /** Update only the response pane + meta after a send — preserves request cursor/scroll. */
