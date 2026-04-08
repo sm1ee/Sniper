@@ -5072,10 +5072,13 @@ function renderReplay() {
 }
 
 function injectWhitespaceMarkers(html) {
-  // code-line spans are joined by \n. Match </span> followed by \n or string end.
-  // Nested syntax spans (hl-method, hl-header, etc.) are NOT followed by \n.
-  const marker = '<span class="ws-cr">↵</span>';
-  return html.replace(/<\/span>\n/g, marker + '</span>\n');
+  // Burp-style: show \r\n at each line end.
+  // code-line spans are joined with "" (no separator).
+  // Pattern: </span> followed by <span class="code-line (next line) or end of string.
+  const m = '<span class="ws-cr">\\r\\n</span>';
+  return html
+    .replace(/<\/span>(?=<span class="code-line)/g, m + '</span>')
+    .replace(/<\/span>$/, m + '</span>');
 }
 
 function renderReplayRequestHighlight(text) {
