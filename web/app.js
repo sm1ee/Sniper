@@ -11428,17 +11428,18 @@ function setReplayHeader(name, value) {
 
 const sniperCMTheme = CM.EditorView.theme({
   "&": {
-    fontSize: "var(--font-xs)",
-    fontFamily: "var(--mono)",
-    backgroundColor: "var(--panel-code)",
-    color: "var(--text)",
+    fontSize: "var(--font-xs, 10px)",
+    fontFamily: "var(--mono, monospace)",
+    backgroundColor: "var(--panel-code, #161616)",
+    color: "var(--text, #f1f1f1)",
     height: "100%",
   },
   ".cm-content": {
     padding: "12px 14px",
     caretColor: "var(--accent, #e0a050)",
     lineHeight: "1.48",
-    fontFamily: "var(--mono)",
+    fontFamily: "var(--mono, monospace)",
+    color: "var(--text, #f1f1f1)",
   },
   ".cm-gutters": {
     backgroundColor: "var(--code-gutter-bg, rgba(12,12,12,0.78))",
