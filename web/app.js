@@ -5072,9 +5072,9 @@ function renderReplay() {
 }
 
 function injectWhitespaceMarkers(html) {
-  // Show \r\n at end of each line (Sniper normalizes \r\n to \n internally,
-  // but the actual HTTP wire format uses \r\n — show that to the user)
-  return html.replace(/<\/span>/g, '<span class="ws-cr">\\r\\n</span></span>');
+  // Show \r\n only at the end of each code-line (not inside nested syntax spans).
+  // code-line spans end with </span>\n or </span> at EOF.
+  return html.replace(/<\/span>(\n|$)/g, '<span class="ws-cr">\\r\\n</span></span>$1');
 }
 
 function renderReplayRequestHighlight(text) {
