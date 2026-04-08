@@ -5567,13 +5567,13 @@ async function saveTargetScope() {
 }
 
 async function openFuzzerFromReplay() {
-  const tab = state.replayTabs[state.activeReplayTabId];
+  const tab = getActiveReplayTab();
   if (!tab) return;
-  const request = parseEditableRawRequest(tab.request_text, tab.base_request);
+  const request = parseEditableRawRequest(tab.requestText, tab.baseRequest);
   state.fuzzerBaseRequest = request;
-  state.fuzzerSourceTransactionId = tab.source_transaction_id || null;
+  state.fuzzerSourceTransactionId = tab.sourceTransactionId || null;
   state.fuzzerNotice = "";
-  state.fuzzerRequestText = tab.request_text;
+  state.fuzzerRequestText = tab.requestText;
   state.fuzzerPayloadsText = "";
   state.fuzzerAttackRecord = null;
   state.activeTool = "fuzzer";
