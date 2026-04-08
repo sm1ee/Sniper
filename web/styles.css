@@ -4712,9 +4712,12 @@ body.pane-resizing-y {
   background: rgba(200, 80, 80, 0.12);
 }
 
-.danger-action:disabled {
-  opacity: 0.4;
+.danger-action:disabled,
+.primary-action:disabled,
+.secondary-action:disabled {
+  opacity: 0.35;
   cursor: not-allowed;
+  pointer-events: none;
 }
 
 .accent-action {
