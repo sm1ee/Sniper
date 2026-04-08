@@ -372,6 +372,8 @@ const els = {
   requestLines: document.getElementById("requestLines"),
   responseView: document.getElementById("responseView"),
   responseLines: document.getElementById("responseLines"),
+  requestViewCM: document.getElementById("requestViewCM"),
+  responseViewCM: document.getElementById("responseViewCM"),
   requestSearchInput: document.getElementById("requestSearchInput"),
   responseSearchInput: document.getElementById("responseSearchInput"),
   requestSearchMeta: document.getElementById("requestSearchMeta"),
@@ -4516,20 +4518,12 @@ function renderMessagePanes() {
     ? buildMessagePresentation("response", responseRecord)
     : "No response selected.";
 
-  const requestPane = updateCodePane(
-    els.requestView,
-    els.requestLines,
-    requestText,
-    state.messageViews.request,
-    "request",
-  );
-  const responsePane = updateCodePane(
-    els.responseView,
-    els.responseLines,
-    responseText,
-    state.messageViews.response,
-    "response",
-  );
+  const requestPane = els.requestViewCM
+    ? updateCodePaneCM("request", els.requestViewCM, requestText)
+    : updateCodePane(els.requestView, els.requestLines, requestText, state.messageViews.request, "request");
+  const responsePane = els.responseViewCM
+    ? updateCodePaneCM("response", els.responseViewCM, responseText)
+    : updateCodePane(els.responseView, els.responseLines, responseText, state.messageViews.response, "response");
   if (els.requestSearchInput.value !== state.messageSearch.request) {
     els.requestSearchInput.value = state.messageSearch.request;
   }
@@ -11554,4 +11548,16 @@ class SniperCodeView {
   destroy() {
     this.view.destroy();
   }
+}
+
+// CodeMirror-based code pane instances (lazy-initialized)
+const _cmViews = {};
+
+function updateCodePaneCM(key, container, text) {
+  if (!_cmViews[key]) {
+    _cmViews[key] = new SniperCodeView(container, { readOnly: true });
+  }
+  _cmViews[key].setContent(text || "");
+  const lineCount = (text || "").split("\n").length;
+  return { lineCount, matchCount: 0 };
 }
