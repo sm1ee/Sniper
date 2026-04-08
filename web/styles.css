@@ -2668,8 +2668,8 @@ body.pane-resizing-y {
 
 .fuzzer-shell .request-editor,
 .fuzzer-shell .replay-highlight-view {
-  font-size: var(--font-sm);
-  line-height: 1.5;
+  font-size: var(--font-xs);
+  line-height: 1.48;
 }
 
 .fuzzer-shell .mini-table {
