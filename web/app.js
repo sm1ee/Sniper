@@ -1905,7 +1905,7 @@ function applyWorkspaceState(snapshot) {
   state.fuzzerBaseRequest = fuzzerWS.base_request ? cloneEditableRequest(fuzzerWS.base_request) : null;
   state.fuzzerSourceTransactionId = fuzzerWS.source_transaction_id || null;
   state.fuzzerNotice = fuzzerWS.notice || "";
-  state.fuzzerRequestText = fuzzerWS.request_text || "";
+  state.fuzzerRequestText = (fuzzerWS.request_text || "").trimEnd();
   state.fuzzerPayloadsText = fuzzerWS.payloads_text || "";
   state.fuzzerAttackRecord = fuzzerWS.attack_record || null;
 }
