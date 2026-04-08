@@ -510,7 +510,8 @@ const els = {
   replayRequestSearchInput: document.getElementById("replayRequestSearchInput"),
   replayRequestSearchMeta: document.getElementById("replayRequestSearchMeta"),
   replayResponseMeta: document.getElementById("replayResponseMeta"),
-  replayResponseView: document.getElementById("replayResponseView"),
+  replayResponseView: document.getElementById("replayResponseView"), // legacy, may be null
+  replayResponseCM: document.getElementById("replayResponseCM"),
   replayResponseSearchInput: document.getElementById("replayResponseSearchInput"),
   replayResponseSearchMeta: document.getElementById("replayResponseSearchMeta"),
   sendReplayButton: document.getElementById("sendReplayButton"),
@@ -5161,9 +5162,19 @@ function syncFuzzerRequestHighlightScroll() {
   els.fuzzerRequestHighlight.scrollLeft = els.fuzzerRequestEditor.scrollLeft;
 }
 
+let _replayResponseCMView = null;
 function renderReplayResponseView(text) {
+  // Use CodeMirror if container exists
+  if (els.replayResponseCM) {
+    if (!_replayResponseCMView) {
+      _replayResponseCMView = new SniperCodeView(els.replayResponseCM, { readOnly: true });
+    }
+    _replayResponseCMView.setContent(text || "");
+    return;
+  }
+  // Fallback to legacy
   const mode = state.replayMessageViews.response;
-  els.replayResponseView.innerHTML = renderCodeHtml(text, mode, "response");
+  if (els.replayResponseView) els.replayResponseView.innerHTML = renderCodeHtml(text, mode, "response");
 }
 
 /** Update only the response pane + meta after a send — preserves request cursor/scroll. */
