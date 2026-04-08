@@ -1213,7 +1213,9 @@ function bindEvents() {
       opposite.push(state._replayLastSnapshot || els.replayRequestHighlight.innerText || "");
       const restored = stack.pop();
       state._replayLastSnapshot = restored;
-      els.replayRequestHighlight.innerHTML = renderCodeHtml(restored, state.replayMessageViews.request, "request");
+      let undoHtml = renderCodeHtml(restored, state.replayMessageViews.request, "request");
+      if (state.showWhitespace.request) undoHtml = injectWhitespaceMarkers(undoHtml);
+      els.replayRequestHighlight.innerHTML = undoHtml;
       // Clamp caret to beginning of text after undo — avoids jumping to trailing whitespace
       const maxOffset = restored.length;
       const savedCaret = saveContentEditableCaret(els.replayRequestHighlight);
@@ -5070,8 +5072,9 @@ function renderReplay() {
 }
 
 function injectWhitespaceMarkers(html) {
-  // Insert \r\n markers at the end of each code-line span (before closing tag)
-  return html.replace(/<\/span>/g, '<span class="ws-lf">\\n</span></span>');
+  // Show \r\n at end of each line (Sniper normalizes \r\n to \n internally,
+  // but the actual HTTP wire format uses \r\n — show that to the user)
+  return html.replace(/<\/span>/g, '<span class="ws-cr">\\r\\n</span></span>');
 }
 
 function renderReplayRequestHighlight(text) {
