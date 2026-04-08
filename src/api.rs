@@ -68,6 +68,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/decoder/", get(decoder_index))
         .route("/decoder/*path", get(decoder_asset))
         .route("/app.js", get(app_js))
+        .route("/codemirror.js", get(codemirror_js))
         .route("/styles.css", get(styles_css))
         .route("/favicon.svg", get(favicon_svg))
         .route("/logo.svg", get(logo_svg))
@@ -1300,6 +1301,13 @@ async fn app_js() -> Response {
     asset_response(
         "application/javascript; charset=utf-8",
         include_str!("../web/app.js"),
+    )
+}
+
+async fn codemirror_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/codemirror.bundle.js"),
     )
 }
 

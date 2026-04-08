@@ -11417,3 +11417,130 @@ function setReplayHeader(name, value) {
     copyTextToClipboard(focused.textContent).catch(() => {});
   });
 })();
+
+// ─── CodeMirror 6 Integration ───────────────────────────────────────────────
+
+const sniperCMTheme = CM.EditorView.theme({
+  "&": {
+    fontSize: "var(--font-xs)",
+    fontFamily: "var(--mono)",
+    backgroundColor: "var(--panel-code)",
+    color: "var(--text)",
+    height: "100%",
+  },
+  ".cm-content": {
+    padding: "12px 14px",
+    caretColor: "var(--accent, #e0a050)",
+    lineHeight: "1.48",
+    fontFamily: "var(--mono)",
+  },
+  ".cm-gutters": {
+    backgroundColor: "var(--code-gutter-bg, rgba(12,12,12,0.78))",
+    color: "var(--code-gutter-text, rgba(255,255,255,0.28))",
+    border: "none",
+    minWidth: "36px",
+  },
+  ".cm-gutter.cm-lineNumbers .cm-gutterElement": {
+    padding: "0 6px 0 12px",
+    fontSize: "var(--font-xs)",
+    fontFamily: "var(--mono)",
+  },
+  ".cm-activeLine": {
+    backgroundColor: "transparent",
+  },
+  ".cm-selectionBackground, ::selection": {
+    backgroundColor: "rgba(255,255,255,0.12) !important",
+  },
+  ".cm-cursor": {
+    borderLeftColor: "var(--accent, #e0a050)",
+  },
+  ".cm-scroller": {
+    overflow: "auto",
+    fontFamily: "var(--mono)",
+  },
+  ".cm-specialChar": {
+    color: "#d19a66",
+    backgroundColor: "rgba(209,154,102,0.15)",
+    borderRadius: "2px",
+    padding: "0 1px",
+  },
+  ".cm-line": {
+    padding: "0",
+  },
+  "&.cm-focused .cm-selectionBackground": {
+    backgroundColor: "rgba(255,255,255,0.15) !important",
+  },
+  "&.cm-focused": {
+    outline: "none",
+  },
+}, { dark: true });
+
+const sniperHighlightStyle = CM.syntaxHighlighting(CM.HighlightStyle.define([
+  { tag: CM.tags.keyword, color: "var(--token-method-color, #22863a)" },           // HTTP method
+  { tag: CM.tags.url, color: "var(--token-url-color, #e0a050)" },                  // URL path
+  { tag: CM.tags.comment, color: "var(--token-version-color, #6a737d)" },          // HTTP version
+  { tag: CM.tags.number, color: "var(--token-info-color, #e0a050)" },              // status code
+  { tag: CM.tags.propertyName, color: "var(--token-header-color, #6cb6d9)" },      // header name
+  { tag: CM.tags.string, color: "var(--token-plain-color, #f1f1f1)" },             // header value
+  { tag: CM.tags.punctuation, color: "var(--token-punctuation-color, #888)" },     // colon, braces
+  { tag: CM.tags.labelName, color: "var(--token-json-key-color, #c9a96e)" },       // JSON key
+  { tag: CM.tags.bool, color: "var(--token-json-key-color, #c9a96e)" },            // JSON bool
+  { tag: CM.tags.null, color: "var(--token-json-key-color, #c9a96e)" },            // JSON null
+]));
+
+function createBaseExtensions(options = {}) {
+  const exts = [
+    sniperCMTheme,
+    sniperHighlightStyle,
+    CM.lineNumbers(),
+    CM.highlightSpecialChars(),
+    CM.drawSelection(),
+    CM.EditorView.lineWrapping,
+    CM.highlightSelectionMatches(),
+  ];
+  if (options.readOnly) {
+    exts.push(CM.EditorState.readOnly.of(true));
+    exts.push(CM.EditorView.editable.of(false));
+  } else {
+    exts.push(CM.history());
+    exts.push(CM.keymap.of([...CM.defaultKeymap, ...CM.historyKeymap, ...CM.searchKeymap]));
+  }
+  if (options.placeholder) {
+    exts.push(CM.placeholder(options.placeholder));
+  }
+  return exts;
+}
+
+/** Reusable CodeMirror wrapper for Sniper code views. */
+class SniperCodeView {
+  constructor(container, options = {}) {
+    this._langCompartment = new CM.Compartment();
+    this._readOnlyCompartment = new CM.Compartment();
+    this._options = options;
+    this.view = new CM.EditorView({
+      state: CM.EditorState.create({
+        doc: "",
+        extensions: [
+          ...createBaseExtensions(options),
+          this._langCompartment.of([]),
+        ],
+      }),
+      parent: container,
+    });
+  }
+
+  setContent(text) {
+    const { view } = this;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: text || "" },
+    });
+  }
+
+  getContent() {
+    return this.view.state.doc.toString();
+  }
+
+  destroy() {
+    this.view.destroy();
+  }
+}

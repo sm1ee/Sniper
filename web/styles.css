@@ -5493,6 +5493,19 @@ body.pane-resizing-y {
   color: var(--text-soft);
 }
 
+/* ─── CodeMirror 6 Integration ─── */
+.cm-container {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+.cm-container .cm-editor {
+  height: 100%;
+}
+.cm-container .cm-scroller {
+  scrollbar-width: thin;
+}
+
 /* Fuzzer payload placeholder highlight */
 .hl-payload-placeholder {
   background: rgba(255, 180, 50, 0.25);
