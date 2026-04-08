@@ -1212,9 +1212,14 @@ function bindEvents() {
       opposite.push(state._replayLastSnapshot || els.replayRequestHighlight.innerText || "");
       const restored = stack.pop();
       state._replayLastSnapshot = restored;
-      const savedCaret = saveContentEditableCaret(els.replayRequestHighlight);
       els.replayRequestHighlight.innerHTML = renderCodeHtml(restored, state.replayMessageViews.request, "request");
-      restoreContentEditableCaret(els.replayRequestHighlight, savedCaret);
+      // Clamp caret to beginning of text after undo — avoids jumping to trailing whitespace
+      const maxOffset = restored.length;
+      const savedCaret = saveContentEditableCaret(els.replayRequestHighlight);
+      const clampedPos = savedCaret
+        ? { start: Math.min(savedCaret.start, maxOffset), end: Math.min(savedCaret.end, maxOffset) }
+        : { start: 0, end: 0 };
+      restoreContentEditableCaret(els.replayRequestHighlight, clampedPos);
       els.replayRequestEditor.value = restored;
       const tab = getActiveReplayTab();
       if (tab) tab.requestText = restored;
