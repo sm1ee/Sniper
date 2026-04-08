@@ -5072,9 +5072,10 @@ function renderReplay() {
 }
 
 function injectWhitespaceMarkers(html) {
-  // Show \r\n only at the end of each code-line (not inside nested syntax spans).
-  // code-line spans end with </span>\n or </span> at EOF.
-  return html.replace(/<\/span>(\n|$)/g, '<span class="ws-cr">\\r\\n</span></span>$1');
+  // code-line spans are joined by \n. Match </span> followed by \n or string end.
+  // Nested syntax spans (hl-method, hl-header, etc.) are NOT followed by \n.
+  const marker = '<span class="ws-cr">↵</span>';
+  return html.replace(/<\/span>\n/g, marker + '</span>\n');
 }
 
 function renderReplayRequestHighlight(text) {

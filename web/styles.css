@@ -5527,8 +5527,7 @@ body.pane-resizing-y {
 }
 
 /* Whitespace markers in code view */
-.ws-cr { color: #6b5b3a; font-size: 0.8em; }
-.ws-lf { color: #6b5b3a; font-size: 0.8em; }
+.ws-cr { color: #7a8a6a; font-size: 0.85em; opacity: 0.7; }
 
 /* Toast notifications */
 .toast-container {
