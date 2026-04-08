@@ -8304,6 +8304,7 @@ function wrapCodeLine(content, className) {
 }
 
 function bindCodePaneScroll(viewElement, lineElement) {
+  if (!viewElement || !lineElement) return;
   viewElement.addEventListener("scroll", () => {
     lineElement.scrollTop = viewElement.scrollTop;
   });
