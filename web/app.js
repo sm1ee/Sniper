@@ -1962,7 +1962,7 @@ function hydrateReplayTab(tab) {
     baseRequest: fallbackRequest,
     sourceTransactionId: tab.source_transaction_id || null,
     notice: tab.notice || "",
-    requestText: tab.request_text || buildEditableRawRequest(fallbackRequest),
+    requestText: (tab.request_text || buildEditableRawRequest(fallbackRequest)).trimEnd(),
     responseRecord: tab.response_record || null,
     targetScheme: normalizedTarget.scheme,
     targetHost: normalizedTarget.host,
@@ -1986,7 +1986,7 @@ function hydrateRepeaterHistoryEntry(entry, fallbackRequest) {
   );
   return {
     request,
-    requestText: entry.request_text || buildEditableRawRequest(request),
+    requestText: (entry.request_text || buildEditableRawRequest(request)).trimEnd(),
     responseRecord: entry.response_record || null,
     notice: entry.notice || "",
     targetScheme: normalizedTarget.scheme,
