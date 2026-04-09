@@ -5502,6 +5502,12 @@ body.pane-resizing-y {
 .cm-container .cm-editor {
   height: 100%;
 }
+.cm-container .cm-editor .cm-content {
+  color: #f1f1f1 !important;
+}
+.cm-container .cm-editor .cm-line {
+  color: #f1f1f1;
+}
 .cm-container .cm-scroller {
   scrollbar-width: thin;
 }
