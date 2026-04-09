@@ -5511,6 +5511,10 @@ body.pane-resizing-y {
 .cm-container .cm-scroller {
   scrollbar-width: thin;
 }
+/* When editor-shell contains only a cm-container, override the 2-column grid */
+.editor-shell > .cm-container:only-child {
+  grid-column: 1 / -1;
+}
 
 /* Fuzzer payload placeholder highlight */
 .hl-payload-placeholder {
