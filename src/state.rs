@@ -825,6 +825,15 @@ impl AppState {
             .context("current app bundle identity check failed")?;
         ensure_self_update_bundle_is_writable(&app_bundle)?;
 
+        // An ad-hoc-signed install (no Developer ID team) was distributed unsigned,
+        // so it cannot enforce Gatekeeper/team pinning on its own updates. Rather
+        // than brick self-update, such installs accept ad-hoc updates from the same
+        // release line. Developer-ID-signed installs keep the strict checks below.
+        // ponytail: only relaxed for already-unsigned installs; sign the app to
+        // restore Gatekeeper + team-pin enforcement.
+        let allow_adhoc_update = allow_ad_hoc_self_update()
+            || app_signing_team_identifier(&app_bundle, "current app")?.is_none();
+
         tx.send(UpdateProgress::step("Checking for updates..."))
             .await
             .ok();
@@ -937,9 +946,9 @@ impl AppState {
             cleanup_update_artifacts(&detach_targets, &tmp_dir).await;
             return Err(error);
         }
-        if allow_ad_hoc_self_update() {
+        if allow_adhoc_update {
             tracing::warn!(
-                "SNIPER_ALLOW_ADHOC_SELF_UPDATE=1 set; skipping Gatekeeper assessment for downloaded app"
+                "skipping Gatekeeper assessment for downloaded app (ad-hoc self-update)"
             );
         } else {
             if let Err(error) = assess_app_gatekeeper(&new_app_path, "downloaded app") {
@@ -2048,6 +2057,17 @@ fn release_asset_archs_match_binary_archs(asset_name: &str, binary_archs: &[&str
 fn verify_app_signing_team_matches(downloaded_app: &Path, current_app: &Path) -> Result<()> {
     let current_team = app_signing_team_identifier(current_app, "current app")?;
     let downloaded_team = app_signing_team_identifier(downloaded_app, "downloaded app")?;
+    signing_team_update_verdict(current_team, downloaded_team)
+}
+
+/// Decide whether a self-update is allowed based on the current and downloaded
+/// app signing teams. A Developer-ID install (Some team) must receive a matching
+/// signed update. An ad-hoc install (None team) cannot pin a team on its updates,
+/// so it accepts ad-hoc updates instead of bricking self-update.
+fn signing_team_update_verdict(
+    current_team: Option<String>,
+    downloaded_team: Option<String>,
+) -> Result<()> {
     match (current_team, downloaded_team) {
         (Some(current), Some(downloaded)) if current == downloaded => Ok(()),
         (Some(current), Some(downloaded)) => {
@@ -2058,14 +2078,11 @@ fn verify_app_signing_team_matches(downloaded_app: &Path, current_app: &Path) ->
         (Some(current), None) => {
             anyhow::bail!("downloaded app is missing signing team identifier {current}")
         }
-        (None, _) if allow_ad_hoc_self_update() => {
-            tracing::warn!("current app has no signing team identifier; skipping team pin check");
-            Ok(())
-        }
         (None, _) => {
-            anyhow::bail!(
-                "current app is missing a signing team identifier; self-update requires a Developer ID signed app"
-            )
+            tracing::warn!(
+                "current app has no signing team identifier (ad-hoc install); accepting ad-hoc self-update"
+            );
+            Ok(())
         }
     }
 }
@@ -2195,7 +2212,8 @@ mod tests {
         parse_hdiutil_attach_output, proxy_url_targets_loopback,
         release_asset_archs_match_binary_archs, release_asset_matches_arch,
         release_proxy_env_targets_loopback, release_update_available, select_release_dmg_asset,
-        self_update_bundle_is_writable, self_update_installer_log_path, update_installer_script,
+        self_update_bundle_is_writable, self_update_installer_log_path, signing_team_update_verdict,
+        update_installer_script,
         validate_downloaded_update_size, validate_self_update_app_bundle_path, verify_app_identity,
         AppState, GitHubAsset, GitHubRelease, UpdateArtifactGuard, CODESIGN_PATH, DITTO_PATH,
         EXPECTED_APP_BUNDLE_IDENTIFIER, EXPECTED_APP_EXECUTABLE, HDIUTIL_PATH, LIPO_PATH,
@@ -2486,6 +2504,18 @@ mod tests {
         assert!(ensure_release_is_newer("0.2.4", "v0.2.5").is_ok());
         assert!(ensure_release_is_newer("0.2.4", "0.2.4").is_err());
         assert!(ensure_release_is_newer("0.2.4", "v0.2.3").is_err());
+    }
+
+    #[test]
+    fn signing_team_verdict_allows_adhoc_and_pins_developer_id() {
+        let team = |s: &str| Some(s.to_string());
+        // Developer-ID install: update must carry the same team.
+        assert!(signing_team_update_verdict(team("ABC123"), team("ABC123")).is_ok());
+        assert!(signing_team_update_verdict(team("ABC123"), team("XYZ789")).is_err());
+        assert!(signing_team_update_verdict(team("ABC123"), None).is_err());
+        // Ad-hoc install (no team): accepts ad-hoc updates so self-update is not bricked.
+        assert!(signing_team_update_verdict(None, None).is_ok());
+        assert!(signing_team_update_verdict(None, team("ABC123")).is_ok());
     }
 
     #[test]
