@@ -1163,6 +1163,26 @@ async fn handle_forwardable_request(
             .await
         }
     };
+    let proxy_addr = state.get_active_proxy_addr().await;
+    if request_targets_own_listener(&absolute_uri, proxy_addr) {
+        return record_http_rejection(
+            &state,
+            &session,
+            RejectedRequestIdentity::from_absolute_uri(&parts.method, &absolute_uri),
+            &parts.headers,
+            &[],
+            Some(parts.version),
+            started_at,
+            started,
+            StatusCode::LOOP_DETECTED,
+            format!(
+                "Request targets Sniper's own proxy listener ({proxy_addr}); refusing to forward to avoid a proxy loop. Point the client at a real destination, or open http://sniper for the certificate portal."
+            ),
+            "proxy loop guard",
+        )
+        .await;
+    }
+
     if let Err(message) = validate_supported_transfer_encoding(&parts.headers) {
         return record_http_rejection(
             &state,
@@ -1278,6 +1298,97 @@ async fn collect_body(mut body: Incoming) -> std::result::Result<Bytes, BodyColl
         }
     }
     Ok(bytes.freeze())
+}
+
+/// Local IP addresses across every interface on this host. Used to recognize a
+/// request that points back at the proxy's own listener when it is bound to a
+/// wildcard address (0.0.0.0 / ::), where the listener answers on any local IP.
+#[cfg(unix)]
+fn local_interface_ips() -> Vec<IpAddr> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let mut addrs = Vec::new();
+    // SAFETY: getifaddrs allocates a linked list we walk read-only and free via
+    // freeifaddrs; every pointer is null-checked before dereference.
+    unsafe {
+        let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifap) != 0 {
+            return addrs;
+        }
+        let mut cur = ifap;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            if !ifa.ifa_addr.is_null() {
+                match (*ifa.ifa_addr).sa_family as i32 {
+                    libc::AF_INET => {
+                        let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                        // s_addr is in network byte order; to_ne_bytes yields the
+                        // in-memory octets [a, b, c, d] regardless of host endianness.
+                        addrs.push(IpAddr::V4(Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes())));
+                    }
+                    libc::AF_INET6 => {
+                        let sin6 = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
+                        addrs.push(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)));
+                    }
+                    _ => {}
+                }
+            }
+            cur = ifa.ifa_next;
+        }
+        libc::freeifaddrs(ifap);
+    }
+    addrs
+}
+
+#[cfg(not(unix))]
+fn local_interface_ips() -> Vec<IpAddr> {
+    // ponytail: non-unix falls back to loopback/bound-ip detection only; add
+    // platform enumeration here if Sniper ever ships on a non-unix target.
+    Vec::new()
+}
+
+fn host_belongs_to_this_machine(host: &str, bound_ip: IpAddr) -> bool {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        // A non-IP hostname (other than localhost) is not resolved here; the
+        // realistic self-target cases are IP literals or localhost.
+        return false;
+    };
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    if bound_ip.is_unspecified() {
+        local_interface_ips().iter().any(|local| *local == ip)
+    } else {
+        ip == bound_ip
+    }
+}
+
+/// True when `uri` resolves back to the proxy's own listener, which would make
+/// the proxy forward the request to itself and spin in a tight loop until the
+/// process exhausts sockets. Port must match the listener; only then is the
+/// (potentially costly) host check performed.
+fn request_targets_own_listener(uri: &Uri, proxy_addr: SocketAddr) -> bool {
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let port = match authority.port_u16() {
+        Some(port) => port,
+        None => match uri.scheme_str().and_then(|scheme| default_port_for_scheme(scheme).ok()) {
+            Some(port) => port,
+            None => return false,
+        },
+    };
+    if port != proxy_addr.port() {
+        return false;
+    }
+    host_belongs_to_this_machine(authority.host(), proxy_addr.ip())
 }
 
 fn resolve_absolute_uri(
@@ -1518,12 +1629,10 @@ fn validate_connect_host_header(headers: &HeaderMap, target: &str) -> Result<()>
         .context("invalid CONNECT Host header")?;
     let header_authority = parse_client_authority(host_header, "CONNECT Host header")?;
     let target_authority = parse_client_authority(target, "CONNECT target authority")?;
-    let header_port = header_authority
-        .port_u16()
-        .ok_or_else(|| anyhow!("CONNECT Host header must include a port: {host_header}"))?;
     let target_port = target_authority
         .port_u16()
         .ok_or_else(|| anyhow!("CONNECT target authority must include a port: {target}"))?;
+    let header_port = header_authority.port_u16().unwrap_or(target_port);
 
     if !authority_hosts_equivalent(header_authority.host(), target_authority.host())
         || header_port != target_port
@@ -7113,6 +7222,61 @@ mod tests {
         headers.insert(HOST, HeaderValue::from_static("[::1]:443"));
 
         validate_connect_host_header(&headers, "[::1]:443").unwrap();
+    }
+
+    #[test]
+    fn own_listener_guard_detects_self_targets() {
+        let wildcard: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        // Loopback and localhost on the listener port loop back into the proxy.
+        assert!(request_targets_own_listener(
+            &"http://127.0.0.1:8080/".parse().unwrap(),
+            wildcard
+        ));
+        assert!(request_targets_own_listener(
+            &"https://localhost:8080/".parse().unwrap(),
+            wildcard
+        ));
+        // A different port cannot reach this listener, so it is not a loop.
+        assert!(!request_targets_own_listener(
+            &"http://127.0.0.1:9999/".parse().unwrap(),
+            wildcard
+        ));
+        // An external host on the same port is a legitimate forward target.
+        assert!(!request_targets_own_listener(
+            &"http://example.com:8080/".parse().unwrap(),
+            wildcard
+        ));
+        assert!(!request_targets_own_listener(
+            &"http://93.184.216.34:8080/".parse().unwrap(),
+            wildcard
+        ));
+
+        // Loopback-only bind: a LAN IP never reaches the listener, so no guard.
+        let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        assert!(request_targets_own_listener(
+            &"http://127.0.0.1:8080/".parse().unwrap(),
+            loopback
+        ));
+        assert!(!request_targets_own_listener(
+            &"http://93.184.216.34:8080/".parse().unwrap(),
+            loopback
+        ));
+    }
+
+    #[test]
+    fn local_interface_ips_are_enumerable() {
+        // getifaddrs should return at least the loopback interface.
+        assert!(!local_interface_ips().is_empty());
+    }
+
+    #[test]
+    fn connect_host_header_accepts_port_omitted() {
+        // iOS/Chrome send `Host: example.com` (no port) on CONNECT; the port
+        // lives in the CONNECT target authority. Inherit it instead of rejecting.
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("example.com"));
+
+        validate_connect_host_header(&headers, "example.com:443").unwrap();
     }
 
     #[test]
