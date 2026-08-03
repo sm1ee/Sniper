@@ -18127,8 +18127,13 @@ function applyWorkbenchPaneWidths(
 
   const requestPercent = clamp((requestWidth / totalWidth) * 100, 18, 72);
   const responsePercent = clamp((responseWidth / totalWidth) * 100, 18, 72);
-  els.lowerWorkbench.style.setProperty("--request-pane-width", `${requestPercent}%`);
-  els.lowerWorkbench.style.setProperty("--response-pane-width", `${responsePercent}%`);
+  // fr, not %: these two tracks have to soak up whatever the fixed tracks beside
+  // them leave over. A percentage track is a fixed size, so once the inspector
+  // collapsed from its full width to the 46px rail — or the window grew — the
+  // freed space stayed empty to the right of the rail. fr keeps the same ratio
+  // between the panes and always fills the row.
+  els.lowerWorkbench.style.setProperty("--request-pane-width", `${requestPercent}fr`);
+  els.lowerWorkbench.style.setProperty("--response-pane-width", `${responsePercent}fr`);
   const updateState = options.updateState !== false;
   if (updateState) {
     state.workbenchPaneWidths = {
