@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -11,6 +11,10 @@ use crate::{
 };
 
 pub const MAX_WORKSPACE_SERIALIZED_BYTES: usize = 16 * 1024 * 1024;
+
+/// Small: subscribers only need to learn that a newer revision exists, and a
+/// lagged receiver simply refetches the snapshot.
+const WORKSPACE_EVENT_CAPACITY: usize = 64;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -171,6 +175,18 @@ impl FuzzerWorkspaceState {
 
 pub struct WorkspaceStateStore {
     inner: RwLock<WorkspaceStateSnapshot>,
+    /// Announces committed snapshots so other clients (the desktop UI) can pick
+    /// up replay tabs created out-of-band, e.g. by `sniper-cli replay open`.
+    events: broadcast::Sender<WorkspaceStateEvent>,
+}
+
+/// Broadcast when a workspace snapshot is committed. `client_id` is the writer,
+/// so a client can ignore the echo of its own save.
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkspaceStateEvent {
+    pub session_id: Option<Uuid>,
+    pub revision: u64,
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -185,9 +201,24 @@ impl WorkspaceStateStore {
     }
 
     pub fn from_snapshot(snapshot: WorkspaceStateSnapshot) -> Self {
+        let (events, _) = broadcast::channel(WORKSPACE_EVENT_CAPACITY);
         Self {
             inner: RwLock::new(snapshot),
+            events,
         }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<WorkspaceStateEvent> {
+        self.events.subscribe()
+    }
+
+    fn announce(&self, snapshot: &WorkspaceStateSnapshot) {
+        // Ignore send errors: no subscribers is the normal headless case.
+        let _ = self.events.send(WorkspaceStateEvent {
+            session_id: snapshot.session_id,
+            revision: snapshot.revision,
+            client_id: snapshot.client_id.clone(),
+        });
     }
 
     pub async fn snapshot(&self) -> WorkspaceStateSnapshot {
@@ -202,7 +233,10 @@ impl WorkspaceStateStore {
         let mut snapshot = snapshot;
         snapshot.revision = current.revision.saturating_add(1);
         *current = snapshot;
-        current.clone()
+        let committed = current.clone();
+        drop(current);
+        self.announce(&committed);
+        committed
     }
 
     pub async fn replace_snapshot_checked(
@@ -216,7 +250,10 @@ impl WorkspaceStateStore {
         let mut snapshot = snapshot;
         snapshot.revision = current.revision.saturating_add(1);
         *current = snapshot;
-        Ok(current.clone())
+        let committed = current.clone();
+        drop(current);
+        self.announce(&committed);
+        Ok(committed)
     }
 
     pub async fn replace_snapshot_checked_persisting<F, Fut, T, E>(
@@ -240,6 +277,8 @@ impl WorkspaceStateStore {
             .map_err(WorkspaceReplaceError::Persist)?;
 
         *current = next.clone();
+        drop(current);
+        self.announce(&next);
         Ok((next, persist_result))
     }
 }

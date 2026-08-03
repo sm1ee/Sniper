@@ -5795,6 +5795,7 @@ async fn events(
     let mut finding_receiver = session.scanner.subscribe();
     let mut websocket_receiver = session.websockets.subscribe();
     let mut websocket_retention_receiver = session.websockets.subscribe_retention();
+    let mut workspace_receiver = session.workspace.subscribe();
     let latest_sequence = session.store.latest_event_sequence();
     let event_stream_started_for_active_session = state.sessions.active_session_id() == session_id;
 
@@ -5808,6 +5809,21 @@ async fn events(
         }
         loop {
             tokio::select! {
+                result = workspace_receiver.recv() => {
+                    match result {
+                        // Tells clients a newer workspace snapshot exists; the
+                        // writer's client_id lets a client skip its own echo.
+                        Ok(event) => {
+                            if let Ok(payload) = serde_json::to_string(&event) {
+                                yield Ok(Event::default()
+                                    .event("workspace_state")
+                                    .data(payload));
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
                 result = transaction_receiver.recv() => {
                     match result {
                         Ok(event) => {

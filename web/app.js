@@ -2777,6 +2777,42 @@ function applyWorkspaceState(snapshot) {
   workspaceSaveCommittedSnapshot = cloneWorkspaceSnapshotForBaseline(snapshotWorkspaceState());
 }
 
+// Pick up replay tabs committed by another client — typically
+// `sniper-cli replay open`. Only tabs we do not already have are added: an open
+// tab may be mid-edit, and replacing it from a background fetch would discard
+// the user's work. A tab the CLI *modified* is therefore left alone.
+async function adoptExternalReplayTabs() {
+  const response = await fetch("/api/workspace-state");
+  if (!response.ok) return;
+  const snapshot = await response.json();
+  if (!workspaceSnapshotMatchesActiveSession(snapshot)) return;
+
+  // Follow the writer's revision, otherwise our next save looks stale and the
+  // server rejects it as a conflict.
+  if (Number.isFinite(snapshot?.revision)) {
+    state.workspaceRevision = snapshot.revision;
+  }
+
+  const incoming = Array.isArray(snapshot?.replay?.tabs) ? snapshot.replay.tabs : [];
+  const known = new Set((state.replayTabs || []).map((tab) => tab?.id));
+  const added = incoming
+    .filter((tab) => tab?.id && !known.has(tab.id))
+    .map((tab) => hydrateReplayTab(tab))
+    .filter(Boolean);
+  if (!added.length) return;
+
+  state.replayTabs = [...(state.replayTabs || []), ...added];
+  state.replayTabSequence = Math.max(
+    state.replayTabSequence || 0,
+    ...added.map((tab) => tab.sequence || 0),
+  );
+  if (!state.activeReplayTabId) {
+    state.activeReplayTabId = added[0].id;
+  }
+  renderReplay();
+  showToast(`${added.length} replay tab${added.length === 1 ? "" : "s"} added from another client.`, "info");
+}
+
 function workspaceSnapshotMatchesActiveSession(snapshot) {
   const snapshotSessionId = snapshot?.session_id || null;
   const activeSessionId = state.activeSession?.id || null;
@@ -6561,6 +6597,18 @@ function connectEvents() {
 
   eventSource.addEventListener("session_changed", () => {
     handleExternalSessionChanged(eventSessionId).catch((error) => console.error(error));
+  });
+
+  eventSource.addEventListener("workspace_state", (event) => {
+    let payload = null;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    // Skip the echo of our own save; only another client's write is news.
+    if (!payload || payload.client_id === workspaceClientId) return;
+    adoptExternalReplayTabs().catch((error) => console.error(error));
   });
 
   eventSource.onerror = () => {
