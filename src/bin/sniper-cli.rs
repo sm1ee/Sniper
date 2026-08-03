@@ -5493,6 +5493,16 @@ async fn open_replay_tab(
         history_index: None,
         ..Default::default()
     };
+    // Refuse before pushing: past the cap the server rejects every
+    // workspace-state save, which strands the UI in a save-retry loop that
+    // even deleting tabs cannot clear.
+    if workspace.replay.tabs.len() >= sniper::workspace::MAX_WORKSPACE_REPLAY_TABS {
+        bail!(
+            "workspace already has {} replay tabs (limit {}); close some before opening more",
+            workspace.replay.tabs.len(),
+            sniper::workspace::MAX_WORKSPACE_REPLAY_TABS
+        );
+    }
     workspace.replay.tab_sequence = sequence;
     workspace.replay.active_tab_id = Some(tab.id.clone());
     workspace.replay.tabs.push(tab.clone());

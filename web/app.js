@@ -873,6 +873,15 @@ let workspaceSaveCommittedSnapshot = null;
 const workspaceClientId = createWorkspaceClientId();
 let workspaceSaveLoopPromise = null;
 let workspaceSaveConflictPending = false;
+// Highest replay-tab count a workspace may hold; must match
+// MAX_WORKSPACE_REPLAY_TABS in src/workspace.rs.
+const MAX_REPLAY_TABS = 512;
+let workspaceTabCapNoticeShown = false;
+
+function isTooManyReplayTabsError(error) {
+  return typeof error?.message === "string"
+    && error.message.includes("too many replay tabs");
+}
 let workspaceSaveConflictLatest = null;
 const uiSettingsClientId = createWorkspaceClientId();
 let uiSettingsSaveVersion = 0;
@@ -3266,6 +3275,26 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
     try {
       await saveWorkspaceState(snapshot, options);
     } catch (error) {
+      if (isTooManyReplayTabsError(error)) {
+        // The server rejects every save while over the limit. Re-sending the
+        // same over-limit snapshot on a 1s timer just spams toasts and never
+        // succeeds, so stop the loop and wait for the user to close tabs —
+        // closing a tab marks the workspace dirty and re-triggers a save that
+        // now carries fewer tabs. Swallowing (not throwing) also stops
+        // closeReplayTab from rolling the deletion back.
+        workspaceSaveDirty = false;
+        window.clearTimeout(workspaceSaveTimer);
+        workspaceSaveTimer = null;
+        if (!workspaceTabCapNoticeShown) {
+          workspaceTabCapNoticeShown = true;
+          showToast(
+            `Too many replay tabs (max ${MAX_REPLAY_TABS}). Close some to save your workspace.`,
+            "error",
+            6000,
+          );
+        }
+        return;
+      }
       if (!(error instanceof WorkspaceStateConflictError)) {
         workspaceSaveDirty = true;
         window.clearTimeout(workspaceSaveTimer);
@@ -3294,6 +3323,7 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
     }
     workspaceSaveConflictPending = false;
     workspaceSaveConflictLatest = null;
+    workspaceTabCapNoticeShown = false;
   }
 }
 
@@ -15378,6 +15408,12 @@ async function closeRepeaterTab(id) {
   try {
     await flushWorkspaceState();
   } catch (error) {
+    if (isTooManyReplayTabsError(error)) {
+      // Keep the close: it is progress back under the limit. Restoring the tab
+      // here is exactly what left the workspace stuck — every delete reappeared.
+      renderReplay();
+      return;
+    }
     restoreReplayTabsState(closeSnapshot);
     handleWorkspaceActionError(error);
     renderReplay();

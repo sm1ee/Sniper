@@ -12,6 +12,11 @@ use crate::{
 
 pub const MAX_WORKSPACE_SERIALIZED_BYTES: usize = 16 * 1024 * 1024;
 
+/// Upper bound on replay tabs a workspace may hold. Bounds the serialized
+/// workspace size; shared by the UI API validator and the CLI so `replay open`
+/// refuses to push past it instead of creating a workspace the server rejects.
+pub const MAX_WORKSPACE_REPLAY_TABS: usize = 512;
+
 /// Small: subscribers only need to learn that a newer revision exists, and a
 /// lagged receiver simply refetches the snapshot.
 const WORKSPACE_EVENT_CAPACITY: usize = 64;
