@@ -957,6 +957,11 @@ code {
 
 .proxy-shell {
   display: grid;
+  /* Declare the single column explicitly. In panel views the only children are
+     the tab bar and one panel, and WebKit would otherwise auto-place them into
+     separate implicit columns — the tab strip ends up beside the panel instead
+     of above it. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows:
     auto
     auto
@@ -1201,6 +1206,7 @@ code {
      and WebKit (wry) otherwise auto-places this nav *after* that panel, dropping
      the tab bar to the bottom. Explicit placement keeps it on top in every engine. */
   grid-row: 1;
+  grid-column: 1;
   display: flex;
   align-items: center;
   padding: 0 8px;
@@ -1804,6 +1810,7 @@ code {
 .proxy-panel,
 .proxy-sub-placeholder {
   grid-row: 2 / -1;
+  grid-column: 1;
   min-height: 0;
 }
 

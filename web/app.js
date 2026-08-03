@@ -103,6 +103,8 @@ const HISTORY_COLUMN_DEFS = {
 const HTTP_HISTORY_SORT_KEYS = new Set(Object.keys(HISTORY_COLUMN_RULES));
 const HTTP_METHOD_FILTER_OPTIONS = new Set(["", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 const HTTP_COLOR_TAG_OPTIONS = new Set(["red", "orange", "yellow", "green", "blue", "purple"]);
+// Index order behind the Cmd+1~6 (tag) and Ctrl+Cmd+1~6 (filter) shortcuts.
+const HTTP_COLOR_TAG_ORDER = ["red", "orange", "yellow", "green", "blue", "purple"];
 const DEFAULT_HISTORY_COLUMN_ORDER = ["index", "host", "method", "path", "status", "length", "mime", "notes", "tls", "started_at"];
 const HISTORY_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
@@ -1389,17 +1391,7 @@ function bindEvents() {
   els.colorTagFilter.addEventListener("click", (event) => {
     const btn = event.target.closest(".color-dot-btn");
     if (!btn) return;
-    const color = btn.dataset.color;
-    if (state.filterSettings.colorTags.has(color)) {
-      state.filterSettings.colorTags.delete(color);
-      btn.classList.remove("active");
-    } else {
-      state.filterSettings.colorTags.add(color);
-      btn.classList.add("active");
-    }
-    scheduleUiSettingsSave();
-    clearHttpHistorySelectionPreview();
-    scheduleRefresh({ resetScroll: true });
+    toggleColorTagFilter(btn.dataset.color);
   });
 
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
@@ -2170,9 +2162,26 @@ function bindEvents() {
       return;
     }
 
+    // Ctrl+Cmd+1~6: show only rows carrying that colour tag; press again to clear.
+    if (
+      event.metaKey &&
+      event.ctrlKey &&
+      !event.shiftKey &&
+      !event.altKey &&
+      state.activeTool === "proxy" &&
+      state.activeProxyTab === "http-history" &&
+      event.key >= "1" && event.key <= "6"
+    ) {
+      event.preventDefault();
+      toggleColorTagFilter(HTTP_COLOR_TAG_ORDER[parseInt(event.key, 10) - 1]);
+      return;
+    }
+
     // Cmd+1~6: color tag selected HTTP item
     if (
       (event.metaKey || event.ctrlKey) &&
+      // Ctrl+Cmd is the filter shortcut above, not a tag.
+      !(event.metaKey && event.ctrlKey) &&
       !event.shiftKey &&
       !event.altKey &&
       state.activeTool === "proxy" &&
@@ -2181,8 +2190,7 @@ function bindEvents() {
       event.key >= "1" && event.key <= "6"
     ) {
       event.preventDefault();
-      const colors = ["red", "orange", "yellow", "green", "blue", "purple"];
-      const color = colors[parseInt(event.key) - 1];
+      const color = HTTP_COLOR_TAG_ORDER[parseInt(event.key, 10) - 1];
       const item = getHistoryItem(state.selectedId);
       const newColor = item?.color_tag === color ? null : color;
       if (item) item.color_tag = newColor;
@@ -2811,6 +2819,23 @@ async function adoptExternalReplayTabs() {
   }
   renderReplay();
   showToast(`${added.length} replay tab${added.length === 1 ? "" : "s"} added from another client.`, "info");
+}
+
+// Toggle the history filter for one colour tag. Shared by the colour dots in
+// the toolbar and the Ctrl+Cmd+1~6 shortcuts.
+function toggleColorTagFilter(color) {
+  if (!HTTP_COLOR_TAG_OPTIONS.has(color)) return;
+  const button = els.colorTagFilter?.querySelector(`.color-dot-btn[data-color="${color}"]`);
+  if (state.filterSettings.colorTags.has(color)) {
+    state.filterSettings.colorTags.delete(color);
+    button?.classList.remove("active");
+  } else {
+    state.filterSettings.colorTags.add(color);
+    button?.classList.add("active");
+  }
+  scheduleUiSettingsSave();
+  clearHttpHistorySelectionPreview();
+  scheduleRefresh({ resetScroll: true });
 }
 
 function workspaceSnapshotMatchesActiveSession(snapshot) {
@@ -16334,7 +16359,7 @@ function renderHistoryCell(colKey, item, entry) {
     case "mime":
       return `<td class="col-center">${escapeHtml(item._mime || inferMimeType(item))}</td>`;
     case "notes": {
-      const tagDot = item.color_tag ? `<span class="row-color-tag row-color-tag-${escapeHtml(item.color_tag)}"></span>` : "";
+      // No colour dot here: the tag already tints the whole row.
       const noteIndicator = item.has_user_note ? `<span class="note-icon" title="Has note">\ud83d\udcdd</span>` : "";
       const hasNotes = !!(item.note_count || item.has_user_note);
       // Show what the note says rather than how many there are; the cell
@@ -16347,7 +16372,7 @@ function renderHistoryCell(colKey, item, entry) {
       const cellAttrs = hasNotes
         ? ` data-col="notes" class="notes-cell-actionable" title="${escapeHtml(preview || "Click to view notes")}"`
         : ' data-col="notes"';
-      return `<td${cellAttrs}>${tagDot}${noteIndicator}${body}</td>`;
+      return `<td${cellAttrs}>${noteIndicator}${body}</td>`;
     }
     case "tls": {
       const tls = isTlsRecord(item) ? '<span class="tls-badge">TLS</span>' : '<span class="tls-badge empty">-</span>';
