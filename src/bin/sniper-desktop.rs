@@ -294,6 +294,7 @@ fn main() -> Result<()> {
         .with_min_inner_size(LogicalSize::new(1120.0, 720.0))
         .build(&event_loop)
         .context("failed to create desktop window")?;
+    enable_window_fullscreen_support(&window);
     let ui_url = format!("http://{}/", config.ui_addr);
     let ui_origin = format!("http://{}", config.ui_addr);
     let ipc_event_proxy = event_loop.create_proxy();
@@ -757,7 +758,10 @@ fn complete_desktop_shutdown(
 #[allow(deprecated)]
 fn install_platform_app_menu() {
     use cocoa::{
-        appkit::{NSApp, NSApplication, NSApplicationActivationPolicyRegular, NSMenu, NSMenuItem},
+        appkit::{
+            NSApp, NSApplication, NSApplicationActivationPolicyRegular, NSEventModifierFlags,
+            NSMenu, NSMenuItem,
+        },
         base::nil,
         foundation::{NSAutoreleasePool, NSProcessInfo, NSString},
     };
@@ -852,11 +856,58 @@ fn install_platform_app_menu() {
         edit_menu.addItem_(paste_item);
         edit_menu.addItem_(select_all_item);
         edit_menu_item.setSubmenu_(edit_menu);
+
+        // macOS routes Ctrl+Cmd+F through the "Enter Full Screen" menu item's key
+        // equivalent. Without a View menu carrying it the shortcut reaches nothing,
+        // so the window can only be zoomed from the green title-bar button.
+        let view_menu_item = NSMenuItem::new(nil).autorelease();
+        menubar.addItem_(view_menu_item);
+        let view_menu = NSMenu::alloc(nil)
+            .initWithTitle_(NSString::alloc(nil).init_str("View"))
+            .autorelease();
+        let fullscreen_item = NSMenuItem::alloc(nil)
+            .initWithTitle_action_keyEquivalent_(
+                NSString::alloc(nil).init_str("Enter Full Screen"),
+                cocoa::base::selector("toggleFullScreen:"),
+                NSString::alloc(nil).init_str("f"),
+            )
+            .autorelease();
+        fullscreen_item.setKeyEquivalentModifierMask_(
+            NSEventModifierFlags::NSControlKeyMask | NSEventModifierFlags::NSCommandKeyMask,
+        );
+        view_menu.addItem_(fullscreen_item);
+        view_menu_item.setSubmenu_(view_menu);
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn install_platform_app_menu() {}
+
+/// tao does not mark its windows full-screen capable, so AppKit would leave the
+/// View > Enter Full Screen item (and its Ctrl+Cmd+F key equivalent) disabled.
+#[cfg(target_os = "macos")]
+fn enable_window_fullscreen_support(window: &tao::window::Window) {
+    use cocoa::{
+        appkit::{NSWindow, NSWindowCollectionBehavior},
+        base::id,
+    };
+    use tao::platform::macos::WindowExtMacOS;
+
+    let ns_window = window.ns_window() as id;
+    if ns_window.is_null() {
+        return;
+    }
+    // SAFETY: ns_window is the live NSWindow tao created for this window, and
+    // this runs on the main thread during window setup.
+    unsafe {
+        let behavior = ns_window.collectionBehavior()
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenPrimary;
+        ns_window.setCollectionBehavior_(behavior);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn enable_window_fullscreen_support(_window: &tao::window::Window) {}
 
 /// Append a `PATH` export line to `~/.zshrc` (and `~/.bashrc` if present) so
 /// that `sniper-cli` is available from the terminal without requiring root.
