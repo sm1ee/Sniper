@@ -2280,6 +2280,7 @@ body.pane-resizing-y {
 }
 
 .inspector-main {
+  grid-column: 1;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
@@ -2459,6 +2460,10 @@ body.pane-resizing-y {
 }
 
 .inspector-rail {
+  /* Always the second column. When the panel is collapsed .inspector-main is
+     display:none and therefore not a grid item, so an auto-placed rail would
+     drop into the first track and leave the 46px track empty beside it. */
+  grid-column: 2;
   /* Fixed-size grid rows rather than flex sizing: the tabs use vertical
      writing-mode, where engines disagree on how min-height feeds a flex item's
      main size, and the two buttons came out unequal. Explicit tracks size them
@@ -2508,8 +2513,7 @@ body.pane-resizing-y {
 
 .inspector-column.collapsed .inspector-layout,
 .lower-workbench.inspector-collapsed .inspector-column .inspector-layout {
-  grid-template-columns: 46px;
-  justify-content: end;
+  grid-template-columns: 0 46px;
 }
 
 .placeholder-screen,
@@ -5500,8 +5504,7 @@ button.utility-button.replay-tab-add {
   }
 
   .lower-workbench:not(.inspector-collapsed) .inspector-layout {
-    grid-template-columns: 46px;
-    justify-content: end;
+    grid-template-columns: 0 46px;
   }
 
   .message-column {
@@ -5589,9 +5592,8 @@ button.utility-button.replay-tab-add {
 
   .inspector-column.collapsed .inspector-layout,
   .lower-workbench.inspector-collapsed .inspector-column .inspector-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: 0 1fr;
     grid-template-rows: 42px;
-    justify-content: stretch;
   }
 
   .inspector-rail {
