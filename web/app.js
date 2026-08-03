@@ -703,6 +703,8 @@ const els = {
   interceptRequestHighlight: document.getElementById("interceptRequestHighlight"),
   interceptRequestEditor: document.getElementById("interceptRequestEditor"),
   interceptMeta: document.getElementById("interceptMeta"),
+  interceptSearchInput: document.getElementById("interceptSearchInput"),
+  interceptSearchMeta: document.getElementById("interceptSearchMeta"),
   forwardInterceptButton: document.getElementById("forwardInterceptButton"),
   dropInterceptButton: document.getElementById("dropInterceptButton"),
   interceptRequestTable: document.getElementById("interceptRequestTable"),
@@ -807,6 +809,9 @@ const els = {
   resetFuzzerButton: document.getElementById("resetFuzzerButton"),
   contextMenu: document.getElementById("contextMenu"),
   contextMenuNote: document.getElementById("contextMenuNote"),
+  contextMenuNotes: document.getElementById("contextMenuNotes"),
+  contextMenuNotesSection: document.getElementById("contextMenuNotesSection"),
+  contextMenuNotesDivider: document.getElementById("contextMenuNotesDivider"),
   wsFrameContextMenu: document.getElementById("wsFrameContextMenu"),
   httpReplayToolbar: document.getElementById("httpReplayToolbar"),
   httpReplayWorkbench: document.getElementById("httpReplayWorkbench"),
@@ -1134,6 +1139,16 @@ function bindEvents() {
     selectHistoryTransaction(row.dataset.id, { scroll: true }).catch((error) => console.error(error));
     // Keep focus on the table so arrow keys navigate rows, not code-view lines
     els.trafficRegion.focus({ preventScroll: true });
+    // Clicking a Notes cell that has notes opens them. The inspector column
+    // that normally shows notes is hidden below 1481px, so this is the only
+    // always-available way to read them. stopPropagation keeps the document
+    // click handler from closing the menu we are opening.
+    const notesCell = event.target.closest('td.notes-cell-actionable[data-col="notes"]');
+    if (notesCell) {
+      event.stopPropagation();
+      const rect = notesCell.getBoundingClientRect();
+      openContextMenu(rect.left, rect.bottom + 4, row.dataset.id);
+    }
   });
   els.historyTableBody.addEventListener("contextmenu", (event) => {
     const row = event.target.closest(".history-row");
@@ -1551,6 +1566,19 @@ function bindEvents() {
   });
   els.interceptQueueTabRequest.addEventListener("click", () => switchInterceptQueueTab("request"));
   els.interceptQueueTabResponse.addEventListener("click", () => switchInterceptQueueTab("response"));
+
+  if (els.interceptSearchInput) {
+    els.interceptSearchInput.addEventListener("input", updateInterceptSearch);
+  }
+  if (els.interceptSearchMeta) {
+    // Same match-cycling as initCMSearchNavigation, but the target pane depends
+    // on the active queue tab, so the key is resolved per click.
+    els.interceptSearchMeta.addEventListener("click", (event) => {
+      if (!event.target.closest(".search-hit-count")) return;
+      const cv = getCMView(activeInterceptCMKey());
+      if (cv) cv.nextSearchMatch();
+    });
+  }
 
   els.interceptStatus.addEventListener("click", () => {
     toggleIntercept().catch((error) => console.error(error));
@@ -10383,7 +10411,7 @@ function renderIntercepts() {
     els.interceptDetailPath.textContent = "Intercept";
     els.interceptDetailTitle.textContent = "No request selected";
     if (els.interceptRequestCM) {
-      updateCodePaneCM("interceptReq", els.interceptRequestCM, "", {
+      setInterceptPaneContent("interceptReq", els.interceptRequestCM, "", {
         mode: "http", readOnly: false,
         placeholder: "Intercepted request will appear here...",
       });
@@ -10404,9 +10432,12 @@ function renderIntercepts() {
   if (els.interceptRequestCM) {
     const cv = getCMView("interceptReq");
     const isFocused = cv && cv.view.hasFocus;
-    if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id || !isFocused) {
-      const rawText = buildEditableRawRequest(state.selectedInterceptRecord.request);
-      updateCodePaneCM("interceptReq", els.interceptRequestCM, rawText, {
+    const rawText = buildEditableRawRequest(state.selectedInterceptRecord.request);
+    // Re-seeding rewrites the document, which resets search highlights and the
+    // match-cycling position, so skip it when the text is already identical.
+    const contentDiffers = !cv || cv.getContent() !== rawText;
+    if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id || (!isFocused && contentDiffers)) {
+      setInterceptPaneContent("interceptReq", els.interceptRequestCM, rawText, {
         mode: "http", readOnly: false,
       });
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
@@ -13949,7 +13980,7 @@ function renderResponseIntercepts() {
       els.interceptDetailPath.textContent = "Response Intercept";
       els.interceptDetailTitle.textContent = "No response selected";
       if (els.interceptResponseCM) {
-        updateCodePaneCM("interceptRes", els.interceptResponseCM, "", {
+        setInterceptPaneContent("interceptRes", els.interceptResponseCM, "", {
           mode: "http", readOnly: false,
           placeholder: "Intercepted response will appear here...",
         });
@@ -13973,9 +14004,12 @@ function renderResponseIntercepts() {
     if (els.interceptResponseCM) {
       const cv = getCMView("interceptRes");
       const isFocused = cv && cv.view.hasFocus;
-      if (state.responseInterceptEditorSeedId !== rec.id || !isFocused) {
-        const rawText = buildEditableRawResponse(rec.response);
-        updateCodePaneCM("interceptRes", els.interceptResponseCM, rawText, {
+      const rawText = buildEditableRawResponse(rec.response);
+      // See the request pane above: avoid a no-op re-seed that would clear the
+      // active search highlights and match position.
+      const contentDiffers = !cv || cv.getContent() !== rawText;
+      if (state.responseInterceptEditorSeedId !== rec.id || (!isFocused && contentDiffers)) {
+        setInterceptPaneContent("interceptRes", els.interceptResponseCM, rawText, {
           mode: "http", readOnly: false,
         });
         state.responseInterceptEditorSeedId = rec.id;
@@ -14076,6 +14110,37 @@ function updateInterceptQueueBadges() {
   els.interceptQueueTabResponse.textContent = resCount > 0 ? `Response Queue (${resCount})` : "Response Queue";
 }
 
+/** Key of the intercept CM pane that is currently visible. */
+function activeInterceptCMKey() {
+  return state.interceptQueueTab === "response" ? "interceptRes" : "interceptReq";
+}
+
+// Re-apply the intercept search box to whichever intercept editor is showing.
+// Setting editor content goes through updateCodePaneCM, which clears highlights,
+// so this has to run after content changes and on every queue-tab switch.
+function updateInterceptSearch() {
+  if (!els.interceptSearchMeta) return;
+  const cv = getCMView(activeInterceptCMKey());
+  if (!cv) {
+    els.interceptSearchMeta.innerHTML = buildSearchMeta(0, "raw", 0);
+    return;
+  }
+  const query = els.interceptSearchInput ? els.interceptSearchInput.value.trim() : "";
+  const result = cv.applySearch(query);
+  els.interceptSearchMeta.innerHTML = buildSearchMeta(cv.view.state.doc.lines, "raw", result.matchCount);
+}
+
+// Set an intercept editor's content with the active search applied in the same
+// pass, and refresh the footer meta when the pane being written is the visible one.
+function setInterceptPaneContent(key, container, text, options = {}) {
+  const query = els.interceptSearchInput ? els.interceptSearchInput.value.trim() : "";
+  const result = updateCodePaneCM(key, container, text, { ...options, search: query });
+  if (els.interceptSearchMeta && activeInterceptCMKey() === key) {
+    els.interceptSearchMeta.innerHTML = buildSearchMeta(result.lineCount, "raw", result.matchCount);
+  }
+  return result;
+}
+
 function switchInterceptQueueTab(tab) {
   state.interceptQueueTab = tab;
   els.interceptQueueTabRequest.classList.toggle("active", tab === "request");
@@ -14095,6 +14160,7 @@ function switchInterceptQueueTab(tab) {
   } else {
     renderResponseIntercepts();
   }
+  updateInterceptSearch();
 }
 
 async function openReplayFromSelection() {
@@ -16222,7 +16288,11 @@ function renderHistoryCell(colKey, item, entry) {
     case "notes": {
       const tagDot = item.color_tag ? `<span class="row-color-tag row-color-tag-${escapeHtml(item.color_tag)}"></span>` : "";
       const noteIndicator = item.has_user_note ? `<span class="note-icon" title="Has note">\ud83d\udcdd</span>` : "";
-      return `<td>${tagDot}${noteIndicator}${item.note_count ? ` ${item.note_count}` : ""}</td>`;
+      const hasNotes = !!(item.note_count || item.has_user_note);
+      const cellAttrs = hasNotes
+        ? ' data-col="notes" class="notes-cell-actionable" title="Click to view notes"'
+        : ' data-col="notes"';
+      return `<td${cellAttrs}>${tagDot}${noteIndicator}${item.note_count ? ` ${item.note_count}` : ""}</td>`;
     }
     case "tls": {
       const tls = isTlsRecord(item) ? '<span class="tls-badge">TLS</span>' : '<span class="tls-badge empty">-</span>';
@@ -21211,6 +21281,7 @@ function clearCompareState() {
 
 /* ─── Context menu (color tags & notes) ─── */
 let contextMenuTargetId = null;
+let contextMenuAnchor = { x: 0, y: 0 };
 let contextMenuSessionId = null;
 let contextMenuRecordTarget = null;
 let contextMenuNoteTimer = null;
@@ -21231,16 +21302,39 @@ function openContextMenu(x, y, transactionId) {
   });
 
   els.contextMenuNote.value = "";
+  renderContextMenuNotes(null);
   if (transactionId) {
     loadUserNote(transactionId);
   }
 
-  const menuWidth = menu.offsetWidth;
-  const menuHeight = menu.offsetHeight;
-  const maxX = window.innerWidth - menuWidth - 8;
-  const maxY = window.innerHeight - menuHeight - 8;
-  menu.style.left = `${Math.min(x, maxX)}px`;
-  menu.style.top = `${Math.min(y, maxY)}px`;
+  contextMenuAnchor = { x, y };
+  positionContextMenu();
+}
+
+// Keep the menu on screen. Called again after the async note load, because
+// rendering recorded notes changes the menu height after it was first placed.
+function positionContextMenu() {
+  const menu = els.contextMenu;
+  if (!menu || menu.classList.contains("hidden")) return;
+  const maxX = window.innerWidth - menu.offsetWidth - 8;
+  const maxY = window.innerHeight - menu.offsetHeight - 8;
+  menu.style.left = `${Math.max(0, Math.min(contextMenuAnchor.x, maxX))}px`;
+  menu.style.top = `${Math.max(0, Math.min(contextMenuAnchor.y, maxY))}px`;
+}
+
+// Recorded (server-side) notes are read-only here. They are otherwise only
+// visible in the inspector column, which responsive CSS hides below 1481px,
+// so this is the one surface that always works.
+function renderContextMenuNotes(notes) {
+  if (!els.contextMenuNotes || !els.contextMenuNotesSection) return;
+  const items = Array.isArray(notes)
+    ? notes.filter((note) => typeof note === "string" && note.trim())
+    : [];
+  els.contextMenuNotes.innerHTML = items.map((note) => `<p>${escapeHtml(note)}</p>`).join("");
+  els.contextMenuNotesSection.classList.toggle("hidden", items.length === 0);
+  if (els.contextMenuNotesDivider) {
+    els.contextMenuNotesDivider.classList.toggle("hidden", items.length === 0);
+  }
 }
 
 function closeContextMenu() {
@@ -21264,6 +21358,8 @@ async function loadUserNote(transactionId) {
       const record = await response.json();
       if (currentSessionId() === sessionId && contextMenuTargetId === transactionId) {
         els.contextMenuNote.value = record.user_note || "";
+        renderContextMenuNotes(record.notes);
+        positionContextMenu();
       }
     }
   } catch { /* ignore */ }

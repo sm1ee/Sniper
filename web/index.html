@@ -372,6 +372,10 @@
                   <div id="interceptResponseCM" class="cm-container" style="height:100%"></div>
                 </div>
                 <footer class="pane-footer">
+                  <label class="pane-search" aria-label="Search intercepted message">
+                    <input id="interceptSearchInput" type="search" placeholder="Search" />
+                  </label>
+                  <span id="interceptSearchMeta">No highlights</span>
                   <span id="interceptMeta">Intercept is empty.</span>
                 </footer>
               </section>
@@ -1640,6 +1644,11 @@
       <div class="context-menu-section">
         <span class="context-menu-label">Note</span>
         <input class="context-menu-note" id="contextMenuNote" type="text" maxlength="32768" placeholder="Add a note..." />
+      </div>
+      <div class="context-menu-divider hidden" id="contextMenuNotesDivider"></div>
+      <div class="context-menu-section hidden" id="contextMenuNotesSection">
+        <span class="context-menu-label">Recorded notes</span>
+        <div class="context-menu-notes" id="contextMenuNotes"></div>
       </div>
     </div>
 

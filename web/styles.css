@@ -6417,3 +6417,32 @@ button.utility-button.replay-tab-add {
   opacity: 0.5;
   font-size: var(--font-xs);
 }
+
+.notes-cell-actionable {
+  cursor: pointer;
+}
+
+/* Read-only recorded notes inside the row context menu. Capped so a long note
+   scrolls instead of pushing the menu past the viewport. */
+.context-menu-notes {
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-code);
+  color: var(--text);
+  font-size: var(--font-sm);
+  line-height: 1.5;
+}
+
+.context-menu-notes p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.context-menu-notes p + p {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
