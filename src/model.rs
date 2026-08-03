@@ -486,6 +486,7 @@ impl TransactionRecord {
             has_match_replace: self.original_request.is_some() || self.original_response.is_some(),
             color_tag: self.color_tag.clone(),
             has_user_note: self.user_note.is_some(),
+            note_preview: note_preview(self.user_note.as_ref(), &self.notes),
             annotation_revision: self.annotation_revision,
         }
     }
@@ -549,8 +550,43 @@ pub struct TransactionSummary {
     pub color_tag: Option<String>,
     #[serde(default)]
     pub has_user_note: bool,
+    /// First line of the operator note, else the first recorded note, so the
+    /// history table can show what a note says instead of only how many exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_preview: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub annotation_revision: u64,
+}
+
+/// Longest note text carried in a summary. Summaries are sent for every row in
+/// the history table, so the full note stays in the record and only a short
+/// lead-in travels with the list.
+const NOTE_PREVIEW_LIMIT: usize = 200;
+
+fn note_preview(user_note: Option<&String>, notes: &[String]) -> Option<String> {
+    let source = user_note
+        .map(String::as_str)
+        .filter(|note| !note.trim().is_empty())
+        .or_else(|| {
+            notes
+                .iter()
+                .map(String::as_str)
+                .find(|note| !note.trim().is_empty())
+        })?;
+    let flattened = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(&flattened, NOTE_PREVIEW_LIMIT))
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    let mut out: String = value.chars().take(limit).collect();
+    out.push('…');
+    out
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

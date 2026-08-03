@@ -1566,7 +1566,7 @@ code {
 }
 
 .history-table .col-notes {
-  width: var(--history-col-notes, 90px);
+  width: var(--history-col-notes, 220px);
 }
 
 .history-table .col-tls {
@@ -1785,12 +1785,15 @@ code {
   overflow: hidden;
 }
 
+/* Four tracks, not five: the response-inspector resizer is display:none while
+   collapsed, so it is not a grid item and auto-placement would otherwise drop
+   the inspector into the spare track and leave the rail's track empty — dead
+   space to the right of the response pane, with the rail clipped out of view. */
 .lower-workbench.inspector-collapsed {
   grid-template-columns:
     minmax(280px, var(--request-pane-width, 1fr))
     10px
     minmax(280px, var(--response-pane-width, 1fr))
-    0px
     46px;
 }
 
@@ -6405,12 +6408,31 @@ button.utility-button.replay-tab-add {
 .row-color-tag-blue { background: #5b9bd5; }
 .row-color-tag-purple { background: #a678c8; }
 
-.history-row.tagged-red { border-left: 3px solid #e05252; }
-.history-row.tagged-orange { border-left: 3px solid #e0943a; }
-.history-row.tagged-yellow { border-left: 3px solid #d4c04e; }
-.history-row.tagged-green { border-left: 3px solid #50c878; }
-.history-row.tagged-blue { border-left: 3px solid #5b9bd5; }
-.history-row.tagged-purple { border-left: 3px solid #a678c8; }
+.history-row.tagged-red { --row-tag: #e05252; }
+.history-row.tagged-orange { --row-tag: #e0943a; }
+.history-row.tagged-yellow { --row-tag: #d4c04e; }
+.history-row.tagged-green { --row-tag: #50c878; }
+.history-row.tagged-blue { --row-tag: #5b9bd5; }
+.history-row.tagged-purple { --row-tag: #a678c8; }
+
+/* A 3px edge alone was easy to miss when scanning; tint the whole row too.
+   Painted on the cells so it layers under the selection colour rather than
+   being hidden by it. */
+.history-row[class*="tagged-"] {
+  border-left: 3px solid var(--row-tag);
+}
+
+.history-row[class*="tagged-"] > td {
+  background: color-mix(in srgb, var(--row-tag) 13%, transparent);
+}
+
+.history-row[class*="tagged-"]:hover > td {
+  background: color-mix(in srgb, var(--row-tag) 22%, transparent);
+}
+
+.history-row[class*="tagged-"].selected > td {
+  background: color-mix(in srgb, var(--row-tag) 24%, var(--point-soft));
+}
 
 .note-icon {
   display: inline-block;
@@ -6420,6 +6442,16 @@ button.utility-button.replay-tab-add {
 
 .notes-cell-actionable {
   cursor: pointer;
+}
+
+.note-preview {
+  color: var(--text-dim);
+}
+
+.note-more {
+  margin-left: 6px;
+  color: var(--point);
+  font-size: var(--font-xs);
 }
 
 /* Read-only recorded notes inside the row context menu. Capped so a long note

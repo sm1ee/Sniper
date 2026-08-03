@@ -84,7 +84,7 @@ const HISTORY_COLUMN_RULES = {
   status: { default: 110, min: 94, max: 180 },
   length: { default: 104, min: 82, max: 180 },
   mime: { default: 128, min: 100, max: 260 },
-  notes: { default: 90, min: 74, max: 140 },
+  notes: { default: 220, min: 74, max: 640 },
   tls: { default: 92, min: 72, max: 140 },
   started_at: { default: 176, min: 132, max: 260 },
 };
@@ -16289,10 +16289,17 @@ function renderHistoryCell(colKey, item, entry) {
       const tagDot = item.color_tag ? `<span class="row-color-tag row-color-tag-${escapeHtml(item.color_tag)}"></span>` : "";
       const noteIndicator = item.has_user_note ? `<span class="note-icon" title="Has note">\ud83d\udcdd</span>` : "";
       const hasNotes = !!(item.note_count || item.has_user_note);
+      // Show what the note says rather than how many there are; the cell
+      // ellipsises and reveals more as the column is widened.
+      const preview = typeof item.note_preview === "string" ? item.note_preview : "";
+      const extra = item.note_count > 1 ? `<span class="note-more">+${item.note_count - 1}</span>` : "";
+      const body = preview
+        ? `<span class="note-preview">${escapeHtml(preview)}</span>${extra}`
+        : (item.note_count ? ` ${item.note_count}` : "");
       const cellAttrs = hasNotes
-        ? ' data-col="notes" class="notes-cell-actionable" title="Click to view notes"'
+        ? ` data-col="notes" class="notes-cell-actionable" title="${escapeHtml(preview || "Click to view notes")}"`
         : ' data-col="notes"';
-      return `<td${cellAttrs}>${tagDot}${noteIndicator}${item.note_count ? ` ${item.note_count}` : ""}</td>`;
+      return `<td${cellAttrs}>${tagDot}${noteIndicator}${body}</td>`;
     }
     case "tls": {
       const tls = isTlsRecord(item) ? '<span class="tls-badge">TLS</span>' : '<span class="tls-badge empty">-</span>';
