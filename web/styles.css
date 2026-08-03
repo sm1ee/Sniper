@@ -2277,10 +2277,6 @@ body.pane-resizing-y {
   grid-template-columns: minmax(0, 1fr) 46px;
   height: 100%;
   min-height: 0;
-  /* The column places this in an auto row, so without stretching the rail is
-     only as tall as its labels instead of running the height of the pane. */
-  align-self: stretch;
-  grid-row: 1 / -1;
 }
 
 .inspector-main {
@@ -5309,16 +5305,27 @@ button.utility-button.replay-tab-add {
     justify-self: end;
   }
 
+  /* Keep the 46px rail: it is the only way to open the inspector and the notes,
+     so hiding the column here removed the panel together with its opener. The
+     message panes give up their 280px floor when it is expanded. */
   .lower-workbench,
   .lower-workbench.inspector-collapsed {
     grid-template-columns:
       minmax(280px, var(--request-pane-width, 1fr))
       10px
-      minmax(280px, var(--response-pane-width, 1fr));
+      minmax(280px, var(--response-pane-width, 1fr))
+      46px;
   }
 
-  .lower-workbench > .pane-resizer[data-resizer="response-inspector"],
-  .lower-workbench .inspector-column {
+  .lower-workbench:not(.inspector-collapsed) {
+    grid-template-columns:
+      minmax(0, var(--request-pane-width, 1fr))
+      10px
+      minmax(0, var(--response-pane-width, 1fr))
+      minmax(0, var(--inspector-pane-width, 300px));
+  }
+
+  .lower-workbench > .pane-resizer[data-resizer="response-inspector"] {
     display: none;
   }
 
@@ -5416,14 +5423,19 @@ button.utility-button.replay-tab-add {
     display: none;
   }
 
+  /* Both resizers are hidden above, so the three columns here are request,
+     response and the rail. */
   .lower-workbench,
   .lower-workbench.inspector-collapsed {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 46px;
     grid-template-rows: minmax(0, 1fr);
   }
 
-  .lower-workbench .inspector-column {
-    display: none;
+  .lower-workbench:not(.inspector-collapsed) {
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(0, 1fr)
+      minmax(0, var(--inspector-pane-width, 260px));
   }
 
   .request-column {
@@ -5457,9 +5469,39 @@ button.utility-button.replay-tab-add {
     display: none;
   }
 
-  .lower-workbench {
-    grid-template-columns: 1fr;
+  /* Panes stack, and the rail runs down the side of both so the inspector stays
+     reachable. Placement is explicit because the stacked rows would otherwise
+     auto-place the rail into a third row of its own. */
+  .lower-workbench,
+  .lower-workbench.inspector-collapsed,
+  .lower-workbench:not(.inspector-collapsed) {
+    grid-template-columns: minmax(0, 1fr) 46px;
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .lower-workbench > .request-column {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .lower-workbench > .response-column {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .lower-workbench > .inspector-column {
+    grid-column: 2;
+    grid-row: 1 / -1;
+  }
+
+  /* Too narrow to also show the expanded panel beside the panes. */
+  .lower-workbench:not(.inspector-collapsed) .inspector-main {
+    display: none;
+  }
+
+  .lower-workbench:not(.inspector-collapsed) .inspector-layout {
+    grid-template-columns: 46px;
+    justify-content: end;
   }
 
   .message-column {
