@@ -2469,11 +2469,13 @@ body.pane-resizing-y {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%);
 }
 
-/* Equal halves rather than label-length-sized buttons, which left the two tabs
-   visibly ragged (Inspector taller than Notes) and the rail floating above the
-   rest of the column. */
+/* Equal, compact buttons packed at the top. Sizing each to its own label left
+   them visibly ragged (Inspector taller than Notes); stretching them to fill
+   the pane made two oversized blocks. The em floor keeps them matched and
+   scales with the UI size setting. */
 .rail-tab {
-  flex: 1 1 0;
+  flex: 0 0 auto;
+  min-height: 7.5em;
   display: flex;
   align-items: center;
   justify-content: center;
