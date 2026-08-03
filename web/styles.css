@@ -2463,8 +2463,13 @@ body.pane-resizing-y {
 }
 
 .inspector-rail {
-  display: flex;
-  flex-direction: column;
+  /* Fixed-size grid rows rather than flex sizing: the tabs use vertical
+     writing-mode, where engines disagree on how min-height feeds a flex item's
+     main size, and the two buttons came out unequal. Explicit tracks size them
+     identically everywhere. */
+  display: grid;
+  grid-template-rows: repeat(2, 7.5em);
+  align-content: start;
   border-left: 1px solid var(--line);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%);
 }
@@ -2474,8 +2479,8 @@ body.pane-resizing-y {
    the pane made two oversized blocks. The em floor keeps them matched and
    scales with the UI size setting. */
 .rail-tab {
-  flex: 0 0 auto;
-  min-height: 7.5em;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
