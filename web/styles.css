@@ -2277,6 +2277,10 @@ body.pane-resizing-y {
   grid-template-columns: minmax(0, 1fr) 46px;
   height: 100%;
   min-height: 0;
+  /* The column places this in an auto row, so without stretching the rail is
+     only as tall as its labels instead of running the height of the pane. */
+  align-self: stretch;
+  grid-row: 1 / -1;
 }
 
 .inspector-main {
@@ -2465,7 +2469,14 @@ body.pane-resizing-y {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%);
 }
 
+/* Equal halves rather than label-length-sized buttons, which left the two tabs
+   visibly ragged (Inspector taller than Notes) and the rail floating above the
+   rest of the column. */
 .rail-tab {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   writing-mode: vertical-rl;
   transform: rotate(180deg);
   padding: 14px 10px;
@@ -2476,6 +2487,10 @@ body.pane-resizing-y {
   cursor: pointer;
   font-size: var(--font-sm);
   font-weight: 600;
+}
+
+.rail-tab:last-child {
+  border-bottom: none;
 }
 
 .rail-tab.active {
@@ -6452,7 +6467,7 @@ button.utility-button.replay-tab-add {
 }
 
 .note-preview {
-  color: var(--text-dim);
+  color: var(--text);
 }
 
 .note-more {

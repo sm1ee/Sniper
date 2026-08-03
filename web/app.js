@@ -1111,9 +1111,27 @@ function bindEvents() {
     tab.addEventListener("click", () => {
       state.activeInspectorTab = tab.dataset.inspectorTab;
       state.inspectorCollapsed = false;
+      inspectorScrollIntent = true;
       renderInspectorPanels();
     });
   });
+
+  // Scrolling the panel by hand should move the rail highlight too; without
+  // this the tabs keep pointing at a section that scrolled out of view.
+  if (els.inspectorContent) {
+    let inspectorScrollFrame = 0;
+    els.inspectorContent.addEventListener(
+      "scroll",
+      () => {
+        if (inspectorScrollFrame) return;
+        inspectorScrollFrame = window.requestAnimationFrame(() => {
+          inspectorScrollFrame = 0;
+          syncInspectorTabToScroll();
+        });
+      },
+      { passive: true },
+    );
+  }
 
   sectionToggles.forEach((toggle) => {
     toggle.addEventListener("click", () => {
@@ -7876,7 +7894,14 @@ async function fetchFindingsCount(sessionId) {
 function updateFindingsBadge() {
   if (!els.findingsBadge) return;
   const count = findingsBadgeCount;
-  els.findingsBadge.textContent = count > 0 ? String(count) : "";
+  // The store evicts past max_entries, so the count saturates there. Say "N+"
+  // rather than implying the total stopped growing.
+  const cap = state.settings?.max_entries;
+  const atCap = Number.isFinite(cap) && cap > 0 && count >= cap;
+  els.findingsBadge.textContent = count > 0 ? `${count}${atCap ? "+" : ""}` : "";
+  els.findingsBadge.title = atCap
+    ? `${count} findings retained (oldest are dropped past this limit)`
+    : "";
   els.findingsBadge.classList.toggle("hidden", count === 0);
 }
 
@@ -9527,6 +9552,27 @@ function renderProxyPanels() {
   els.footerMode.textContent = `${label} placeholder active`;
 }
 
+// Set by a rail-tab click so the next render scrolls to that section once.
+let inspectorScrollIntent = false;
+
+// Highlight the rail tab for whichever section the user has scrolled to. Only
+// the button state is touched — calling renderInspectorPanels here would
+// scroll the panel again and fight the scroll in progress.
+function syncInspectorTabToScroll() {
+  if (state.inspectorCollapsed || !els.inspectorContent || !els.notesPanel) return;
+  const container = els.inspectorContent.getBoundingClientRect();
+  const notes = els.notesPanel.getBoundingClientRect();
+  // Notes is the trailing section and is often short, so scrolling to the very
+  // bottom still leaves its top well down the viewport. Treat it as current as
+  // soon as it comes into view rather than when it reaches some fraction.
+  const tab = notes.top < container.bottom - 8 ? "notes" : "inspector";
+  if (tab === state.activeInspectorTab) return;
+  state.activeInspectorTab = tab;
+  railTabs.forEach((railTab) => {
+    railTab.classList.toggle("active", railTab.dataset.inspectorTab === tab);
+  });
+}
+
 function renderInspectorPanels() {
   if (!els.lowerWorkbench) {
     return;
@@ -9535,14 +9581,20 @@ function renderInspectorPanels() {
   railTabs.forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.inspectorTab === state.activeInspectorTab);
   });
-  if (
-    !state.inspectorCollapsed
-    && state.activeInspectorTab === "notes"
-    && els.notesPanel
-    && els.inspectorContent
-  ) {
+  // Both tabs render into the same scroller, so selecting one scrolls to it.
+  // Inspector previously had no target and so did nothing when clicked. Only a
+  // click asks for this: the scroll spy also sets activeInspectorTab, and
+  // scrolling again from here would drag the view back to the section the user
+  // just scrolled away from.
+  if (!state.inspectorCollapsed && els.inspectorContent && inspectorScrollIntent) {
+    inspectorScrollIntent = false;
+    const target = state.activeInspectorTab === "notes" ? els.notesPanel : null;
     window.requestAnimationFrame(() => {
-      els.notesPanel.scrollIntoView({ block: "start", behavior: "smooth" });
+      if (target) {
+        target.scrollIntoView({ block: "start", behavior: "smooth" });
+      } else {
+        els.inspectorContent.scrollTo({ top: 0, behavior: "smooth" });
+      }
     });
   }
 }
