@@ -1814,6 +1814,14 @@ code {
   min-height: 0;
 }
 
+/* Always the last track of .lower-workbench. Hidden siblings (the
+   response-inspector resizer disappears while collapsed) shift auto-placement,
+   which parked the column in an earlier track and left the rail floating with
+   dead space to its right. -2/-1 is the last track whatever the count. */
+.lower-workbench > .inspector-column {
+  grid-column: -2 / -1;
+}
+
 .message-column {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
