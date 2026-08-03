@@ -2232,14 +2232,14 @@ code {
 .search-hit {
   padding: 0 1px;
   border-radius: 4px;
-  background: rgba(132, 151, 173, 0.2);
-  box-shadow: inset 0 0 0 1px rgba(132, 151, 173, 0.42);
+  background: rgba(132, 151, 173, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(170, 190, 214, 0.72);
   color: #f5f8fb;
 }
 
 .search-hit.search-hit-active {
-  background: rgba(218, 165, 32, 0.35);
-  box-shadow: inset 0 0 0 1px rgba(218, 165, 32, 0.7);
+  background: rgba(218, 165, 32, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(232, 201, 141, 0.9);
 }
 
 .search-hit-count {
@@ -4410,13 +4410,13 @@ button.utility-button.replay-tab-add {
 
 /* Findings search highlight — cyan to distinguish from yellow evidence */
 .findings-pane .search-hit {
-  background: rgba(56, 189, 248, 0.2);
-  box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.5);
-  color: #bae6fd;
+  background: rgba(56, 189, 248, 0.4);
+  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.75);
+  color: #e0f2fe;
 }
 .findings-pane .search-hit.search-hit-active {
-  background: rgba(56, 189, 248, 0.4);
-  box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.8);
+  background: rgba(56, 189, 248, 0.62);
+  box-shadow: inset 0 0 0 1px rgba(186, 230, 253, 0.9);
 }
 
 .session-context-menu {

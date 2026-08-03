@@ -23123,8 +23123,8 @@ const sniperCMTheme = CM.EditorView.theme({
   /* ── Payload placeholder ── */
   ".tok-payload":      { color: "#f8d06b", background: "rgba(248, 208, 107, 0.18)", borderRadius: "3px", padding: "0 2px", fontWeight: "600" },
   /* ── Search highlight ── */
-  ".tok-search-hit":   { background: "rgba(132, 151, 173, 0.2)", borderRadius: "4px", padding: "0 1px" },
-  ".tok-search-active": { background: "rgba(201, 169, 110, 0.4)", borderRadius: "4px", padding: "0 1px" },
+  ".tok-search-hit":   { background: "rgba(132, 151, 173, 0.42)", borderRadius: "4px", padding: "0 1px", boxShadow: "inset 0 0 0 1px rgba(170, 190, 214, 0.72)" },
+  ".tok-search-active": { background: "rgba(201, 169, 110, 0.62)", borderRadius: "4px", padding: "0 1px", boxShadow: "inset 0 0 0 1px rgba(232, 201, 141, 0.9)" },
   ".tok-finding-evidence-hit": { color: "#f3e7cc", background: "rgba(201, 169, 110, 0.24)", borderRadius: "3px", padding: "0 2px", fontWeight: "700", boxShadow: "0 0 0 1px rgba(201, 169, 110, 0.44), 0 0 0 1px rgba(0, 0, 0, 0.18)" },
   ".tok-finding-evidence-active": { color: "#fff3cf", background: "rgba(201, 169, 110, 0.34)", borderRadius: "3px", padding: "0 2px", fontWeight: "800", boxShadow: "0 0 0 1px rgba(230, 199, 139, 0.58), 0 0 8px rgba(201, 169, 110, 0.12)" },
 }, { dark: true });
