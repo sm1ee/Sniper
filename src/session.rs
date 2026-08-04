@@ -47,6 +47,10 @@ const SNAPSHOT_FILE: &str = "snapshot.json";
 /// snapshot.json meant rewriting the whole session document — 1.35 GB in a real
 /// session, of which the workspace was 1 MB — for each of those edits.
 const WORKSPACE_FILE: &str = "workspace.json";
+/// Everything except transactions and websockets. Those two dominate the session
+/// document (89.9% on a real 1.35 GB session) and are durable through their own
+/// journals, so the small components get a file that can be rewritten cheaply.
+const STATE_FILE: &str = "state.json";
 const TRANSACTION_JOURNAL_FILE: &str = "transactions.journal";
 const WEBSOCKET_JOURNAL_FILE: &str = "websockets.journal";
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -573,6 +577,57 @@ impl SessionContext {
         Ok(None)
     }
 
+    /// Everything in the session document except the two big journal-backed
+    /// sections, which are left empty. Written on its own to `state.json` so that
+    /// changing a scanner finding, an intercept queue entry or a fuzzer attack
+    /// does not rewrite the transactions — 89.9% of a real 1.35 GB session.
+    async fn build_state_snapshot(
+        &self,
+        workspace: WorkspaceStateSnapshot,
+    ) -> StoredSessionSnapshot {
+        StoredSessionSnapshot {
+            runtime: self.runtime.snapshot().await,
+            transactions: Vec::new(),
+            transaction_event_sequence: 0,
+            websockets: Vec::new(),
+            event_log: self.event_log.snapshot(Some(self.max_entries)).await,
+            match_replace_rules: self.match_replace.snapshot().await,
+            fuzzer_attacks: self.fuzzer.snapshot(Some(self.max_entries)).await,
+            scanner_findings: self.scanner.snapshot(Some(self.max_entries)).await,
+            scanner_config: self.scanner.get_config().await,
+            intercept_rules: self.intercept_rules.snapshot().await,
+            sequence_definitions: self.sequence.snapshot_definitions().await,
+            sequence_runs: self.sequence.snapshot_runs(Some(self.max_entries)).await,
+            oast_callbacks: Some(self.oast.snapshot().await),
+            oast_cleared_callback_keys: self.oast.snapshot_cleared_keys().await,
+            oast_registration: self.oast.snapshot_registration().await,
+            workspace,
+            replayed_transaction_journal: false,
+            replayed_transaction_ids: HashSet::new(),
+            replayed_websocket_journal: false,
+            compactable_websocket_journal: false,
+            unresolved_websocket_journal: false,
+        }
+    }
+
+    /// Persists everything except transactions and websockets. Those two are
+    /// durable through their own journals, so the callers that only changed a
+    /// small component — an intercept enqueue, a scanner finding, a websocket
+    /// open — can pay a few MB instead of the whole session document.
+    pub async fn persist_state_only(&self) -> Result<()> {
+        let _persist_guard = self.persist_lock.lock().await;
+        let state = self
+            .build_state_snapshot(self.workspace.snapshot().await)
+            .await;
+        create_private_dir_all(&self.storage_dir).with_context(|| {
+            format!(
+                "failed to create session directory {}",
+                self.storage_dir.display()
+            )
+        })?;
+        write_json(&state_path(&self.storage_dir), &state)
+    }
+
     async fn persist_with_workspace_snapshot_locked(
         &self,
         workspace: WorkspaceStateSnapshot,
@@ -593,35 +648,22 @@ impl SessionContext {
                     self.storage_dir.display()
                 )
             })?;
-        let snapshot = StoredSessionSnapshot {
-            runtime: self.runtime.snapshot().await,
-            transactions,
-            transaction_event_sequence: self.store.latest_event_sequence(),
-            websockets: self
-                .websockets
-                .snapshot_with_frame_limit(
-                    Some(self.max_entries),
-                    Some(MAX_PERSISTED_WEBSOCKET_FRAMES_PER_SESSION),
-                )
-                .await,
-            event_log: self.event_log.snapshot(Some(self.max_entries)).await,
-            match_replace_rules: self.match_replace.snapshot().await,
-            fuzzer_attacks: self.fuzzer.snapshot(Some(self.max_entries)).await,
-            scanner_findings: self.scanner.snapshot(Some(self.max_entries)).await,
-            scanner_config: self.scanner.get_config().await,
-            intercept_rules: self.intercept_rules.snapshot().await,
-            sequence_definitions: self.sequence.snapshot_definitions().await,
-            sequence_runs: self.sequence.snapshot_runs(Some(self.max_entries)).await,
-            oast_callbacks: Some(self.oast.snapshot().await),
-            oast_cleared_callback_keys: self.oast.snapshot_cleared_keys().await,
-            oast_registration: self.oast.snapshot_registration().await,
-            workspace,
-            replayed_transaction_journal: false,
-            replayed_transaction_ids: HashSet::new(),
-            replayed_websocket_journal: false,
-            compactable_websocket_journal: false,
-            unresolved_websocket_journal: false,
-        };
+        let websockets = self
+            .websockets
+            .snapshot_with_frame_limit(
+                Some(self.max_entries),
+                Some(MAX_PERSISTED_WEBSOCKET_FRAMES_PER_SESSION),
+            )
+            .await;
+        let state = self.build_state_snapshot(workspace).await;
+        // The two big sections are the only ones that need the full document
+        // rewritten; everything else is a few MB and gets its own file. Cloning
+        // `state` here copies only those small sections — the big ones are still
+        // empty at this point.
+        let mut snapshot = state.clone();
+        snapshot.transactions = transactions;
+        snapshot.websockets = websockets;
+        snapshot.transaction_event_sequence = self.store.latest_event_sequence();
 
         let mut metadata = self
             .metadata
@@ -649,6 +691,10 @@ impl SessionContext {
         tokio::task::spawn_blocking(move || write_json(&snapshot_file, &snapshot))
             .await
             .context("session snapshot writer panicked")??;
+        // After snapshot.json, so state.json is never the older of the two — that
+        // is what lets the loader prefer it by mtime. Both hold the same data
+        // here; a crash in between just means the loader takes snapshot.json.
+        write_json(&state_path(&self.storage_dir), &state)?;
         if let Err(error) = discard_transaction_journal_checkpoint(&self.storage_dir) {
             warn!(
                 %error,
@@ -1638,6 +1684,55 @@ fn workspace_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join(WORKSPACE_FILE)
 }
 
+fn state_path(storage_dir: &Path) -> PathBuf {
+    storage_dir.join(STATE_FILE)
+}
+
+/// Reads the standalone state file, but only when it is at least as new as
+/// snapshot.json. Both are written by the same full persist (snapshot.json
+/// first), so state.json is normally the newer one; a build from before the split
+/// writes only snapshot.json, so after a downgrade the embedded copy is newer and
+/// has to win. Returns `None` when the file is absent, stale or unusable.
+fn read_state_file(
+    storage_dir: &Path,
+    mode: SessionSnapshotLoadMode,
+) -> Option<StoredSessionSnapshot> {
+    let path = state_path(storage_dir);
+    let state_modified = fs::metadata(&path).ok()?.modified().ok();
+    let snapshot_modified = fs::metadata(snapshot_path(storage_dir))
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
+    if let (Some(state), Some(snapshot)) = (state_modified, snapshot_modified) {
+        if state < snapshot {
+            warn!(
+                path = %path.display(),
+                "ignoring state file older than the session snapshot"
+            );
+            return None;
+        }
+    }
+    match fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(state) => Some(state),
+            Err(error) => {
+                warn!(?error, path = %path.display(), "discarding corrupt state file");
+                if mode == SessionSnapshotLoadMode::Writable {
+                    move_corrupt_session_file_aside(storage_dir, &path, "state");
+                }
+                None
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            warn!(?error, path = %path.display(), "discarding unreadable state file");
+            if mode == SessionSnapshotLoadMode::Writable {
+                move_corrupt_session_file_aside(storage_dir, &path, "state");
+            }
+            None
+        }
+    }
+}
+
 /// Reads the standalone workspace file. Returns `None` when it is absent — the
 /// normal case for a session written before the split, and for a session that
 /// has not been edited since — so the caller keeps the copy embedded in
@@ -1872,6 +1967,16 @@ fn load_session_snapshot_with_mode(
         Err(error) => Err(error)
             .with_context(|| format!("failed to read session snapshot {}", path.display())),
     }?;
+    // Take the small components from state.json when it is present, keeping the
+    // two big journal-backed sections from snapshot.json. Using the state file as
+    // the base means a component added later is read from the file that actually
+    // writes it, rather than being silently dropped.
+    if let Some(mut state) = read_state_file(storage_dir, mode) {
+        state.transactions = std::mem::take(&mut snapshot.transactions);
+        state.websockets = std::mem::take(&mut snapshot.websockets);
+        state.transaction_event_sequence = snapshot.transaction_event_sequence;
+        snapshot = state;
+    }
     // Prefer the standalone workspace file, but never over a newer copy inside
     // snapshot.json. Revisions are monotonic per commit (see
     // WorkspaceStateStore::replace_snapshot_checked), and a build from before the
@@ -3100,6 +3205,66 @@ mod tests {
         assert!(loaded.workspace.fuzzer.target_request_authority.is_none());
 
         let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    #[test]
+    fn load_session_snapshot_takes_small_components_from_the_state_file() {
+        // "state file is newer" is the normal case: a full persist writes
+        // snapshot.json first, and persist_state_only writes only state.json.
+        // "snapshot is newer" only happens after a build from before the split
+        // wrote the whole document, and then the embedded copy has to win.
+        for state_file_is_newer in [true, false] {
+            let storage_dir = std::env::temp_dir()
+                .join(format!("sniper-state-file-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&storage_dir).unwrap();
+
+            // write_json fsyncs and renames, so write order is mtime order.
+            let write_snapshot = || {
+                super::write_json(
+                    &super::snapshot_path(&storage_dir),
+                    &serde_json::json!({
+                        "runtime": { "scope_patterns": ["from-snapshot"] },
+                        "transactions": [],
+                        "transaction_event_sequence": 42,
+                    }),
+                )
+                .unwrap()
+            };
+            let write_state = || {
+                super::write_json(
+                    &super::state_path(&storage_dir),
+                    &serde_json::json!({
+                        "runtime": { "scope_patterns": ["from-state-file"] },
+                        "transaction_event_sequence": 0,
+                    }),
+                )
+                .unwrap()
+            };
+            if state_file_is_newer {
+                write_snapshot();
+                write_state();
+            } else {
+                write_state();
+                write_snapshot();
+            }
+
+            let loaded = super::load_session_snapshot(&storage_dir, 32, 32).unwrap();
+            let expected = if state_file_is_newer {
+                "from-state-file"
+            } else {
+                "from-snapshot"
+            };
+            assert_eq!(
+                loaded.runtime.scope_patterns,
+                vec![expected.to_string()],
+                "state file newer = {state_file_is_newer}"
+            );
+            // The big journal-backed sections always come from snapshot.json,
+            // never from the state file's empty placeholders.
+            assert_eq!(loaded.transaction_event_sequence, 42);
+
+            let _ = std::fs::remove_dir_all(storage_dir);
+        }
     }
 
     #[test]

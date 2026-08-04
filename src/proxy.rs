@@ -2430,7 +2430,6 @@ async fn forward_http_request(
     let request_http_version = parts.version;
     let editable_request = editable_request_from_parts(&parts, &request_bytes, &absolute_uri);
     let intercepted_request = match maybe_intercept_request(
-        state.clone(),
         session.clone(),
         peer_addr,
         editable_request,
@@ -2500,7 +2499,6 @@ async fn forward_http_request(
     let client_response = match exchange.response {
         Ok(response) => {
             let intercepted = maybe_intercept_response(
-                state.clone(),
                 session.clone(),
                 &record,
                 response.status,
@@ -2571,7 +2569,6 @@ async fn forward_websocket_request(
     let client_request_headers = parts.headers.clone();
     let editable_request = editable_request_from_parts(&parts, &request_bytes, &absolute_uri);
     let forwarded_request = match maybe_intercept_request(
-        state.clone(),
         session.clone(),
         peer_addr,
         editable_request,
@@ -2964,7 +2961,7 @@ async fn forward_websocket_request(
             captured_websocket_id = None;
         }
     }
-    persist_session_quiet(&state, &session).await;
+    persist_session_state_quiet(&session).await;
 
     let relay_id = Uuid::new_v4();
     let (relay_abort, relay_registration) = AbortHandle::new_pair();
@@ -3027,7 +3024,7 @@ async fn forward_websocket_request(
                                     close_note,
                                 )
                                 .await;
-                            persist_session_quiet(&state, &session).await;
+                            persist_session_state_quiet(&session).await;
                         }
                     }
                 }
@@ -3056,7 +3053,6 @@ async fn forward_websocket_request(
 }
 
 async fn maybe_intercept_request(
-    state: Arc<AppState>,
     session: Arc<SessionContext>,
     peer_addr: SocketAddr,
     request: EditableRequest,
@@ -3102,12 +3098,11 @@ async fn maybe_intercept_request(
             is_websocket,
         })
         .await;
-    persist_session_quiet(&state, &session).await;
+    persist_session_state_quiet(&session).await;
     resolution
 }
 
 async fn maybe_intercept_response(
-    state: Arc<AppState>,
     session: Arc<SessionContext>,
     record: &TransactionRecord,
     status: StatusCode,
@@ -3167,7 +3162,7 @@ async fn maybe_intercept_response(
             response: editable.clone(),
         })
         .await;
-    persist_session_quiet(&state, &session).await;
+    persist_session_state_quiet(&session).await;
     resolution
 }
 
@@ -3178,18 +3173,13 @@ async fn store_record_and_scan(
 ) {
     let insert_outcome =
         insert_transaction_quiet(session, record.clone(), "captured transaction").await;
-    scan_record_for_session(state, session, record);
+    scan_record_for_session(session, record);
     persist_transaction_insert_outcome(state, session, insert_outcome).await;
 }
 
-fn scan_record_for_session(
-    state: &Arc<AppState>,
-    session: &Arc<SessionContext>,
-    record: TransactionRecord,
-) {
+fn scan_record_for_session(session: &Arc<SessionContext>, record: TransactionRecord) {
     let scanner = session.scanner.clone();
     let scan_generation = scanner.clear_generation();
-    let scan_state = Arc::clone(state);
     let scan_session = Arc::clone(session);
     spawn_tracked_proxy_task(session.id(), async move {
         let config = scanner.get_config().await;
@@ -3198,13 +3188,12 @@ fn scan_record_for_session(
         for finding in findings {
             accepted_findings |= scanner.push_if_generation(finding, scan_generation).await;
         }
-        // Findings are rebuilt from journal-replayed transactions on load
-        // (`recover_missing_scanner_findings`), so this rewrite is not what makes
-        // them durable — it only compacts the journal. Persisting on every new
-        // finding rewrote the whole session document every PERSIST_DEBOUNCE while
-        // browsing, which on a real 1.35 GB session is 11 rewrites per 20 seconds.
-        if accepted_findings && transaction_journal_compaction_due(&scan_session) {
-            persist_session_quiet(&scan_state, &scan_session).await;
+        // Findings live in state.json, so persisting them no longer drags the
+        // transactions along. Doing this as a full snapshot rewrote the whole
+        // session document every PERSIST_DEBOUNCE while browsing — 11 rewrites
+        // per 20 seconds on a real 1.35 GB session.
+        if accepted_findings {
+            persist_session_state_quiet(&scan_session).await;
         }
     });
 }
@@ -3281,6 +3270,19 @@ async fn persist_transaction_insert_outcome(
 /// makes the expensive snapshot rewrites rarer, at the cost of a slower load and a
 /// longer window of non-journaled state (event log entries) to lose in a crash.
 const TRANSACTION_JOURNAL_COMPACT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Persists only the small components, to state.json. For changes that are not a
+/// captured transaction — an intercept enqueue, a websocket open, a scanner
+/// finding — rewriting the transactions along with them is wasted work.
+async fn persist_session_state_quiet(session: &SessionContext) {
+    if let Err(error) = session.persist_state_only().await {
+        warn!(
+            ?error,
+            session_id = %session.id(),
+            "failed to persist session state"
+        );
+    }
+}
 
 /// The journal is only emptied by a full snapshot rewrite, so that rewrite has to
 /// be driven by how much the journal has accumulated. Every other trigger made it
@@ -3684,7 +3686,7 @@ impl StreamedRecordContext {
             {
                 let mut scan_record = record;
                 scan_record.id = record_id;
-                scan_record_for_session(&self.state, &self.session, scan_record);
+                scan_record_for_session(&self.session, scan_record);
                 forget_persist_context_if_clean(self.session.id(), self.persist_generation);
                 return;
             }
