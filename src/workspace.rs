@@ -10,7 +10,10 @@ use crate::{
     ws_replay::WsReplayFrame,
 };
 
-pub const MAX_WORKSPACE_SERIALIZED_BYTES: usize = 16 * 1024 * 1024;
+// Kept comfortably below the 64 MB HTTP body limit (see DefaultBodyLimit in
+// src/api.rs). The whole workspace is rewritten to disk on every edit, so this
+// bounds both the POST and the per-edit file write.
+pub const MAX_WORKSPACE_SERIALIZED_BYTES: usize = 48 * 1024 * 1024;
 
 /// Upper bound on replay tabs a workspace may hold. Bounds the serialized
 /// workspace size; shared by the UI API validator and the CLI so `replay open`

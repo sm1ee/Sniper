@@ -142,10 +142,10 @@ const WS_REPLAY_TRANSCRIPT_SAVE_DELAY_MS = 2000;
 const WS_REPLAY_TRANSCRIPT_SAVE_MAX_WAIT_MS = 5000;
 const WEBSOCKET_SORTED_SUMMARY_REFRESH_MIN_MS = 2000;
 const WORKSPACE_UNLOAD_KEEPALIVE_MAX_BYTES = 60 * 1024;
-// Kept below the server's 16 MB workspace limit (MAX_WORKSPACE_SERIALIZED_BYTES
+// Kept below the server's workspace limit (MAX_WORKSPACE_SERIALIZED_BYTES = 48 MB
 // in src/workspace.rs). A single large replay response would otherwise push the
 // full snapshot over the limit and block every save.
-const WORKSPACE_SAVE_SAFE_BYTES = 15 * 1024 * 1024;
+const WORKSPACE_SAVE_SAFE_BYTES = 46 * 1024 * 1024;
 let workspaceResponseTrimNoticeShown = false;
 const WORKSPACE_UNLOAD_HISTORY_ENTRIES_MAX_BYTES = 12 * 1024;
 const WORKSPACE_UNLOAD_RESPONSE_RECORD_MAX_BYTES = 12 * 1024;
@@ -3335,43 +3335,58 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
 
 // Keep the workspace POST under the server's size limit. Replay tabs store the
 // full response of the last send and of each history entry, and a body can be
-// up to ~10 MB, so one large response can push the snapshot past 16 MB and make
-// EVERY save fail — including an edit to an unrelated tab. Drop oversized
-// response bodies (requests and metadata are preserved; a response is
-// re-fetchable by re-sending) so the save always fits.
+// multiple MB, so one large response can push the snapshot past the limit and
+// make EVERY save fail — including an edit to an unrelated tab.
+//
+// Drop response bodies largest-first, and only as many as needed to get back
+// under the threshold, so a single giant response doesn't cost every other
+// tab's modest response. Requests and metadata are always kept (a response is
+// re-fetchable by re-sending). If requests alone still overflow, history is
+// dropped as a last resort.
 function boundWorkspaceSnapshotForSave(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return snapshot;
   if (utf8ByteLength(JSON.stringify(snapshot)) <= WORKSPACE_SAVE_SAFE_BYTES) {
     return snapshot;
   }
-  const trimResponse = (rec) =>
-    rec && utf8ByteLength(JSON.stringify(rec)) > WORKSPACE_UNLOAD_RESPONSE_RECORD_MAX_BYTES
-      ? null
-      : rec;
-  const tabs = (snapshot.replay?.tabs || []).map((tab) => ({
-    ...tab,
-    response_record: trimResponse(tab.response_record),
-    history_entries: (tab.history_entries || []).map((entry) => ({
-      ...entry,
-      response_record: trimResponse(entry.response_record),
-    })),
-  }));
-  let bounded = { ...snapshot, replay: { ...snapshot.replay, tabs } };
-  // If requests/history alone still overflow (rare), drop history bodies too,
+  // Deep clone so we can null response records in place without touching state.
+  const bounded = JSON.parse(JSON.stringify(snapshot));
+  const tabs = bounded.replay?.tabs || [];
+
+  // Every response record, ordered largest-first, with a setter to drop it.
+  const responses = [];
+  for (const tab of tabs) {
+    if (tab.response_record) {
+      responses.push({ bytes: utf8ByteLength(JSON.stringify(tab.response_record)), drop: () => { tab.response_record = null; } });
+    }
+    for (const entry of tab.history_entries || []) {
+      if (entry.response_record) {
+        responses.push({ bytes: utf8ByteLength(JSON.stringify(entry.response_record)), drop: () => { entry.response_record = null; } });
+      }
+    }
+  }
+  responses.sort((a, b) => b.bytes - a.bytes);
+
+  let dropped = false;
+  for (const r of responses) {
+    if (utf8ByteLength(JSON.stringify(bounded)) <= WORKSPACE_SAVE_SAFE_BYTES) break;
+    r.drop();
+    dropped = true;
+  }
+
+  // Last resort: requests/history text alone still overflow. Drop history,
   // keeping each tab's current request so replay still works.
   if (utf8ByteLength(JSON.stringify(bounded)) > WORKSPACE_SAVE_SAFE_BYTES) {
-    bounded = {
-      ...bounded,
-      replay: {
-        ...bounded.replay,
-        tabs: bounded.replay.tabs.map((tab) => ({ ...tab, history_entries: [], history_index: null })),
-      },
-    };
+    for (const tab of tabs) {
+      tab.history_entries = [];
+      tab.history_index = null;
+    }
+    dropped = true;
   }
-  if (!workspaceResponseTrimNoticeShown) {
+
+  if (dropped && !workspaceResponseTrimNoticeShown) {
     workspaceResponseTrimNoticeShown = true;
     showToast(
-      "Some large replay responses were not saved to keep the workspace under its size limit.",
+      "A large replay response was not saved to keep the workspace under its size limit.",
       "warning",
       6000,
     );
