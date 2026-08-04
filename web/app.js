@@ -142,6 +142,11 @@ const WS_REPLAY_TRANSCRIPT_SAVE_DELAY_MS = 2000;
 const WS_REPLAY_TRANSCRIPT_SAVE_MAX_WAIT_MS = 5000;
 const WEBSOCKET_SORTED_SUMMARY_REFRESH_MIN_MS = 2000;
 const WORKSPACE_UNLOAD_KEEPALIVE_MAX_BYTES = 60 * 1024;
+// Kept below the server's 16 MB workspace limit (MAX_WORKSPACE_SERIALIZED_BYTES
+// in src/workspace.rs). A single large replay response would otherwise push the
+// full snapshot over the limit and block every save.
+const WORKSPACE_SAVE_SAFE_BYTES = 15 * 1024 * 1024;
+let workspaceResponseTrimNoticeShown = false;
 const WORKSPACE_UNLOAD_HISTORY_ENTRIES_MAX_BYTES = 12 * 1024;
 const WORKSPACE_UNLOAD_RESPONSE_RECORD_MAX_BYTES = 12 * 1024;
 const WORKSPACE_UNLOAD_WS_SETUP_QUEUE_MAX_BYTES = 12 * 1024;
@@ -3324,7 +3329,54 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
     workspaceSaveConflictPending = false;
     workspaceSaveConflictLatest = null;
     workspaceTabCapNoticeShown = false;
+    workspaceResponseTrimNoticeShown = false;
   }
+}
+
+// Keep the workspace POST under the server's size limit. Replay tabs store the
+// full response of the last send and of each history entry, and a body can be
+// up to ~10 MB, so one large response can push the snapshot past 16 MB and make
+// EVERY save fail — including an edit to an unrelated tab. Drop oversized
+// response bodies (requests and metadata are preserved; a response is
+// re-fetchable by re-sending) so the save always fits.
+function boundWorkspaceSnapshotForSave(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return snapshot;
+  if (utf8ByteLength(JSON.stringify(snapshot)) <= WORKSPACE_SAVE_SAFE_BYTES) {
+    return snapshot;
+  }
+  const trimResponse = (rec) =>
+    rec && utf8ByteLength(JSON.stringify(rec)) > WORKSPACE_UNLOAD_RESPONSE_RECORD_MAX_BYTES
+      ? null
+      : rec;
+  const tabs = (snapshot.replay?.tabs || []).map((tab) => ({
+    ...tab,
+    response_record: trimResponse(tab.response_record),
+    history_entries: (tab.history_entries || []).map((entry) => ({
+      ...entry,
+      response_record: trimResponse(entry.response_record),
+    })),
+  }));
+  let bounded = { ...snapshot, replay: { ...snapshot.replay, tabs } };
+  // If requests/history alone still overflow (rare), drop history bodies too,
+  // keeping each tab's current request so replay still works.
+  if (utf8ByteLength(JSON.stringify(bounded)) > WORKSPACE_SAVE_SAFE_BYTES) {
+    bounded = {
+      ...bounded,
+      replay: {
+        ...bounded.replay,
+        tabs: bounded.replay.tabs.map((tab) => ({ ...tab, history_entries: [], history_index: null })),
+      },
+    };
+  }
+  if (!workspaceResponseTrimNoticeShown) {
+    workspaceResponseTrimNoticeShown = true;
+    showToast(
+      "Some large replay responses were not saved to keep the workspace under its size limit.",
+      "warning",
+      6000,
+    );
+  }
+  return bounded;
 }
 
 async function saveWorkspaceState(snapshot = null, options = {}) {
@@ -3334,6 +3386,7 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
   if (!snapshot) {
     snapshot = snapshotWorkspaceState(options);
   }
+  snapshot = boundWorkspaceSnapshotForSave(snapshot);
 
   const response = await fetch("/api/workspace-state", {
     method: "POST",
