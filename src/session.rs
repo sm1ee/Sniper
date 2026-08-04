@@ -1850,11 +1850,21 @@ fn load_session_snapshot_with_mode(
         Err(error) => Err(error)
             .with_context(|| format!("failed to read session snapshot {}", path.display())),
     }?;
-    // A standalone workspace file, when present, is always at least as fresh as
-    // the copy inside snapshot.json: both are written from the same in-memory
-    // store, but only this one is rewritten on every workspace edit.
+    // Prefer the standalone workspace file, but never over a newer copy inside
+    // snapshot.json. Revisions are monotonic per commit (see
+    // WorkspaceStateStore::replace_snapshot_checked), and a build from before the
+    // split writes the workspace only into snapshot.json — so after a downgrade
+    // and back, the embedded copy can be the newer of the two.
     if let Some(workspace) = read_workspace_file(storage_dir, mode) {
-        snapshot.workspace = workspace;
+        if workspace.revision >= snapshot.workspace.revision {
+            snapshot.workspace = workspace;
+        } else {
+            warn!(
+                workspace_revision = workspace.revision,
+                snapshot_revision = snapshot.workspace.revision,
+                "keeping the newer workspace embedded in the session snapshot"
+            );
+        }
     }
     snapshot.workspace.fuzzer.migrate_attack_record_to_id();
     if let Err(error) = validate_workspace_state(&snapshot.workspace) {
@@ -3068,6 +3078,47 @@ mod tests {
         assert!(loaded.workspace.fuzzer.target_request_authority.is_none());
 
         let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    #[test]
+    fn load_session_snapshot_prefers_the_workspace_file_but_not_over_a_newer_snapshot_copy() {
+        for (workspace_file_revision, snapshot_revision, expected_tab) in [
+            (7u64, 3u64, "from-workspace-file"),
+            (7, 7, "from-workspace-file"),
+            // An older build writes the workspace only into snapshot.json, so
+            // after a downgrade and back the embedded copy can be the newer one.
+            (3, 7, "from-snapshot-copy"),
+        ] {
+            let storage_dir = std::env::temp_dir()
+                .join(format!("sniper-workspace-precedence-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&storage_dir).unwrap();
+            let tab = |id: &str| {
+                serde_json::json!({
+                    "replay": { "tabs": [{ "id": id, "sequence": 1 }], "active_tab_id": id }
+                })
+            };
+
+            let mut snapshot_workspace = tab("from-snapshot-copy");
+            snapshot_workspace["revision"] = snapshot_revision.into();
+            super::write_json(
+                &super::snapshot_path(&storage_dir),
+                &serde_json::json!({ "workspace": snapshot_workspace }),
+            )
+            .unwrap();
+
+            let mut file_workspace = tab("from-workspace-file");
+            file_workspace["revision"] = workspace_file_revision.into();
+            super::write_json(&super::workspace_path(&storage_dir), &file_workspace).unwrap();
+
+            let loaded = super::load_session_snapshot(&storage_dir, 32, 32).unwrap();
+            assert_eq!(
+                loaded.workspace.replay.active_tab_id.as_deref(),
+                Some(expected_tab),
+                "workspace file revision {workspace_file_revision} vs snapshot revision {snapshot_revision}"
+            );
+
+            let _ = std::fs::remove_dir_all(storage_dir);
+        }
     }
 
     #[test]
