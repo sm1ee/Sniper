@@ -641,7 +641,14 @@ impl SessionContext {
                 self.storage_dir.display()
             )
         })?;
-        write_json(&snapshot_path(&self.storage_dir), &snapshot)?;
+        // Serializing and fsyncing the session document takes seconds once it is
+        // large (1.7 s to pretty-print 1.35 GB, plus the fsync). Doing that inline
+        // parks a tokio worker, and the proxy shares this runtime — so a snapshot
+        // write would stall request handling.
+        let snapshot_file = snapshot_path(&self.storage_dir);
+        tokio::task::spawn_blocking(move || write_json(&snapshot_file, &snapshot))
+            .await
+            .context("session snapshot writer panicked")??;
         if let Err(error) = discard_transaction_journal_checkpoint(&self.storage_dir) {
             warn!(
                 %error,
