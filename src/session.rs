@@ -42,6 +42,11 @@ use crate::{
 pub(crate) const SESSIONS_DIR: &str = "sessions";
 const REGISTRY_FILE: &str = "registry.json";
 const SNAPSHOT_FILE: &str = "snapshot.json";
+/// The workspace lives in its own file because it is the only high-frequency
+/// writer: every replay tab rename or target edit persists it. Keeping it inside
+/// snapshot.json meant rewriting the whole session document — 1.35 GB in a real
+/// session, of which the workspace was 1 MB — for each of those edits.
+const WORKSPACE_FILE: &str = "workspace.json";
 const TRANSACTION_JOURNAL_FILE: &str = "transactions.journal";
 const WEBSOCKET_JOURNAL_FILE: &str = "websockets.journal";
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -543,58 +548,13 @@ impl SessionContext {
         validate_workspace_state(&workspace)
             .map_err(anyhow::Error::msg)
             .with_context(|| "workspace snapshot is invalid")?;
-        let path = snapshot_path(&self.storage_dir);
-        let mut snapshot = match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<StoredSessionSnapshot>(&bytes) {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    warn!(
-                        ?error,
-                        session_id = %self.id,
-                        path = %path.display(),
-                        "falling back to full session persist after workspace snapshot decode failed"
-                    );
-                    let metadata = self
-                        .persist_with_workspace_snapshot_locked(workspace)
-                        .await?;
-                    return Ok(Some(metadata));
-                }
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                warn!(
-                    session_id = %self.id,
-                    path = %path.display(),
-                    "falling back to full session persist because workspace snapshot is missing"
-                );
-                let metadata = self
-                    .persist_with_workspace_snapshot_locked(workspace)
-                    .await?;
-                return Ok(Some(metadata));
-            }
-            Err(error) if path.exists() => {
-                warn!(
-                    ?error,
-                    session_id = %self.id,
-                    path = %path.display(),
-                    "falling back to full session persist after workspace snapshot became unreadable"
-                );
-                move_corrupt_session_file_aside(&self.storage_dir, &path, "snapshot");
-                let metadata = self
-                    .persist_with_workspace_snapshot_locked(workspace)
-                    .await?;
-                return Ok(Some(metadata));
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to read session snapshot {}", path.display())
-                });
-            }
-        };
-
-        snapshot.workspace = workspace;
-        snapshot.replayed_transaction_journal = false;
-        snapshot.replayed_transaction_ids.clear();
-        write_json(&path, &snapshot)?;
+        // Write only the workspace file. This used to read snapshot.json, parse
+        // it, swap the workspace field and rewrite the whole document, which
+        // costs 1.35 GB of I/O and 3.3 s of CPU per edit on a real session for a
+        // 1 MB payload. snapshot.json is left untouched; its embedded workspace
+        // copy stays as the load-time fallback, and a corrupt snapshot.json is
+        // repaired on the next load rather than here.
+        write_json(&workspace_path(&self.storage_dir), &workspace)?;
         Ok(None)
     }
 
@@ -1652,6 +1612,49 @@ fn snapshot_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join(SNAPSHOT_FILE)
 }
 
+fn workspace_path(storage_dir: &Path) -> PathBuf {
+    storage_dir.join(WORKSPACE_FILE)
+}
+
+/// Reads the standalone workspace file. Returns `None` when it is absent — the
+/// normal case for a session written before the split, and for a session that
+/// has not been edited since — so the caller keeps the copy embedded in
+/// snapshot.json as the fallback.
+fn read_workspace_file(
+    storage_dir: &Path,
+    mode: SessionSnapshotLoadMode,
+) -> Option<WorkspaceStateSnapshot> {
+    let path = workspace_path(storage_dir);
+    match fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(workspace) => Some(workspace),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    path = %path.display(),
+                    "discarding corrupt workspace file"
+                );
+                if mode == SessionSnapshotLoadMode::Writable {
+                    move_corrupt_session_file_aside(storage_dir, &path, "workspace");
+                }
+                None
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            warn!(
+                ?error,
+                path = %path.display(),
+                "discarding unreadable workspace file"
+            );
+            if mode == SessionSnapshotLoadMode::Writable {
+                move_corrupt_session_file_aside(storage_dir, &path, "workspace");
+            }
+            None
+        }
+    }
+}
+
 fn transaction_journal_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join(TRANSACTION_JOURNAL_FILE)
 }
@@ -1847,6 +1850,12 @@ fn load_session_snapshot_with_mode(
         Err(error) => Err(error)
             .with_context(|| format!("failed to read session snapshot {}", path.display())),
     }?;
+    // A standalone workspace file, when present, is always at least as fresh as
+    // the copy inside snapshot.json: both are written from the same in-memory
+    // store, but only this one is rewritten on every workspace edit.
+    if let Some(workspace) = read_workspace_file(storage_dir, mode) {
+        snapshot.workspace = workspace;
+    }
     snapshot.workspace.fuzzer.migrate_attack_record_to_id();
     if let Err(error) = validate_workspace_state(&snapshot.workspace) {
         warn!(
@@ -3853,12 +3862,24 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(fallback_metadata.is_some());
+        // The workspace now has its own file, so saving it neither reads nor
+        // rewrites snapshot.json: an unusable snapshot.json no longer forces a
+        // full-session persist, and no longer blocks the save at all.
+        assert!(fallback_metadata.is_none());
         assert_eq!(
             committed.replay.active_tab_id.as_deref(),
             Some("recovered-workspace-tab")
         );
-        assert!(snapshot_path.is_file());
+        assert!(super::workspace_path(active.storage_dir()).is_file());
+        assert!(snapshot_path.is_dir(), "the workspace save must not touch snapshot.json");
+
+        // The unusable snapshot.json is cleared out of the way on the next load
+        // instead, and the workspace still restores — from its own file.
+        let loaded = registry.load_context(active.id()).unwrap();
+        assert!(
+            !snapshot_path.is_dir(),
+            "loading must move the unusable snapshot.json aside"
+        );
         let has_corrupt_backup = std::fs::read_dir(active.storage_dir())
             .unwrap()
             .any(|entry| {
@@ -3870,7 +3891,6 @@ mod tests {
             });
         assert!(has_corrupt_backup);
 
-        let loaded = registry.load_context(active.id()).unwrap();
         let durable_workspace = loaded.workspace.snapshot().await;
         assert_eq!(
             durable_workspace.replay.active_tab_id.as_deref(),
