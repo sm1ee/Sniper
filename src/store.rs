@@ -93,14 +93,19 @@ pub struct TransactionStore {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransactionInsertOutcome {
     journal_fallback_required: bool,
-    retention_trimmed: bool,
 }
 
 impl TransactionInsertOutcome {
-    pub fn snapshot_fallback_needed(self) -> bool {
-        self.journal_fallback_required || self.retention_trimmed
-    }
-
+    /// True when the journal could not take this record, so rewriting the full
+    /// session snapshot is the only way to make it durable.
+    ///
+    /// A retention trim deliberately does NOT ask for a snapshot: journal replay
+    /// applies the same retention cap (`trim_transaction_replay_state`), so a
+    /// trimmed record cannot come back. Treating a trim as a snapshot trigger
+    /// meant that once a session reached `max_transaction_entries` — where every
+    /// insert trims — the whole 1.35 GB document was rewritten every
+    /// `PERSIST_DEBOUNCE`. Journal size drives compaction instead; see
+    /// `AppConfig::transaction_journal_compact_bytes`.
     pub fn immediate_snapshot_required(self) -> bool {
         self.journal_fallback_required
     }
@@ -418,7 +423,6 @@ impl TransactionStore {
         }
         TransactionInsertOutcome {
             journal_fallback_required,
-            retention_trimmed,
         }
     }
 
@@ -2017,7 +2021,6 @@ mod tests {
 
         let record = test_record("lost.example");
         let outcome = store.insert(record).await;
-        assert!(outcome.snapshot_fallback_needed());
         assert!(outcome.immediate_snapshot_required());
 
         let listed = store.list(&ListFilters::default()).await;
@@ -2035,7 +2038,6 @@ mod tests {
 
         let outcome = store.insert(test_record("snapshot.example")).await;
 
-        assert!(outcome.snapshot_fallback_needed());
         assert!(outcome.immediate_snapshot_required());
         let listed = store.list(&ListFilters::default()).await;
         assert_eq!(listed.len(), 1);
@@ -2089,7 +2091,7 @@ mod tests {
         let record_id = record.id;
 
         let outcome = store.insert(record).await;
-        assert!(!outcome.snapshot_fallback_needed());
+        assert!(!outcome.immediate_snapshot_required());
         let updated = store
             .update_record_durable(record_id, |record| {
                 record.status = Some(200);
@@ -2201,7 +2203,7 @@ mod tests {
 
         ack.send(Ok(())).unwrap();
         let insert_outcome = insert_task.await.unwrap();
-        assert!(!insert_outcome.snapshot_fallback_needed());
+        assert!(!insert_outcome.immediate_snapshot_required());
 
         let listed = store.list(&ListFilters::default()).await;
         assert_eq!(listed.len(), 2);

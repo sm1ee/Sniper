@@ -514,6 +514,21 @@ impl SessionContext {
         })
     }
 
+    /// Bytes the next load would have to replay from the transaction journal:
+    /// the active file plus the checkpoint, which holds rotated entries until a
+    /// snapshot write discards them. Rewriting the session snapshot is what
+    /// compacts both, so this is the signal for when that rewrite is worth its
+    /// cost.
+    pub fn transaction_journal_replay_bytes(&self) -> u64 {
+        let journal = transaction_journal_path(&self.storage_dir);
+        let checkpoint = transaction_journal_checkpoint_path(&journal);
+        [journal, checkpoint]
+            .iter()
+            .filter_map(|path| fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .sum()
+    }
+
     pub async fn replace_workspace_snapshot_checked_and_persist(
         &self,
         snapshot: WorkspaceStateSnapshot,
@@ -3078,6 +3093,27 @@ mod tests {
         assert!(loaded.workspace.fuzzer.target_request_authority.is_none());
 
         let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    #[test]
+    fn transaction_journal_replay_bytes_counts_the_checkpoint_too() {
+        let data_dir = std::env::temp_dir()
+            .join(format!("sniper-journal-replay-bytes-{}", uuid::Uuid::new_v4()));
+        let (_registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let journal = super::transaction_journal_path(active.storage_dir());
+        let checkpoint = transaction_journal_checkpoint_path(&journal);
+
+        // Both files are replayed on load, so both count toward the compaction
+        // threshold — a checkpoint holds rotated entries until a snapshot write
+        // discards it, so counting only the active file understates the load cost.
+        std::fs::write(&journal, vec![b'a'; 300]).unwrap();
+        assert_eq!(active.transaction_journal_replay_bytes(), 300);
+        std::fs::write(&checkpoint, vec![b'b'; 45]).unwrap();
+        assert_eq!(active.transaction_journal_replay_bytes(), 345);
+        std::fs::remove_file(&journal).unwrap();
+        assert_eq!(active.transaction_journal_replay_bytes(), 45);
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]

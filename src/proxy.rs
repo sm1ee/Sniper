@@ -3198,7 +3198,12 @@ fn scan_record_for_session(
         for finding in findings {
             accepted_findings |= scanner.push_if_generation(finding, scan_generation).await;
         }
-        if accepted_findings {
+        // Findings are rebuilt from journal-replayed transactions on load
+        // (`recover_missing_scanner_findings`), so this rewrite is not what makes
+        // them durable — it only compacts the journal. Persisting on every new
+        // finding rewrote the whole session document every PERSIST_DEBOUNCE while
+        // browsing, which on a real 1.35 GB session is 11 rewrites per 20 seconds.
+        if accepted_findings && transaction_journal_compaction_due(&scan_session) {
             persist_session_quiet(&scan_state, &scan_session).await;
         }
     });
@@ -3225,7 +3230,13 @@ async fn update_transaction_record_quiet(
         .await
     {
         Ok(Some(_)) => {
-            persist_session_quiet(state, session).await;
+            // `update_record_durable` already appended and fsynced this change to
+            // the journal, so the snapshot rewrite is not what makes it durable —
+            // it only compacts the journal. Doing it unconditionally here meant
+            // every streamed response rewrote the whole session document.
+            if transaction_journal_compaction_due(session) {
+                persist_session_quiet(state, session).await;
+            }
             true
         }
         Ok(None) => false,
@@ -3257,9 +3268,25 @@ async fn persist_transaction_insert_outcome(
 ) {
     if outcome.immediate_snapshot_required() {
         persist_session_immediate_quiet(state, session).await;
-    } else if outcome.snapshot_fallback_needed() {
+    } else if transaction_journal_compaction_due(session) {
         persist_session_quiet(state, session).await;
     }
+}
+
+/// How much transaction journal (active file plus checkpoint) may pile up before a
+/// full session snapshot is rewritten to compact it.
+///
+/// 64 MiB replays in roughly 80 ms at the measured 0.8 GB/s JSON parse rate, and
+/// is about 5,000 records at the average record size of a real session. Raising it
+/// makes the expensive snapshot rewrites rarer, at the cost of a slower load and a
+/// longer window of non-journaled state (event log entries) to lose in a crash.
+const TRANSACTION_JOURNAL_COMPACT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The journal is only emptied by a full snapshot rewrite, so that rewrite has to
+/// be driven by how much the journal has accumulated. Every other trigger made it
+/// fire on essentially every request.
+fn transaction_journal_compaction_due(session: &SessionContext) -> bool {
+    session.transaction_journal_replay_bytes() >= TRANSACTION_JOURNAL_COMPACT_BYTES
 }
 
 async fn should_stream_upstream_response(
@@ -6204,7 +6231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn journaled_capture_compacts_after_retention_eviction() {
+    async fn retention_eviction_neither_rewrites_the_snapshot_nor_resurrects_on_reload() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-journaled-capture-retention-{}",
             Uuid::new_v4()
@@ -6238,17 +6265,24 @@ mod tests {
 
         store_record_and_scan(&state, &session, third).await;
         drain_proxy_connections(Duration::from_secs(1)).await;
-        flush_pending_session_persists(state.as_ref())
-            .await
-            .unwrap();
 
+        // The third insert evicts the oldest record. That eviction must NOT
+        // schedule a full snapshot rewrite: at the retention cap every insert
+        // evicts, so treating it as a trigger rewrote the entire session document
+        // (1.35 GB on a real session) every PERSIST_DEBOUNCE. The journal stays
+        // uncompacted until it reaches TRANSACTION_JOURNAL_COMPACT_BYTES.
         assert!(!session_has_pending_persist(session_id));
         let storage_dir = state.session_storage_path(session_id).unwrap();
         let journal_len = std::fs::metadata(storage_dir.join("transactions.journal"))
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        assert_eq!(journal_len, 0);
+        assert!(
+            journal_len > 0,
+            "a retention eviction must not compact the journal"
+        );
 
+        // Safety of the above: journal replay applies the same retention cap, so
+        // the evicted record does not come back and the newest two survive.
         let reloaded = state.sessions.load_context(session_id).unwrap();
         assert!(reloaded.store.get(first_id).await.is_none());
         assert!(reloaded.store.get(second_id).await.is_some());
