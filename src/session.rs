@@ -51,6 +51,13 @@ const WORKSPACE_FILE: &str = "workspace.json";
 /// document (89.9% on a real 1.35 GB session) and are durable through their own
 /// journals, so the small components get a file that can be rewritten cheaply.
 const STATE_FILE: &str = "state.json";
+/// Captured transactions, one compact JSON record per line. Newline-delimited so
+/// the 100,000 records of a real session can be parsed across cores: 2,408 ms to
+/// parse them inside snapshot.json, 331 ms as this file on 10 threads.
+const TRANSACTIONS_FILE: &str = "transactions.ndjson";
+/// Parsing is CPU-bound and each line is independent, but splitting work costs
+/// something, so stay single-threaded for small files.
+const PARALLEL_TRANSACTION_PARSE_MIN_BYTES: usize = 8 * 1024 * 1024;
 const TRANSACTION_JOURNAL_FILE: &str = "transactions.journal";
 const WEBSOCKET_JOURNAL_FILE: &str = "websockets.journal";
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -683,14 +690,22 @@ impl SessionContext {
                 self.storage_dir.display()
             )
         })?;
-        // Serializing and fsyncing the session document takes seconds once it is
-        // large (1.7 s to pretty-print 1.35 GB, plus the fsync). Doing that inline
-        // parks a tokio worker, and the proxy shares this runtime — so a snapshot
-        // write would stall request handling.
+        // Transactions go to their own file, and snapshot.json is written without
+        // them — writing both would double the ~1.2 GB they occupy on disk. The
+        // transactions file goes first, so if this is interrupted the loader still
+        // finds the newer copy there rather than a stale one in snapshot.json.
+        //
+        // Both writes are serializing and fsyncing over a GB once a session is
+        // large, and the proxy shares this tokio runtime, so they run off it.
+        let transactions = std::mem::take(&mut snapshot.transactions);
         let snapshot_file = snapshot_path(&self.storage_dir);
-        tokio::task::spawn_blocking(move || write_json(&snapshot_file, &snapshot))
-            .await
-            .context("session snapshot writer panicked")??;
+        let transactions_file = transactions_path(&self.storage_dir);
+        tokio::task::spawn_blocking(move || {
+            write_transactions_file(&transactions_file, &transactions)?;
+            write_json(&snapshot_file, &snapshot)
+        })
+        .await
+        .context("session snapshot writer panicked")??;
         // After snapshot.json, so state.json is never the older of the two — that
         // is what lets the loader prefer it by mtime. Both hold the same data
         // here; a crash in between just means the loader takes snapshot.json.
@@ -1113,7 +1128,13 @@ impl SessionRegistry {
         let compactable_websocket_journal = snapshot.compactable_websocket_journal;
         let unresolved_websocket_journal = snapshot.unresolved_websocket_journal;
         if repaired_open_websockets || replayed_transaction_journal || replayed_websocket_journal {
+            // Same split as a normal persist: transactions to their own file,
+            // snapshot.json without them. Writing `snapshot` whole here would put
+            // the ~1.2 GB of records back where they were just moved out of.
+            let transactions = std::mem::take(&mut snapshot.transactions);
+            write_transactions_file(&transactions_path(&storage_dir), &transactions)?;
             write_json(&snapshot_path(&storage_dir), &snapshot)?;
+            snapshot.transactions = transactions;
         }
         if replayed_transaction_journal {
             if let Err(error) = compact_replayed_transaction_journal(&storage_dir) {
@@ -1688,6 +1709,118 @@ fn state_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join(STATE_FILE)
 }
 
+fn transactions_path(storage_dir: &Path) -> PathBuf {
+    storage_dir.join(TRANSACTIONS_FILE)
+}
+
+/// Splits `bytes` into `parts` slices that each end on a line boundary, so every
+/// line lands wholly inside exactly one slice.
+fn split_on_line_boundaries(bytes: &[u8], parts: usize) -> Vec<&[u8]> {
+    let mut bounds = Vec::with_capacity(parts + 1);
+    bounds.push(0);
+    for part in 1..parts {
+        let mut at = bytes.len() * part / parts;
+        while at < bytes.len() && bytes[at] != b'\n' {
+            at += 1;
+        }
+        if at < bytes.len() {
+            at += 1;
+        }
+        bounds.push(at.min(bytes.len()));
+    }
+    bounds.push(bytes.len());
+    bounds.dedup();
+    bounds.windows(2).map(|w| &bytes[w[0]..w[1]]).collect()
+}
+
+fn parse_transaction_lines(bytes: &[u8]) -> Vec<TransactionRecord> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !trim_ascii_whitespace(line).is_empty())
+        .filter_map(|line| match serde_json::from_slice(line) {
+            Ok(record) => Some(record),
+            Err(error) => {
+                warn!(?error, "skipping unreadable transaction record");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Reads the transactions file. Returns `None` when it is absent, which is the
+/// normal case for a session written before transactions moved out of
+/// snapshot.json — the caller then keeps the copy embedded there.
+fn read_transactions_file(storage_dir: &Path) -> Option<Vec<TransactionRecord>> {
+    let path = transactions_path(storage_dir);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            warn!(?error, path = %path.display(), "ignoring unreadable transactions file");
+            return None;
+        }
+    };
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    if threads < 2 || bytes.len() < PARALLEL_TRANSACTION_PARSE_MIN_BYTES {
+        return Some(parse_transaction_lines(&bytes));
+    }
+    let chunks = split_on_line_boundaries(&bytes, threads);
+    let parsed: Vec<Vec<TransactionRecord>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| scope.spawn(move || parse_transaction_lines(chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    });
+    Some(parsed.into_iter().flatten().collect())
+}
+
+/// Writes the transactions file atomically, one compact record per line.
+fn write_transactions_file(path: &Path, records: &[TransactionRecord]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        create_private_dir_all(parent)
+            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+    let mut tmp_guard = TempJsonFile::new(tmp_path.clone());
+    {
+        let mut file = create_private_file(&tmp_path)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        {
+            let mut writer = BufWriter::new(&mut file);
+            for record in records {
+                serde_json::to_writer(&mut writer, record)
+                    .context("failed to serialize transaction record")?;
+                writer.write_all(b"\n")?;
+            }
+            writer
+                .flush()
+                .with_context(|| format!("failed to flush {}", tmp_path.display()))?;
+        }
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
+    }
+    fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to rename {} to {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
+    tmp_guard.commit();
+    tighten_private_file(path)
+        .with_context(|| format!("failed to set private permissions on {}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent, "transactions directory")?;
+    }
+    Ok(())
+}
+
 /// Reads the standalone state file, but only when it is at least as new as
 /// snapshot.json. Both are written by the same full persist (snapshot.json
 /// first), so state.json is normally the newer one; a build from before the split
@@ -1967,6 +2100,12 @@ fn load_session_snapshot_with_mode(
         Err(error) => Err(error)
             .with_context(|| format!("failed to read session snapshot {}", path.display())),
     }?;
+    // Transactions live in their own newline-delimited file so they can be parsed
+    // across cores. When it is absent — a session written before the move — they
+    // are still in snapshot.json, and the first persist migrates them.
+    if let Some(transactions) = read_transactions_file(storage_dir) {
+        snapshot.transactions = transactions;
+    }
     // Take the small components from state.json when it is present, keeping the
     // two big journal-backed sections from snapshot.json. Using the state file as
     // the base means a component added later is read from the file that actually
@@ -3265,6 +3404,85 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(storage_dir);
         }
+    }
+
+    #[test]
+    fn split_on_line_boundaries_never_cuts_a_record_in_half() {
+        // The parallel parse hands each thread a slice of the file. If a boundary
+        // landed mid-line, that record would be dropped by one thread and produce
+        // a parse error in the other — silently losing captured traffic.
+        let bytes = b"aaaa\nbb\ncccccccccc\nd\n\nee\n";
+        for parts in 1..=9 {
+            let chunks = super::split_on_line_boundaries(bytes, parts);
+            assert_eq!(
+                chunks.concat(),
+                bytes.to_vec(),
+                "parts = {parts}: chunks must cover the input exactly once"
+            );
+            for chunk in &chunks {
+                assert!(
+                    chunk.is_empty() || chunk.ends_with(b"\n"),
+                    "parts = {parts}: every chunk must end on a line boundary"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transactions_round_trip_through_their_own_file_and_fall_back_to_the_snapshot() {
+        let storage_dir = std::env::temp_dir()
+            .join(format!("sniper-transactions-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let record = |path: &str| {
+            TransactionRecord::http(
+                Utc::now(),
+                "GET".to_string(),
+                "https".to_string(),
+                "records.example:443".to_string(),
+                path.to_string(),
+                Some(200),
+                1,
+                MessageRecord {
+                    headers: vec![],
+                    body_preview: String::new(),
+                    body_encoding: BodyEncoding::Utf8,
+                    body_size: 0,
+                    decoded_body_size: None,
+                    preview_truncated: false,
+                    content_type: None,
+                    content_decoded: false,
+                },
+                None,
+                vec![],
+                None,
+                None,
+            )
+        };
+
+        // A session written before the move keeps its records in snapshot.json.
+        let legacy = record("/legacy");
+        super::write_json(
+            &super::snapshot_path(&storage_dir),
+            &serde_json::json!({ "transactions": [legacy] }),
+        )
+        .unwrap();
+        assert!(super::read_transactions_file(&storage_dir).is_none());
+        let loaded = super::load_session_snapshot(&storage_dir, 32, 32).unwrap();
+        assert_eq!(loaded.transactions.len(), 1);
+        assert_eq!(loaded.transactions[0].path, "/legacy");
+
+        // Once the file exists it is authoritative, and survives a round trip.
+        let moved: Vec<_> = (0..3).map(|i| record(&format!("/moved-{i}"))).collect();
+        super::write_transactions_file(&super::transactions_path(&storage_dir), &moved).unwrap();
+        let loaded = super::load_session_snapshot(&storage_dir, 32, 32).unwrap();
+        let paths: Vec<_> = loaded
+            .transactions
+            .iter()
+            .map(|record| record.path.clone())
+            .collect();
+        assert_eq!(paths, vec!["/moved-0", "/moved-1", "/moved-2"]);
+
+        let _ = std::fs::remove_dir_all(storage_dir);
     }
 
     #[test]
@@ -6816,7 +7034,12 @@ mod tests {
             serde_json::from_slice(&std::fs::read(super::snapshot_path(&storage_dir)).unwrap())
                 .unwrap();
         assert_eq!(persisted.transaction_event_sequence, 2);
-        assert_eq!(persisted.transactions.len(), 1);
+        // Records live in transactions.ndjson, not inside snapshot.json.
+        assert!(persisted.transactions.is_empty());
+        assert_eq!(
+            super::read_transactions_file(&storage_dir).unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -7115,13 +7338,9 @@ mod tests {
         assert_eq!(restored[0].color_tag.as_deref(), Some("green"));
         assert_eq!(std::fs::metadata(&journal_path).unwrap().len(), 0);
 
-        let disk_snapshot: super::StoredSessionSnapshot =
-            serde_json::from_slice(&std::fs::read(super::snapshot_path(&storage_dir)).unwrap())
-                .unwrap();
-        assert_eq!(
-            disk_snapshot.transactions[0].color_tag.as_deref(),
-            Some("green")
-        );
+        // Records live in transactions.ndjson, not inside snapshot.json.
+        let disk_transactions = super::read_transactions_file(&storage_dir).unwrap();
+        assert_eq!(disk_transactions[0].color_tag.as_deref(), Some("green"));
 
         let reloaded = registry.load_context(active.id()).unwrap();
         let reloaded_records = reloaded.store.snapshot(Some(10)).await;
