@@ -940,7 +940,7 @@ async fn handle_connect(
     if special_host::is_special_host(&target) {
         let state = state.clone();
         let session = session.clone();
-        spawn_tracked_proxy_task(session.id(), async move {
+        spawn_tracked_proxy_task(session.id(), PROXY_WORK_TUNNEL, async move {
             if let Err(error) = serve_special_host_tls(
                 upgrade,
                 state,
@@ -996,7 +996,7 @@ async fn handle_connect(
         let state = state.clone();
         let session = session.clone();
         let target = target.clone();
-        spawn_tracked_proxy_task(session.id(), async move {
+        spawn_tracked_proxy_task(session.id(), PROXY_WORK_TUNNEL, async move {
             if let Err(error) = serve_passthrough_tunnel(
                 upgrade,
                 upstream_stream,
@@ -1022,7 +1022,7 @@ async fn handle_connect(
         let failure_started = started;
         let failure_request_http_version = request_http_version;
 
-        spawn_tracked_proxy_task(session.id(), async move {
+        spawn_tracked_proxy_task(session.id(), PROXY_WORK_TUNNEL, async move {
             if let Err(error) = serve_https_mitm(
                 upgrade,
                 state.clone(),
@@ -2974,7 +2974,7 @@ async fn forward_websocket_request(
         relay_abort,
     );
 
-    spawn_tracked_proxy_task(session.id(), async move {
+    spawn_tracked_proxy_task(session.id(), PROXY_WORK_WEBSOCKET, async move {
         let relay = relay_websocket_session(
             on_upgrade,
             response.websocket,
@@ -3182,7 +3182,7 @@ fn scan_record_for_session(session: &Arc<SessionContext>, record: TransactionRec
     let scanner = session.scanner.clone();
     let scan_generation = scanner.clear_generation();
     let scan_session = Arc::clone(session);
-    spawn_tracked_proxy_task(session.id(), async move {
+    spawn_tracked_proxy_task(session.id(), PROXY_WORK_CAPTURE_TASK, async move {
         let config = scanner.get_config().await;
         let findings = crate::scanner::scan_transaction(&record, &config);
         let mut accepted_findings = false;
@@ -4714,6 +4714,10 @@ static ACTIVE_PROXY_CONNECTIONS: LazyLock<Mutex<HashMap<Uuid, AbortHandle>>> =
 /// a forced switch knows whether stopping streamed responses can help.
 static ACTIVE_PROXY_SESSION_OWNERS: LazyLock<Mutex<HashMap<Uuid, BTreeMap<&'static str, usize>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Abort handles for long-running per-session proxy tasks, so a forced session
+/// switch can stop exactly that session's work.
+static ACTIVE_SESSION_TASKS: LazyLock<Mutex<HashMap<Uuid, HashMap<Uuid, AbortHandle>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A response still being streamed to the client. Stoppable by a forced switch.
 pub(crate) const PROXY_WORK_STREAMED_RESPONSE: &str = "streamed response";
@@ -4721,6 +4725,11 @@ pub(crate) const PROXY_WORK_STREAMED_RESPONSE: &str = "streamed response";
 pub(crate) const PROXY_WORK_CAPTURE_TASK: &str = "capture task";
 /// A replay or other API-driven exchange the user started.
 pub(crate) const PROXY_WORK_REPLAY: &str = "replay";
+/// An HTTPS CONNECT tunnel. A browser holds these open for minutes at a time, so
+/// they never drain on their own — stoppable only by a forced switch.
+pub(crate) const PROXY_WORK_TUNNEL: &str = "HTTPS tunnel";
+/// A live WebSocket relay. Open for as long as the page keeps the socket.
+pub(crate) const PROXY_WORK_WEBSOCKET: &str = "WebSocket relay";
 const PERSIST_DEBOUNCE: Duration = Duration::from_secs(2);
 const PENDING_PERSIST_FLUSH_PROXY_WAIT: Duration = Duration::from_secs(1);
 const PENDING_PERSIST_FLUSH_RETRY_LIMIT: usize = 3;
@@ -5221,19 +5230,63 @@ fn active_proxy_work_is_empty() -> bool {
     owners.is_empty()
 }
 
-fn spawn_tracked_proxy_task<F>(session_id: Uuid, future: F)
+fn spawn_tracked_proxy_task<F>(session_id: Uuid, reason: &'static str, future: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
     let connection_id = Uuid::new_v4();
     let (abort, registration) = AbortHandle::new_pair();
-    let session_owner = remember_active_proxy_session_owner(session_id, PROXY_WORK_CAPTURE_TASK);
-    remember_proxy_connection(connection_id, abort);
+    let session_owner = remember_active_proxy_session_owner(session_id, reason);
+    remember_proxy_connection(connection_id, abort.clone());
+    remember_session_task(session_id, connection_id, abort);
     tokio::spawn(async move {
         let _session_owner = session_owner;
         let _ = Abortable::new(future, registration).await;
+        forget_session_task(session_id, connection_id);
         forget_proxy_connection(connection_id);
     });
+}
+
+fn remember_session_task(session_id: Uuid, task_id: Uuid, abort: AbortHandle) {
+    ACTIVE_SESSION_TASKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(session_id)
+        .or_default()
+        .insert(task_id, abort);
+}
+
+fn forget_session_task(session_id: Uuid, task_id: Uuid) {
+    let mut tasks = ACTIVE_SESSION_TASKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(session_tasks) = tasks.get_mut(&session_id) {
+        session_tasks.remove(&task_id);
+        if session_tasks.is_empty() {
+            tasks.remove(&session_id);
+        }
+    }
+}
+
+/// Aborts a session's long-running proxy tasks — HTTPS tunnels, WebSocket relays,
+/// post-capture work. Only for a forced session switch: a browser keeps tunnels
+/// open for minutes, so they never drain on their own. Whatever they were
+/// carrying is cut and not recorded.
+pub fn abort_session_tracked_tasks(session_id: Uuid) -> usize {
+    let aborts = {
+        let mut tasks = ACTIVE_SESSION_TASKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        tasks
+            .remove(&session_id)
+            .map(|session_tasks| session_tasks.into_values().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let aborted = aborts.len();
+    for abort in aborts {
+        abort.abort();
+    }
+    aborted
 }
 
 /// Number of proxy connections currently in flight, for telling the user what is
@@ -7239,6 +7292,33 @@ mod tests {
         state.delete_session(original_id).await.unwrap();
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn aborting_session_tasks_releases_work_that_never_finishes() {
+        // An HTTPS tunnel or a WebSocket relay runs for as long as the client
+        // keeps it open, so waiting never clears it. A forced session switch has
+        // to be able to cut them, which is what abort_session_tracked_tasks does.
+        let session_id = Uuid::new_v4();
+        assert!(!session_has_active_proxy_work(session_id));
+
+        spawn_tracked_proxy_task(session_id, PROXY_WORK_TUNNEL, async move {
+            std::future::pending::<()>().await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(session_has_active_proxy_work(session_id));
+        assert_eq!(describe_session_proxy_work(session_id), "1 HTTPS tunnel");
+
+        assert_eq!(abort_session_tracked_tasks(session_id), 1);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while session_has_active_proxy_work(session_id) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !session_has_active_proxy_work(session_id),
+            "aborting the task must release the session"
+        );
+        assert_eq!(describe_session_proxy_work(session_id), "");
     }
 
     #[test]

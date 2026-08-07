@@ -495,18 +495,30 @@ impl AppState {
                     continue;
                 }
                 if force {
-                    // Waits, then stops the session's streamed-response pumps if
-                    // it is still busy. Those streams are what never drain, and
-                    // cutting one drops the exchange without recording it.
-                    tracing::warn!(
-                        %session_id,
-                        "stopping streamed responses for a forced session switch"
-                    );
+                    // Stops everything a session can be holding: streamed
+                    // responses, and the long-running tasks behind HTTPS tunnels
+                    // and WebSocket relays. A browser keeps tunnels open for
+                    // minutes, so none of this drains on its own. Whatever they
+                    // were carrying is cut and never recorded.
                     crate::proxy::wait_for_session_proxy_work_to_finish(
                         session_id,
                         SESSION_SWITCH_FORCE_TIMEOUT,
                     )
                     .await;
+                    if crate::proxy::session_has_active_proxy_work(session_id) {
+                        let aborted = crate::proxy::abort_session_tracked_tasks(session_id);
+                        tracing::warn!(
+                            %session_id,
+                            aborted,
+                            "cutting long-running proxy tasks for a forced session switch"
+                        );
+                        let deadline = Instant::now() + SESSION_SWITCH_FORCE_TIMEOUT;
+                        while crate::proxy::session_has_active_proxy_work(session_id)
+                            && Instant::now() < deadline
+                        {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }
                 } else {
                     // No cutting: just give work that is about to finish a moment.
                     let deadline = Instant::now() + SESSION_SWITCH_DRAIN_TIMEOUT;
