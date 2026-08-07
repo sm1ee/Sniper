@@ -2528,13 +2528,26 @@ async fn create_session(
     }
 }
 
-async fn activate_session(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+#[derive(Debug, Default, Deserialize)]
+struct ActivateSessionParams {
+    /// Cut in-flight proxy connections instead of refusing the switch. A streamed
+    /// response holds its session open for as long as it lasts, so without this a
+    /// browser pointed at the proxy can block switching indefinitely.
+    #[serde(default)]
+    force: bool,
+}
+
+async fn activate_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<ActivateSessionParams>,
+) -> Response {
     let id = match Uuid::parse_str(&id) {
         Ok(id) => id,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    match state.activate_session(id).await {
+    match state.activate_session_with_options(id, params.force).await {
         Ok(summary) => Json(summary).into_response(),
         Err(error) => session_operation_error_response(error),
     }

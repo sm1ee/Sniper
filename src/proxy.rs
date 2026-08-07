@@ -5180,6 +5180,15 @@ where
     });
 }
 
+/// Number of proxy connections currently in flight, for telling the user what is
+/// holding a session switch up.
+pub fn active_proxy_connection_count() -> usize {
+    ACTIVE_PROXY_CONNECTIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .len()
+}
+
 pub async fn drain_proxy_connections(timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
@@ -5474,7 +5483,11 @@ fn pending_persist_session_count_for_state(state: &AppState) -> usize {
         .count()
 }
 
-async fn wait_for_session_proxy_work_to_finish(session_id: Uuid, timeout: Duration) {
+/// Waits for a session's in-flight proxy work, and if it is still busy at the
+/// deadline, tells its streamed-response pumps to stop and waits again. A stream
+/// that never ends — a server-sent event stream, a long poll — otherwise keeps a
+/// session busy forever.
+pub async fn wait_for_session_proxy_work_to_finish(session_id: Uuid, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while session_has_active_proxy_work(session_id) && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;

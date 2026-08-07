@@ -4488,7 +4488,7 @@ async function createSession() {
   await reloadSessionWorkspace({ cleanupBeforeReset: false });
 }
 
-async function activateSessionById(id) {
+async function activateSessionById(id, { force = false } = {}) {
   if (!(await flushTargetScopeDraft())) {
     return;
   }
@@ -4501,11 +4501,19 @@ async function activateSessionById(id) {
   await flushAllPendingAnnotations();
   await flushWorkspaceState();
   await cleanupWsReplayTabsBeforeStateReset();
-  const response = await fetch(`/api/sessions/${id}/activate`, {
+  const response = await fetch(`/api/sessions/${id}/activate${force ? "?force=true" : ""}`, {
     method: "POST",
   });
   if (!response.ok) {
-    throw new Error(await response.text());
+    const message = await response.text();
+    // The server already waited for in-flight work; if it is still busy, only a
+    // forced switch can get through. Point at where that lives.
+    if (response.status === 409 && !force && message.includes("proxy activity is still running")) {
+      throw new Error(
+        `${message}. Right-click the session for "Switch, cutting open connections".`,
+      );
+    }
+    throw new Error(message);
   }
   state.selectedSessionId = id;
   await reloadSessionWorkspace({ cleanupBeforeReset: false });
@@ -7762,6 +7770,7 @@ function showSessionContextMenu(event, sessionId) {
   menu.className = "context-menu session-context-menu";
   menu.innerHTML = `
     <button class="context-menu-item" data-action="folder">Open session folder</button>
+    ${session.active ? "" : `<button class="context-menu-item" data-action="force-activate">Switch, cutting open connections</button>`}
     ${session.active ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
   `;
   document.body.appendChild(menu);
@@ -7784,6 +7793,12 @@ function showSessionContextMenu(event, sessionId) {
         console.error(error);
         showToast(error?.message || "Failed to open session folder.", "error");
       });
+    } else if (action === "force-activate") {
+      // A streamed response — a server-sent event stream, a long poll, a download
+      // — holds its session for as long as it stays open, so an ordinary switch
+      // can wait forever. This cuts those connections; requests still in flight
+      // are dropped and never recorded.
+      activateSessionById(sessionId, { force: true }).catch(handleWorkspaceActionError);
     } else if (action === "delete") {
       deleteSessionById(sessionId);
     }

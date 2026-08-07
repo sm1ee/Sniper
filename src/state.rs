@@ -32,6 +32,11 @@ const MAX_WEBSOCKET_FRAMES_PER_SESSION: usize = 50_000;
 const APP_RELEASES_URL: &str = "https://github.com/sm1ee/Sniper/releases";
 const APP_LATEST_RELEASE_API_URL: &str =
     "https://api.github.com/repos/sm1ee/Sniper/releases/latest";
+/// How long a session switch waits for in-flight proxy work before giving up. Long
+/// enough for a request that is nearly done, short enough not to feel like a hang.
+const SESSION_SWITCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a forced switch waits before and after stopping streamed responses.
+const SESSION_SWITCH_FORCE_TIMEOUT: Duration = Duration::from_secs(3);
 const APP_VERSION_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const APP_VERSION_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 const APP_RELEASE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -446,6 +451,18 @@ impl AppState {
     }
 
     pub async fn activate_session(&self, id: uuid::Uuid) -> Result<SessionSummary> {
+        self.activate_session_with_options(id, false).await
+    }
+
+    /// `force` cuts in-flight proxy connections instead of refusing the switch.
+    /// Needed because a streamed response — a server-sent event stream, a long
+    /// poll, a download — holds its session for as long as it stays open, and a
+    /// browser pointed at the proxy keeps one open indefinitely.
+    pub async fn activate_session_with_options(
+        &self,
+        id: uuid::Uuid,
+        force: bool,
+    ) -> Result<SessionSummary> {
         let _activation_guard = self.session_activation_lock.lock().await;
         if !self.sessions.contains_session(id) {
             anyhow::bail!("session {id} was not found");
@@ -468,6 +485,40 @@ impl AppState {
         } else {
             None
         };
+        // Give in-flight proxy work a moment to finish rather than refusing on the
+        // spot — an ordinary request is done in milliseconds. This runs before the
+        // active-session write lock is taken, so the rest of the app keeps serving
+        // while we wait.
+        if current_id != id {
+            for session_id in [current_id, id] {
+                if !crate::proxy::session_has_active_proxy_work(session_id) {
+                    continue;
+                }
+                if force {
+                    // Waits, then stops the session's streamed-response pumps if
+                    // it is still busy. Those streams are what never drain, and
+                    // cutting one drops the exchange without recording it.
+                    tracing::warn!(
+                        %session_id,
+                        "stopping streamed responses for a forced session switch"
+                    );
+                    crate::proxy::wait_for_session_proxy_work_to_finish(
+                        session_id,
+                        SESSION_SWITCH_FORCE_TIMEOUT,
+                    )
+                    .await;
+                } else {
+                    // No cutting: just give work that is about to finish a moment.
+                    let deadline = Instant::now() + SESSION_SWITCH_DRAIN_TIMEOUT;
+                    while crate::proxy::session_has_active_proxy_work(session_id)
+                        && Instant::now() < deadline
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
+            }
+        }
+
         let mut active_session = self.active_session.write().await;
         let current = active_session.clone();
         let current_id = current.id();
@@ -475,7 +526,12 @@ impl AppState {
             if crate::proxy::session_has_active_proxy_work(current_id)
                 || crate::proxy::session_has_active_proxy_work(id)
             {
-                anyhow::bail!("cannot switch sessions while proxy activity is still running");
+                anyhow::bail!(
+                    "cannot switch sessions while proxy activity is still running \
+                     ({} proxy connection(s) still open) — close whatever is using the proxy, \
+                     or switch with force to cut them",
+                    crate::proxy::active_proxy_connection_count()
+                );
             }
             self.persist_session_context(&current).await?;
             {
@@ -3491,6 +3547,53 @@ mod tests {
 
         drop(operation_guard);
         assert_eq!(state.activate_session(next.id).await.unwrap().id, next.id);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn activate_session_with_force_still_reports_work_it_cannot_stop() {
+        // Forcing stops the session's streamed-response pumps, which is what
+        // normally never drains. An owner guard held by something else — a replay
+        // in flight — is not a stream, so forcing must not pretend it succeeded.
+        let data_dir = std::env::temp_dir().join(format!(
+            "sniper-activate-force-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let state = AppState::new(AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 100,
+            max_transaction_entries: 100,
+            body_preview_bytes: 4096,
+            data_dir: data_dir.clone(),
+        })
+        .unwrap();
+        let original_id = state.active_session_summary().await.id;
+        let next = state
+            .sessions
+            .create_session(Some("Second".to_string()))
+            .unwrap();
+
+        let owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let error = state
+            .activate_session_with_options(next.id, true)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("proxy activity is still running"));
+        assert_eq!(state.active_session_summary().await.id, original_id);
+
+        drop(owner);
+        assert_eq!(
+            state
+                .activate_session_with_options(next.id, true)
+                .await
+                .unwrap()
+                .id,
+            next.id
+        );
 
         let _ = std::fs::remove_dir_all(data_dir);
     }
