@@ -872,6 +872,11 @@ let wsTranscriptSaveTimer = null;
 let wsTranscriptFirstDirtyAt = 0;
 let workspaceSaveInFlight = false;
 let workspaceSaveDirty = false;
+// False from the moment session-scoped state is cleared until the session's
+// workspace has been read back. Saving in that window would commit the emptied
+// in-memory state over the stored one — which is how a session switch wiped every
+// replay tab, since the reset runs several round trips before the load finishes.
+let workspaceLoaded = false;
 let workspaceSaveVersion = 0;
 let workspaceSaveLastSnapshot = null;
 let workspaceSaveCommittedSnapshot = null;
@@ -2751,6 +2756,7 @@ async function loadWorkspaceState() {
     }
   }
   applyWorkspaceState(snapshot);
+  workspaceLoaded = true;
 }
 
 class WorkspaceSessionMismatchError extends Error {
@@ -3189,7 +3195,7 @@ function snapshotWorkspaceState(options = {}) {
 }
 
 function scheduleWorkspaceStateSave() {
-  if (!state.activeSession) {
+  if (!state.activeSession || !workspaceLoaded) {
     return;
   }
 
@@ -3395,7 +3401,7 @@ function boundWorkspaceSnapshotForSave(snapshot) {
 }
 
 async function saveWorkspaceState(snapshot = null, options = {}) {
-  if (!state.activeSession) {
+  if (!state.activeSession || !workspaceLoaded) {
     return;
   }
   if (!snapshot) {
@@ -3579,7 +3585,7 @@ function flushWorkspaceStateOnUnload(event) {
   if (state.sequenceDirty && state.editingSequence) {
     requestWorkspaceUnloadPrompt(event);
   }
-  if (!state.activeSession || (!workspaceSaveDirty && !workspaceSaveTimer && !workspaceSaveInFlight && !hadTranscriptSaveTimer)) {
+  if (!state.activeSession || !workspaceLoaded || (!workspaceSaveDirty && !workspaceSaveTimer && !workspaceSaveInFlight && !hadTranscriptSaveTimer)) {
     return;
   }
   window.clearTimeout(workspaceSaveTimer);
@@ -4220,6 +4226,7 @@ async function cleanupWsReplayTabsBeforeStateReset(options = {}) {
 }
 
 function resetSessionScopedUiState() {
+  workspaceLoaded = false;
   clearReplaySendInFlight();
   closeContextMenu();
   window.clearTimeout(refreshTimer);

@@ -291,10 +291,30 @@ impl WorkspaceStateStore {
     }
 }
 
+/// A client that has reset its state but has not yet loaded the session's
+/// workspace looks exactly like this: no replay tabs, and the tab sequence back
+/// at zero. Committing it would drop every stored tab, which is what happened
+/// when switching sessions — the reset runs several round trips before the load
+/// finishes, and any save in that window wrote an empty workspace.
+///
+/// Closing tabs by hand does not look like this: the sequence only ever counts
+/// up, so a deliberate "close everything" still carries the sequence it reached.
+fn discards_stored_replay_tabs(
+    snapshot: &WorkspaceStateSnapshot,
+    current: &WorkspaceStateSnapshot,
+) -> bool {
+    !current.replay.tabs.is_empty()
+        && snapshot.replay.tabs.is_empty()
+        && snapshot.replay.tab_sequence == 0
+}
+
 pub fn can_replace_snapshot(
     snapshot: &WorkspaceStateSnapshot,
     current: &WorkspaceStateSnapshot,
 ) -> bool {
+    if discards_stored_replay_tabs(snapshot, current) {
+        return false;
+    }
     if snapshot.revision == current.revision {
         return true;
     }
@@ -352,6 +372,47 @@ mod tests {
         let serialized = serde_json::to_value(&fuzzer).unwrap();
         assert_eq!(serialized["attack_record_id"], attack_id.to_string());
         assert!(serialized.get("attack_record").is_none());
+    }
+
+    #[tokio::test]
+    async fn workspace_replace_refuses_to_drop_stored_tabs_for_an_unloaded_client() {
+        let store = WorkspaceStateStore::new();
+        let with_tabs = |sequence: usize, tabs: Vec<ReplayTabState>| WorkspaceStateSnapshot {
+            client_id: Some("ui".to_string()),
+            replay: ReplayWorkspaceState {
+                tabs,
+                tab_sequence: sequence,
+                ..ReplayWorkspaceState::default()
+            },
+            ..WorkspaceStateSnapshot::default()
+        };
+        let stored = store
+            .replace_snapshot_checked(with_tabs(
+                3,
+                vec![ReplayTabState {
+                    id: "keep-me".to_string(),
+                    sequence: 1,
+                    ..ReplayTabState::default()
+                }],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(stored.revision, 1);
+
+        // A client that reset but has not loaded yet: no tabs, sequence back to 0.
+        let mut unloaded = with_tabs(0, Vec::new());
+        unloaded.revision = stored.revision;
+        let rejected = store.replace_snapshot_checked(unloaded).await.unwrap_err();
+        assert_eq!(rejected.replay.tabs.len(), 1, "stored tabs must survive");
+
+        // Closing every tab by hand keeps the sequence, and is still accepted.
+        let mut closed_by_user = with_tabs(3, Vec::new());
+        closed_by_user.revision = stored.revision;
+        let committed = store
+            .replace_snapshot_checked(closed_by_user)
+            .await
+            .unwrap();
+        assert!(committed.replay.tabs.is_empty());
     }
 
     #[tokio::test]
