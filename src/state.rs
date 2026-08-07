@@ -520,12 +520,33 @@ impl AppState {
                         }
                     }
                 } else {
-                    // No cutting: just give work that is about to finish a moment.
+                    // Give work that is about to finish a moment to do so.
                     let deadline = Instant::now() + SESSION_SWITCH_DRAIN_TIMEOUT;
                     while crate::proxy::session_has_active_proxy_work(session_id)
                         && Instant::now() < deadline
                     {
                         tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    // What is usually left is an idle HTTPS tunnel a browser keeps
+                    // open between requests. That carries nothing — a request
+                    // inside one registers its own work and would still be holding
+                    // the session here — so close them rather than making the user
+                    // confirm on every single switch. The client reconnects.
+                    if crate::proxy::session_has_active_proxy_work(session_id) {
+                        let closed = crate::proxy::abort_session_idle_tunnels(session_id);
+                        if closed > 0 {
+                            tracing::info!(
+                                %session_id,
+                                closed,
+                                "closed idle HTTPS tunnels to switch sessions"
+                            );
+                            let deadline = Instant::now() + SESSION_SWITCH_DRAIN_TIMEOUT;
+                            while crate::proxy::session_has_active_proxy_work(session_id)
+                                && Instant::now() < deadline
+                            {
+                                tokio::time::sleep(Duration::from_millis(20)).await;
+                            }
+                        }
                     }
                 }
             }

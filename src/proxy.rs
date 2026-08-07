@@ -4716,8 +4716,9 @@ static ACTIVE_PROXY_SESSION_OWNERS: LazyLock<Mutex<HashMap<Uuid, BTreeMap<&'stat
     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Abort handles for long-running per-session proxy tasks, so a forced session
 /// switch can stop exactly that session's work.
-static ACTIVE_SESSION_TASKS: LazyLock<Mutex<HashMap<Uuid, HashMap<Uuid, AbortHandle>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static ACTIVE_SESSION_TASKS: LazyLock<
+    Mutex<HashMap<Uuid, HashMap<Uuid, (&'static str, AbortHandle)>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A response still being streamed to the client. Stoppable by a forced switch.
 pub(crate) const PROXY_WORK_STREAMED_RESPONSE: &str = "streamed response";
@@ -5238,7 +5239,7 @@ where
     let (abort, registration) = AbortHandle::new_pair();
     let session_owner = remember_active_proxy_session_owner(session_id, reason);
     remember_proxy_connection(connection_id, abort.clone());
-    remember_session_task(session_id, connection_id, abort);
+    remember_session_task(session_id, connection_id, reason, abort);
     tokio::spawn(async move {
         let _session_owner = session_owner;
         let _ = Abortable::new(future, registration).await;
@@ -5247,13 +5248,18 @@ where
     });
 }
 
-fn remember_session_task(session_id: Uuid, task_id: Uuid, abort: AbortHandle) {
+fn remember_session_task(
+    session_id: Uuid,
+    task_id: Uuid,
+    reason: &'static str,
+    abort: AbortHandle,
+) {
     ACTIVE_SESSION_TASKS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .entry(session_id)
         .or_default()
-        .insert(task_id, abort);
+        .insert(task_id, (reason, abort));
 }
 
 fn forget_session_task(session_id: Uuid, task_id: Uuid) {
@@ -5273,14 +5279,42 @@ fn forget_session_task(session_id: Uuid, task_id: Uuid) {
 /// open for minutes, so they never drain on their own. Whatever they were
 /// carrying is cut and not recorded.
 pub fn abort_session_tracked_tasks(session_id: Uuid) -> usize {
+    abort_session_tasks_where(session_id, |_| true)
+}
+
+/// Aborts only a session's idle transport: the HTTPS tunnels a browser holds open
+/// between requests. Safe to do without asking, because a request travelling
+/// inside a tunnel registers its own work (`PROXY_WORK_STREAMED_RESPONSE`) and so
+/// still blocks a switch on its own account — an idle tunnel carries nothing, and
+/// the client simply reconnects.
+pub fn abort_session_idle_tunnels(session_id: Uuid) -> usize {
+    abort_session_tasks_where(session_id, |reason| reason == PROXY_WORK_TUNNEL)
+}
+
+fn abort_session_tasks_where(
+    session_id: Uuid,
+    matches: impl Fn(&'static str) -> bool,
+) -> usize {
     let aborts = {
         let mut tasks = ACTIVE_SESSION_TASKS
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        tasks
-            .remove(&session_id)
-            .map(|session_tasks| session_tasks.into_values().collect::<Vec<_>>())
-            .unwrap_or_default()
+        let Some(session_tasks) = tasks.get_mut(&session_id) else {
+            return 0;
+        };
+        let ids = session_tasks
+            .iter()
+            .filter_map(|(task_id, (reason, _))| matches(reason).then_some(*task_id))
+            .collect::<Vec<_>>();
+        let aborts = ids
+            .into_iter()
+            .filter_map(|task_id| session_tasks.remove(&task_id))
+            .map(|(_, abort)| abort)
+            .collect::<Vec<_>>();
+        if session_tasks.is_empty() {
+            tasks.remove(&session_id);
+        }
+        aborts
     };
     let aborted = aborts.len();
     for abort in aborts {
@@ -7292,6 +7326,47 @@ mod tests {
         state.delete_session(original_id).await.unwrap();
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn closing_idle_tunnels_leaves_exchanges_and_relays_alone() {
+        // A switch closes idle tunnels without asking, so it must touch nothing
+        // else: an exchange in flight or a live relay still has to hold the
+        // session, or a switch would silently drop captured traffic.
+        let session_id = Uuid::new_v4();
+        spawn_tracked_proxy_task(session_id, PROXY_WORK_TUNNEL, async move {
+            std::future::pending::<()>().await;
+        });
+        spawn_tracked_proxy_task(session_id, PROXY_WORK_WEBSOCKET, async move {
+            std::future::pending::<()>().await;
+        });
+        let exchange = remember_active_proxy_session_owner(session_id, PROXY_WORK_STREAMED_RESPONSE);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            describe_session_proxy_work(session_id),
+            "1 HTTPS tunnel, 1 WebSocket relay, 1 streamed response"
+        );
+
+        assert_eq!(abort_session_idle_tunnels(session_id), 1);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while describe_session_proxy_work(session_id).contains("tunnel")
+            && Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            describe_session_proxy_work(session_id),
+            "1 WebSocket relay, 1 streamed response",
+            "closing tunnels must not touch relays or exchanges"
+        );
+
+        assert_eq!(abort_session_tracked_tasks(session_id), 1);
+        drop(exchange);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while session_has_active_proxy_work(session_id) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!session_has_active_proxy_work(session_id));
     }
 
     #[tokio::test]
