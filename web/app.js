@@ -7669,9 +7669,12 @@ function renderDashboard() {
   els.dashboardCurrentSessionStatus.textContent = isActive ? "Active" : "Stored";
   els.dashboardCurrentSessionStatus.className = `detail-chip ${isActive ? "active-badge" : "none"}`;
   els.dashboardCurrentSessionPath.textContent = current?.storage_path || "No storage path";
-  els.dashboardCurrentSessionRequests.textContent = String(current?.request_count ?? 0);
-  els.dashboardCurrentSessionWebsockets.textContent = String(current?.websocket_count ?? 0);
-  els.dashboardCurrentSessionEvents.textContent = String(current?.event_count ?? 0);
+  els.dashboardCurrentSessionRequests.textContent =
+    formatCappedCount(current?.request_count ?? 0, retainedTransactionsCap());
+  els.dashboardCurrentSessionWebsockets.textContent =
+    formatCappedCount(current?.websocket_count ?? 0, retainedEntriesCap());
+  els.dashboardCurrentSessionEvents.textContent =
+    formatCappedCount(current?.event_count ?? 0, retainedEntriesCap());
   els.dashboardCurrentSessionFuzzer.textContent = String(current?.fuzzer_count ?? 0);
   els.dashboardCurrentSessionRules.textContent = String(current?.rule_count ?? 0);
   els.dashboardCurrentSessionCreated.textContent = current ? formatTimestamp(current.created_at) : "-";
@@ -7700,9 +7703,9 @@ function renderDashboard() {
         .map((session) => `
           <tr class="history-row ${session.id === state.selectedSessionId ? "selected" : ""}" data-id="${session.id}">
             <td>${escapeHtml(session.name)}</td>
-            <td>${session.request_count}</td>
-            <td>${session.websocket_count}</td>
-            <td>${session.event_count}</td>
+            <td>${formatCappedCount(session.request_count, retainedTransactionsCap())}</td>
+            <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
+            <td>${formatCappedCount(session.event_count, retainedEntriesCap())}</td>
             <td>${session.rule_count}</td>
             <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
             <td>${escapeHtml(formatTimestamp(session.last_opened_at))}</td>
@@ -8010,14 +8013,30 @@ async function fetchFindingsCount(sessionId) {
   return Number.isFinite(count) && count >= 0 ? count : 0;
 }
 
+// The stores evict past their retention cap, so a count that reaches it has
+// stopped being a total. Show "N+" rather than implying capture stopped growing.
+function formatCappedCount(count, cap) {
+  const value = Number.isFinite(Number(count)) ? Number(count) : 0;
+  const limit = Number(cap);
+  return Number.isFinite(limit) && limit > 0 && value >= limit ? `${value}+` : String(value);
+}
+
+function retainedTransactionsCap() {
+  return state.settings?.max_transaction_entries ?? null;
+}
+
+function retainedEntriesCap() {
+  return state.settings?.max_entries ?? null;
+}
+
 function updateFindingsBadge() {
   if (!els.findingsBadge) return;
   const count = findingsBadgeCount;
   // The store evicts past max_entries, so the count saturates there. Say "N+"
   // rather than implying the total stopped growing.
-  const cap = state.settings?.max_entries;
-  const atCap = Number.isFinite(cap) && cap > 0 && count >= cap;
-  els.findingsBadge.textContent = count > 0 ? `${count}${atCap ? "+" : ""}` : "";
+  const cap = retainedEntriesCap();
+  const atCap = Number.isFinite(Number(cap)) && Number(cap) > 0 && count >= Number(cap);
+  els.findingsBadge.textContent = count > 0 ? formatCappedCount(count, cap) : "";
   els.findingsBadge.title = atCap
     ? `${count} findings retained (oldest are dropped past this limit)`
     : "";

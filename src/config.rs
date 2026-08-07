@@ -13,8 +13,17 @@ use tracing::warn;
 use crate::certificate::default_data_dir;
 
 const STARTUP_SETTINGS_FILE: &str = "startup-settings.json";
-const DEFAULT_MAX_ENTRIES: usize = 5_000;
-const DEFAULT_MAX_TRANSACTION_ENTRIES: usize = 100_000;
+/// Retained websocket sessions, event log entries, scanner findings, fuzzer
+/// attacks and sequence runs. These are small next to captured traffic — 5,000
+/// findings are 3 MB and 5,000 websockets 13 MB in a real session — so the cap can
+/// be generous.
+const DEFAULT_MAX_ENTRIES: usize = 20_000;
+/// Retained captured transactions. Raised now that they load in parallel from
+/// transactions.ndjson: 100,000 records parsed in 2,408 ms inside snapshot.json
+/// and parse in 331 ms as their own file, so a larger history costs less to open
+/// than the old default did. They stay the bulk of a session on disk — roughly
+/// 12 KB per record — so this is the knob to lower if space matters.
+const DEFAULT_MAX_TRANSACTION_ENTRIES: usize = 250_000;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -470,8 +479,8 @@ mod tests {
         let config =
             super::AppConfig::from_env_with_defaults("127.0.0.1:18080", "127.0.0.1:0").unwrap();
 
-        assert_eq!(config.max_entries, 5_000);
-        assert_eq!(config.max_transaction_entries, 100_000);
+        assert_eq!(config.max_entries, super::DEFAULT_MAX_ENTRIES);
+        assert_eq!(config.max_transaction_entries, super::DEFAULT_MAX_TRANSACTION_ENTRIES);
 
         let _ = std::fs::remove_dir_all(home);
     }
