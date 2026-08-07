@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    io::{self, BufRead, BufReader, BufWriter, Write},
+    io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -1767,24 +1767,78 @@ fn split_on_line_boundaries(bytes: &[u8], parts: usize) -> Vec<&[u8]> {
     bounds.windows(2).map(|w| &bytes[w[0]..w[1]]).collect()
 }
 
-fn parse_transaction_lines(bytes: &[u8]) -> Vec<TransactionRecord> {
-    bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !trim_ascii_whitespace(line).is_empty())
-        .filter_map(|line| match serde_json::from_slice(line) {
-            Ok(record) => Some(record),
-            Err(error) => {
-                warn!(?error, "skipping unreadable transaction record");
-                None
-            }
-        })
-        .collect()
+/// A record's line in transactions.ndjson, so its bodies can be read back on
+/// demand instead of being held in memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BodyLocator {
+    pub offset: u64,
+    pub len: u32,
+}
+
+/// Parses one chunk, recording where each line sits in the whole file.
+/// `chunk_start` is the chunk's own offset, so locators are file-absolute.
+fn parse_transaction_lines(
+    bytes: &[u8],
+    chunk_start: u64,
+) -> Vec<(TransactionRecord, BodyLocator)> {
+    let mut parsed = Vec::new();
+    let mut line_start = 0usize;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let line = &bytes[line_start..index];
+        push_transaction_line(&mut parsed, line, chunk_start + line_start as u64);
+        line_start = index + 1;
+    }
+    if line_start < bytes.len() {
+        let line = &bytes[line_start..];
+        push_transaction_line(&mut parsed, line, chunk_start + line_start as u64);
+    }
+    parsed
+}
+
+fn push_transaction_line(
+    parsed: &mut Vec<(TransactionRecord, BodyLocator)>,
+    line: &[u8],
+    offset: u64,
+) {
+    if trim_ascii_whitespace(line).is_empty() {
+        return;
+    }
+    match serde_json::from_slice::<TransactionRecord>(line) {
+        Ok(record) => parsed.push((
+            record,
+            BodyLocator {
+                offset,
+                len: line.len() as u32,
+            },
+        )),
+        Err(error) => warn!(?error, "skipping unreadable transaction record"),
+    }
+}
+
+/// Reads one record straight out of transactions.ndjson. Used to put bodies back
+/// on a record whose bodies were dropped after loading.
+pub fn read_transaction_at(storage_dir: &Path, locator: BodyLocator) -> Option<TransactionRecord> {
+    let path = transactions_path(storage_dir);
+    let mut file = fs::File::open(&path).ok()?;
+    file.seek(std::io::SeekFrom::Start(locator.offset)).ok()?;
+    let mut line = vec![0u8; locator.len as usize];
+    file.read_exact(&mut line).ok()?;
+    match serde_json::from_slice(&line) {
+        Ok(record) => Some(record),
+        Err(error) => {
+            warn!(?error, path = %path.display(), "transaction line did not parse");
+            None
+        }
+    }
 }
 
 /// Reads the transactions file. Returns `None` when it is absent, which is the
 /// normal case for a session written before transactions moved out of
 /// snapshot.json — the caller then keeps the copy embedded there.
-fn read_transactions_file(storage_dir: &Path) -> Option<Vec<TransactionRecord>> {
+fn read_transactions_file(storage_dir: &Path) -> Option<Vec<(TransactionRecord, BodyLocator)>> {
     let path = transactions_path(storage_dir);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -1798,13 +1852,22 @@ fn read_transactions_file(storage_dir: &Path) -> Option<Vec<TransactionRecord>> 
         .map(|count| count.get())
         .unwrap_or(1);
     if threads < 2 || bytes.len() < PARALLEL_TRANSACTION_PARSE_MIN_BYTES {
-        return Some(parse_transaction_lines(&bytes));
+        return Some(parse_transaction_lines(&bytes, 0));
     }
     let chunks = split_on_line_boundaries(&bytes, threads);
-    let parsed: Vec<Vec<TransactionRecord>> = std::thread::scope(|scope| {
+    let mut chunk_start = 0u64;
+    let chunks: Vec<(&[u8], u64)> = chunks
+        .into_iter()
+        .map(|chunk| {
+            let start = chunk_start;
+            chunk_start += chunk.len() as u64;
+            (chunk, start)
+        })
+        .collect();
+    let parsed: Vec<Vec<(TransactionRecord, BodyLocator)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = chunks
             .into_iter()
-            .map(|chunk| scope.spawn(move || parse_transaction_lines(chunk)))
+            .map(|(chunk, start)| scope.spawn(move || parse_transaction_lines(chunk, start)))
             .collect();
         handles
             .into_iter()
@@ -2137,8 +2200,10 @@ fn load_session_snapshot_with_mode(
     // Transactions live in their own newline-delimited file so they can be parsed
     // across cores. When it is absent — a session written before the move — they
     // are still in snapshot.json, and the first persist migrates them.
-    if let Some(transactions) = read_transactions_file(storage_dir) {
-        snapshot.transactions = transactions;
+    if let Some(located) = read_transactions_file(storage_dir) {
+        // Locators are dropped here for now; the store gains them in the step that
+        // stops holding bodies in memory.
+        snapshot.transactions = located.into_iter().map(|(record, _)| record).collect();
     }
     // Take the small components from state.json when it is present, keeping the
     // two big journal-backed sections from snapshot.json. Using the state file as
@@ -3460,6 +3525,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn transaction_locators_point_at_the_right_line_across_parallel_chunks() {
+        // Each record is read back by seeking to its recorded offset, so an offset
+        // that is off by one line silently returns someone else's traffic. The
+        // parallel path hands each thread a slice, and its locators must still be
+        // absolute within the whole file.
+        let storage_dir = std::env::temp_dir()
+            .join(format!("sniper-locators-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let records: Vec<_> = (0..600)
+            .map(|i| {
+                TransactionRecord::http(
+                    Utc::now(),
+                    "GET".to_string(),
+                    "https".to_string(),
+                    "locators.example:443".to_string(),
+                    format!("/record-{i}"),
+                    Some(200),
+                    1,
+                    MessageRecord {
+                        headers: vec![],
+                        // Vary the length so lines are not uniform.
+                        body_preview: "x".repeat(i * 80),
+                        body_encoding: BodyEncoding::Utf8,
+                        body_size: i * 80,
+                        decoded_body_size: None,
+                        preview_truncated: false,
+                        content_type: None,
+                        content_decoded: false,
+                    },
+                    None,
+                    vec![],
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        super::write_transactions_file(&super::transactions_path(&storage_dir), &records).unwrap();
+
+        // Must exceed PARALLEL_TRANSACTION_PARSE_MIN_BYTES so the chunked path runs.
+        let file_len = std::fs::metadata(super::transactions_path(&storage_dir))
+            .unwrap()
+            .len() as usize;
+        assert!(
+            file_len > super::PARALLEL_TRANSACTION_PARSE_MIN_BYTES,
+            "fixture must be big enough to take the parallel path, was {file_len} bytes"
+        );
+
+        let located = super::read_transactions_file(&storage_dir).unwrap();
+        assert_eq!(located.len(), records.len());
+        for (index, (record, locator)) in located.iter().enumerate() {
+            assert_eq!(record.path, format!("/record-{index}"));
+            let reread = super::read_transaction_at(&storage_dir, *locator)
+                .unwrap_or_else(|| panic!("record {index} did not read back at its locator"));
+            assert_eq!(reread.id, record.id);
+            assert_eq!(reread.path, record.path);
+            assert_eq!(reread.request.body_preview, record.request.body_preview);
+        }
+
+        let _ = std::fs::remove_dir_all(storage_dir);
     }
 
     #[test]
@@ -7374,7 +7501,7 @@ mod tests {
 
         // Records live in transactions.ndjson, not inside snapshot.json.
         let disk_transactions = super::read_transactions_file(&storage_dir).unwrap();
-        assert_eq!(disk_transactions[0].color_tag.as_deref(), Some("green"));
+        assert_eq!(disk_transactions[0].0.color_tag.as_deref(), Some("green"));
 
         let reloaded = registry.load_context(active.id()).unwrap();
         let reloaded_records = reloaded.store.snapshot(Some(10)).await;
