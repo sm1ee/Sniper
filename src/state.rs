@@ -255,7 +255,7 @@ impl AppState {
     ) -> (Arc<SessionContext>, crate::proxy::ActiveProxySessionGuard) {
         let active_session = self.active_session.read().await;
         let session = active_session.clone();
-        let owner = crate::proxy::remember_active_proxy_session_owner(session.id());
+        let owner = crate::proxy::remember_active_proxy_session_owner(session.id(), crate::proxy::PROXY_WORK_REPLAY);
         (session, owner)
     }
 
@@ -526,11 +526,13 @@ impl AppState {
             if crate::proxy::session_has_active_proxy_work(current_id)
                 || crate::proxy::session_has_active_proxy_work(id)
             {
+                let busy = [current_id, id]
+                    .into_iter()
+                    .map(crate::proxy::describe_session_proxy_work)
+                    .find(|description| !description.is_empty())
+                    .unwrap_or_else(|| "proxy work".to_string());
                 anyhow::bail!(
-                    "cannot switch sessions while proxy activity is still running \
-                     ({} proxy connection(s) still open) — close whatever is using the proxy, \
-                     or switch with force to cut them",
-                    crate::proxy::active_proxy_connection_count()
+                    "cannot switch sessions while proxy activity is still running ({busy})"
                 );
             }
             self.persist_session_context(&current).await?;
@@ -3575,7 +3577,7 @@ mod tests {
             .create_session(Some("Second".to_string()))
             .unwrap();
 
-        let owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         let error = state
             .activate_session_with_options(next.id, true)
             .await
@@ -3619,7 +3621,7 @@ mod tests {
             .create_session(Some("Second".to_string()))
             .unwrap();
 
-        let owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         let error = state.activate_session(next.id).await.unwrap_err();
         assert!(error
             .to_string()
@@ -3651,7 +3653,7 @@ mod tests {
         let _current_operation_lock = state.session_operation_lock(original_id).await;
         let before = state.session_operation_lock_count().await;
 
-        let owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         for index in 0..3 {
             let error = state
                 .create_session(Some(format!("Blocked {index}")))
@@ -3694,7 +3696,7 @@ mod tests {
             .await
             .unwrap();
 
-        let owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         let error = state.activate_session(original_id).await.unwrap_err();
         assert!(error
             .to_string()

@@ -3,7 +3,10 @@ use std::{
     fs,
     io::{self, BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, RwLock,
+    },
     thread,
 };
 
@@ -55,6 +58,9 @@ const STATE_FILE: &str = "state.json";
 /// the 100,000 records of a real session can be parsed across cores: 2,408 ms to
 /// parse them inside snapshot.json, 331 ms as this file on 10 threads.
 const TRANSACTIONS_FILE: &str = "transactions.ndjson";
+/// Batches state-only persists. Long enough to fold a burst of scanner findings
+/// into one write, short enough that a crash loses little.
+const STATE_PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(750);
 /// Parsing is CPU-bound and each line is independent, but splitting work costs
 /// something, so stay single-threaded for small files.
 const PARALLEL_TRANSACTION_PARSE_MIN_BYTES: usize = 8 * 1024 * 1024;
@@ -273,6 +279,9 @@ pub struct SessionContext {
     metadata: RwLock<SessionMetadata>,
     mutation_lock: AsyncMutex<()>,
     persist_lock: AsyncMutex<()>,
+    /// Set while a state-only persist is already queued, so a burst of small
+    /// changes costs one write instead of one write each.
+    state_persist_scheduled: AtomicBool,
 }
 
 impl SessionContext {
@@ -418,7 +427,32 @@ impl SessionContext {
             metadata: RwLock::new(metadata),
             mutation_lock: AsyncMutex::new(()),
             persist_lock: AsyncMutex::new(()),
+            state_persist_scheduled: AtomicBool::new(false),
         }
+    }
+
+    /// Queues a state-only persist and returns immediately.
+    ///
+    /// Callers are on the capture path — a scanner finding, an intercept enqueue —
+    /// and some run inside tasks that count as active proxy work. Awaiting a
+    /// multi-megabyte fsync there keeps the session marked busy, which blocks
+    /// switching away from it. One write is queued at a time; it snapshots the
+    /// state when it runs, so anything that changes meanwhile is either included
+    /// or queues the next one.
+    pub fn schedule_state_persist(self: &Arc<Self>) {
+        if self.state_persist_scheduled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let session = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(STATE_PERSIST_DEBOUNCE).await;
+            session
+                .state_persist_scheduled
+                .store(false, Ordering::SeqCst);
+            if let Err(error) = session.persist_state_only().await {
+                warn!(?error, session_id = %session.id, "failed to persist session state");
+            }
+        });
     }
 
     pub fn id(&self) -> Uuid {

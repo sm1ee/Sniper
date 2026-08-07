@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     collections::HashMap,
     convert::Infallible,
     future::Future,
@@ -2961,7 +2962,7 @@ async fn forward_websocket_request(
             captured_websocket_id = None;
         }
     }
-    persist_session_state_quiet(&session).await;
+    persist_session_state_quiet(&session);
 
     let relay_id = Uuid::new_v4();
     let (relay_abort, relay_registration) = AbortHandle::new_pair();
@@ -3024,7 +3025,7 @@ async fn forward_websocket_request(
                                     close_note,
                                 )
                                 .await;
-                            persist_session_state_quiet(&session).await;
+                            persist_session_state_quiet(&session);
                         }
                     }
                 }
@@ -3098,7 +3099,7 @@ async fn maybe_intercept_request(
             is_websocket,
         })
         .await;
-    persist_session_state_quiet(&session).await;
+    persist_session_state_quiet(&session);
     resolution
 }
 
@@ -3162,7 +3163,7 @@ async fn maybe_intercept_response(
             response: editable.clone(),
         })
         .await;
-    persist_session_state_quiet(&session).await;
+    persist_session_state_quiet(&session);
     resolution
 }
 
@@ -3193,7 +3194,7 @@ fn scan_record_for_session(session: &Arc<SessionContext>, record: TransactionRec
         // session document every PERSIST_DEBOUNCE while browsing — 11 rewrites
         // per 20 seconds on a real 1.35 GB session.
         if accepted_findings {
-            persist_session_state_quiet(&scan_session).await;
+            persist_session_state_quiet(&scan_session);
         }
     });
 }
@@ -3274,14 +3275,8 @@ const TRANSACTION_JOURNAL_COMPACT_BYTES: u64 = 64 * 1024 * 1024;
 /// Persists only the small components, to state.json. For changes that are not a
 /// captured transaction — an intercept enqueue, a websocket open, a scanner
 /// finding — rewriting the transactions along with them is wasted work.
-async fn persist_session_state_quiet(session: &SessionContext) {
-    if let Err(error) = session.persist_state_only().await {
-        warn!(
-            ?error,
-            session_id = %session.id(),
-            "failed to persist session state"
-        );
-    }
+fn persist_session_state_quiet(session: &Arc<SessionContext>) {
+    session.schedule_state_persist();
 }
 
 /// The journal is only emptied by a full snapshot rewrite, so that rewrite has to
@@ -3475,7 +3470,7 @@ async fn execute_streaming_http_exchange(
             let context = StreamedRecordContext {
                 state: state.clone(),
                 session: session.clone(),
-                _session_owner: remember_active_proxy_session_owner(session.id()),
+                _session_owner: remember_active_proxy_session_owner(session.id(), PROXY_WORK_STREAMED_RESPONSE),
                 persist_generation,
                 record_id: None,
                 started_at,
@@ -4714,8 +4709,18 @@ static ACTIVE_STREAMED_RESPONSE_PUMPS: LazyLock<Mutex<HashMap<Uuid, StreamedResp
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static ACTIVE_PROXY_CONNECTIONS: LazyLock<Mutex<HashMap<Uuid, AbortHandle>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static ACTIVE_PROXY_SESSION_OWNERS: LazyLock<Mutex<HashMap<Uuid, usize>>> =
+/// Per session, how much work is in flight broken down by what is holding it.
+/// The breakdown exists so a refused session switch can say what to close, and so
+/// a forced switch knows whether stopping streamed responses can help.
+static ACTIVE_PROXY_SESSION_OWNERS: LazyLock<Mutex<HashMap<Uuid, BTreeMap<&'static str, usize>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A response still being streamed to the client. Stoppable by a forced switch.
+pub(crate) const PROXY_WORK_STREAMED_RESPONSE: &str = "streamed response";
+/// Post-capture work such as scanning. Short-lived; waiting is enough.
+pub(crate) const PROXY_WORK_CAPTURE_TASK: &str = "capture task";
+/// A replay or other API-driven exchange the user started.
+pub(crate) const PROXY_WORK_REPLAY: &str = "replay";
 const PERSIST_DEBOUNCE: Duration = Duration::from_secs(2);
 const PENDING_PERSIST_FLUSH_PROXY_WAIT: Duration = Duration::from_secs(1);
 const PENDING_PERSIST_FLUSH_RETRY_LIMIT: usize = 3;
@@ -4737,11 +4742,12 @@ struct StreamedResponsePump {
 
 pub(crate) struct ActiveProxySessionGuard {
     session_id: Uuid,
+    reason: &'static str,
 }
 
 impl Drop for ActiveProxySessionGuard {
     fn drop(&mut self) {
-        forget_active_proxy_session_owner(self.session_id);
+        forget_active_proxy_session_owner(self.session_id, self.reason);
     }
 }
 
@@ -5122,23 +5128,71 @@ fn forget_proxy_connection(connection_id: Uuid) {
     connections.remove(&connection_id);
 }
 
-pub(crate) fn remember_active_proxy_session_owner(session_id: Uuid) -> ActiveProxySessionGuard {
+pub(crate) fn remember_active_proxy_session_owner(
+    session_id: Uuid,
+    reason: &'static str,
+) -> ActiveProxySessionGuard {
     let mut owners = ACTIVE_PROXY_SESSION_OWNERS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    *owners.entry(session_id).or_insert(0) += 1;
-    ActiveProxySessionGuard { session_id }
+    *owners
+        .entry(session_id)
+        .or_default()
+        .entry(reason)
+        .or_insert(0) += 1;
+    ActiveProxySessionGuard { session_id, reason }
 }
 
-fn forget_active_proxy_session_owner(session_id: Uuid) {
+/// Human-readable summary of what is keeping a session busy, e.g.
+/// "2 streamed responses, 1 replay". Empty when nothing is.
+pub fn describe_session_proxy_work(session_id: Uuid) -> String {
+    let owners = ACTIVE_PROXY_SESSION_OWNERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(reasons) = owners.get(&session_id) else {
+        return String::new();
+    };
+    reasons
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(reason, count)| {
+            if *count == 1 {
+                format!("1 {reason}")
+            } else {
+                format!("{count} {reason}s")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether the only thing holding this session is work a forced switch can stop.
+pub fn session_proxy_work_is_only_streams(session_id: Uuid) -> bool {
+    let owners = ACTIVE_PROXY_SESSION_OWNERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    owners.get(&session_id).is_some_and(|reasons| {
+        reasons
+            .iter()
+            .all(|(reason, count)| *count == 0 || *reason == PROXY_WORK_STREAMED_RESPONSE)
+    })
+}
+
+fn forget_active_proxy_session_owner(session_id: Uuid, reason: &'static str) {
     let mut owners = ACTIVE_PROXY_SESSION_OWNERS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if let Some(count) = owners.get_mut(&session_id) {
+    let Some(reasons) = owners.get_mut(&session_id) else {
+        return;
+    };
+    if let Some(count) = reasons.get_mut(reason) {
         *count = count.saturating_sub(1);
         if *count == 0 {
-            owners.remove(&session_id);
+            reasons.remove(reason);
         }
+    }
+    if reasons.is_empty() {
+        owners.remove(&session_id);
     }
 }
 
@@ -5146,7 +5200,9 @@ pub fn session_has_active_proxy_work(session_id: Uuid) -> bool {
     let owners = ACTIVE_PROXY_SESSION_OWNERS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    owners.get(&session_id).copied().unwrap_or(0) > 0
+    owners
+        .get(&session_id)
+        .is_some_and(|reasons| reasons.values().any(|count| *count > 0))
 }
 
 fn active_proxy_work_is_empty() -> bool {
@@ -5171,7 +5227,7 @@ where
 {
     let connection_id = Uuid::new_v4();
     let (abort, registration) = AbortHandle::new_pair();
-    let session_owner = remember_active_proxy_session_owner(session_id);
+    let session_owner = remember_active_proxy_session_owner(session_id, PROXY_WORK_CAPTURE_TASK);
     remember_proxy_connection(connection_id, abort);
     tokio::spawn(async move {
         let _session_owner = session_owner;
@@ -6332,7 +6388,7 @@ mod tests {
         let context = StreamedRecordContext {
             state: Arc::clone(&state),
             session: Arc::clone(&session),
-            _session_owner: remember_active_proxy_session_owner(session_id),
+            _session_owner: remember_active_proxy_session_owner(session_id, PROXY_WORK_STREAMED_RESPONSE),
             persist_generation,
             record_id: None,
             started_at: Utc::now(),
@@ -6391,7 +6447,7 @@ mod tests {
         let mut context = StreamedRecordContext {
             state: Arc::clone(&state),
             session: Arc::clone(&session),
-            _session_owner: remember_active_proxy_session_owner(session_id),
+            _session_owner: remember_active_proxy_session_owner(session_id, PROXY_WORK_STREAMED_RESPONSE),
             persist_generation,
             record_id: None,
             started_at: Utc::now(),
@@ -7173,7 +7229,7 @@ mod tests {
             .await
             .unwrap();
 
-        let owner = remember_active_proxy_session_owner(original_id);
+        let owner = remember_active_proxy_session_owner(original_id, PROXY_WORK_STREAMED_RESPONSE);
         let error = state.delete_session(original_id).await.unwrap_err();
         assert!(error
             .to_string()

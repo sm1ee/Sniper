@@ -3352,7 +3352,7 @@ async fn begin_session_proxy_operation(
     {
         return Err(response);
     }
-    Ok(proxy::remember_active_proxy_session_owner(session.id()))
+    Ok(proxy::remember_active_proxy_session_owner(session.id(), proxy::PROXY_WORK_REPLAY))
 }
 
 async fn resolve_session_for_required_id(
@@ -11483,7 +11483,7 @@ mod tests {
 
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut update_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         drop(operation_guard);
 
         let response = update_future.await;
@@ -11523,7 +11523,7 @@ mod tests {
         ));
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut proxy_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         drop(operation_guard);
 
         match proxy_future.await {
@@ -11961,7 +11961,7 @@ mod tests {
         assert!(runtime.oast_enabled);
         assert_eq!(runtime.oast_provider, OastProvider::Boast);
 
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive.id());
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive.id(), crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
 
         let runtime_read: RuntimeSettingsSnapshot = response_json(
             super::get_runtime_settings(
@@ -12298,7 +12298,7 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
 
         let inactive_config: ScannerConfig = response_json(
             super::get_scanner_config(
@@ -13175,7 +13175,7 @@ mod tests {
             .unwrap();
 
         let pending_generation = crate::proxy::remember_pending_persist_context_for_test(&inactive);
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive.id());
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive.id(), crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
 
         let read_response = super::get_workspace_state(
             State(state.clone()),
@@ -14582,7 +14582,7 @@ mod tests {
             !response_task.is_finished(),
             "ws replay remove should wait before rechecking active proxy work"
         );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         drop(operation_guard);
 
         let response = response_task.await.unwrap();
@@ -14702,7 +14702,7 @@ mod tests {
             !response_task.is_finished(),
             "ws replay send should wait before rechecking active proxy work"
         );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         drop(operation_guard);
 
         let response = response_task.await.unwrap();
@@ -14820,7 +14820,7 @@ mod tests {
             !response_task.is_finished(),
             "ws replay connect should wait before rechecking active proxy work"
         );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         drop(operation_guard);
 
         let response = response_task.await.unwrap();
@@ -15258,7 +15258,7 @@ mod tests {
 
         {
             let _active_proxy_owner =
-                crate::proxy::remember_active_proxy_session_owner(original_id);
+                crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
 
             let pinned_response = super::get_transaction(
                 State(state.clone()),
@@ -15467,7 +15467,7 @@ mod tests {
             active_fuzzer_response.status(),
             super::StatusCode::NOT_FOUND
         );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
 
         let pinned_fuzzer_response = super::get_fuzzer_attack(
             State(state.clone()),
@@ -16311,7 +16311,7 @@ mod tests {
         ));
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut upsert_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         drop(operation_guard);
 
         let response = upsert_future.await;
@@ -16365,7 +16365,7 @@ mod tests {
         ));
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut delete_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         drop(operation_guard);
 
         let response = delete_future.await;
@@ -16519,7 +16519,7 @@ mod tests {
         ));
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut run_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
         drop(operation_guard);
 
         let response = run_future.await;
@@ -16664,7 +16664,7 @@ mod tests {
         .await;
         assert_eq!(active_response.status(), super::StatusCode::NOT_FOUND);
 
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive_id);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
 
         let pinned_response = super::get_sequence(
             State(state.clone()),

@@ -4506,12 +4506,18 @@ async function activateSessionById(id, { force = false } = {}) {
   });
   if (!response.ok) {
     const message = await response.text();
-    // The server already waited for in-flight work; if it is still busy, only a
-    // forced switch can get through. Point at where that lives.
+    // The server already waited for work that was about to finish. What is left is
+    // a stream that does not end on its own — a server-sent event stream, a long
+    // poll — so offer to cut it rather than leaving the user stuck.
     if (response.status === 409 && !force && message.includes("proxy activity is still running")) {
-      throw new Error(
-        `${message}. Right-click the session for "Switch, cutting open connections".`,
+      showConfirmDialog(
+        `${message}.\n\nSwitch anyway? Anything still in flight is cut and will not be recorded.`,
+        () => {
+          activateSessionById(id, { force: true }).catch(handleWorkspaceActionError);
+        },
+        { title: "Proxy is busy", confirmLabel: "Switch anyway" },
       );
+      return;
     }
     throw new Error(message);
   }
@@ -7770,7 +7776,6 @@ function showSessionContextMenu(event, sessionId) {
   menu.className = "context-menu session-context-menu";
   menu.innerHTML = `
     <button class="context-menu-item" data-action="folder">Open session folder</button>
-    ${session.active ? "" : `<button class="context-menu-item" data-action="force-activate">Switch, cutting open connections</button>`}
     ${session.active ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
   `;
   document.body.appendChild(menu);
@@ -7793,12 +7798,6 @@ function showSessionContextMenu(event, sessionId) {
         console.error(error);
         showToast(error?.message || "Failed to open session folder.", "error");
       });
-    } else if (action === "force-activate") {
-      // A streamed response — a server-sent event stream, a long poll, a download
-      // — holds its session for as long as it stays open, so an ordinary switch
-      // can wait forever. This cuts those connections; requests still in flight
-      // are dropped and never recorded.
-      activateSessionById(sessionId, { force: true }).catch(handleWorkspaceActionError);
     } else if (action === "delete") {
       deleteSessionById(sessionId);
     }
@@ -7825,20 +7824,20 @@ function closeSessionContextMenu() {
 document.addEventListener("click", () => closeSessionContextMenu());
 document.addEventListener("contextmenu", () => closeSessionContextMenu());
 
-function showConfirmDialog(message, onConfirm) {
+function showConfirmDialog(message, onConfirm, { title = "Confirm", confirmLabel = "Delete" } = {}) {
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop confirm-dialog-backdrop";
   backdrop.innerHTML = `
     <div class="modal-card" style="width: min(400px, 90%);">
       <div class="modal-header" style="padding: 16px 20px;">
-        <h3 style="margin:0; font-size: var(--font-md);">Confirm</h3>
+        <h3 style="margin:0; font-size: var(--font-md);">${escapeHtml(title)}</h3>
       </div>
       <div class="modal-body" style="padding: 16px 20px;">
         <p style="margin:0; white-space: pre-line; color: var(--text-dim);">${escapeHtml(message)}</p>
       </div>
       <div style="display:flex; justify-content:flex-end; gap:8px; padding: 12px 20px; border-top: 1px solid var(--line);">
         <button class="secondary-action confirm-dialog-cancel" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">Cancel</button>
-        <button class="danger-action confirm-dialog-ok" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">Delete</button>
+        <button class="danger-action confirm-dialog-ok" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">${escapeHtml(confirmLabel)}</button>
       </div>
     </div>
   `;
