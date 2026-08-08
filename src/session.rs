@@ -1743,6 +1743,21 @@ fn state_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join(STATE_FILE)
 }
 
+#[cfg(test)]
+pub(crate) fn write_transactions_file_for_test(
+    storage_dir: &Path,
+    records: &[TransactionRecord],
+) -> Result<()> {
+    write_transactions_file(&transactions_path(storage_dir), records)
+}
+
+#[cfg(test)]
+pub(crate) fn read_transactions_file_for_test(
+    storage_dir: &Path,
+) -> Option<Vec<(TransactionRecord, BodyLocator)>> {
+    read_transactions_file(storage_dir)
+}
+
 fn transactions_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join(TRANSACTIONS_FILE)
 }

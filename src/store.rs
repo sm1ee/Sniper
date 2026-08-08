@@ -85,6 +85,9 @@ pub struct TransactionStore {
     events: broadcast::Sender<TransactionEvent>,
     retention_events: broadcast::Sender<()>,
     journal_tx: Option<mpsc::Sender<TransactionJournalCommand>>,
+    /// Session directory, so a record whose bodies were dropped can be read back
+    /// out of transactions.ndjson. Derived from the journal path.
+    storage_dir: Option<PathBuf>,
     max_entries: Option<usize>,
     next_sequence: AtomicU64,
     next_event_sequence: AtomicU64,
@@ -377,6 +380,7 @@ impl TransactionStore {
             events,
             retention_events,
             journal_tx: None,
+            storage_dir: None,
             max_entries,
             next_sequence: AtomicU64::new(max_seq + 1),
             next_event_sequence: AtomicU64::new(max_seq.max(latest_event_sequence) + 1),
@@ -402,6 +406,7 @@ impl TransactionStore {
             max_entries,
             latest_event_sequence,
         );
+        store.storage_dir = journal_path.parent().map(Path::to_path_buf);
         store.journal_tx = start_transaction_journal_writer(journal_path);
         store
     }
@@ -682,6 +687,28 @@ impl TransactionStore {
         snapshot_entries(&inner, limit)
     }
 
+    /// Puts the body text back on a record whose bodies were dropped after loading.
+    /// The in-memory copy carries the current annotations, which may be ahead of
+    /// what is on disk, so those are kept and only the bodies come from the file.
+    fn rehydrate(&self, record: &TransactionRecord, inner: &StoreInner) -> TransactionRecord {
+        let Some(locator) = inner.locators.get(&record.id).copied() else {
+            return record.clone();
+        };
+        let Some(storage_dir) = self.storage_dir.as_deref() else {
+            return record.clone();
+        };
+        let Some(mut full) = crate::session::read_transaction_at(storage_dir, locator) else {
+            warn!(record_id = %record.id, "could not read transaction bodies back from disk");
+            return record.clone();
+        };
+        full.notes = record.notes.clone();
+        full.color_tag = record.color_tag.clone();
+        full.user_note = record.user_note.clone();
+        full.annotation_revision = record.annotation_revision;
+        full.annotation_client_versions = record.annotation_client_versions.clone();
+        full
+    }
+
     pub async fn snapshot_for_persistence(
         &self,
         limit: Option<usize>,
@@ -700,7 +727,12 @@ impl TransactionStore {
                 }
             }
         }
-        Ok(snapshot_entries(&inner, limit))
+        // Rehydrate before handing records to a writer: persisting a stripped
+        // record would replace its stored bodies with nothing.
+        Ok(snapshot_entries(&inner, limit)
+            .into_iter()
+            .map(|record| self.rehydrate(&record, &inner))
+            .collect())
     }
 
     pub async fn update_annotations(
@@ -1066,6 +1098,15 @@ impl TransactionStore {
 
     pub fn subscribe_retention(&self) -> broadcast::Receiver<()> {
         self.retention_events.subscribe()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_body_locator_for_test(
+        &self,
+        id: Uuid,
+        locator: crate::session::BodyLocator,
+    ) {
+        self.inner.write().await.locators.insert(id, locator);
     }
 
     pub fn latest_sequence(&self) -> u64 {
@@ -2018,6 +2059,73 @@ mod tests {
         assert_eq!(file_mode, 0o600);
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn persisting_a_stripped_record_reads_its_bodies_back_from_disk() {
+        // The gate this whole change rests on: once bodies live on disk, handing a
+        // stripped record to a writer would replace the stored bodies with nothing.
+        // snapshot_for_persistence must read them back first.
+        let storage_dir = std::env::temp_dir()
+            .join(format!("sniper-rehydrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let mut record = TransactionRecord::http(
+            Utc::now(),
+            "GET".to_string(),
+            "https".to_string(),
+            "rehydrate.example:443".to_string(),
+            "/body".to_string(),
+            Some(200),
+            1,
+            MessageRecord {
+                headers: vec![],
+                body_preview: "the request body".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 16,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            },
+            Some(MessageRecord {
+                headers: vec![],
+                body_preview: "the response body".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 17,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            }),
+            vec![],
+            None,
+            None,
+        );
+        record.sequence = 1;
+        let record_id = record.id;
+        crate::session::write_transactions_file_for_test(&storage_dir, &[record.clone()]).unwrap();
+        let locator = crate::session::read_transactions_file_for_test(&storage_dir).unwrap()[0].1;
+
+        // Build a store holding the stripped record plus its locator, as loading will.
+        let mut stripped = record.clone();
+        super::strip_transaction_bodies(&mut stripped);
+        let store = TransactionStore::from_records_with_journal_and_event_sequence(
+            vec![stripped],
+            storage_dir.join("transactions.journal"),
+            None,
+            0,
+        );
+        store.set_body_locator_for_test(record_id, locator).await;
+
+        let persisted = store.snapshot_for_persistence(None).await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].request.body_preview, "the request body");
+        assert_eq!(
+            persisted[0].response.as_ref().unwrap().body_preview,
+            "the response body"
+        );
+
+        let _ = std::fs::remove_dir_all(storage_dir);
     }
 
     #[test]
