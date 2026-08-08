@@ -187,6 +187,27 @@ struct StoreInner {
     entries: Vec<TransactionRecord>,
     summaries: Vec<CachedSummary>,
     by_id: HashMap<Uuid, usize>,
+    /// Where a record's line sits in transactions.ndjson, for records whose bodies
+    /// were dropped after loading. Bodies are read back through this rather than
+    /// kept resident: they are ~90% of a record and the history list never needs
+    /// them (`ListFilters` has no body search and `summary()` reads only sizes).
+    locators: HashMap<Uuid, crate::session::BodyLocator>,
+}
+
+/// Drops the body text a record carries, leaving sizes, headers and metadata.
+/// Only safe for a record that has a locator, so the text can be read back.
+pub(crate) fn strip_transaction_bodies(record: &mut TransactionRecord) {
+    record.request.body_preview = String::new();
+    for message in [
+        record.response.as_mut(),
+        record.original_request.as_mut(),
+        record.original_response.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        message.body_preview = String::new();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -284,6 +305,7 @@ impl StoreInner {
             entries,
             summaries,
             by_id,
+            locators: HashMap::new(),
         }
     }
 
@@ -1996,6 +2018,60 @@ mod tests {
         assert_eq!(file_mode, 0o600);
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn stripping_bodies_keeps_everything_a_summary_needs() {
+        // Bodies come off records loaded from disk. Anything the history list or a
+        // persist decision reads must survive that, or the list silently changes
+        // and a rewrite could shrink a record to nothing.
+        let mut record = TransactionRecord::http(
+            Utc::now(),
+            "POST".to_string(),
+            "https".to_string(),
+            "strip.example:443".to_string(),
+            "/submit".to_string(),
+            Some(200),
+            7,
+            MessageRecord {
+                headers: vec![],
+                body_preview: "request body".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 4096,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: Some("application/json".to_string()),
+                content_decoded: false,
+            },
+            Some(MessageRecord {
+                headers: vec![],
+                body_preview: "response body".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 8192,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: Some("text/html".to_string()),
+                content_decoded: false,
+            }),
+            vec!["a note".to_string()],
+            None,
+            None,
+        );
+        let before = record.summary();
+
+        super::strip_transaction_bodies(&mut record);
+
+        assert!(record.request.body_preview.is_empty());
+        assert!(record.response.as_ref().unwrap().body_preview.is_empty());
+        // Sizes, content types and note counts are what the list shows.
+        let after = record.summary();
+        assert_eq!(after.request_bytes, before.request_bytes);
+        assert_eq!(after.response_bytes, before.response_bytes);
+        assert_eq!(after.content_type, before.content_type);
+        assert_eq!(after.has_response, before.has_response);
+        assert_eq!(after.note_count, before.note_count);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.sequence, before.sequence);
     }
 
     #[tokio::test]
