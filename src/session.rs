@@ -168,6 +168,11 @@ struct StoredSessionSnapshot {
     oast_registration: Option<crate::oast::StoredOastRegistration>,
     #[serde(default, deserialize_with = "deserialize_workspace_state_lossy")]
     workspace: WorkspaceStateSnapshot,
+    /// Where each record's line sits in transactions.ndjson, for records whose
+    /// bodies can therefore be dropped from memory. Never serialized: it describes
+    /// the file we just read, not the session.
+    #[serde(skip)]
+    transaction_locators: HashMap<Uuid, BodyLocator>,
     #[serde(skip)]
     replayed_transaction_journal: bool,
     #[serde(skip)]
@@ -364,8 +369,10 @@ impl SessionContext {
             max_entries,
             max_transaction_entries,
             store: Arc::new(if enable_journal {
-                TransactionStore::from_records_with_journal_and_event_sequence(
+                TransactionStore::from_located_records_with_journal(
                     snapshot.transactions,
+                    snapshot.transaction_locators,
+                    &snapshot.replayed_transaction_ids,
                     journal_path,
                     Some(max_transaction_entries),
                     transaction_event_sequence,
@@ -643,6 +650,7 @@ impl SessionContext {
             oast_cleared_callback_keys: self.oast.snapshot_cleared_keys().await,
             oast_registration: self.oast.snapshot_registration().await,
             workspace,
+            transaction_locators: HashMap::new(),
             replayed_transaction_journal: false,
             replayed_transaction_ids: HashSet::new(),
             replayed_websocket_journal: false,
@@ -2216,9 +2224,14 @@ fn load_session_snapshot_with_mode(
     // across cores. When it is absent — a session written before the move — they
     // are still in snapshot.json, and the first persist migrates them.
     if let Some(located) = read_transactions_file(storage_dir) {
-        // Locators are dropped here for now; the store gains them in the step that
-        // stops holding bodies in memory.
-        snapshot.transactions = located.into_iter().map(|(record, _)| record).collect();
+        let mut records = Vec::with_capacity(located.len());
+        let mut locators = HashMap::with_capacity(located.len());
+        for (record, locator) in located {
+            locators.insert(record.id, locator);
+            records.push(record);
+        }
+        snapshot.transactions = records;
+        snapshot.transaction_locators = locators;
     }
     // Take the small components from state.json when it is present, keeping the
     // two big journal-backed sections from snapshot.json. Using the state file as

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -393,6 +393,42 @@ impl TransactionStore {
         max_entries: Option<usize>,
     ) -> Self {
         Self::from_records_with_journal_and_event_sequence(records, journal_path, max_entries, 0)
+    }
+
+    /// Builds a store that keeps bodies on disk for every record with a locator.
+    ///
+    /// A record the journal replayed is deliberately given no locator: the journal
+    /// holds a newer version than the line in transactions.ndjson, so reading that
+    /// line back would serve stale traffic. Those keep their bodies in memory until
+    /// the next compaction writes them out, which the journal size bounds.
+    pub fn from_located_records_with_journal(
+        mut records: Vec<TransactionRecord>,
+        mut locators: HashMap<Uuid, crate::session::BodyLocator>,
+        replayed_ids: &HashSet<Uuid>,
+        journal_path: PathBuf,
+        max_entries: Option<usize>,
+        latest_event_sequence: u64,
+    ) -> Self {
+        for id in replayed_ids {
+            locators.remove(id);
+        }
+        for record in records.iter_mut() {
+            if locators.contains_key(&record.id) {
+                strip_transaction_bodies(record);
+            }
+        }
+        let store = Self::from_records_with_journal_and_event_sequence(
+            records,
+            journal_path,
+            max_entries,
+            latest_event_sequence,
+        );
+        store
+            .inner
+            .try_write()
+            .expect("new store is not shared yet")
+            .locators = locators;
+        store
     }
 
     pub fn from_records_with_journal_and_event_sequence(
