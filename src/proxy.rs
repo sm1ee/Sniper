@@ -2430,6 +2430,7 @@ async fn forward_http_request(
 ) -> Response<Body> {
     let request_http_version = parts.version;
     let editable_request = editable_request_from_parts(&parts, &request_bytes, &absolute_uri);
+    let client_request = editable_request.clone();
     let intercepted_request = match maybe_intercept_request(
         session.clone(),
         peer_addr,
@@ -2454,12 +2455,20 @@ async fn forward_http_request(
             return dropped.response;
         }
     };
-    let (forwarded_request, notes, original_request_capture) = apply_request_match_replace(
+    let intercept_original = intercept_request_original(
+        &client_request,
+        &intercepted_request,
+        state.config.body_preview_bytes,
+    );
+    let (forwarded_request, notes, match_replace_original) = apply_request_match_replace(
         session.as_ref(),
         intercepted_request,
         state.config.body_preview_bytes,
     )
     .await;
+    // What the client actually sent wins: match/replace only ever saw the edited
+    // request, so its capture is not the true original once intercept changed it.
+    let original_request_capture = intercept_original.or(match_replace_original);
 
     let client = build_client(session.runtime.upstream_insecure().await);
     if should_stream_upstream_response(session.as_ref(), &forwarded_request).await {
@@ -2523,6 +2532,11 @@ async fn forward_http_request(
                     let body = Bytes::from(edited.body_bytes());
                     let status = StatusCode::from_u16(edited.status)
                         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    // Keep what the server actually sent before overwriting it, so
+                    // the history view has an original to show against the edit.
+                    if record.original_response.is_none() {
+                        record.original_response = record.response.clone();
+                    }
                     record.status = Some(status.as_u16());
                     record.response = Some(MessageRecord::from_headers_and_body(
                         &headers,
@@ -2569,6 +2583,7 @@ async fn forward_websocket_request(
     let request_http_version = parts.version;
     let client_request_headers = parts.headers.clone();
     let editable_request = editable_request_from_parts(&parts, &request_bytes, &absolute_uri);
+    let client_request = editable_request.clone();
     let forwarded_request = match maybe_intercept_request(
         session.clone(),
         peer_addr,
@@ -3553,6 +3568,8 @@ fn stream_upstream_response_body(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let pump_id = Uuid::new_v4();
     let session_id = context.session.id();
+    let close_delimited =
+        response_body_is_close_delimited(context.response_version, &context.response_headers);
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
     remember_streamed_response_pump(pump_id, session_id, shutdown_tx);
     tokio::spawn(async move {
@@ -3588,6 +3605,12 @@ fn stream_upstream_response_body(
                                 break;
                             }
                         }
+                        Some(Err(error)) if close_delimited && is_unexpected_eof(&error) => {
+                            notes.push(
+                                "Upstream closed the connection without a TLS close_notify; the close-delimited response body was accepted as complete.".to_string(),
+                            );
+                            break;
+                        }
                         Some(Err(error)) => {
                             let message = format!("Failed to read upstream response body: {error}");
                             notes.push(message.clone());
@@ -3609,6 +3632,37 @@ fn stream_upstream_response_body(
             yield chunk;
         }
     })
+}
+
+/// An HTTP/1.x response with neither Content-Length nor Transfer-Encoding is
+/// delimited by the connection closing (RFC 9112 §6.3), so EOF *is* the end of
+/// the body. HTTP/2 and HTTP/3 always frame the end explicitly, so an early EOF
+/// there is real truncation.
+fn response_body_is_close_delimited(version: Version, headers: &HeaderMap) -> bool {
+    matches!(
+        version,
+        Version::HTTP_09 | Version::HTTP_10 | Version::HTTP_11
+    ) && !headers.contains_key(CONTENT_LENGTH)
+        && !headers.contains_key(TRANSFER_ENCODING)
+}
+
+/// rustls surfaces a peer that drops TCP without a TLS close_notify as
+/// `UnexpectedEof`. curl, browsers and other proxies tolerate that on a
+/// close-delimited body; forwarding it as a stream error instead aborts the
+/// client-facing chunked response and makes Chrome discard a body we received
+/// in full (`ERR_INCOMPLETE_CHUNKED_ENCODING`).
+fn is_unexpected_eof(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::UnexpectedEof)
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    false
 }
 
 fn append_body_preview(preview: &mut Vec<u8>, chunk: &[u8], max_preview: usize) {
@@ -4086,6 +4140,26 @@ async fn execute_http_exchange(
             }
         }
     }
+}
+
+/// The request as the client sent it, when intercept handed back something else.
+///
+/// Only match/replace used to record an original, and it sees the request
+/// *after* intercept — so editing a held request left nothing to compare against
+/// and the history view showed no original/modified toggle for it.
+fn intercept_request_original(
+    before: &EditableRequest,
+    after: &EditableRequest,
+    preview_bytes: usize,
+) -> Option<MessageRecord> {
+    if before == after {
+        return None;
+    }
+    Some(MessageRecord::from_headers_and_body(
+        &header_map_from_records(&before.headers),
+        before.body_bytes().as_ref(),
+        preview_bytes,
+    ))
 }
 
 async fn apply_request_match_replace(
@@ -6031,6 +6105,54 @@ mod tests {
     }
 
     #[test]
+    fn close_delimited_detection_follows_response_framing() {
+        let mut headers = HeaderMap::new();
+        assert!(response_body_is_close_delimited(Version::HTTP_11, &headers));
+
+        // HTTP/2 always frames the end of the body explicitly.
+        assert!(!response_body_is_close_delimited(Version::HTTP_2, &headers));
+
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("10"));
+        assert!(!response_body_is_close_delimited(Version::HTTP_11, &headers));
+
+        headers.remove(CONTENT_LENGTH);
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        assert!(!response_body_is_close_delimited(Version::HTTP_11, &headers));
+    }
+
+    #[test]
+    fn unexpected_eof_is_found_through_the_error_source_chain() {
+        #[derive(Debug)]
+        struct Wrapper(std::io::Error);
+
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(formatter, "error reading a body from connection")
+            }
+        }
+
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        // Matches the chain rustls/hyper/reqwest produce for a peer that drops
+        // TCP without a close_notify.
+        let nested = Wrapper(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "peer closed connection without sending TLS close_notify",
+        ));
+        assert!(is_unexpected_eof(&nested));
+
+        let reset = Wrapper(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        ));
+        assert!(!is_unexpected_eof(&reset));
+    }
+
+    #[test]
     fn transfer_encoding_validation_allows_identity_and_plain_chunked() {
         let mut headers = HeaderMap::new();
         assert!(validate_supported_transfer_encoding(&headers).is_ok());
@@ -7394,6 +7516,42 @@ mod tests {
             "aborting the task must release the session"
         );
         assert_eq!(describe_session_proxy_work(session_id), "");
+    }
+
+    #[test]
+    fn an_intercept_edit_records_what_the_client_actually_sent() {
+        // The history view only offers an original/modified toggle when the record
+        // carries an original. Match/replace records one, but it runs after
+        // intercept, so without this an operator edit had nothing to compare
+        // against.
+        let base = EditableRequest {
+            scheme: "https".to_string(),
+            host: "edit.example".to_string(),
+            method: "POST".to_string(),
+            path: "/submit".to_string(),
+            headers: vec![HeaderRecord {
+                name: "content-type".to_string(),
+                value: "application/json".to_string(),
+            }],
+            body: "{\"a\":1}".to_string(),
+            body_encoding: BodyEncoding::Utf8,
+            preview_truncated: false,
+        };
+
+        // Forwarded untouched: nothing to show, so no original.
+        assert!(super::intercept_request_original(&base, &base.clone(), 4096).is_none());
+
+        // Body edited in intercept: the client's own body is what gets kept.
+        let mut edited = base.clone();
+        edited.body = "{\"a\":999}".to_string();
+        let original = super::intercept_request_original(&base, &edited, 4096)
+            .expect("an edited request must keep the client's original");
+        assert_eq!(original.body_preview, "{\"a\":1}");
+
+        // A header edit counts too, not just the body.
+        let mut header_edited = base.clone();
+        header_edited.headers[0].value = "text/plain".to_string();
+        assert!(super::intercept_request_original(&base, &header_edited, 4096).is_some());
     }
 
     #[test]

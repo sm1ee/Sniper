@@ -36,7 +36,7 @@ pub enum BodyEncoding {
     Base64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct HeaderRecord {
     #[serde(default)]
     pub name: String,
@@ -44,7 +44,7 @@ pub struct HeaderRecord {
     pub value: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EditableRequest {
     pub scheme: String,
     pub host: String,
