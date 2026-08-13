@@ -715,7 +715,10 @@ impl TransactionStore {
     pub async fn get(&self, id: Uuid) -> Option<TransactionRecord> {
         let inner = self.inner.read().await;
         let index = *inner.by_id.get(&id)?;
-        inner.entries.get(index).cloned()
+        let record = inner.entries.get(index)?;
+        // This is the one caller that needs the body text, so it is where a record
+        // whose bodies live on disk gets them back.
+        Some(self.rehydrate(record, &inner))
     }
 
     pub async fn snapshot(&self, limit: Option<usize>) -> Vec<TransactionRecord> {
@@ -2095,6 +2098,74 @@ mod tests {
         assert_eq!(file_mode, 0o600);
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn get_reads_bodies_back_for_a_record_kept_on_disk() {
+        // Viewing a request is the one place the body text is needed. If get()
+        // returned the stripped copy, the detail pane would show an empty body for
+        // everything captured before the last restart.
+        let storage_dir = std::env::temp_dir()
+            .join(format!("sniper-get-rehydrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let mut record = TransactionRecord::http(
+            Utc::now(),
+            "GET".to_string(),
+            "https".to_string(),
+            "detail.example:443".to_string(),
+            "/view".to_string(),
+            Some(200),
+            1,
+            MessageRecord {
+                headers: vec![],
+                body_preview: "request text".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 12,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            },
+            Some(MessageRecord {
+                headers: vec![],
+                body_preview: "response text".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 13,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            }),
+            vec![],
+            None,
+            None,
+        );
+        record.sequence = 1;
+        let record_id = record.id;
+        crate::session::write_transactions_file_for_test(&storage_dir, &[record.clone()]).unwrap();
+        let locator = crate::session::read_transactions_file_for_test(&storage_dir).unwrap()[0].1;
+
+        let mut stripped = record.clone();
+        super::strip_transaction_bodies(&mut stripped);
+        // An annotation applied after loading must win over the copy on disk.
+        stripped.color_tag = Some("red".to_string());
+        let store = TransactionStore::from_records_with_journal_and_event_sequence(
+            vec![stripped],
+            storage_dir.join("transactions.journal"),
+            None,
+            0,
+        );
+        store.set_body_locator_for_test(record_id, locator).await;
+
+        let fetched = store.get(record_id).await.expect("record should be found");
+        assert_eq!(fetched.request.body_preview, "request text");
+        assert_eq!(
+            fetched.response.as_ref().unwrap().body_preview,
+            "response text"
+        );
+        assert_eq!(fetched.color_tag.as_deref(), Some("red"));
+
+        let _ = std::fs::remove_dir_all(storage_dir);
     }
 
     #[tokio::test]
