@@ -86,6 +86,7 @@ const HISTORY_COLUMN_RULES = {
   mime: { default: 128, min: 100, max: 260 },
   notes: { default: 220, min: 74, max: 640 },
   tls: { default: 92, min: 72, max: 140 },
+  edited: { default: 84, min: 64, max: 140 },
   started_at: { default: 176, min: 132, max: 260 },
 };
 const HISTORY_COLUMN_DEFS = {
@@ -98,6 +99,9 @@ const HISTORY_COLUMN_DEFS = {
   mime: { label: "MIME", cssClass: "col-type col-center", sortKey: "mime" },
   notes: { label: "Notes", cssClass: "col-notes", sortKey: "notes" },
   tls: { label: "TLS", cssClass: "col-tls", sortKey: "tls" },
+  // Set for a record whose request or response was changed before it was sent —
+  // by a match/replace rule or by an operator editing it in intercept.
+  edited: { label: "Edited", cssClass: "col-edited col-center", sortKey: "edited" },
   started_at: { label: "Time", cssClass: "col-time", sortKey: "started_at" },
 };
 const HTTP_HISTORY_SORT_KEYS = new Set(Object.keys(HISTORY_COLUMN_RULES));
@@ -105,7 +109,7 @@ const HTTP_METHOD_FILTER_OPTIONS = new Set(["", "GET", "POST", "PUT", "PATCH", "
 const HTTP_COLOR_TAG_OPTIONS = new Set(["red", "orange", "yellow", "green", "blue", "purple"]);
 // Index order behind the Cmd+1~6 (tag) and Ctrl+Cmd+1~6 (filter) shortcuts.
 const HTTP_COLOR_TAG_ORDER = ["red", "orange", "yellow", "green", "blue", "purple"];
-const DEFAULT_HISTORY_COLUMN_ORDER = ["index", "host", "method", "path", "status", "length", "mime", "notes", "tls", "started_at"];
+const DEFAULT_HISTORY_COLUMN_ORDER = ["index", "host", "method", "path", "status", "length", "mime", "notes", "tls", "edited", "started_at"];
 const HISTORY_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "2-digit",
@@ -16574,6 +16578,13 @@ function renderHistoryCell(colKey, item, entry) {
       const tls = isTlsRecord(item) ? '<span class="tls-badge">TLS</span>' : '<span class="tls-badge empty">-</span>';
       return `<td class="tls-cell">${tls}</td>`;
     }
+    case "edited": {
+      const edited = Boolean(item.has_match_replace);
+      const mark = edited
+        ? '<span class="edited-dot" title="Request or response was modified before it was sent">●</span>'
+        : '<span class="edited-dot empty">-</span>';
+      return `<td class="edited-cell">${mark}</td>`;
+    }
     case "started_at":
       return `<td>${escapeHtml(getHistoryTimeLabel(item))}</td>`;
     default:
@@ -18672,6 +18683,11 @@ function normalizeWorkbenchStackHeight(options = {}) {
   const historyHeight = els.trafficRegion.getBoundingClientRect().height;
   const messagesHeight = els.lowerWorkbench.getBoundingClientRect().height;
   const combinedHeight = historyHeight + messagesHeight;
+  // Capture is hidden (another tool tab) or not laid out yet, so both panes
+  // measure 0. Keep the stored height instead of shrinking it to the minimum.
+  if (combinedHeight < WORKBENCH_STACK_MIN_HEIGHTS.messages + WORKBENCH_STACK_MIN_HEIGHTS.history) {
+    return;
+  }
   const nextMessages = clamp(
     messagesHeight,
     WORKBENCH_STACK_MIN_HEIGHTS.messages,
@@ -18834,7 +18850,11 @@ function initReplayResponseCMSearchNavigation() {
 }
 
 function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
+  // `min` wins when the bounds are inverted (max < min). Callers derive `max`
+  // from measured element sizes, and a hidden ancestor measures 0 — the old
+  // order returned a negative `max`, which turned `minmax(180px, -140px)` and
+  // `-280fr` into invalid values and dropped the whole grid template.
+  return Math.max(Math.min(value, max), min);
 }
 
 function toggleSort(key) {
@@ -19587,7 +19607,7 @@ function humanizeSortKey(key) {
 }
 
 function defaultSortDirection(key) {
-  return ["index", "started_at", "status", "length", "notes", "tls"].includes(key) ? "desc" : "asc";
+  return ["index", "started_at", "status", "length", "notes", "tls", "edited"].includes(key) ? "desc" : "asc";
 }
 
 function compareSortValues(left, right) {

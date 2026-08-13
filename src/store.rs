@@ -1749,6 +1749,12 @@ fn sort_filtered_records(records: &mut [&CachedSummary], filters: &ListFilters) 
                 .cmp(&right.is_tls)
                 .then_with(|| compare_sequence(left, right))
         }),
+        "edited" => records.sort_by(|left, right| {
+            left.summary
+                .has_match_replace
+                .cmp(&right.summary.has_match_replace)
+                .then_with(|| compare_sequence(left, right))
+        }),
         "started_at" => records.sort_by(|left, right| compare_started_at(left, right)),
         _ => records.sort_by(|left, right| compare_started_at(left, right)),
     }
@@ -2335,6 +2341,62 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    #[tokio::test]
+    async fn list_page_can_sort_by_whether_a_record_was_edited() {
+        // The Edited column is sortable, so the server has to know the key. An
+        // unknown key silently falls back to time order, which looks like the
+        // column simply does not sort.
+        let store = TransactionStore::new();
+        for (path, edited) in [("/plain", false), ("/changed", true), ("/also-plain", false)] {
+            let mut record = TransactionRecord::http(
+                Utc::now(),
+                "GET".to_string(),
+                "https".to_string(),
+                "sort.example:443".to_string(),
+                path.to_string(),
+                Some(200),
+                1,
+                MessageRecord {
+                    headers: vec![],
+                    body_preview: String::new(),
+                    body_encoding: BodyEncoding::Utf8,
+                    body_size: 0,
+                    decoded_body_size: None,
+                    preview_truncated: false,
+                    content_type: None,
+                    content_decoded: false,
+                },
+                None,
+                vec![],
+                None,
+                None,
+            );
+            if edited {
+                record.original_request = Some(MessageRecord {
+                    headers: vec![],
+                    body_preview: "before".to_string(),
+                    body_encoding: BodyEncoding::Utf8,
+                    body_size: 6,
+                    decoded_body_size: None,
+                    preview_truncated: false,
+                    content_type: None,
+                    content_decoded: false,
+                });
+            }
+            store.insert(record).await;
+        }
+
+        let page = store
+            .list_page(&ListFilters {
+                sort_key: Some("edited".to_string()),
+                sort_direction: Some("desc".to_string()),
+                ..ListFilters::default()
+            })
+            .await;
+        assert_eq!(page.items.first().map(|item| item.path.as_str()), Some("/changed"));
+        assert!(page.items.first().map(|item| item.has_match_replace).unwrap_or(false));
     }
 
     #[test]
