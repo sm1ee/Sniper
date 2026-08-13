@@ -58,6 +58,10 @@ const STATE_FILE: &str = "state.json";
 /// the 100,000 records of a real session can be parsed across cores: 2,408 ms to
 /// parse them inside snapshot.json, 331 ms as this file on 10 threads.
 const TRANSACTIONS_FILE: &str = "transactions.ndjson";
+/// Body-less copies of the same records plus where each one's bodies sit, so a
+/// load can skip reading the bodies at all. About 1.5 KB per record against 12 KB
+/// in transactions.ndjson. Rebuilt from that file whenever it does not match.
+const TRANSACTIONS_META_FILE: &str = "transactions.meta.ndjson";
 /// Batches state-only persists. Long enough to fold a burst of scanner findings
 /// into one write, short enough that a crash loses little.
 const STATE_PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(750);
@@ -1789,6 +1793,111 @@ fn transactions_path(storage_dir: &Path) -> PathBuf {
     storage_dir.join(TRANSACTIONS_FILE)
 }
 
+fn transactions_meta_path(storage_dir: &Path) -> PathBuf {
+    storage_dir.join(TRANSACTIONS_META_FILE)
+}
+
+/// First line of the metadata file: what it was written against. A load compares
+/// this with the real transactions.ndjson and falls back to reading that file when
+/// they disagree, so a metadata file can never describe the wrong bodies.
+#[derive(Serialize, Deserialize)]
+struct TransactionsMetaHeader {
+    source_len: u64,
+    records: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TransactionsMetaLine {
+    #[serde(rename = "r")]
+    record: TransactionRecord,
+    #[serde(rename = "o")]
+    offset: u64,
+    #[serde(rename = "l")]
+    len: u32,
+}
+
+fn write_transactions_meta(
+    storage_dir: &Path,
+    source_len: u64,
+    entries: &[(TransactionRecord, BodyLocator)],
+) -> Result<()> {
+    let path = transactions_meta_path(storage_dir);
+    let tmp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+    let mut tmp_guard = TempJsonFile::new(tmp_path.clone());
+    {
+        let mut file = create_private_file(&tmp_path)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        {
+            let mut writer = BufWriter::new(&mut file);
+            serde_json::to_writer(
+                &mut writer,
+                &TransactionsMetaHeader {
+                    source_len,
+                    records: entries.len(),
+                },
+            )?;
+            writer.write_all(b"\n")?;
+            for (record, locator) in entries {
+                let mut lean = record.clone();
+                crate::store::strip_transaction_bodies(&mut lean);
+                serde_json::to_writer(
+                    &mut writer,
+                    &TransactionsMetaLine {
+                        record: lean,
+                        offset: locator.offset,
+                        len: locator.len,
+                    },
+                )?;
+                writer.write_all(b"\n")?;
+            }
+            writer.flush()?;
+        }
+        file.sync_all()?;
+    }
+    fs::rename(&tmp_path, &path)?;
+    tmp_guard.commit();
+    tighten_private_file(&path)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent, "transactions metadata directory")?;
+    }
+    Ok(())
+}
+
+/// Reads the metadata file, or `None` when it is absent or does not describe the
+/// transactions file that is actually there.
+fn read_transactions_meta(storage_dir: &Path) -> Option<Vec<(TransactionRecord, BodyLocator)>> {
+    let source_len = fs::metadata(transactions_path(storage_dir)).ok()?.len();
+    let bytes = fs::read(transactions_meta_path(storage_dir)).ok()?;
+    let mut lines = bytes.split(|byte| *byte == b'\n');
+    let header: TransactionsMetaHeader = serde_json::from_slice(lines.next()?).ok()?;
+    if header.source_len != source_len {
+        warn!(
+            expected = header.source_len,
+            actual = source_len,
+            "transaction metadata does not match the transactions file; rereading it"
+        );
+        return None;
+    }
+    let mut records = Vec::with_capacity(header.records);
+    for line in lines {
+        if trim_ascii_whitespace(line).is_empty() {
+            continue;
+        }
+        let parsed: TransactionsMetaLine = serde_json::from_slice(line).ok()?;
+        records.push((
+            parsed.record,
+            BodyLocator {
+                offset: parsed.offset,
+                len: parsed.len,
+            },
+        ));
+    }
+    if records.len() != header.records {
+        return None;
+    }
+    Some(records)
+}
+
 /// Splits `bytes` into `parts` slices that each end on a line boundary, so every
 /// line lands wholly inside exactly one slice.
 fn split_on_line_boundaries(bytes: &[u8], parts: usize) -> Vec<&[u8]> {
@@ -1996,6 +2105,21 @@ fn write_transactions_file_streaming(
         .with_context(|| format!("failed to set private permissions on {}", path.display()))?;
     if let Some(parent) = path.parent() {
         sync_directory(parent, "transactions directory")?;
+    }
+    // The metadata file goes last: if this is interrupted it simply does not match
+    // the transactions file, and the next load rereads that instead.
+    if let Some(storage_dir) = path.parent() {
+        let meta: Vec<_> = entries
+            .iter()
+            .filter_map(|(record, _)| {
+                locators
+                    .get(&record.id)
+                    .map(|locator| (record.clone(), *locator))
+            })
+            .collect();
+        if let Err(error) = write_transactions_meta(storage_dir, offset, &meta) {
+            warn!(?error, "failed to write transaction metadata; it will be rebuilt");
+        }
     }
     Ok(locators)
 }
@@ -2340,7 +2464,10 @@ fn load_session_snapshot_with_mode(
     // Transactions live in their own newline-delimited file so they can be parsed
     // across cores. When it is absent — a session written before the move — they
     // are still in snapshot.json, and the first persist migrates them.
-    if let Some(located) = read_transactions_file(storage_dir) {
+    // Prefer the body-less metadata file: it describes the same records at about
+    // an eighth of the bytes, so a load does not have to read the bodies at all.
+    let located = read_transactions_meta(storage_dir).or_else(|| read_transactions_file(storage_dir));
+    if let Some(located) = located {
         let mut records = Vec::with_capacity(located.len());
         let mut locators = HashMap::with_capacity(located.len());
         for (record, locator) in located {
@@ -2358,6 +2485,10 @@ fn load_session_snapshot_with_mode(
         state.transactions = std::mem::take(&mut snapshot.transactions);
         state.websockets = std::mem::take(&mut snapshot.websockets);
         state.transaction_event_sequence = snapshot.transaction_event_sequence;
+        // Carried across with the transactions they describe. Dropping them here
+        // left the store with no way to read bodies back, so every record loaded
+        // from disk showed an empty body.
+        state.transaction_locators = std::mem::take(&mut snapshot.transaction_locators);
         snapshot = state;
     }
     // Prefer the standalone workspace file, but never over a newer copy inside
@@ -3674,6 +3805,81 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn stale_transaction_metadata_is_ignored_rather_than_trusted() {
+        // The metadata file describes bodies by byte offset. If it is allowed to
+        // describe a transactions file it was not written against, every offset is
+        // wrong and reads return other requests' traffic. It must be checked, not
+        // trusted.
+        let storage_dir = std::env::temp_dir()
+            .join(format!("sniper-stale-meta-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let make = |path: &str, body: &str| {
+            TransactionRecord::http(
+                Utc::now(),
+                "GET".to_string(),
+                "https".to_string(),
+                "meta.example:443".to_string(),
+                path.to_string(),
+                Some(200),
+                1,
+                MessageRecord {
+                    headers: vec![],
+                    body_preview: body.to_string(),
+                    body_encoding: BodyEncoding::Utf8,
+                    body_size: body.len(),
+                    decoded_body_size: None,
+                    preview_truncated: false,
+                    content_type: None,
+                    content_decoded: false,
+                },
+                None,
+                vec![],
+                None,
+                None,
+            )
+        };
+
+        // A write produces both files, and the metadata is used.
+        let first = make("/first", "one");
+        super::write_transactions_file_for_test(&storage_dir, &[first.clone()]).unwrap();
+        let entries: Vec<_> = super::read_transactions_file_for_test(&storage_dir)
+            .unwrap()
+            .into_iter()
+            .map(|(record, locator)| (record, locator))
+            .collect();
+        super::write_transactions_meta(
+            &storage_dir,
+            std::fs::metadata(super::transactions_path(&storage_dir))
+                .unwrap()
+                .len(),
+            &entries,
+        )
+        .unwrap();
+        let from_meta = super::read_transactions_meta(&storage_dir).unwrap();
+        assert_eq!(from_meta.len(), 1);
+        assert_eq!(from_meta[0].0.path, "/first");
+
+        // Rewriting the transactions file without refreshing the metadata must make
+        // the metadata unusable, not silently wrong.
+        super::write_transactions_file_for_test(
+            &storage_dir,
+            &[make("/second", &"y".repeat(500)), first],
+        )
+        .unwrap();
+        std::fs::write(
+            super::transactions_meta_path(&storage_dir),
+            std::fs::read(super::transactions_meta_path(&storage_dir)).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            super::read_transactions_meta(&storage_dir).is_none(),
+            "metadata written against a different file must be rejected"
+        );
+
+        let _ = std::fs::remove_dir_all(storage_dir);
     }
 
     #[test]
