@@ -3007,7 +3007,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_list_uses_live_retained_counts() {
+    async fn session_list_counts_every_captured_record() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-session-list-live-count-{}",
             uuid::Uuid::new_v4()
@@ -3131,21 +3131,23 @@ mod tests {
             .into_iter()
             .find(|summary| summary.id == session.id())
             .unwrap();
-        assert_eq!(summary.request_count, 2);
+        // Captured traffic is not discarded, so all three inserts are counted even
+        // though max_transaction_entries is 2.
+        assert_eq!(summary.request_count, 3);
         assert_eq!(summary.websocket_count, 1);
         assert_eq!(summary.event_count, 1);
         assert_eq!(summary.fuzzer_count, 1);
         assert_eq!(summary.rule_count, 1);
 
         let active_summary = state.active_session_summary().await;
-        assert_eq!(active_summary.request_count, 2);
+        assert_eq!(active_summary.request_count, 3);
         assert_eq!(active_summary.websocket_count, 1);
         assert_eq!(active_summary.event_count, 1);
         assert_eq!(active_summary.fuzzer_count, 1);
         assert_eq!(active_summary.rule_count, 1);
 
         let runtime_info = state.runtime_info().await;
-        assert_eq!(runtime_info.active_session.request_count, 2);
+        assert_eq!(runtime_info.active_session.request_count, 3);
         assert_eq!(runtime_info.active_session.websocket_count, 1);
         assert_eq!(runtime_info.active_session.event_count, 1);
         assert_eq!(runtime_info.active_session.fuzzer_count, 1);

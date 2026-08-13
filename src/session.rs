@@ -374,13 +374,12 @@ impl SessionContext {
                     snapshot.transaction_locators,
                     &snapshot.replayed_transaction_ids,
                     journal_path,
-                    Some(max_transaction_entries),
                     transaction_event_sequence,
                 )
             } else {
                 TransactionStore::from_records_with_max_entries_and_event_sequence(
                     snapshot.transactions,
-                    Some(max_transaction_entries),
+                    None,
                     transaction_event_sequence,
                 )
             }),
@@ -2268,9 +2267,13 @@ fn load_session_snapshot_with_mode(
         );
         snapshot.workspace = WorkspaceStateSnapshot::default();
     }
+    // Captured traffic is not discarded any more, so replay keeps every record it
+    // finds. Memory is bounded by dropping bodies in the store, not by dropping
+    // records here.
+    let _ = max_transaction_entries;
     let replay_result = replay_transaction_journal(
         storage_dir,
-        max_transaction_entries,
+        usize::MAX,
         &mut snapshot,
         mode == SessionSnapshotLoadMode::Writable,
     )?;
@@ -7537,7 +7540,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_ignores_old_journal_entries_already_trimmed_from_snapshot() {
+    async fn registry_replays_every_journal_entry_into_the_snapshot() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-session-journal-trim-test-{}",
             uuid::Uuid::new_v4()
@@ -7592,13 +7595,24 @@ mod tests {
         let loaded = registry.load_context(active.id()).unwrap();
         let restored = loaded.store.snapshot(Some(10)).await;
 
-        assert_eq!(restored.len(), 2);
-        assert_eq!(restored[0].host, "4.example:443");
-        assert_eq!(restored[1].host, "3.example:443");
+        // Nothing is dropped any more, so every journalled record comes back.
+        // Order is not the point here — survival is.
+        assert_eq!(restored.len(), 4);
+        let mut hosts: Vec<_> = restored.iter().map(|r| r.host.as_str()).collect();
+        hosts.sort_unstable();
+        assert_eq!(
+            hosts,
+            vec![
+                "1.example:443",
+                "2.example:443",
+                "3.example:443",
+                "4.example:443"
+            ]
+        );
     }
 
     #[tokio::test]
-    async fn registry_backfill_does_not_evict_full_snapshot_window() {
+    async fn registry_backfill_keeps_every_record_in_the_snapshot() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-session-journal-backfill-full-test-{}",
             uuid::Uuid::new_v4()
@@ -7657,12 +7671,17 @@ mod tests {
                 .iter()
                 .map(|record| record.host.as_str())
                 .collect::<Vec<_>>(),
-            vec!["4.example:443", "3.example:443"]
+            vec![
+                "2.example:443",
+                "1.example:443",
+                "4.example:443",
+                "3.example:443"
+            ]
         );
     }
 
     #[tokio::test]
-    async fn registry_keeps_journal_when_only_trimmed_backfill_annotation_mutates() {
+    async fn registry_applies_a_backfill_annotation_to_the_record_it_names() {
         fn record(sequence: u64) -> TransactionRecord {
             let mut record = TransactionRecord::http(
                 Utc::now(),
@@ -7739,18 +7758,22 @@ mod tests {
         let loaded = registry.load_context(active.id()).unwrap();
         let restored = loaded.store.snapshot(Some(10)).await;
 
-        assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].host, "2.example:443");
-        assert_eq!(
-            std::fs::metadata(&journal_path).unwrap().len(),
-            journal_len_before
-        );
+        // The record this annotation targets used to be trimmed away, so replay
+        // changed nothing and the journal was kept. Nothing is trimmed now: the
+        // annotation lands on a live record, the snapshot changes, and the journal
+        // is compacted into it.
+        assert!(journal_len_before > 0);
+        assert_eq!(restored.len(), 2);
+        let mut hosts: Vec<_> = restored.iter().map(|r| r.host.as_str()).collect();
+        hosts.sort_unstable();
+        assert_eq!(hosts, vec!["1.example:443", "2.example:443"]);
+        assert_eq!(std::fs::metadata(&journal_path).unwrap().len(), 0);
 
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
-    async fn registry_bounds_active_journal_replay_to_max_entries() {
+    async fn registry_replays_the_whole_active_journal() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-session-journal-replay-bound-test-{}",
             uuid::Uuid::new_v4()
@@ -7800,13 +7823,14 @@ mod tests {
         let loaded = registry.load_context(active.id()).unwrap();
         let restored = loaded.store.snapshot(Some(10)).await;
 
-        assert_eq!(restored.len(), 2);
+        // Replay is no longer bounded by a retention cap.
+        assert_eq!(restored.len(), 10);
         assert_eq!(restored[0].host, "32.example:443");
         assert_eq!(restored[1].host, "31.example:443");
     }
 
     #[tokio::test]
-    async fn registry_uses_separate_transaction_retention_limit() {
+    async fn registry_keeps_transactions_beyond_the_old_retention_limit() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-session-transaction-retention-test-{}",
             uuid::Uuid::new_v4()
@@ -7857,7 +7881,7 @@ mod tests {
         let loaded = registry.load_context(active.id()).unwrap();
         let restored = loaded.store.snapshot(Some(10)).await;
 
-        assert_eq!(restored.len(), 5);
+        assert_eq!(restored.len(), 8);
         assert_eq!(
             restored
                 .iter()
@@ -7868,7 +7892,10 @@ mod tests {
                 "7.example:443",
                 "6.example:443",
                 "5.example:443",
-                "4.example:443"
+                "4.example:443",
+                "3.example:443",
+                "2.example:443",
+                "1.example:443"
             ]
         );
 

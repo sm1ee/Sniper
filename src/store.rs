@@ -406,7 +406,6 @@ impl TransactionStore {
         mut locators: HashMap<Uuid, crate::session::BodyLocator>,
         replayed_ids: &HashSet<Uuid>,
         journal_path: PathBuf,
-        max_entries: Option<usize>,
         latest_event_sequence: u64,
     ) -> Self {
         for id in replayed_ids {
@@ -417,10 +416,12 @@ impl TransactionStore {
                 strip_transaction_bodies(record);
             }
         }
+        // No cap: captured traffic is kept. Bodies live on disk, so what a record
+        // costs resident no longer scales with its response size.
         let store = Self::from_records_with_journal_and_event_sequence(
             records,
             journal_path,
-            max_entries,
+            None,
             latest_event_sequence,
         );
         store

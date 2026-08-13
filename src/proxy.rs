@@ -6389,7 +6389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_eviction_neither_rewrites_the_snapshot_nor_resurrects_on_reload() {
+    async fn capturing_past_the_old_cap_keeps_every_record_without_compacting() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-journaled-capture-retention-{}",
             Uuid::new_v4()
@@ -6439,10 +6439,10 @@ mod tests {
             "a retention eviction must not compact the journal"
         );
 
-        // Safety of the above: journal replay applies the same retention cap, so
-        // the evicted record does not come back and the newest two survive.
+        // And nothing is dropped: captured traffic is kept, so all three records
+        // are still there after a reload.
         let reloaded = state.sessions.load_context(session_id).unwrap();
-        assert!(reloaded.store.get(first_id).await.is_none());
+        assert!(reloaded.store.get(first_id).await.is_some());
         assert!(reloaded.store.get(second_id).await.is_some());
         assert!(reloaded.store.get(third_id).await.is_some());
 
