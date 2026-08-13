@@ -1140,6 +1140,23 @@ impl TransactionStore {
         self.retention_events.subscribe()
     }
 
+    /// Points the store at where a compaction just put each record, and drops the
+    /// bodies it no longer has to hold. Must be called after every rewrite of
+    /// transactions.ndjson: the offsets from before it are stale, and a stale
+    /// offset silently returns a different request's traffic.
+    pub async fn adopt_written_locators(
+        &self,
+        locators: HashMap<Uuid, crate::session::BodyLocator>,
+    ) {
+        let mut inner = self.inner.write().await;
+        for record in inner.entries.iter_mut() {
+            if locators.contains_key(&record.id) {
+                strip_transaction_bodies(record);
+            }
+        }
+        inner.locators = locators;
+    }
+
     #[cfg(test)]
     pub(crate) async fn set_body_locator_for_test(
         &self,
@@ -2099,6 +2116,77 @@ mod tests {
         assert_eq!(file_mode, 0o600);
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn locators_follow_the_file_after_a_rewrite() {
+        // A rewrite moves every offset after the first record whose serialized form
+        // changed. A stale offset does not error — it parses whatever line happens
+        // to sit there and hands back a different request's traffic.
+        let storage_dir = std::env::temp_dir()
+            .join(format!("sniper-locator-refresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let make = |path: &str, body: &str, sequence: u64| {
+            let mut record = TransactionRecord::http(
+                Utc::now(),
+                "GET".to_string(),
+                "https".to_string(),
+                "shift.example:443".to_string(),
+                path.to_string(),
+                Some(200),
+                1,
+                MessageRecord {
+                    headers: vec![],
+                    body_preview: body.to_string(),
+                    body_encoding: BodyEncoding::Utf8,
+                    body_size: body.len(),
+                    decoded_body_size: None,
+                    preview_truncated: false,
+                    content_type: None,
+                    content_decoded: false,
+                },
+                None,
+                vec![],
+                None,
+                None,
+            );
+            record.sequence = sequence;
+            record
+        };
+        let first = make("/first", "short", 1);
+        let second = make("/second", "the second body", 2);
+        let second_id = second.id;
+        crate::session::write_transactions_file_for_test(
+            &storage_dir,
+            &[first.clone(), second.clone()],
+        )
+        .unwrap();
+        let located = crate::session::read_transactions_file_for_test(&storage_dir).unwrap();
+
+        let mut stripped_second = second.clone();
+        super::strip_transaction_bodies(&mut stripped_second);
+        let store = TransactionStore::from_records_with_journal_and_event_sequence(
+            vec![stripped_second],
+            storage_dir.join("transactions.journal"),
+            None,
+            0,
+        );
+        store.set_body_locator_for_test(second_id, located[1].1).await;
+
+        // Rewrite with a longer first record, which pushes the second one along.
+        let grown_first = make("/first", &"x".repeat(4096), 1);
+        let fresh = crate::session::write_transactions_file_for_test_returning_locators(
+            &storage_dir,
+            &[grown_first, second.clone()],
+        )
+        .unwrap();
+        store.adopt_written_locators(fresh).await;
+
+        let fetched = store.get(second_id).await.expect("record should be found");
+        assert_eq!(fetched.path, "/second");
+        assert_eq!(fetched.request.body_preview, "the second body");
+
+        let _ = std::fs::remove_dir_all(storage_dir);
     }
 
     #[tokio::test]

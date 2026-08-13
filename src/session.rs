@@ -741,12 +741,15 @@ impl SessionContext {
         let transactions = std::mem::take(&mut snapshot.transactions);
         let snapshot_file = snapshot_path(&self.storage_dir);
         let transactions_file = transactions_path(&self.storage_dir);
-        tokio::task::spawn_blocking(move || {
-            write_transactions_file(&transactions_file, &transactions)?;
-            write_json(&snapshot_file, &snapshot)
+        let written_locators = tokio::task::spawn_blocking(move || -> Result<_> {
+            let locators = write_transactions_file(&transactions_file, &transactions)?;
+            write_json(&snapshot_file, &snapshot)?;
+            Ok(locators)
         })
         .await
         .context("session snapshot writer panicked")??;
+        // Every offset just moved, so the store has to follow the new file.
+        self.store.adopt_written_locators(written_locators).await;
         // After snapshot.json, so state.json is never the older of the two — that
         // is what lets the loader prefer it by mtime. Both hold the same data
         // here; a crash in between just means the loader takes snapshot.json.
@@ -1755,6 +1758,14 @@ pub(crate) fn write_transactions_file_for_test(
     storage_dir: &Path,
     records: &[TransactionRecord],
 ) -> Result<()> {
+    write_transactions_file(&transactions_path(storage_dir), records).map(|_| ())
+}
+
+#[cfg(test)]
+pub(crate) fn write_transactions_file_for_test_returning_locators(
+    storage_dir: &Path,
+    records: &[TransactionRecord],
+) -> Result<HashMap<Uuid, BodyLocator>> {
     write_transactions_file(&transactions_path(storage_dir), records)
 }
 
@@ -1900,21 +1911,39 @@ fn read_transactions_file(storage_dir: &Path) -> Option<Vec<(TransactionRecord, 
 }
 
 /// Writes the transactions file atomically, one compact record per line.
-fn write_transactions_file(path: &Path, records: &[TransactionRecord]) -> Result<()> {
+/// Writes the transactions file and returns where each record landed. Compaction
+/// changes every offset after the first record whose serialized form changed, so
+/// the caller must replace its locators with these — a stale locator does not
+/// error, it hands back a different request's traffic.
+fn write_transactions_file(
+    path: &Path,
+    records: &[TransactionRecord],
+) -> Result<HashMap<Uuid, BodyLocator>> {
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)
             .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
     }
     let tmp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
     let mut tmp_guard = TempJsonFile::new(tmp_path.clone());
+    let mut locators = HashMap::with_capacity(records.len());
+    let mut offset = 0u64;
     {
         let mut file = create_private_file(&tmp_path)
             .with_context(|| format!("failed to write {}", tmp_path.display()))?;
         {
             let mut writer = BufWriter::new(&mut file);
             for record in records {
-                serde_json::to_writer(&mut writer, record)
+                let line = serde_json::to_vec(record)
                     .context("failed to serialize transaction record")?;
+                locators.insert(
+                    record.id,
+                    BodyLocator {
+                        offset,
+                        len: line.len() as u32,
+                    },
+                );
+                offset += line.len() as u64 + 1;
+                writer.write_all(&line)?;
                 writer.write_all(b"\n")?;
             }
             writer
@@ -1937,7 +1966,7 @@ fn write_transactions_file(path: &Path, records: &[TransactionRecord]) -> Result
     if let Some(parent) = path.parent() {
         sync_directory(parent, "transactions directory")?;
     }
-    Ok(())
+    Ok(locators)
 }
 
 /// Reads the standalone state file, but only when it is at least as new as
