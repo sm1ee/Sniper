@@ -749,10 +749,13 @@ impl TransactionStore {
         full
     }
 
+    /// Records to write, each with where its bodies already sit on disk. The
+    /// writer copies those lines across rather than loading them, so compaction
+    /// never has to hold the whole history in memory.
     pub async fn snapshot_for_persistence(
         &self,
         limit: Option<usize>,
-    ) -> io::Result<Vec<TransactionRecord>> {
+    ) -> io::Result<Vec<(TransactionRecord, Option<crate::session::BodyLocator>)>> {
         let _insert_guard = self.insert_lock.lock().await;
         let inner = self.inner.read().await;
         if let Some(tx) = &self.journal_tx {
@@ -767,11 +770,12 @@ impl TransactionStore {
                 }
             }
         }
-        // Rehydrate before handing records to a writer: persisting a stripped
-        // record would replace its stored bodies with nothing.
         Ok(snapshot_entries(&inner, limit)
             .into_iter()
-            .map(|record| self.rehydrate(&record, &inner))
+            .map(|record| {
+                let locator = inner.locators.get(&record.id).copied();
+                (record, locator)
+            })
             .collect())
     }
 
@@ -2258,7 +2262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisting_a_stripped_record_reads_its_bodies_back_from_disk() {
+    async fn rewriting_copies_bodies_across_for_a_stripped_record() {
         // The gate this whole change rests on: once bodies live on disk, handing a
         // stripped record to a writer would replace the stored bodies with nothing.
         // snapshot_for_persistence must read them back first.
@@ -2313,11 +2317,20 @@ mod tests {
         );
         store.set_body_locator_for_test(record_id, locator).await;
 
+        // The store hands back the stripped record plus where its bodies sit; the
+        // writer is what puts them in the new file. What matters is that the file
+        // it writes still has them.
         let persisted = store.snapshot_for_persistence(None).await.unwrap();
         assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].request.body_preview, "the request body");
+        assert!(persisted[0].0.request.body_preview.is_empty());
+        assert!(persisted[0].1.is_some(), "bodies must be locatable on disk");
+
+        crate::session::rewrite_transactions_file_for_test(&storage_dir, &persisted).unwrap();
+        let rewritten = crate::session::read_transactions_file_for_test(&storage_dir).unwrap();
+        assert_eq!(rewritten.len(), 1);
+        assert_eq!(rewritten[0].0.request.body_preview, "the request body");
         assert_eq!(
-            persisted[0].response.as_ref().unwrap().body_preview,
+            rewritten[0].0.response.as_ref().unwrap().body_preview,
             "the response body"
         );
 
@@ -2389,7 +2402,7 @@ mod tests {
         let snapshot = store.snapshot_for_persistence(None).await.unwrap();
 
         assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].host, "example.com");
+        assert_eq!(snapshot[0].0.host, "example.com");
     }
 
     #[tokio::test]
@@ -2409,7 +2422,7 @@ mod tests {
 
         let snapshot = store.snapshot_for_persistence(None).await.unwrap();
         assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].host, "lost.example");
+        assert_eq!(snapshot[0].0.host, "lost.example");
     }
 
     #[tokio::test]
@@ -2591,7 +2604,7 @@ mod tests {
 
         let snapshot = snapshot_task.await.unwrap().unwrap();
         assert_eq!(snapshot.len(), 2);
-        assert_eq!(snapshot[0].host, "pending.example");
+        assert_eq!(snapshot[0].0.host, "pending.example");
     }
 
     #[tokio::test]

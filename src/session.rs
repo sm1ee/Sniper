@@ -709,7 +709,6 @@ impl SessionContext {
         // `state` here copies only those small sections — the big ones are still
         // empty at this point.
         let mut snapshot = state.clone();
-        snapshot.transactions = transactions;
         snapshot.websockets = websockets;
         snapshot.transaction_event_sequence = self.store.latest_event_sequence();
 
@@ -719,7 +718,7 @@ impl SessionContext {
             .expect("session metadata lock poisoned")
             .clone();
         metadata.updated_at = Utc::now();
-        metadata.request_count = snapshot.transactions.len();
+        metadata.request_count = transactions.len();
         metadata.websocket_count = snapshot.websockets.len();
         metadata.event_count = snapshot.event_log.len();
         metadata.fuzzer_count = snapshot.fuzzer_attacks.len();
@@ -738,11 +737,12 @@ impl SessionContext {
         //
         // Both writes are serializing and fsyncing over a GB once a session is
         // large, and the proxy shares this tokio runtime, so they run off it.
-        let transactions = std::mem::take(&mut snapshot.transactions);
         let snapshot_file = snapshot_path(&self.storage_dir);
         let transactions_file = transactions_path(&self.storage_dir);
+        let source_file = transactions_file.clone();
         let written_locators = tokio::task::spawn_blocking(move || -> Result<_> {
-            let locators = write_transactions_file(&transactions_file, &transactions)?;
+            let locators =
+                write_transactions_file_streaming(&transactions_file, &source_file, &transactions)?;
             write_json(&snapshot_file, &snapshot)?;
             Ok(locators)
         })
@@ -1762,6 +1762,15 @@ pub(crate) fn write_transactions_file_for_test(
 }
 
 #[cfg(test)]
+pub(crate) fn rewrite_transactions_file_for_test(
+    storage_dir: &Path,
+    entries: &[(TransactionRecord, Option<BodyLocator>)],
+) -> Result<HashMap<Uuid, BodyLocator>> {
+    let path = transactions_path(storage_dir);
+    write_transactions_file_streaming(&path, &path.clone(), entries)
+}
+
+#[cfg(test)]
 pub(crate) fn write_transactions_file_for_test_returning_locators(
     storage_dir: &Path,
     records: &[TransactionRecord],
@@ -1911,6 +1920,86 @@ fn read_transactions_file(storage_dir: &Path) -> Option<Vec<(TransactionRecord, 
 }
 
 /// Writes the transactions file atomically, one compact record per line.
+/// Writes the transactions file from records that may still have their bodies on
+/// disk, copying those lines straight across instead of loading them.
+///
+/// Compaction used to materialize every record: with bodies on disk that meant
+/// reopening the file once per record — 115,000 opens on a real session — and
+/// holding the whole 1.2 GB in memory to write it straight back out. Records that
+/// have not changed since the last rewrite are copied byte for byte.
+fn write_transactions_file_streaming(
+    path: &Path,
+    source: &Path,
+    entries: &[(TransactionRecord, Option<BodyLocator>)],
+) -> Result<HashMap<Uuid, BodyLocator>> {
+    if let Some(parent) = path.parent() {
+        create_private_dir_all(parent)
+            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+    }
+    let mut reader = fs::File::open(source).ok().map(BufReader::new);
+    let tmp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+    let mut tmp_guard = TempJsonFile::new(tmp_path.clone());
+    let mut locators = HashMap::with_capacity(entries.len());
+    let mut offset = 0u64;
+    {
+        let mut file = create_private_file(&tmp_path)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        {
+            let mut writer = BufWriter::new(&mut file);
+            let mut line = Vec::new();
+            for (record, locator) in entries {
+                line.clear();
+                let copied = match (locator, reader.as_mut()) {
+                    (Some(locator), Some(reader)) => {
+                        line.resize(locator.len as usize, 0);
+                        reader
+                            .seek(std::io::SeekFrom::Start(locator.offset))
+                            .and_then(|_| reader.read_exact(&mut line))
+                            .is_ok()
+                    }
+                    _ => false,
+                };
+                if !copied {
+                    // No locator, or the copy failed: the in-memory record is what
+                    // there is. A record with a locator always has its bodies on
+                    // disk, so this only serializes ones that still hold them.
+                    line = serde_json::to_vec(record)
+                        .context("failed to serialize transaction record")?;
+                }
+                locators.insert(
+                    record.id,
+                    BodyLocator {
+                        offset,
+                        len: line.len() as u32,
+                    },
+                );
+                offset += line.len() as u64 + 1;
+                writer.write_all(&line)?;
+                writer.write_all(b"\n")?;
+            }
+            writer
+                .flush()
+                .with_context(|| format!("failed to flush {}", tmp_path.display()))?;
+        }
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
+    }
+    fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to rename {} to {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
+    tmp_guard.commit();
+    tighten_private_file(path)
+        .with_context(|| format!("failed to set private permissions on {}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent, "transactions directory")?;
+    }
+    Ok(locators)
+}
+
 /// Writes the transactions file and returns where each record landed. Compaction
 /// changes every offset after the first record whose serialized form changed, so
 /// the caller must replace its locators with these — a stale locator does not
