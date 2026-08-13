@@ -86,7 +86,7 @@ const HISTORY_COLUMN_RULES = {
   mime: { default: 128, min: 100, max: 260 },
   notes: { default: 220, min: 74, max: 640 },
   tls: { default: 92, min: 72, max: 140 },
-  edited: { default: 84, min: 64, max: 140 },
+  edited: { default: 96, min: 72, max: 160 },
   started_at: { default: 176, min: 132, max: 260 },
 };
 const HISTORY_COLUMN_DEFS = {
@@ -101,7 +101,7 @@ const HISTORY_COLUMN_DEFS = {
   tls: { label: "TLS", cssClass: "col-tls", sortKey: "tls" },
   // Set for a record whose request or response was changed before it was sent —
   // by a match/replace rule or by an operator editing it in intercept.
-  edited: { label: "Edited", cssClass: "col-edited col-center", sortKey: "edited" },
+  edited: { label: "Modified", cssClass: "col-edited col-center", sortKey: "edited" },
   started_at: { label: "Time", cssClass: "col-time", sortKey: "started_at" },
 };
 const HTTP_HISTORY_SORT_KEYS = new Set(Object.keys(HISTORY_COLUMN_RULES));
@@ -109,7 +109,7 @@ const HTTP_METHOD_FILTER_OPTIONS = new Set(["", "GET", "POST", "PUT", "PATCH", "
 const HTTP_COLOR_TAG_OPTIONS = new Set(["red", "orange", "yellow", "green", "blue", "purple"]);
 // Index order behind the Cmd+1~6 (tag) and Ctrl+Cmd+1~6 (filter) shortcuts.
 const HTTP_COLOR_TAG_ORDER = ["red", "orange", "yellow", "green", "blue", "purple"];
-const DEFAULT_HISTORY_COLUMN_ORDER = ["index", "host", "method", "path", "status", "length", "mime", "notes", "tls", "edited", "started_at"];
+const DEFAULT_HISTORY_COLUMN_ORDER = ["index", "host", "method", "path", "edited", "status", "length", "mime", "notes", "tls", "started_at"];
 const HISTORY_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "2-digit",
@@ -16500,10 +16500,22 @@ function sanitizeHistoryColumnOrder(candidate) {
       seen.add(key);
     }
   }
+  // A column added after a layout was saved is missing from it. Appending would
+  // drop it at the far right, nowhere near where it belongs; put it back beside
+  // the column it follows by default instead.
   for (const key of DEFAULT_HISTORY_COLUMN_ORDER) {
-    if (!seen.has(key)) {
-      order.push(key);
+    if (seen.has(key)) continue;
+    const defaultIndex = DEFAULT_HISTORY_COLUMN_ORDER.indexOf(key);
+    let insertAt = order.length;
+    for (let i = defaultIndex - 1; i >= 0; i -= 1) {
+      const previous = order.indexOf(DEFAULT_HISTORY_COLUMN_ORDER[i]);
+      if (previous !== -1) {
+        insertAt = previous + 1;
+        break;
+      }
     }
+    order.splice(insertAt, 0, key);
+    seen.add(key);
   }
   return order;
 }
