@@ -313,7 +313,7 @@ struct HistoryListArgs {
     #[arg(long)]
     mime: Option<String>,
     /// Sort key for paged history output, e.g. index, host, method, path, status, length, mime, notes, tls, started_at.
-    #[arg(long, value_parser = ["index", "host", "method", "path", "status", "length", "mime", "notes", "tls", "started_at"])]
+    #[arg(long, value_parser = ["index", "host", "method", "path", "status", "length", "mime", "notes", "tls", "edited", "started_at"])]
     sort_key: Option<String>,
     /// Sort direction for paged history output.
     #[arg(long, value_parser = ["asc", "desc"])]

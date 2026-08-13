@@ -602,6 +602,7 @@ fn validate_transaction_sort_key(sort_key: Option<&str>) -> std::result::Result<
     };
     match sort_key {
         "index" | "host" | "method" | "path" | "status" | "length" | "mime" | "notes" | "tls"
+        | "edited"
         | "started_at" => Ok(()),
         _ => Err(format!("invalid transaction sort_key: {sort_key}")),
     }
@@ -14315,6 +14316,33 @@ mod tests {
         assert!(session.fuzzer.list(Some(10)).await.is_empty());
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn every_history_column_sort_key_is_accepted() {
+        // The UI offers a sort for each column and the store implements each one,
+        // but requests pass through this validator first — a key missing here is a
+        // 400 that looks like the column is broken, which is how the Edited column
+        // shipped the first time.
+        for key in [
+            "index",
+            "host",
+            "method",
+            "path",
+            "status",
+            "length",
+            "mime",
+            "notes",
+            "tls",
+            "edited",
+            "started_at",
+        ] {
+            assert!(
+                super::validate_transaction_sort_key(Some(key)).is_ok(),
+                "sort key {key} must be accepted"
+            );
+        }
+        assert!(super::validate_transaction_sort_key(Some("nonsense")).is_err());
     }
 
     #[test]
