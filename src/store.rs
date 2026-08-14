@@ -2123,8 +2123,8 @@ mod tests {
         // A rewrite moves every offset after the first record whose serialized form
         // changed. A stale offset does not error — it parses whatever line happens
         // to sit there and hands back a different request's traffic.
-        let storage_dir = std::env::temp_dir()
-            .join(format!("sniper-locator-refresh-{}", uuid::Uuid::new_v4()));
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-locator-refresh-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&storage_dir).unwrap();
         let make = |path: &str, body: &str, sequence: u64| {
             let mut record = TransactionRecord::http(
@@ -2171,7 +2171,9 @@ mod tests {
             None,
             0,
         );
-        store.set_body_locator_for_test(second_id, located[1].1).await;
+        store
+            .set_body_locator_for_test(second_id, located[1].1)
+            .await;
 
         // Rewrite with a longer first record, which pushes the second one along.
         let grown_first = make("/first", &"x".repeat(4096), 1);
@@ -2194,8 +2196,8 @@ mod tests {
         // Viewing a request is the one place the body text is needed. If get()
         // returned the stripped copy, the detail pane would show an empty body for
         // everything captured before the last restart.
-        let storage_dir = std::env::temp_dir()
-            .join(format!("sniper-get-rehydrate-{}", uuid::Uuid::new_v4()));
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-get-rehydrate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&storage_dir).unwrap();
         let mut record = TransactionRecord::http(
             Utc::now(),
@@ -2262,8 +2264,8 @@ mod tests {
         // The gate this whole change rests on: once bodies live on disk, handing a
         // stripped record to a writer would replace the stored bodies with nothing.
         // snapshot_for_persistence must read them back first.
-        let storage_dir = std::env::temp_dir()
-            .join(format!("sniper-rehydrate-{}", uuid::Uuid::new_v4()));
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-rehydrate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&storage_dir).unwrap();
         let mut record = TransactionRecord::http(
             Utc::now(),
@@ -2339,7 +2341,11 @@ mod tests {
         // unknown key silently falls back to time order, which looks like the
         // column simply does not sort.
         let store = TransactionStore::new();
-        for (path, edited) in [("/plain", false), ("/changed", true), ("/also-plain", false)] {
+        for (path, edited) in [
+            ("/plain", false),
+            ("/changed", true),
+            ("/also-plain", false),
+        ] {
             let mut record = TransactionRecord::http(
                 Utc::now(),
                 "GET".to_string(),
@@ -2385,8 +2391,15 @@ mod tests {
                 ..ListFilters::default()
             })
             .await;
-        assert_eq!(page.items.first().map(|item| item.path.as_str()), Some("/changed"));
-        assert!(page.items.first().map(|item| item.has_match_replace).unwrap_or(false));
+        assert_eq!(
+            page.items.first().map(|item| item.path.as_str()),
+            Some("/changed")
+        );
+        assert!(page
+            .items
+            .first()
+            .map(|item| item.has_match_replace)
+            .unwrap_or(false));
     }
 
     #[test]

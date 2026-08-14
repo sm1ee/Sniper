@@ -255,7 +255,10 @@ impl AppState {
     ) -> (Arc<SessionContext>, crate::proxy::ActiveProxySessionGuard) {
         let active_session = self.active_session.read().await;
         let session = active_session.clone();
-        let owner = crate::proxy::remember_active_proxy_session_owner(session.id(), crate::proxy::PROXY_WORK_REPLAY);
+        let owner = crate::proxy::remember_active_proxy_session_owner(
+            session.id(),
+            crate::proxy::PROXY_WORK_REPLAY,
+        );
         (session, owner)
     }
 
@@ -2303,10 +2306,10 @@ mod tests {
         parse_hdiutil_attach_output, proxy_url_targets_loopback,
         release_asset_archs_match_binary_archs, release_asset_matches_arch,
         release_proxy_env_targets_loopback, release_update_available, select_release_dmg_asset,
-        self_update_bundle_is_writable, self_update_installer_log_path, signing_team_update_verdict,
-        update_installer_script,
-        validate_downloaded_update_size, validate_self_update_app_bundle_path, verify_app_identity,
-        AppState, GitHubAsset, GitHubRelease, UpdateArtifactGuard, CODESIGN_PATH, DITTO_PATH,
+        self_update_bundle_is_writable, self_update_installer_log_path,
+        signing_team_update_verdict, update_installer_script, validate_downloaded_update_size,
+        validate_self_update_app_bundle_path, verify_app_identity, AppState, GitHubAsset,
+        GitHubRelease, UpdateArtifactGuard, CODESIGN_PATH, DITTO_PATH,
         EXPECTED_APP_BUNDLE_IDENTIFIER, EXPECTED_APP_EXECUTABLE, HDIUTIL_PATH, LIPO_PATH,
         PLIST_BUDDY_PATH, SH_PATH, SPCTL_PATH,
     };
@@ -3593,10 +3596,8 @@ mod tests {
         // Forcing stops the session's streamed-response pumps, which is what
         // normally never drains. An owner guard held by something else — a replay
         // in flight — is not a stream, so forcing must not pretend it succeeded.
-        let data_dir = std::env::temp_dir().join(format!(
-            "sniper-activate-force-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-activate-force-{}", uuid::Uuid::new_v4()));
         let state = AppState::new(AppConfig {
             proxy_addr: "127.0.0.1:0".parse().unwrap(),
             ui_addr: "127.0.0.1:0".parse().unwrap(),
@@ -3612,7 +3613,10 @@ mod tests {
             .create_session(Some("Second".to_string()))
             .unwrap();
 
-        let owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         let error = state
             .activate_session_with_options(next.id, true)
             .await
@@ -3656,7 +3660,10 @@ mod tests {
             .create_session(Some("Second".to_string()))
             .unwrap();
 
-        let owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         let error = state.activate_session(next.id).await.unwrap_err();
         assert!(error
             .to_string()
@@ -3688,7 +3695,10 @@ mod tests {
         let _current_operation_lock = state.session_operation_lock(original_id).await;
         let before = state.session_operation_lock_count().await;
 
-        let owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         for index in 0..3 {
             let error = state
                 .create_session(Some(format!("Blocked {index}")))
@@ -3731,7 +3741,10 @@ mod tests {
             .await
             .unwrap();
 
-        let owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         let error = state.activate_session(original_id).await.unwrap_err();
         assert!(error
             .to_string()

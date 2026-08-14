@@ -480,7 +480,10 @@ mod tests {
             super::AppConfig::from_env_with_defaults("127.0.0.1:18080", "127.0.0.1:0").unwrap();
 
         assert_eq!(config.max_entries, super::DEFAULT_MAX_ENTRIES);
-        assert_eq!(config.max_transaction_entries, super::DEFAULT_MAX_TRANSACTION_ENTRIES);
+        assert_eq!(
+            config.max_transaction_entries,
+            super::DEFAULT_MAX_TRANSACTION_ENTRIES
+        );
 
         let _ = std::fs::remove_dir_all(home);
     }

@@ -107,7 +107,10 @@ pub fn host_without_port(host: &str) -> &str {
         }
     }
     if trimmed.matches(':').count() == 1 {
-        return trimmed.split_once(':').map(|(host, _)| host).unwrap_or(trimmed);
+        return trimmed
+            .split_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(trimmed);
     }
     trimmed
 }
@@ -126,7 +129,10 @@ mod tests {
         assert!(host_matches_pattern("api.example.com", "*.example.com"));
         assert!(host_matches_pattern("a.b.example.com", "*.example.com"));
         assert!(!host_matches_pattern("notexample.com", "*.example.com"));
-        assert!(!host_matches_pattern("example.com.evil.net", "*.example.com"));
+        assert!(!host_matches_pattern(
+            "example.com.evil.net",
+            "*.example.com"
+        ));
     }
 
     #[test]
@@ -136,8 +142,14 @@ mod tests {
             "aem-kakao-collector.onkakao.net",
             "aem-*.onkakao.net"
         ));
-        assert!(host_matches_pattern("aem-x.onkakao.net", "aem-*.onkakao.net"));
-        assert!(!host_matches_pattern("cdn.onkakao.net", "aem-*.onkakao.net"));
+        assert!(host_matches_pattern(
+            "aem-x.onkakao.net",
+            "aem-*.onkakao.net"
+        ));
+        assert!(!host_matches_pattern(
+            "cdn.onkakao.net",
+            "aem-*.onkakao.net"
+        ));
         // Anchored: a host that merely contains the prefix does not match.
         assert!(!host_matches_pattern(
             "x-aem-y.onkakao.net",

@@ -2118,7 +2118,10 @@ fn write_transactions_file_streaming(
             })
             .collect();
         if let Err(error) = write_transactions_meta(storage_dir, offset, &meta) {
-            warn!(?error, "failed to write transaction metadata; it will be rebuilt");
+            warn!(
+                ?error,
+                "failed to write transaction metadata; it will be rebuilt"
+            );
         }
     }
     Ok(locators)
@@ -2146,8 +2149,8 @@ fn write_transactions_file(
         {
             let mut writer = BufWriter::new(&mut file);
             for record in records {
-                let line = serde_json::to_vec(record)
-                    .context("failed to serialize transaction record")?;
+                let line =
+                    serde_json::to_vec(record).context("failed to serialize transaction record")?;
                 locators.insert(
                     record.id,
                     BodyLocator {
@@ -2466,7 +2469,8 @@ fn load_session_snapshot_with_mode(
     // are still in snapshot.json, and the first persist migrates them.
     // Prefer the body-less metadata file: it describes the same records at about
     // an eighth of the bytes, so a load does not have to read the bodies at all.
-    let located = read_transactions_meta(storage_dir).or_else(|| read_transactions_file(storage_dir));
+    let located =
+        read_transactions_meta(storage_dir).or_else(|| read_transactions_file(storage_dir));
     if let Some(located) = located {
         let mut records = Vec::with_capacity(located.len());
         let mut locators = HashMap::with_capacity(located.len());
@@ -3732,8 +3736,8 @@ mod tests {
         // "snapshot is newer" only happens after a build from before the split
         // wrote the whole document, and then the embedded copy has to win.
         for state_file_is_newer in [true, false] {
-            let storage_dir = std::env::temp_dir()
-                .join(format!("sniper-state-file-{}", uuid::Uuid::new_v4()));
+            let storage_dir =
+                std::env::temp_dir().join(format!("sniper-state-file-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&storage_dir).unwrap();
 
             // write_json fsyncs and renames, so write order is mtime order.
@@ -3813,8 +3817,8 @@ mod tests {
         // describe a transactions file it was not written against, every offset is
         // wrong and reads return other requests' traffic. It must be checked, not
         // trusted.
-        let storage_dir = std::env::temp_dir()
-            .join(format!("sniper-stale-meta-{}", uuid::Uuid::new_v4()));
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-stale-meta-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&storage_dir).unwrap();
         let make = |path: &str, body: &str| {
             TransactionRecord::http(
@@ -3888,8 +3892,8 @@ mod tests {
         // that is off by one line silently returns someone else's traffic. The
         // parallel path hands each thread a slice, and its locators must still be
         // absolute within the whole file.
-        let storage_dir = std::env::temp_dir()
-            .join(format!("sniper-locators-{}", uuid::Uuid::new_v4()));
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-locators-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&storage_dir).unwrap();
         let records: Vec<_> = (0..600)
             .map(|i| {
@@ -3946,8 +3950,8 @@ mod tests {
 
     #[test]
     fn transactions_round_trip_through_their_own_file_and_fall_back_to_the_snapshot() {
-        let storage_dir = std::env::temp_dir()
-            .join(format!("sniper-transactions-file-{}", uuid::Uuid::new_v4()));
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-transactions-file-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&storage_dir).unwrap();
         let record = |path: &str| {
             TransactionRecord::http(
@@ -4003,8 +4007,10 @@ mod tests {
 
     #[test]
     fn transaction_journal_replay_bytes_counts_the_checkpoint_too() {
-        let data_dir = std::env::temp_dir()
-            .join(format!("sniper-journal-replay-bytes-{}", uuid::Uuid::new_v4()));
+        let data_dir = std::env::temp_dir().join(format!(
+            "sniper-journal-replay-bytes-{}",
+            uuid::Uuid::new_v4()
+        ));
         let (_registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
         let journal = super::transaction_journal_path(active.storage_dir());
         let checkpoint = transaction_journal_checkpoint_path(&journal);
@@ -4031,8 +4037,10 @@ mod tests {
             // after a downgrade and back the embedded copy can be the newer one.
             (3, 7, "from-snapshot-copy"),
         ] {
-            let storage_dir = std::env::temp_dir()
-                .join(format!("sniper-workspace-precedence-{}", uuid::Uuid::new_v4()));
+            let storage_dir = std::env::temp_dir().join(format!(
+                "sniper-workspace-precedence-{}",
+                uuid::Uuid::new_v4()
+            ));
             std::fs::create_dir_all(&storage_dir).unwrap();
             let tab = |id: &str| {
                 serde_json::json!({
@@ -4864,7 +4872,10 @@ mod tests {
             Some("recovered-workspace-tab")
         );
         assert!(super::workspace_path(active.storage_dir()).is_file());
-        assert!(snapshot_path.is_dir(), "the workspace save must not touch snapshot.json");
+        assert!(
+            snapshot_path.is_dir(),
+            "the workspace save must not touch snapshot.json"
+        );
 
         // The unusable snapshot.json is cleared out of the way on the next load
         // instead, and the workspace still restores — from its own file.
