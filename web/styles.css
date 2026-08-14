@@ -5381,8 +5381,11 @@ button.utility-button.replay-tab-add {
 }
 
 @media (max-width: 1240px) {
-  .split-panel,
-  .split-panel-tight,
+  /* .split-panel and .split-panel-tight are deliberately not here. They are
+     grids that fill a fixed-height pane, so height:auto left the Intercept and
+     Replay panes' content bunched at the top with the rest of the pane empty.
+     flex-direction did nothing for them either — every selector below except
+     .fuzzer-top-row is display:grid. */
   .dual-code-panel,
   .modal-grid,
   .display-settings-grid,
