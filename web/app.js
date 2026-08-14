@@ -819,7 +819,6 @@ const els = {
   startFuzzerButton: document.getElementById("startFuzzerButton"),
   resetFuzzerButton: document.getElementById("resetFuzzerButton"),
   contextMenu: document.getElementById("contextMenu"),
-  contextMenuNote: document.getElementById("contextMenuNote"),
   contextMenuNotes: document.getElementById("contextMenuNotes"),
   contextMenuNotesSection: document.getElementById("contextMenuNotesSection"),
   contextMenuNotesDivider: document.getElementById("contextMenuNotesDivider"),
@@ -1192,6 +1191,15 @@ function bindEvents() {
       const rect = notesCell.getBoundingClientRect();
       openContextMenu(rect.left, rect.bottom + 4, row.dataset.id);
     }
+  });
+  els.historyTableBody.addEventListener("dblclick", (event) => {
+    const cell = event.target.closest('td[data-col="notes"]');
+    if (!cell) return;
+    const row = cell.closest(".history-row");
+    if (!row?.dataset.id) return;
+    event.preventDefault();
+    event.stopPropagation();
+    beginNoteEdit(cell, row.dataset.id).catch((error) => console.error(error));
   });
   els.historyTableBody.addEventListener("contextmenu", (event) => {
     const row = event.target.closest(".history-row");
@@ -21598,8 +21606,6 @@ let contextMenuTargetId = null;
 let contextMenuAnchor = { x: 0, y: 0 };
 let contextMenuSessionId = null;
 let contextMenuRecordTarget = null;
-let contextMenuNoteTimer = null;
-let contextMenuPendingNote = null;
 
 function openContextMenu(x, y, transactionId) {
   contextMenuTargetId = transactionId;
@@ -21615,7 +21621,6 @@ function openContextMenu(x, y, transactionId) {
     dot.classList.toggle("active", dot.dataset.color === currentColor);
   });
 
-  els.contextMenuNote.value = "";
   renderContextMenuNotes(null);
   if (transactionId) {
     loadUserNote(transactionId);
@@ -21652,7 +21657,6 @@ function renderContextMenuNotes(notes) {
 }
 
 function closeContextMenu() {
-  flushContextMenuPendingNote();
   els.contextMenu.classList.add("hidden");
   contextMenuTargetId = null;
   contextMenuSessionId = null;
@@ -21663,6 +21667,78 @@ function contextMenuSessionIsCurrent() {
   return !!contextMenuSessionId && contextMenuSessionId === currentSessionId();
 }
 
+// Editing a note happens in the cell itself: double-click it, type, Enter or
+// click away to save, Escape to abandon. It used to live in the right-click
+// menu, which meant aiming at a menu to write one word.
+async function beginNoteEdit(cell, transactionId) {
+  if (!cell || cell.querySelector("input.note-inline-input")) return;
+  const sessionId = currentSessionId();
+  closeContextMenu();
+
+  let current = "";
+  try {
+    const response = await fetch(transactionPath(transactionId, sessionId));
+    if (response.ok) {
+      current = (await response.json()).user_note || "";
+    }
+  } catch { /* start from empty */ }
+  if (currentSessionId() !== sessionId || !cell.isConnected) return;
+
+  const previous = cell.innerHTML;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "note-inline-input";
+  input.value = current;
+  input.placeholder = "Add a note...";
+  cell.innerHTML = "";
+  cell.appendChild(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  let debounce = null;
+  const save = (value) => {
+    updateAnnotations(transactionId, { user_note: value || null }, sessionId);
+  };
+  const restore = () => {
+    if (settled) return;
+    settled = true;
+    if (cell.isConnected) cell.innerHTML = previous;
+  };
+  const commit = () => {
+    if (settled) return;
+    window.clearTimeout(debounce);
+    const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES).trim();
+    settled = true;
+    if (cell.isConnected) cell.innerHTML = previous;
+    if (value !== current.trim()) {
+      save(value);
+    }
+  };
+  // Save as you type as well as on commit: closing the window mid-edit should
+  // not lose what was typed, and updateAnnotations is already flushed on unload.
+  input.addEventListener("input", () => {
+    const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES);
+    if (value !== input.value) input.value = value;
+    window.clearTimeout(debounce);
+    debounce = window.setTimeout(() => save(value.trim()), 500);
+  });
+  input.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      window.clearTimeout(debounce);
+      restore();
+    }
+  });
+  input.addEventListener("blur", commit);
+  input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("dblclick", (event) => event.stopPropagation());
+}
+
 async function loadUserNote(transactionId) {
   const sessionId = currentSessionId();
   try {
@@ -21671,7 +21747,6 @@ async function loadUserNote(transactionId) {
     if (response.ok) {
       const record = await response.json();
       if (currentSessionId() === sessionId && contextMenuTargetId === transactionId) {
-        els.contextMenuNote.value = record.user_note || "";
         renderContextMenuNotes(record.notes);
         positionContextMenu();
       }
@@ -21699,24 +21774,7 @@ async function updateAnnotations(transactionId, payload, sessionId = currentSess
   }
 }
 
-function flushContextMenuPendingNote(options = {}) {
-  window.clearTimeout(contextMenuNoteTimer);
-  contextMenuNoteTimer = null;
-  const pending = contextMenuPendingNote;
-  if (!pending?.id || !pending.sessionId) {
-    contextMenuPendingNote = null;
-    return false;
-  }
-  if (options.sessionId && pending.sessionId !== options.sessionId) {
-    return false;
-  }
-  contextMenuPendingNote = null;
-  updateAnnotations(pending.id, { user_note: pending.value || null }, pending.sessionId);
-  return true;
-}
-
 function flushAnnotationsOnUnload() {
-  flushContextMenuPendingNote();
   if (!state._pendingAnnotations) {
     return;
   }
@@ -21734,7 +21792,6 @@ function flushAnnotationsOnUnload() {
 }
 
 async function flushAllPendingAnnotations(options = {}) {
-  flushContextMenuPendingNote(options);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const pendingIds = state._pendingAnnotations ? Array.from(state._pendingAnnotations.keys()) : [];
     const inFlight = state._annotationInFlight || new Set();
@@ -21931,44 +21988,6 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
       openCompareModal(targetId).catch((error) => console.error(error));
     }
   });
-});
-
-els.contextMenuNote.addEventListener("input", () => {
-  if (!contextMenuTargetId) return;
-  if (!contextMenuSessionIsCurrent()) {
-    closeContextMenu();
-    return;
-  }
-  clearTimeout(contextMenuNoteTimer);
-  const id = contextMenuTargetId;
-  const sessionId = contextMenuSessionId;
-  const value = truncateUtf8(els.contextMenuNote.value, MAX_ANNOTATION_NOTE_BYTES);
-  if (value !== els.contextMenuNote.value) {
-    els.contextMenuNote.value = value;
-  }
-  contextMenuPendingNote = { id, sessionId, value };
-  contextMenuNoteTimer = setTimeout(() => {
-    flushContextMenuPendingNote();
-  }, 500);
-});
-
-els.contextMenuNote.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    if (!contextMenuTargetId) return;
-    if (!contextMenuSessionIsCurrent()) {
-      closeContextMenu();
-      return;
-    }
-    contextMenuPendingNote = {
-      id: contextMenuTargetId,
-      sessionId: contextMenuSessionId,
-      value: truncateUtf8(els.contextMenuNote.value, MAX_ANNOTATION_NOTE_BYTES),
-    };
-    flushContextMenuPendingNote();
-    closeContextMenu();
-  }
-  event.stopPropagation();
 });
 
 /* ─── WS Frame context menu ─── */

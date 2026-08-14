@@ -1575,6 +1575,18 @@ code {
   width: var(--history-col-notes, 220px);
 }
 
+.note-inline-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  border: 1px solid var(--accent, #d9a441);
+  border-radius: 3px;
+  background: var(--panel, #1a1a1a);
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
 .history-table .col-edited {
   width: var(--history-col-edited, 96px);
   text-align: center;
