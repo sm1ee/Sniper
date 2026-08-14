@@ -1576,7 +1576,8 @@ code {
 }
 
 .history-table .col-edited {
-  width: var(--history-col-edited, 84px);
+  width: var(--history-col-edited, 96px);
+  text-align: center;
 }
 
 .edited-cell {
@@ -1584,13 +1585,12 @@ code {
 }
 
 .edited-dot {
+  display: inline-block;
+  width: 100%;
+  text-align: center;
   color: var(--accent, #d9a441);
   font-size: 11px;
-}
-
-.edited-dot.empty {
-  color: var(--text-dim);
-  opacity: 0.5;
+  line-height: 1;
 }
 
 .history-table .col-tls {

@@ -16591,10 +16591,11 @@ function renderHistoryCell(colKey, item, entry) {
       return `<td class="tls-cell">${tls}</td>`;
     }
     case "edited": {
-      const edited = Boolean(item.has_match_replace);
-      const mark = edited
+      // Only the modified rows carry a mark. A placeholder on every other row is
+      // noise in a column that exists to make the few stand out.
+      const mark = item.has_match_replace
         ? '<span class="edited-dot" title="Request or response was modified before it was sent">●</span>'
-        : '<span class="edited-dot empty">-</span>';
+        : "";
       return `<td class="edited-cell">${mark}</td>`;
     }
     case "started_at":
