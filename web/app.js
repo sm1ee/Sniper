@@ -10501,8 +10501,16 @@ function renderLoadingDetail(message = "Loading selected transaction...") {
 function renderMessagePanes() {
   const record = state.selectedRecord;
   const detailLoading = Boolean(state.selectedId && state.loadingDetailId === state.selectedId);
+  // The request line comes off the record, so the original view has to swap the
+  // method and path too — otherwise an edit that only touched the query string
+  // renders identically to the modified request.
   const requestRecord = record && state.showOriginal.request && record.original_request
-    ? { ...record, request: record.original_request }
+    ? {
+        ...record,
+        request: record.original_request,
+        method: record.original_method ?? record.method,
+        path: record.original_path ?? record.path,
+      }
     : record;
   const responseRecord = record && state.showOriginal.response && record.original_response
     ? { ...record, response: record.original_response }
@@ -14047,6 +14055,11 @@ async function forwardSelectedIntercept() {
     interceptReqText,
     state.selectedInterceptRecord.request,
   );
+  // The editor is the only place that knows whether anything was actually typed.
+  // Comparing the parsed request against the held one on the server reports edits
+  // that never happened, because the round trip through text normalises headers
+  // and can rewrite Content-Length on its own.
+  const edited = interceptReqText !== buildEditableRawRequest(state.selectedInterceptRecord.request);
   if (state.selectedInterceptRecord.is_websocket && request.body) {
     showToast("WebSocket upgrade requests must not include a request body.", "error");
     return;
@@ -14064,7 +14077,7 @@ async function forwardSelectedIntercept() {
     const response = await fetch(sessionWritePath(`/api/intercepts/${id}/forward`, sessionId), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ request }),
+      body: JSON.stringify({ request, edited }),
     });
     await requireOkResponse(response, "Failed to forward intercepted request.");
     if (sessionId !== currentSessionId()) {
@@ -14342,6 +14355,8 @@ async function forwardSelectedResponseIntercept() {
     state.selectedResponseInterceptRecord.response,
     state.selectedResponseInterceptRecord.method,
   );
+  const edited =
+    interceptResText !== buildEditableRawResponse(state.selectedResponseInterceptRecord.response);
 
   // Optimistic UI
   state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
@@ -14355,7 +14370,7 @@ async function forwardSelectedResponseIntercept() {
     const response = await fetch(sessionWritePath(`/api/response-intercepts/${id}/forward`, sessionId), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ response: editedResponse }),
+      body: JSON.stringify({ response: editedResponse, edited }),
     });
     await requireOkResponse(response, "Failed to forward intercepted response.");
     if (sessionId !== currentSessionId()) {
@@ -17155,6 +17170,8 @@ function buildDiffPresentation(target, record) {
   const fakeOriginal = { ...record };
   if (target === "request") {
     fakeOriginal.request = original;
+    fakeOriginal.method = record.original_method ?? record.method;
+    fakeOriginal.path = record.original_path ?? record.path;
   } else {
     fakeOriginal.response = original;
   }

@@ -186,7 +186,14 @@ pub struct InterceptSummary {
 
 #[derive(Clone, Debug)]
 pub enum InterceptResolution {
-    Forward(EditableRequest),
+    /// `edited` is what the operator actually did, reported by the client. The
+    /// server cannot tell from the request alone: the editor renders the held
+    /// request to text and parses it back, and that round trip can rewrite
+    /// Content-Length or trim header whitespace on its own.
+    Forward {
+        request: EditableRequest,
+        edited: bool,
+    },
     Drop(EditableRequest),
 }
 
@@ -240,7 +247,7 @@ impl InterceptQueue {
             .map(|entry| entry.record.clone())
     }
 
-    pub async fn forward(&self, id: Uuid, request: EditableRequest) -> Result<()> {
+    pub async fn forward(&self, id: Uuid, request: EditableRequest, edited: bool) -> Result<()> {
         let mut queue = self.queue.lock().await;
         let index = queue
             .iter()
@@ -251,7 +258,7 @@ impl InterceptQueue {
             .ok_or_else(|| anyhow!("failed to remove intercept item {id}"))?;
         pending
             .responder
-            .send(InterceptResolution::Forward(request))
+            .send(InterceptResolution::Forward { request, edited })
             .map_err(|_| anyhow!("intercept consumer dropped before forward"))?;
         Ok(())
     }
@@ -260,9 +267,10 @@ impl InterceptQueue {
         let mut queue = self.queue.lock().await;
         let count = queue.len();
         while let Some(pending) = queue.pop_front() {
-            let _ = pending
-                .responder
-                .send(InterceptResolution::Forward(pending.record.request));
+            let _ = pending.responder.send(InterceptResolution::Forward {
+                request: pending.record.request,
+                edited: false,
+            });
         }
         count
     }
@@ -310,9 +318,10 @@ fn trim_pending_request_intercepts(
         let Some(pending) = queue.pop_front() else {
             break;
         };
-        let _ = pending
-            .responder
-            .send(InterceptResolution::Forward(pending.record.request));
+        let _ = pending.responder.send(InterceptResolution::Forward {
+            request: pending.record.request,
+            edited: false,
+        });
         evicted += 1;
     }
     evicted
@@ -360,7 +369,10 @@ pub struct ResponseInterceptSummary {
 #[derive(Clone, Debug)]
 pub enum ResponseInterceptResolution {
     PassThrough,
-    Forward(EditableResponse),
+    Forward {
+        response: EditableResponse,
+        edited: bool,
+    },
     Drop,
 }
 
@@ -412,7 +424,7 @@ impl ResponseInterceptQueue {
             .map(|entry| entry.record.clone())
     }
 
-    pub async fn forward(&self, id: Uuid, response: EditableResponse) -> Result<()> {
+    pub async fn forward(&self, id: Uuid, response: EditableResponse, edited: bool) -> Result<()> {
         let mut queue = self.queue.lock().await;
         let index = queue
             .iter()
@@ -423,7 +435,7 @@ impl ResponseInterceptQueue {
             .ok_or_else(|| anyhow!("failed to remove response intercept item {id}"))?;
         pending
             .responder
-            .send(ResponseInterceptResolution::Forward(response))
+            .send(ResponseInterceptResolution::Forward { response, edited })
             .map_err(|_| anyhow!("response intercept consumer dropped before forward"))?;
         Ok(())
     }
@@ -432,9 +444,12 @@ impl ResponseInterceptQueue {
         let mut queue = self.queue.lock().await;
         let count = queue.len();
         while let Some(pending) = queue.pop_front() {
-            let _ = pending.responder.send(ResponseInterceptResolution::Forward(
-                pending.record.response,
-            ));
+            let _ = pending
+                .responder
+                .send(ResponseInterceptResolution::Forward {
+                    response: pending.record.response,
+                    edited: false,
+                });
         }
         count
     }
@@ -480,9 +495,12 @@ fn trim_pending_response_intercepts(
         let Some(pending) = queue.pop_front() else {
             break;
         };
-        let _ = pending.responder.send(ResponseInterceptResolution::Forward(
-            pending.record.response,
-        ));
+        let _ = pending
+            .responder
+            .send(ResponseInterceptResolution::Forward {
+                response: pending.record.response,
+                edited: false,
+            });
         evicted += 1;
     }
     evicted
@@ -609,7 +627,7 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue.front().map(|pending| pending.record.id), Some(new_id));
         match old_receiver.await.unwrap() {
-            InterceptResolution::Forward(request) => assert_eq!(request.host, old.host),
+            InterceptResolution::Forward { request, .. } => assert_eq!(request.host, old.host),
             InterceptResolution::Drop(_) => panic!("old request should be forwarded"),
         }
     }
@@ -655,7 +673,7 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue.front().map(|pending| pending.record.id), Some(new_id));
         match old_receiver.await.unwrap() {
-            ResponseInterceptResolution::Forward(response) => {
+            ResponseInterceptResolution::Forward { response, .. } => {
                 assert_eq!(response.status, old.status)
             }
             ResponseInterceptResolution::PassThrough | ResponseInterceptResolution::Drop => {
@@ -691,7 +709,9 @@ mod tests {
 
         match pending.await.unwrap() {
             InterceptResolution::Drop(request) => assert_eq!(request.host, original.host),
-            InterceptResolution::Forward(_) => panic!("expected pending intercept to be dropped"),
+            InterceptResolution::Forward { .. } => {
+                panic!("expected pending intercept to be dropped")
+            }
         }
     }
 
@@ -724,7 +744,8 @@ mod tests {
 
         match pending.await.unwrap() {
             ResponseInterceptResolution::Drop => {}
-            ResponseInterceptResolution::PassThrough | ResponseInterceptResolution::Forward(_) => {
+            ResponseInterceptResolution::PassThrough
+            | ResponseInterceptResolution::Forward { .. } => {
                 panic!("expected pending response intercept to be dropped")
             }
         }

@@ -321,6 +321,16 @@ impl MessageRecord {
     }
 }
 
+/// What the client actually sent, kept when intercept or a match/replace rule
+/// changed the request on its way upstream. The request line travels with the
+/// message because a `MessageRecord` has no method or target of its own.
+#[derive(Clone, Debug)]
+pub struct OriginalRequest {
+    pub message: MessageRecord,
+    pub method: String,
+    pub path: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionRecord {
     pub id: Uuid,
@@ -351,6 +361,13 @@ pub struct TransactionRecord {
     pub annotation_client_versions: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_request: Option<MessageRecord>,
+    /// The request line before it was changed. A MessageRecord carries headers and
+    /// a body but no method or target, so without these the original view showed
+    /// the edited URL and a query-string change looked like no change at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_response: Option<MessageRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,9 +388,17 @@ impl TransactionRecord {
         request: MessageRecord,
         response: Option<MessageRecord>,
         notes: Vec<String>,
-        original_request: Option<MessageRecord>,
+        original_request: Option<OriginalRequest>,
         original_response: Option<MessageRecord>,
     ) -> Self {
+        let (original_request, original_method, original_path) = match original_request {
+            Some(original) => (
+                Some(original.message),
+                Some(original.method),
+                Some(original.path),
+            ),
+            None => (None, None, None),
+        };
         Self {
             id: Uuid::new_v4(),
             started_at,
@@ -393,6 +418,8 @@ impl TransactionRecord {
             annotation_revision: 0,
             annotation_client_versions: BTreeMap::new(),
             original_request,
+            original_method,
+            original_path,
             original_response,
             http_version: None,
             response_http_version: None,
@@ -452,6 +479,8 @@ impl TransactionRecord {
             annotation_revision: 0,
             annotation_client_versions: BTreeMap::new(),
             original_request: None,
+            original_method: None,
+            original_path: None,
             original_response: None,
             http_version: None,
             response_http_version: None,

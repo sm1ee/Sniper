@@ -648,7 +648,7 @@ async fn intercept_forward_keeps_client_request_alive() {
         .expect("intercept record should still exist");
     session
         .intercepts
-        .forward(intercept_id, intercept.request)
+        .forward(intercept_id, intercept.request, false)
         .await
         .expect("forward should resume the waiting client request");
 

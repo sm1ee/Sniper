@@ -59,8 +59,8 @@ use crate::{
     },
     model::{
         BodyEncoding, EditableRequest, EditableResponse, HeaderRecord, MessageRecord,
-        RequestTargetOverride, TransactionRecord, WebSocketFrameDirection, WebSocketFrameKind,
-        WebSocketFrameRecord, WebSocketSessionRecord,
+        OriginalRequest, RequestTargetOverride, TransactionRecord, WebSocketFrameDirection,
+        WebSocketFrameKind, WebSocketFrameRecord, WebSocketSessionRecord,
     },
     runtime_state::{self, RuntimeStateSnapshot},
     session::SessionContext,
@@ -104,7 +104,7 @@ struct StreamedRecordContext {
     request_capture: MessageRecord,
     response_headers: HeaderMap,
     notes: Vec<String>,
-    original_request_capture: Option<MessageRecord>,
+    original_request_capture: Option<OriginalRequest>,
     request_version: Option<Version>,
     response_version: Version,
     max_preview: usize,
@@ -1325,7 +1325,9 @@ fn local_interface_ips() -> Vec<IpAddr> {
                         let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
                         // s_addr is in network byte order; to_ne_bytes yields the
                         // in-memory octets [a, b, c, d] regardless of host endianness.
-                        addrs.push(IpAddr::V4(Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes())));
+                        addrs.push(IpAddr::V4(Ipv4Addr::from(
+                            sin.sin_addr.s_addr.to_ne_bytes(),
+                        )));
                     }
                     libc::AF_INET6 => {
                         let sin6 = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
@@ -1381,7 +1383,10 @@ fn request_targets_own_listener(uri: &Uri, proxy_addr: SocketAddr) -> bool {
     };
     let port = match authority.port_u16() {
         Some(port) => port,
-        None => match uri.scheme_str().and_then(|scheme| default_port_for_scheme(scheme).ok()) {
+        None => match uri
+            .scheme_str()
+            .and_then(|scheme| default_port_for_scheme(scheme).ok())
+        {
             Some(port) => port,
             None => return false,
         },
@@ -2431,35 +2436,26 @@ async fn forward_http_request(
     let request_http_version = parts.version;
     let editable_request = editable_request_from_parts(&parts, &request_bytes, &absolute_uri);
     let client_request = editable_request.clone();
-    let intercepted_request = match maybe_intercept_request(
-        session.clone(),
-        peer_addr,
-        editable_request,
-        false,
-    )
-    .await
-    {
-        InterceptResolution::Forward(request) => request,
-        InterceptResolution::Drop(request) => {
-            let dropped = build_dropped_transaction(
-                state.as_ref(),
-                request,
-                started_at,
-                started,
-                "Request dropped in intercept.",
-                Some(request_http_version),
-            );
-            let insert_outcome =
-                insert_transaction_quiet(&session, dropped.record, "dropped request").await;
-            persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
-            return dropped.response;
-        }
-    };
-    let intercept_original = intercept_request_original(
-        &client_request,
-        &intercepted_request,
-        state.config.body_preview_bytes,
-    );
+    let (intercepted_request, intercept_edited) =
+        match maybe_intercept_request(session.clone(), peer_addr, editable_request, false).await {
+            InterceptResolution::Forward { request, edited } => (request, edited),
+            InterceptResolution::Drop(request) => {
+                let dropped = build_dropped_transaction(
+                    state.as_ref(),
+                    request,
+                    started_at,
+                    started,
+                    "Request dropped in intercept.",
+                    Some(request_http_version),
+                );
+                let insert_outcome =
+                    insert_transaction_quiet(&session, dropped.record, "dropped request").await;
+                persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
+                return dropped.response;
+            }
+        };
+    let intercept_original = intercept_edited
+        .then(|| intercept_request_original(&client_request, state.config.body_preview_bytes));
     let (forwarded_request, notes, match_replace_original) = apply_request_match_replace(
         session.as_ref(),
         intercepted_request,
@@ -2527,14 +2523,21 @@ async fn forward_http_request(
                         &response_method,
                     )
                 }
-                ResponseInterceptResolution::Forward(edited) => {
+                ResponseInterceptResolution::Forward {
+                    response: edited,
+                    edited: was_edited,
+                } => {
                     let headers = header_map_from_records(&edited.headers);
                     let body = Bytes::from(edited.body_bytes());
                     let status = StatusCode::from_u16(edited.status)
                         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                     // Keep what the server actually sent before overwriting it, so
                     // the history view has an original to show against the edit.
-                    if record.original_response.is_none() {
+                    // Only when the editor reports a change: forwarding untouched
+                    // still round-trips the response through the editor's text, and
+                    // marking that as modified is what put a false mark on records
+                    // nobody edited.
+                    if was_edited && record.original_response.is_none() {
                         record.original_response = record.response.clone();
                     }
                     record.status = Some(status.as_u16());
@@ -2584,37 +2587,34 @@ async fn forward_websocket_request(
     let client_request_headers = parts.headers.clone();
     let editable_request = editable_request_from_parts(&parts, &request_bytes, &absolute_uri);
     let client_request = editable_request.clone();
-    let forwarded_request = match maybe_intercept_request(
-        session.clone(),
-        peer_addr,
-        editable_request,
-        true,
-    )
-    .await
-    {
-        InterceptResolution::Forward(request) => request,
-        InterceptResolution::Drop(request) => {
-            let dropped = build_dropped_transaction(
-                state.as_ref(),
-                request,
-                started_at,
-                started,
-                "WebSocket upgrade dropped in intercept.",
-                Some(request_http_version),
-            );
-            let insert_outcome =
-                insert_transaction_quiet(&session, dropped.record, "dropped websocket upgrade")
-                    .await;
-            persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
-            return dropped.response;
-        }
-    };
-    let (forwarded_request, request_notes, original_request_capture) = apply_request_match_replace(
+    let (forwarded_request, ws_intercept_edited) =
+        match maybe_intercept_request(session.clone(), peer_addr, editable_request, true).await {
+            InterceptResolution::Forward { request, edited } => (request, edited),
+            InterceptResolution::Drop(request) => {
+                let dropped = build_dropped_transaction(
+                    state.as_ref(),
+                    request,
+                    started_at,
+                    started,
+                    "WebSocket upgrade dropped in intercept.",
+                    Some(request_http_version),
+                );
+                let insert_outcome =
+                    insert_transaction_quiet(&session, dropped.record, "dropped websocket upgrade")
+                        .await;
+                persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
+                return dropped.response;
+            }
+        };
+    let ws_intercept_original = ws_intercept_edited
+        .then(|| intercept_request_original(&client_request, state.config.body_preview_bytes));
+    let (forwarded_request, request_notes, match_replace_original) = apply_request_match_replace(
         session.as_ref(),
         forwarded_request,
         state.config.body_preview_bytes,
     )
     .await;
+    let original_request_capture = ws_intercept_original.or(match_replace_original);
 
     if !is_websocket_upgrade_editable(&forwarded_request) {
         let response_method = forwarded_request.method.clone();
@@ -3075,20 +3075,32 @@ async fn maybe_intercept_request(
     is_websocket: bool,
 ) -> InterceptResolution {
     if !session.runtime.intercept_enabled().await {
-        return InterceptResolution::Forward(request);
+        return InterceptResolution::Forward {
+            request,
+            edited: false,
+        };
     }
 
     if special_host::is_special_host(&request.host) {
-        return InterceptResolution::Forward(request);
+        return InterceptResolution::Forward {
+            request,
+            edited: false,
+        };
     }
     if session.runtime.intercept_scope_only().await
         && !session.runtime.is_in_scope(&request.host).await
     {
-        return InterceptResolution::Forward(request);
+        return InterceptResolution::Forward {
+            request,
+            edited: false,
+        };
     }
 
     if !session.intercept_rules.matches_any(&request).await {
-        return InterceptResolution::Forward(request);
+        return InterceptResolution::Forward {
+            request,
+            edited: false,
+        };
     }
 
     session
@@ -3341,7 +3353,7 @@ async fn execute_streaming_http_exchange(
     started: Instant,
     mut notes: Vec<String>,
     _secure_special_host: bool,
-    original_request_capture: Option<MessageRecord>,
+    original_request_capture: Option<OriginalRequest>,
     request_http_version: Option<Version>,
     requested_http_version: Option<Version>,
     outbound_uri_authority: Option<&str>,
@@ -3485,7 +3497,10 @@ async fn execute_streaming_http_exchange(
             let context = StreamedRecordContext {
                 state: state.clone(),
                 session: session.clone(),
-                _session_owner: remember_active_proxy_session_owner(session.id(), PROXY_WORK_STREAMED_RESPONSE),
+                _session_owner: remember_active_proxy_session_owner(
+                    session.id(),
+                    PROXY_WORK_STREAMED_RESPONSE,
+                ),
                 persist_generation,
                 record_id: None,
                 started_at,
@@ -3793,7 +3808,7 @@ async fn execute_http_exchange(
     started: Instant,
     mut notes: Vec<String>,
     secure_special_host: bool,
-    original_request_capture: Option<MessageRecord>,
+    original_request_capture: Option<OriginalRequest>,
     request_http_version: Option<Version>,
     requested_http_version: Option<Version>,
     outbound_uri_authority: Option<&str>,
@@ -4142,33 +4157,30 @@ async fn execute_http_exchange(
     }
 }
 
-/// The request as the client sent it, when intercept handed back something else.
-///
-/// Only match/replace used to record an original, and it sees the request
-/// *after* intercept — so editing a held request left nothing to compare against
-/// and the history view showed no original/modified toggle for it.
-fn intercept_request_original(
-    before: &EditableRequest,
-    after: &EditableRequest,
-    preview_bytes: usize,
-) -> Option<MessageRecord> {
-    if before == after {
-        return None;
+/// The request as the client sent it, kept when the operator edited it in
+/// intercept. Only match/replace used to record an original, and it sees the
+/// request *after* intercept, so an operator edit had nothing to compare against.
+fn intercept_request_original(before: &EditableRequest, preview_bytes: usize) -> OriginalRequest {
+    OriginalRequest {
+        message: MessageRecord::from_headers_and_body(
+            &header_map_from_records(&before.headers),
+            before.body_bytes().as_ref(),
+            preview_bytes,
+        ),
+        method: before.method.clone(),
+        path: before.path.clone(),
     }
-    Some(MessageRecord::from_headers_and_body(
-        &header_map_from_records(&before.headers),
-        before.body_bytes().as_ref(),
-        preview_bytes,
-    ))
 }
 
 async fn apply_request_match_replace(
     session: &SessionContext,
     request: EditableRequest,
     preview_bytes: usize,
-) -> (EditableRequest, Vec<String>, Option<MessageRecord>) {
+) -> (EditableRequest, Vec<String>, Option<OriginalRequest>) {
     let original_headers = header_map_from_records(&request.headers);
     let original_body = request.body_bytes();
+    let original_method = request.method.clone();
+    let original_path = request.path.clone();
     let applied_request = session.match_replace.apply_request(request).await;
     if !applied_request.notes.is_empty() {
         session
@@ -4184,11 +4196,15 @@ async fn apply_request_match_replace(
     let original_capture = if applied_request.notes.is_empty() {
         None
     } else {
-        Some(MessageRecord::from_headers_and_body(
-            &original_headers,
-            original_body.as_ref(),
-            preview_bytes,
-        ))
+        Some(OriginalRequest {
+            message: MessageRecord::from_headers_and_body(
+                &original_headers,
+                original_body.as_ref(),
+                preview_bytes,
+            ),
+            method: original_method,
+            path: original_path,
+        })
     };
     (
         applied_request.request,
@@ -5365,10 +5381,7 @@ pub fn abort_session_idle_tunnels(session_id: Uuid) -> usize {
     abort_session_tasks_where(session_id, |reason| reason == PROXY_WORK_TUNNEL)
 }
 
-fn abort_session_tasks_where(
-    session_id: Uuid,
-    matches: impl Fn(&'static str) -> bool,
-) -> usize {
+fn abort_session_tasks_where(session_id: Uuid, matches: impl Fn(&'static str) -> bool) -> usize {
     let aborts = {
         let mut tasks = ACTIVE_SESSION_TASKS
             .lock()
@@ -6113,11 +6126,17 @@ mod tests {
         assert!(!response_body_is_close_delimited(Version::HTTP_2, &headers));
 
         headers.insert(CONTENT_LENGTH, HeaderValue::from_static("10"));
-        assert!(!response_body_is_close_delimited(Version::HTTP_11, &headers));
+        assert!(!response_body_is_close_delimited(
+            Version::HTTP_11,
+            &headers
+        ));
 
         headers.remove(CONTENT_LENGTH);
         headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
-        assert!(!response_body_is_close_delimited(Version::HTTP_11, &headers));
+        assert!(!response_body_is_close_delimited(
+            Version::HTTP_11,
+            &headers
+        ));
     }
 
     #[test]
@@ -6597,7 +6616,10 @@ mod tests {
         let context = StreamedRecordContext {
             state: Arc::clone(&state),
             session: Arc::clone(&session),
-            _session_owner: remember_active_proxy_session_owner(session_id, PROXY_WORK_STREAMED_RESPONSE),
+            _session_owner: remember_active_proxy_session_owner(
+                session_id,
+                PROXY_WORK_STREAMED_RESPONSE,
+            ),
             persist_generation,
             record_id: None,
             started_at: Utc::now(),
@@ -6656,7 +6678,10 @@ mod tests {
         let mut context = StreamedRecordContext {
             state: Arc::clone(&state),
             session: Arc::clone(&session),
-            _session_owner: remember_active_proxy_session_owner(session_id, PROXY_WORK_STREAMED_RESPONSE),
+            _session_owner: remember_active_proxy_session_owner(
+                session_id,
+                PROXY_WORK_STREAMED_RESPONSE,
+            ),
             persist_generation,
             record_id: None,
             started_at: Utc::now(),
@@ -7462,7 +7487,8 @@ mod tests {
         spawn_tracked_proxy_task(session_id, PROXY_WORK_WEBSOCKET, async move {
             std::future::pending::<()>().await;
         });
-        let exchange = remember_active_proxy_session_owner(session_id, PROXY_WORK_STREAMED_RESPONSE);
+        let exchange =
+            remember_active_proxy_session_owner(session_id, PROXY_WORK_STREAMED_RESPONSE);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             describe_session_proxy_work(session_id),
@@ -7519,16 +7545,15 @@ mod tests {
     }
 
     #[test]
-    fn an_intercept_edit_records_what_the_client_actually_sent() {
-        // The history view only offers an original/modified toggle when the record
-        // carries an original. Match/replace records one, but it runs after
-        // intercept, so without this an operator edit had nothing to compare
-        // against.
-        let base = EditableRequest {
+    fn an_intercept_edit_records_the_client_request_line_not_just_headers_and_body() {
+        // The original view rebuilds the request line from the record's own method
+        // and path. Keeping only headers and a body meant an edit to the query
+        // string rendered byte-for-byte identical to the modified request.
+        let client_request = EditableRequest {
             scheme: "https".to_string(),
             host: "edit.example".to_string(),
             method: "POST".to_string(),
-            path: "/submit".to_string(),
+            path: "/pay?amount=25000&hash=abc".to_string(),
             headers: vec![HeaderRecord {
                 name: "content-type".to_string(),
                 value: "application/json".to_string(),
@@ -7538,20 +7563,31 @@ mod tests {
             preview_truncated: false,
         };
 
-        // Forwarded untouched: nothing to show, so no original.
-        assert!(super::intercept_request_original(&base, &base.clone(), 4096).is_none());
+        let original = super::intercept_request_original(&client_request, 4096);
+        assert_eq!(original.method, "POST");
+        assert_eq!(original.path, "/pay?amount=25000&hash=abc");
+        assert_eq!(original.message.body_preview, "{\"a\":1}");
 
-        // Body edited in intercept: the client's own body is what gets kept.
-        let mut edited = base.clone();
-        edited.body = "{\"a\":999}".to_string();
-        let original = super::intercept_request_original(&base, &edited, 4096)
-            .expect("an edited request must keep the client's original");
-        assert_eq!(original.body_preview, "{\"a\":1}");
-
-        // A header edit counts too, not just the body.
-        let mut header_edited = base.clone();
-        header_edited.headers[0].value = "text/plain".to_string();
-        assert!(super::intercept_request_original(&base, &header_edited, 4096).is_some());
+        // And the record carries the request line through to the client.
+        let record = TransactionRecord::http(
+            Utc::now(),
+            "POST".to_string(),
+            "https".to_string(),
+            "edit.example".to_string(),
+            "/pay?amount=1&hash=zzz".to_string(),
+            Some(200),
+            1,
+            original.message.clone(),
+            None,
+            Vec::new(),
+            Some(original),
+            None,
+        );
+        assert_eq!(record.original_method.as_deref(), Some("POST"));
+        assert_eq!(
+            record.original_path.as_deref(),
+            Some("/pay?amount=25000&hash=abc")
+        );
     }
 
     #[test]

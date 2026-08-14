@@ -609,8 +609,7 @@ fn validate_transaction_sort_key(sort_key: Option<&str>) -> std::result::Result<
     };
     match sort_key {
         "index" | "host" | "method" | "path" | "status" | "length" | "mime" | "notes" | "tls"
-        | "edited"
-        | "started_at" => Ok(()),
+        | "edited" | "started_at" => Ok(()),
         _ => Err(format!("invalid transaction sort_key: {sort_key}")),
     }
 }
@@ -2354,6 +2353,11 @@ struct InterceptForwardPayload {
     #[serde(default)]
     session_id: Option<Uuid>,
     request: EditableRequest,
+    /// Whether the operator changed the request in the editor. Reported by the
+    /// client because only it knows what it displayed: rendering the held request
+    /// and parsing it back can differ on its own.
+    #[serde(default)]
+    edited: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2361,6 +2365,8 @@ struct ResponseInterceptForwardPayload {
     #[serde(default)]
     session_id: Option<Uuid>,
     response: EditableResponse,
+    #[serde(default)]
+    edited: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3360,7 +3366,10 @@ async fn begin_session_proxy_operation(
     {
         return Err(response);
     }
-    Ok(proxy::remember_active_proxy_session_owner(session.id(), proxy::PROXY_WORK_REPLAY))
+    Ok(proxy::remember_active_proxy_session_owner(
+        session.id(),
+        proxy::PROXY_WORK_REPLAY,
+    ))
 }
 
 async fn resolve_session_for_required_id(
@@ -4065,7 +4074,11 @@ async fn list_transactions(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(query, runtime.scope_patterns, runtime.excluded_scope_patterns);
+    let filters = transaction_list_filters(
+        query,
+        runtime.scope_patterns,
+        runtime.excluded_scope_patterns,
+    );
     Json(session.store.list(&filters).await).into_response()
 }
 
@@ -4090,7 +4103,11 @@ async fn list_transactions_page(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(query, runtime.scope_patterns, runtime.excluded_scope_patterns);
+    let filters = transaction_list_filters(
+        query,
+        runtime.scope_patterns,
+        runtime.excluded_scope_patterns,
+    );
     let page = session.store.list_page(&filters).await;
     Json(TransactionPageResponse::from(page)).into_response()
 }
@@ -4237,6 +4254,7 @@ async fn forward_intercept(
     if session.intercepts.get(id).await.is_none() {
         return StatusCode::NOT_FOUND.into_response();
     }
+    let payload_edited = payload.edited;
     let request = match canonicalize_intercept_forward_request(payload.request) {
         Ok(request) => request,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
@@ -4257,7 +4275,11 @@ async fn forward_intercept(
         .event_log
         .snapshot(Some(state.config.max_entries))
         .await;
-    if let Err(error) = session.intercepts.forward(id, request).await {
+    if let Err(error) = session
+        .intercepts
+        .forward(id, request, payload_edited)
+        .await
+    {
         return intercept_action_error_status(&error).into_response();
     }
     session
@@ -4578,6 +4600,7 @@ async fn forward_response_intercept(
     let Some(intercept_record) = session.response_intercepts.get(id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let payload_edited = payload.edited;
     let response_payload =
         match canonicalize_intercept_forward_response(payload.response, &intercept_record.method) {
             Ok(response) => response,
@@ -4601,7 +4624,7 @@ async fn forward_response_intercept(
         .await;
     if let Err(error) = session
         .response_intercepts
-        .forward(id, response_payload)
+        .forward(id, response_payload, payload_edited)
         .await
     {
         return intercept_action_error_status(&error).into_response();
@@ -5201,7 +5224,11 @@ async fn list_websockets(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = websocket_list_filters(&query, runtime.scope_patterns, runtime.excluded_scope_patterns);
+    let filters = websocket_list_filters(
+        &query,
+        runtime.scope_patterns,
+        runtime.excluded_scope_patterns,
+    );
     let page = session.websockets.list_page_filtered(&filters).await;
     Json(page.items).into_response()
 }
@@ -5223,7 +5250,11 @@ async fn list_websockets_page(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = websocket_list_filters(&query, runtime.scope_patterns, runtime.excluded_scope_patterns);
+    let filters = websocket_list_filters(
+        &query,
+        runtime.scope_patterns,
+        runtime.excluded_scope_patterns,
+    );
     let page = session.websockets.list_page_filtered(&filters).await;
     Json(WebSocketPageResponse {
         items: page.items,
@@ -10196,6 +10227,7 @@ mod tests {
             Json(super::InterceptForwardPayload {
                 session_id: Some(original_id),
                 request: test_editable_request("/conflict"),
+                edited: true,
             }),
         )
         .await;
@@ -10212,13 +10244,14 @@ mod tests {
             Json(super::InterceptForwardPayload {
                 session_id: Some(original_id),
                 request: test_editable_request("/forwarded"),
+                edited: true,
             }),
         )
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(queue.list().await.is_empty());
         match task.await.unwrap() {
-            InterceptResolution::Forward(request) => assert_eq!(request.path, "/forwarded"),
+            InterceptResolution::Forward { request, .. } => assert_eq!(request.path, "/forwarded"),
             other => panic!("expected forward resolution, got {other:?}"),
         }
     }
@@ -10269,6 +10302,7 @@ mod tests {
             Json(super::ResponseInterceptForwardPayload {
                 session_id: Some(original_id),
                 response: test_editable_response(409),
+                edited: true,
             }),
         )
         .await;
@@ -10285,13 +10319,16 @@ mod tests {
             Json(super::ResponseInterceptForwardPayload {
                 session_id: Some(original_id),
                 response: test_editable_response(204),
+                edited: true,
             }),
         )
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(queue.list().await.is_empty());
         match task.await.unwrap() {
-            ResponseInterceptResolution::Forward(response) => assert_eq!(response.status, 204),
+            ResponseInterceptResolution::Forward { response, .. } => {
+                assert_eq!(response.status, 204)
+            }
             other => panic!("expected forward resolution, got {other:?}"),
         }
     }
@@ -10348,13 +10385,14 @@ mod tests {
             Json(super::ResponseInterceptForwardPayload {
                 session_id: None,
                 response,
+                edited: true,
             }),
         )
         .await;
 
         assert_eq!(api_response.status(), StatusCode::NO_CONTENT);
         match task.await.unwrap() {
-            ResponseInterceptResolution::Forward(response) => {
+            ResponseInterceptResolution::Forward { response, .. } => {
                 assert_eq!(response.status, 200);
                 assert_eq!(response.body, "");
                 assert_eq!(response.headers[0].name, "Content-Length");
@@ -10417,6 +10455,7 @@ mod tests {
             Json(super::ResponseInterceptForwardPayload {
                 session_id: None,
                 response,
+                edited: true,
             }),
         )
         .await;
@@ -10580,7 +10619,7 @@ mod tests {
         assert!(queue.list().await.is_empty());
         assert!(matches!(
             task.await.unwrap(),
-            InterceptResolution::Forward(_)
+            InterceptResolution::Forward { .. }
         ));
     }
 
@@ -10636,7 +10675,7 @@ mod tests {
         assert!(queue.list().await.is_empty());
         assert!(matches!(
             task.await.unwrap(),
-            ResponseInterceptResolution::Forward(_)
+            ResponseInterceptResolution::Forward { .. }
         ));
     }
 
@@ -10732,6 +10771,7 @@ mod tests {
             Json(super::InterceptForwardPayload {
                 session_id: None,
                 request: test_editable_request("/stale"),
+                edited: true,
             }),
         )
         .await;
@@ -10758,6 +10798,7 @@ mod tests {
             Json(super::ResponseInterceptForwardPayload {
                 session_id: None,
                 response: test_editable_response(200),
+                edited: true,
             }),
         )
         .await;
@@ -10863,11 +10904,11 @@ mod tests {
         assert!(session.intercepts.list().await.is_empty());
         assert!(matches!(
             first_task.await.unwrap(),
-            InterceptResolution::Forward(_)
+            InterceptResolution::Forward { .. }
         ));
         assert!(matches!(
             second_task.await.unwrap(),
-            InterceptResolution::Forward(_)
+            InterceptResolution::Forward { .. }
         ));
     }
 
@@ -10930,11 +10971,11 @@ mod tests {
         assert!(session.response_intercepts.list().await.is_empty());
         assert!(matches!(
             first_task.await.unwrap(),
-            ResponseInterceptResolution::Forward(_)
+            ResponseInterceptResolution::Forward { .. }
         ));
         assert!(matches!(
             second_task.await.unwrap(),
-            ResponseInterceptResolution::Forward(_)
+            ResponseInterceptResolution::Forward { .. }
         ));
     }
 
@@ -11491,7 +11532,10 @@ mod tests {
 
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut update_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            inactive_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         drop(operation_guard);
 
         let response = update_future.await;
@@ -11531,7 +11575,10 @@ mod tests {
         ));
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut proxy_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         drop(operation_guard);
 
         match proxy_future.await {
@@ -11969,7 +12016,10 @@ mod tests {
         assert!(runtime.oast_enabled);
         assert_eq!(runtime.oast_provider, OastProvider::Boast);
 
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive.id(), crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            inactive.id(),
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
 
         let runtime_read: RuntimeSettingsSnapshot = response_json(
             super::get_runtime_settings(
@@ -12306,7 +12356,10 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            inactive_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
 
         let inactive_config: ScannerConfig = response_json(
             super::get_scanner_config(
@@ -13183,7 +13236,10 @@ mod tests {
             .unwrap();
 
         let pending_generation = crate::proxy::remember_pending_persist_context_for_test(&inactive);
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive.id(), crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            inactive.id(),
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
 
         let read_response = super::get_workspace_state(
             State(state.clone()),
@@ -14617,7 +14673,10 @@ mod tests {
             !response_task.is_finished(),
             "ws replay remove should wait before rechecking active proxy work"
         );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         drop(operation_guard);
 
         let response = response_task.await.unwrap();
@@ -14737,7 +14796,10 @@ mod tests {
             !response_task.is_finished(),
             "ws replay send should wait before rechecking active proxy work"
         );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         drop(operation_guard);
 
         let response = response_task.await.unwrap();
@@ -14855,7 +14917,10 @@ mod tests {
             !response_task.is_finished(),
             "ws replay connect should wait before rechecking active proxy work"
         );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         drop(operation_guard);
 
         let response = response_task.await.unwrap();
@@ -15292,8 +15357,10 @@ mod tests {
         assert!(active_list.is_empty());
 
         {
-            let _active_proxy_owner =
-                crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+            let _active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+                original_id,
+                crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+            );
 
             let pinned_response = super::get_transaction(
                 State(state.clone()),
@@ -15502,7 +15569,10 @@ mod tests {
             active_fuzzer_response.status(),
             super::StatusCode::NOT_FOUND
         );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
 
         let pinned_fuzzer_response = super::get_fuzzer_attack(
             State(state.clone()),
@@ -16346,7 +16416,10 @@ mod tests {
         ));
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut upsert_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         drop(operation_guard);
 
         let response = upsert_future.await;
@@ -16400,7 +16473,10 @@ mod tests {
         ));
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut delete_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         drop(operation_guard);
 
         let response = delete_future.await;
@@ -16554,7 +16630,10 @@ mod tests {
         ));
         let blocked = tokio::time::timeout(Duration::from_millis(30), &mut run_future).await;
         assert!(blocked.is_err());
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(original_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            original_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
         drop(operation_guard);
 
         let response = run_future.await;
@@ -16699,7 +16778,10 @@ mod tests {
         .await;
         assert_eq!(active_response.status(), super::StatusCode::NOT_FOUND);
 
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(inactive_id, crate::proxy::PROXY_WORK_STREAMED_RESPONSE);
+        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
+            inactive_id,
+            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+        );
 
         let pinned_response = super::get_sequence(
             State(state.clone()),
