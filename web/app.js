@@ -1181,16 +1181,6 @@ function bindEvents() {
     selectHistoryTransaction(row.dataset.id, { scroll: true }).catch((error) => console.error(error));
     // Keep focus on the table so arrow keys navigate rows, not code-view lines
     els.trafficRegion.focus({ preventScroll: true });
-    // Clicking a Notes cell that has notes opens them. The inspector column
-    // that normally shows notes is hidden below 1481px, so this is the only
-    // always-available way to read them. stopPropagation keeps the document
-    // click handler from closing the menu we are opening.
-    const notesCell = event.target.closest('td.notes-cell-actionable[data-col="notes"]');
-    if (notesCell) {
-      event.stopPropagation();
-      const rect = notesCell.getBoundingClientRect();
-      openContextMenu(rect.left, rect.bottom + 4, row.dataset.id);
-    }
   });
   els.historyTableBody.addEventListener("dblclick", (event) => {
     const cell = event.target.closest('td[data-col="notes"]');
@@ -16590,7 +16580,7 @@ function renderHistoryCell(colKey, item, entry) {
         ? `<span class="note-preview">${escapeHtml(preview)}</span>${extra}`
         : (item.note_count ? ` ${item.note_count}` : "");
       const cellAttrs = hasNotes
-        ? ` data-col="notes" class="notes-cell-actionable" title="${escapeHtml(preview || "Click to view notes")}"`
+        ? ` data-col="notes" class="notes-cell-actionable" title="${escapeHtml(preview || "Double-click to edit this note")}"`
         : ' data-col="notes"';
       return `<td${cellAttrs}>${noteIndicator}${body}</td>`;
     }
@@ -21697,7 +21687,13 @@ async function beginNoteEdit(cell, transactionId) {
 
   let settled = false;
   let debounce = null;
+  // Compared against what was last written, not against what the note said when
+  // the edit began: typing saves after a pause, so clearing the field back to
+  // empty is still a change the server has to be told about.
+  let lastSaved = current.trim();
   const save = (value) => {
+    if (value === lastSaved) return;
+    lastSaved = value;
     updateAnnotations(transactionId, { user_note: value || null }, sessionId);
   };
   const restore = () => {
@@ -21711,9 +21707,7 @@ async function beginNoteEdit(cell, transactionId) {
     const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES).trim();
     settled = true;
     if (cell.isConnected) cell.innerHTML = previous;
-    if (value !== current.trim()) {
-      save(value);
-    }
+    save(value);
   };
   // Save as you type as well as on commit: closing the window mid-edit should
   // not lose what was typed, and updateAnnotations is already flushed on unload.
