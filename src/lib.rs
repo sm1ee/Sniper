@@ -13,6 +13,7 @@ pub mod proxy;
 pub mod runtime;
 pub mod runtime_state;
 pub mod scanner;
+pub mod scope;
 pub mod sequence;
 pub mod session;
 pub mod skills;

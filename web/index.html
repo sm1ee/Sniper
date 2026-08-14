@@ -1291,7 +1291,12 @@
                 <label class="settings-field target-scope-field">
                   <span>In-scope hosts</span>
                   <textarea id="targetScopeEditor" rows="4" placeholder="*.example.com&#10;api.example.com"></textarea>
-                  <small>These patterns are shared with intercept and filter settings.</small>
+                  <small>Leave empty to include every host.</small>
+                </label>
+                <label class="settings-field target-scope-field">
+                  <span>Excluded hosts</span>
+                  <textarea id="targetScopeExcludeEditor" rows="4" placeholder="aem-*.example.com&#10;collector.example.com"></textarea>
+                  <small>Taken back out of scope, with or without an in-scope list. These patterns are shared with intercept and filter settings.</small>
                 </label>
               </div>
             </section>

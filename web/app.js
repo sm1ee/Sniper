@@ -418,6 +418,7 @@ const state = {
   wsColumnWidths: createDefaultWsColumnWidths(),
   filterSettings: createDefaultFilterSettings(),
   targetScopeDraft: "",
+  targetScopeExcludeDraft: "",
   targetScopeDirty: false,
   targetScopeEditorSessionId: null,
   targetExpandedHosts: new Set(),
@@ -804,6 +805,7 @@ const els = {
   addMatchReplaceRuleButton: document.getElementById("addMatchReplaceRuleButton"),
   deleteMatchReplaceRuleButton: document.getElementById("deleteMatchReplaceRuleButton"),
   targetScopeEditor: document.getElementById("targetScopeEditor"),
+  targetScopeExcludeEditor: document.getElementById("targetScopeExcludeEditor"),
   saveTargetScopeButton: document.getElementById("saveTargetScopeButton"),
   reloadTargetButton: document.getElementById("reloadTargetButton"),
   targetTree: document.getElementById("targetTree"),
@@ -1783,6 +1785,11 @@ function bindEvents() {
   });
   els.targetScopeEditor.addEventListener("input", () => {
     state.targetScopeDraft = els.targetScopeEditor.value;
+    state.targetScopeDirty = true;
+    state.targetScopeEditorSessionId = currentSessionId();
+  });
+  els.targetScopeExcludeEditor?.addEventListener("input", () => {
+    state.targetScopeExcludeDraft = els.targetScopeExcludeEditor.value;
     state.targetScopeDirty = true;
     state.targetScopeEditorSessionId = currentSessionId();
   });
@@ -4310,6 +4317,7 @@ function resetSessionScopedUiState() {
   state.targetSiteMap = [];
   resetOastUiState();
   state.targetScopeDraft = "";
+  state.targetScopeExcludeDraft = "";
   state.targetScopeDirty = false;
   state.targetScopeEditorSessionId = null;
   state.targetExpandedHosts = new Set();
@@ -6556,6 +6564,9 @@ function syncTargetScopeDraft(force = false) {
   const runtimeText = formatScopePatternsText(state.runtime?.scope_patterns);
   if (force || !state.targetScopeDirty) {
     state.targetScopeDraft = runtimeText;
+    state.targetScopeExcludeDraft = formatScopePatternsText(
+      state.runtime?.excluded_scope_patterns,
+    );
     state.targetScopeDirty = false;
     if (force) {
       state.targetScopeEditorSessionId = null;
@@ -12095,6 +12106,9 @@ function renderTarget() {
   const sessionId = currentSessionId();
   if (!state.targetScopeDirty) {
     state.targetScopeDraft = formatScopePatternsText(state.runtime?.scope_patterns);
+    state.targetScopeExcludeDraft = formatScopePatternsText(
+      state.runtime?.excluded_scope_patterns,
+    );
   }
 
   const editorSessionMismatch = state.targetScopeEditorSessionId !== sessionId;
@@ -12103,6 +12117,13 @@ function renderTarget() {
     && els.targetScopeEditor.value !== state.targetScopeDraft
   ) {
     els.targetScopeEditor.value = state.targetScopeDraft;
+  }
+  if (
+    els.targetScopeExcludeEditor
+    && (editorSessionMismatch || document.activeElement !== els.targetScopeExcludeEditor)
+    && els.targetScopeExcludeEditor.value !== state.targetScopeExcludeDraft
+  ) {
+    els.targetScopeExcludeEditor.value = state.targetScopeExcludeDraft;
   }
   if (editorSessionMismatch || document.activeElement !== els.targetScopeEditor) {
     state.targetScopeEditorSessionId = sessionId;
@@ -12631,10 +12652,15 @@ async function saveTargetScope(options = {}) {
   const scopeText = state.targetScopeEditorSessionId === sessionId
     ? els.targetScopeEditor.value
     : state.targetScopeDraft;
-  const scopePatterns = String(scopeText || "")
+  const excludeText = state.targetScopeEditorSessionId === sessionId
+    ? els.targetScopeExcludeEditor?.value
+    : state.targetScopeExcludeDraft;
+  const toPatterns = (text) => String(text || "")
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+  const scopePatterns = toPatterns(scopeText);
+  const excludedScopePatterns = toPatterns(excludeText);
   const response = await fetch("/api/runtime", {
     method: "POST",
     headers: {
@@ -12644,6 +12670,7 @@ async function saveTargetScope(options = {}) {
       session_id: sessionId,
       expected_active_session_id: expectedActiveSessionIdForWrite(sessionId, options),
       scope_patterns: scopePatterns,
+      excluded_scope_patterns: excludedScopePatterns,
     }),
   });
   if (!response.ok) {
@@ -12653,6 +12680,7 @@ async function saveTargetScope(options = {}) {
   if (sessionId !== currentSessionId()) {
     if (state.targetScopeEditorSessionId === sessionId) {
       state.targetScopeDraft = formatScopePatternsText(runtime?.scope_patterns);
+      state.targetScopeExcludeDraft = formatScopePatternsText(runtime?.excluded_scope_patterns);
       state.targetScopeDirty = false;
       state.targetScopeEditorSessionId = null;
     }
@@ -12660,10 +12688,19 @@ async function saveTargetScope(options = {}) {
   }
   state.runtime = runtime;
   state.targetScopeDraft = formatScopePatternsText(state.runtime?.scope_patterns);
+  state.targetScopeExcludeDraft = formatScopePatternsText(
+    state.runtime?.excluded_scope_patterns,
+  );
   state.targetScopeDirty = false;
   state.targetScopeEditorSessionId = sessionId;
   if (els.targetScopeEditor.value !== state.targetScopeDraft) {
     els.targetScopeEditor.value = state.targetScopeDraft;
+  }
+  if (
+    els.targetScopeExcludeEditor
+    && els.targetScopeExcludeEditor.value !== state.targetScopeExcludeDraft
+  ) {
+    els.targetScopeExcludeEditor.value = state.targetScopeExcludeDraft;
   }
   renderInterceptStatus();
   renderProxySettings();

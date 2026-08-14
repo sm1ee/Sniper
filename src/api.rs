@@ -515,7 +515,11 @@ fn optional_csv_param(value: Option<String>) -> Option<Vec<String>> {
     })
 }
 
-fn transaction_list_filters(query: TransactionQuery, scope_patterns: Vec<String>) -> ListFilters {
+fn transaction_list_filters(
+    query: TransactionQuery,
+    scope_patterns: Vec<String>,
+    excluded_scope_patterns: Vec<String>,
+) -> ListFilters {
     ListFilters {
         query: query.q,
         method: query.method,
@@ -525,6 +529,7 @@ fn transaction_list_filters(query: TransactionQuery, scope_patterns: Vec<String>
         sort_key: query.sort_key,
         sort_direction: normalize_sort_direction(query.sort_direction.as_deref()),
         scope_patterns,
+        excluded_scope_patterns,
         in_scope_only: query.in_scope_only.unwrap_or(false),
         hide_connect: query.hide_connect.unwrap_or(false),
         hide_without_responses: query.hide_without_responses.unwrap_or(false),
@@ -550,6 +555,7 @@ fn transaction_list_filters(query: TransactionQuery, scope_patterns: Vec<String>
 fn websocket_list_filters(
     query: &WebSocketQuery,
     scope_patterns: Vec<String>,
+    excluded_scope_patterns: Vec<String>,
 ) -> WebSocketListFilters {
     WebSocketListFilters {
         query: query.q.clone(),
@@ -559,6 +565,7 @@ fn websocket_list_filters(
         sort_key: query.sort_key.clone(),
         sort_direction: normalize_sort_direction(query.sort_direction.as_deref()),
         scope_patterns,
+        excluded_scope_patterns,
         in_scope_only: query.in_scope_only.unwrap_or(false),
         live_only: query.live_only.unwrap_or(false),
     }
@@ -4058,7 +4065,7 @@ async fn list_transactions(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(query, runtime.scope_patterns);
+    let filters = transaction_list_filters(query, runtime.scope_patterns, runtime.excluded_scope_patterns);
     Json(session.store.list(&filters).await).into_response()
 }
 
@@ -4083,7 +4090,7 @@ async fn list_transactions_page(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(query, runtime.scope_patterns);
+    let filters = transaction_list_filters(query, runtime.scope_patterns, runtime.excluded_scope_patterns);
     let page = session.store.list_page(&filters).await;
     Json(TransactionPageResponse::from(page)).into_response()
 }
@@ -5194,7 +5201,7 @@ async fn list_websockets(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = websocket_list_filters(&query, runtime.scope_patterns);
+    let filters = websocket_list_filters(&query, runtime.scope_patterns, runtime.excluded_scope_patterns);
     let page = session.websockets.list_page_filtered(&filters).await;
     Json(page.items).into_response()
 }
@@ -5216,7 +5223,7 @@ async fn list_websockets_page(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = websocket_list_filters(&query, runtime.scope_patterns);
+    let filters = websocket_list_filters(&query, runtime.scope_patterns, runtime.excluded_scope_patterns);
     let page = session.websockets.list_page_filtered(&filters).await;
     Json(WebSocketPageResponse {
         items: page.items,

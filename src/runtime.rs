@@ -17,6 +17,10 @@ pub struct RuntimeSettingsSnapshot {
     pub websocket_capture_enabled: bool,
     #[serde(default)]
     pub scope_patterns: Vec<String>,
+    /// Hosts taken back out of scope. Applied after the include list, and on their
+    /// own when that list is empty, so excluding works without first including.
+    #[serde(default)]
+    pub excluded_scope_patterns: Vec<String>,
     #[serde(default)]
     pub passthrough_hosts: Vec<String>,
     #[serde(default = "default_upstream_insecure")]
@@ -70,6 +74,7 @@ impl Default for RuntimeSettingsSnapshot {
             intercept_enabled: false,
             websocket_capture_enabled: true,
             scope_patterns: Vec::new(),
+            excluded_scope_patterns: Vec::new(),
             passthrough_hosts: Vec::new(),
             upstream_insecure: true,
             intercept_scope_only: true,
@@ -91,6 +96,11 @@ impl RuntimeSettingsSnapshot {
     }
 
     pub fn sanitized_for_load(mut self) -> Self {
+        self.excluded_scope_patterns = normalize_bounded_scope_patterns(
+            "excluded scope pattern",
+            std::mem::take(&mut self.excluded_scope_patterns),
+        )
+        .unwrap_or_default();
         self.scope_patterns =
             normalize_bounded_scope_patterns("scope pattern", self.scope_patterns)
                 .unwrap_or_default();
@@ -125,6 +135,8 @@ pub struct RuntimeSettingsUpdate {
     pub intercept_enabled: Option<bool>,
     pub websocket_capture_enabled: Option<bool>,
     pub scope_patterns: Option<Vec<String>>,
+    #[serde(default)]
+    pub excluded_scope_patterns: Option<Vec<String>>,
     pub passthrough_hosts: Option<Vec<String>>,
     pub upstream_insecure: Option<bool>,
     pub intercept_scope_only: Option<bool>,
@@ -188,6 +200,10 @@ impl RuntimeSettings {
             candidate.websocket_capture_enabled = websocket_capture_enabled;
         }
 
+        if let Some(excluded) = update.excluded_scope_patterns {
+            candidate.excluded_scope_patterns =
+                normalize_bounded_scope_patterns("excluded scope pattern", excluded)?;
+        }
         if let Some(scope_patterns) = update.scope_patterns {
             candidate.scope_patterns =
                 normalize_bounded_scope_patterns("scope pattern", scope_patterns)?;
@@ -266,7 +282,19 @@ impl RuntimeSettings {
 
     pub async fn is_in_scope(&self, host: &str) -> bool {
         let current = self.inner.read().await;
-        matches_scope(host, &current.scope_patterns)
+        crate::scope::is_host_in_scope(
+            host,
+            &current.scope_patterns,
+            &current.excluded_scope_patterns,
+        )
+    }
+
+    pub async fn scope_lists(&self) -> (Vec<String>, Vec<String>) {
+        let current = self.inner.read().await;
+        (
+            current.scope_patterns.clone(),
+            current.excluded_scope_patterns.clone(),
+        )
     }
 
     pub async fn is_passthrough(&self, host: &str) -> bool {
@@ -326,41 +354,12 @@ fn validate_runtime_text_field(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn matches_scope(host: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return true;
-    }
-
-    host_matches_any(host, patterns)
-}
-
 fn matches_passthrough(host: &str, patterns: &[String]) -> bool {
     if patterns.is_empty() {
         return false;
     }
 
-    host_matches_any(host, patterns)
-}
-
-fn host_matches_any(host: &str, patterns: &[String]) -> bool {
-    let hostname = normalize_host_for_matching(host);
-
-    patterns.iter().any(|pattern| {
-        let normalized = normalize_host_for_matching(pattern);
-        if let Some(suffix) = normalized.strip_prefix("*.") {
-            hostname == suffix || hostname.ends_with(&format!(".{suffix}"))
-        } else {
-            hostname == normalized
-        }
-    })
-}
-
-fn normalize_host_for_matching(host: &str) -> String {
-    strip_dns_root_dot(host_without_port(host)).to_ascii_lowercase()
-}
-
-fn strip_dns_root_dot(host: &str) -> &str {
-    host.strip_suffix('.').unwrap_or(host)
+    crate::scope::host_matches_any(host, patterns)
 }
 
 fn host_without_port(host: &str) -> &str {

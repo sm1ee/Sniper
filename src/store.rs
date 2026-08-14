@@ -35,6 +35,7 @@ pub struct ListFilters {
     pub sort_key: Option<String>,
     pub sort_direction: Option<String>,
     pub scope_patterns: Vec<String>,
+    pub excluded_scope_patterns: Vec<String>,
     pub in_scope_only: bool,
     pub hide_connect: bool,
     pub hide_without_responses: bool,
@@ -1648,7 +1649,13 @@ fn matches_filters(
         }
     }
 
-    if filters.in_scope_only && !summary_matches_scope(&summary.host, &filters.scope_patterns) {
+    if filters.in_scope_only
+        && !crate::scope::is_host_in_scope(
+            &summary.host,
+            &filters.scope_patterns,
+            &filters.excluded_scope_patterns,
+        )
+    {
         return false;
     }
 
@@ -1895,23 +1902,6 @@ fn extract_path_extension(path: &str) -> Option<String> {
         return None;
     }
     Some(extension.to_ascii_lowercase())
-}
-
-fn summary_matches_scope(host: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return true;
-    }
-
-    let hostname = normalize_host_for_matching(host);
-
-    patterns.iter().any(|pattern| {
-        let normalized = normalize_host_for_matching(pattern);
-        if let Some(suffix) = normalized.strip_prefix("*.") {
-            hostname == suffix || hostname.ends_with(&format!(".{suffix}"))
-        } else {
-            hostname == normalized
-        }
-    })
 }
 
 fn normalize_host_for_matching(host: &str) -> String {
