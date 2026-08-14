@@ -21841,7 +21841,15 @@ async function flushPendingAnnotations(transactionId, options = {}) {
     } else if (pending.get(transactionId) === entry) {
       const index = getHistoryItemIndex(transactionId);
       if (index !== -1) {
-        Object.assign(state.items[index], summary);
+        // A cleared field is omitted from the response rather than sent as null
+        // (color_tag, note_preview and annotation_revision are
+        // skip_serializing_if), so merging the response straight over the row
+        // keeps the old value — a deleted note kept rendering until a reload.
+        Object.assign(
+          state.items[index],
+          { color_tag: null, note_preview: null, annotation_revision: 0 },
+          summary,
+        );
         prepareHistoryItem(state.items[index]);
         if (!summaryMatchesActiveHistoryFilters(state.items[index])) {
           state.items.splice(index, 1);
