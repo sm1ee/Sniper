@@ -13,7 +13,7 @@
 ///
 /// - `*.example.com` — the domain and anything under it, so `example.com` and
 ///   `api.example.com` both match. This is the common case and predates the rest.
-/// - `aem-*.example.com` — `*` stands for any run of characters. Useful for
+/// - `log-*.example.com` — `*` stands for any run of characters. Useful for
 ///   excluding a family of hosts that share a prefix.
 /// - `api.example.com` — exactly that host.
 ///
@@ -53,7 +53,7 @@ pub fn is_host_in_scope(host: &str, include: &[String], exclude: &[String]) -> b
 }
 
 /// `*` matches any run of characters, including dots. Anchored at both ends, so
-/// `aem-*.example.com` does not match `x-aem-y.example.com`.
+/// `log-*.example.com` does not match `x-log-y.example.com`.
 fn glob_matches(value: &str, pattern: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
     if parts.len() == 1 {
@@ -137,23 +137,23 @@ mod tests {
 
     #[test]
     fn a_star_inside_a_label_matches_that_family_of_hosts() {
-        // The case this was added for: exclude every aem- host under a domain.
+        // The case this was added for: exclude every log- host under a domain.
         assert!(host_matches_pattern(
-            "aem-kakao-collector.onkakao.net",
-            "aem-*.onkakao.net"
+            "log-collector.example.com",
+            "log-*.example.com"
         ));
         assert!(host_matches_pattern(
-            "aem-x.onkakao.net",
-            "aem-*.onkakao.net"
+            "log-x.example.com",
+            "log-*.example.com"
         ));
         assert!(!host_matches_pattern(
-            "cdn.onkakao.net",
-            "aem-*.onkakao.net"
+            "cdn.example.com",
+            "log-*.example.com"
         ));
         // Anchored: a host that merely contains the prefix does not match.
         assert!(!host_matches_pattern(
-            "x-aem-y.onkakao.net",
-            "aem-*.onkakao.net"
+            "x-log-y.example.com",
+            "log-*.example.com"
         ));
     }
 
@@ -162,32 +162,32 @@ mod tests {
         assert!(host_matches_pattern("API.Example.COM:443", "*.example.com"));
         assert!(host_matches_pattern("api.example.com.", "*.example.com"));
         assert!(host_matches_pattern(
-            "AEM-Collector.OnKakao.net:443",
-            "aem-*.onkakao.net"
+            "Log-Collector.Example.com:443",
+            "log-*.example.com"
         ));
     }
 
     #[test]
     fn an_exclude_narrows_an_include() {
-        let include = list(&["*.onkakao.net"]);
-        let exclude = list(&["aem-*.onkakao.net"]);
-        assert!(is_host_in_scope("api.onkakao.net", &include, &exclude));
+        let include = list(&["*.example.com"]);
+        let exclude = list(&["log-*.example.com"]);
+        assert!(is_host_in_scope("api.example.com", &include, &exclude));
         assert!(!is_host_in_scope(
-            "aem-kakao-collector.onkakao.net",
+            "log-collector.example.com",
             &include,
             &exclude
         ));
-        assert!(!is_host_in_scope("example.com", &include, &exclude));
+        assert!(!is_host_in_scope("other.test", &include, &exclude));
     }
 
     #[test]
     fn an_exclude_works_with_no_includes_at_all() {
         // No includes means everything is in scope, so an exclude list on its own
         // has to still take hosts out of it.
-        let exclude = list(&["aem-kakao-collector.onkakao.net"]);
-        assert!(is_host_in_scope("api.onkakao.net", &[], &exclude));
+        let exclude = list(&["log-collector.example.com"]);
+        assert!(is_host_in_scope("api.example.com", &[], &exclude));
         assert!(!is_host_in_scope(
-            "aem-kakao-collector.onkakao.net",
+            "log-collector.example.com",
             &[],
             &exclude
         ));
