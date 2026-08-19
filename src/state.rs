@@ -91,6 +91,11 @@ pub struct AppState {
     pub active_proxy_addr: Arc<RwLock<SocketAddr>>,
     /// The currently bound UI listener address (mutable because port 0 is resolved at bind time).
     active_ui_addr: Arc<RwLock<SocketAddr>>,
+    /// Whether the UI listener is bound somewhere other than loopback, so the UI can
+    /// say so. Kept separately from `active_ui_addr` because that one holds the
+    /// *advertised* address, where a wildcard bind is rewritten to 127.0.0.1 — reading
+    /// exposure from it would report "local" for exactly the bind that is not.
+    remote_ui_exposed: Arc<AtomicBool>,
     /// Handle for the running proxy task so it can be aborted on rebind.
     proxy_task: Arc<RwLock<Option<JoinHandle<()>>>>,
     /// Serializes runtime proxy rebinds so reported state cannot race the actual listener.
@@ -178,6 +183,7 @@ impl AppState {
             update_in_progress: Arc::new(AtomicBool::new(false)),
             active_proxy_addr: Arc::new(RwLock::new(active_proxy_addr)),
             active_ui_addr: Arc::new(RwLock::new(active_ui_addr)),
+            remote_ui_exposed: Arc::new(AtomicBool::new(!active_ui_addr.ip().is_loopback())),
             proxy_task: Arc::new(RwLock::new(None)),
             proxy_rebind_lock: Arc::new(AsyncMutex::new(())),
             startup_settings_lock: Arc::new(AsyncMutex::new(())),
@@ -778,6 +784,17 @@ impl AppState {
         *self.active_ui_addr.read().await
     }
 
+    pub fn remote_ui_exposed(&self) -> bool {
+        self.remote_ui_exposed.load(Ordering::Relaxed)
+    }
+
+    /// Record the address the UI listener actually bound to, before it is rewritten
+    /// for display.
+    pub fn set_remote_ui_exposed_from_bound_addr(&self, bound: SocketAddr) {
+        self.remote_ui_exposed
+            .store(!bound.ip().is_loopback(), Ordering::Relaxed);
+    }
+
     pub async fn set_active_ui_addr(&self, addr: SocketAddr) {
         *self.active_ui_addr.write().await = addr;
     }
@@ -814,6 +831,7 @@ impl AppState {
             body_preview_bytes: self.config.body_preview_bytes,
             data_dir: self.config.data_dir.display().to_string(),
             proxy_online: self.is_proxy_online(),
+            remote_ui_exposed: self.remote_ui_exposed(),
             features: vec![
                 "http_capture".to_string(),
                 "connect_tunnel".to_string(),
@@ -1372,6 +1390,8 @@ pub struct RuntimeInfo {
     pub body_preview_bytes: usize,
     pub data_dir: String,
     pub proxy_online: bool,
+    /// True when the UI listener is reachable from outside this machine.
+    pub remote_ui_exposed: bool,
     pub features: Vec<String>,
     pub notes: Vec<String>,
     pub certificate: CertificateExport,

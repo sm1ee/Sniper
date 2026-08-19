@@ -1330,11 +1330,11 @@ async fn collect_body(mut body: Incoming) -> std::result::Result<Bytes, BodyColl
     Ok(bytes.freeze())
 }
 
-/// Local IP addresses across every interface on this host. Used to recognize a
-/// request that points back at the proxy's own listener when it is bound to a
-/// wildcard address (0.0.0.0 / ::), where the listener answers on any local IP.
+/// Local IP addresses across every interface on this host. Shared by listeners
+/// that must distinguish same-machine traffic from connections made by another
+/// host.
 #[cfg(unix)]
-fn local_interface_ips() -> Vec<IpAddr> {
+pub(crate) fn local_interface_ips() -> Vec<IpAddr> {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     let mut addrs = Vec::new();
@@ -1373,7 +1373,7 @@ fn local_interface_ips() -> Vec<IpAddr> {
 }
 
 #[cfg(not(unix))]
-fn local_interface_ips() -> Vec<IpAddr> {
+pub(crate) fn local_interface_ips() -> Vec<IpAddr> {
     // ponytail: non-unix falls back to loopback/bound-ip detection only; add
     // platform enumeration here if Sniper ever ships on a non-unix target.
     Vec::new()

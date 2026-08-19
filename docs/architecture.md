@@ -82,9 +82,18 @@ flowchart LR
   - exposes record/detail APIs
   - serves the lightweight desktop UI
   - exports the root CA through API download routes
+  - requires a one-time bootstrap token and process-scoped session cookie when
+    the UI listener uses a non-loopback address
 - `src/bin/sniper-desktop.rs`
   - starts the proxy and UI listeners inside one process
   - opens the desktop UI in a native window
+
+Same-machine UI clients are trusted so the local desktop shell and `sniper-cli`
+keep their existing workflow. A non-loopback UI listener authenticates clients
+from other hosts before serving either embedded assets or API routes. The
+bootstrap token is generated in memory, printed once at startup, consumed on
+first use, and exchanged for an HttpOnly, SameSite session cookie that expires
+with the server process.
 
 ## Bootstrap and trust flow
 

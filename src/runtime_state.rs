@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -168,9 +168,6 @@ fn sanitize_loaded_runtime_state(snapshot: &mut RuntimeStateSnapshot) -> Result<
         .parse()
         .context("runtime-state ui_addr is not a socket address")?;
     let advertised_ui_addr = advertise_local_api_addr(ui_addr);
-    if !advertised_ui_addr.ip().is_loopback() {
-        bail!("runtime-state ui_addr must be loopback");
-    }
     snapshot.proxy_addr = proxy_addr.to_string();
     snapshot.ui_addr = advertised_ui_addr.to_string();
     Ok(())
@@ -749,6 +746,27 @@ mod tests {
 
         assert_eq!(loaded.proxy_addr, "127.0.0.1:18080");
         assert_eq!(loaded.ui_addr, "127.0.0.1:23001");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn runtime_state_load_preserves_specific_non_loopback_ui_addr() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "sniper-runtime-state-specific-ui-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(
+            runtime_state_path(&temp_dir),
+            br#"{"proxy_addr":"127.0.0.1:18080","ui_addr":"192.0.2.1:23001"}"#,
+        )
+        .unwrap();
+
+        let loaded = load_runtime_state(&temp_dir).unwrap().unwrap();
+
+        assert_eq!(loaded.proxy_addr, "127.0.0.1:18080");
+        assert_eq!(loaded.ui_addr, "192.0.2.1:23001");
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

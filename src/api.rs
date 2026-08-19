@@ -1,16 +1,17 @@
 use std::{
     collections::HashSet,
     convert::Infallible,
-    net::{IpAddr, Ipv6Addr},
+    io::IsTerminal,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     path::{Component, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::{Context, Result};
 use async_stream::stream;
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{connect_info::ConnectInfo, Path, Query, Request, State},
     http::{
         header,
         uri::{Authority, PathAndQuery},
@@ -24,7 +25,9 @@ use axum::{
     routing::{any, delete, get, patch, post},
     Json, Router,
 };
+use base64::Engine;
 use indexmap::IndexMap;
+use rand::{rngs::OsRng, RngCore};
 use regex::RegexBuilder;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -100,6 +103,109 @@ const ALLOWED_COLOR_TAGS: &[&str] = &["red", "orange", "yellow", "green", "blue"
 const DEFAULT_WEBSOCKET_DETAIL_FRAME_LIMIT: usize = 1_000;
 const MAX_WEBSOCKET_DETAIL_FRAME_LIMIT: usize = 1_000;
 const OPEN_PATH: &str = "/usr/bin/open";
+const REMOTE_UI_SESSION_COOKIE: &str = "sniper_ui_session";
+const REMOTE_UI_TOKEN_BYTES: usize = 32;
+const REMOTE_UI_TOKEN_FILE: &str = "remote-ui-token";
+
+#[derive(Clone, Default)]
+struct UiAccessControl {
+    remote: Option<Arc<RemoteUiAuth>>,
+    same_host_ips: Arc<HashSet<IpAddr>>,
+}
+
+struct RemoteUiAuth {
+    bootstrap_token: Mutex<Option<String>>,
+    session_token: String,
+}
+
+impl UiAccessControl {
+    fn for_listener(addr: SocketAddr) -> Self {
+        if addr.ip().is_loopback() {
+            return Self::default();
+        }
+        let mut same_host_ips: HashSet<IpAddr> = proxy::local_interface_ips().into_iter().collect();
+        if !addr.ip().is_unspecified() {
+            same_host_ips.insert(addr.ip());
+        }
+        Self {
+            remote: Some(Arc::new(RemoteUiAuth::new())),
+            same_host_ips: Arc::new(same_host_ips),
+        }
+    }
+
+    fn bootstrap_url(&self, addr: SocketAddr) -> Option<String> {
+        let token = self.remote.as_ref()?.bootstrap_token_for_log()?;
+        Some(format!("http://{addr}/?token={token}"))
+    }
+
+    fn peer_is_same_host(&self, peer: SocketAddr) -> bool {
+        peer.ip().is_loopback() || self.same_host_ips.contains(&peer.ip())
+    }
+}
+
+impl RemoteUiAuth {
+    fn new() -> Self {
+        Self {
+            bootstrap_token: Mutex::new(Some(random_remote_ui_token())),
+            session_token: random_remote_ui_token(),
+        }
+    }
+
+    fn bootstrap_token_for_log(&self) -> Option<String> {
+        self.bootstrap_token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn redeem_bootstrap_token(&self, candidate: &str) -> bool {
+        let mut token = self
+            .bootstrap_token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if token
+            .as_deref()
+            .is_some_and(|expected| constant_time_token_eq(expected, candidate))
+        {
+            token.take();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn has_session_cookie(&self, headers: &HeaderMap) -> bool {
+        headers
+            .get_all(header::COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(';'))
+            .filter_map(|cookie| cookie.trim().split_once('='))
+            .any(|(name, value)| {
+                name == REMOTE_UI_SESSION_COOKIE
+                    && constant_time_token_eq(&self.session_token, value)
+            })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AuthorizedNonLoopbackUiRequest;
+
+fn random_remote_ui_token() -> String {
+    let mut bytes = [0_u8; REMOTE_UI_TOKEN_BYTES];
+    OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn constant_time_token_eq(expected: &str, candidate: &str) -> bool {
+    let expected = expected.as_bytes();
+    let candidate = candidate.as_bytes();
+    let mut difference = expected.len() ^ candidate.len();
+    for (index, expected_byte) in expected.iter().enumerate() {
+        difference |= usize::from(*expected_byte ^ candidate.get(index).copied().unwrap_or(0));
+    }
+    difference == 0
+}
 
 #[derive(RustEmbed)]
 #[folder = "web/decoder/"]
@@ -118,15 +224,22 @@ pub async fn serve_api(listener: tokio::net::TcpListener, state: Arc<AppState>) 
         .local_addr()
         .context("failed to read bound UI listener address")?;
     let advertised_ui_addr = runtime_state::advertise_local_api_addr(ui_addr);
+    // From the bound address, not the advertised one: a wildcard bind is advertised
+    // as 127.0.0.1, and reading exposure from that reports "local" for the one bind
+    // that is reachable from the network.
+    state.set_remote_ui_exposed_from_bound_addr(ui_addr);
     state.set_active_ui_addr(advertised_ui_addr).await;
     if let Err(error) = persist_bound_runtime_state(&state, advertised_ui_addr).await {
         tracing::warn!(?error, "failed to persist runtime-state.json");
     }
-    let app = router(state);
+    let app = router_for_ui_addr(state.clone(), ui_addr);
     tracing::info!(ui_addr = %ui_addr, advertised_ui_addr = %advertised_ui_addr, "ui listener ready");
-    axum::serve(listener, app)
-        .await
-        .context("ui server stopped unexpectedly")
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("ui server stopped unexpectedly")
 }
 
 async fn persist_bound_runtime_state(
@@ -145,6 +258,94 @@ async fn persist_bound_runtime_state(
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
+    let ui_addr = state.config.ui_addr;
+    router_for_ui_addr(state, ui_addr)
+}
+
+fn router_for_ui_addr(state: Arc<AppState>, ui_addr: SocketAddr) -> Router {
+    let access_control = UiAccessControl::for_listener(ui_addr);
+    if let Some(auth_url) = access_control.bootstrap_url(ui_addr) {
+        announce_remote_ui_exposure(&state.config.data_dir, ui_addr, &auth_url);
+    }
+    router_with_access_control(state, access_control)
+}
+
+/// Tell the operator, on stdout, that the UI is no longer local — and hand over the
+/// one-time token without putting it through `tracing`.
+///
+/// The token is a live credential. `tracing` output is stdout today, but a service
+/// manager captures stdout to a journal and any future log layer would ship it, so
+/// the token only goes to a terminal a person is actually looking at. With no
+/// terminal it goes to a private file instead and only the path is announced.
+fn announce_remote_ui_exposure(data_dir: &std::path::Path, ui_addr: SocketAddr, auth_url: &str) {
+    let host_hint = if ui_addr.ip().is_unspecified() {
+        format!(
+            "\n  The listener is on every interface. Replace the wildcard host in the\n  URL below with this machine's reachable address."
+        )
+    } else {
+        String::new()
+    };
+    eprintln!(
+        "\n================================ SNIPER =================================\n  The Sniper UI is listening on {ui_addr}, which is NOT loopback.\n  It is reachable from the network, and it is served over plain HTTP.\n\n  Anyone who can reach this port and observe the network can read every\n  request this session has captured, including cookies and tokens.\n  Across an untrusted network, use an SSH tunnel or a TLS reverse proxy\n  instead of exposing this listener directly.{host_hint}\n========================================================================="
+    );
+
+    match remote_ui_token_delivery(data_dir, auth_url) {
+        RemoteUiTokenDelivery::Terminal => {
+            eprintln!("\n  Open this one-time URL to sign in:\n\n    {auth_url}\n");
+        }
+        RemoteUiTokenDelivery::File(path) => {
+            eprintln!(
+                "\n  No terminal attached, so the one-time URL was written to:\n\n    {}\n\n  It is readable only by this user. Restart Sniper to issue a new one.\n",
+                path.display()
+            );
+        }
+        RemoteUiTokenDelivery::Failed(error) => {
+            // Falling back to stdout beats leaving the operator unable to sign in.
+            eprintln!(
+                "\n  Could not write the one-time URL to a file ({error}).\n  Open this URL to sign in:\n\n    {auth_url}\n"
+            );
+        }
+    }
+}
+
+enum RemoteUiTokenDelivery {
+    Terminal,
+    File(PathBuf),
+    Failed(String),
+}
+
+fn remote_ui_token_delivery(data_dir: &std::path::Path, auth_url: &str) -> RemoteUiTokenDelivery {
+    if std::io::stderr().is_terminal() {
+        return RemoteUiTokenDelivery::Terminal;
+    }
+    let path = data_dir.join(REMOTE_UI_TOKEN_FILE);
+    match write_remote_ui_token_file(&path, auth_url) {
+        Ok(()) => RemoteUiTokenDelivery::File(path),
+        Err(error) => RemoteUiTokenDelivery::Failed(format!("{error:#}")),
+    }
+}
+
+fn write_remote_ui_token_file(path: &std::path::Path, auth_url: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    use std::io::Write as _;
+    writeln!(file, "{auth_url}").with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessControl) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/decoder", get(decoder_index))
@@ -264,13 +465,122 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/events", get(events))
         .fallback(any(spa_or_api_not_found))
         .layer(middleware::from_fn(local_api_write_guard))
+        .layer(middleware::from_fn_with_state(
+            access_control,
+            remote_ui_auth_guard,
+        ))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)) // 64 MB
         .with_state(state)
 }
 
+async fn remote_ui_auth_guard(
+    State(access_control): State<UiAccessControl>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let Some(auth) = access_control.remote.as_ref() else {
+        return next.run(request).await;
+    };
+    let bootstrap_query = (request.method() == Method::GET && request.uri().path() == "/")
+        .then(|| bootstrap_token_query(request.uri()));
+    if let Some(Ok(Some(token))) = bootstrap_query.as_ref() {
+        if auth.redeem_bootstrap_token(token) {
+            return remote_ui_auth_redirect(Some(&auth.session_token));
+        }
+    }
+    let token_was_supplied = matches!(bootstrap_query.as_ref(), Some(Ok(Some(_))) | Some(Err(())));
+    if request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|peer| access_control.peer_is_same_host(peer.0))
+    {
+        if token_was_supplied {
+            return remote_ui_auth_redirect(None);
+        }
+        request
+            .extensions_mut()
+            .insert(AuthorizedNonLoopbackUiRequest);
+        return next.run(request).await;
+    }
+
+    let has_session = auth.has_session_cookie(request.headers());
+    if token_was_supplied {
+        if has_session {
+            return remote_ui_auth_redirect(None);
+        }
+        return remote_ui_unauthorized();
+    }
+
+    if !has_session {
+        return remote_ui_unauthorized();
+    }
+    request
+        .extensions_mut()
+        .insert(AuthorizedNonLoopbackUiRequest);
+    next.run(request).await
+}
+
+fn bootstrap_token_query(uri: &Uri) -> std::result::Result<Option<String>, ()> {
+    let Some(query) = uri.query() else {
+        return Ok(None);
+    };
+    let mut tokens = url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(name, _)| name == "token")
+        .map(|(_, value)| value.into_owned());
+    let Some(token) = tokens.next() else {
+        return Ok(None);
+    };
+    if tokens.next().is_some() {
+        return Err(());
+    }
+    Ok(Some(token))
+}
+
+fn remote_ui_auth_redirect(session_token: Option<&str>) -> Response {
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    response
+        .headers_mut()
+        .insert(header::LOCATION, HeaderValue::from_static("/"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    if let Some(session_token) = session_token {
+        let cookie = format!(
+            "{REMOTE_UI_SESSION_COOKIE}={session_token}; Path=/; HttpOnly; SameSite=Strict"
+        );
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&cookie)
+                .expect("random UI session token should be a valid cookie"),
+        );
+    }
+    response
+}
+
+fn remote_ui_unauthorized() -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        "Remote Sniper UI authentication required. Open the one-time URL printed by the Sniper process.",
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 async fn local_api_write_guard(request: Request, next: Next) -> Response {
     if is_api_path(request.uri().path()) {
-        if !request_host_is_allowed_local_api(request.headers(), request.uri()) {
+        if request
+            .extensions()
+            .get::<AuthorizedNonLoopbackUiRequest>()
+            .is_none()
+            && !request_host_is_allowed_local_api(request.headers(), request.uri())
+        {
             return (
                 StatusCode::FORBIDDEN,
                 "requests to the local Sniper API must use a loopback Host",
@@ -7016,6 +7326,169 @@ mod tests {
         let uri = Uri::from_static("/api/self-update");
 
         assert!(super::is_allowed_browser_write(&headers, &uri));
+    }
+
+    // The advertised UI address rewrites a wildcard bind to 127.0.0.1, so exposure has
+    // to be read from the bound address. Reading it from the advertised one reported
+    // "local" for 0.0.0.0 — the one bind that is actually reachable.
+    #[tokio::test]
+    async fn exposure_is_read_from_the_bound_address_not_the_advertised_one() {
+        let (state, data_dir) = test_state("sniper-remote-ui-exposure");
+
+        for loopback in ["127.0.0.1:23001", "[::1]:23001"] {
+            state.set_remote_ui_exposed_from_bound_addr(loopback.parse().unwrap());
+            assert!(
+                !state.remote_ui_exposed(),
+                "{loopback} is loopback and must not be reported as exposed"
+            );
+            assert!(!state.runtime_info().await.remote_ui_exposed);
+        }
+
+        for exposed in ["0.0.0.0:23001", "[::]:23001", "192.0.2.10:23001"] {
+            let bound: std::net::SocketAddr = exposed.parse().unwrap();
+            state.set_remote_ui_exposed_from_bound_addr(bound);
+            assert!(
+                state.remote_ui_exposed(),
+                "{exposed} is not loopback and must be reported as exposed"
+            );
+            assert!(state.runtime_info().await.remote_ui_exposed);
+            // The guard the flag exists for: the advertised address hides a wildcard.
+            if bound.ip().is_unspecified() {
+                assert!(crate::runtime_state::advertise_local_api_addr(bound)
+                    .ip()
+                    .is_loopback());
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn remote_ui_requires_one_time_token_then_accepts_session_cookie() {
+        let (state, data_dir) = test_state("sniper-remote-ui-auth");
+        let access_control = super::UiAccessControl::for_listener(
+            "192.0.2.10:23001"
+                .parse()
+                .expect("specific address should parse"),
+        );
+        let bootstrap_token = access_control
+            .remote
+            .as_ref()
+            .and_then(|auth| auth.bootstrap_token_for_log())
+            .expect("non-loopback listener should have a bootstrap token");
+        let app = super::router_with_access_control(state, access_control).layer(
+            axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    request
+                        .extensions_mut()
+                        .insert(axum::extract::connect_info::ConnectInfo(
+                            "192.0.2.11:45678".parse::<std::net::SocketAddr>().unwrap(),
+                        ));
+                    next.run(request).await
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let response = client.get(format!("http://{addr}/")).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let response = client
+            .get(format!("http://{addr}/?token=wrong"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let response = client
+            .get(format!("http://{addr}/?token={bootstrap_token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/")
+        );
+        let set_cookie = response
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("successful bootstrap should set a session cookie");
+        assert!(set_cookie.contains("; HttpOnly; SameSite=Strict"));
+        let session_cookie = set_cookie
+            .split(';')
+            .next()
+            .expect("session cookie should contain a name and value")
+            .to_string();
+
+        let response = client
+            .get(format!("http://{addr}/?token={bootstrap_token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let response = client
+            .get(format!("http://{addr}/api/runtime"))
+            .header(reqwest::header::HOST, "example.test:23001")
+            .header(reqwest::header::COOKIE, &session_cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let response = client
+            .post(format!("http://{addr}/api/runtime"))
+            .header(reqwest::header::HOST, "example.test:23001")
+            .header(reqwest::header::COOKIE, &session_cookie)
+            .header(reqwest::header::ORIGIN, "http://attacker.test")
+            .json(&serde_json::json!({ "intercept_enabled": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn remote_ui_tokens_are_random_url_safe_values() {
+        let first = super::random_remote_ui_token();
+        let second = super::random_remote_ui_token();
+
+        assert_eq!(first.len(), 43);
+        assert!(first
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn specific_non_loopback_listener_prints_exact_url_and_trusts_only_same_host() {
+        let listener = "192.0.2.10:23001".parse().unwrap();
+        let access_control = super::UiAccessControl::for_listener(listener);
+
+        assert!(access_control
+            .bootstrap_url(listener)
+            .unwrap()
+            .starts_with("http://192.0.2.10:23001/?token="));
+        assert!(access_control.peer_is_same_host("192.0.2.10:45678".parse().unwrap()));
+        assert!(access_control.peer_is_same_host("127.0.0.1:45678".parse().unwrap()));
+        assert!(!access_control.peer_is_same_host("192.0.2.11:45678".parse().unwrap()));
     }
 
     #[test]
