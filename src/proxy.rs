@@ -70,6 +70,8 @@ use crate::{
 
 const REPLAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const REPLAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const PROXY_ACCEPT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(50);
+const PROXY_ACCEPT_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
 const WEBSOCKET_CAPTURE_PREVIEW_BYTES: usize = 64 * 1024;
 
 type ProxyClient = Client;
@@ -386,8 +388,28 @@ pub async fn mark_proxy_offline_after_task_exit(
 }
 
 pub async fn serve_proxy(listener: TcpListener, state: Arc<AppState>) -> Result<()> {
+    let mut accept_retry_delay = PROXY_ACCEPT_RETRY_INITIAL_DELAY;
     loop {
-        let (stream, peer_addr) = listener.accept().await.context("proxy accept failed")?;
+        let (stream, peer_addr) = match listener.accept().await {
+            Ok(accepted) => {
+                accept_retry_delay = PROXY_ACCEPT_RETRY_INITIAL_DELAY;
+                accepted
+            }
+            Err(error) => {
+                // A process can temporarily run out of descriptors while browsers
+                // hold many CONNECT tunnels open. The listener remains usable; if
+                // this task exits, those tunnels eventually close but the proxy
+                // stays offline until the operator restarts it.
+                warn!(
+                    ?error,
+                    retry_delay_ms = accept_retry_delay.as_millis(),
+                    "proxy accept failed; retrying"
+                );
+                tokio::time::sleep(accept_retry_delay).await;
+                accept_retry_delay = next_proxy_accept_retry_delay(accept_retry_delay);
+                continue;
+            }
+        };
         let io = TokioIo::new(stream);
         let state = state.clone();
 
@@ -409,6 +431,13 @@ pub async fn serve_proxy(listener: TcpListener, state: Arc<AppState>) -> Result<
             forget_proxy_connection(connection_id);
         });
     }
+}
+
+fn next_proxy_accept_retry_delay(current: Duration) -> Duration {
+    current
+        .checked_mul(2)
+        .unwrap_or(PROXY_ACCEPT_RETRY_MAX_DELAY)
+        .min(PROXY_ACCEPT_RETRY_MAX_DELAY)
 }
 
 pub async fn send_replay_request(
@@ -6169,6 +6198,22 @@ mod tests {
             "connection reset by peer",
         ));
         assert!(!is_unexpected_eof(&reset));
+    }
+
+    #[test]
+    fn proxy_accept_retry_delay_backs_off_and_caps() {
+        assert_eq!(
+            next_proxy_accept_retry_delay(PROXY_ACCEPT_RETRY_INITIAL_DELAY),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            next_proxy_accept_retry_delay(Duration::from_millis(800)),
+            PROXY_ACCEPT_RETRY_MAX_DELAY
+        );
+        assert_eq!(
+            next_proxy_accept_retry_delay(PROXY_ACCEPT_RETRY_MAX_DELAY),
+            PROXY_ACCEPT_RETRY_MAX_DELAY
+        );
     }
 
     #[test]

@@ -150,6 +150,11 @@ const WORKSPACE_UNLOAD_KEEPALIVE_MAX_BYTES = 60 * 1024;
 // in src/workspace.rs). A single large replay response would otherwise push the
 // full snapshot over the limit and block every save.
 const WORKSPACE_SAVE_SAFE_BYTES = 46 * 1024 * 1024;
+// The server also caps each embedded response record on its own
+// (MAX_WORKSPACE_EMBEDDED_RECORD_BYTES in src/api.rs). Staying under the total
+// is not enough: one oversized record rejects the whole save, so the snapshot
+// has to satisfy both limits.
+const WORKSPACE_SAVE_RECORD_SAFE_BYTES = 15 * 1024 * 1024;
 let workspaceResponseTrimNoticeShown = false;
 const WORKSPACE_UNLOAD_HISTORY_ENTRIES_MAX_BYTES = 12 * 1024;
 const WORKSPACE_UNLOAD_RESPONSE_RECORD_MAX_BYTES = 12 * 1024;
@@ -3360,7 +3365,10 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
 // dropped as a last resort.
 function boundWorkspaceSnapshotForSave(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return snapshot;
-  if (utf8ByteLength(JSON.stringify(snapshot)) <= WORKSPACE_SAVE_SAFE_BYTES) {
+  const totalBytes = utf8ByteLength(JSON.stringify(snapshot));
+  // A snapshot smaller than the per-record limit cannot contain a record that
+  // breaks it, so the common case still costs one measurement.
+  if (totalBytes <= WORKSPACE_SAVE_SAFE_BYTES && totalBytes <= WORKSPACE_SAVE_RECORD_SAFE_BYTES) {
     return snapshot;
   }
   // Deep clone so we can null response records in place without touching state.
@@ -3382,9 +3390,22 @@ function boundWorkspaceSnapshotForSave(snapshot) {
   responses.sort((a, b) => b.bytes - a.bytes);
 
   let dropped = false;
+  // A record over the per-record limit has to go whatever the total is —
+  // keeping it rejects the save, and with it every unrelated edit in the
+  // snapshot.
   for (const r of responses) {
+    if (r.bytes > WORKSPACE_SAVE_RECORD_SAFE_BYTES) {
+      r.drop();
+      r.gone = true;
+      dropped = true;
+    }
+  }
+
+  for (const r of responses) {
+    if (r.gone) continue;
     if (utf8ByteLength(JSON.stringify(bounded)) <= WORKSPACE_SAVE_SAFE_BYTES) break;
     r.drop();
+    r.gone = true;
     dropped = true;
   }
 

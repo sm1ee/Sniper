@@ -139,7 +139,7 @@ mod tests {
     fn a_star_inside_a_label_matches_that_family_of_hosts() {
         // The case this was added for: exclude every log- host under a domain.
         assert!(host_matches_pattern(
-            "log-collector.example.com",
+            "log-ingest.example.com",
             "log-*.example.com"
         ));
         assert!(host_matches_pattern(
@@ -162,7 +162,7 @@ mod tests {
         assert!(host_matches_pattern("API.Example.COM:443", "*.example.com"));
         assert!(host_matches_pattern("api.example.com.", "*.example.com"));
         assert!(host_matches_pattern(
-            "Log-Collector.Example.com:443",
+            "Log-Ingest.Example.com:443",
             "log-*.example.com"
         ));
     }
@@ -173,7 +173,7 @@ mod tests {
         let exclude = list(&["log-*.example.com"]);
         assert!(is_host_in_scope("api.example.com", &include, &exclude));
         assert!(!is_host_in_scope(
-            "log-collector.example.com",
+            "log-ingest.example.com",
             &include,
             &exclude
         ));
@@ -184,13 +184,9 @@ mod tests {
     fn an_exclude_works_with_no_includes_at_all() {
         // No includes means everything is in scope, so an exclude list on its own
         // has to still take hosts out of it.
-        let exclude = list(&["log-collector.example.com"]);
+        let exclude = list(&["log-ingest.example.com"]);
         assert!(is_host_in_scope("api.example.com", &[], &exclude));
-        assert!(!is_host_in_scope(
-            "log-collector.example.com",
-            &[],
-            &exclude
-        ));
+        assert!(!is_host_in_scope("log-ingest.example.com", &[], &exclude));
     }
 
     #[test]

@@ -72,7 +72,12 @@ const MAX_WS_REPLAY_PATH_BYTES: usize = 64 * 1024;
 const MAX_WORKSPACE_WS_SETUP_QUEUE_ITEMS: usize = 250;
 const MAX_WORKSPACE_WS_SETUP_ITEM_BYTES: usize = 64 * 1024;
 const MAX_WORKSPACE_EDITABLE_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_WORKSPACE_EMBEDDED_RECORD_BYTES: usize = 4 * 1024 * 1024;
+// Must clear what capture itself is willing to keep, or a replay of a perfectly
+// ordinary large response is rejected and every later workspace save fails with
+// it. `body_preview_bytes` defaults to 10 MB and a binary body is stored base64,
+// which costs a third more again, so 4 MB rejected responses the app had already
+// captured in full.
+const MAX_WORKSPACE_EMBEDDED_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WORKSPACE_STORED_BYTES: usize = MAX_WORKSPACE_SERIALIZED_BYTES;
 const MAX_WORKSPACE_CLIENT_ID_BYTES: usize = 128;
 const MAX_WORKSPACE_REPLAY_TAB_ID_BYTES: usize = 128;
@@ -6452,6 +6457,30 @@ mod tests {
     use serde::de::DeserializeOwned;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use uuid::Uuid;
+
+    // A replay tab embeds the whole response of the last send. Capture is willing
+    // to keep `body_preview_bytes` of body, and a binary body is stored base64 at
+    // four bytes per three, so a record can legitimately reach that much again by
+    // a third. When the workspace cap sat below it the server rejected the save,
+    // and because the oversized record stayed in the snapshot every later save
+    // failed too — the operator got a wall of identical toasts and lost unrelated
+    // edits.
+    #[test]
+    fn the_embedded_record_cap_clears_what_capture_is_willing_to_keep() {
+        let default_preview_bytes = 10 * 1024 * 1024;
+        let base64_worst_case = default_preview_bytes * 4 / 3;
+        assert!(
+            super::MAX_WORKSPACE_EMBEDDED_RECORD_BYTES >= base64_worst_case,
+            "embedded record cap {} is below a base64 body at the default preview cap ({base64_worst_case})",
+            super::MAX_WORKSPACE_EMBEDDED_RECORD_BYTES
+        );
+        // And a single record must still fit inside the whole-workspace budget,
+        // or the two limits can never both be satisfied.
+        assert!(
+            super::MAX_WORKSPACE_EMBEDDED_RECORD_BYTES < super::MAX_WORKSPACE_STORED_BYTES,
+            "a record that cannot fit in the workspace budget is unsavable"
+        );
+    }
 
     use super::{
         build_ws_replay_url, decode_ws_replay_control_payload, decode_ws_replay_payload,
