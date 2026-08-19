@@ -554,6 +554,7 @@ const els = {
   dashboardSessionsBody: document.getElementById("dashboardSessionsBody"),
   proxyStatusIndicator: document.getElementById("proxyStatusIndicator"),
   proxyStatusLabel: document.getElementById("proxyStatusLabel"),
+  remoteUiIndicator: document.getElementById("remoteUiIndicator"),
   appVersionLabel: document.getElementById("appVersionLabel"),
   openUpdateButton: document.getElementById("openUpdateButton"),
   proxyAddr: document.getElementById("proxyAddr"),
@@ -2609,6 +2610,7 @@ async function _applySettings(response) {
   els.settingsSpecialHostHttp.textContent = state.settings.certificate.special_host_http;
 
   updateProxyStatusIndicator(state.settings.proxy_online);
+  updateRemoteUiIndicator(state.settings.remote_ui_exposed);
 
   const certificate = state.settings.certificate;
   els.certificateName.textContent = certificate.common_name;
@@ -9775,6 +9777,21 @@ function renderInterceptStatus() {
   const enabled = Boolean(state.runtime?.intercept_enabled);
   els.interceptStatus.textContent = enabled ? "On" : "Off";
   els.interceptStatus.classList.toggle("online", enabled);
+}
+
+// The UI listener is normally loopback-only. When it is not, say so wherever the
+// operator is looking — a startup log line is not seen by someone who left the
+// window open, or who never read stdout on a headless host.
+function updateRemoteUiIndicator(exposed) {
+  if (!els.remoteUiIndicator) return;
+  els.remoteUiIndicator.classList.toggle("hidden", !exposed);
+  // Deliberately not naming the address: settings.ui_addr is the advertised one,
+  // and a wildcard bind advertises itself as 127.0.0.1, which would read as a
+  // contradiction right next to "reachable from the network".
+  if (!exposed) return;
+  els.remoteUiIndicator.title =
+    "The Sniper UI is bound to a non-loopback address and is reachable from the network. " +
+    "Traffic to it is not encrypted — use an SSH tunnel or a TLS reverse proxy across an untrusted network.";
 }
 
 function updateProxyStatusIndicator(online) {

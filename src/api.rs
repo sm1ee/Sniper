@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     convert::Infallible,
+    io::IsTerminal,
     net::{IpAddr, Ipv6Addr, SocketAddr},
     path::{Component, PathBuf},
     sync::{Arc, Mutex},
@@ -104,6 +105,7 @@ const MAX_WEBSOCKET_DETAIL_FRAME_LIMIT: usize = 1_000;
 const OPEN_PATH: &str = "/usr/bin/open";
 const REMOTE_UI_SESSION_COOKIE: &str = "sniper_ui_session";
 const REMOTE_UI_TOKEN_BYTES: usize = 32;
+const REMOTE_UI_TOKEN_FILE: &str = "remote-ui-token";
 
 #[derive(Clone, Default)]
 struct UiAccessControl {
@@ -222,11 +224,15 @@ pub async fn serve_api(listener: tokio::net::TcpListener, state: Arc<AppState>) 
         .local_addr()
         .context("failed to read bound UI listener address")?;
     let advertised_ui_addr = runtime_state::advertise_local_api_addr(ui_addr);
+    // From the bound address, not the advertised one: a wildcard bind is advertised
+    // as 127.0.0.1, and reading exposure from that reports "local" for the one bind
+    // that is reachable from the network.
+    state.set_remote_ui_exposed_from_bound_addr(ui_addr);
     state.set_active_ui_addr(advertised_ui_addr).await;
     if let Err(error) = persist_bound_runtime_state(&state, advertised_ui_addr).await {
         tracing::warn!(?error, "failed to persist runtime-state.json");
     }
-    let app = router_for_ui_addr(state, ui_addr);
+    let app = router_for_ui_addr(state.clone(), ui_addr);
     tracing::info!(ui_addr = %ui_addr, advertised_ui_addr = %advertised_ui_addr, "ui listener ready");
     axum::serve(
         listener,
@@ -259,19 +265,84 @@ pub fn router(state: Arc<AppState>) -> Router {
 fn router_for_ui_addr(state: Arc<AppState>, ui_addr: SocketAddr) -> Router {
     let access_control = UiAccessControl::for_listener(ui_addr);
     if let Some(auth_url) = access_control.bootstrap_url(ui_addr) {
-        if ui_addr.ip().is_unspecified() {
-            tracing::warn!(
-                auth_url = %auth_url,
-                "remote UI authentication is required; replace the wildcard host with this machine's address and open this one-time URL"
+        announce_remote_ui_exposure(&state.config.data_dir, ui_addr, &auth_url);
+    }
+    router_with_access_control(state, access_control)
+}
+
+/// Tell the operator, on stdout, that the UI is no longer local — and hand over the
+/// one-time token without putting it through `tracing`.
+///
+/// The token is a live credential. `tracing` output is stdout today, but a service
+/// manager captures stdout to a journal and any future log layer would ship it, so
+/// the token only goes to a terminal a person is actually looking at. With no
+/// terminal it goes to a private file instead and only the path is announced.
+fn announce_remote_ui_exposure(data_dir: &std::path::Path, ui_addr: SocketAddr, auth_url: &str) {
+    let host_hint = if ui_addr.ip().is_unspecified() {
+        format!(
+            "\n  The listener is on every interface. Replace the wildcard host in the\n  URL below with this machine's reachable address."
+        )
+    } else {
+        String::new()
+    };
+    eprintln!(
+        "\n================================ SNIPER =================================\n  The Sniper UI is listening on {ui_addr}, which is NOT loopback.\n  It is reachable from the network, and it is served over plain HTTP.\n\n  Anyone who can reach this port and observe the network can read every\n  request this session has captured, including cookies and tokens.\n  Across an untrusted network, use an SSH tunnel or a TLS reverse proxy\n  instead of exposing this listener directly.{host_hint}\n========================================================================="
+    );
+
+    match remote_ui_token_delivery(data_dir, auth_url) {
+        RemoteUiTokenDelivery::Terminal => {
+            eprintln!("\n  Open this one-time URL to sign in:\n\n    {auth_url}\n");
+        }
+        RemoteUiTokenDelivery::File(path) => {
+            eprintln!(
+                "\n  No terminal attached, so the one-time URL was written to:\n\n    {}\n\n  It is readable only by this user. Restart Sniper to issue a new one.\n",
+                path.display()
             );
-        } else {
-            tracing::warn!(
-                auth_url = %auth_url,
-                "remote UI authentication is required; open this one-time URL"
+        }
+        RemoteUiTokenDelivery::Failed(error) => {
+            // Falling back to stdout beats leaving the operator unable to sign in.
+            eprintln!(
+                "\n  Could not write the one-time URL to a file ({error}).\n  Open this URL to sign in:\n\n    {auth_url}\n"
             );
         }
     }
-    router_with_access_control(state, access_control)
+}
+
+enum RemoteUiTokenDelivery {
+    Terminal,
+    File(PathBuf),
+    Failed(String),
+}
+
+fn remote_ui_token_delivery(data_dir: &std::path::Path, auth_url: &str) -> RemoteUiTokenDelivery {
+    if std::io::stderr().is_terminal() {
+        return RemoteUiTokenDelivery::Terminal;
+    }
+    let path = data_dir.join(REMOTE_UI_TOKEN_FILE);
+    match write_remote_ui_token_file(&path, auth_url) {
+        Ok(()) => RemoteUiTokenDelivery::File(path),
+        Err(error) => RemoteUiTokenDelivery::Failed(format!("{error:#}")),
+    }
+}
+
+fn write_remote_ui_token_file(path: &std::path::Path, auth_url: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    use std::io::Write as _;
+    writeln!(file, "{auth_url}").with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
 }
 
 fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessControl) -> Router {
@@ -7255,6 +7326,41 @@ mod tests {
         let uri = Uri::from_static("/api/self-update");
 
         assert!(super::is_allowed_browser_write(&headers, &uri));
+    }
+
+    // The advertised UI address rewrites a wildcard bind to 127.0.0.1, so exposure has
+    // to be read from the bound address. Reading it from the advertised one reported
+    // "local" for 0.0.0.0 — the one bind that is actually reachable.
+    #[tokio::test]
+    async fn exposure_is_read_from_the_bound_address_not_the_advertised_one() {
+        let (state, data_dir) = test_state("sniper-remote-ui-exposure");
+
+        for loopback in ["127.0.0.1:23001", "[::1]:23001"] {
+            state.set_remote_ui_exposed_from_bound_addr(loopback.parse().unwrap());
+            assert!(
+                !state.remote_ui_exposed(),
+                "{loopback} is loopback and must not be reported as exposed"
+            );
+            assert!(!state.runtime_info().await.remote_ui_exposed);
+        }
+
+        for exposed in ["0.0.0.0:23001", "[::]:23001", "192.0.2.10:23001"] {
+            let bound: std::net::SocketAddr = exposed.parse().unwrap();
+            state.set_remote_ui_exposed_from_bound_addr(bound);
+            assert!(
+                state.remote_ui_exposed(),
+                "{exposed} is not loopback and must be reported as exposed"
+            );
+            assert!(state.runtime_info().await.remote_ui_exposed);
+            // The guard the flag exists for: the advertised address hides a wildcard.
+            if bound.ip().is_unspecified() {
+                assert!(crate::runtime_state::advertise_local_api_addr(bound)
+                    .ip()
+                    .is_loopback());
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
