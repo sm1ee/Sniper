@@ -201,18 +201,7 @@ fn parse_socket_addr(name: &str, default: &str) -> Result<SocketAddr> {
 }
 
 fn parse_ui_socket_addr(name: &str, default: &str) -> Result<SocketAddr> {
-    let addr = parse_socket_addr(name, default)?;
-    validate_ui_socket_addr(name, addr)?;
-    Ok(addr)
-}
-
-fn validate_ui_socket_addr(name: &str, addr: SocketAddr) -> Result<()> {
-    if !addr.ip().is_loopback() {
-        anyhow::bail!(
-            "{name} must bind to a loopback address because Sniper's local UI API is unauthenticated"
-        );
-    }
-    Ok(())
+    parse_socket_addr(name, default)
 }
 
 fn parse_socket_addr_value(name: &str, value: &str) -> Result<SocketAddr> {
@@ -434,12 +423,17 @@ mod tests {
     }
 
     #[test]
-    fn ui_addr_rejects_non_loopback_bind() {
-        let result =
-            super::validate_ui_socket_addr("SNIPER_UI_ADDR", "0.0.0.0:23001".parse().unwrap());
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("loopback address"));
+    fn ui_addr_allows_loopback_wildcard_and_specific_binds() {
+        let _guard = lock_env();
+        for value in ["127.0.0.1:0", "[::1]:0", "0.0.0.0:23001", "192.0.2.1:23001"] {
+            let _ui_guard = EnvVarGuard::set("SNIPER_TEST_UI_ADDR", value);
+            assert_eq!(
+                super::parse_ui_socket_addr("SNIPER_TEST_UI_ADDR", "127.0.0.1:0")
+                    .unwrap()
+                    .to_string(),
+                value
+            );
+        }
     }
 
     #[test]
@@ -511,12 +505,6 @@ mod tests {
         assert_eq!(config.max_transaction_entries, 456);
 
         let _ = std::fs::remove_dir_all(home);
-    }
-
-    #[test]
-    fn ui_addr_allows_loopback_ephemeral_bind() {
-        super::validate_ui_socket_addr("SNIPER_UI_ADDR", "127.0.0.1:0".parse().unwrap()).unwrap();
-        super::validate_ui_socket_addr("SNIPER_UI_ADDR", "[::1]:0".parse().unwrap()).unwrap();
     }
 
     #[tokio::test]

@@ -77,6 +77,31 @@ Default listeners:
 - Proxy: `127.0.0.1:8080`
 - UI: `127.0.0.1:23001` (headless mode)
 
+### Remote headless UI
+
+The headless UI can bind directly to any local address when remote access is
+required:
+
+```bash
+SNIPER_DATA_DIR=/tmp/sniper-headless \
+SNIPER_UI_ADDR=192.168.1.10:23001 \
+  cargo run --bin sniper
+```
+
+Use `0.0.0.0:23001` instead to listen on every IPv4 interface. Any non-loopback
+UI listener requires authentication for clients connecting from another host.
+At startup Sniper prints a URL containing a random one-time token. An exact bind
+address produces a ready-to-open URL; for a wildcard bind, replace `0.0.0.0`
+with the machine's reachable address. Sniper exchanges the token for an HttpOnly
+session cookie, removes the token from the address bar, and rejects any later
+attempt to reuse it. Restart Sniper to issue a new token if the browser session
+is lost. Same-machine clients, including `sniper-desktop` and `sniper-cli`,
+remain trusted.
+
+Sniper serves HTTP rather than TLS, so do not expose this listener directly to
+an untrusted network. Use an SSH tunnel or an authenticated TLS reverse proxy
+for access across one.
+
 ## Core workflow
 
 ```
