@@ -1784,7 +1784,13 @@ pub(crate) fn validate_workspace_state(
                 MAX_WORKSPACE_TEXT_FIELD_BYTES,
             )?;
             if let Some(request) = &entry.request {
-                validate_editable_request(request)
+                // Lenient on the path, exactly like the tab's base request above.
+                // A history entry is stored traffic; a placeholder like
+                // `?id=<VICTIM_ID>` in one of them must not fail the *whole*
+                // workspace save, which wedges every later save (and every other
+                // tab) until the offending entry is gone. The path is checked
+                // strictly at send time, where it belongs.
+                validate_editable_request_with(request, true)
                     .map_err(|error| format!("invalid replay history request: {error}"))?;
                 add_workspace_json_bytes(
                     &mut stored_bytes_total,
@@ -7377,6 +7383,47 @@ mod tests {
         let mut controlled = request.clone();
         controlled.path = "/user\u{7}/info".to_string();
         assert!(super::validate_workspace_draft_request(&controlled).is_err());
+    }
+
+    // The same placeholder, but sitting in a tab's *history* rather than its draft.
+    // A history entry keeps the request that was sent, and the operator often sends
+    // one with a placeholder still in it. Validation runs over the whole snapshot, so
+    // a strict parse here rejected the entire save — every tab, every later edit —
+    // until that one entry was gone. This exercises the real save path, not just the
+    // draft helper.
+    #[test]
+    fn a_placeholder_in_replay_history_does_not_reject_the_whole_workspace_save() {
+        let mut poisoned =
+            test_editable_request("/user/info_v2.json?map_user_id=<VICTIM_MAP_USER_ID>");
+        poisoned.host = "app.example.com".to_string();
+
+        let mut snapshot = WorkspaceStateSnapshot::default();
+        snapshot.replay.tabs.push(ReplayTabState {
+            id: "tab-with-history".to_string(),
+            sequence: 1,
+            history_entries: vec![ReplayHistoryEntryState {
+                request: Some(poisoned.clone()),
+                request_text: String::new(),
+                response_record: None,
+                notice: String::new(),
+                target_scheme: String::new(),
+                target_host: String::new(),
+                target_port: String::new(),
+                ..ReplayHistoryEntryState::default()
+            }],
+            ..ReplayTabState::default()
+        });
+
+        assert!(
+            super::validate_workspace_state(&snapshot).is_ok(),
+            "a placeholder in a stored history entry must not fail the workspace save"
+        );
+
+        // And a genuinely malformed history path is still refused.
+        let mut broken = poisoned;
+        broken.path = "/user\u{7}/info".to_string();
+        snapshot.replay.tabs[0].history_entries[0].request = Some(broken);
+        assert!(super::validate_workspace_state(&snapshot).is_err());
     }
 
     #[tokio::test]
