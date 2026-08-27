@@ -1036,9 +1036,16 @@ fn validate_since(input: &str) -> Option<()> {
 pub(crate) fn validate_editable_request(
     request: &EditableRequest,
 ) -> std::result::Result<(), String> {
+    validate_editable_request_with(request, false)
+}
+
+fn validate_editable_request_with(
+    request: &EditableRequest,
+    lenient_path: bool,
+) -> std::result::Result<(), String> {
     validate_http_scheme_field(&request.scheme, "request scheme")?;
     validate_editable_request_host(&request.host)?;
-    validate_editable_request_path(&request.path)?;
+    validate_editable_request_path_with(&request.path, lenient_path)?;
     validate_http_method(&request.method)?;
     for header in &request.headers {
         validate_editable_header(header)?;
@@ -1125,6 +1132,20 @@ fn validate_editable_request_host(host: &str) -> std::result::Result<(), String>
 }
 
 fn validate_editable_request_path(path: &str) -> std::result::Result<(), String> {
+    validate_editable_request_path_with(path, false)
+}
+
+/// `lenient` keeps every structural check but the URI parse. A persisted replay
+/// draft is work in progress — a placeholder like `<VICTIM_ID>` is exactly what an
+/// operator types before filling it in, and it is not a valid URI yet. Requiring
+/// it to parse at *persist* time rejected the whole workspace over one unsent
+/// draft, which wedged every other tab and every later edit. The parse still runs
+/// at send time (`validate_runnable_editable_request`), where an unfinished path
+/// belongs as an error on that one action.
+fn validate_editable_request_path_with(
+    path: &str,
+    lenient: bool,
+) -> std::result::Result<(), String> {
     if path.is_empty() {
         return Err("request path is required".to_string());
     }
@@ -1137,7 +1158,7 @@ fn validate_editable_request_path(path: &str) -> std::result::Result<(), String>
     if path != "*" && !path.starts_with('/') {
         return Err("request path must start with '/'".to_string());
     }
-    if path != "*" {
+    if !lenient && path != "*" {
         path.parse::<PathAndQuery>()
             .map_err(|_| format!("invalid request path: {path}"))?;
     }
@@ -1946,7 +1967,7 @@ fn validate_workspace_string_bytes(
 
 fn validate_workspace_draft_request(request: &EditableRequest) -> std::result::Result<(), String> {
     if !request.host.trim().is_empty() {
-        return validate_editable_request(request);
+        return validate_editable_request_with(request, true);
     }
     if request.host.trim() != request.host {
         return Err("draft request host must not include whitespace".to_string());
@@ -1955,7 +1976,7 @@ fn validate_workspace_draft_request(request: &EditableRequest) -> std::result::R
         validate_http_scheme_field(&request.scheme, "request scheme")?;
     }
     if !request.path.trim().is_empty() {
-        validate_editable_request_path(&request.path)?;
+        validate_editable_request_path_with(&request.path, true)?;
     }
     if !request.method.trim().is_empty() {
         validate_http_method(&request.method)?;
@@ -7331,6 +7352,33 @@ mod tests {
     // The advertised UI address rewrites a wildcard bind to 127.0.0.1, so exposure has
     // to be read from the bound address. Reading it from the advertised one reported
     // "local" for 0.0.0.0 — the one bind that is actually reachable.
+    // A replay tab is a draft: an operator seeds it from a capture and edits the
+    // path, often leaving a placeholder like <VICTIM_ID> in place mid-edit. That is
+    // not a valid URI, but persisting it must not reject the whole workspace — one
+    // such tab used to wedge every other tab and every later save. The strict parse
+    // still runs at send time.
+    #[test]
+    fn a_draft_replay_path_with_a_placeholder_persists_but_will_not_send() {
+        let mut request = test_editable_request("/user/info_v2.json?id=<VICTIM_ID>");
+        request.host = "app.example.com".to_string();
+
+        // Persisted as a draft: allowed.
+        assert!(
+            super::validate_workspace_draft_request(&request).is_ok(),
+            "a draft path with a placeholder must persist"
+        );
+
+        // Sent for real: rejected, with the path named.
+        let send_error = super::validate_runnable_editable_request(&request)
+            .expect_err("an unfinished path must not be sendable");
+        assert!(send_error.contains("invalid request path"), "{send_error}");
+
+        // Structural breakage is still rejected even in a draft.
+        let mut controlled = request.clone();
+        controlled.path = "/user\u{7}/info".to_string();
+        assert!(super::validate_workspace_draft_request(&controlled).is_err());
+    }
+
     #[tokio::test]
     async fn exposure_is_read_from_the_bound_address_not_the_advertised_one() {
         let (state, data_dir) = test_state("sniper-remote-ui-exposure");
