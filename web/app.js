@@ -10564,11 +10564,33 @@ function renderMessagePanes() {
   const resMode = state.messageViews.response;
   // Map view mode to CM highlight mode: pretty/raw → http, hex → hex, diff → diff
   const cmMode = (m) => (m === "hex" ? "hex" : m === "diff" ? "diff" : "http");
+
+  // On the Modified view, tint the lines an edit rewrote. Only for pretty/raw:
+  // hex renders on a fixed grid where a line diff has no meaning, and diff mode
+  // already shows +/-. Comparing against the original built the same way keeps
+  // the request line's method/path change visible too.
+  const requestChanged = record && !state.showOriginal.request && record.original_request
+    && (reqMode === "pretty" || reqMode === "raw")
+    ? changedLineRanges(requestText, buildMessagePresentation("request", {
+        ...record,
+        request: record.original_request,
+        method: record.original_method ?? record.method,
+        path: record.original_path ?? record.path,
+      }))
+    : [];
+  const responseChanged = record && !state.showOriginal.response && record.original_response
+    && (resMode === "pretty" || resMode === "raw")
+    ? changedLineRanges(responseText, buildMessagePresentation("response", {
+        ...record,
+        response: record.original_response,
+      }))
+    : [];
+
   const requestPane = els.requestViewCM
-    ? updateCodePaneCM("request", els.requestViewCM, requestText, { mode: cmMode(reqMode), search: state.messageSearch.request })
+    ? updateCodePaneCM("request", els.requestViewCM, requestText, { mode: cmMode(reqMode), search: state.messageSearch.request, changedRanges: requestChanged })
     : (els.requestView && els.requestLines ? updateCodePane(els.requestView, els.requestLines, requestText, reqMode, "request") : null);
   const responsePane = els.responseViewCM
-    ? updateCodePaneCM("response", els.responseViewCM, responseText, { mode: cmMode(resMode), search: state.messageSearch.response })
+    ? updateCodePaneCM("response", els.responseViewCM, responseText, { mode: cmMode(resMode), search: state.messageSearch.response, changedRanges: responseChanged })
     : (els.responseView && els.responseLines ? updateCodePane(els.responseView, els.responseLines, responseText, resMode, "response") : null);
   if (els.requestSearchInput.value !== state.messageSearch.request) {
     els.requestSearchInput.value = state.messageSearch.request;
@@ -17196,6 +17218,99 @@ function buildMessagePresentation(target, record) {
   return text;
 }
 
+// Which lines of `a` have no counterpart in `b`, by line LCS. Only the lines
+// that actually differ come back — marking the whole span between the first and
+// last difference would tint the untouched lines in between, which is the noise
+// this highlight exists to remove (a body edit also rewrites Content-Length, so
+// two distant changes are the normal case, not the exception).
+function diffChangedLineIndices(a, b) {
+  const n = a.length;
+  const m = b.length;
+  const changed = new Set();
+  if (n === 0) return changed;
+  // The DP table is (n+1)*(m+1) u32. Past this the table costs more than the
+  // precision is worth, so fall back to marking the whole band.
+  if (n * m > 1000000) {
+    for (let i = 0; i < n; i++) changed.add(i);
+    return changed;
+  }
+  const width = m + 1;
+  const dp = new Uint32Array((n + 1) * width);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i * width + j] = a[i] === b[j]
+        ? dp[(i + 1) * width + (j + 1)] + 1
+        : Math.max(dp[(i + 1) * width + j], dp[i * width + (j + 1)]);
+    }
+  }
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+    } else if (dp[(i + 1) * width + j] >= dp[i * width + (j + 1)]) {
+      changed.add(i);
+      i++;
+    } else {
+      j++;
+    }
+  }
+  while (i < n) {
+    changed.add(i);
+    i++;
+  }
+  return changed;
+}
+
+// Character ranges, in the modified text, of the lines an edit rewrote. The
+// common prefix and suffix are trimmed first so the LCS only runs over the part
+// that can differ — a 10 MB body with a one-line edit never builds a big table.
+function changedLineRanges(modifiedText, originalText) {
+  if (!originalText || !modifiedText || modifiedText === originalText) return [];
+  const mod = modifiedText.split("\n");
+  const orig = originalText.split("\n");
+  let start = 0;
+  const cap = Math.min(mod.length, orig.length);
+  while (start < cap && mod[start] === orig[start]) start++;
+  let endMod = mod.length - 1;
+  let endOrig = orig.length - 1;
+  while (endMod >= start && endOrig >= start && mod[endMod] === orig[endOrig]) {
+    endMod--;
+    endOrig--;
+  }
+  if (endMod < start) return []; // the edit only removed lines; nothing to mark here
+
+  const changed = diffChangedLineIndices(
+    mod.slice(start, endMod + 1),
+    orig.slice(start, endOrig + 1),
+  );
+  const offsets = [];
+  let pos = 0;
+  for (let i = 0; i < mod.length; i++) {
+    offsets.push(pos);
+    pos += mod[i].length + 1;
+  }
+  const ranges = [];
+  const pushRange = (bandFrom, bandTo) => {
+    const first = start + bandFrom;
+    const last = start + bandTo;
+    ranges.push([offsets[first], offsets[last] + mod[last].length]);
+  };
+  const bandLength = endMod - start + 1;
+  let runStart = -1;
+  for (let i = 0; i < bandLength; i++) {
+    const isChanged = changed.has(i);
+    if (isChanged && runStart < 0) runStart = i;
+    if (!isChanged && runStart >= 0) {
+      pushRange(runStart, i - 1);
+      runStart = -1;
+    }
+  }
+  if (runStart >= 0) pushRange(runStart, bandLength - 1);
+  return ranges;
+}
+
 function buildDiffPresentation(target, record) {
   const originalField = target === "request" ? "original_request" : "original_response";
   const original = record[originalField];
@@ -23475,6 +23590,13 @@ const sniperCMTheme = CM.EditorView.theme({
     fontSize: "var(--font-xs)",
     fontFamily: "var(--mono)",
   },
+  // A line an edit rewrote, shown on the Modified view. Amber, and a left rail
+  // so it still reads for a viewer who cannot separate the tint — this is not an
+  // error state, so it deliberately avoids the diff red/green.
+  ".cm-line.cm-changed-line": {
+    backgroundColor: "rgba(224, 165, 63, 0.16)",
+    boxShadow: "inset 2px 0 0 var(--accent, #e0a050)",
+  },
   ".cm-activeLine": {
     backgroundColor: "rgba(255, 255, 255, 0.07)",
     outline: "1px solid rgba(255, 255, 255, 0.12)",
@@ -23958,6 +24080,54 @@ const searchDecoField = CM.StateField.define({
   provide: (f) => CM.EditorView.decorations.from(f, (val) => val.decos),
 });
 
+// Changed-line decoration: tints the lines that a match/replace rule or an
+// intercept edit rewrote, so the Modified view shows *where* the change is
+// instead of leaving the operator to spot it by eye. Kept separate from the
+// search field so both can highlight at once.
+const setChangedRanges = CM.StateEffect.define();
+const changedDecoField = CM.StateField.define({
+  create() {
+    return CM.Decoration.none;
+  },
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setChangedRanges)) {
+        return buildChangedLineDecorations(tr.state.doc, e.value);
+      }
+    }
+    // Replacing the document invalidates the ranges; the caller re-applies them
+    // against the new text right after setContent.
+    if (tr.docChanged) {
+      return CM.Decoration.none;
+    }
+    return value;
+  },
+  provide: (f) => CM.EditorView.decorations.from(f),
+});
+
+function buildChangedLineDecorations(doc, ranges) {
+  if (!ranges || !ranges.length) return CM.Decoration.none;
+  const lineDeco = CM.Decoration.line({ class: "cm-changed-line" });
+  const marks = [];
+  const seen = new Set();
+  for (const range of ranges) {
+    const from = Math.max(0, Math.min(range[0], doc.length));
+    const to = Math.max(0, Math.min(range[1], doc.length));
+    let pos = from;
+    while (pos <= to) {
+      const line = doc.lineAt(pos);
+      if (!seen.has(line.from)) {
+        seen.add(line.from);
+        marks.push(lineDeco.range(line.from));
+      }
+      if (line.to >= to) break;
+      pos = line.to + 1;
+    }
+  }
+  marks.sort((a, b) => a.from - b.from);
+  return CM.Decoration.set(marks);
+}
+
 /** Reusable CodeMirror wrapper for Sniper code views. */
 class SniperCodeView {
   constructor(container, options = {}) {
@@ -23966,10 +24136,15 @@ class SniperCodeView {
     this.view = new CM.EditorView({
       state: CM.EditorState.create({
         doc: "",
-        extensions: [...createBaseExtensions(options), searchDecoField],
+        extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField],
       }),
       parent: container,
     });
+  }
+
+  /** Tint the given character ranges as changed lines. Call after setContent. */
+  applyChangedLines(ranges) {
+    this.view.dispatch({ effects: setChangedRanges.of(ranges || []) });
   }
 
   setContent(text) {
@@ -24093,6 +24268,10 @@ function updateCodePaneCM(key, container, text, options = {}) {
   // Search highlights
   const query = (options.search || "").trim();
   const searchResult = cv.applySearch(query, { classes: options.searchClasses });
+
+  // Changed-line highlights (Modified view). Applied after setContent, which
+  // clears them, so this is the authoritative re-apply for the new text.
+  cv.applyChangedLines(options.changedRanges);
 
   const lineCount = cv.view.state.doc.lines;
   return {
