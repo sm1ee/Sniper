@@ -23593,9 +23593,14 @@ const sniperCMTheme = CM.EditorView.theme({
   // A line an edit rewrote, shown on the Modified view. Amber, and a left rail
   // so it still reads for a viewer who cannot separate the tint — this is not an
   // error state, so it deliberately avoids the diff red/green.
+  //
+  // The rail sits in the content's own left padding, not inside the line box: an
+  // inset shadow lands on column 0, which a wrapped line starts its continuation
+  // row at, and it clipped the first character there.
   ".cm-line.cm-changed-line": {
     backgroundColor: "rgba(224, 165, 63, 0.16)",
-    boxShadow: "inset 2px 0 0 var(--accent, #e0a050)",
+    borderLeft: "2px solid var(--accent, #e0a050)",
+    marginLeft: "-2px",
   },
   ".cm-activeLine": {
     backgroundColor: "rgba(255, 255, 255, 0.07)",
