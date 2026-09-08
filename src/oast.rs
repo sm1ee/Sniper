@@ -1441,6 +1441,7 @@ pub fn start_oast_poller_for_state(state: Arc<AppState>) -> tokio::task::JoinHan
 
 pub async fn run_oast_poller_for_state(state: Arc<AppState>) {
     let client = reqwest::Client::builder()
+        .use_rustls_tls()
         .timeout(Duration::from_secs(15))
         .build()
         .unwrap_or_default();

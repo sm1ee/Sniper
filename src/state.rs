@@ -2272,6 +2272,7 @@ fn is_newer_version(current: &str, latest: &str) -> bool {
 
 fn app_release_http_client(error_context: &'static str) -> Result<reqwest::Client> {
     let builder = reqwest::Client::builder()
+        .use_rustls_tls()
         .connect_timeout(APP_RELEASE_CONNECT_TIMEOUT)
         .read_timeout(APP_RELEASE_READ_TIMEOUT)
         .user_agent(format!(

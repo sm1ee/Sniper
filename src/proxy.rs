@@ -619,11 +619,61 @@ pub async fn try_send_replay_request_for_session(
 
 fn build_client(upstream_insecure: bool) -> ProxyClient {
     Client::builder()
+        // Pinned, not defaulted: enabling reqwest's native-tls feature for the
+        // legacy fallback below also makes it reqwest's default backend, which
+        // would silently move every upstream connection off rustls.
+        .use_rustls_tls()
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure)
         .http1_only()
         .build()
         .expect("failed to build upstream HTTP client")
+}
+
+/// A second client that hands TLS to the platform instead of rustls.
+///
+/// rustls implements neither static-RSA key exchange nor the CBC cipher suites,
+/// on purpose. A server that offers only those — still ordinary on internal and
+/// long-lived stacks — therefore fails the handshake outright, and the proxy
+/// reports a bare connection error for a host every browser on the machine can
+/// reach. A testing proxy that cannot reach the host under test is useless, so a
+/// connection failure gets one retry through the platform stack, which does
+/// support them.
+fn build_legacy_tls_client(upstream_insecure: bool) -> Option<ProxyClient> {
+    Client::builder()
+        .redirect(Policy::none())
+        .danger_accept_invalid_certs(upstream_insecure)
+        .http1_only()
+        .use_native_tls()
+        .build()
+        .ok()
+}
+
+/// Whether a failed send is worth one more attempt over the platform TLS stack.
+///
+/// ponytail: `is_connect` also covers DNS and refused connections, so an
+/// unreachable host costs one extra attempt. Narrowing it means string-matching
+/// rustls' error text, which breaks on any rustls release; one wasted connect on
+/// an already-failing request is the cheaper trade.
+fn should_retry_over_legacy_tls(error: &reqwest::Error, scheme: Option<&str>) -> bool {
+    scheme == Some("https") && error.is_connect()
+}
+
+/// reqwest renders only the head of its error chain, so a TLS handshake failure
+/// arrives as "error sending request for url (...)" with the cause — the part
+/// that says what is actually wrong — dropped. Walk the chain so the operator
+/// sees it.
+fn describe_upstream_error(error: &reqwest::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !parts.iter().any(|part| part == &text) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    parts.join(": ")
 }
 
 fn parse_replay_http_version(value: Option<&str>) -> Result<Option<Version>> {
@@ -645,6 +695,7 @@ async fn build_replay_client(
     http_version: Option<Version>,
 ) -> Result<ProxyClient> {
     let mut builder = Client::builder()
+        .use_rustls_tls()
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure)
         .timeout(REPLAY_REQUEST_TIMEOUT)
@@ -3466,18 +3517,41 @@ async fn execute_streaming_http_exchange(
     outbound_headers.remove(HOST);
     outbound_headers.remove(CONTENT_LENGTH);
 
-    let mut request_builder = client
-        .request(method.clone(), absolute_uri.to_string())
-        .headers(outbound_headers)
-        .body(request_body.clone());
-    if let Some(version) = requested_http_version {
-        request_builder = request_builder.version(version);
-    }
-    if let Some(host_override) = host_override {
-        request_builder = request_builder.header(HOST, host_override);
+    let build_outbound = |client: &ProxyClient| {
+        let mut request_builder = client
+            .request(method.clone(), absolute_uri.to_string())
+            .headers(outbound_headers.clone())
+            .body(request_body.clone());
+        if let Some(version) = requested_http_version {
+            request_builder = request_builder.version(version);
+        }
+        if let Some(host_override) = host_override.clone() {
+            request_builder = request_builder.header(HOST, host_override);
+        }
+        request_builder
+    };
+
+    // Same legacy-TLS retry as the buffered path: whether a response streams is
+    // decided before the connection is made, so a host that only speaks legacy
+    // TLS can arrive on either path.
+    let mut send_result = build_outbound(client).send().await;
+    if let Err(error) = &send_result {
+        if should_retry_over_legacy_tls(error, absolute_uri.scheme_str()) {
+            let upstream_insecure = session.runtime.upstream_insecure().await;
+            if let Some(legacy_client) = build_legacy_tls_client(upstream_insecure) {
+                let retried = build_outbound(&legacy_client).send().await;
+                if retried.is_ok() {
+                    notes.push(
+                        "Upstream negotiated only legacy TLS; connected through the platform TLS stack."
+                            .to_string(),
+                    );
+                }
+                send_result = retried;
+            }
+        }
     }
 
-    match request_builder.send().await {
+    match send_result {
         Ok(response) => {
             let status = response.status();
             let response_version = response.version();
@@ -3564,7 +3638,10 @@ async fn execute_streaming_http_exchange(
             rebuild_streaming_response(response_headers, status, body, &method_text)
         }
         Err(error) => {
-            let message = format!("Upstream request failed: {error}");
+            let message = format!(
+                "Upstream request failed: {}",
+                describe_upstream_error(&error)
+            );
             notes.push(message.clone());
             session
                 .event_log
@@ -3973,18 +4050,38 @@ async fn execute_http_exchange(
     outbound_headers.remove(HOST);
     outbound_headers.remove(CONTENT_LENGTH);
 
-    let mut request_builder = client
-        .request(method.clone(), absolute_uri.to_string())
-        .headers(outbound_headers)
-        .body(request_body.clone());
-    if let Some(version) = requested_http_version {
-        request_builder = request_builder.version(version);
-    }
-    if let Some(host_override) = host_override {
-        request_builder = request_builder.header(HOST, host_override);
+    let build_outbound = |client: &ProxyClient| {
+        let mut request_builder = client
+            .request(method.clone(), absolute_uri.to_string())
+            .headers(outbound_headers.clone())
+            .body(request_body.clone());
+        if let Some(version) = requested_http_version {
+            request_builder = request_builder.version(version);
+        }
+        if let Some(host_override) = host_override.clone() {
+            request_builder = request_builder.header(HOST, host_override);
+        }
+        request_builder
+    };
+
+    let mut send_result = build_outbound(client).send().await;
+    if let Err(error) = &send_result {
+        if should_retry_over_legacy_tls(error, absolute_uri.scheme_str()) {
+            let upstream_insecure = session.runtime.upstream_insecure().await;
+            if let Some(legacy_client) = build_legacy_tls_client(upstream_insecure) {
+                let retried = build_outbound(&legacy_client).send().await;
+                if retried.is_ok() {
+                    notes.push(
+                        "Upstream negotiated only legacy TLS; connected through the platform TLS stack."
+                            .to_string(),
+                    );
+                }
+                send_result = retried;
+            }
+        }
     }
 
-    match request_builder.send().await {
+    match send_result {
         Ok(response) => {
             let status = response.status();
             let resp_version = response.version();
@@ -4141,7 +4238,10 @@ async fn execute_http_exchange(
             }
         }
         Err(error) => {
-            let message = format!("Upstream request failed: {error}");
+            let message = format!(
+                "Upstream request failed: {}",
+                describe_upstream_error(&error)
+            );
             notes.push(message.clone());
             session
                 .event_log
@@ -6198,6 +6298,41 @@ mod tests {
             "connection reset by peer",
         ));
         assert!(!is_unexpected_eof(&reset));
+    }
+
+    // rustls implements neither static-RSA key exchange nor CBC suites, so a server
+    // offering only those fails the handshake and the proxy returned a bare 502 for
+    // a host every browser on the machine could reach. The retry is gated on a
+    // connect-class failure over https; anything else must not pay for a second
+    // attempt. Uses a refused loopback port so the test stays off the network.
+    #[tokio::test]
+    async fn a_refused_https_connection_is_retried_over_the_platform_tls_stack() {
+        let client = super::build_client(true);
+        let error = client
+            .get("https://127.0.0.1:1/")
+            .send()
+            .await
+            .expect_err("port 1 on loopback must refuse");
+
+        assert!(error.is_connect(), "expected a connect-class failure");
+        assert!(super::should_retry_over_legacy_tls(&error, Some("https")));
+        // Plain HTTP has no handshake to fall back for.
+        assert!(!super::should_retry_over_legacy_tls(&error, Some("http")));
+        assert!(!super::should_retry_over_legacy_tls(&error, None));
+
+        // The chain has to add something the top-level message does not, or the
+        // operator is back to guessing why the upstream refused them.
+        let described = super::describe_upstream_error(&error);
+        assert!(
+            described.len() > error.to_string().len(),
+            "error chain added nothing: {described}"
+        );
+    }
+
+    #[test]
+    fn a_legacy_tls_client_can_be_built() {
+        assert!(super::build_legacy_tls_client(true).is_some());
+        assert!(super::build_legacy_tls_client(false).is_some());
     }
 
     #[test]
