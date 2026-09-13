@@ -1268,6 +1268,9 @@ impl AppState {
     /// Resolve the `.app` bundle directory from the current executable path.
     /// Expects layout: `Sniper.app/Contents/MacOS/<binary>`.
     fn app_bundle_path(&self) -> Result<std::path::PathBuf> {
+        if !cfg!(target_os = "macos") {
+            anyhow::bail!("automatic installation is available only on macOS; download the update from the releases page");
+        }
         let exe = std::env::current_exe().context("cannot determine executable path")?;
         // exe → Contents/MacOS/<binary>
         let contents = exe
@@ -1405,6 +1408,7 @@ pub struct AppVersionInfo {
     pub current_version: String,
     pub latest_version: Option<String>,
     pub update_available: bool,
+    pub self_update_supported: bool,
     pub releases_url: String,
     pub latest_release_url: Option<String>,
 }
@@ -1415,6 +1419,7 @@ impl AppVersionInfo {
             current_version: env!("CARGO_PKG_VERSION").to_string(),
             latest_version: None,
             update_available: false,
+            self_update_supported: cfg!(target_os = "macos"),
             releases_url: APP_RELEASES_URL.to_string(),
             latest_release_url: None,
         }
@@ -2329,11 +2334,12 @@ mod tests {
         release_proxy_env_targets_loopback, release_update_available, select_release_dmg_asset,
         self_update_bundle_is_writable, self_update_installer_log_path,
         signing_team_update_verdict, update_installer_script, validate_downloaded_update_size,
-        validate_self_update_app_bundle_path, verify_app_identity, AppState, GitHubAsset,
-        GitHubRelease, UpdateArtifactGuard, CODESIGN_PATH, DITTO_PATH,
-        EXPECTED_APP_BUNDLE_IDENTIFIER, EXPECTED_APP_EXECUTABLE, HDIUTIL_PATH, LIPO_PATH,
-        PLIST_BUDDY_PATH, SH_PATH, SPCTL_PATH,
+        validate_self_update_app_bundle_path, AppState, GitHubAsset, GitHubRelease,
+        UpdateArtifactGuard, CODESIGN_PATH, DITTO_PATH, HDIUTIL_PATH, LIPO_PATH, PLIST_BUDDY_PATH,
+        SH_PATH, SPCTL_PATH,
     };
+    #[cfg(target_os = "macos")]
+    use super::{verify_app_identity, EXPECTED_APP_BUNDLE_IDENTIFIER, EXPECTED_APP_EXECUTABLE};
     use crate::config::AppConfig;
     use crate::event_log::EventLevel;
     use crate::fuzzer::{FuzzerAttackRecord, FuzzerAttackStatus};
@@ -3830,6 +3836,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn self_update_identity_check_pins_bundle_executable_and_version() {
         let temp_dir =
             std::env::temp_dir().join(format!("sniper-identity-{}", uuid::Uuid::new_v4()));
@@ -3992,6 +3999,7 @@ mod tests {
         assert_eq!(parse_codesign_team_identifier("Authority=Ad Hoc\n"), None);
     }
 
+    #[cfg(target_os = "macos")]
     fn write_test_info_plist(
         app_dir: &std::path::Path,
         bundle_id: &str,

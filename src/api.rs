@@ -102,7 +102,12 @@ const MAX_WS_REPLAY_OUTBOUND_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const ALLOWED_COLOR_TAGS: &[&str] = &["red", "orange", "yellow", "green", "blue", "purple"];
 const DEFAULT_WEBSOCKET_DETAIL_FRAME_LIMIT: usize = 1_000;
 const MAX_WEBSOCKET_DETAIL_FRAME_LIMIT: usize = 1_000;
+#[cfg(target_os = "macos")]
 const OPEN_PATH: &str = "/usr/bin/open";
+#[cfg(windows)]
+const OPEN_PATH: &str = "explorer.exe";
+#[cfg(all(unix, not(target_os = "macos")))]
+const OPEN_PATH: &str = "xdg-open";
 const REMOTE_UI_SESSION_COOKIE: &str = "sniper_ui_session";
 const REMOTE_UI_TOKEN_BYTES: usize = 32;
 const REMOTE_UI_TOKEN_FILE: &str = "remote-ui-token";
@@ -4236,7 +4241,18 @@ async fn download_root_der(State(state): State<Arc<AppState>>) -> Response {
 
 async fn reveal_certificate_folder(State(state): State<Arc<AppState>>) -> Response {
     let export = state.certificates.export();
-    match spawn_open_command(OPEN_PATH, ["-R", export.pem_path.as_str()]) {
+    #[cfg(target_os = "macos")]
+    let result = spawn_open_command(OPEN_PATH, ["-R", export.pem_path.as_str()]);
+    #[cfg(not(target_os = "macos"))]
+    let result = spawn_open_command(
+        OPEN_PATH,
+        std::iter::once(
+            std::path::Path::new(&export.pem_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        ),
+    );
+    match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,

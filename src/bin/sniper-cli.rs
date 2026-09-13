@@ -6375,9 +6375,7 @@ fn cli_data_dir() -> PathBuf {
 }
 
 fn default_cli_data_dir() -> PathBuf {
-    env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".sniper"))
-        .unwrap_or_else(|| PathBuf::from(".sniper"))
+    sniper::platform::default_data_dir()
 }
 
 async fn discover_api_base_url_from_data_dir(
@@ -6481,9 +6479,9 @@ fn runtime_state_owner_process_is_running(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(unix))]
-fn runtime_state_owner_process_is_running(_pid: u32) -> bool {
-    false
+#[cfg(windows)]
+fn runtime_state_owner_process_is_running(pid: u32) -> bool {
+    sniper::platform::running_process_path(pid).is_some()
 }
 
 #[cfg(target_os = "macos")]
@@ -6513,9 +6511,11 @@ fn runtime_state_owner_process_path_matches(pid: u32, expected_process_path: &st
         })
 }
 
-#[cfg(not(unix))]
-fn runtime_state_owner_process_path_matches(_pid: u32, _expected_process_path: &str) -> bool {
-    false
+#[cfg(windows)]
+fn runtime_state_owner_process_path_matches(pid: u32, expected_process_path: &str) -> bool {
+    sniper::platform::running_process_path(pid).is_some_and(|path| {
+        process_path_strings_match(expected_process_path, &path.to_string_lossy())
+    })
 }
 
 fn process_path_strings_match(expected_process_path: &str, observed_process_path: &str) -> bool {
@@ -7956,10 +7956,10 @@ mod tests {
         build_editable_raw_request, build_editable_raw_request_with_version,
         build_oast_configure_update, clap_error_payload, cli_data_dir, cli_error_payload,
         cli_output_format_from_raw_args, cli_parse_error_operation, cli_partial_apply_error,
-        command_from_call_args, command_from_operation_input, data_dir_strings_match,
-        default_cli_data_dir, default_editable_request, discover_api_base_url,
-        discover_api_base_url_from_data_dir, dry_run_command, ensure_http_replay_tab,
-        explicit_or_active_session_id, failed_record_output, fuzzer_active_target_for_request,
+        command_from_call_args, command_from_operation_input, default_cli_data_dir,
+        default_editable_request, discover_api_base_url, discover_api_base_url_from_data_dir,
+        dry_run_command, ensure_http_replay_tab, explicit_or_active_session_id,
+        failed_record_output, fuzzer_active_target_for_request,
         fuzzer_target_request_authority_for_request, history_list_path, install_skills,
         json_value_with_session_and_workspace_save_error, manifest_operations,
         next_replay_tab_sequence, normalize_api_base_url, normalize_replay_port,
@@ -7967,22 +7967,25 @@ mod tests {
         parse_editable_raw_request, parse_editable_raw_request_bytes_with_version,
         parse_editable_raw_request_with_version, parse_editable_raw_response,
         parse_editable_raw_response_bytes, parse_editable_raw_response_for_request_method,
-        prepare_cli_workspace_save, process_path_strings_match, push_replay_history_entry,
-        read_limited_to_end, read_payloads_input, read_raw_request_input, read_raw_response_input,
-        read_text_input, replay_send_http_version, replay_send_target_for_tab,
-        replay_tab_target_as_request, replay_update_should_preserve_current_port,
-        sequence_write_session_id, session_id_for_write_payload, session_query_path,
-        session_query_path_with_expected_active, sniper_settings_probe_matches, split_host_port,
-        split_payload_lines, strip_host_port, transaction_detail_path, validate_command_preflight,
-        validate_sniper_settings_probe, websocket_detail_path, websocket_list_path,
-        workspace_conflict_message, workspace_state_conflict_detail, CaptureCommand, Cli,
-        CliSideEffect, Command, FuzzerCommand, HistoryCommand, HistoryListArgs,
-        HistoryListResponse, InterceptRuleCommand, OastCommand, OastConfigureArgs, OutputFormat,
-        ReplayCommand, RuntimeUpdatePayload, SequenceCommand, SequenceCreateInput, SessionCommand,
-        SkillsInstallArgs, SniperApiProbeExpectation, TargetCommand, WebSocketListArgs,
-        WebSocketListResponse, CLI_REPEATER_HISTORY_LIMIT, CLI_WORKSPACE_CLIENT_ID,
-        MAX_CLI_INPUT_BYTES, MAX_OAST_POLLING_INTERVAL_SECS, SNIPER_API_PROBE_RETRY_DELAYS,
-        SNIPER_DATA_DIR_ENV,
+        prepare_cli_workspace_save, push_replay_history_entry, read_limited_to_end,
+        read_payloads_input, read_raw_request_input, read_raw_response_input, read_text_input,
+        replay_send_http_version, replay_send_target_for_tab, replay_tab_target_as_request,
+        replay_update_should_preserve_current_port, sequence_write_session_id,
+        session_id_for_write_payload, session_query_path, session_query_path_with_expected_active,
+        sniper_settings_probe_matches, split_host_port, split_payload_lines, strip_host_port,
+        transaction_detail_path, validate_command_preflight, websocket_detail_path,
+        websocket_list_path, workspace_conflict_message, workspace_state_conflict_detail,
+        CaptureCommand, Cli, CliSideEffect, Command, FuzzerCommand, HistoryCommand,
+        HistoryListArgs, HistoryListResponse, InterceptRuleCommand, OastCommand, OastConfigureArgs,
+        OutputFormat, ReplayCommand, RuntimeUpdatePayload, SequenceCommand, SequenceCreateInput,
+        SessionCommand, SkillsInstallArgs, TargetCommand, WebSocketListArgs, WebSocketListResponse,
+        CLI_REPEATER_HISTORY_LIMIT, CLI_WORKSPACE_CLIENT_ID, MAX_CLI_INPUT_BYTES,
+        MAX_OAST_POLLING_INTERVAL_SECS, SNIPER_API_PROBE_RETRY_DELAYS, SNIPER_DATA_DIR_ENV,
+    };
+    #[cfg(unix)]
+    use super::{
+        data_dir_strings_match, process_path_strings_match, validate_sniper_settings_probe,
+        SniperApiProbeExpectation,
     };
     use chrono::Utc;
     use clap::Parser;
@@ -11112,6 +11115,17 @@ mod tests {
         let _data_dir_guard = EnvVarGuard::set(SNIPER_DATA_DIR_ENV, "");
 
         assert_eq!(cli_data_dir(), default_cli_data_dir());
+    }
+
+    #[test]
+    fn cli_data_dir_uses_windows_profile_without_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("sniper-profile-{}", Uuid::new_v4()));
+        let _data_dir = EnvVarGuard::remove(SNIPER_DATA_DIR_ENV);
+        let _home = EnvVarGuard::remove("HOME");
+        let _profile = EnvVarGuard::set("USERPROFILE", root.clone().into_os_string());
+        assert_eq!(cli_data_dir(), root.join(".sniper"));
+        assert_eq!(cli_data_dir(), sniper::certificate::default_data_dir());
     }
 
     #[tokio::test]

@@ -1324,7 +1324,7 @@ fn start_transaction_journal_writer(
                 }
             }
 
-            let mut file = match open_private_append_file(&journal_path) {
+            let file = match open_private_append_file(&journal_path) {
                 Ok(file) => file,
                 Err(error) => {
                     warn!(?error, path = %journal_path.display(), "failed to open transaction journal");
@@ -1332,9 +1332,23 @@ fn start_transaction_journal_writer(
                     return;
                 }
             };
+            #[cfg(not(windows))]
+            let mut file = file;
+            // An idle open child file prevents renaming its session directory
+            // on Windows. Close before acknowledging every queued write too.
+            #[cfg(windows)]
+            drop(file);
             let _ = ready_tx.send(Ok(()));
 
             while let Ok(command) = rx.recv() {
+                #[cfg(windows)]
+                let mut file = match open_private_append_file(&journal_path) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        warn!(?error, path = %journal_path.display(), "failed to reopen session journal");
+                        return;
+                    }
+                };
                 match command {
                     TransactionJournalCommand::Append { line, ack } => {
                         let result = file
@@ -1345,6 +1359,8 @@ fn start_transaction_journal_writer(
                         if let Err(error) = &result {
                             warn!(?error, path = %journal_path.display(), "failed to append transaction journal entry");
                         }
+                        #[cfg(windows)]
+                        drop(file);
                         if let Some(ack) = ack {
                             let _ = ack.send(result);
                         }
@@ -1358,6 +1374,8 @@ fn start_transaction_journal_writer(
                             warn!(?error, path = %journal_path.display(), "failed to rotate transaction journal");
                         }
                         let failed = result.is_err();
+                        #[cfg(windows)]
+                        drop(file);
                         let _ = ack.send(result);
                         if failed {
                             return;
@@ -1439,8 +1457,7 @@ fn rotate_transaction_journal_file(file: &mut fs::File, journal_path: &Path) -> 
         merge_transaction_journal_checkpoint(&checkpoint_path, &active)?;
     }
 
-    file.set_len(0)?;
-    file.sync_all()
+    crate::platform::truncate_journal(file, journal_path)
 }
 
 fn merge_transaction_journal_checkpoint(checkpoint_path: &Path, active: &[u8]) -> io::Result<()> {
@@ -1467,7 +1484,8 @@ fn merge_transaction_journal_checkpoint(checkpoint_path: &Path, active: &[u8]) -
         let mut tmp = open_private_truncate_file(&tmp_path)?;
         tmp.write_all(&checkpoint)?;
         tmp.sync_all()?;
-        fs::rename(&tmp_path, checkpoint_path)?;
+        drop(tmp);
+        crate::platform::rename(&tmp_path, checkpoint_path)?;
         tighten_private_file(checkpoint_path)?;
         if let Some(parent) = checkpoint_path.parent() {
             sync_directory(parent)?;
@@ -1481,7 +1499,7 @@ fn merge_transaction_journal_checkpoint(checkpoint_path: &Path, active: &[u8]) -
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
-    fs::File::open(path).and_then(|directory| directory.sync_all())
+    crate::platform::sync_directory(path)
 }
 
 pub(crate) fn transaction_journal_checkpoint_path(journal_path: &Path) -> PathBuf {

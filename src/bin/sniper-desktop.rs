@@ -1,8 +1,9 @@
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 use std::{
     env,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -11,6 +12,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use sniper::{api, config::AppConfig, proxy, runtime_state, skills, state::AppState};
+#[cfg(any(target_os = "macos", all(test, unix)))]
+use std::process::Command;
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -30,7 +33,9 @@ enum DesktopUserEvent {
     WebviewCloseFlushTimedOut { generation: u64 },
 }
 
+#[cfg(target_os = "macos")]
 const APP_BUNDLE_IDENTIFIER: &str = "com.sm1ee.sniper";
+#[cfg(target_os = "macos")]
 const OPEN_PATH: &str = "/usr/bin/open";
 const INSTALL_SKILLS_ENV: &str = "SNIPER_INSTALL_AGENT_SKILLS";
 const INSTALL_CLI_PATH_ENV: &str = "SNIPER_INSTALL_CLI_PATH";
@@ -47,9 +52,7 @@ fn desktop_data_dir_from_env() -> PathBuf {
 }
 
 fn default_desktop_data_dir() -> PathBuf {
-    env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".sniper"))
-        .unwrap_or_else(|| PathBuf::from(".sniper"))
+    sniper::platform::default_data_dir()
 }
 
 fn normalize_empty_data_dir_env() {
@@ -69,6 +72,7 @@ fn request_existing_desktop_focus() -> bool {
     }
 }
 
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn request_existing_desktop_focus_with(open_path: &Path, bundle_identifier: &str) -> bool {
     match Command::new(open_path)
         .args(["-b", bundle_identifier])
@@ -147,6 +151,27 @@ fn process_path_points_to_desktop_bundle(process_path: Option<&str>) -> bool {
 }
 
 fn main() -> Result<()> {
+    let result = run_desktop();
+    #[cfg(windows)]
+    if let Err(error) = &result {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let message: Vec<u16> = format!("Sniper could not start.\n\n{error:#}\n\nIf WebView2 could not be created, install Microsoft Edge WebView2 Runtime and try again.")
+            .encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = "Sniper".encode_utf16().chain(Some(0)).collect();
+        // Release builds have no console, so startup failures need a visible explanation.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                message.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+    result
+}
+
+fn run_desktop() -> Result<()> {
     sniper::init_tracing();
     normalize_empty_data_dir_env();
 
@@ -161,7 +186,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         anyhow::bail!(
-            "another Sniper runtime is already using data dir {}; stop the existing Sniper CLI/server process or use a different SNIPER_DATA_DIR before launching Sniper.app",
+            "another Sniper runtime is already using data dir {}; stop the existing Sniper process or use a different SNIPER_DATA_DIR before launching Sniper",
             data_dir.display()
         );
     };
@@ -303,7 +328,11 @@ fn main() -> Result<()> {
             error!(?error, "ui task stopped");
         }
     });
+    // WebView2 otherwise stores its profile next to the executable, which may
+    // be installed in a directory the user cannot write to.
+    let mut web_context = wry::WebContext::new(Some(config.data_dir.join("webview")));
     let webview_builder = WebViewBuilder::new(&window)
+        .with_web_context(&mut web_context)
         .with_incognito(true)
         .with_devtools(desktop_devtools_enabled())
         .with_navigation_handler({
@@ -1051,8 +1080,8 @@ fn write_shell_rc_atomically(rc_path: &std::path::Path, contents: &str) -> std::
         if let Some(permissions) = existing_permissions {
             std::fs::set_permissions(&tmp_path, permissions)?;
         }
-        std::fs::rename(&tmp_path, &write_path)?;
-        std::fs::File::open(parent)?.sync_all()?;
+        sniper::platform::rename(&tmp_path, &write_path)?;
+        sniper::platform::sync_directory(parent)?;
         Ok(())
     })();
 
@@ -1174,17 +1203,20 @@ fn is_same_origin(url: &str, expected_origin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::request_existing_desktop_focus_with;
+    #[cfg(target_os = "macos")]
+    use super::should_install_cli_path;
     use super::{
         begin_desktop_teardown, block_desktop_shutdown, combine_desktop_persist_results,
         complete_desktop_shutdown, desktop_close_flush_script, desktop_user_event_from_ipc,
         finish_desktop_teardown, handle_navigation_request, handle_new_window_request,
         is_blocked_desktop_navigation_scheme, is_same_origin, load_shell_rc_contents,
         normalize_empty_data_dir_env, persist_desktop_session_state,
-        process_path_points_to_desktop_bundle, request_existing_desktop_focus_with,
-        shell_single_quote, should_install_cli_path, should_install_cli_path_on_launch,
-        should_install_skills_on_launch, should_request_existing_desktop_focus,
-        upsert_managed_path_line, write_shell_rc_atomically, AppConfig, AppState, DesktopUserEvent,
-        SNIPER_DATA_DIR_ENV,
+        process_path_points_to_desktop_bundle, shell_single_quote,
+        should_install_cli_path_on_launch, should_install_skills_on_launch,
+        should_request_existing_desktop_focus, upsert_managed_path_line, write_shell_rc_atomically,
+        AppConfig, AppState, DesktopUserEvent, SNIPER_DATA_DIR_ENV,
     };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -1292,6 +1324,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn existing_runtime_focus_reports_open_command_failures() {
         assert!(request_existing_desktop_focus_with(
             std::path::Path::new("/usr/bin/true"),
@@ -1578,6 +1611,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn cli_path_install_skips_transient_dmg_mounts() {
         assert!(!should_install_cli_path(std::path::Path::new(
             "/Volumes/Sniper/Sniper.app/Contents/MacOS",

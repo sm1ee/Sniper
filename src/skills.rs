@@ -58,7 +58,7 @@ fn write_skill_markdown(skill_dir: &Path, skill_path: &Path, skill_md: &str) -> 
     let tmp_path = skill_dir.join(format!("SKILL.{}.tmp", uuid::Uuid::new_v4()));
     fs::write(&tmp_path, skill_md)
         .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    if let Err(error) = fs::rename(&tmp_path, skill_path) {
+    if let Err(error) = crate::platform::rename(&tmp_path, skill_path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(error).with_context(|| {
             format!(
@@ -115,9 +115,7 @@ fn agent_home_dir(value: Option<OsString>) -> Option<OsString> {
 }
 
 pub fn user_home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+    crate::platform::user_home_dir()
 }
 
 pub fn ensure_distinct_skill_install_targets(codex_root: &Path, claude_root: &Path) -> Result<()> {

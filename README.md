@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="web/sniper-logo-wide.png" width="360" alt="Sniper — open-source web proxy for macOS" />
+  <img src="web/sniper-logo-wide.png" width="360" alt="Sniper — open-source web proxy for macOS and Windows" />
 </p>
 
 <p align="center">
-  <strong>Lightweight, fast, open-source web proxy for macOS</strong><br/>
+  <strong>Lightweight, fast, open-source web proxy for macOS and Windows</strong><br/>
   A modern alternative to heavy proxy platforms — built in Rust, designed for security testing.
 </p>
 
@@ -12,6 +12,7 @@
   <a href="https://github.com/sm1ee/Sniper/releases/latest"><img src="https://img.shields.io/github/downloads/sm1ee/Sniper/total?style=flat-square&label=downloads&labelColor=1c1c1c&color=d4a017" alt="Downloads" /></a>
   <img src="https://img.shields.io/badge/lang-Rust-orange?style=flat-square&logo=rust" alt="Rust" />
   <img src="https://img.shields.io/badge/platform-macOS-blue?style=flat-square&logo=apple" alt="macOS" />
+  <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square" alt="Windows" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License" /></a>
 </p>
 
@@ -23,13 +24,19 @@
 
 ## What is Sniper?
 
-Sniper is an **open-source desktop web security proxy** for macOS. It intercepts, inspects, and modifies HTTP/HTTPS traffic between your browser and the internet — the core workflow for web application security testing, bug bounty hunting, and API debugging.
+Sniper is an **open-source desktop web security proxy** for macOS and Windows. It intercepts, inspects, and modifies HTTP/HTTPS traffic between your browser and the internet — the core workflow for web application security testing, bug bounty hunting, and API debugging.
 
-If you've used Burp Suite, OWASP ZAP, or Caido, you'll feel right at home — but without the Java overhead, subscription fees, or bloated feature set. Sniper is a **native macOS app** written in Rust that starts in under a second and stays under 100 MB of RAM.
+If you've used Burp Suite, OWASP ZAP, or Caido, you'll feel right at home — but without the Java overhead, subscription fees, or bloated feature set. Sniper is a **native desktop app** written in Rust with an embedded web UI.
 
 **Who it's for:** penetration testers, bug bounty hunters, security researchers, and developers who need to see what's happening on the wire.
 
 ## Install
+
+### Windows
+
+Build from source with the MSVC Rust toolchain and Microsoft Edge WebView2 Runtime, or extract a Windows ZIP built by `packaging/windows/make-zip.ps1` and open `sniper-desktop.exe`. See [Windows setup and packaging](packaging/windows/README.md) for prerequisites, HTTPS certificates, CLI usage, and isolated testing. Windows x64 is the first port; Linux validation is still pending.
+
+### macOS
 
 **Download the latest `.dmg`** from [Releases](https://github.com/sm1ee/Sniper/releases/latest), open it, and drag Sniper to your Applications folder.
 
@@ -172,7 +179,7 @@ AI agents can drive the full workflow through CLI — capture, scope, replay, fu
 | UI server | `axum` serving embedded SPA |
 | Frontend | Vanilla **JS** + **CSS** — zero framework, zero build step |
 | Desktop shell | Native **WebView** (`wry`) |
-| Packaging | macOS `.app` + `.dmg` with code signing & notarization |
+| Packaging | macOS `.app` + `.dmg`; Windows portable `.zip` with desktop, server and CLI |
 
 ## Build from source
 

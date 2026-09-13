@@ -87,6 +87,23 @@ flowchart LR
 - `src/bin/sniper-desktop.rs`
   - starts the proxy and UI listeners inside one process
   - opens the desktop UI in a native window
+- `src/platform.rs`
+  - shares the user data directory between desktop, server and CLI
+  - handles Windows file locks, process identity and persistence operations
+
+The desktop shell uses WebKit on macOS and WebView2 on Windows. Its WebView2
+profile lives under the data directory, so an installation in a read-only
+application folder remains usable. Windows packages contain all three
+executables; automatic DMG installation is restricted to macOS.
+
+On Windows, journal workers close their handles before acknowledging commands:
+an idle open journal otherwise prevents renaming its session directory for
+deletion. Rotation uses a separate writable handle because append-only handles
+cannot truncate a file. Snapshot rewrites close their source reader before
+replacement and still adopt the new body locators. File contents are synced
+before replacement; Unix also syncs the parent directory, while Windows uses
+write-through renames with the standard library's rename fallback where needed.
+Windows does not provide the same directory fsync operation as Unix.
 
 Same-machine UI clients are trusted so the local desktop shell and `sniper-cli`
 keep their existing workflow. A non-loopback UI listener authenticates clients

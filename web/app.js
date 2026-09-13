@@ -2214,18 +2214,17 @@ function bindEvents() {
       return;
     }
 
-    // Ctrl+Cmd+1~6: show only rows carrying that colour tag; press again to clear.
+    // Ctrl+Cmd+1~6 (Ctrl+Shift+1~6 on Windows/Linux): filter by colour tag.
     if (
-      event.metaKey &&
-      event.ctrlKey &&
-      !event.shiftKey &&
+      ((event.metaKey && event.ctrlKey && !event.shiftKey) ||
+        (!event.metaKey && event.ctrlKey && event.shiftKey)) &&
       !event.altKey &&
       state.activeTool === "proxy" &&
       state.activeProxyTab === "http-history" &&
-      event.key >= "1" && event.key <= "6"
+      /^Digit[1-6]$/.test(event.code)
     ) {
       event.preventDefault();
-      toggleColorTagFilter(HTTP_COLOR_TAG_ORDER[parseInt(event.key, 10) - 1]);
+      toggleColorTagFilter(HTTP_COLOR_TAG_ORDER[parseInt(event.code.slice(-1), 10) - 1]);
       return;
     }
 
@@ -2440,7 +2439,7 @@ function bindEvents() {
     }
 
     if (
-      event.metaKey &&
+      (event.metaKey || event.ctrlKey) &&
       !event.shiftKey &&
       !event.altKey &&
       event.key.toLowerCase() === "i"
@@ -2650,6 +2649,10 @@ async function loadAppVersionInfo() {
 }
 
 async function performSelfUpdate() {
+  if (state.appVersion?.self_update_supported === false) {
+    window.open(state.appVersion.latest_release_url || state.appVersion.releases_url, "_blank", "noopener,noreferrer");
+    return;
+  }
   if (els.openUpdateButton.disabled) return;
   els.openUpdateButton.disabled = true;
 

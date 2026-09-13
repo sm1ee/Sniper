@@ -292,7 +292,7 @@ fn recover_startup_settings_snapshot(
             ".startup-settings.corrupt-{}.json",
             uuid::Uuid::new_v4()
         ));
-        fs::rename(path, &corrupt_path).with_context(|| {
+        crate::platform::rename(path, &corrupt_path).with_context(|| {
             format!(
                 "failed to move corrupt startup settings {} to {}",
                 path.display(),
@@ -326,15 +326,14 @@ fn persist_startup_settings(path: &Path, snapshot: &StartupSettingsSnapshot) -> 
         file.sync_all()
             .with_context(|| format!("failed to sync startup settings {}", tmp_path.display()))?;
     }
-    fs::rename(&tmp_path, path)
+    crate::platform::rename(&tmp_path, path)
         .with_context(|| format!("failed to replace startup settings {}", path.display()))?;
     sync_directory(parent, "startup settings directory")?;
     Ok(())
 }
 
 fn sync_directory(path: &Path, label: &str) -> Result<()> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
+    crate::platform::sync_directory(path)
         .with_context(|| format!("failed to sync {label} {}", path.display()))
 }
 

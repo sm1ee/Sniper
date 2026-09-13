@@ -1081,7 +1081,7 @@ impl SessionRegistry {
         let storage_metadata = session_storage_metadata(&storage_dir)?;
         let quarantined_storage = if storage_metadata.is_some() {
             let quarantine_dir = deleted_session_dir(&self.root_dir, id);
-            fs::rename(&storage_dir, &quarantine_dir).with_context(|| {
+            crate::platform::rename(&storage_dir, &quarantine_dir).with_context(|| {
                 format!(
                     "failed to quarantine session storage directory {}",
                     storage_dir.display()
@@ -1098,7 +1098,7 @@ impl SessionRegistry {
         }
         if let Err(error) = write_json(&self.registry_path, &next) {
             if let Some(quarantine_dir) = quarantined_storage.as_ref() {
-                if let Err(rollback_error) = fs::rename(quarantine_dir, &storage_dir) {
+                if let Err(rollback_error) = crate::platform::rename(quarantine_dir, &storage_dir) {
                     warn!(
                         ?rollback_error,
                         session_id = %id,
@@ -1854,7 +1854,7 @@ fn write_transactions_meta(
         }
         file.sync_all()?;
     }
-    fs::rename(&tmp_path, &path)?;
+    crate::platform::rename(&tmp_path, &path)?;
     tmp_guard.commit();
     tighten_private_file(&path)?;
     if let Some(parent) = path.parent() {
@@ -2093,7 +2093,9 @@ fn write_transactions_file_streaming(
         file.sync_all()
             .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
     }
-    fs::rename(&tmp_path, path).with_context(|| {
+    // Windows cannot replace the destination while our copy reader holds it open.
+    drop(reader);
+    crate::platform::rename(&tmp_path, path).with_context(|| {
         format!(
             "failed to rename {} to {}",
             tmp_path.display(),
@@ -2169,7 +2171,7 @@ fn write_transactions_file(
         file.sync_all()
             .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
     }
-    fs::rename(&tmp_path, path).with_context(|| {
+    crate::platform::rename(&tmp_path, path).with_context(|| {
         format!(
             "failed to rename {} to {}",
             tmp_path.display(),
@@ -2547,7 +2549,7 @@ fn load_session_snapshot_with_mode(
 
 fn move_corrupt_session_file_aside(parent_dir: &Path, path: &Path, label: &str) {
     let corrupt_path = parent_dir.join(format!(".{label}.corrupt-{}.json", Uuid::new_v4()));
-    if let Err(rename_error) = fs::rename(path, &corrupt_path) {
+    if let Err(rename_error) = crate::platform::rename(path, &corrupt_path) {
         warn!(
             ?rename_error,
             path = %path.display(),
@@ -2684,7 +2686,7 @@ fn start_websocket_journal_writer(
                 }
             }
 
-            let mut file = match open_private_append_file(&journal_path) {
+            let file = match open_private_append_file(&journal_path) {
                 Ok(file) => file,
                 Err(error) => {
                     warn!(?error, path = %journal_path.display(), "failed to open websocket journal");
@@ -2692,9 +2694,23 @@ fn start_websocket_journal_writer(
                     return;
                 }
             };
+            #[cfg(not(windows))]
+            let mut file = file;
+            // An idle open child file prevents renaming its session directory
+            // on Windows. Close before acknowledging every queued write too.
+            #[cfg(windows)]
+            drop(file);
             let _ = ready_tx.send(Ok(()));
 
             while let Ok(command) = rx.recv() {
+                #[cfg(windows)]
+                let mut file = match open_private_append_file(&journal_path) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        warn!(?error, path = %journal_path.display(), "failed to reopen session journal");
+                        return;
+                    }
+                };
                 match command {
                     WebSocketJournalCommand::Append { line, ack } => {
                         let result = file
@@ -2705,17 +2721,21 @@ fn start_websocket_journal_writer(
                         if let Err(error) = &result {
                             warn!(?error, path = %journal_path.display(), "failed to append websocket journal entry");
                         }
+                        #[cfg(windows)]
+                        drop(file);
                         let _ = ack.send(result);
                         if failed {
                             return;
                         }
                     }
                     WebSocketJournalCommand::Clear { ack } => {
-                        let result = file.set_len(0).and_then(|()| file.sync_all());
+                        let result = crate::platform::truncate_journal(&file, &journal_path);
                         if let Err(error) = &result {
                             warn!(?error, path = %journal_path.display(), "failed to clear websocket journal");
                         }
                         let failed = result.is_err();
+                        #[cfg(windows)]
+                        drop(file);
                         let _ = ack.send(result);
                         if failed {
                             return;
@@ -3050,7 +3070,7 @@ fn preserve_corrupt_websocket_journal(journal_path: &Path) {
 fn move_unreadable_websocket_journal_aside(journal_path: &Path) {
     let parent = journal_path.parent().unwrap_or_else(|| Path::new("."));
     let corrupt_path = parent.join(format!(".websockets.journal.corrupt-{}", Uuid::new_v4()));
-    if let Err(error) = fs::rename(journal_path, &corrupt_path) {
+    if let Err(error) = crate::platform::rename(journal_path, &corrupt_path) {
         warn!(
             ?error,
             source = %journal_path.display(),
@@ -3391,7 +3411,7 @@ fn repair_corrupt_transaction_journal_tail(journal_path: &Path, valid_prefix_len
 fn move_unreadable_transaction_journal_aside(journal_path: &Path) {
     let parent = journal_path.parent().unwrap_or_else(|| Path::new("."));
     let corrupt_path = parent.join(format!(".transactions.journal.corrupt-{}", Uuid::new_v4()));
-    if let Err(error) = fs::rename(journal_path, &corrupt_path) {
+    if let Err(error) = crate::platform::rename(journal_path, &corrupt_path) {
         warn!(
             ?error,
             source = %journal_path.display(),
@@ -3520,7 +3540,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
         file.sync_all()
             .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
     }
-    fs::rename(&tmp_path, path).with_context(|| {
+    crate::platform::rename(&tmp_path, path).with_context(|| {
         format!(
             "failed to rename {} to {}",
             tmp_path.display(),
@@ -3567,8 +3587,7 @@ impl Drop for TempJsonFile {
 }
 
 fn sync_directory(path: &Path, label: &str) -> Result<()> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
+    crate::platform::sync_directory(path)
         .with_context(|| format!("failed to sync {label} {}", path.display()))
 }
 
@@ -4999,7 +5018,7 @@ mod tests {
         .expect("orphan snapshot should be written before quarantine");
         let orphan_storage = super::session_dir(&root_dir, orphan.id);
         let quarantine_path = super::deleted_session_dir(&root_dir, orphan.id);
-        std::fs::rename(&orphan_storage, &quarantine_path)
+        crate::platform::rename(&orphan_storage, &quarantine_path)
             .expect("orphan session storage should be quarantined");
         super::write_json(
             &root_dir.join(super::REGISTRY_FILE),
@@ -5498,7 +5517,7 @@ mod tests {
         .expect("deleted snapshot should be written before quarantine");
         let deleted_storage = super::session_dir(&root_dir, deleted.id);
         let quarantine_dir = root_dir.join(format!(".deleted-{}", deleted.id));
-        std::fs::rename(&deleted_storage, &quarantine_dir)
+        crate::platform::rename(&deleted_storage, &quarantine_dir)
             .expect("deleted session storage should be quarantined");
         std::fs::write(root_dir.join(super::REGISTRY_FILE), b"{not json")
             .expect("corrupt registry should be written");
