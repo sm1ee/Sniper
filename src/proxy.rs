@@ -823,7 +823,12 @@ fn parse_request_authority(authority: &str, scheme: &str) -> Result<ParsedAuthor
         .with_context(|| format!("failed to parse request authority {authority}"))?;
     let host = parsed
         .host_str()
-        .map(str::to_string)
+        // URL hosts retain IPv6 brackets; IpAddr and socket resolution do not.
+        .map(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string()
+        })
         .ok_or_else(|| anyhow!("request is missing a valid authority"))?;
     Ok(ParsedAuthority {
         host,
@@ -1372,10 +1377,69 @@ pub(crate) fn local_interface_ips() -> Vec<IpAddr> {
     addrs
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub(crate) fn local_interface_ips() -> Vec<IpAddr> {
-    // ponytail: non-unix falls back to loopback/bound-ip detection only; add
-    // platform enumeration here if Sniper ever ships on a non-unix target.
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use windows_sys::Win32::{
+        Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
+        NetworkManagement::IpHelper::{
+            GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+            GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
+        },
+        Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6},
+    };
+
+    let mut size = 15 * 1024u32;
+    for _ in 0..3 {
+        // u64 supplies the alignment required by IP_ADAPTER_ADDRESSES. Keep
+        // the buffer alive while walking the linked lists owned by Windows.
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        let first = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        // SAFETY: the buffer has at least `size` bytes and proper alignment;
+        // all pointers returned by the API are consumed before it is dropped.
+        unsafe {
+            let result = GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                std::ptr::null(),
+                first,
+                &mut size,
+            );
+            if result == ERROR_BUFFER_OVERFLOW {
+                continue;
+            }
+            if result != NO_ERROR {
+                return Vec::new();
+            }
+            let mut ips = Vec::new();
+            let mut adapter = first;
+            while !adapter.is_null() {
+                let mut address = (*adapter).FirstUnicastAddress;
+                while !address.is_null() {
+                    let socket = (*address).Address.lpSockaddr;
+                    let length = (*address).Address.iSockaddrLength as usize;
+                    if !socket.is_null() {
+                        match (*socket).sa_family {
+                            AF_INET if length >= std::mem::size_of::<SOCKADDR_IN>() => {
+                                let socket = &*socket.cast::<SOCKADDR_IN>();
+                                ips.push(IpAddr::V4(Ipv4Addr::from(
+                                    socket.sin_addr.S_un.S_addr.to_ne_bytes(),
+                                )));
+                            }
+                            AF_INET6 if length >= std::mem::size_of::<SOCKADDR_IN6>() => {
+                                let socket = &*socket.cast::<SOCKADDR_IN6>();
+                                ips.push(IpAddr::V6(Ipv6Addr::from(socket.sin6_addr.u.Byte)));
+                            }
+                            _ => {}
+                        }
+                    }
+                    address = (*address).Next;
+                }
+                adapter = (*adapter).Next;
+            }
+            return ips;
+        }
+    }
     Vec::new()
 }
 
@@ -7764,7 +7828,7 @@ mod tests {
 
     #[test]
     fn local_interface_ips_are_enumerable() {
-        // getifaddrs should return at least the loopback interface.
+        // Platform enumeration should include at least the loopback interface.
         assert!(!local_interface_ips().is_empty());
     }
 

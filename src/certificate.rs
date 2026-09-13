@@ -213,11 +213,7 @@ pub fn default_data_dir() -> PathBuf {
         return PathBuf::from(value);
     }
 
-    if let Some(home) = env::var_os("HOME") {
-        return PathBuf::from(home).join(".sniper");
-    }
-
-    PathBuf::from(".sniper")
+    crate::platform::default_data_dir()
 }
 
 fn certificate_files(data_dir: &Path) -> CertificateFiles {
@@ -240,11 +236,11 @@ fn ensure_certificate_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn tighten_private_key_permissions(path: &Path) -> Result<()> {
+fn tighten_private_key_permissions(_path: &Path) -> Result<()> {
     #[cfg(unix)]
-    if path.exists() {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to secure private key {}", path.display()))?;
+    if _path.exists() {
+        fs::set_permissions(_path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to secure private key {}", _path.display()))?;
     }
     Ok(())
 }

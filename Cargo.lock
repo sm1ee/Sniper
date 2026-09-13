@@ -3002,6 +3002,7 @@ dependencies = [
  "url",
  "uuid",
  "webbrowser",
+ "windows-sys 0.61.2",
  "wry",
  "x509-parser",
  "zstd",

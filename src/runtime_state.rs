@@ -178,7 +178,7 @@ fn move_invalid_runtime_state_aside(data_dir: &Path, path: &Path) {
         ".runtime-state.corrupt-{}.json",
         uuid::Uuid::new_v4()
     ));
-    if let Err(rename_error) = fs::rename(path, &corrupt_path) {
+    if let Err(rename_error) = crate::platform::rename(path, &corrupt_path) {
         warn!(
             ?rename_error,
             path = %path.display(),
@@ -214,7 +214,7 @@ fn persist_runtime_state_locked(data_dir: &Path, snapshot: &RuntimeStateSnapshot
         );
         move_invalid_runtime_state_aside(data_dir, &path);
     }
-    fs::rename(&tmp_path, &path)
+    crate::platform::rename(&tmp_path, &path)
         .with_context(|| format!("failed to replace runtime state at {}", path.display()))?;
     sync_directory(data_dir, "runtime state directory")?;
     Ok(())
@@ -344,9 +344,10 @@ fn try_lock_runtime_owner_file(file: &fs::File, lock_path: &Path) -> Result<bool
     }
 }
 
-#[cfg(not(unix))]
-fn try_lock_runtime_owner_file(_file: &fs::File, _lock_path: &Path) -> Result<bool> {
-    Ok(true)
+#[cfg(windows)]
+fn try_lock_runtime_owner_file(file: &fs::File, lock_path: &Path) -> Result<bool> {
+    crate::platform::lock_file(file, false)
+        .with_context(|| format!("failed to lock runtime owner {}", lock_path.display()))
 }
 
 #[cfg(unix)]
@@ -363,8 +364,7 @@ impl Drop for RuntimeOwnerLock {
 }
 
 fn sync_directory(path: &Path, label: &str) -> Result<()> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
+    crate::platform::sync_directory(path)
         .with_context(|| format!("failed to sync {label} {}", path.display()))
 }
 
@@ -399,8 +399,10 @@ fn lock_runtime_state_file(file: &fs::File, lock_path: &Path) -> Result<()> {
     }
 }
 
-#[cfg(not(unix))]
-fn lock_runtime_state_file(_file: &fs::File, _lock_path: &Path) -> Result<()> {
+#[cfg(windows)]
+fn lock_runtime_state_file(file: &fs::File, lock_path: &Path) -> Result<()> {
+    crate::platform::lock_file(file, true)
+        .with_context(|| format!("failed to lock runtime state {}", lock_path.display()))?;
     Ok(())
 }
 

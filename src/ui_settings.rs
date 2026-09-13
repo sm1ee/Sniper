@@ -559,7 +559,7 @@ fn persist_ui_settings(path: &Path, snapshot: &AppUiSettingsSnapshot) -> Result<
             move_corrupt_ui_settings_aside(parent, path);
         }
     }
-    fs::rename(&tmp_path, path).with_context(|| {
+    crate::platform::rename(&tmp_path, path).with_context(|| {
         format!(
             "failed to rename ui settings {} to {}",
             tmp_path.display(),
@@ -574,7 +574,7 @@ fn persist_ui_settings(path: &Path, snapshot: &AppUiSettingsSnapshot) -> Result<
 
 fn move_corrupt_ui_settings_aside(data_dir: &Path, path: &Path) {
     let corrupt_path = data_dir.join(format!(".ui-settings.corrupt-{}.json", Uuid::new_v4()));
-    if let Err(rename_error) = fs::rename(path, &corrupt_path) {
+    if let Err(rename_error) = crate::platform::rename(path, &corrupt_path) {
         warn!(
             ?rename_error,
             path = %path.display(),
@@ -585,8 +585,7 @@ fn move_corrupt_ui_settings_aside(data_dir: &Path, path: &Path) {
 }
 
 fn sync_directory(path: &Path, label: &str) -> Result<()> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
+    crate::platform::sync_directory(path)
         .with_context(|| format!("failed to sync {label} {}", path.display()))
 }
 
