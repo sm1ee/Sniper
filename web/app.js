@@ -15487,9 +15487,12 @@ function markReplayTabDropGap(tabElement, placeAfter) {
   tabElement.classList.toggle("drop-before", !placeAfter);
   tabElement.classList.toggle("drop-after", placeAfter);
 
-  const neighbour = placeAfter
-    ? tabElement.nextElementSibling
-    : tabElement.previousElementSibling;
+  // Step over the dragged tab: it is hidden, so it is not one of the two tabs
+  // the operator sees the gap opening between.
+  let neighbour = placeAfter ? tabElement.nextElementSibling : tabElement.previousElementSibling;
+  while (neighbour?.classList.contains("dragging")) {
+    neighbour = placeAfter ? neighbour.nextElementSibling : neighbour.previousElementSibling;
+  }
   if (!neighbour?.classList.contains("replay-tab")) return;
   const neighbourId = neighbour.dataset.replayTabId;
   if (neighbourId === replayTabDragId || !replayTabDropIsAllowed(neighbourId)) return;
@@ -15543,7 +15546,12 @@ function wireReplayTabDragReorder(tabElement, id) {
   wireReplayTabStripDragCleanup();
   tabElement.addEventListener("dragstart", (event) => {
     replayTabDragId = id;
-    tabElement.classList.add("dragging");
+    // Hiding the source has to wait a tick: the browser takes the drag image
+    // from the element as it is at the end of this handler, and a display:none
+    // element gives it nothing to carry.
+    setTimeout(() => {
+      if (replayTabDragId === id) tabElement.classList.add("dragging");
+    }, 0);
     event.dataTransfer.effectAllowed = "move";
     // Firefox will not start a drag without data on the transfer.
     event.dataTransfer.setData("text/plain", id);

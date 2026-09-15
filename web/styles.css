@@ -3578,30 +3578,39 @@ body.pane-resizing-y {
   background: var(--point-soft);
 }
 
-/* Drag reorder. Both tabs either side of the gap are marked, so the cue reads as
-   "it goes in here" rather than as one tab growing an edge. Drawn as a shadow
-   outside the border box, which does not reflow the strip mid-drag the way an
-   inserted placeholder element would. */
+/* Drag reorder. The tab being dragged leaves the strip entirely — the cursor is
+   already carrying its drag image, so leaving a ghost behind shows the same tab
+   twice. The strip then opens a gap the width of a tab at the drop point, which
+   is the space the dragged tab is about to occupy. */
 .replay-tab.dragging {
-  opacity: 0.8;
+  display: none;
 }
 
-.replay-tab.drop-before,
-.replay-tab.drop-after {
-  border-color: var(--accent, #e0a050);
+.replay-tab {
+  transition: margin 0.12s ease;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .replay-tab {
+    transition: none;
+  }
+}
+
+/* Only the edge facing the gap is marked, never the whole tab: an outline around
+   the tab reads as "this tab is selected", not as "it goes in beside this one". */
 .replay-tab.drop-before {
-  box-shadow: -3px 0 0 -1px var(--accent, #e0a050);
+  margin-left: 30px;
+  box-shadow: inset 3px 0 0 var(--text, #f1f1f1);
 }
 
 .replay-tab.drop-after {
-  box-shadow: 3px 0 0 -1px var(--accent, #e0a050);
+  margin-right: 30px;
+  box-shadow: inset -3px 0 0 var(--text, #f1f1f1);
 }
 
-/* Both edges when a tab is the only one beside the gap. */
+/* At the end of a run there is only one tab beside the gap, so it carries both. */
 .replay-tab.drop-before.drop-after {
-  box-shadow: -3px 0 0 -1px var(--accent, #e0a050), 3px 0 0 -1px var(--accent, #e0a050);
+  box-shadow: inset 3px 0 0 var(--text, #f1f1f1), inset -3px 0 0 var(--text, #f1f1f1);
 }
 
 .replay-tab-button,
