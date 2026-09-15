@@ -15461,6 +15461,91 @@ function getReplayTabVisualOrder() {
   });
 }
 
+// ─── Replay tab drag reorder ───
+
+// Pinned tabs are drawn as their own run at the head of the strip, so a drop is
+// only accepted between tabs that share the dragged tab's pinned state. Letting
+// a drop cross the boundary would have to either silently flip the pin — turning
+// "move this left" into "pin this" — or land the tab somewhere it was not
+// dropped. Neither is what the operator asked for, so the crossing is refused.
+let replayTabDragId = null;
+
+function clearReplayTabDropMarkers() {
+  els.replayTabStrip?.querySelectorAll(".replay-tab").forEach((element) => {
+    element.classList.remove("drop-before", "drop-after", "dragging");
+  });
+}
+
+function replayTabById(id) {
+  return state.replayTabs.find((tab) => tab.id === id) || null;
+}
+
+function replayTabDropIsAllowed(targetId) {
+  if (!replayTabDragId || !targetId || replayTabDragId === targetId) return false;
+  const dragged = replayTabById(replayTabDragId);
+  const target = replayTabById(targetId);
+  if (!dragged || !target) return false;
+  return !!dragged.pinned === !!target.pinned;
+}
+
+function moveReplayTabBeside(draggedId, targetId, placeAfter) {
+  const from = state.replayTabs.findIndex((tab) => tab.id === draggedId);
+  if (from < 0) return false;
+  const [moved] = state.replayTabs.splice(from, 1);
+  // Re-find after the removal: the target's index shifts when it sat behind the
+  // tab that was just taken out.
+  const targetIndex = state.replayTabs.findIndex((tab) => tab.id === targetId);
+  if (targetIndex < 0) {
+    state.replayTabs.splice(from, 0, moved);
+    return false;
+  }
+  state.replayTabs.splice(targetIndex + (placeAfter ? 1 : 0), 0, moved);
+  return true;
+}
+
+function wireReplayTabDragReorder(tabElement, id) {
+  tabElement.addEventListener("dragstart", (event) => {
+    replayTabDragId = id;
+    tabElement.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    // Firefox will not start a drag without data on the transfer.
+    event.dataTransfer.setData("text/plain", id);
+  });
+
+  tabElement.addEventListener("dragend", () => {
+    replayTabDragId = null;
+    clearReplayTabDropMarkers();
+  });
+
+  tabElement.addEventListener("dragover", (event) => {
+    if (!replayTabDropIsAllowed(id)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const bounds = tabElement.getBoundingClientRect();
+    const placeAfter = event.clientX > bounds.left + bounds.width / 2;
+    tabElement.classList.toggle("drop-before", !placeAfter);
+    tabElement.classList.toggle("drop-after", placeAfter);
+  });
+
+  tabElement.addEventListener("dragleave", () => {
+    tabElement.classList.remove("drop-before", "drop-after");
+  });
+
+  tabElement.addEventListener("drop", (event) => {
+    if (!replayTabDropIsAllowed(id)) return;
+    event.preventDefault();
+    const bounds = tabElement.getBoundingClientRect();
+    const placeAfter = event.clientX > bounds.left + bounds.width / 2;
+    const draggedId = replayTabDragId;
+    replayTabDragId = null;
+    clearReplayTabDropMarkers();
+    if (moveReplayTabBeside(draggedId, id, placeAfter)) {
+      scheduleWorkspaceStateSave();
+      renderReplayTabs();
+    }
+  });
+}
+
 function renderReplayTabs() {
   const sortedTabs = getReplayTabVisualOrder();
 
@@ -15479,8 +15564,11 @@ function renderReplayTabs() {
       const labelControl = state.replayRenamingTabId === tab.id
         ? `<input class="replay-tab-name-input" type="text" value="${escapeHtml(tab.customLabel || "")}" placeholder="${escapeHtml(autoLabel)}" maxlength="80" aria-label="Replay tab name">`
         : `<button class="replay-tab-button" type="button" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+      // Not draggable while the name is being edited: a draggable ancestor stops
+      // the browser letting you select text inside the input.
+      const dragAttr = state.replayRenamingTabId === tab.id ? "" : ' draggable="true"';
       return `
-        <div class="replay-tab ${active} ${pinned}" data-replay-tab-id="${tab.id}">
+        <div class="replay-tab ${active} ${pinned}" data-replay-tab-id="${tab.id}"${dragAttr}>
           ${pinBtn}
           ${labelControl}
           <button class="replay-tab-close" type="button" aria-label="Close replay tab">\u00d7</button>
@@ -15492,6 +15580,7 @@ function renderReplayTabs() {
   Array.from(els.replayTabStrip.querySelectorAll(".replay-tab")).forEach((tabElement) => {
     const id = tabElement.dataset.replayTabId;
     const nameInput = tabElement.querySelector(".replay-tab-name-input");
+    wireReplayTabDragReorder(tabElement, id);
     tabElement.addEventListener("pointerdown", (event) => {
       const editingId = state.replayRenamingTabId;
       if (!editingId || event.target.closest(".replay-tab-name-input")) {

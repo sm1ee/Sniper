@@ -3555,6 +3555,20 @@ body.pane-resizing-y {
   background: var(--point-soft);
 }
 
+/* Drag reorder. The insertion point is drawn as an inset shadow on the edge the
+   tab would land against, so the strip does not reflow while dragging over it. */
+.replay-tab.dragging {
+  opacity: 0.45;
+}
+
+.replay-tab.drop-before {
+  box-shadow: inset 2px 0 0 var(--accent, #e0a050);
+}
+
+.replay-tab.drop-after {
+  box-shadow: inset -2px 0 0 var(--accent, #e0a050);
+}
+
 .replay-tab-button,
 .replay-tab-close {
   border: none;
