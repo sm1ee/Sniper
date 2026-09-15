@@ -3592,7 +3592,9 @@ body.pane-resizing-y {
    so the gap the operator sees is its own slot — exactly the space it will land
    in, at exactly its own width. Its contents are hidden rather than the element:
    the cursor already carries the drag image, so drawing them would show the same
-   tab twice, and a display:none source breaks the drag outright. */
+   tab twice, and a display:none source breaks the drag outright. The outline is
+   the whole cue — --point is the signature colour, and every theme defines its
+   own. */
 .replay-tab.dragging {
   border-color: var(--point-border);
   background: transparent;
@@ -3600,22 +3602,6 @@ body.pane-resizing-y {
 
 .replay-tab.dragging > * {
   visibility: hidden;
-}
-
-/* Only the edge facing the gap is marked, never the whole tab: an outline around
-   the tab reads as "this tab is selected", not as "it goes in beside this one".
-   --point is the signature colour, and every theme defines its own. */
-.replay-tab.drop-before {
-  box-shadow: inset 2px 0 0 var(--point);
-}
-
-.replay-tab.drop-after {
-  box-shadow: inset -2px 0 0 var(--point);
-}
-
-/* At the end of a run there is only one tab beside the gap, so it carries both. */
-.replay-tab.drop-before.drop-after {
-  box-shadow: inset 2px 0 0 var(--point), inset -2px 0 0 var(--point);
 }
 
 .replay-tab-button,

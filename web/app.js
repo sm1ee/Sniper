@@ -15526,9 +15526,9 @@ function getReplayTabVisualOrder() {
 // dropped. Neither is what the operator asked for, so the crossing is refused.
 let replayTabDragId = null;
 
-function clearReplayTabDropMarkers() {
+function clearReplayTabDropSlot() {
   els.replayTabStrip?.querySelectorAll(".replay-tab").forEach((element) => {
-    element.classList.remove("drop-before", "drop-after", "dragging");
+    element.classList.remove("dragging");
   });
 }
 
@@ -15557,17 +15557,6 @@ function animateReplayTabStrip(mutate) {
       easing: "cubic-bezier(0.2, 0, 0, 1)",
     });
   });
-}
-
-// Mark the two tabs the gap opens between, on their facing edges only: an
-// outline around a whole tab reads as "this tab is selected", not as "it goes
-// in beside this one".
-function markReplayTabDropGap(slot) {
-  els.replayTabStrip?.querySelectorAll(".replay-tab").forEach((element) => {
-    element.classList.remove("drop-before", "drop-after");
-  });
-  slot.previousElementSibling?.classList.add("drop-after");
-  slot.nextElementSibling?.classList.add("drop-before");
 }
 
 function replayTabById(id) {
@@ -15610,7 +15599,7 @@ function commitReplayTabDrag() {
     else if (replayTabDropIsAllowed(after)) moved = moveReplayTabBeside(draggedId, after, false);
   }
   replayTabDragId = null;
-  clearReplayTabDropMarkers();
+  clearReplayTabDropSlot();
   // Always re-render: the preview moved the element in the DOM, so a cancelled
   // drag has to be put back too.
   renderReplayTabs({ keepScroll: true });
@@ -15633,16 +15622,25 @@ function wireReplayTabStripDragCleanup() {
     event.dataTransfer.dropEffect = "move";
     const slot = els.replayTabStrip?.querySelector(".replay-tab.dragging");
     if (!slot) return;
-    const over = event.target.closest?.(".replay-tab");
-    if (over && over !== slot && replayTabDropIsAllowed(over.dataset.replayTabId)) {
-      const bounds = over.getBoundingClientRect();
-      const placeAfter = event.clientX > bounds.left + bounds.width / 2;
-      const anchor = placeAfter ? over.nextElementSibling : over;
-      if (anchor !== slot) {
-        animateReplayTabStrip(() => els.replayTabStrip.insertBefore(slot, anchor));
-      }
+    // The tab goes before the first tab in its run whose midpoint the pointer
+    // has not passed, and after the last one otherwise. Scanning the run beats
+    // looking at whatever is under the pointer: past the last tab, over the +
+    // button, or in the bar's padding there is nothing under it, and the drag
+    // would just stop moving — which is what "I dragged it to the end and it
+    // stayed put" was.
+    const run = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab"))
+      .filter((element) => element !== slot && replayTabDropIsAllowed(element.dataset.replayTabId));
+    if (!run.length) return;
+    const nextIndex = run.findIndex((element) => {
+      const bounds = element.getBoundingClientRect();
+      return event.clientX < bounds.left + bounds.width / 2;
+    });
+    // Landing after the run's last tab is not the same as appending to the
+    // strip: a pinned run ends in the middle of it.
+    const anchor = nextIndex === -1 ? run[run.length - 1].nextElementSibling : run[nextIndex];
+    if (anchor !== slot) {
+      animateReplayTabStrip(() => els.replayTabStrip.insertBefore(slot, anchor));
     }
-    markReplayTabDropGap(slot);
   });
 
   bar.addEventListener("drop", (event) => {
@@ -15651,13 +15649,13 @@ function wireReplayTabStripDragCleanup() {
     commitReplayTabDrag();
   });
 
-  bar.addEventListener("dragleave", (event) => {
-    // relatedTarget is what the pointer moved onto; still inside means it only
-    // crossed between two tabs.
-    if (event.relatedTarget && bar.contains(event.relatedTarget)) return;
-    els.replayTabStrip?.querySelectorAll(".replay-tab").forEach((element) => {
-      element.classList.remove("drop-before", "drop-after");
-    });
+  // Bubbling, so the bar's handler above has already claimed the events it
+  // wants. Anywhere else is refused explicitly rather than left to whatever the
+  // element under the pointer would have offered.
+  document.addEventListener("dragover", (event) => {
+    if (!replayTabDragId || event.defaultPrevented) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "none";
   });
 }
 
@@ -15672,8 +15670,11 @@ function wireReplayTabDragReorder(tabElement, id) {
       if (replayTabDragId === id) tabElement.classList.add("dragging");
     }, 0);
     event.dataTransfer.effectAllowed = "move";
-    // Firefox will not start a drag without data on the transfer.
-    event.dataTransfer.setData("text/plain", id);
+    // Firefox will not start a drag without data on the transfer, but the type
+    // must not be text/plain: that makes the target-host field and the editors
+    // willing drop targets, and the cursor picks up the copy badge over them.
+    // Nothing reads this back — the drop uses replayTabDragId.
+    event.dataTransfer.setData("application/x-sniper-replay-tab", id);
   });
 
   tabElement.addEventListener("dragend", () => {
@@ -15681,7 +15682,7 @@ function wireReplayTabDragReorder(tabElement, id) {
     // with the preview still in the DOM.
     if (!replayTabDragId) return;
     replayTabDragId = null;
-    clearReplayTabDropMarkers();
+    clearReplayTabDropSlot();
     renderReplayTabs({ keepScroll: true });
   });
 }
