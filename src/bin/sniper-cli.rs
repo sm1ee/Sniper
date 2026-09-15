@@ -583,10 +583,35 @@ enum InterceptCommand {
     On(InterceptSessionArgs),
     Off(InterceptSessionArgs),
     List(InterceptSessionArgs),
+    Get(InterceptGetArgs),
+    Wait(InterceptWaitArgs),
     Forward(InterceptForwardArgs),
     Drop(InterceptDropArgs),
     #[command(name = "forward-all")]
     ForwardAll(InterceptSessionArgs),
+}
+
+#[derive(Args, Debug, Default)]
+struct InterceptGetArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    #[arg(long)]
+    id: Uuid,
+}
+
+/// `list` only reports summaries, so an agent that wants to edit a held request
+/// has to poll for one and then fetch it. `wait` does both: it blocks until the
+/// queue has something and prints that record in full, ready to edit and forward.
+#[derive(Args, Debug)]
+struct InterceptWaitArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Give up after this many seconds.
+    #[arg(long, default_value_t = 30)]
+    timeout: u64,
+    /// How often to re-check the queue, in milliseconds.
+    #[arg(long, default_value_t = 200)]
+    poll_interval: u64,
 }
 
 #[derive(Args, Debug, Default)]
@@ -777,6 +802,7 @@ struct AutoReplaceSetArgs {
 enum ResponseInterceptCommand {
     List(ResponseInterceptSessionArgs),
     Get(ResponseInterceptGetArgs),
+    Wait(InterceptWaitArgs),
     Forward(ResponseInterceptForwardArgs),
     Drop(ResponseInterceptDropArgs),
     #[command(name = "forward-all")]
@@ -1627,6 +1653,8 @@ impl InterceptCommand {
             InterceptCommand::On(_) => "capture.intercept.on",
             InterceptCommand::Off(_) => "capture.intercept.off",
             InterceptCommand::List(_) => "capture.intercept.list",
+            InterceptCommand::Get(_) => "capture.intercept.get",
+            InterceptCommand::Wait(_) => "capture.intercept.wait",
             InterceptCommand::Forward(_) => "capture.intercept.forward",
             InterceptCommand::Drop(_) => "capture.intercept.drop",
             InterceptCommand::ForwardAll(_) => "capture.intercept.forward_all",
@@ -1657,6 +1685,7 @@ impl ResponseInterceptCommand {
         match self {
             ResponseInterceptCommand::List(_) => "capture.response_intercept.list",
             ResponseInterceptCommand::Get(_) => "capture.response_intercept.get",
+            ResponseInterceptCommand::Wait(_) => "capture.response_intercept.wait",
             ResponseInterceptCommand::Forward(_) => "capture.response_intercept.forward",
             ResponseInterceptCommand::Drop(_) => "capture.response_intercept.drop",
             ResponseInterceptCommand::ForwardAll(_) => "capture.response_intercept.forward_all",
@@ -2586,6 +2615,10 @@ fn intercept_input_preview(command: &InterceptCommand) -> Value {
             "stdin": args.stdin,
         }),
         InterceptCommand::Drop(args) => json!({ "id": args.id, "session_id": args.session_id }),
+        InterceptCommand::Get(args) => json!({ "id": args.id, "session_id": args.session_id }),
+        InterceptCommand::Wait(args) => {
+            json!({ "session_id": args.session_id, "timeout": args.timeout })
+        }
     }
 }
 
@@ -2626,6 +2659,9 @@ fn response_intercept_input_preview(command: &ResponseInterceptCommand) -> Value
     match command {
         ResponseInterceptCommand::List(args) | ResponseInterceptCommand::ForwardAll(args) => {
             json!({ "session_id": args.session_id })
+        }
+        ResponseInterceptCommand::Wait(args) => {
+            json!({ "session_id": args.session_id, "timeout": args.timeout })
         }
         ResponseInterceptCommand::Get(args) => {
             json!({ "id": args.id, "session_id": args.session_id })
@@ -2855,6 +2891,16 @@ fn intercept_api_preview(command: &InterceptCommand) -> Value {
             session_query_path("/api/intercepts", args.session_id),
             None,
         ),
+        InterceptCommand::Get(args) => api_preview(
+            "GET",
+            session_query_path(&format!("/api/intercepts/{}", args.id), args.session_id),
+            None,
+        ),
+        InterceptCommand::Wait(args) => api_preview(
+            "GET",
+            session_query_path("/api/intercepts", args.session_id),
+            Some(json!({ "note": "polls until a request is held" })),
+        ),
         InterceptCommand::Forward(args) => api_preview(
             "POST",
             session_query_path(
@@ -2926,6 +2972,11 @@ fn response_intercept_api_preview(command: &ResponseInterceptCommand) -> Value {
                 args.session_id,
             ),
             None,
+        ),
+        ResponseInterceptCommand::Wait(args) => api_preview(
+            "GET",
+            session_query_path("/api/response-intercepts", args.session_id),
+            Some(json!({ "note": "polls until a response is held" })),
         ),
         ResponseInterceptCommand::Forward(args) => api_preview(
             "POST",
@@ -4878,6 +4929,34 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
     }
 }
 
+/// Block until the queue at `list_path` holds something, and return the first
+/// entry.
+///
+/// The event stream carries transactions, findings and workspace saves but not
+/// intercepts, so there is nothing to subscribe to — this polls. An intercept
+/// holds a live client connection open the whole time it waits, so the interval
+/// is the operator's latency budget, not just ours.
+async fn wait_for_first_intercept<T: DeserializeOwned>(
+    api: &ApiClient,
+    list_path: &str,
+    timeout_secs: u64,
+    poll_interval_ms: u64,
+    _id_of: impl Fn(&T) -> Uuid,
+) -> Result<Option<T>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let interval = std::time::Duration::from_millis(poll_interval_ms.max(25));
+    loop {
+        let mut queued: Vec<T> = api.get_json(list_path).await?;
+        if !queued.is_empty() {
+            return Ok(Some(queued.remove(0)));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
 async fn handle_intercept(api: ApiClient, command: InterceptCommand) -> Result<()> {
     match command {
         InterceptCommand::On(args) => {
@@ -4913,6 +4992,34 @@ async fn handle_intercept(api: ApiClient, command: InterceptCommand) -> Result<(
                 )
                 .await?;
             print_json_with_session(&runtime, session_id)
+        }
+        InterceptCommand::Get(args) => {
+            let session_id = resolve_session_id_arg(&api, args.session_id).await?;
+            let path = session_query_path(&format!("/api/intercepts/{}", args.id), session_id);
+            let intercept: InterceptRecord = api.get_json(&path).await?;
+            print_json(&intercept)
+        }
+        InterceptCommand::Wait(args) => {
+            let session_id = resolve_session_id_arg(&api, args.session_id).await?;
+            let list_path = session_query_path("/api/intercepts", session_id);
+            let Some(summary) = wait_for_first_intercept::<InterceptSummary>(
+                &api,
+                &list_path,
+                args.timeout,
+                args.poll_interval,
+                |summary| summary.id,
+            )
+            .await?
+            else {
+                return Err(anyhow!(
+                    "no request was intercepted within {}s",
+                    args.timeout
+                ));
+            };
+            let detail_path =
+                session_query_path(&format!("/api/intercepts/{}", summary.id), session_id);
+            let intercept: InterceptRecord = api.get_json(&detail_path).await?;
+            print_json(&intercept)
         }
         InterceptCommand::List(args) => {
             let session_id = resolve_session_id_arg(&api, args.session_id).await?;
@@ -5070,6 +5177,30 @@ async fn handle_response_intercept(
             let path = session_query_path("/api/response-intercepts", session_id);
             let items: Vec<ResponseInterceptSummary> = api.get_json(&path).await?;
             print_json(&items)
+        }
+        ResponseInterceptCommand::Wait(args) => {
+            let session_id = resolve_session_id_arg(&api, args.session_id).await?;
+            let list_path = session_query_path("/api/response-intercepts", session_id);
+            let Some(summary) = wait_for_first_intercept::<ResponseInterceptSummary>(
+                &api,
+                &list_path,
+                args.timeout,
+                args.poll_interval,
+                |summary| summary.id,
+            )
+            .await?
+            else {
+                return Err(anyhow!(
+                    "no response was intercepted within {}s",
+                    args.timeout
+                ));
+            };
+            let detail_path = session_query_path(
+                &format!("/api/response-intercepts/{}", summary.id),
+                session_id,
+            );
+            let item: ResponseInterceptRecord = api.get_json(&detail_path).await?;
+            print_json(&item)
         }
         ResponseInterceptCommand::Get(args) => {
             let session_id = resolve_session_id_arg(&api, args.session_id).await?;
