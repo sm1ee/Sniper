@@ -3537,6 +3537,29 @@ body.pane-resizing-y {
   width: 0;
   overflow-x: auto;
   overflow-y: hidden;
+  /* The horizontal scrollbar is laid over the content, so without room of its
+     own it sits on top of the tab labels. Reserve the strip's own gutter for it
+     and keep it thin. */
+  padding-bottom: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.replay-tab-list::-webkit-scrollbar {
+  height: 6px;
+}
+
+.replay-tab-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.replay-tab-list::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
+}
+
+.replay-tab-list::-webkit-scrollbar-thumb:hover {
+  background: var(--rule-strong, var(--line));
 }
 
 .replay-tab {
@@ -3555,18 +3578,30 @@ body.pane-resizing-y {
   background: var(--point-soft);
 }
 
-/* Drag reorder. The insertion point is drawn as an inset shadow on the edge the
-   tab would land against, so the strip does not reflow while dragging over it. */
+/* Drag reorder. Both tabs either side of the gap are marked, so the cue reads as
+   "it goes in here" rather than as one tab growing an edge. Drawn as a shadow
+   outside the border box, which does not reflow the strip mid-drag the way an
+   inserted placeholder element would. */
 .replay-tab.dragging {
-  opacity: 0.45;
+  opacity: 0.8;
+}
+
+.replay-tab.drop-before,
+.replay-tab.drop-after {
+  border-color: var(--accent, #e0a050);
 }
 
 .replay-tab.drop-before {
-  box-shadow: inset 2px 0 0 var(--accent, #e0a050);
+  box-shadow: -3px 0 0 -1px var(--accent, #e0a050);
 }
 
 .replay-tab.drop-after {
-  box-shadow: inset -2px 0 0 var(--accent, #e0a050);
+  box-shadow: 3px 0 0 -1px var(--accent, #e0a050);
+}
+
+/* Both edges when a tab is the only one beside the gap. */
+.replay-tab.drop-before.drop-after {
+  box-shadow: -3px 0 0 -1px var(--accent, #e0a050), 3px 0 0 -1px var(--accent, #e0a050);
 }
 
 .replay-tab-button,

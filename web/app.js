@@ -15476,6 +15476,27 @@ function clearReplayTabDropMarkers() {
   });
 }
 
+// Mark both tabs that straddle the gap, so the cue reads as "it goes in here"
+// rather than as one tab growing an edge. The neighbour on the far side of the
+// gap is only marked when it is a legal drop partner — at the end of a run, or
+// against the pinned boundary, there is nothing there to mark.
+function markReplayTabDropGap(tabElement, placeAfter) {
+  els.replayTabStrip?.querySelectorAll(".replay-tab").forEach((element) => {
+    if (element !== tabElement) element.classList.remove("drop-before", "drop-after");
+  });
+  tabElement.classList.toggle("drop-before", !placeAfter);
+  tabElement.classList.toggle("drop-after", placeAfter);
+
+  const neighbour = placeAfter
+    ? tabElement.nextElementSibling
+    : tabElement.previousElementSibling;
+  if (!neighbour?.classList.contains("replay-tab")) return;
+  const neighbourId = neighbour.dataset.replayTabId;
+  if (neighbourId === replayTabDragId || !replayTabDropIsAllowed(neighbourId)) return;
+  neighbour.classList.toggle("drop-after", !placeAfter);
+  neighbour.classList.toggle("drop-before", placeAfter);
+}
+
 function replayTabById(id) {
   return state.replayTabs.find((tab) => tab.id === id) || null;
 }
@@ -15503,7 +15524,23 @@ function moveReplayTabBeside(draggedId, targetId, placeAfter) {
   return true;
 }
 
+function wireReplayTabStripDragCleanup() {
+  const strip = els.replayTabStrip;
+  if (!strip || strip._dragCleanupWired) return;
+  strip._dragCleanupWired = true;
+  strip.addEventListener("dragleave", (event) => {
+    // relatedTarget is what the pointer moved onto; still inside means it only
+    // crossed between two tabs.
+    if (event.relatedTarget && strip.contains(event.relatedTarget)) return;
+    els.replayTabStrip.querySelectorAll(".replay-tab").forEach((element) => {
+      element.classList.remove("drop-before", "drop-after");
+    });
+  });
+  strip.addEventListener("drop", () => clearReplayTabDropMarkers());
+}
+
 function wireReplayTabDragReorder(tabElement, id) {
+  wireReplayTabStripDragCleanup();
   tabElement.addEventListener("dragstart", (event) => {
     replayTabDragId = id;
     tabElement.classList.add("dragging");
@@ -15523,13 +15560,13 @@ function wireReplayTabDragReorder(tabElement, id) {
     event.dataTransfer.dropEffect = "move";
     const bounds = tabElement.getBoundingClientRect();
     const placeAfter = event.clientX > bounds.left + bounds.width / 2;
-    tabElement.classList.toggle("drop-before", !placeAfter);
-    tabElement.classList.toggle("drop-after", placeAfter);
+    markReplayTabDropGap(tabElement, placeAfter);
   });
 
-  tabElement.addEventListener("dragleave", () => {
-    tabElement.classList.remove("drop-before", "drop-after");
-  });
+  // No per-tab dragleave: moving between two tabs fires leave after the next
+  // tab's dragover, which would erase the marker that was just drawn. The strip
+  // clears the markers when the pointer actually leaves it.
+
 
   tabElement.addEventListener("drop", (event) => {
     if (!replayTabDropIsAllowed(id)) return;
@@ -15541,12 +15578,13 @@ function wireReplayTabDragReorder(tabElement, id) {
     clearReplayTabDropMarkers();
     if (moveReplayTabBeside(draggedId, id, placeAfter)) {
       scheduleWorkspaceStateSave();
-      renderReplayTabs();
+      renderReplayTabs({ keepScroll: true });
     }
   });
 }
 
-function renderReplayTabs() {
+function renderReplayTabs(options = {}) {
+  const preserveScrollLeft = options.keepScroll ? els.replayTabStrip.scrollLeft : null;
   const sortedTabs = getReplayTabVisualOrder();
 
   els.replayTabStrip.innerHTML = sortedTabs
@@ -15656,8 +15694,15 @@ function renderReplayTabs() {
     });
   });
 
-  // Scroll active tab into view
-  scrollActiveReplayTabIntoView();
+  // Reordering is the one re-render the operator did not ask to be scrolled by:
+  // the tab they dragged is usually not the active one, so jumping to the active
+  // tab throws the strip somewhere they were not looking. Put the scroll back
+  // where innerHTML dropped it instead.
+  if (preserveScrollLeft != null) {
+    els.replayTabStrip.scrollLeft = preserveScrollLeft;
+  } else {
+    scrollActiveReplayTabIntoView();
+  }
 }
 
 function refreshReplayTabLabel(id) {
