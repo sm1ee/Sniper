@@ -3588,33 +3588,28 @@ body.pane-resizing-y {
   background: var(--point-soft);
 }
 
-/* Drag reorder. The tab being dragged leaves the strip entirely — the cursor is
-   already carrying its drag image, so leaving a ghost behind shows the same tab
-   twice. The strip then opens a gap the width of a tab at the drop point, which
-   is the space the dragged tab is about to occupy. */
+/* Drag reorder. The dragged tab is moved through the strip as the drop preview,
+   so the gap the operator sees is its own slot — exactly the space it will land
+   in, at exactly its own width. Its contents are hidden rather than the element:
+   the cursor already carries the drag image, so drawing them would show the same
+   tab twice, and a display:none source breaks the drag outright. */
 .replay-tab.dragging {
-  display: none;
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.18);
+  background: transparent;
 }
 
-.replay-tab {
-  transition: margin 0.12s ease;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .replay-tab {
-    transition: none;
-  }
+.replay-tab.dragging > * {
+  visibility: hidden;
 }
 
 /* Only the edge facing the gap is marked, never the whole tab: an outline around
    the tab reads as "this tab is selected", not as "it goes in beside this one". */
 .replay-tab.drop-before {
-  margin-left: 30px;
   box-shadow: inset 2px 0 0 rgba(255, 255, 255, 0.55);
 }
 
 .replay-tab.drop-after {
-  margin-right: 30px;
   box-shadow: inset -2px 0 0 rgba(255, 255, 255, 0.55);
 }
 
