@@ -15532,6 +15532,33 @@ function clearReplayTabDropMarkers() {
   });
 }
 
+// Moving the slot in the DOM relocates every tab after it in one frame, which
+// reads as a jump. Record where the tabs were, let the move happen, then play
+// them back from their old positions (FLIP) so the gap looks like it opens.
+function animateReplayTabStrip(mutate) {
+  const strip = els.replayTabStrip;
+  if (!strip) {
+    mutate();
+    return;
+  }
+  const tabs = Array.from(strip.querySelectorAll(".replay-tab"));
+  const before = tabs.map((tab) => tab.getBoundingClientRect().left);
+  mutate();
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  tabs.forEach((tab, index) => {
+    const delta = before[index] - tab.getBoundingClientRect().left;
+    if (!delta) return;
+    // Web Animations rather than a transition on an inline transform: releasing
+    // one of those needs requestAnimationFrame, which does not run while the
+    // window is hidden or occluded — the strip would stay frozen mid-slide with
+    // the tabs offset. This also leaves no inline styles to clean up.
+    tab.animate([{ transform: `translateX(${delta}px)` }, { transform: "none" }], {
+      duration: 180,
+      easing: "cubic-bezier(0.2, 0, 0, 1)",
+    });
+  });
+}
+
 // Mark the two tabs the gap opens between, on their facing edges only: an
 // outline around a whole tab reads as "this tab is selected", not as "it goes
 // in beside this one".
@@ -15611,7 +15638,9 @@ function wireReplayTabStripDragCleanup() {
       const bounds = over.getBoundingClientRect();
       const placeAfter = event.clientX > bounds.left + bounds.width / 2;
       const anchor = placeAfter ? over.nextElementSibling : over;
-      if (anchor !== slot) els.replayTabStrip.insertBefore(slot, anchor);
+      if (anchor !== slot) {
+        animateReplayTabStrip(() => els.replayTabStrip.insertBefore(slot, anchor));
+      }
     }
     markReplayTabDropGap(slot);
   });
