@@ -1517,6 +1517,20 @@
               </dl>
             </section>
 
+            <section class="filter-group">
+              <h3>Command line</h3>
+              <p class="modal-copy">
+                Put this app's <code>sniper-cli</code> on your shell <code>PATH</code>.
+                Only <code>~/.zshrc</code> and an existing <code>~/.bashrc</code> are
+                touched, and running it again replaces the line instead of adding
+                another. Open a new terminal afterwards.
+              </p>
+              <div class="filter-group-actions">
+                <button class="secondary-action" id="installCliPathButton" type="button">Add sniper-cli to PATH</button>
+              </div>
+              <p class="modal-copy settings-inline-status hidden" id="installCliPathStatus"></p>
+            </section>
+
             <section class="filter-group filter-group-wide">
               <div class="filter-group-header">
                 <h3>Certificate authority</h3>
@@ -1541,6 +1555,11 @@
                 <dt>HTTPS bootstrap</dt>
                 <dd id="specialHostHttps">https://sniper</dd>
               </dl>
+            </section>
+
+            <section class="filter-group filter-group-wide">
+              <h3>Keyboard shortcuts</h3>
+              <div class="shortcut-reference" id="shortcutReference"></div>
             </section>
           </div>
         </div>

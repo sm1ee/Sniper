@@ -6701,3 +6701,65 @@ button.utility-button.replay-tab-add {
   padding-top: 6px;
   border-top: 1px solid var(--line);
 }
+
+/* Settings ▸ Command line */
+.settings-inline-status {
+  margin-top: 8px;
+  color: var(--text-soft);
+}
+
+.settings-inline-status.error {
+  color: var(--danger, #f0796b);
+}
+
+/* Settings ▸ Keyboard shortcuts. The reference is long, so it runs in columns
+   that reflow rather than in one list the operator has to scroll past. */
+.shortcut-reference {
+  /* Column width, not a column count: the section is full width on a wide
+     window and half of it below 1240px, where two columns would be cramped. */
+  columns: 240px 2;
+  column-gap: 20px;
+}
+
+.shortcut-group {
+  break-inside: avoid;
+  margin-bottom: 14px;
+}
+
+.shortcut-group h4 {
+  margin: 0 0 6px;
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.shortcut-group dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+}
+
+.shortcut-group dt,
+.shortcut-group dd {
+  margin: 0;
+}
+
+.shortcut-group kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--font-xs);
+  white-space: nowrap;
+}
+
+.shortcut-group dd {
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+}

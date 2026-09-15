@@ -396,6 +396,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/certificates/root.pem", get(download_root_pem))
         .route("/api/certificates/root.der", get(download_root_der))
         .route("/api/certificates/reveal", post(reveal_certificate_folder))
+        .route("/api/cli-path", post(install_cli_on_path))
         .route(
             "/api/match-replace",
             get(list_match_replace_rules).post(update_match_replace_rules),
@@ -4260,6 +4261,22 @@ async fn reveal_certificate_folder(State(state): State<Arc<AppState>>) -> Respon
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to reveal certificate folder: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+// Editing a shell profile is blocking file I/O; keep it off the API runtime.
+async fn install_cli_on_path() -> Response {
+    match tokio::task::spawn_blocking(crate::cli_path::install_cli_path).await {
+        Ok(Ok(install)) => Json(install).into_response(),
+        // The common failures here are the operator's to fix — running from a
+        // checkout, a translocated bundle, an unreadable rc file — so the text
+        // goes back to the UI instead of only into the log.
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to install the CLI path: {error}"),
         )
             .into_response(),
     }

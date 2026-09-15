@@ -1499,6 +1499,7 @@ function bindEvents() {
   els.openUpdateButton.addEventListener("click", performSelfUpdate);
   if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
+  document.getElementById("installCliPathButton")?.addEventListener("click", installCliPath);
   els.displaySettingsModal.addEventListener("click", (event) => {
     if (event.target === els.displaySettingsModal) {
       closeDisplaySettingsModal();
@@ -16654,8 +16655,33 @@ function closeCertificateModal() {
 function openDisplaySettingsModal() {
   hydrateDisplaySettingsForm();
   applyDisplaySettingsState();
+  renderShortcutReference();
   displaySettingsPreviewActive = false;
   els.displaySettingsModal.classList.remove("hidden");
+}
+
+async function installCliPath() {
+  const button = document.getElementById("installCliPathButton");
+  const status = document.getElementById("installCliPathStatus");
+  if (!button || !status) return;
+  button.disabled = true;
+  status.classList.remove("hidden", "error");
+  status.textContent = "Working...";
+  try {
+    const response = await fetch("/api/cli-path", { method: "POST" });
+    const text = await response.text();
+    if (!response.ok) throw new Error(text || `Request failed (${response.status})`);
+    const result = JSON.parse(text);
+    const written = [...result.updated, ...result.unchanged];
+    status.textContent = result.updated.length
+      ? `Updated ${written.join(", ")}. Open a new terminal and run sniper-cli.`
+      : `${written.join(", ")} already has it. Open a new terminal and run sniper-cli.`;
+  } catch (error) {
+    status.classList.add("error");
+    status.textContent = error?.message || "Could not update the shell profile.";
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function closeDisplaySettingsModal() {
@@ -22161,7 +22187,67 @@ const SHORTCUT_KEY_NAMES = {
   alt: IS_APPLE_PLATFORM ? "\u2325" : "Alt",
   ctrl: IS_APPLE_PLATFORM ? "\u2303" : "Ctrl",
   enter: IS_APPLE_PLATFORM ? "\u21A9" : "Enter",
+  tab: "Tab",
+  esc: "Esc",
+  up: "\u2191",
+  down: "\u2193",
 };
+
+// The reference shown in Settings. It is written out by hand rather than derived
+// from the handlers: the handlers test conditions (which tool is open, whether a
+// row is selected) that do not read back as a sentence. Add the chord here when
+// you add one there.
+const SHORTCUT_REFERENCE = [
+  ["HTTP history", [
+    ["mod+r", "Send to Replay"],
+    ["mod+i", "Send to Fuzzer"],
+    ["mod+1", "Colour-tag the selected row (1-6)"],
+    [IS_APPLE_PLATFORM ? "ctrl+mod+1" : "ctrl+shift+1", "Filter by colour tag (1-6)"],
+    ["up", "Previous row"],
+    ["down", "Next row"],
+    ["mod+a", "Select the whole message pane"],
+  ]],
+  ["WebSockets history", [
+    ["mod+r", "Send the selected frame to WS Replay"],
+    ["up", "Previous session or frame"],
+    ["down", "Next session or frame"],
+    ["esc", "Back from frames to sessions"],
+  ]],
+  ["Intercept", [
+    ["mod+enter", "Forward"],
+    ["mod+shift+enter", "Drop"],
+  ]],
+  ["Replay", [
+    ["mod+r", "Duplicate the active tab"],
+    ["mod+i", "Send to Fuzzer"],
+    ["ctrl+tab", "Next tab"],
+    ["ctrl+shift+tab", "Previous tab"],
+    ["up", "Previous WebSocket frame"],
+    ["down", "Next WebSocket frame"],
+    ["mod+enter", "Send (WebSocket editor)"],
+  ]],
+  ["Anywhere", [
+    ["mod+shift+f", "Open the Fuzzer, with the selection if there is one"],
+    ["mod+c", "Copy the selected text in a message pane"],
+    ["esc", "Close the open dialog or menu"],
+  ]],
+];
+
+function renderShortcutReference() {
+  const host = document.getElementById("shortcutReference");
+  if (!host || host.childElementCount) return;
+  host.innerHTML = SHORTCUT_REFERENCE.map(([group, rows]) => `
+      <div class="shortcut-group">
+        <h4>${escapeHtml(group)}</h4>
+        <dl>
+          ${rows.map(([chord, description]) => `
+            <dt><kbd>${escapeHtml(formatShortcut(chord))}</kbd></dt>
+            <dd>${escapeHtml(description)}</dd>
+          `).join("")}
+        </dl>
+      </div>
+    `).join("");
+}
 
 function formatShortcut(chord) {
   const parts = String(chord || "")
