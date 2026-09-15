@@ -1146,6 +1146,21 @@ impl TransactionStore {
     }
 
     /// Points the store at where a compaction just put each record, and drops the
+    /// Drop every captured transaction, returning how many went.
+    ///
+    /// The locator map goes with them: an offset into transactions.ndjson only
+    /// means anything while the record it belongs to is still here, and the
+    /// caller rewrites that file immediately after.
+    pub async fn clear(&self) -> usize {
+        let mut inner = self.inner.write().await;
+        let removed = inner.entries.len();
+        inner.entries.clear();
+        inner.summaries.clear();
+        inner.by_id.clear();
+        inner.locators.clear();
+        removed
+    }
+
     /// bodies it no longer has to hold. Must be called after every rewrite of
     /// transactions.ndjson: the offsets from before it are stale, and a stale
     /// offset silently returns a different request's traffic.

@@ -15,6 +15,10 @@ pub struct RuntimeSettingsSnapshot {
     pub intercept_enabled: bool,
     #[serde(default = "default_true")]
     pub websocket_capture_enabled: bool,
+    /// Whether proxied HTTP traffic is recorded. Pausing leaves the proxy
+    /// forwarding exactly as before; only the history stops filling.
+    #[serde(default = "default_true")]
+    pub http_capture_enabled: bool,
     #[serde(default)]
     pub scope_patterns: Vec<String>,
     /// Hosts taken back out of scope. Applied after the include list, and on their
@@ -73,6 +77,7 @@ impl Default for RuntimeSettingsSnapshot {
         Self {
             intercept_enabled: false,
             websocket_capture_enabled: true,
+            http_capture_enabled: true,
             scope_patterns: Vec::new(),
             excluded_scope_patterns: Vec::new(),
             passthrough_hosts: Vec::new(),
@@ -134,6 +139,8 @@ pub struct RuntimeSettingsUpdate {
     pub expected_active_session_id: Option<uuid::Uuid>,
     pub intercept_enabled: Option<bool>,
     pub websocket_capture_enabled: Option<bool>,
+    #[serde(default)]
+    pub http_capture_enabled: Option<bool>,
     pub scope_patterns: Option<Vec<String>>,
     #[serde(default)]
     pub excluded_scope_patterns: Option<Vec<String>>,
@@ -196,6 +203,9 @@ impl RuntimeSettings {
             candidate.intercept_enabled = intercept_enabled;
         }
 
+        if let Some(http_capture_enabled) = update.http_capture_enabled {
+            candidate.http_capture_enabled = http_capture_enabled;
+        }
         if let Some(websocket_capture_enabled) = update.websocket_capture_enabled {
             candidate.websocket_capture_enabled = websocket_capture_enabled;
         }
@@ -270,6 +280,10 @@ impl RuntimeSettings {
 
     pub async fn websocket_capture_enabled(&self) -> bool {
         self.inner.read().await.websocket_capture_enabled
+    }
+
+    pub async fn http_capture_enabled(&self) -> bool {
+        self.inner.read().await.http_capture_enabled
     }
 
     pub async fn upstream_insecure(&self) -> bool {

@@ -273,6 +273,7 @@ struct SessionRevealArgs {
 enum HistoryCommand {
     List(HistoryListArgs),
     Get(HistoryGetArgs),
+    Clear(InterceptSessionArgs),
     Replay(HistoryReplayArgs),
     Fuzzer(HistoryFuzzerArgs),
     Annotate(HistoryAnnotateArgs),
@@ -1257,6 +1258,11 @@ impl ApiClient {
         Ok(status)
     }
 
+    async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.request_json_with_client::<(), T>(&self.client, Method::DELETE, path, None)
+            .await
+    }
+
     async fn delete_status(&self, path: &str) -> Result<StatusCode> {
         let response = self
             .client
@@ -1607,6 +1613,7 @@ impl HistoryCommand {
         match self {
             HistoryCommand::List(_) => "capture.http.list",
             HistoryCommand::Get(_) => "capture.http.get",
+            HistoryCommand::Clear(_) => "capture.http.clear",
             HistoryCommand::Replay(_) => "capture.http.replay",
             HistoryCommand::Fuzzer(_) => "capture.http.fuzzer",
             HistoryCommand::Annotate(_) => "capture.http.annotate",
@@ -2509,6 +2516,7 @@ fn command_input_preview(command: &Command) -> Value {
 
 fn history_input_preview(command: &HistoryCommand) -> Value {
     match command {
+        HistoryCommand::Clear(args) => json!({ "session_id": args.session_id }),
         HistoryCommand::List(args) => json!({
             "session_id": args.session_id,
             "query": args.query,
@@ -2800,6 +2808,11 @@ fn capture_api_preview(command: &CaptureCommand) -> Result<Value> {
 
 fn history_api_preview(command: &HistoryCommand) -> Result<Value> {
     Ok(match command {
+        HistoryCommand::Clear(args) => api_preview(
+            "DELETE",
+            session_query_path("/api/transactions", args.session_id),
+            Some(json!({ "note": "removes every captured request in the session" })),
+        ),
         HistoryCommand::List(args) => {
             api_preview("GET", history_list_path(args.session_id, args)?, None)
         }
@@ -4412,6 +4425,17 @@ fn auto_replace_write_session_id(
 
 async fn handle_history(api: ApiClient, command: HistoryCommand) -> Result<()> {
     match command {
+        HistoryCommand::Clear(args) => {
+            let (session_id, expected_active_session_id) =
+                runtime_write_session_ids(&api, args.session_id).await?;
+            let path = session_query_path_with_expected_active(
+                "/api/transactions",
+                session_id,
+                expected_active_session_id,
+            );
+            let result: Value = api.delete_json(&path).await?;
+            print_json_with_session(&result, session_id)
+        }
         HistoryCommand::List(args) => {
             let include_page = args.page;
             let session_id = match args.session_id {

@@ -414,7 +414,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/oast/generate", post(generate_oast_payload))
         .route("/api/oast/status", get(oast_status))
         .route("/api/target/site-map", get(get_target_site_map))
-        .route("/api/transactions", get(list_transactions))
+        .route(
+            "/api/transactions",
+            get(list_transactions).delete(clear_transactions),
+        )
         .route("/api/transactions-page", get(list_transactions_page))
         .route("/api/transactions/:id", get(get_transaction))
         .route(
@@ -4793,6 +4796,79 @@ async fn forward_all_intercepts(
         "ok": true,
         "action": "forward-all",
         "forwarded": count,
+    }))
+    .into_response()
+}
+
+/// Empty the HTTP history for one session.
+///
+/// Findings and WebSocket sessions are left alone: a finding is a conclusion the
+/// scanner reached, not traffic, and clearing the history it was drawn from does
+/// not make it untrue. The detail panes already say when a finding's transaction
+/// is no longer there.
+///
+/// The snapshot is rewritten before returning, rather than left to the usual
+/// journal-driven compaction: the journal still replays every cleared record, so
+/// a crash before the next compaction would bring them all back.
+async fn clear_transactions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+    payload: Option<Json<SessionActionPayload>>,
+) -> Response {
+    let (target_session_id, session_id_is_explicit) = match reconcile_write_session_id(
+        query.session_id,
+        payload
+            .map(|Json(payload)| payload.session_id)
+            .unwrap_or(None),
+    ) {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    if let Some(response) = expected_active_session_conflict_response(
+        &state,
+        query.expected_active_session_id,
+        target_session_id,
+    ) {
+        return response;
+    }
+    let session = match resolve_session_for_optional_id(&state, target_session_id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let _operation_guard = match guard_session_write_operation(
+        &state,
+        &session,
+        !session_id_is_explicit || query.expected_active_session_id.is_some(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
+    let _mutation_guard = session.mutation_guard().await;
+
+    let removed = session.store.clear().await;
+    if let Err(error) = session.persist_mutation_locked().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cleared the history but could not persist it: {error:#}"),
+        )
+            .into_response();
+    }
+    session
+        .event_log
+        .push(
+            EventLevel::Info,
+            "capture",
+            "History cleared",
+            format!("{removed} captured transaction(s) removed"),
+        )
+        .await;
+
+    Json(serde_json::json!({
+        "ok": true,
+        "action": "clear",
+        "removed": removed,
     }))
     .into_response()
 }

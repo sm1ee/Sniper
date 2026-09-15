@@ -585,7 +585,7 @@ pub async fn try_send_replay_request_for_session(
             record.response_http_version().unwrap_or("unknown")
         );
         record.notes.push(message.clone());
-        store_record_and_scan(&state, &session, record.clone()).await;
+        store_record_and_scan_unconditionally(&state, &session, record.clone()).await;
         return Err(ReplaySendError::with_record(message, record));
     }
 
@@ -600,7 +600,7 @@ pub async fn try_send_replay_request_for_session(
         if message != error.message {
             record.notes.push(message.clone());
         }
-        store_record_and_scan(&state, &session, record.clone()).await;
+        store_record_and_scan_unconditionally(&state, &session, record.clone()).await;
         return Err(ReplaySendError::with_record(message, record));
     }
 
@@ -613,7 +613,7 @@ pub async fn try_send_replay_request_for_session(
             format!("{} {}{}", record.method, record.host, record.path),
         )
         .await;
-    store_record_and_scan(&state, &session, record.clone()).await;
+    store_record_and_scan_unconditionally(&state, &session, record.clone()).await;
     Ok(record)
 }
 
@@ -3338,7 +3338,26 @@ async fn maybe_intercept_response(
     resolution
 }
 
+/// Record proxied traffic, unless capture is paused.
+///
+/// Pausing stops the history filling up while the operator drives the target
+/// through setup they do not want recorded. The request is still proxied — only
+/// the record is dropped — so pausing never changes what the client sees.
 async fn store_record_and_scan(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    record: TransactionRecord,
+) {
+    if !session.runtime.http_capture_enabled().await {
+        return;
+    }
+    store_record_and_scan_unconditionally(state, session, record).await;
+}
+
+/// The same, for traffic the operator asked for by hand. A replay send is an
+/// explicit action and its result is the answer to it, so pausing capture must
+/// not swallow it.
+async fn store_record_and_scan_unconditionally(
     state: &Arc<AppState>,
     session: &Arc<SessionContext>,
     record: TransactionRecord,
@@ -3890,6 +3909,12 @@ fn apply_streamed_record_update(stored: &mut TransactionRecord, record: &Transac
 impl StreamedRecordContext {
     async fn insert_provisional_record(&mut self) {
         if self.record_id.is_some() {
+            return;
+        }
+        // A streamed response is recorded up front and filled in when the body
+        // finishes, so the pause has to be checked here too — the completion path
+        // only updates the row this inserted.
+        if !self.session.runtime.http_capture_enabled().await {
             return;
         }
         let mut notes = self.notes.clone();

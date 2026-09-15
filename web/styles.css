@@ -1362,6 +1362,16 @@ code {
   border-color: #50b4dc;
 }
 
+/* Paused capture is a state the operator has to be able to spot: an empty
+   history with recording off looks the same as an empty history with nothing
+   happening. Amber rather than the blue "on" tint, and not red — it is a choice,
+   not a fault. */
+.scope-pill.paused {
+  background: rgba(224, 165, 63, 0.16);
+  color: #e0a53f;
+  border-color: #e0a53f;
+}
+
 .websocket-filter-summary {
   cursor: default;
 }
@@ -3600,17 +3610,17 @@ body.pane-resizing-y {
    the tab reads as "this tab is selected", not as "it goes in beside this one". */
 .replay-tab.drop-before {
   margin-left: 30px;
-  box-shadow: inset 3px 0 0 var(--text, #f1f1f1);
+  box-shadow: inset 2px 0 0 rgba(255, 255, 255, 0.55);
 }
 
 .replay-tab.drop-after {
   margin-right: 30px;
-  box-shadow: inset -3px 0 0 var(--text, #f1f1f1);
+  box-shadow: inset -2px 0 0 rgba(255, 255, 255, 0.55);
 }
 
 /* At the end of a run there is only one tab beside the gap, so it carries both. */
 .replay-tab.drop-before.drop-after {
-  box-shadow: inset 3px 0 0 var(--text, #f1f1f1), inset -3px 0 0 var(--text, #f1f1f1);
+  box-shadow: inset 2px 0 0 rgba(255, 255, 255, 0.55), inset -2px 0 0 rgba(255, 255, 255, 0.55);
 }
 
 .replay-tab-button,

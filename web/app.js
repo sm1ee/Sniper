@@ -964,6 +964,7 @@ async function init() {
   resetLayoutTextareas();
   hydrateFilterForm();
   syncHttpInScopePill();
+  syncHttpCapturePill();
   const aclInit = document.getElementById("proxySettingAutoContentLength");
   if (aclInit) aclInit.checked = localStorage.getItem("sniper_auto_content_length") !== "false";
   await loadUiSettings();
@@ -1386,6 +1387,58 @@ function bindEvents() {
     clearHttpHistorySelectionPreview();
     scheduleRefresh({ resetScroll: true });
   });
+  document.getElementById("httpCaptureToggle")?.addEventListener("click", async (e) => {
+    const toggle = e.currentTarget;
+    const sessionId = currentSessionId();
+    const next = !state.runtime?.http_capture_enabled;
+    toggle.disabled = true;
+    try {
+      const response = await fetch(sessionWritePath("/api/runtime", sessionId), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ http_capture_enabled: next }),
+      });
+      await requireOkResponse(response, "Failed to change capture.");
+      const runtime = await response.json();
+      if (sessionId !== currentSessionId()) return;
+      state.runtime = runtime;
+      syncHttpCapturePill();
+    } catch (error) {
+      console.error(error);
+      showToast(error?.message || "Failed to change capture.", "error");
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+
+  document.getElementById("clearHistoryButton")?.addEventListener("click", async (e) => {
+    const button = e.currentTarget;
+    // Irreversible and easy to hit beside Filter, so it asks first.
+    if (!window.confirm("Remove every captured request in this session? This cannot be undone.")) {
+      return;
+    }
+    const sessionId = currentSessionId();
+    button.disabled = true;
+    try {
+      const response = await fetch(sessionWritePath("/api/transactions", sessionId), {
+        method: "DELETE",
+      });
+      await requireOkResponse(response, "Failed to clear the history.");
+      const result = await response.json();
+      if (sessionId !== currentSessionId()) return;
+      clearHttpHistorySelectionPreview();
+      state.selectedId = null;
+      state.selectedRecord = null;
+      scheduleRefresh({ resetScroll: true });
+      showToast(`Cleared ${result.removed} captured request${result.removed === 1 ? "" : "s"}.`, "info");
+    } catch (error) {
+      console.error(error);
+      showToast(error?.message || "Failed to clear the history.", "error");
+    } finally {
+      button.disabled = false;
+    }
+  });
+
   document.getElementById("interceptInScopeToggle")?.addEventListener("click", async (e) => {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
@@ -1465,6 +1518,7 @@ function bindEvents() {
     state.filterSettings = createDefaultFilterSettings();
     hydrateFilterForm();
     syncHttpInScopePill();
+  syncHttpCapturePill();
     scheduleUiSettingsSave();
     clearHttpHistorySelectionPreview();
     scheduleRefresh({ resetScroll: true });
@@ -2594,6 +2648,7 @@ async function loadSettings(retries = 5) {
 async function _applySettings(response) {
   state.settings = await response.json();
   state.runtime = state.settings.runtime;
+  syncHttpCapturePill();
   state.activeSession = state.settings.active_session;
   state.oastTokenClearPending = false;
   // Sync intercept scope pill with server state
@@ -17109,6 +17164,7 @@ function applyUiSettingsSnapshot(snapshot) {
   }
   hydrateFilterForm();
   syncHttpInScopePill();
+  syncHttpCapturePill();
   document.getElementById("wsInScopeOnly")?.classList.toggle("active", state.websocketInScopeOnly);
   document.getElementById("wsHideClosed")?.classList.toggle("active", state.websocketLiveOnly);
   applyDisplaySettingsState();
@@ -17318,6 +17374,20 @@ function syncHttpInScopePill() {
   if (pill) pill.classList.toggle("active", !!state.filterSettings.inScopeOnly);
 }
 
+// Paused is the state worth announcing: an empty history with capture off looks
+// exactly like an empty history with nothing happening.
+function syncHttpCapturePill() {
+  const pill = document.getElementById("httpCaptureToggle");
+  if (!pill) return;
+  const capturing = state.runtime?.http_capture_enabled !== false;
+  pill.classList.toggle("active", capturing);
+  pill.classList.toggle("paused", !capturing);
+  pill.textContent = capturing ? "Capturing" : "Paused";
+  pill.title = capturing
+    ? "Recording proxied traffic. Click to pause; traffic still passes through."
+    : "Not recording. Traffic still passes through. Click to resume.";
+}
+
 function hydrateFilterForm() {
   const filters = state.filterSettings;
   els.filterInScopeOnly.checked = filters.inScopeOnly;
@@ -17398,6 +17468,7 @@ function applyFilterSettings() {
   };
   closeFilterModal();
   syncHttpInScopePill();
+  syncHttpCapturePill();
   scheduleUiSettingsSave();
   clearHttpHistorySelectionPreview();
   scheduleRefresh({ resetScroll: true });

@@ -130,6 +130,17 @@ Session → Scope → Capture → Replay → Fuzz
 
 ## CLI
 
+`sniper-cli` ships inside the app bundle. Sniper does not edit your shell
+profile on its own, so put it on `PATH` once, either way:
+
+```bash
+# Let the app add it to ~/.zshrc (and ~/.bashrc when present) on next launch
+SNIPER_INSTALL_CLI_PATH=1 open -a Sniper
+
+# Or add it yourself
+export PATH="/Applications/Sniper.app/Contents/MacOS:$PATH"
+```
+
 ```bash
 sniper-cli session list
 sniper-cli --output compact capture http list --limit 10
