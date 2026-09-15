@@ -1012,7 +1012,7 @@ impl HistoryListResponse {
     fn into_cli_output(self, include_page: bool) -> serde_json::Value {
         match self {
             Self::Items(items) if include_page => serde_json::json!({
-                "items": items,
+                "items": with_labels(&items, transaction_label),
                 "total": null,
                 "filtered_total": null,
                 "hidden_connect_total": null,
@@ -1020,7 +1020,7 @@ impl HistoryListResponse {
                 "limit": null,
                 "has_more": null,
             }),
-            Self::Items(items) => serde_json::json!(items),
+            Self::Items(items) => with_labels(&items, transaction_label),
             Self::Page {
                 items,
                 total,
@@ -1030,7 +1030,7 @@ impl HistoryListResponse {
                 limit,
                 has_more,
             } if include_page => serde_json::json!({
-                "items": items,
+                "items": with_labels(&items, transaction_label),
                 "total": total,
                 "filtered_total": filtered_total,
                 "hidden_connect_total": hidden_connect_total,
@@ -1038,7 +1038,7 @@ impl HistoryListResponse {
                 "limit": limit,
                 "has_more": has_more,
             }),
-            Self::Page { items, .. } => serde_json::json!(items),
+            Self::Page { items, .. } => with_labels(&items, transaction_label),
         }
     }
 }
@@ -4598,7 +4598,14 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
     match command {
         ReplayCommand::List(args) => {
             let workspace = load_workspace_state(&api, args.session_id).await?;
-            print_json(&workspace.replay)
+            let mut replay = serde_json::to_value(&workspace.replay)?;
+            if let Some(object) = replay.as_object_mut() {
+                object.insert(
+                    "tabs".to_string(),
+                    with_labels(&workspace.replay.tabs, replay_tab_label),
+                );
+            }
+            print_json(&replay)
         }
         ReplayCommand::Open(args) => {
             let (session_id, tab) = open_replay_tab(
@@ -4955,6 +4962,80 @@ async fn wait_for_first_intercept<T: DeserializeOwned>(
         }
         tokio::time::sleep(interval).await;
     }
+}
+
+/// The identifier a person actually sees on a Replay tab.
+///
+/// The UI composes this from `sequence`, the request line and the target, and
+/// never stores it — the tab is persisted, so a derived label written next to it
+/// would go stale the moment either part changed. An agent reporting on a tab
+/// has only the UUID otherwise, which nobody can match against their screen, so
+/// the CLI composes the same string on the way out. Keep in step with
+/// `replayTabAutoLabel` in web/app.js.
+fn replay_tab_label(tab: &ReplayTabState) -> String {
+    if !tab.custom_label.trim().is_empty() {
+        return tab.custom_label.clone();
+    }
+    if tab.tab_type == "websocket" {
+        let host = if tab.ws_host.trim().is_empty() {
+            "draft"
+        } else {
+            tab.ws_host.trim()
+        };
+        return format!("{}. WS {host}", tab.sequence);
+    }
+    let method = tab
+        .base_request
+        .as_ref()
+        .map(|request| request.method.as_str())
+        .filter(|method| !method.trim().is_empty())
+        .unwrap_or("GET");
+    let authority = replay_tab_authority(tab);
+    format!("{}. {method} {authority}", tab.sequence)
+}
+
+fn replay_tab_authority(tab: &ReplayTabState) -> String {
+    let host = if tab.target_host.trim().is_empty() {
+        tab.base_request
+            .as_ref()
+            .map(|request| request.host.trim().to_string())
+            .unwrap_or_default()
+    } else {
+        tab.target_host.trim().to_string()
+    };
+    if host.is_empty() {
+        return "draft".to_string();
+    }
+    // The host already carries a port when it came off a captured request, so
+    // only an explicit override adds one.
+    if tab.target_port.trim().is_empty() || host.contains(':') {
+        host
+    } else {
+        format!("{host}:{}", tab.target_port.trim())
+    }
+}
+
+/// The identifier a person sees on a row of the HTTP history: the `#` column is
+/// the capture sequence, followed by the method and where it went.
+fn transaction_label(summary: &TransactionSummary) -> String {
+    format!(
+        "#{} {} {}{}",
+        summary.sequence, summary.method, summary.host, summary.path
+    )
+}
+
+/// Attach `label` to each element of a serialized list, leaving every field that
+/// was already there untouched.
+fn with_labels<T: Serialize>(items: &[T], label_of: impl Fn(&T) -> String) -> Value {
+    let mut values = serde_json::json!(items);
+    if let Some(array) = values.as_array_mut() {
+        for (value, item) in array.iter_mut().zip(items) {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("label".to_string(), Value::String(label_of(item)));
+            }
+        }
+    }
+    values
 }
 
 async fn handle_intercept(api: ApiClient, command: InterceptCommand) -> Result<()> {

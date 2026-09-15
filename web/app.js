@@ -5219,7 +5219,7 @@ function renderInterceptRules() {
   if (!container) return;
   const rules = state.interceptRules || [];
   if (!rules.length) {
-    container.innerHTML = `<div class="intercept-rules-empty">No rules: all in-scope requests will be intercepted. Add a response or Req+Res rule to intercept responses.</div>`;
+    container.innerHTML = `<div class="intercept-rules-empty">No rules: every in-scope request and response is intercepted. Add a rule to narrow it to one direction, or to specific hosts, paths or methods.</div>`;
     return;
   }
   container.innerHTML = rules.map((rule) => {
