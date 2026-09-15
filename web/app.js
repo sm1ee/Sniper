@@ -2859,23 +2859,73 @@ async function adoptExternalReplayTabs() {
   }
 
   const incoming = Array.isArray(snapshot?.replay?.tabs) ? snapshot.replay.tabs : [];
-  const known = new Set((state.replayTabs || []).map((tab) => tab?.id));
-  const added = incoming
-    .filter((tab) => tab?.id && !known.has(tab.id))
-    .map((tab) => hydrateReplayTab(tab))
-    .filter(Boolean);
-  if (!added.length) return;
+  const local = new Map((state.replayTabs || []).map((tab) => [tab?.id, tab]));
+  const added = [];
+  let updated = 0;
+  for (const tab of incoming) {
+    if (!tab?.id) continue;
+    const existing = local.get(tab.id);
+    if (!existing) {
+      const hydrated = hydrateReplayTab(tab);
+      if (hydrated) added.push(hydrated);
+      continue;
+    }
+    if (adoptExternalReplayResult(existing, tab)) updated += 1;
+  }
+  if (!added.length && !updated) return;
 
-  state.replayTabs = [...(state.replayTabs || []), ...added];
-  state.replayTabSequence = Math.max(
-    state.replayTabSequence || 0,
-    ...added.map((tab) => tab.sequence || 0),
-  );
-  if (!state.activeReplayTabId) {
-    state.activeReplayTabId = added[0].id;
+  if (added.length) {
+    state.replayTabs = [...(state.replayTabs || []), ...added];
+    state.replayTabSequence = Math.max(
+      state.replayTabSequence || 0,
+      ...added.map((tab) => tab.sequence || 0),
+    );
+    if (!state.activeReplayTabId) {
+      state.activeReplayTabId = added[0].id;
+    }
   }
   renderReplay();
-  showToast(`${added.length} replay tab${added.length === 1 ? "" : "s"} added from another client.`, "info");
+  // Only a new tab is announced. An update lands in the pane the operator is
+  // already looking at, and an agent firing a run of sends would otherwise bury
+  // the screen in toasts.
+  if (added.length) {
+    showToast(`${added.length} replay tab${added.length === 1 ? "" : "s"} added from another client.`, "info");
+  }
+}
+
+// A send from another client — `sniper-cli replay send`, or a second window —
+// appends to a tab that already exists here, so the "new tab" test above misses
+// it entirely and the result only appeared after a reload.
+//
+// Only the result is taken: the request editor, the draft request and the target
+// fields stay exactly as the operator left them. That split is the whole reason
+// the old code refused to touch a known tab, and it still holds — someone else's
+// send must never overwrite an edit in progress.
+function adoptExternalReplayResult(existing, incoming) {
+  if (existing.type === "websocket" || incoming.type === "websocket") return false;
+
+  const entries = Array.isArray(incoming.history_entries) ? incoming.history_entries : [];
+  const sameLength = entries.length === (existing.historyEntries?.length || 0);
+  const sameResponse = (incoming.response_record?.id ?? null) === (existing.responseRecord?.id ?? null);
+  // Length alone is not enough: sending from a point back in the history
+  // truncates and re-pushes, which can leave the count unchanged.
+  if (sameLength && sameResponse) return false;
+
+  const fallbackRequest = incoming.base_request
+    ? cloneEditableRequest(incoming.base_request)
+    : existing.baseRequest;
+  existing.historyEntries = entries
+    .map((entry) => hydrateRepeaterHistoryEntry(entry, fallbackRequest))
+    .filter(Boolean);
+  // The writer already pointed the index at what it just sent; follow it rather
+  // than leaving the operator on an entry that may no longer exist.
+  existing.historyIndex = normalizeRepeaterHistoryIndex(
+    incoming.history_index,
+    existing.historyEntries.length,
+  );
+  existing.responseRecord = incoming.response_record || null;
+  existing.notice = incoming.notice || "";
+  return true;
 }
 
 // Toggle the history filter for one colour tag. Shared by the colour dots in
