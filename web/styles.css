@@ -6804,3 +6804,46 @@ button.utility-button.replay-tab-add {
   color: var(--text-soft);
   font-size: var(--font-xs);
 }
+
+/* Progress on a button that is waiting for the API. The bar is drawn inside the
+   button's own box so a row of them does not change height, and it only appears
+   once .is-working-shown is added — see withButtonProgress, which delays that so
+   fast actions do not flash. */
+.is-working {
+  position: relative;
+  overflow: hidden;
+  cursor: progress;
+}
+
+/* :disabled drops these to 0.35 opacity, which would all but hide the bar. A
+   button that is working is not the same as one that is unavailable. */
+.is-working:disabled {
+  opacity: 0.75;
+  cursor: progress;
+}
+
+.is-working-shown::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 40%;
+  height: 2px;
+  background: var(--point);
+  animation: button-progress 0.9s linear infinite;
+}
+
+@keyframes button-progress {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+
+/* Still, not stopped: the bar stays put so the button is visibly busy without
+   anything moving. */
+@media (prefers-reduced-motion: reduce) {
+  .is-working-shown::after {
+    width: 100%;
+    animation: none;
+    opacity: 0.6;
+  }
+}

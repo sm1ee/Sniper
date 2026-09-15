@@ -239,6 +239,43 @@ const DECODER_SCRIPT_SOURCES = [
   "/decoder/hasher.js",
 ];
 
+// Anything that waits on the session lock — switching session above all, but
+// also clearing a large history or saving scope — used to sit there looking
+// unclicked until it finished, so the operator clicked again. The button goes
+// disabled straight away, which is what actually stops the second click, and
+// grows a progress bar if the work outlasts a blink.
+//
+// The delay before the bar appears is the point: most of these finish in a few
+// milliseconds, and a bar that flashes on every click is worse than none.
+const BUTTON_PROGRESS_DELAY_MS = 180;
+
+// Registers a click listener whose element shows progress while it runs. The
+// handler MUST return its promise — that is what the progress waits on.
+function onClickWithProgress(element, handler) {
+  element?.addEventListener("click", (event) => {
+    withButtonProgress(element, () => handler(event));
+  });
+}
+
+async function withButtonProgress(button, work) {
+  if (!button) return work();
+  // Already running. Returning without calling work() is the double-submit
+  // guard — the caller is a click handler, so there is no value to lose.
+  if (button.disabled) return undefined;
+  button.disabled = true;
+  button.classList.add("is-working");
+  const reveal = setTimeout(() => button.classList.add("is-working-shown"), BUTTON_PROGRESS_DELAY_MS);
+  try {
+    return await work();
+  } finally {
+    clearTimeout(reveal);
+    // Many of these actions re-render the markup the button lived in, so this
+    // often writes to a detached element. Harmless, and cheaper than checking.
+    button.disabled = false;
+    button.classList.remove("is-working", "is-working-shown");
+  }
+}
+
 function showToast(message, type = "success", durationMs = 2000) {
   const container = document.getElementById("toastContainer");
   if (!container) return;
@@ -1419,9 +1456,8 @@ function bindEvents() {
     // all. Every other destructive action in this file already uses this.
     showConfirmDialog(
       "Remove every captured request in this session?\nThis cannot be undone.",
-      async () => {
+      () => withButtonProgress(button, async () => {
         const sessionId = currentSessionId();
-        button.disabled = true;
         try {
           const response = await fetch(sessionWritePath("/api/transactions", sessionId), {
             method: "DELETE",
@@ -1437,10 +1473,8 @@ function bindEvents() {
         } catch (error) {
           console.error(error);
           showToast(error?.message || "Failed to clear the history.", "error");
-        } finally {
-          button.disabled = false;
         }
-      },
+      }),
       { title: "Clear history", confirmLabel: "Clear" },
     );
   });
@@ -1562,26 +1596,23 @@ function bindEvents() {
   els.displaySizeInput.addEventListener("input", previewDisplaySettingsFromForm);
   els.displaySizeInput.addEventListener("change", previewDisplaySettingsFromForm);
 
-  els.openCertFolderButton.addEventListener("click", () => openCertificateFolder());
-  els.openEventLogButton.addEventListener("click", async () => {
+  onClickWithProgress(els.openCertFolderButton, () => openCertificateFolder());
+  onClickWithProgress(els.openEventLogButton, async () => {
     setActiveTool("logger");
     await loadEventLog();
     renderToolPanels();
   });
-  els.dashboardReloadSessionsButton?.addEventListener("click", () => {
-    loadSessions({ reloadOnActiveChange: true }).catch((error) => console.error(error));
-  });
-  els.dashboardCreateSessionButton?.addEventListener("click", () => {
-    createSession().catch(handleWorkspaceActionError);
-  });
-  els.dashboardOpenStorageBtn?.addEventListener("click", () => {
+  onClickWithProgress(els.dashboardReloadSessionsButton, () =>
+    loadSessions({ reloadOnActiveChange: true }).catch((error) => console.error(error)));
+  onClickWithProgress(els.dashboardCreateSessionButton, () =>
+    createSession().catch(handleWorkspaceActionError));
+  onClickWithProgress(els.dashboardOpenStorageBtn, () => {
     const sessionId = state.selectedSessionId || state.activeSession?.id || state.sessions.find((s) => s.active)?.id;
-    if (sessionId) {
-      revealSessionFolder(sessionId).catch((error) => {
-        console.error(error);
-        showToast(error?.message || "Failed to open session folder.", "error");
-      });
-    }
+    if (!sessionId) return undefined;
+    return revealSessionFolder(sessionId).catch((error) => {
+      console.error(error);
+      showToast(error?.message || "Failed to open session folder.", "error");
+    });
   });
 
   // Session table sort headers
@@ -1598,8 +1629,8 @@ function bindEvents() {
     });
   });
 
-  els.clearEventLogButton.addEventListener("click", () => {
-    clearEventLog().catch((error) => {
+  onClickWithProgress(els.clearEventLogButton, () => {
+    return clearEventLog().catch((error) => {
       console.error(error);
       showToast(error?.message || "Failed to clear event log.", "error");
     });
@@ -1610,9 +1641,8 @@ function bindEvents() {
     renderInspectorPanels();
   });
 
-  document.getElementById("addInterceptRuleButton")?.addEventListener("click", () => {
-    addInterceptRule().catch(handleInterceptRuleError);
-  });
+  onClickWithProgress(document.getElementById("addInterceptRuleButton"), () =>
+    addInterceptRule().catch(handleInterceptRuleError));
   document.getElementById("interceptRulesList").addEventListener("click", (event) => {
     const deleteBtn = event.target.closest("[data-rule-delete]");
     if (deleteBtn) { deleteInterceptRule(deleteBtn.dataset.ruleDelete).catch(handleInterceptRuleError); return; }
@@ -1709,11 +1739,10 @@ function bindEvents() {
         els.saveProxySettingsButton.disabled = false;
       });
   });
-  els.reloadProxySettingsButton.addEventListener("click", () => {
+  onClickWithProgress(els.reloadProxySettingsButton, () =>
     loadSettings()
       .then(renderProxySettings)
-      .catch((error) => console.error(error));
-  });
+      .catch((error) => console.error(error)));
   document.getElementById("proxySettingAutoContentLength")?.addEventListener("change", (e) => {
     localStorage.setItem("sniper_auto_content_length", e.target.checked);
   });
@@ -1813,12 +1842,12 @@ function bindEvents() {
   els.replayFollowRedirectButton.addEventListener("click", () => {
     followRedirect().catch(handleReplayActionError);
   });
-  els.saveMatchReplaceRuleButton.addEventListener("click", () => {
+  onClickWithProgress(els.saveMatchReplaceRuleButton, () => {
     if (!state.selectedMatchReplaceRuleId) {
       createNewMatchReplaceRule();
     }
     syncMatchReplaceEditor();
-    saveMatchReplaceRules()
+    return saveMatchReplaceRules()
       .then(() => showToast("Rule saved"))
       .catch((error) => { console.error(error); showToast("Failed to save rule", "error"); });
   });
@@ -1846,11 +1875,10 @@ function bindEvents() {
     element.addEventListener("input", syncMatchReplaceEditor);
     element.addEventListener("change", syncMatchReplaceEditor);
   });
-  els.saveTargetScopeButton.addEventListener("click", () => {
+  onClickWithProgress(els.saveTargetScopeButton, () =>
     saveTargetScope()
       .then(() => showToast("Scope saved"))
-      .catch((error) => { console.error(error); showToast(error?.message || "Failed to save scope", "error"); });
-  });
+      .catch((error) => { console.error(error); showToast(error?.message || "Failed to save scope", "error"); }));
   els.targetScopeEditor.addEventListener("input", () => {
     state.targetScopeDraft = els.targetScopeEditor.value;
     state.targetScopeDirty = true;
@@ -1861,9 +1889,8 @@ function bindEvents() {
     state.targetScopeDirty = true;
     state.targetScopeEditorSessionId = currentSessionId();
   });
-  els.reloadTargetButton.addEventListener("click", () => {
-    reloadTargetSiteMapFromButton().catch((error) => console.error(error));
-  });
+  onClickWithProgress(els.reloadTargetButton, () =>
+    reloadTargetSiteMapFromButton().catch((error) => console.error(error)));
   els.startFuzzerButton.addEventListener("click", () => {
     runFuzzerAttack().catch((error) => {
       console.error("Fuzzer start error:", error);
@@ -1930,13 +1957,11 @@ function bindEvents() {
     });
   });
 
-  document.getElementById("newSequenceButton").addEventListener("click", () => {
-    createNewSequence().catch(handleSequenceActionError);
-  });
+  onClickWithProgress(document.getElementById("newSequenceButton"), () =>
+    createNewSequence().catch(handleSequenceActionError));
   document.getElementById("addSequenceStepButton").addEventListener("click", addSequenceStep);
-  document.getElementById("saveSequenceButton").addEventListener("click", () => {
-    saveCurrentSequence().catch(handleSequenceActionError);
-  });
+  onClickWithProgress(document.getElementById("saveSequenceButton"), () =>
+    saveCurrentSequence().catch(handleSequenceActionError));
   document.getElementById("runSequenceButton").addEventListener("click", () => {
     runCurrentSequence().catch(handleSequenceActionError);
   });
@@ -2055,8 +2080,8 @@ function bindEvents() {
     });
   }
   if (els.oastClearButton) {
-    els.oastClearButton.addEventListener("click", () => {
-      clearOastCallbacks().catch((error) => {
+    onClickWithProgress(els.oastClearButton, () => {
+      return clearOastCallbacks().catch((error) => {
         console.error(error);
         showToast(error?.message || "Failed to clear OAST callbacks.", "error");
       });
@@ -7912,7 +7937,7 @@ function renderDashboard() {
       if (!row) return;
       const { id } = row.dataset;
       if (!id) return;
-      activateSessionById(id).catch(handleWorkspaceActionError);
+      withButtonProgress(btn, () => activateSessionById(id)).catch(handleWorkspaceActionError);
     });
   });
 
@@ -7931,13 +7956,12 @@ function renderDashboard() {
 
   // Delete button
   Array.from(els.dashboardSessionsBody.querySelectorAll(".session-delete-button")).forEach((btn) => {
-    btn.addEventListener("click", (event) => {
+    onClickWithProgress(btn, (event) => {
       event.stopPropagation();
       const row = btn.closest("tr[data-id]");
-      if (!row) return;
+      if (!row) return undefined;
       const { id } = row.dataset;
-      if (!id) return;
-      deleteSessionById(id);
+      return id ? deleteSessionById(id) : undefined;
     });
   });
 }
@@ -9525,20 +9549,20 @@ function bindFindingsEvents() {
   }
   const findingsReplayBtn = document.getElementById("findingsDetailSendReplay");
   if (findingsReplayBtn) {
-    findingsReplayBtn.addEventListener("click", () => {
+    onClickWithProgress(findingsReplayBtn, () => {
       const recordId = els.findingsDetailJump?.dataset.recordId;
-      if (recordId) sendFindingToReplay(recordId).catch(handleFindingActionError);
+      return recordId ? sendFindingToReplay(recordId).catch(handleFindingActionError) : undefined;
     });
   }
   const findingsFuzzerBtn = document.getElementById("findingsDetailSendFuzzer");
   if (findingsFuzzerBtn) {
-    findingsFuzzerBtn.addEventListener("click", () => {
+    onClickWithProgress(findingsFuzzerBtn, () => {
       const recordId = els.findingsDetailJump?.dataset.recordId;
-      if (recordId) sendFindingToFuzzer(recordId).catch(handleFindingActionError);
+      return recordId ? sendFindingToFuzzer(recordId).catch(handleFindingActionError) : undefined;
     });
   }
   if (els.findingsClearButton) {
-    els.findingsClearButton.addEventListener("click", async () => {
+    onClickWithProgress(els.findingsClearButton, async () => {
       const sessionId = currentSessionId();
       try {
         const response = await fetch(sessionWritePath("/api/findings/clear", sessionId), { method: "POST" });
@@ -9661,7 +9685,7 @@ function bindFindingsEvents() {
 
   // Scanner settings modal
   if (els.findingsSettingsButton) {
-    els.findingsSettingsButton.addEventListener("click", () => openScannerSettings());
+    onClickWithProgress(els.findingsSettingsButton, () => openScannerSettings());
   }
   if (els.scannerSettingsClose) {
     els.scannerSettingsClose.addEventListener("click", () => closeScannerSettings());
@@ -9670,12 +9694,11 @@ function bindFindingsEvents() {
     els.scannerSettingsCancel.addEventListener("click", () => closeScannerSettings());
   }
   if (els.scannerSettingsSave) {
-    els.scannerSettingsSave.addEventListener("click", () => {
+    onClickWithProgress(els.scannerSettingsSave, () =>
       saveScannerSettingsFromModal().catch((error) => {
         console.error(error);
         showToast(error?.message || "Failed to save scanner settings.", "error");
-      });
-    });
+      }));
   }
   if (els.scannerAddCustomRule) {
     els.scannerAddCustomRule.addEventListener("click", () => {
@@ -13825,7 +13848,7 @@ function renderSequencePanel() {
     });
   });
   listBody.querySelectorAll(".seq-delete").forEach((btn) => {
-    btn.addEventListener("click", () => deleteSequence(btn.dataset.seqDelete).catch(handleSequenceActionError));
+    onClickWithProgress(btn, () => deleteSequence(btn.dataset.seqDelete).catch(handleSequenceActionError));
   });
 
   // Editor
@@ -21450,7 +21473,7 @@ function renderWsSetupQueue() {
 
   // Individual send button
   listEl.querySelectorAll(".ws-setup-send").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    onClickWithProgress(btn, async () => {
       const idx = parseInt(btn.dataset.idx);
       const item = setupQueue[idx];
       if (!item || tab.wsStatus !== "connected") return;
@@ -21882,12 +21905,10 @@ function bindWsReplayEvents() {
   els.wsConnectButton.addEventListener("click", () => {
     wsConnect().catch(handleWsReplayActionError);
   });
-  els.wsDisconnectButton.addEventListener("click", () => {
-    wsDisconnect().catch(handleWsReplayActionError);
-  });
-  els.wsSendButton.addEventListener("click", () => {
-    wsSend().catch(handleWsReplayActionError);
-  });
+  onClickWithProgress(els.wsDisconnectButton, () =>
+    wsDisconnect().catch(handleWsReplayActionError));
+  onClickWithProgress(els.wsSendButton, () =>
+    wsSend().catch(handleWsReplayActionError));
 
   els.wsSchemeSelect.addEventListener("change", () => {
     const tab = getActiveReplayTab();
