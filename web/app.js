@@ -1411,32 +1411,38 @@ function bindEvents() {
     }
   });
 
-  document.getElementById("clearHistoryButton")?.addEventListener("click", async (e) => {
+  document.getElementById("clearHistoryButton")?.addEventListener("click", (e) => {
     const button = e.currentTarget;
-    // Irreversible and easy to hit beside Filter, so it asks first.
-    if (!window.confirm("Remove every captured request in this session? This cannot be undone.")) {
-      return;
-    }
-    const sessionId = currentSessionId();
-    button.disabled = true;
-    try {
-      const response = await fetch(sessionWritePath("/api/transactions", sessionId), {
-        method: "DELETE",
-      });
-      await requireOkResponse(response, "Failed to clear the history.");
-      const result = await response.json();
-      if (sessionId !== currentSessionId()) return;
-      clearHttpHistorySelectionPreview();
-      state.selectedId = null;
-      state.selectedRecord = null;
-      scheduleRefresh({ resetScroll: true });
-      showToast(`Cleared ${result.removed} captured request${result.removed === 1 ? "" : "s"}.`, "info");
-    } catch (error) {
-      console.error(error);
-      showToast(error?.message || "Failed to clear the history.", "error");
-    } finally {
-      button.disabled = false;
-    }
+    // Irreversible and easy to hit beside Filter, so it asks first — through the
+    // app's own dialog. window.confirm is useless here: the desktop webview
+    // shows no native JS panel, so it returned false and Clear did nothing at
+    // all. Every other destructive action in this file already uses this.
+    showConfirmDialog(
+      "Remove every captured request in this session?\nThis cannot be undone.",
+      async () => {
+        const sessionId = currentSessionId();
+        button.disabled = true;
+        try {
+          const response = await fetch(sessionWritePath("/api/transactions", sessionId), {
+            method: "DELETE",
+          });
+          await requireOkResponse(response, "Failed to clear the history.");
+          const result = await response.json();
+          if (sessionId !== currentSessionId()) return;
+          clearHttpHistorySelectionPreview();
+          state.selectedId = null;
+          state.selectedRecord = null;
+          scheduleRefresh({ resetScroll: true });
+          showToast(`Cleared ${result.removed} captured request${result.removed === 1 ? "" : "s"}.`, "info");
+        } catch (error) {
+          console.error(error);
+          showToast(error?.message || "Failed to clear the history.", "error");
+        } finally {
+          button.disabled = false;
+        }
+      },
+      { title: "Clear history", confirmLabel: "Clear" },
+    );
   });
 
   document.getElementById("interceptInScopeToggle")?.addEventListener("click", async (e) => {
