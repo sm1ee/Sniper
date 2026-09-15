@@ -195,6 +195,11 @@ mod tests {
         sync_directory(&root).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "new");
         assert!(!temp.exists());
+        // Rejecting a non-directory is specific to the Windows arm, which has to
+        // check because it cannot fsync a directory handle at all. On Unix the
+        // idiomatic implementation is File::open(dir).sync_all(), and opening a
+        // regular file and syncing it succeeds — there is nothing to fail on.
+        #[cfg(windows)]
         assert!(sync_directory(&target).is_err());
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
