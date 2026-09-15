@@ -807,13 +807,10 @@ fn install_platform_app_menu() {
 
         let menubar = NSMenu::new(nil).autorelease();
         let app_menu_item = NSMenuItem::new(nil).autorelease();
-        let edit_menu_item = NSMenuItem::alloc(nil)
-            .initWithTitle_action_keyEquivalent_(
-                NSString::alloc(nil).init_str("Edit"),
-                cocoa::base::selector("terminate:"),
-                NSString::alloc(nil).init_str(""),
-            )
-            .autorelease();
+        // The menu bar shows the *submenu's* title, not the item's, so the title
+        // goes on the NSMenu below. Titling the item instead left this one blank
+        // and AppKit drew it as a missing-glyph box between Sniper and View.
+        let edit_menu_item = NSMenuItem::new(nil).autorelease();
         menubar.addItem_(app_menu_item);
         menubar.addItem_(edit_menu_item);
         app.setMainMenu_(menubar);
@@ -833,7 +830,9 @@ fn install_platform_app_menu() {
         app_menu.addItem_(quit_item);
         app_menu_item.setSubmenu_(app_menu);
 
-        let edit_menu = NSMenu::new(nil).autorelease();
+        let edit_menu = NSMenu::alloc(nil)
+            .initWithTitle_(NSString::alloc(nil).init_str("Edit"))
+            .autorelease();
 
         let undo_item = NSMenuItem::alloc(nil)
             .initWithTitle_action_keyEquivalent_(
