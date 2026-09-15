@@ -124,6 +124,11 @@ def main():
                 eventually(lambda: api("/api/intercepts"))
                 assert not held.done(), "Request was not held for interception"
                 api("/api/intercepts/forward-all", {})
+                # An empty rule list intercepts both directions, so forwarding the
+                # request only gets as far as the response queue; the client stays
+                # blocked until that leg is forwarded too.
+                eventually(lambda: api("/api/response-intercepts"))
+                api("/api/response-intercepts/forward-all", {})
                 held.result(timeout=10)
             api("/api/runtime", {"intercept_enabled": False})
             replay = api("/api/replay/send", {"session_id": session_id, "request": {
