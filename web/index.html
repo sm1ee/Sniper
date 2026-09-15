@@ -1619,8 +1619,8 @@
 
     <div class="context-menu hidden" id="contextMenu">
       <div class="context-menu-section">
-        <button class="context-menu-item" data-action="send-to-replay" type="button">Send to Replay</button>
-        <button class="context-menu-item" data-action="send-to-fuzzer" type="button">Send to Fuzzer</button>
+        <button class="context-menu-item" data-action="send-to-replay" data-shortcut="mod+r" type="button">Send to Replay</button>
+        <button class="context-menu-item" data-action="send-to-fuzzer" data-shortcut="mod+i" type="button">Send to Fuzzer</button>
         <button class="context-menu-item" data-action="send-to-sequence" type="button">Send to Sequence</button>
       </div>
       <div class="context-menu-divider"></div>
@@ -1653,6 +1653,20 @@
       <div class="context-menu-section hidden" id="contextMenuNotesSection">
         <span class="context-menu-label">Recorded notes</span>
         <div class="context-menu-notes" id="contextMenuNotes"></div>
+      </div>
+    </div>
+
+    <div class="context-menu hidden" id="interceptContextMenu">
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-intercept-action="send-to-replay" data-shortcut="mod+r" type="button">Send to Replay</button>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-section">
+        <button class="context-menu-item" data-intercept-action="copy-url" type="button">Copy URL</button>
+        <button class="context-menu-item" data-intercept-action="copy-as-curl" type="button">Copy as cURL</button>
+        <button class="context-menu-item" data-intercept-action="copy-as-python" type="button">Copy as Python</button>
+        <button class="context-menu-item" data-intercept-action="copy-as-fetch" type="button">Copy as fetch</button>
+        <button class="context-menu-item" data-intercept-action="copy-as-powershell" type="button">Copy as PowerShell</button>
       </div>
     </div>
 

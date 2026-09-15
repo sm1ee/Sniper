@@ -5991,7 +5991,12 @@ button.utility-button.replay-tab-add {
 }
 
 .context-menu-item {
-  display: block;
+  /* Flex, not block: the shortcut hint sits on the trailing edge and the label
+     keeps the leading edge whatever the menu width turns out to be. */
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
   width: 100%;
   padding: 6px 10px;
   border: none;
@@ -6001,6 +6006,20 @@ button.utility-button.replay-tab-add {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* Reads as a hint, not an action: dimmer, and never competes with the label. */
+.context-menu-shortcut {
+  flex-shrink: 0;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+  font-size: var(--font-2xs, 10px);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.context-menu-item:hover .context-menu-shortcut {
+  color: inherit;
+  opacity: 0.7;
 }
 
 .context-menu-item:hover {

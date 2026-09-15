@@ -827,6 +827,7 @@ const els = {
   startFuzzerButton: document.getElementById("startFuzzerButton"),
   resetFuzzerButton: document.getElementById("resetFuzzerButton"),
   contextMenu: document.getElementById("contextMenu"),
+  interceptContextMenu: document.getElementById("interceptContextMenu"),
   contextMenuNotes: document.getElementById("contextMenuNotes"),
   contextMenuNotesSection: document.getElementById("contextMenuNotesSection"),
   contextMenuNotesDivider: document.getElementById("contextMenuNotesDivider"),
@@ -10800,6 +10801,20 @@ function renderIntercepts() {
         renderIntercepts();
       }
       loadInterceptDetail(id).catch((error) => console.error(error));
+    });
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const id = row.dataset.id;
+      if (!id) return;
+      // Select first, so the menu acts on what the operator sees highlighted.
+      if (state.selectedInterceptId !== id) {
+        state.selectedInterceptId = id;
+        state.selectedInterceptRecord = null;
+        state.interceptEditorSeedId = null;
+        renderIntercepts();
+        loadInterceptDetail(id).catch((error) => console.error(error));
+      }
+      openInterceptContextMenu(event.clientX, event.clientY, id);
     });
   });
 
@@ -21906,6 +21921,140 @@ function renderContextMenuNotes(notes) {
   }
 }
 
+// ─── Context menu keyboard hints ───
+
+// macOS writes shortcuts as symbols and Windows/Linux spell them out, so the
+// same menu has to render differently per platform. Menu items declare the
+// chord as `data-shortcut="mod+shift+f"`; `mod` is Command on a Mac and Control
+// everywhere else, which is exactly how the handlers already test for it
+// (`event.metaKey || event.ctrlKey`).
+const IS_APPLE_PLATFORM = /mac|iphone|ipad|ipod/i.test(
+  navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "",
+);
+
+const SHORTCUT_KEY_NAMES = {
+  mod: IS_APPLE_PLATFORM ? "\u2318" : "Ctrl",
+  shift: IS_APPLE_PLATFORM ? "\u21E7" : "Shift",
+  alt: IS_APPLE_PLATFORM ? "\u2325" : "Alt",
+  ctrl: IS_APPLE_PLATFORM ? "\u2303" : "Ctrl",
+  enter: IS_APPLE_PLATFORM ? "\u21A9" : "Enter",
+};
+
+function formatShortcut(chord) {
+  const parts = String(chord || "")
+    .split("+")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  if (!parts.length) return "";
+  const keys = parts.map((part) => SHORTCUT_KEY_NAMES[part] || part.toUpperCase());
+  // Apple convention is to run the symbols together; elsewhere they are joined.
+  return IS_APPLE_PLATFORM ? keys.join("") : keys.join("+");
+}
+
+// Runs once over every menu in the document, so a new menu only has to declare
+// data-shortcut to get the hint.
+function decorateContextMenuShortcuts(root = document) {
+  root.querySelectorAll(".context-menu-item[data-shortcut]").forEach((item) => {
+    if (item.querySelector(".context-menu-shortcut")) return;
+    const text = formatShortcut(item.dataset.shortcut);
+    if (!text) return;
+    const hint = document.createElement("span");
+    hint.className = "context-menu-shortcut";
+    hint.textContent = text;
+    item.appendChild(hint);
+  });
+}
+
+// ─── Intercept queue context menu ───
+
+let interceptContextMenuTargetId = null;
+
+function openInterceptContextMenu(x, y, interceptId) {
+  const menu = els.interceptContextMenu;
+  if (!menu) return;
+  interceptContextMenuTargetId = interceptId;
+  menu.classList.remove("hidden");
+  const maxX = window.innerWidth - menu.offsetWidth - 8;
+  const maxY = window.innerHeight - menu.offsetHeight - 8;
+  menu.style.left = `${Math.max(0, Math.min(x, maxX))}px`;
+  menu.style.top = `${Math.max(0, Math.min(y, maxY))}px`;
+}
+
+function closeInterceptContextMenu() {
+  els.interceptContextMenu?.classList.add("hidden");
+  interceptContextMenuTargetId = null;
+}
+
+// A held request is not a transaction yet, so the history menu's record loader
+// does not apply. The export helpers all read a transaction shape, so the
+// EditableRequest is mapped onto one — there is no response and no id that
+// means anything outside the queue.
+function interceptRecordAsTransactionShape(intercept) {
+  const request = intercept?.request;
+  if (!request) return null;
+  return {
+    id: intercept.id,
+    kind: "http",
+    method: request.method,
+    scheme: request.scheme,
+    host: request.host,
+    path: request.path,
+    http_version: "HTTP/1.1",
+    request: {
+      headers: request.headers || [],
+      body_preview: request.body || "",
+      body_encoding: request.body_encoding || "utf8",
+      preview_truncated: !!request.preview_truncated,
+    },
+    response: null,
+    notes: [],
+  };
+}
+
+async function loadInterceptForMenu(interceptId) {
+  const sessionId = currentSessionId();
+  const response = await fetch(sessionQueryPath(`/api/intercepts/${interceptId}`, sessionId));
+  await requireOkResponse(response, "Failed to load the intercepted request.");
+  return response.json();
+}
+
+function runInterceptMenuAction(action, interceptId) {
+  loadInterceptForMenu(interceptId)
+    .then((intercept) => {
+      if (action === "send-to-replay") {
+        // Deliberately no sourceTransactionId: the id belongs to the intercept
+        // queue, and replay would reject a send that cites it as a capture.
+        const request = cloneEditableRequest(intercept.request);
+        const tab = createReplayTab({
+          baseRequest: request,
+          sourceTransactionId: null,
+          requestText: buildEditableRawRequest(request),
+        });
+        state.replayTabs.push(tab);
+        state.activeReplayTabId = tab.id;
+        setActiveTool("replay");
+        scheduleWorkspaceStateSave();
+        renderToolPanels();
+        return;
+      }
+      const record = interceptRecordAsTransactionShape(intercept);
+      if (!record) throw new Error("The intercepted request could not be read.");
+      if (action === "copy-url") {
+        const url = transactionUrlFromSource(record);
+        if (!url) throw new Error("This request has no URL to copy.");
+        return copyTextToClipboard(url).then(() => showToast("Copied URL"));
+      }
+      if (action.startsWith("copy-as-")) {
+        const format = action.replace("copy-as-", "");
+        const text = recordToFormat(record, format);
+        if (!text) return null;
+        return copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`));
+      }
+      return null;
+    })
+    .catch(handleClipboardActionError);
+}
+
 function closeContextMenu() {
   els.contextMenu.classList.add("hidden");
   contextMenuTargetId = null;
@@ -22172,11 +22321,29 @@ document.addEventListener("click", (event) => {
   if (!els.contextMenu.contains(event.target)) {
     closeContextMenu();
   }
+  if (els.interceptContextMenu && !els.interceptContextMenu.contains(event.target)) {
+    closeInterceptContextMenu();
+  }
 });
+
+els.interceptContextMenu?.querySelectorAll("[data-intercept-action]").forEach((item) => {
+  item.addEventListener("click", () => {
+    const action = item.dataset.interceptAction;
+    const id = interceptContextMenuTargetId;
+    closeInterceptContextMenu();
+    if (!action || !id) return;
+    runInterceptMenuAction(action, id);
+  });
+});
+
+decorateContextMenuShortcuts();
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.contextMenu.classList.contains("hidden")) {
     closeContextMenu();
+  }
+  if (event.key === "Escape" && els.interceptContextMenu && !els.interceptContextMenu.classList.contains("hidden")) {
+    closeInterceptContextMenu();
   }
 });
 
