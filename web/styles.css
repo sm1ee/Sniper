@@ -65,9 +65,10 @@
      up against the panel on its own, and it is also the label colour, so the bar
      is text contrast. The light themes override these: a tint picked for a
      near-black ground sits at about 2:1 on a near-white one. Measured worst case
-     across all twelve themes is 5.18:1 for on and 5.21:1 for paused. The default
-     ground is dark, so :root keeps the brighter pair. */
+     across all twelve themes is 5.18:1 on, 5.29:1 running, 5.21:1 paused. The
+     default ground is dark, so :root keeps the brighter set. */
   --toggle-on: #50b4dc;
+  --toggle-run: #50c878;
   --toggle-warn: #e0a53f;
   --font-2xs: max(8px, calc(var(--ui-root-size) - 3px));
   --font-xs: max(9px, calc(var(--ui-root-size) - 2px));
@@ -354,6 +355,7 @@ body[data-theme="dusk"] {
 
 body[data-theme="white"] {
   --toggle-on: #18728c;
+  --toggle-run: #25763e;
   --toggle-warn: #8a6111;
   --bg: #efede8;
   --bg-top: #f8f6f2;
@@ -405,6 +407,7 @@ body[data-theme="white"] {
 
 body[data-theme="paper"] {
   --toggle-on: #18728c;
+  --toggle-run: #25763e;
   --toggle-warn: #8a6111;
   --bg: #e6e2da;
   --bg-top: #f8f4eb;
@@ -455,6 +458,7 @@ body[data-theme="paper"] {
 
 body[data-theme="snow"] {
   --toggle-on: #18728c;
+  --toggle-run: #25763e;
   --toggle-warn: #8a6111;
   --bg: #eaf0f4;
   --bg-top: #f4f8fb;
@@ -506,6 +510,7 @@ body[data-theme="snow"] {
 
 body[data-theme="ivory"] {
   --toggle-on: #18728c;
+  --toggle-run: #25763e;
   --toggle-warn: #8a6111;
   --bg: #edeee6;
   --bg-top: #f6f7f0;
@@ -557,6 +562,7 @@ body[data-theme="ivory"] {
 
 body[data-theme="frost"] {
   --toggle-on: #18728c;
+  --toggle-run: #25763e;
   --toggle-warn: #8a6111;
   --bg: #ecedf4;
   --bg-top: #f5f6fb;
@@ -1388,6 +1394,15 @@ code {
 .scope-pill.active {
   color: var(--toggle-on);
   border-color: var(--toggle-on);
+}
+
+/* Capture is the one pill in the row that reports what the proxy is doing
+   rather than what the table is filtered to, so it gets the colour the rest of
+   the app already uses for running — the same green as the proxy indicator and
+   the intercept On toggle — and pairs with amber when it stops. */
+.scope-pill-run.active {
+  color: var(--toggle-run);
+  border-color: var(--toggle-run);
 }
 
 /* Paused capture is a state the operator has to be able to spot: an empty
