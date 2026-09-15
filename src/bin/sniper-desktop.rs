@@ -2,7 +2,6 @@
 
 use std::{
     env,
-    io::Write,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -240,7 +239,9 @@ fn run_desktop() -> Result<()> {
     // Keep shell rc mutation opt-in; normal desktop launch should not edit user dotfiles.
     let install_cli_path_env = env::var(INSTALL_CLI_PATH_ENV).ok();
     if should_install_cli_path_on_launch(install_cli_path_env.as_deref()) {
-        install_cli_path();
+        if let Err(error) = sniper::cli_path::install_cli_path() {
+            info!(%error, "sniper-cli PATH install skipped");
+        }
     } else {
         info!(
             env = INSTALL_CLI_PATH_ENV,
@@ -940,55 +941,6 @@ fn enable_window_fullscreen_support(_window: &tao::window::Window) {}
 /// Append a `PATH` export line to `~/.zshrc` (and `~/.bashrc` if present) so
 /// that `sniper-cli` is available from the terminal without requiring root.
 /// If the line already exists the function is a no-op.
-fn install_cli_path() {
-    let Ok(exe) = env::current_exe() else { return };
-    let macos_dir = exe.parent().unwrap_or(&exe);
-    if !should_install_cli_path(macos_dir) {
-        info!(dir = %macos_dir.display(), "skipping sniper-cli PATH install from transient app location");
-        return;
-    }
-    let cli_bin = macos_dir.join("sniper-cli");
-    if !cli_bin.exists() {
-        return;
-    }
-
-    let dir = macos_dir.to_string_lossy().to_string();
-    let export_line = format!(
-        "export PATH={}:$PATH # Added by Sniper.app",
-        shell_single_quote(&dir)
-    );
-
-    let home = match env::var("HOME") {
-        Ok(h) => PathBuf::from(h),
-        Err(_) => return,
-    };
-
-    // Always patch .zshrc (macOS default shell). Also patch .bashrc if it exists.
-    let mut targets = vec![home.join(".zshrc")];
-    let bashrc = home.join(".bashrc");
-    if bashrc.exists() {
-        targets.push(bashrc);
-    }
-
-    for rc_path in &targets {
-        let contents = match load_shell_rc_contents(rc_path) {
-            Ok(contents) => contents,
-            Err(e) => {
-                error!(?e, file = %rc_path.display(), "skipping unreadable shell rc");
-                continue;
-            }
-        };
-        let Some(updated) = upsert_managed_path_line(&contents, &export_line) else {
-            info!(file = %rc_path.display(), "sniper-cli PATH already configured");
-            continue;
-        };
-        if let Err(e) = write_shell_rc_atomically(rc_path, &updated) {
-            error!(?e, file = %rc_path.display(), "failed to write PATH to shell rc");
-        } else {
-            info!(file = %rc_path.display(), "updated sniper-cli PATH");
-        }
-    }
-}
 
 fn should_install_cli_path_on_launch(env_value: Option<&str>) -> bool {
     truthy_env_value(env_value)
@@ -1002,150 +954,6 @@ fn truthy_env_value(env_value: Option<&str>) -> bool {
     env_value
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
-}
-
-fn should_install_cli_path(macos_dir: &std::path::Path) -> bool {
-    let path = macos_dir.to_string_lossy();
-    if macos_dir.starts_with("/Volumes") || path.contains("/AppTranslocation/") {
-        return false;
-    }
-
-    let Some(app_contents_dir) = macos_dir.parent() else {
-        return false;
-    };
-    if macos_dir.file_name().and_then(|name| name.to_str()) != Some("MacOS")
-        || app_contents_dir.file_name().and_then(|name| name.to_str()) != Some("Contents")
-    {
-        return false;
-    }
-
-    let Some(app_bundle) = app_contents_dir.parent() else {
-        return false;
-    };
-    let Some(app_bundle_name) = app_bundle.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    if !app_bundle_name.ends_with(".app") {
-        return false;
-    }
-
-    let Some(install_dir) = app_bundle.parent() else {
-        return false;
-    };
-    if install_dir == std::path::Path::new("/Applications") {
-        return true;
-    }
-    match env::var("HOME") {
-        Ok(home) => {
-            let home = std::path::PathBuf::from(home);
-            install_dir == home.join("Applications")
-                || app_bundle == home.join("Desktop").join("Sniper.app")
-        }
-        Err(_) => false,
-    }
-}
-
-fn load_shell_rc_contents(rc_path: &std::path::Path) -> std::io::Result<String> {
-    match std::fs::read_to_string(rc_path) {
-        Ok(contents) => Ok(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(error) => Err(error),
-    }
-}
-
-fn write_shell_rc_atomically(rc_path: &std::path::Path, contents: &str) -> std::io::Result<()> {
-    let write_path = resolve_shell_rc_write_path(rc_path)?;
-    let parent = write_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let file_name = write_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("shellrc");
-    let tmp_path = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-    let existing_permissions = std::fs::metadata(&write_path)
-        .ok()
-        .map(|metadata| metadata.permissions());
-
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        if let Some(permissions) = existing_permissions {
-            std::fs::set_permissions(&tmp_path, permissions)?;
-        }
-        sniper::platform::rename(&tmp_path, &write_path)?;
-        sniper::platform::sync_directory(parent)?;
-        Ok(())
-    })();
-
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
-    result
-}
-
-fn resolve_shell_rc_write_path(rc_path: &std::path::Path) -> std::io::Result<PathBuf> {
-    match std::fs::symlink_metadata(rc_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let target = std::fs::read_link(rc_path)?;
-            if target.is_absolute() {
-                Ok(target)
-            } else {
-                Ok(rc_path
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new("."))
-                    .join(target))
-            }
-        }
-        Ok(_) => Ok(rc_path.to_path_buf()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(rc_path.to_path_buf()),
-        Err(error) => Err(error),
-    }
-}
-
-fn upsert_managed_path_line(contents: &str, export_line: &str) -> Option<String> {
-    const MARKER: &str = "# Added by Sniper.app";
-    let mut changed = false;
-    let mut found_managed = false;
-    let mut lines = Vec::new();
-    for line in contents.lines() {
-        if line.contains(MARKER) {
-            if found_managed {
-                changed = true;
-                continue;
-            }
-            found_managed = true;
-            changed |= line.trim() != export_line;
-            lines.push(export_line.to_string());
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-
-    if !found_managed {
-        if !contents.is_empty() {
-            lines.push(String::new());
-        }
-        lines.push(export_line.to_string());
-        changed = true;
-    }
-
-    if !changed {
-        return None;
-    }
-    let mut updated = lines.join("\n");
-    updated.push('\n');
-    Some(updated)
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn handle_navigation_request(url: &str, ui_origin: &str) -> bool {
@@ -1204,18 +1012,15 @@ fn is_same_origin(url: &str, expected_origin: &str) -> bool {
 mod tests {
     #[cfg(unix)]
     use super::request_existing_desktop_focus_with;
-    #[cfg(target_os = "macos")]
-    use super::should_install_cli_path;
     use super::{
         begin_desktop_teardown, block_desktop_shutdown, combine_desktop_persist_results,
         complete_desktop_shutdown, desktop_close_flush_script, desktop_user_event_from_ipc,
         finish_desktop_teardown, handle_navigation_request, handle_new_window_request,
-        is_blocked_desktop_navigation_scheme, is_same_origin, load_shell_rc_contents,
-        normalize_empty_data_dir_env, persist_desktop_session_state,
-        process_path_points_to_desktop_bundle, shell_single_quote,
+        is_blocked_desktop_navigation_scheme, is_same_origin, normalize_empty_data_dir_env,
+        persist_desktop_session_state, process_path_points_to_desktop_bundle,
         should_install_cli_path_on_launch, should_install_skills_on_launch,
-        should_request_existing_desktop_focus, upsert_managed_path_line, write_shell_rc_atomically,
-        AppConfig, AppState, DesktopUserEvent, SNIPER_DATA_DIR_ENV,
+        should_request_existing_desktop_focus, AppConfig, AppState, DesktopUserEvent,
+        SNIPER_DATA_DIR_ENV,
     };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -1255,14 +1060,6 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::Release);
         }
-    }
-
-    #[test]
-    fn shell_single_quote_escapes_embedded_quotes() {
-        assert_eq!(
-            shell_single_quote("/Applications/Sniper 'Beta'.app/Contents/MacOS"),
-            "'/Applications/Sniper '\\''Beta'\\''.app/Contents/MacOS'"
-        );
     }
 
     #[test]
@@ -1365,67 +1162,6 @@ mod tests {
         assert!(script.contains("window.__sniperFlushBeforeNativeClose"));
         assert!(script.contains("sniper:native-close-flush-ok:42"));
         assert!(script.contains("sniper:native-close-flush-error:42:"));
-    }
-
-    #[test]
-    fn upsert_managed_path_line_replaces_old_managed_line() {
-        let updated = upsert_managed_path_line(
-            "export PATH='/old/Sniper.app/Contents/MacOS':$PATH # Added by Sniper.app\n",
-            "export PATH='/new/Sniper.app/Contents/MacOS':$PATH # Added by Sniper.app",
-        )
-        .unwrap();
-        assert!(updated.contains("/new/Sniper.app"));
-        assert!(!updated.contains("/old/Sniper.app"));
-    }
-
-    #[test]
-    fn upsert_managed_path_line_collapses_duplicate_managed_lines() {
-        let updated = upsert_managed_path_line(
-            "before\nexport PATH='/old/Sniper.app/Contents/MacOS':$PATH # Added by Sniper.app\nmiddle\nexport PATH='/older/Sniper.app/Contents/MacOS':$PATH # Added by Sniper.app\nafter\n",
-            "export PATH='/new/Sniper.app/Contents/MacOS':$PATH # Added by Sniper.app",
-        )
-        .unwrap();
-
-        assert_eq!(updated.matches("# Added by Sniper.app").count(), 1);
-        assert!(updated.contains("before\n"));
-        assert!(updated.contains("middle\n"));
-        assert!(updated.contains("after\n"));
-        assert!(updated.contains("/new/Sniper.app"));
-        assert!(!updated.contains("/old/Sniper.app"));
-        assert!(!updated.contains("/older/Sniper.app"));
-    }
-
-    #[test]
-    fn shell_rc_loader_only_defaults_missing_files() {
-        let root = std::env::temp_dir().join(format!("sniper-rc-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(load_shell_rc_contents(&root.join(".zshrc")).unwrap(), "");
-
-        let invalid_utf8 = root.join(".bashrc");
-        std::fs::write(&invalid_utf8, [0xff, 0xfe]).unwrap();
-        assert!(load_shell_rc_contents(&invalid_utf8).is_err());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn shell_rc_writer_replaces_file_atomically() {
-        let root =
-            std::env::temp_dir().join(format!("sniper-rc-write-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let rc_path = root.join(".zshrc");
-        std::fs::write(&rc_path, "old\n").unwrap();
-
-        write_shell_rc_atomically(&rc_path, "new\n").unwrap();
-
-        assert_eq!(std::fs::read_to_string(&rc_path).unwrap(), "new\n");
-        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .contains(".tmp")));
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1584,65 +1320,6 @@ mod tests {
 
         assert!(dropped.load(Ordering::Acquire));
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn shell_rc_writer_preserves_symlinked_rc_files() {
-        let root =
-            std::env::temp_dir().join(format!("sniper-rc-symlink-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let target_path = root.join("dotfiles").join("zshrc");
-        std::fs::create_dir_all(target_path.parent().unwrap()).unwrap();
-        std::fs::write(&target_path, "old\n").unwrap();
-        let rc_path = root.join(".zshrc");
-        std::os::unix::fs::symlink("dotfiles/zshrc", &rc_path).unwrap();
-
-        write_shell_rc_atomically(&rc_path, "new\n").unwrap();
-
-        assert!(std::fs::symlink_metadata(&rc_path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "new\n");
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn cli_path_install_skips_transient_dmg_mounts() {
-        assert!(!should_install_cli_path(std::path::Path::new(
-            "/Volumes/Sniper/Sniper.app/Contents/MacOS",
-        )));
-        assert!(!should_install_cli_path(std::path::Path::new(
-            "/private/var/folders/xx/AppTranslocation/123/Sniper.app/Contents/MacOS",
-        )));
-        assert!(!should_install_cli_path(std::path::Path::new(
-            "/Users/kakao/Desktop/git/Sniper/target/release",
-        )));
-        assert!(!should_install_cli_path(std::path::Path::new(
-            "/tmp/sniper-build/release/Sniper.app/Contents/MacOS",
-        )));
-        assert!(!should_install_cli_path(std::path::Path::new(
-            "/Users/kakao/Desktop/git/Sniper/dist/Sniper.app/Contents/MacOS",
-        )));
-        assert!(should_install_cli_path(
-            &std::path::PathBuf::from(std::env::var("HOME").unwrap())
-                .join("Desktop")
-                .join("Sniper.app")
-                .join("Contents")
-                .join("MacOS")
-        ));
-        assert!(should_install_cli_path(std::path::Path::new(
-            "/Applications/Sniper.app/Contents/MacOS",
-        )));
-        let user_app = std::path::PathBuf::from(std::env::var("HOME").unwrap())
-            .join("Applications")
-            .join("Sniper.app")
-            .join("Contents")
-            .join("MacOS");
-        assert!(should_install_cli_path(&user_app));
     }
 
     #[test]

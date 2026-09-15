@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod certificate;
+pub mod cli_path;
 pub mod config;
 pub mod event_log;
 pub mod fuzzer;
