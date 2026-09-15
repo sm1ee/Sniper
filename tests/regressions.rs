@@ -652,6 +652,31 @@ async fn intercept_forward_keeps_client_request_alive() {
         .await
         .expect("forward should resume the waiting client request");
 
+    // An empty rule list intercepts both directions, so the response is held too
+    // and the client stays blocked until that leg is forwarded as well.
+    let response_intercept_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let intercepts = session.response_intercepts.list().await;
+            if let Some(intercept) = intercepts.first() {
+                return intercept.id;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("response intercept should appear in queue");
+
+    let response_intercept = session
+        .response_intercepts
+        .get(response_intercept_id)
+        .await
+        .expect("response intercept record should still exist");
+    session
+        .response_intercepts
+        .forward(response_intercept_id, response_intercept.response, false)
+        .await
+        .expect("forward should resume the waiting client response");
+
     let mut buffer = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buffer))
         .await

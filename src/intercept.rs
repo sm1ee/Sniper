@@ -123,7 +123,12 @@ impl InterceptRuleStore {
     pub async fn matches_any_response(&self, request: &EditableRequest) -> bool {
         let rules = self.rules.read().await;
         if rules.is_empty() {
-            return false; // No rules keeps the legacy request-only intercept behavior.
+            // Same answer as the request side: no rules means intercept
+            // everything. The two used to disagree — an empty list held every
+            // request and no response at all — and nothing in the UI said so, so
+            // turning intercept on and seeing the Response Queue stay empty
+            // looked like a bug with no way to tell what was missing.
+            return true;
         }
         rules.iter().any(|rule| {
             rule.matches(request)
@@ -555,6 +560,46 @@ mod tests {
             body: String::new(),
             body_encoding: BodyEncoding::Utf8,
         }
+    }
+
+    // An empty rule list has to answer the same for both directions. It used to
+    // hold every request and no response, which reads as "response intercept is
+    // broken" — the Response Queue simply never fills and nothing explains why.
+    #[tokio::test]
+    async fn an_empty_rule_list_intercepts_responses_like_requests() {
+        let store = InterceptRuleStore::new();
+        let request = request();
+
+        assert!(store.matches_any(&request).await);
+        assert!(store.matches_any_response(&request).await);
+
+        // With a rule present both sides narrow again, and each direction only
+        // answers for the scope it was given.
+        store
+            .replace_all(vec![InterceptRule {
+                id: Uuid::new_v4(),
+                enabled: true,
+                scope: InterceptScope::Request,
+                host_pattern: String::new(),
+                path_pattern: String::new(),
+                method_filter: Vec::new(),
+            }])
+            .await;
+        assert!(store.matches_any(&request).await);
+        assert!(!store.matches_any_response(&request).await);
+
+        store
+            .replace_all(vec![InterceptRule {
+                id: Uuid::new_v4(),
+                enabled: true,
+                scope: InterceptScope::Both,
+                host_pattern: String::new(),
+                path_pattern: String::new(),
+                method_filter: Vec::new(),
+            }])
+            .await;
+        assert!(store.matches_any(&request).await);
+        assert!(store.matches_any_response(&request).await);
     }
 
     #[test]
