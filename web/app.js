@@ -22309,8 +22309,9 @@ function formatShortcut(chord) {
     .filter(Boolean);
   if (!parts.length) return "";
   const keys = parts.map((part) => SHORTCUT_KEY_NAMES[part] || part.toUpperCase());
-  // Apple convention is to run the symbols together; elsewhere they are joined.
-  return IS_APPLE_PLATFORM ? keys.join("") : keys.join("+");
+  // Spaced on every platform. Apple's own convention runs the symbols together,
+  // but ⌘⇧F is hard to read at the size these hints are drawn at.
+  return keys.join(" + ");
 }
 
 // Runs once over every menu in the document, so a new menu only has to declare
