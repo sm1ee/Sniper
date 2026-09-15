@@ -55,6 +55,18 @@
   --point-soft: rgba(201, 169, 110, 0.14);
   --point-border: rgba(201, 169, 110, 0.4);
   --ui-root-size: 12px;
+  /* Every control that sits in a tool's toolbar row — pills, buttons, search
+     boxes, selects — is this tall. They were 28, 29 and 30px depending on which
+     toolbar they landed in, which read as a ragged, heavy band above panels
+     whose own rows are 13px. Derived from the base text size so it still tracks
+     when that is changed in Settings. Modal buttons are deliberately not on it. */
+  --control-h: max(22px, calc(var(--ui-root-size) + 14px));
+  /* Toggle states. Only the border carries "on" now, so the colour has to hold
+     up against the panel on its own — the light themes override these, because
+     a tint picked for a near-black ground sits at about 2:1 on a near-white one.
+     The default ground is dark, so :root keeps the brighter pair. */
+  --toggle-on: #50b4dc;
+  --toggle-warn: #e0a53f;
   --font-2xs: max(8px, calc(var(--ui-root-size) - 3px));
   --font-xs: max(9px, calc(var(--ui-root-size) - 2px));
   --font-sm: max(10px, calc(var(--ui-root-size) - 1px));
@@ -339,6 +351,8 @@ body[data-theme="dusk"] {
 }
 
 body[data-theme="white"] {
+  --toggle-on: #1b7ea3;
+  --toggle-warn: #8a6111;
   --bg: #efede8;
   --bg-top: #f8f6f2;
   --bg-bottom: #eae7e0;
@@ -388,6 +402,8 @@ body[data-theme="white"] {
 }
 
 body[data-theme="paper"] {
+  --toggle-on: #1b7ea3;
+  --toggle-warn: #8a6111;
   --bg: #e6e2da;
   --bg-top: #f8f4eb;
   --bg-bottom: #dfd9cf;
@@ -436,6 +452,8 @@ body[data-theme="paper"] {
 }
 
 body[data-theme="snow"] {
+  --toggle-on: #1b7ea3;
+  --toggle-warn: #8a6111;
   --bg: #eaf0f4;
   --bg-top: #f4f8fb;
   --bg-bottom: #e4eaf0;
@@ -485,6 +503,8 @@ body[data-theme="snow"] {
 }
 
 body[data-theme="ivory"] {
+  --toggle-on: #1b7ea3;
+  --toggle-warn: #8a6111;
   --bg: #edeee6;
   --bg-top: #f6f7f0;
   --bg-bottom: #e6e8de;
@@ -534,6 +554,8 @@ body[data-theme="ivory"] {
 }
 
 body[data-theme="frost"] {
+  --toggle-on: #1b7ea3;
+  --toggle-warn: #8a6111;
   --bg: #ecedf4;
   --bg-top: #f5f6fb;
   --bg-bottom: #e6e7f0;
@@ -1254,8 +1276,9 @@ code {
 
 .filter-summary {
   min-width: 0;
+  min-height: var(--control-h);
   overflow: hidden;
-  padding: 5px 10px;
+  padding: 4px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.03);
@@ -1327,7 +1350,7 @@ code {
 }
 
 .filter-actions .secondary-action {
-  min-height: 30px;
+  min-height: var(--control-h);
   padding: 4px 14px;
   font-size: var(--font-xs);
 }
@@ -1337,7 +1360,7 @@ code {
 }
 
 .scope-pill {
-  min-height: 30px;
+  min-height: var(--control-h);
   padding: 4px 14px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -1356,10 +1379,14 @@ code {
   border-color: var(--text-dim);
 }
 
+/* Border only. Two of these sit side by side and are on most of the time; as
+   filled, recoloured blocks they dominated a row whose job is to be glanced at.
+   The label stays in the normal text colour so it reads as text, not as a
+   status. Paused below keeps its fill on purpose — that one is the exception
+   the operator has to notice. */
 .scope-pill.active {
-  background: rgba(80, 180, 220, 0.15);
-  color: #50b4dc;
-  border-color: #50b4dc;
+  color: var(--text);
+  border-color: var(--toggle-on);
 }
 
 /* Paused capture is a state the operator has to be able to spot: an empty
@@ -1367,9 +1394,11 @@ code {
    happening. Amber rather than the blue "on" tint, and not red — it is a choice,
    not a fault. */
 .scope-pill.paused {
+  /* A translucent amber wash reads over either ground, so it stays a literal;
+     only the line and the label need the per-theme colour. */
   background: rgba(224, 165, 63, 0.16);
-  color: #e0a53f;
-  border-color: #e0a53f;
+  color: var(--toggle-warn);
+  border-color: var(--toggle-warn);
 }
 
 .websocket-filter-summary {
@@ -1405,7 +1434,7 @@ code {
 .search-box input,
 .select-box select {
   width: 100%;
-  min-height: 30px;
+  min-height: var(--control-h);
   padding: 4px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -2149,7 +2178,7 @@ code {
 .pane-search input {
   width: 100%;
   min-width: 0;
-  min-height: 28px;
+  min-height: var(--control-h);
   padding: 5px 10px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
@@ -3736,7 +3765,7 @@ button.utility-button.replay-tab-add {
 
 .replay-toolbar-actions .primary-action,
 .replay-toolbar-actions .secondary-action {
-  min-height: 28px;
+  min-height: var(--control-h);
   padding: 0 10px;
   border-radius: 8px;
   font-size: var(--font-xs);
@@ -3774,15 +3803,15 @@ button.utility-button.replay-tab-add {
 
 .toolbar-actions .primary-action,
 .toolbar-actions .secondary-action {
-  min-height: unset;
-  padding: 6px 14px;
+  min-height: var(--control-h);
+  padding: 4px 14px;
   font-size: var(--font-xs);
   border-radius: 6px;
 }
 
 .toolbar-actions .toggle-pill {
-  min-height: unset;
-  padding: 6px 14px;
+  min-height: var(--control-h);
+  padding: 4px 14px;
   font-size: var(--font-xs);
 }
 
@@ -3972,7 +4001,7 @@ button.utility-button.replay-tab-add {
 }
 
 .findings-filter-select {
-  height: 28px;
+  height: var(--control-h);
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -3988,7 +4017,7 @@ button.utility-button.replay-tab-add {
 }
 
 .findings-filter-input {
-  height: 28px;
+  height: var(--control-h);
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -4041,8 +4070,8 @@ button.utility-button.replay-tab-add {
 
 .findings-toolbar .secondary-action,
 .findings-toolbar-actions .secondary-action {
-  min-height: unset;
-  padding: 5px 12px;
+  min-height: var(--control-h);
+  padding: 4px 12px;
   font-size: var(--font-xs);
   border-radius: var(--radius-md);
 }
@@ -4652,7 +4681,7 @@ button.utility-button.replay-tab-add {
 .compact-field input,
 .compact-field select {
   width: 100%;
-  min-height: 28px;
+  min-height: var(--control-h);
   padding: 4px 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -5078,7 +5107,8 @@ button.utility-button.replay-tab-add {
 }
 
 .danger-action {
-  padding: 6px 14px;
+  min-height: var(--control-h);
+  padding: 4px 14px;
   border: 1px solid var(--danger);
   border-radius: 6px;
   background: transparent;
@@ -5101,7 +5131,8 @@ button.utility-button.replay-tab-add {
 }
 
 .accent-action {
-  padding: 6px 14px;
+  min-height: var(--control-h);
+  padding: 4px 14px;
   border: 1px solid var(--point-border);
   border-radius: 6px;
   background: transparent;
@@ -5907,12 +5938,20 @@ button.utility-button.replay-tab-add {
   flex-shrink: 0;
 }
 
+.oast-payload-display .utility-button {
+  /* .utility-button's own padding is sized for the top strip, which is a taller
+     band; here it has to sit level with the payload field. */
+  min-height: var(--control-h);
+  padding: 0 10px;
+}
+
 .oast-payload-input {
   font-family: var(--font-mono);
   font-size: var(--font-sm);
   color: var(--accent);
   background: var(--panel-elevated);
-  padding: 6px 10px;
+  min-height: var(--control-h);
+  padding: 4px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   flex: 1;

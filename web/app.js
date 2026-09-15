@@ -2463,6 +2463,22 @@ function bindEvents() {
       openReplayFromSelection().catch(handleSendActionError);
     }
 
+    // Cmd+R on the Intercept tab — send the held request to Replay. The queue's
+    // context menu offers this and says the chord, so the chord has to exist.
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "r" &&
+      state.activeTool === "proxy" &&
+      state.activeProxyTab === "intercept" &&
+      state.selectedInterceptRecord
+    ) {
+      event.preventDefault();
+      runInterceptMenuAction("send-to-replay", state.selectedInterceptRecord.id);
+      return;
+    }
+
     // Cmd+R on WebSocket tab — send selected frame to WS Replay
     if (
       (event.metaKey || event.ctrlKey) &&
@@ -22246,6 +22262,7 @@ const SHORTCUT_REFERENCE = [
   ["Intercept", [
     ["mod+enter", "Forward"],
     ["mod+shift+enter", "Drop"],
+    ["mod+r", "Send the held request to Replay"],
   ]],
   ["Replay", [
     ["mod+r", "Duplicate the active tab"],
