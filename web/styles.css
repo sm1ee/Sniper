@@ -6881,3 +6881,28 @@ button.utility-button.replay-tab-add {
     content: none;
   }
 }
+
+/* Hold the modifier to see what is bound. The badges live in a fixed layer of
+   their own rather than inside each control: several sit in table cells that
+   clip their overflow, where a child badge would be cut in half. */
+.shortcut-badge-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.shortcut-badge {
+  position: fixed;
+  transform: translate(-40%, -60%);
+  padding: 1px 5px;
+  border: 1px solid var(--point-border);
+  border-radius: 4px;
+  background: var(--panel-elevated, #1b1b1b);
+  color: var(--point);
+  font-size: var(--font-2xs);
+  font-family: var(--sans);
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: var(--shadow);
+}
