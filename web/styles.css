@@ -4815,6 +4815,10 @@ button.utility-button.replay-tab-add {
 }
 
 .replay-workbench {
+  position: relative;
+  /* The horizontal swipe is the history gesture once the editor reaches its
+     edge, so the platform must not turn the rest of it into a rubber band. */
+  overscroll-behavior-x: contain;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   min-height: 0;
   height: 100%;
@@ -6992,35 +6996,38 @@ button.utility-button.replay-tab-add {
 }
 
 
-/* The pull indicator for the replay history swipe. Sits over the pane rather
-   than moving it: the panes are CodeMirror, which measures its own viewport, and
-   translating one mid-gesture repaints the whole document. */
+/* The pull indicator for the replay history swipe. It sits over the workbench
+   rather than moving it: the panes are CodeMirror, which measures its own
+   viewport, and translating one mid-gesture repaints the whole document. The
+   size is clamped because the workbench stacks to one column under 1240px and
+   the badge has to stay clear of the content at either layout. */
 .replay-swipe-badge {
   position: absolute;
   top: 50%;
-  left: 12px;
-  z-index: 5;
+  left: clamp(6px, 1.5vw, 18px);
+  z-index: 6;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--line);
+  width: clamp(40px, 3.6vw, 52px);
+  height: clamp(40px, 3.6vw, 52px);
+  border: 2px solid var(--line-strong, var(--line));
   border-radius: 50%;
   background: var(--panel-elevated, var(--panel));
   color: var(--text-soft);
-  font-size: 17px;
+  font-size: clamp(21px, 2vw, 27px);
   line-height: 1;
   pointer-events: none;
-  box-shadow: var(--shadow);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
 }
 
 .replay-swipe-badge.trailing {
-  right: 12px;
+  right: clamp(6px, 1.5vw, 18px);
   left: auto;
 }
 
 .replay-swipe-badge.armed {
   border-color: var(--point);
+  background: var(--point-soft);
   color: var(--point);
 }

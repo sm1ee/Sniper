@@ -16662,20 +16662,21 @@ function canNavigateReplayHistory(tab, direction) {
 
 // ─── Swipe the replay history ───
 
-// Two fingers left or right over a message pane steps through the tab's history,
-// the same call the < and > buttons make. It only takes over once the editor has
-// run out of horizontal scroll, the way a browser's back gesture waits for the
-// page to reach its edge, so reading a long line still works.
+// Two fingers left or right anywhere over the replay workbench steps through the
+// tab's history, the same call the < and > buttons make. It only takes over once
+// the editor under the pointer has run out of horizontal scroll, the way a
+// browser's back gesture waits for the page to reach its edge.
 //
-// The trackpad gives no "fingers lifted" event, so the gesture commits the moment
-// the pull passes the threshold and then locks until the deltas go quiet. Without
-// the lock one long swipe walks several entries at once.
-const REPLAY_SWIPE_THRESHOLD_PX = 80;
-const REPLAY_SWIPE_SETTLE_MS = 200;
+// The commit waits for the gesture to stop rather than firing the moment the pull
+// is long enough, so a pull can be abandoned by not letting it settle. A caveat
+// worth knowing: `wheel` carries no gesture phase, so "stopped moving" is the
+// closest thing to "let go" available — resting still on the trackpad reads the
+// same as lifting off.
+const REPLAY_SWIPE_THRESHOLD_PX = 90;
+const REPLAY_SWIPE_SETTLE_MS = 110;
 
 let replaySwipeAccum = 0;
 let replaySwipeDirection = 0;
-let replaySwipeLocked = false;
 let replaySwipeSettleTimer = 0;
 let replaySwipeBadge = null;
 
@@ -16697,32 +16698,46 @@ function resetReplaySwipe() {
   replaySwipeSettleTimer = 0;
   replaySwipeAccum = 0;
   replaySwipeDirection = 0;
-  replaySwipeLocked = false;
   clearReplaySwipeBadge();
+}
+
+// Fires once the wheel has been quiet long enough to call the gesture over.
+function settleReplaySwipe() {
+  const direction = replaySwipeDirection;
+  const armed = replaySwipeAccum >= REPLAY_SWIPE_THRESHOLD_PX;
+  resetReplaySwipe();
+  if (!armed || !direction) return;
+  const tab = getActiveReplayTab();
+  if (tab && !isReplayTabSending(tab.id) && canNavigateReplayHistory(tab, direction)) {
+    navigateReplayHistory(direction);
+  }
 }
 
 function armReplaySwipeSettle() {
   clearTimeout(replaySwipeSettleTimer);
-  replaySwipeSettleTimer = setTimeout(resetReplaySwipe, REPLAY_SWIPE_SETTLE_MS);
+  replaySwipeSettleTimer = setTimeout(settleReplaySwipe, REPLAY_SWIPE_SETTLE_MS);
 }
 
-function renderReplaySwipeBadge(panel, direction, progress) {
-  if (!replaySwipeBadge || replaySwipeBadge.parentElement !== panel) {
+// The badge belongs to the workbench, not to the pane the pointer happens to be
+// over: the two panes read as one surface, so going back shows on the Request
+// side and going forward on the Response side however the panes are laid out.
+function renderReplaySwipeBadge(workbench, direction, progress) {
+  if (!replaySwipeBadge || replaySwipeBadge.parentElement !== workbench) {
     clearReplaySwipeBadge();
     replaySwipeBadge = document.createElement("div");
     replaySwipeBadge.className = "replay-swipe-badge";
-    panel.appendChild(replaySwipeBadge);
+    workbench.appendChild(replaySwipeBadge);
   }
   replaySwipeBadge.textContent = direction < 0 ? "\u2039" : "\u203A";
   replaySwipeBadge.classList.toggle("trailing", direction > 0);
   replaySwipeBadge.classList.toggle("armed", progress >= 1);
-  replaySwipeBadge.style.opacity = `${0.3 + progress * 0.7}`;
+  replaySwipeBadge.style.opacity = `${0.35 + progress * 0.65}`;
   // Slides in from just outside the edge as the pull grows.
-  const offset = (1 - progress) * 14 * (direction < 0 ? -1 : 1);
+  const offset = (1 - progress) * 20 * (direction < 0 ? -1 : 1);
   replaySwipeBadge.style.transform = `translateY(-50%) translateX(${offset}px)`;
 }
 
-function onReplaySwipeWheel(event, panel) {
+function onReplaySwipeWheel(event, workbench) {
   if (state.activeTool !== "replay") return;
   // Vertical scrolling is not ours, and a diagonal gesture is scrolling.
   if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
@@ -16733,7 +16748,9 @@ function onReplaySwipeWheel(event, panel) {
     return;
   }
   const direction = event.deltaX < 0 ? -1 : 1;
-  if (replayScrollerHasRoom(panel.querySelector(".cm-scroller"), direction)) {
+  // The scroller under the pointer, not a fixed pane: the listener covers the
+  // whole workbench so the gesture works over headers and footers too.
+  if (replayScrollerHasRoom(event.target?.closest?.(".cm-scroller"), direction)) {
     resetReplaySwipe();
     return;
   }
@@ -16745,23 +16762,18 @@ function onReplaySwipeWheel(event, panel) {
   // Past the editor's edge with somewhere to go: the gesture is ours, so stop
   // the platform turning it into a rubber band.
   event.preventDefault();
-  if (replaySwipeLocked) {
-    armReplaySwipeSettle();
-    return;
-  }
   if (replaySwipeDirection !== direction) {
     replaySwipeAccum = 0;
     replaySwipeDirection = direction;
   }
   replaySwipeAccum += Math.abs(event.deltaX);
 
-  const progress = Math.min(1, replaySwipeAccum / REPLAY_SWIPE_THRESHOLD_PX);
-  if (!prefersReducedMotion()) renderReplaySwipeBadge(panel, direction, progress);
-
-  if (progress >= 1) {
-    replaySwipeLocked = true;
-    clearReplaySwipeBadge();
-    navigateReplayHistory(direction);
+  if (!prefersReducedMotion()) {
+    renderReplaySwipeBadge(
+      workbench,
+      direction,
+      Math.min(1, replaySwipeAccum / REPLAY_SWIPE_THRESHOLD_PX),
+    );
   }
   armReplaySwipeSettle();
 }
@@ -16771,14 +16783,14 @@ function prefersReducedMotion() {
 }
 
 function wireReplayHistorySwipe() {
-  ["replayRequestCM", "replayResponseCM"].forEach((id) => {
-    const panel = document.getElementById(id)?.closest(".editor-panel");
-    if (!panel || panel._replaySwipeWired) return;
-    panel._replaySwipeWired = true;
-    // Not passive: the handler calls preventDefault once it owns the gesture.
-    panel.addEventListener("wheel", (event) => onReplaySwipeWheel(event, panel), { passive: false });
-    panel.addEventListener("mouseleave", resetReplaySwipe);
+  const workbench = document.getElementById("httpReplayWorkbench");
+  if (!workbench || workbench._replaySwipeWired) return;
+  workbench._replaySwipeWired = true;
+  // Not passive: the handler calls preventDefault once it owns the gesture.
+  workbench.addEventListener("wheel", (event) => onReplaySwipeWheel(event, workbench), {
+    passive: false,
   });
+  workbench.addEventListener("mouseleave", resetReplaySwipe);
 }
 
 function navigateReplayHistory(direction) {
