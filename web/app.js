@@ -16685,13 +16685,18 @@ let replaySwipeOffset = 0;
 let replaySwipeDirection = 0;
 let replaySwipeSettleTimer = 0;
 let replaySwipeBadge = null;
-// Set the first time the native bridge speaks. Until then the timer is the only
-// way to end a gesture; after that it is a safety net for a phase that never
-// arrives, not the thing that decides.
-let replaySwipeNativePhase = false;
+// Whether THIS gesture was opened by a native phase. Deliberately not sticky: a
+// mouse wheel — or shift+wheel, which the platform turns into a horizontal one —
+// has no phase at all, so a session-wide flag left those waiting on the long
+// timer the moment a trackpad had been used once.
+let replaySwipeNativeGesture = false;
 // True between a native "ended" and the next "began": macOS keeps sending wheel
-// events as momentum after the fingers lift, and they are not a new gesture.
+// events as momentum after the fingers lift, and they are not a new gesture. It
+// expires on its own, because a mouse never sends the "began" that would clear
+// it and its input would otherwise be swallowed for the rest of the session.
 let replaySwipeCoasting = false;
+let replaySwipeCoastTimer = 0;
+const REPLAY_SWIPE_COAST_MAX_MS = 1200;
 
 function replayScrollerHasRoom(scroller, direction) {
   if (!scroller) return false;
@@ -16711,6 +16716,7 @@ function resetReplaySwipe() {
   replaySwipeSettleTimer = 0;
   replaySwipeOffset = 0;
   replaySwipeDirection = 0;
+  replaySwipeNativeGesture = false;
   clearReplaySwipeBadge();
 }
 
@@ -16728,24 +16734,30 @@ function settleReplaySwipe() {
 
 function armReplaySwipeSettle() {
   clearTimeout(replaySwipeSettleTimer);
-  // With a real phase to wait for, the timer only catches a gesture whose end
-  // never arrives, so it gets far longer than any pause would last.
-  const wait = replaySwipeNativePhase ? REPLAY_SWIPE_SETTLE_MS * 8 : REPLAY_SWIPE_SETTLE_MS;
+  // With a real phase coming, the timer only catches a gesture whose end never
+  // arrives, so it gets far longer than any pause would last. Without one — a
+  // mouse — it is the only thing that ends the gesture.
+  const wait = replaySwipeNativeGesture ? REPLAY_SWIPE_SETTLE_MS * 8 : REPLAY_SWIPE_SETTLE_MS;
   replaySwipeSettleTimer = setTimeout(settleReplaySwipe, wait);
 }
 
 // Called by the desktop shell with the trackpad's actual gesture phase.
 window.__sniperScrollGesture = (phase) => {
-  replaySwipeNativePhase = true;
+  clearTimeout(replaySwipeCoastTimer);
   if (phase === "began") {
     replaySwipeCoasting = false;
     // A new gesture starts from nothing, including its direction.
     resetReplaySwipe();
+    replaySwipeNativeGesture = true;
     return;
   }
   // Ended: the fingers are off, so whatever was pulled is what was meant.
-  // Anything still arriving after this is momentum.
+  // Anything still arriving after this is momentum — but only for as long as
+  // momentum can last, or a mouse used next would never be heard.
   replaySwipeCoasting = true;
+  replaySwipeCoastTimer = setTimeout(() => {
+    replaySwipeCoasting = false;
+  }, REPLAY_SWIPE_COAST_MAX_MS);
   settleReplaySwipe();
 };
 
