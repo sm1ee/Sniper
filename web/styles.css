@@ -6826,19 +6826,27 @@ button.utility-button.replay-tab-add {
    buttons are 26px tall and a spinner beside the text would either overflow or
    force the button to resize mid-click. */
 /* Both classes, not just .is-working-shown: .secondary-action sets its own
-   colour at the same specificity, so one class is a coin toss on source order. */
+   colour at the same specificity, so one class is a coin toss on source order.
+   transition:none because these buttons animate `color` over 0.15s — the ring
+   appears at once, and without this the label is still fading out underneath
+   it. */
 .is-working.is-working-shown {
   color: transparent;
+  transition: none;
 }
 
+/* inset:0 + margin:auto rather than top/left 50% with a negative margin. The
+   global reset at the top of this file is `*`, which does not cover ::before
+   and ::after, so a pseudo-element is content-box: the 2px border sat outside
+   the 12px and pushed the ring 2px down and right of centre. This form does not
+   care what the box model is. */
 .is-working-shown::after {
   content: "";
   position: absolute;
-  top: 50%;
-  left: 50%;
+  inset: 0;
+  margin: auto;
   width: 12px;
   height: 12px;
-  margin: -6px 0 0 -6px;
   border: 2px solid var(--point-border);
   border-top-color: var(--point);
   border-radius: 50%;

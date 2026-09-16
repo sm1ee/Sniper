@@ -1403,19 +1403,19 @@ function bindEvents() {
       });
     }
   });
-  document.getElementById("wsInScopeOnly")?.addEventListener("click", (e) => {
+  onClickWithProgress(document.getElementById("wsInScopeOnly"), (e) => {
     state.websocketInScopeOnly = e.currentTarget.classList.toggle("active");
     scheduleUiSettingsSave();
     clearWebsocketQueryBackfill();
     clearWebsocketSelectionPreview({ render: true });
-    loadWebsocketsPageRefresh(true, { resetWindow: true }).catch((error) => console.error(error));
+    return loadWebsocketsPageRefresh(true, { resetWindow: true }).catch((error) => console.error(error));
   });
-  document.getElementById("wsHideClosed")?.addEventListener("click", (e) => {
+  onClickWithProgress(document.getElementById("wsHideClosed"), (e) => {
     state.websocketLiveOnly = e.currentTarget.classList.toggle("active");
     scheduleUiSettingsSave();
     clearWebsocketQueryBackfill();
     clearWebsocketSelectionPreview({ render: true });
-    loadWebsocketsPageRefresh(true, { resetWindow: true }).catch((error) => console.error(error));
+    return loadWebsocketsPageRefresh(true, { resetWindow: true }).catch((error) => console.error(error));
   });
   document.getElementById("httpInScopeToggle")?.addEventListener("click", (e) => {
     e.currentTarget.classList.toggle("active");
@@ -1424,11 +1424,10 @@ function bindEvents() {
     clearHttpHistorySelectionPreview();
     scheduleRefresh({ resetScroll: true });
   });
-  document.getElementById("httpCaptureToggle")?.addEventListener("click", async (e) => {
+  onClickWithProgress(document.getElementById("httpCaptureToggle"), async (e) => {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
     const next = !state.runtime?.http_capture_enabled;
-    toggle.disabled = true;
     try {
       const response = await fetch(sessionWritePath("/api/runtime", sessionId), {
         method: "POST",
@@ -1443,8 +1442,6 @@ function bindEvents() {
     } catch (error) {
       console.error(error);
       showToast(error?.message || "Failed to change capture.", "error");
-    } finally {
-      toggle.disabled = false;
     }
   });
 
@@ -1479,13 +1476,12 @@ function bindEvents() {
     );
   });
 
-  document.getElementById("interceptInScopeToggle")?.addEventListener("click", async (e) => {
+  onClickWithProgress(document.getElementById("interceptInScopeToggle"), async (e) => {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
     const previousScopeOnly = Boolean(state.interceptInScopeOnly);
     const nextScopeOnly = !toggle.classList.contains("active");
     toggle.classList.toggle("active", nextScopeOnly);
-    toggle.disabled = true;
     state.interceptInScopeOnly = nextScopeOnly;
     try {
       await applyInterceptScopeFilterLocally();
@@ -1517,8 +1513,6 @@ function bindEvents() {
       state.interceptInScopeOnly = previousScopeOnly;
       toggle.classList.toggle("active", previousScopeOnly);
       await applyInterceptScopeFilterLocally();
-    } finally {
-      toggle.disabled = false;
     }
   });
 
