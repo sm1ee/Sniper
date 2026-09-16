@@ -321,6 +321,7 @@ fn run_desktop() -> Result<()> {
         .build(&event_loop)
         .context("failed to create desktop window")?;
     enable_window_fullscreen_support(&window);
+    hide_window_title_text(&window);
     let ui_url = format!("http://{}/", config.ui_addr);
     let ui_origin = format!("http://{}", config.ui_addr);
     let ipc_event_proxy = event_loop.create_proxy();
@@ -937,6 +938,32 @@ fn enable_window_fullscreen_support(window: &tao::window::Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn enable_window_fullscreen_support(_window: &tao::window::Window) {}
+
+/// Drop the title drawn in the title bar. The window keeps its title — the Dock
+/// menu, the Window menu and Mission Control all read it — but the app's own tab
+/// bar sits directly under the traffic lights, and "Sniper" above it is a second
+/// label for something already named by the window itself.
+#[cfg(target_os = "macos")]
+fn hide_window_title_text(window: &tao::window::Window) {
+    use cocoa::{
+        appkit::{NSWindow, NSWindowTitleVisibility},
+        base::id,
+    };
+    use tao::platform::macos::WindowExtMacOS;
+
+    let ns_window = window.ns_window() as id;
+    if ns_window.is_null() {
+        return;
+    }
+    // SAFETY: ns_window is the live NSWindow tao created for this window, and
+    // this runs on the main thread during window setup.
+    unsafe {
+        ns_window.setTitleVisibility_(NSWindowTitleVisibility::NSWindowTitleHidden);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_window_title_text(_window: &tao::window::Window) {}
 
 /// Append a `PATH` export line to `~/.zshrc` (and `~/.bashrc` if present) so
 /// that `sniper-cli` is available from the terminal without requiring root.
