@@ -6881,3 +6881,18 @@ button.utility-button.replay-tab-add {
     content: none;
   }
 }
+
+/* Settings is split into tabs rather than one column that grows every time
+   something is added to it. Reuses the Capture sub-tab look so there is one
+   kind of tab in the app, not two. */
+.settings-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-tabs .sub-tab {
+  margin-bottom: -1px;
+}

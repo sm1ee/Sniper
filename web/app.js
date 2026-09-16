@@ -1534,6 +1534,9 @@ function bindEvents() {
   if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
   document.getElementById("installCliPathButton")?.addEventListener("click", installCliPath);
+  els.displaySettingsModal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
+    tab.addEventListener("click", () => selectSettingsTab(tab.dataset.settingsTab));
+  });
   els.displaySettingsModal.addEventListener("click", (event) => {
     if (event.target === els.displaySettingsModal) {
       closeDisplaySettingsModal();
@@ -16721,10 +16724,26 @@ function closeCertificateModal() {
   closeDisplaySettingsModal();
 }
 
+// Apply and Reset belong to the Display tab and nothing else, so they follow it
+// rather than sitting under Runtime looking like they might reset the proxy.
+function selectSettingsTab(name) {
+  const modal = els.displaySettingsModal;
+  modal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
+    const on = tab.dataset.settingsTab === name;
+    tab.classList.toggle("active", on);
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  modal.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.settingsPanel !== name);
+  });
+  modal.querySelector(".modal-actions")?.classList.toggle("hidden", name !== "display");
+}
+
 function openDisplaySettingsModal() {
   hydrateDisplaySettingsForm();
   applyDisplaySettingsState();
   renderShortcutReference();
+  selectSettingsTab("display");
   displaySettingsPreviewActive = false;
   els.displaySettingsModal.classList.remove("hidden");
 }
