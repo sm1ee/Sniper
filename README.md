@@ -26,7 +26,7 @@
 
 Sniper is an **open-source desktop web security proxy** for macOS and Windows. It intercepts, inspects, and modifies HTTP/HTTPS traffic between your browser and the internet — the core workflow for web application security testing, bug bounty hunting, and API debugging.
 
-If you've used Burp Suite, OWASP ZAP, or Caido, you'll feel right at home — but without the Java overhead, subscription fees, or bloated feature set. Sniper is a **native desktop app** written in Rust with an embedded web UI.
+If you've used an intercepting proxy before, the workflow will be familiar. Sniper is a **native desktop app** written in Rust with an embedded web UI.
 
 **Who it's for:** penetration testers, bug bounty hunters, security researchers, and developers who need to see what's happening on the wire.
 
@@ -64,14 +64,9 @@ cargo run --bin sniper-desktop
 
 ## Why Sniper?
 
-| | Sniper | Burp Suite | OWASP ZAP | Caido |
-|---|---|---|---|---|
-| **Runtime** | Native (Rust) | JVM | JVM | Rust + Electron |
-| **Startup** | < 1 sec | 10+ sec | 10+ sec | ~3 sec |
-| **Memory** | ~80 MB | 500+ MB | 400+ MB | ~200 MB |
-| **Price** | Free | $449/yr Pro | Free | Freemium |
-| **CLI automation** | JSON-first | Limited | Limited | API |
-| **AI integration** | Built-in | No | No | No |
+- **Native.** One Rust binary with no runtime to install. It opens immediately and stays small while it runs.
+- **Scriptable.** `sniper-cli` speaks JSON for the operations the UI exposes, so reviewing a capture or resending a request can be driven from a shell script.
+- **Agent-ready.** Claude Code and Codex skill templates ship in the repository, so a coding agent drives the same workflow through the same CLI.
 
 ## Quick start
 

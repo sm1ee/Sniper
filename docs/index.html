@@ -7,7 +7,7 @@
 <meta name="description" content="Sniper is a lightweight, fast, open-source web security proxy for macOS. Intercept HTTP/HTTPS traffic, replay requests, fuzz parameters, and scan for vulnerabilities. A modern alternative to Burp Suite built in Rust." />
 <meta name="keywords" content="web proxy, MITM proxy, HTTP proxy, HTTPS proxy, security testing, penetration testing, bug bounty, Burp Suite alternative, macOS proxy, Rust proxy, open source proxy, vulnerability scanner, web security, OWASP, intercept proxy, API testing" />
 <meta property="og:title" content="Sniper — Open-Source Web Proxy for macOS" />
-<meta property="og:description" content="Lightweight, fast web security proxy built in Rust. Capture, replay, fuzz, and scan — without the Java overhead." />
+<meta property="og:description" content="Lightweight, fast web security proxy built in Rust. Capture, replay, fuzz, and scan." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://sm1ee.github.io/Sniper/" />
 <meta property="og:image" content="https://raw.githubusercontent.com/sm1ee/Sniper/main/web/screenshot.png" />
@@ -106,16 +106,11 @@ footer{text-align:center;padding:40px 0;color:#484f58;font-size:.85rem;border-to
 
 <section>
   <h2>Why Sniper?</h2>
-  <table>
-    <thead><tr><th></th><th>Sniper</th><th>Burp Suite</th><th>OWASP ZAP</th><th>Caido</th></tr></thead>
-    <tbody>
-      <tr><td>Runtime</td><td class="highlight">Native (Rust)</td><td>JVM</td><td>JVM</td><td>Rust + Electron</td></tr>
-      <tr><td>Startup</td><td class="highlight">&lt; 1 sec</td><td>10+ sec</td><td>10+ sec</td><td>~3 sec</td></tr>
-      <tr><td>Memory</td><td class="highlight">~80 MB</td><td>500+ MB</td><td>400+ MB</td><td>~200 MB</td></tr>
-      <tr><td>Price</td><td class="highlight">Free</td><td>$449/yr</td><td>Free</td><td>Freemium</td></tr>
-      <tr><td>AI integration</td><td class="highlight">Built-in</td><td>No</td><td>No</td><td>No</td></tr>
-    </tbody>
-  </table>
+  <ul style="margin-top:12px;padding-left:20px;color:#8b949e">
+    <li><strong>Native.</strong> One Rust binary with no runtime to install. It opens immediately and stays small while it runs.</li>
+    <li><strong>Scriptable.</strong> <code>sniper-cli</code> speaks JSON for the operations the UI exposes, so reviewing a capture or resending a request can be driven from a shell script.</li>
+    <li><strong>Agent-ready.</strong> Claude Code and Codex skill templates ship in the repository, so a coding agent drives the same workflow through the same CLI.</li>
+  </ul>
 </section>
 
 <section>
