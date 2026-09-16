@@ -16667,15 +16667,13 @@ function canNavigateReplayHistory(tab, direction) {
 // the editor under the pointer has run out of horizontal scroll, the way a
 // browser's back gesture waits for the page to reach its edge.
 //
-// The commit waits for the gesture to stop rather than firing the moment the pull
-// is long enough, so a pull can be abandoned by not letting it settle. A caveat
-// worth knowing: `wheel` carries no gesture phase, so "stopped moving" is the
-// closest thing to "let go" available — resting still on the trackpad reads the
-// same as lifting off.
-// The threshold is a deliberate pull, not a nudge. The settle window is the
-// bigger lever: at 110ms a slow drag that paused for a moment mid-pull read as
-// a release and committed under the operator's fingers, so it waits a good deal
-// longer for the wheel to be genuinely done.
+// The commit waits for the fingers to leave the trackpad. On macOS the desktop
+// shell watches NSEvent's gesture phase and calls window.__sniperScrollGesture,
+// which is the real thing — `wheel` carries no phase of its own, and guessing a
+// release from the deltas going quiet fires under the operator's hand whenever
+// they pause mid-pull. Elsewhere that guess is still the only option.
+//
+// The threshold is a deliberate pull rather than a nudge.
 const REPLAY_SWIPE_THRESHOLD_PX = 160;
 const REPLAY_SWIPE_SETTLE_MS = 260;
 
@@ -16683,6 +16681,13 @@ let replaySwipeAccum = 0;
 let replaySwipeDirection = 0;
 let replaySwipeSettleTimer = 0;
 let replaySwipeBadge = null;
+// Set the first time the native bridge speaks. Until then the timer is the only
+// way to end a gesture; after that it is a safety net for a phase that never
+// arrives, not the thing that decides.
+let replaySwipeNativePhase = false;
+// True between a native "ended" and the next "began": macOS keeps sending wheel
+// events as momentum after the fingers lift, and they are not a new gesture.
+let replaySwipeCoasting = false;
 
 function replayScrollerHasRoom(scroller, direction) {
   if (!scroller) return false;
@@ -16719,8 +16724,24 @@ function settleReplaySwipe() {
 
 function armReplaySwipeSettle() {
   clearTimeout(replaySwipeSettleTimer);
-  replaySwipeSettleTimer = setTimeout(settleReplaySwipe, REPLAY_SWIPE_SETTLE_MS);
+  // With a real phase to wait for, the timer only catches a gesture whose end
+  // never arrives, so it gets far longer than any pause would last.
+  const wait = replaySwipeNativePhase ? REPLAY_SWIPE_SETTLE_MS * 8 : REPLAY_SWIPE_SETTLE_MS;
+  replaySwipeSettleTimer = setTimeout(settleReplaySwipe, wait);
 }
+
+// Called by the desktop shell with the trackpad's actual gesture phase.
+window.__sniperScrollGesture = (phase) => {
+  replaySwipeNativePhase = true;
+  if (phase === "began") {
+    replaySwipeCoasting = false;
+    return;
+  }
+  // Ended: the fingers are off, so whatever was pulled is what was meant.
+  // Anything still arriving after this is momentum.
+  replaySwipeCoasting = true;
+  settleReplaySwipe();
+};
 
 // The badge belongs to the workbench, not to the pane the pointer happens to be
 // over: the two panes read as one surface, so going back shows on the Request
@@ -16746,6 +16767,11 @@ function onReplaySwipeWheel(event, workbench) {
   // Vertical scrolling is not ours, and a diagonal gesture is scrolling.
   if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
 
+  // Momentum after the fingers left is not a new gesture.
+  if (replaySwipeCoasting) {
+    event.preventDefault();
+    return;
+  }
   const tab = getActiveReplayTab();
   if (!tab || isReplayTabSending(tab.id)) {
     resetReplaySwipe();

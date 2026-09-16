@@ -28,8 +28,19 @@ use wry::{WebView, WebViewBuilder};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DesktopUserEvent {
     ShutdownSignal,
-    WebviewCloseFlushFinished { generation: u64, ok: bool },
-    WebviewCloseFlushTimedOut { generation: u64 },
+    /// A trackpad scroll gesture began or ended. `wheel` events carry no phase,
+    /// so without this the page has to guess a release from the deltas going
+    /// quiet — and a slow pull that pauses reads exactly like a lifted hand.
+    ScrollGesturePhase {
+        ended: bool,
+    },
+    WebviewCloseFlushFinished {
+        generation: u64,
+        ok: bool,
+    },
+    WebviewCloseFlushTimedOut {
+        generation: u64,
+    },
 }
 
 #[cfg(target_os = "macos")]
@@ -322,6 +333,7 @@ fn run_desktop() -> Result<()> {
         .context("failed to create desktop window")?;
     enable_window_fullscreen_support(&window);
     hide_window_title_text(&window);
+    forward_scroll_gesture_phase(event_loop.create_proxy());
     let ui_url = format!("http://{}/", config.ui_addr);
     let ui_origin = format!("http://{}", config.ui_addr);
     let ipc_event_proxy = event_loop.create_proxy();
@@ -504,6 +516,13 @@ fn run_desktop() -> Result<()> {
                 ) {
                     *control_flow = block_desktop_shutdown(error);
                 }
+            }
+            Event::UserEvent(DesktopUserEvent::ScrollGesturePhase { ended }) => {
+                let _ = webview.evaluate_script(if ended {
+                    "window.__sniperScrollGesture && window.__sniperScrollGesture('ended')"
+                } else {
+                    "window.__sniperScrollGesture && window.__sniperScrollGesture('began')"
+                });
             }
             Event::UserEvent(DesktopUserEvent::WebviewCloseFlushFinished {
                 generation,
@@ -964,6 +983,53 @@ fn hide_window_title_text(window: &tao::window::Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn hide_window_title_text(_window: &tao::window::Window) {}
+
+/// Report trackpad scroll gesture boundaries to the page.
+///
+/// AppKit knows when the fingers land and lift; the web platform does not expose
+/// it on `wheel` at all. Without this the replay swipe has to treat "the deltas
+/// went quiet" as a release, which fires under the operator's hand whenever they
+/// pause mid-pull. The monitor returns the event untouched — it only observes.
+#[cfg(target_os = "macos")]
+fn forward_scroll_gesture_phase(proxy: tao::event_loop::EventLoopProxy<DesktopUserEvent>) {
+    use block::ConcreteBlock;
+    use cocoa::{
+        appkit::{NSEvent, NSEventMask, NSEventPhase},
+        base::{id, nil},
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let handler = ConcreteBlock::new(move |event: id| -> id {
+        if event != nil {
+            // SAFETY: AppKit hands us a live NSScrollWheel event on the main
+            // thread, and phase is a plain enum read.
+            let phase = unsafe { NSEvent::phase(event) };
+            if phase.contains(NSEventPhase::NSEventPhaseBegan) {
+                let _ = proxy.send_event(DesktopUserEvent::ScrollGesturePhase { ended: false });
+            } else if phase.contains(NSEventPhase::NSEventPhaseEnded)
+                || phase.contains(NSEventPhase::NSEventPhaseCancelled)
+            {
+                let _ = proxy.send_event(DesktopUserEvent::ScrollGesturePhase { ended: true });
+            }
+        }
+        event
+    })
+    .copy();
+
+    // SAFETY: the block is copied to the heap and deliberately leaked with the
+    // monitor, which lives as long as the process.
+    unsafe {
+        let _: id = msg_send![
+            class!(NSEvent),
+            addLocalMonitorForEventsMatchingMask: NSEventMask::NSScrollWheelMask
+            handler: &*handler
+        ];
+    }
+    std::mem::forget(handler);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn forward_scroll_gesture_phase(_proxy: tao::event_loop::EventLoopProxy<DesktopUserEvent>) {}
 
 /// Append a `PATH` export line to `~/.zshrc` (and `~/.bashrc` if present) so
 /// that `sniper-cli` is available from the terminal without requiring root.
