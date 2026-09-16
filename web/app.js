@@ -16677,7 +16677,11 @@ function canNavigateReplayHistory(tab, direction) {
 const REPLAY_SWIPE_THRESHOLD_PX = 160;
 const REPLAY_SWIPE_SETTLE_MS = 260;
 
-let replaySwipeAccum = 0;
+// Signed distance pulled in the gesture's own direction. Pulling back shrinks it
+// rather than turning it into a pull the other way — see onReplaySwipeWheel.
+let replaySwipeOffset = 0;
+// Decided by the first wheel event that claims a gesture, and fixed until that
+// gesture ends. Going the other way takes lifting off and pulling again.
 let replaySwipeDirection = 0;
 let replaySwipeSettleTimer = 0;
 let replaySwipeBadge = null;
@@ -16705,7 +16709,7 @@ function clearReplaySwipeBadge() {
 function resetReplaySwipe() {
   clearTimeout(replaySwipeSettleTimer);
   replaySwipeSettleTimer = 0;
-  replaySwipeAccum = 0;
+  replaySwipeOffset = 0;
   replaySwipeDirection = 0;
   clearReplaySwipeBadge();
 }
@@ -16713,7 +16717,7 @@ function resetReplaySwipe() {
 // Fires once the wheel has been quiet long enough to call the gesture over.
 function settleReplaySwipe() {
   const direction = replaySwipeDirection;
-  const armed = replaySwipeAccum >= REPLAY_SWIPE_THRESHOLD_PX;
+  const armed = replaySwipeOffset >= REPLAY_SWIPE_THRESHOLD_PX;
   resetReplaySwipe();
   if (!armed || !direction) return;
   const tab = getActiveReplayTab();
@@ -16735,6 +16739,8 @@ window.__sniperScrollGesture = (phase) => {
   replaySwipeNativePhase = true;
   if (phase === "began") {
     replaySwipeCoasting = false;
+    // A new gesture starts from nothing, including its direction.
+    resetReplaySwipe();
     return;
   }
   // Ended: the fingers are off, so whatever was pulled is what was meant.
@@ -16777,33 +16783,36 @@ function onReplaySwipeWheel(event, workbench) {
     resetReplaySwipe();
     return;
   }
-  const direction = event.deltaX < 0 ? -1 : 1;
-  // The scroller under the pointer, not a fixed pane: the listener covers the
-  // whole workbench so the gesture works over headers and footers too.
-  if (replayScrollerHasRoom(event.target?.closest?.(".cm-scroller"), direction)) {
-    resetReplaySwipe();
-    return;
-  }
-  if (!canNavigateReplayHistory(tab, direction)) {
-    resetReplaySwipe();
-    return;
-  }
 
-  // Past the editor's edge with somewhere to go: the gesture is ours, so stop
-  // the platform turning it into a rubber band.
-  event.preventDefault();
-  if (replaySwipeDirection !== direction) {
-    replaySwipeAccum = 0;
+  // A gesture's direction is decided once, by the event that claims it, and does
+  // not flip while the fingers are down: pulling back from a full pull retreats
+  // the arrow to the edge, it does not raise the opposite one. Turning round
+  // means lifting off and pulling again.
+  let direction = replaySwipeDirection;
+  if (!direction) {
+    direction = event.deltaX < 0 ? -1 : 1;
+    // The scroller under the pointer, not a fixed pane: the listener covers the
+    // whole workbench so the gesture works over headers and footers too.
+    if (replayScrollerHasRoom(event.target?.closest?.(".cm-scroller"), direction)) return;
+    if (!canNavigateReplayHistory(tab, direction)) return;
     replaySwipeDirection = direction;
   }
-  replaySwipeAccum += Math.abs(event.deltaX);
+
+  // Claimed: stop the platform turning the rest of it into a rubber band.
+  event.preventDefault();
+  const towards = direction < 0 ? -event.deltaX : event.deltaX;
+  replaySwipeOffset = Math.max(0, replaySwipeOffset + towards);
 
   if (!prefersReducedMotion()) {
-    renderReplaySwipeBadge(
-      workbench,
-      direction,
-      Math.min(1, replaySwipeAccum / REPLAY_SWIPE_THRESHOLD_PX),
-    );
+    if (replaySwipeOffset <= 0) {
+      clearReplaySwipeBadge();
+    } else {
+      renderReplaySwipeBadge(
+        workbench,
+        direction,
+        Math.min(1, replaySwipeOffset / REPLAY_SWIPE_THRESHOLD_PX),
+      );
+    }
   }
   armReplaySwipeSettle();
 }
