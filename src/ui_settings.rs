@@ -135,7 +135,7 @@ impl WorkbenchPaneWidthsSnapshot {
             inspector_width: self
                 .inspector_width
                 .filter(|width| *width > 0)
-                .map(|width| width.clamp(300, 4_096)),
+                .map(|width| width.clamp(240, 4_096)),
         }
     }
 

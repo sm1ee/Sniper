@@ -958,10 +958,15 @@ let toolsBootPromise = null;
 let displaySettingsPreviewActive = false;
 
 const WORKBENCH_STACK_BREAKPOINT = "(max-width: 1260px)";
+// The inspector keeps its handle well past the point where request and response
+// give theirs up: those two hit their minimums at 1260px, but the inspector is
+// exactly the pane an operator wants to trim on a narrow window. It only stops
+// being resizable at 980px, where the panes stack and the panel is hidden.
+const INSPECTOR_STACK_BREAKPOINT = "(max-width: 980px)";
 const WORKBENCH_MIN_WIDTHS = {
   request: 320,
   response: 320,
-  inspector: 300,
+  inspector: 240,
 };
 const WEBSOCKET_WORKBENCH_BREAKPOINT = "(max-width: 980px)";
 const WEBSOCKET_WORKBENCH_MIN_WIDTHS = {
@@ -19048,8 +19053,12 @@ function bindPaneResizer(handle, mode) {
     scheduleUiSettingsSave();
   });
 
+  const stackBreakpoint = mode === "response-inspector"
+    ? INSPECTOR_STACK_BREAKPOINT
+    : WORKBENCH_STACK_BREAKPOINT;
+
   handle.addEventListener("mousedown", (event) => {
-    if (window.matchMedia(WORKBENCH_STACK_BREAKPOINT).matches) {
+    if (window.matchMedia(stackBreakpoint).matches) {
       return;
     }
 
@@ -19125,7 +19134,7 @@ function applySavedWorkbenchPaneWidths() {
     return;
   }
   const totalWidth = els.lowerWorkbench.getBoundingClientRect().width;
-  if (!totalWidth || window.matchMedia(WORKBENCH_STACK_BREAKPOINT).matches) {
+  if (!totalWidth || window.matchMedia(INSPECTOR_STACK_BREAKPOINT).matches) {
     return;
   }
   const currentRequestWidth = els.requestColumn?.getBoundingClientRect().width || totalWidth / 3;
@@ -19156,22 +19165,27 @@ function applyWorkbenchPaneWidths(
     return;
   }
 
-  const requestPercent = clamp((requestWidth / totalWidth) * 100, 18, 72);
-  const responsePercent = clamp((responseWidth / totalWidth) * 100, 18, 72);
-  // fr, not %: these two tracks have to soak up whatever the fixed tracks beside
-  // them leave over. A percentage track is a fixed size, so once the inspector
-  // collapsed from its full width to the 46px rail — or the window grew — the
-  // freed space stayed empty to the right of the rail. fr keeps the same ratio
-  // between the panes and always fills the row.
-  els.lowerWorkbench.style.setProperty("--request-pane-width", `${requestPercent}fr`);
-  els.lowerWorkbench.style.setProperty("--response-pane-width", `${responsePercent}fr`);
   const updateState = options.updateState !== false;
-  if (updateState) {
-    state.workbenchPaneWidths = {
-      ...(state.workbenchPaneWidths || {}),
-      requestPercent: Math.round(requestPercent),
-      responsePercent: Math.round(responsePercent),
-    };
+  // Below the stack breakpoint the panes are two equal fr tracks that ignore
+  // these variables, so recording what they currently measure would quietly
+  // flatten a split the operator chose on a wider window.
+  if (!window.matchMedia(WORKBENCH_STACK_BREAKPOINT).matches) {
+    const requestPercent = clamp((requestWidth / totalWidth) * 100, 18, 72);
+    const responsePercent = clamp((responseWidth / totalWidth) * 100, 18, 72);
+    // fr, not %: these two tracks have to soak up whatever the fixed tracks beside
+    // them leave over. A percentage track is a fixed size, so once the inspector
+    // collapsed from its full width to the 46px rail — or the window grew — the
+    // freed space stayed empty to the right of the rail. fr keeps the same ratio
+    // between the panes and always fills the row.
+    els.lowerWorkbench.style.setProperty("--request-pane-width", `${requestPercent}fr`);
+    els.lowerWorkbench.style.setProperty("--response-pane-width", `${responsePercent}fr`);
+    if (updateState) {
+      state.workbenchPaneWidths = {
+        ...(state.workbenchPaneWidths || {}),
+        requestPercent: Math.round(requestPercent),
+        responsePercent: Math.round(responsePercent),
+      };
+    }
   }
   if (Number.isFinite(inspectorWidth)) {
     const maxInspectorWidth = Math.max(
@@ -19185,7 +19199,10 @@ function applyWorkbenchPaneWidths(
     );
     els.lowerWorkbench.style.setProperty("--inspector-pane-width", `${Math.round(clampedInspectorWidth)}px`);
     if (updateState) {
-      state.workbenchPaneWidths.inspectorWidth = Math.round(clampedInspectorWidth);
+      state.workbenchPaneWidths = {
+        ...(state.workbenchPaneWidths || {}),
+        inspectorWidth: Math.round(clampedInspectorWidth),
+      };
     }
   }
 }

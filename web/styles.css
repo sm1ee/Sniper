@@ -5509,11 +5509,8 @@ button.utility-button.replay-tab-add {
       minmax(0, var(--request-pane-width, 1fr))
       10px
       minmax(0, var(--response-pane-width, 1fr))
+      10px
       minmax(0, var(--inspector-pane-width, 300px));
-  }
-
-  .lower-workbench > .pane-resizer[data-resizer="response-inspector"] {
-    display: none;
   }
 
   .replay-toolbar {
@@ -5609,12 +5606,13 @@ button.utility-button.replay-tab-add {
       minmax(180px, var(--workbench-pane-height, 38vh));
   }
 
-  .lower-workbench > .pane-resizer {
+  /* Only the request/response split gives up its handle here: those two panes
+     are already at their minimums, while the inspector is the pane that most
+     needs trimming at this width. */
+  .lower-workbench > .pane-resizer[data-resizer="request-response"] {
     display: none;
   }
 
-  /* Both resizers are hidden above, so the three columns here are request,
-     response and the rail. */
   .lower-workbench,
   .lower-workbench.inspector-collapsed {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 46px;
@@ -5625,6 +5623,7 @@ button.utility-button.replay-tab-add {
     grid-template-columns:
       minmax(0, 1fr)
       minmax(0, 1fr)
+      10px
       minmax(0, var(--inspector-pane-width, 260px));
   }
 
@@ -5662,6 +5661,10 @@ button.utility-button.replay-tab-add {
   /* Panes stack, and the rail runs down the side of both so the inspector stays
      reachable. Placement is explicit because the stacked rows would otherwise
      auto-place the rail into a third row of its own. */
+  .lower-workbench > .pane-resizer {
+    display: none;
+  }
+
   .lower-workbench,
   .lower-workbench.inspector-collapsed,
   .lower-workbench:not(.inspector-collapsed) {
