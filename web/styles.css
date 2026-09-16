@@ -6805,7 +6805,7 @@ button.utility-button.replay-tab-add {
   font-size: var(--font-xs);
 }
 
-/* Progress on a button that is waiting for the API. The bar is drawn inside the
+/* Progress on a button that is waiting for the API. The ring is drawn inside the
    button's own box so a row of them does not change height, and it only appears
    once .is-working-shown is added — see withButtonProgress, which delays that so
    fast actions do not flash. */
@@ -6822,28 +6822,42 @@ button.utility-button.replay-tab-add {
   cursor: progress;
 }
 
+/* The label steps aside for the ring rather than sharing the box with it: these
+   buttons are 26px tall and a spinner beside the text would either overflow or
+   force the button to resize mid-click. */
+/* Both classes, not just .is-working-shown: .secondary-action sets its own
+   colour at the same specificity, so one class is a coin toss on source order. */
+.is-working.is-working-shown {
+  color: transparent;
+}
+
 .is-working-shown::after {
   content: "";
   position: absolute;
-  left: 0;
-  bottom: 0;
-  width: 40%;
-  height: 2px;
-  background: var(--point);
-  animation: button-progress 0.9s linear infinite;
+  top: 50%;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid var(--point-border);
+  border-top-color: var(--point);
+  border-radius: 50%;
+  animation: button-spinner 0.6s linear infinite;
 }
 
-@keyframes button-progress {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(250%); }
+@keyframes button-spinner {
+  to { transform: rotate(360deg); }
 }
 
-/* Still, not stopped: the bar stays put so the button is visibly busy without
-   anything moving. */
+/* No ring at all rather than a still one: a ring that does not turn reads as
+   decoration. The button is already visibly dimmed and disabled, and keeping
+   the label is more use than a frozen spinner. */
 @media (prefers-reduced-motion: reduce) {
+  .is-working.is-working-shown {
+    color: inherit;
+  }
+
   .is-working-shown::after {
-    width: 100%;
-    animation: none;
-    opacity: 0.6;
+    content: none;
   }
 }
