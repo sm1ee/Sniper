@@ -1594,8 +1594,6 @@ function bindEvents() {
   [els.displayThemeSelect, els.displayUiFontSelect, els.displayMonoFontSelect].forEach((element) => {
     element.addEventListener("change", previewDisplaySettingsFromForm);
   });
-  els.displaySizeInput.addEventListener("input", previewDisplaySettingsFromForm);
-  els.displaySizeInput.addEventListener("change", previewDisplaySettingsFromForm);
 
   onClickWithProgress(els.openCertFolderButton, () => openCertificateFolder());
   onClickWithProgress(els.openEventLogButton, async () => {
@@ -17448,8 +17446,15 @@ function collectDisplaySettingsFormValues() {
   });
 }
 
+// Theme and fonts preview as they are picked, because every value they can hold
+// is a finished one. The text size does not: typing 14 over 13 passes through
+// "1", and applying that resizes the whole workbench for a keystroke. It lands
+// on Apply instead.
 function previewDisplaySettingsFromForm() {
-  applyDisplaySettingsState(collectDisplaySettingsFormValues());
+  applyDisplaySettingsState({
+    ...collectDisplaySettingsFormValues(),
+    sizePx: state.displaySettings.sizePx,
+  });
   displaySettingsPreviewActive = true;
 }
 
