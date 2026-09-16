@@ -12270,8 +12270,8 @@ function renderMatchReplaceRules() {
               <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${rule.enabled ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
               <td>${escapeHtml(rule.scope)}</td>
               <td>${escapeHtml(rule.target)}</td>
-              <td class="text-truncate">${escapeHtml(rule.search || "—")}</td>
-              <td class="text-truncate">${escapeHtml(rule.replace || "—")}</td>
+              <td class="text-truncate" title="${escapeHtml(rule.search || "")}">${escapeHtml(rule.search || "—")}</td>
+              <td class="text-truncate" title="${escapeHtml(rule.replace || "")}">${escapeHtml(rule.replace || "—")}</td>
               <td>${rule.regex ? "✓" : ""}</td>
               <td>${rule.case_sensitive ? "✓" : ""}</td>
             </tr>

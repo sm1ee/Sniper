@@ -5315,6 +5315,18 @@ button.utility-button.replay-tab-add {
 
 .iq-col-method { width: 44px; max-width: 44px; }
 .iq-col-status { width: 40px; max-width: 40px; }
+/* Six table cells across the replace rules and both intercept queues carry
+   .text-truncate, and it was never defined — so a long value in a
+   table-layout:fixed cell did not shrink the column, it overflowed and printed
+   on top of the next one. max-width:0 is what makes such a cell take the
+   column's width rather than its content's. */
+.text-truncate {
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .iq-col-host { width: 40%; max-width: 0; }
 .iq-col-path { width: 40%; max-width: 0; }
 .iq-col-time { width: 120px; max-width: 120px; }
