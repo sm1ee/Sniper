@@ -6900,25 +6900,56 @@ button.utility-button.replay-tab-add {
   margin-bottom: -1px;
 }
 
-/* One indicator that slides, rather than an underline that blinks from tab to
-   tab. The shared .sub-tab.active::after underline steps aside here only. */
-.settings-tabs .sub-tab.active::after {
+/* One highlight that slides between tabs, rather than a pill and underline that
+   blink from one to the next. The active tab keeps its text colour and hands the
+   background and the underline to the indicator, which is the same shape in the
+   same place — so a strip that is not moving looks exactly as it did. */
+.has-tab-indicator {
+  position: relative;
+}
+
+.has-tab-indicator .main-tab,
+.has-tab-indicator .sub-tab {
+  position: relative;
+  z-index: 1;
+}
+
+.has-tab-indicator .main-tab.active,
+.has-tab-indicator .sub-tab.active {
+  background: transparent;
+}
+
+.has-tab-indicator .main-tab.active::after,
+.has-tab-indicator .sub-tab.active::after {
   content: none;
 }
 
-.settings-tab-indicator {
+.tab-indicator {
   position: absolute;
-  bottom: -1px;
+  top: 0;
   left: 0;
+  z-index: 0;
   width: 0;
-  height: 2px;
+  height: 0;
+  border-radius: var(--radius-md);
+  background: var(--point-soft);
+  pointer-events: none;
+  transition: left 0.2s cubic-bezier(0.2, 0, 0, 1), width 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.tab-indicator::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: 0;
+  left: 8px;
+  height: 3px;
   border-radius: 999px;
   background: linear-gradient(90deg, var(--point) 0%, var(--point-border) 100%);
-  transition: left 0.22s cubic-bezier(0.2, 0, 0, 1), width 0.22s cubic-bezier(0.2, 0, 0, 1);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .settings-tab-indicator {
+  .tab-indicator {
     transition: none;
   }
 }
@@ -6936,7 +6967,7 @@ button.utility-button.replay-tab-add {
    columns are minmax(0, 1fr) contributes zero, which collapsed the whole modal
    to its border. It also gives the operator the fixed width they asked for. */
 #displaySettingsModal .modal-card {
-  width: min(1080px, calc(100vw - 32px));
+  width: min(840px, calc(100vw - 32px));
 }
 
 #displaySettingsModal .modal-actions.settings-actions-off {

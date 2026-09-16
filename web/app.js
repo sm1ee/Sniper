@@ -1537,6 +1537,9 @@ function bindEvents() {
   els.displaySettingsModal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
     tab.addEventListener("click", () => selectSettingsTab(tab.dataset.settingsTab));
   });
+  wireTabIndicator(document.querySelector(".main-tabs"));
+  wireTabIndicator(document.querySelector(".sub-tabs"));
+  wireTabIndicator(els.displaySettingsModal.querySelector(".settings-tabs"));
   els.displaySettingsModal.addEventListener("click", (event) => {
     if (event.target === els.displaySettingsModal) {
       closeDisplaySettingsModal();
@@ -16726,7 +16729,57 @@ function closeCertificateModal() {
 
 // Apply and Reset belong to the Display tab and nothing else, so they follow it
 // rather than sitting under Runtime looking like they might reset the proxy.
-function selectSettingsTab(name, { animate = true } = {}) {
+// One highlight that slides between the tabs of a strip, instead of the pill and
+// underline blinking from one tab to the next. Driven by a MutationObserver on
+// the .active class rather than by the click handlers: these strips are
+// re-rendered from several places, and the highlight has to follow whatever put
+// it there.
+function wireTabIndicator(strip) {
+  if (!strip || strip._tabIndicatorWired) return;
+  strip._tabIndicatorWired = true;
+  strip.classList.add("has-tab-indicator");
+
+  const indicator = document.createElement("span");
+  indicator.className = "tab-indicator";
+  indicator.setAttribute("aria-hidden", "true");
+  strip.appendChild(indicator);
+
+  let placed = false;
+  const place = () => {
+    const active = strip.querySelector(".active");
+    if (!active || !strip.offsetWidth) {
+      indicator.style.opacity = "0";
+      placed = false;
+      return;
+    }
+    // The first placement, and any after the strip was hidden, must not slide in
+    // from wherever the indicator happened to be.
+    if (!placed) indicator.style.transition = "none";
+    indicator.style.opacity = "1";
+    indicator.style.left = `${active.offsetLeft}px`;
+    indicator.style.top = `${active.offsetTop}px`;
+    indicator.style.width = `${active.offsetWidth}px`;
+    indicator.style.height = `${active.offsetHeight}px`;
+    if (!placed) {
+      void indicator.offsetWidth;
+      indicator.style.transition = "";
+      placed = true;
+    }
+  };
+
+  // Only class changes; the writes above touch style, so this cannot loop.
+  new MutationObserver(place).observe(strip, {
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["class"],
+  });
+  // Covers the strip being shown, the window resizing, and the operator
+  // changing the base text size.
+  new ResizeObserver(place).observe(strip);
+  place();
+}
+
+function selectSettingsTab(name) {
   const modal = els.displaySettingsModal;
   modal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
     const on = tab.dataset.settingsTab === name;
@@ -16744,19 +16797,7 @@ function selectSettingsTab(name, { animate = true } = {}) {
   // meant to stop.
   modal.querySelector(".modal-actions")?.classList.toggle("settings-actions-off", name !== "display");
 
-  const indicator = modal.querySelector(".settings-tab-indicator");
-  const active = modal.querySelector("[data-settings-tab].active");
-  if (!indicator || !active) return;
-  // The first placement must not slide in from the left edge, so it is applied
-  // with the transition off and committed with a forced reflow before the next
-  // click can animate away from it.
-  if (!animate) indicator.style.transition = "none";
-  indicator.style.left = `${active.offsetLeft}px`;
-  indicator.style.width = `${active.offsetWidth}px`;
-  if (!animate) {
-    void indicator.offsetWidth;
-    indicator.style.transition = "";
-  }
+  // The indicator follows the .active class on its own, via wireTabIndicator.
 }
 
 function openDisplaySettingsModal() {
@@ -16767,7 +16808,7 @@ function openDisplaySettingsModal() {
   els.displaySettingsModal.classList.remove("hidden");
   // After the modal is shown: the tabs have no offsetWidth to measure while it
   // is still display:none.
-  selectSettingsTab("runtime", { animate: false });
+  selectSettingsTab("runtime");
 }
 
 async function installCliPath() {
