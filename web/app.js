@@ -1537,6 +1537,7 @@ function bindEvents() {
   els.displaySettingsModal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
     tab.addEventListener("click", () => selectSettingsTab(tab.dataset.settingsTab));
   });
+  wireReplayHistorySwipe();
   wireTabIndicator(document.querySelector(".main-tabs"));
   wireTabIndicator(document.querySelector(".sub-tabs"));
   wireTabIndicator(els.displaySettingsModal.querySelector(".settings-tabs"));
@@ -16657,6 +16658,127 @@ function canNavigateReplayHistory(tab, direction) {
 
   const nextIndex = index + direction;
   return nextIndex >= 0 && nextIndex < tab.historyEntries.length;
+}
+
+// ─── Swipe the replay history ───
+
+// Two fingers left or right over a message pane steps through the tab's history,
+// the same call the < and > buttons make. It only takes over once the editor has
+// run out of horizontal scroll, the way a browser's back gesture waits for the
+// page to reach its edge, so reading a long line still works.
+//
+// The trackpad gives no "fingers lifted" event, so the gesture commits the moment
+// the pull passes the threshold and then locks until the deltas go quiet. Without
+// the lock one long swipe walks several entries at once.
+const REPLAY_SWIPE_THRESHOLD_PX = 80;
+const REPLAY_SWIPE_SETTLE_MS = 200;
+
+let replaySwipeAccum = 0;
+let replaySwipeDirection = 0;
+let replaySwipeLocked = false;
+let replaySwipeSettleTimer = 0;
+let replaySwipeBadge = null;
+
+function replayScrollerHasRoom(scroller, direction) {
+  if (!scroller) return false;
+  const max = scroller.scrollWidth - scroller.clientWidth;
+  if (max <= 1) return false;
+  // Swiping right (direction -1) scrolls the editor left, and vice versa.
+  return direction < 0 ? scroller.scrollLeft > 1 : scroller.scrollLeft < max - 1;
+}
+
+function clearReplaySwipeBadge() {
+  replaySwipeBadge?.remove();
+  replaySwipeBadge = null;
+}
+
+function resetReplaySwipe() {
+  clearTimeout(replaySwipeSettleTimer);
+  replaySwipeSettleTimer = 0;
+  replaySwipeAccum = 0;
+  replaySwipeDirection = 0;
+  replaySwipeLocked = false;
+  clearReplaySwipeBadge();
+}
+
+function armReplaySwipeSettle() {
+  clearTimeout(replaySwipeSettleTimer);
+  replaySwipeSettleTimer = setTimeout(resetReplaySwipe, REPLAY_SWIPE_SETTLE_MS);
+}
+
+function renderReplaySwipeBadge(panel, direction, progress) {
+  if (!replaySwipeBadge || replaySwipeBadge.parentElement !== panel) {
+    clearReplaySwipeBadge();
+    replaySwipeBadge = document.createElement("div");
+    replaySwipeBadge.className = "replay-swipe-badge";
+    panel.appendChild(replaySwipeBadge);
+  }
+  replaySwipeBadge.textContent = direction < 0 ? "\u2039" : "\u203A";
+  replaySwipeBadge.classList.toggle("trailing", direction > 0);
+  replaySwipeBadge.classList.toggle("armed", progress >= 1);
+  replaySwipeBadge.style.opacity = `${0.3 + progress * 0.7}`;
+  // Slides in from just outside the edge as the pull grows.
+  const offset = (1 - progress) * 14 * (direction < 0 ? -1 : 1);
+  replaySwipeBadge.style.transform = `translateY(-50%) translateX(${offset}px)`;
+}
+
+function onReplaySwipeWheel(event, panel) {
+  if (state.activeTool !== "replay") return;
+  // Vertical scrolling is not ours, and a diagonal gesture is scrolling.
+  if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+
+  const tab = getActiveReplayTab();
+  if (!tab || isReplayTabSending(tab.id)) {
+    resetReplaySwipe();
+    return;
+  }
+  const direction = event.deltaX < 0 ? -1 : 1;
+  if (replayScrollerHasRoom(panel.querySelector(".cm-scroller"), direction)) {
+    resetReplaySwipe();
+    return;
+  }
+  if (!canNavigateReplayHistory(tab, direction)) {
+    resetReplaySwipe();
+    return;
+  }
+
+  // Past the editor's edge with somewhere to go: the gesture is ours, so stop
+  // the platform turning it into a rubber band.
+  event.preventDefault();
+  if (replaySwipeLocked) {
+    armReplaySwipeSettle();
+    return;
+  }
+  if (replaySwipeDirection !== direction) {
+    replaySwipeAccum = 0;
+    replaySwipeDirection = direction;
+  }
+  replaySwipeAccum += Math.abs(event.deltaX);
+
+  const progress = Math.min(1, replaySwipeAccum / REPLAY_SWIPE_THRESHOLD_PX);
+  if (!prefersReducedMotion()) renderReplaySwipeBadge(panel, direction, progress);
+
+  if (progress >= 1) {
+    replaySwipeLocked = true;
+    clearReplaySwipeBadge();
+    navigateReplayHistory(direction);
+  }
+  armReplaySwipeSettle();
+}
+
+function prefersReducedMotion() {
+  return !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+}
+
+function wireReplayHistorySwipe() {
+  ["replayRequestCM", "replayResponseCM"].forEach((id) => {
+    const panel = document.getElementById(id)?.closest(".editor-panel");
+    if (!panel || panel._replaySwipeWired) return;
+    panel._replaySwipeWired = true;
+    // Not passive: the handler calls preventDefault once it owns the gesture.
+    panel.addEventListener("wheel", (event) => onReplaySwipeWheel(event, panel), { passive: false });
+    panel.addEventListener("mouseleave", resetReplaySwipe);
+  });
 }
 
 function navigateReplayHistory(direction) {

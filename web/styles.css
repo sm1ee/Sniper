@@ -4654,9 +4654,13 @@ button.utility-button.replay-tab-add {
 }
 
 .editor-panel {
+  position: relative;
   display: flex;
   min-height: 0;
   overflow: hidden;
+  /* The horizontal swipe is the history gesture once the editor reaches its
+     edge, so the platform must not turn the rest of it into a rubber band. */
+  overscroll-behavior-x: contain;
 }
 
 .editor-panel > * {
@@ -6985,4 +6989,38 @@ button.utility-button.replay-tab-add {
 .settings-panels > .settings-panel-off {
   visibility: hidden;
   pointer-events: none;
+}
+
+
+/* The pull indicator for the replay history swipe. Sits over the pane rather
+   than moving it: the panes are CodeMirror, which measures its own viewport, and
+   translating one mid-gesture repaints the whole document. */
+.replay-swipe-badge {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--panel-elevated, var(--panel));
+  color: var(--text-soft);
+  font-size: 17px;
+  line-height: 1;
+  pointer-events: none;
+  box-shadow: var(--shadow);
+}
+
+.replay-swipe-badge.trailing {
+  right: 12px;
+  left: auto;
+}
+
+.replay-swipe-badge.armed {
+  border-color: var(--point);
+  color: var(--point);
 }
