@@ -16726,26 +16726,48 @@ function closeCertificateModal() {
 
 // Apply and Reset belong to the Display tab and nothing else, so they follow it
 // rather than sitting under Runtime looking like they might reset the proxy.
-function selectSettingsTab(name) {
+function selectSettingsTab(name, { animate = true } = {}) {
   const modal = els.displaySettingsModal;
   modal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
     const on = tab.dataset.settingsTab === name;
     tab.classList.toggle("active", on);
     tab.setAttribute("aria-selected", on ? "true" : "false");
   });
+  // Not .hidden: the panels are stacked in one grid cell so the modal keeps the
+  // size of its tallest tab, and display:none would take the hidden ones out of
+  // that measurement.
   modal.querySelectorAll("[data-settings-panel]").forEach((panel) => {
-    panel.classList.toggle("hidden", panel.dataset.settingsPanel !== name);
+    panel.classList.toggle("settings-panel-off", panel.dataset.settingsPanel !== name);
   });
-  modal.querySelector(".modal-actions")?.classList.toggle("hidden", name !== "display");
+  // Hidden, not removed: taking the row out of the flow made the modal 72px
+  // shorter on the tabs that do not use it, which is the resizing the tabs were
+  // meant to stop.
+  modal.querySelector(".modal-actions")?.classList.toggle("settings-actions-off", name !== "display");
+
+  const indicator = modal.querySelector(".settings-tab-indicator");
+  const active = modal.querySelector("[data-settings-tab].active");
+  if (!indicator || !active) return;
+  // The first placement must not slide in from the left edge, so it is applied
+  // with the transition off and committed with a forced reflow before the next
+  // click can animate away from it.
+  if (!animate) indicator.style.transition = "none";
+  indicator.style.left = `${active.offsetLeft}px`;
+  indicator.style.width = `${active.offsetWidth}px`;
+  if (!animate) {
+    void indicator.offsetWidth;
+    indicator.style.transition = "";
+  }
 }
 
 function openDisplaySettingsModal() {
   hydrateDisplaySettingsForm();
   applyDisplaySettingsState();
   renderShortcutReference();
-  selectSettingsTab("display");
   displaySettingsPreviewActive = false;
   els.displaySettingsModal.classList.remove("hidden");
+  // After the modal is shown: the tabs have no offsetWidth to measure while it
+  // is still display:none.
+  selectSettingsTab("runtime", { animate: false });
 }
 
 async function installCliPath() {

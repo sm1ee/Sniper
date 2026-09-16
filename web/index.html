@@ -1452,11 +1452,66 @@
 
         <div class="modal-body">
           <nav class="settings-tabs" role="tablist">
-            <button class="sub-tab active" data-settings-tab="display" type="button" role="tab" aria-selected="true">Display</button>
-            <button class="sub-tab" data-settings-tab="runtime" type="button" role="tab" aria-selected="false">Runtime</button>
+            <button class="sub-tab active" data-settings-tab="runtime" type="button" role="tab" aria-selected="true">Runtime</button>
+            <button class="sub-tab" data-settings-tab="display" type="button" role="tab" aria-selected="false">Display</button>
             <button class="sub-tab" data-settings-tab="shortcuts" type="button" role="tab" aria-selected="false">Shortcuts</button>
+            <span class="settings-tab-indicator" aria-hidden="true"></span>
           </nav>
 
+          <div class="settings-panels">
+          <div class="display-settings-grid" data-settings-panel="runtime" role="tabpanel">
+            <section class="filter-group">
+              <h3>Runtime</h3>
+              <dl class="modal-list modal-list-compact">
+                <dt>Proxy listener</dt>
+                <dd id="proxyAddr">Loading...</dd>
+                <dt>UI listener</dt>
+                <dd id="uiAddr">Loading...</dd>
+                <dt>Status</dt>
+                <dd><span class="status-pill settings-status online" id="liveStatus">Proxy live</span></dd>
+                <dt>Bootstrap host</dt>
+                <dd id="settingsSpecialHostHttp">http://sniper</dd>
+              </dl>
+            </section>
+<section class="filter-group">
+              <h3>Command line</h3>
+              <p class="modal-copy">
+                Put this app's <code>sniper-cli</code> on your shell <code>PATH</code>.
+                Only <code>~/.zshrc</code> and an existing <code>~/.bashrc</code> are
+                touched, and running it again replaces the line instead of adding
+                another. Open a new terminal afterwards.
+              </p>
+              <div class="filter-group-actions">
+                <button class="secondary-action" id="installCliPathButton" type="button">Add sniper-cli to PATH</button>
+              </div>
+              <p class="modal-copy settings-inline-status" id="installCliPathStatus"></p>
+            </section>
+<section class="filter-group filter-group-wide">
+              <div class="filter-group-header">
+                <h3>Certificate authority</h3>
+                <div class="filter-group-actions">
+                </div>
+              </div>
+              <p class="modal-copy" id="certificateNote">
+                Download the local root certificate and trust it before using HTTPS interception.
+              </p>
+
+              <dl class="modal-list">
+                <dt>Common name</dt>
+                <dd id="certificateName">Loading...</dd>
+                <dt>Valid until</dt>
+                <dd id="certificateExpiry">Loading...</dd>
+                <dt>PEM file</dt>
+                <dd id="certificatePemPath">Loading...</dd>
+                <dt>DER file</dt>
+                <dd id="certificateDerPath">Loading...</dd>
+                <dt>Data directory</dt>
+                <dd id="dataDir">Loading...</dd>
+                <dt>HTTPS bootstrap</dt>
+                <dd id="specialHostHttps">https://sniper</dd>
+              </dl>
+            </section>
+          </div>
           <div class="display-settings-grid" data-settings-panel="display" role="tabpanel">
             <section class="filter-group">
               <h3>Appearance</h3>
@@ -1513,63 +1568,11 @@
               </label>
             </section>
           </div>
-          <div class="display-settings-grid hidden" data-settings-panel="runtime" role="tabpanel">
-            <section class="filter-group">
-              <h3>Runtime</h3>
-              <dl class="modal-list modal-list-compact">
-                <dt>Proxy listener</dt>
-                <dd id="proxyAddr">Loading...</dd>
-                <dt>UI listener</dt>
-                <dd id="uiAddr">Loading...</dd>
-                <dt>Status</dt>
-                <dd><span class="status-pill settings-status online" id="liveStatus">Proxy live</span></dd>
-                <dt>Bootstrap host</dt>
-                <dd id="settingsSpecialHostHttp">http://sniper</dd>
-              </dl>
-            </section>
-<section class="filter-group">
-              <h3>Command line</h3>
-              <p class="modal-copy">
-                Put this app's <code>sniper-cli</code> on your shell <code>PATH</code>.
-                Only <code>~/.zshrc</code> and an existing <code>~/.bashrc</code> are
-                touched, and running it again replaces the line instead of adding
-                another. Open a new terminal afterwards.
-              </p>
-              <div class="filter-group-actions">
-                <button class="secondary-action" id="installCliPathButton" type="button">Add sniper-cli to PATH</button>
-              </div>
-              <p class="modal-copy settings-inline-status hidden" id="installCliPathStatus"></p>
-            </section>
-<section class="filter-group filter-group-wide">
-              <div class="filter-group-header">
-                <h3>Certificate authority</h3>
-                <div class="filter-group-actions">
-                </div>
-              </div>
-              <p class="modal-copy" id="certificateNote">
-                Download the local root certificate and trust it before using HTTPS interception.
-              </p>
-
-              <dl class="modal-list">
-                <dt>Common name</dt>
-                <dd id="certificateName">Loading...</dd>
-                <dt>Valid until</dt>
-                <dd id="certificateExpiry">Loading...</dd>
-                <dt>PEM file</dt>
-                <dd id="certificatePemPath">Loading...</dd>
-                <dt>DER file</dt>
-                <dd id="certificateDerPath">Loading...</dd>
-                <dt>Data directory</dt>
-                <dd id="dataDir">Loading...</dd>
-                <dt>HTTPS bootstrap</dt>
-                <dd id="specialHostHttps">https://sniper</dd>
-              </dl>
-            </section>
-          </div>
-          <div class="settings-panel-plain hidden" data-settings-panel="shortcuts" role="tabpanel">
+          <div class="settings-panel-plain" data-settings-panel="shortcuts" role="tabpanel">
             <section class="filter-group filter-group-wide">
               <div class="shortcut-reference" id="shortcutReference"></div>
             </section>
+          </div>
           </div>
         </div>
 

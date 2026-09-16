@@ -4674,7 +4674,9 @@ button.utility-button.replay-tab-add {
 
 .replay-target-bar {
   display: grid;
-  grid-template-columns: 86px minmax(160px, 1fr) 64px 76px;
+  /* The last column holds the HTTP version. 76px fitted "Auto" but not
+     "HTTP/1.1": the chevron reserves 34px of padding on its own. */
+  grid-template-columns: 86px minmax(160px, 1fr) 64px 96px;
   gap: 8px;
   min-width: 0;
   width: min(100%, 610px);
@@ -6886,6 +6888,7 @@ button.utility-button.replay-tab-add {
    something is added to it. Reuses the Capture sub-tab look so there is one
    kind of tab in the app, not two. */
 .settings-tabs {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -6895,4 +6898,60 @@ button.utility-button.replay-tab-add {
 
 .settings-tabs .sub-tab {
   margin-bottom: -1px;
+}
+
+/* One indicator that slides, rather than an underline that blinks from tab to
+   tab. The shared .sub-tab.active::after underline steps aside here only. */
+.settings-tabs .sub-tab.active::after {
+  content: none;
+}
+
+.settings-tab-indicator {
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  width: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--point) 0%, var(--point-border) 100%);
+  transition: left 0.22s cubic-bezier(0.2, 0, 0, 1), width 0.22s cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-tab-indicator {
+    transition: none;
+  }
+}
+
+/* All three panels occupy the same grid cell, so the modal is as tall and as
+   wide as the largest of them and does not resize when the tab changes. */
+.settings-panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* A definite width, the way #filterSettingsModal already does it. The card's
+   `min(1080px, 100%)` resolves against a backdrop that is sized by the card, so
+   it needs the content to have an intrinsic width — and a nested grid whose
+   columns are minmax(0, 1fr) contributes zero, which collapsed the whole modal
+   to its border. It also gives the operator the fixed width they asked for. */
+#displaySettingsModal .modal-card {
+  width: min(1080px, calc(100vw - 32px));
+}
+
+#displaySettingsModal .modal-actions.settings-actions-off {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.settings-panels > [data-settings-panel] {
+  grid-area: 1 / 1;
+  /* The stack is as tall as the tallest tab; without this the shorter tabs
+     stretch their sections to fill it instead of keeping their own height. */
+  align-content: start;
+}
+
+.settings-panels > .settings-panel-off {
+  visibility: hidden;
+  pointer-events: none;
 }
