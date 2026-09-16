@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 700" width="1240" height="700" role="img" aria-labelledby="title desc">
+  <title id="title">How Sniper fits together</title>
+  <desc id="desc">Traffic from a browser or app goes through Sniper's MITM proxy to the upstream target. Inside Sniper, an interception engine handles capture, intercept, replay and scope, backed by a session store, and exposed over a loopback-only HTTP API. That API drives the desktop UI and sniper-cli, and an AI agent drives Sniper through the CLI.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#6c6c6c"/>
+    </marker>
+  </defs>
+
+  <rect width="1240" height="700" fill="#131313"/>
+
+  <g fill="none" stroke="#6c6c6c" stroke-width="1.5">
+    <path d="M322 118 H386" marker-end="url(#arrow)"/>
+    <path d="M852 118 H914" marker-end="url(#arrow)"/>
+    <path d="M620 160 V180"/>
+    <path d="M620 272 V292"/>
+    <path d="M620 368 V388"/>
+    <path d="M620 464 V520 H205 V550" marker-end="url(#arrow)"/>
+    <path d="M620 520 V550" marker-end="url(#arrow)"/>
+    <path d="M866 608 H791" marker-end="url(#arrow)"/>
+  </g>
+
+  <rect x="360" y="30" width="520" height="462" rx="14" fill="#171717" stroke="#c9a96e" stroke-opacity="0.45" stroke-width="1.5"/>
+
+  <g fill="#1b1b1b" stroke="#303030" stroke-width="1.5">
+    <rect x="40" y="76" width="280" height="84" rx="10"/>
+    <rect x="392" y="76" width="456" height="84" rx="10"/>
+    <rect x="920" y="76" width="280" height="84" rx="10"/>
+    <rect x="392" y="180" width="456" height="92" rx="10"/>
+    <rect x="392" y="292" width="456" height="76" rx="10"/>
+    <rect x="392" y="388" width="456" height="76" rx="10"/>
+    <rect x="40" y="556" width="330" height="104" rx="10"/>
+    <rect x="455" y="556" width="330" height="104" rx="10"/>
+  </g>
+  <rect x="870" y="556" width="330" height="104" rx="10" fill="#1b1b1b" stroke="#c9a96e" stroke-opacity="0.5" stroke-width="1.5"/>
+
+  <g fill="#242424" stroke="#3b3b3b" stroke-width="1.5">
+    <rect x="416" y="225" width="96" height="28" rx="7"/>
+    <rect x="524" y="225" width="96" height="28" rx="7"/>
+    <rect x="632" y="225" width="96" height="28" rx="7"/>
+    <rect x="740" y="225" width="84" height="28" rx="7"/>
+  </g>
+
+  <g font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+    <g font-size="17" font-weight="600" fill="#f1f1f1">
+      <text x="64" y="112">Browser · app · curl</text>
+      <text x="416" y="112">MITM proxy</text>
+      <text x="944" y="112">Upstream target</text>
+      <text x="416" y="209">Interception engine</text>
+      <text x="416" y="323">Session store</text>
+      <text x="416" y="419">Local HTTP API</text>
+      <text x="64" y="592">Desktop UI</text>
+      <text x="479" y="592">sniper-cli</text>
+      <text x="894" y="592">AI agent</text>
+    </g>
+
+    <g font-size="13" fill="#8a8a8a">
+      <text x="416" y="136">TLS interception with Sniper's own CA</text>
+      <text x="944" y="136">untouched request, real response</text>
+      <text x="416" y="443">loopback only — never binds a routable address</text>
+      <text x="64" y="616">the window above — embedded in</text>
+      <text x="479" y="616">JSON in, JSON out</text>
+      <text x="894" y="616">Claude Code, via the bundled</text>
+    </g>
+
+    <g font-size="12.5" fill="#cacaca" text-anchor="middle">
+      <text x="464" y="244">Capture</text>
+      <text x="572" y="244">Intercept</text>
+      <text x="680" y="244">Replay</text>
+      <text x="782" y="244">Scope</text>
+    </g>
+
+    <g font-size="11.5" fill="#7a7a7a" letter-spacing="0.4" text-anchor="middle">
+      <text x="354" y="106">HTTP(S)</text>
+      <text x="883" y="106">forward</text>
+    </g>
+  </g>
+
+  <g font-family="ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace">
+    <text x="392" y="60" font-size="13" font-weight="700" fill="#c9a96e" letter-spacing="2.8">SNIPER</text>
+    <g font-size="13" fill="#8a8a8a">
+      <text x="64" y="136">proxy → 127.0.0.1:8080</text>
+      <text x="416" y="347">~/.sniper — transactions, replay tabs, CA</text>
+      <text x="64" y="636">sniper-desktop</text>
+      <text x="479" y="636">sniper-cli capture http list</text>
+      <text x="894" y="636">Skills</text>
+    </g>
+  </g>
+</svg>
