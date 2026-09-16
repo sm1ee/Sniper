@@ -16672,8 +16672,12 @@ function canNavigateReplayHistory(tab, direction) {
 // worth knowing: `wheel` carries no gesture phase, so "stopped moving" is the
 // closest thing to "let go" available — resting still on the trackpad reads the
 // same as lifting off.
-const REPLAY_SWIPE_THRESHOLD_PX = 90;
-const REPLAY_SWIPE_SETTLE_MS = 110;
+// The threshold is a deliberate pull, not a nudge. The settle window is the
+// bigger lever: at 110ms a slow drag that paused for a moment mid-pull read as
+// a release and committed under the operator's fingers, so it waits a good deal
+// longer for the wheel to be genuinely done.
+const REPLAY_SWIPE_THRESHOLD_PX = 160;
+const REPLAY_SWIPE_SETTLE_MS = 260;
 
 let replaySwipeAccum = 0;
 let replaySwipeDirection = 0;

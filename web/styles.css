@@ -7009,13 +7009,16 @@ button.utility-button.replay-tab-add {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: clamp(40px, 3.6vw, 52px);
-  height: clamp(40px, 3.6vw, 52px);
+  /* The floor, not the ceiling, is what the stacked layout gets: 3.6vw only
+     reaches 52px past ~1440px, and the badge was noticeably smaller in the
+     one-column layout where there is more room around it, not less. */
+  width: clamp(52px, 3.6vw, 58px);
+  height: clamp(52px, 3.6vw, 58px);
   border: 2px solid var(--line-strong, var(--line));
   border-radius: 50%;
   background: var(--panel-elevated, var(--panel));
   color: var(--text-soft);
-  font-size: clamp(21px, 2vw, 27px);
+  font-size: clamp(27px, 2.2vw, 30px);
   line-height: 1;
   pointer-events: none;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
