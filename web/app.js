@@ -22295,7 +22295,6 @@ const SHORTCUT_REFERENCE = [
     ["mod+enter", "Send (WebSocket editor)"],
   ]],
   ["Anywhere", [
-    ["mod", "Hold to badge the controls whose shortcut is live right now"],
     ["mod+shift+f", "Open the Fuzzer, with the selection if there is one"],
     ["mod+c", "Copy the selected text in a message pane"],
     ["esc", "Close the open dialog or menu"],
@@ -22342,102 +22341,6 @@ function decorateContextMenuShortcuts(root = document) {
     hint.textContent = text;
     item.appendChild(hint);
   });
-}
-
-// ─── Hold the modifier to see what is bound ───
-
-// Which on-screen controls carry a chord, and when that chord is actually live.
-// `when` is not decoration: the colour dots are visible on every Capture
-// sub-tab but their filter chord only fires on HTTP history, and the response
-// queue's Forward/Drop have no chord at all — the handler at the top of this
-// file only looks at state.selectedInterceptRecord. A badge on an inert
-// shortcut is worse than no badge.
-const interceptRowIsSelected = () =>
-  state.activeTool === "proxy" &&
-  state.activeProxyTab === "intercept" &&
-  !!state.selectedInterceptRecord;
-
-const findingHasRecord = () =>
-  state.activeTool === "proxy" &&
-  state.activeProxyTab === "findings" &&
-  !!els.findingsDetailJump?.dataset.recordId;
-
-const SHORTCUT_BADGES = [
-  { selector: "#forwardInterceptButton", chord: () => "mod+enter", when: interceptRowIsSelected },
-  { selector: "#dropInterceptButton", chord: () => "mod+shift+enter", when: interceptRowIsSelected },
-  { selector: "#findingsDetailSendReplay", chord: () => "mod+r", when: findingHasRecord },
-  { selector: "#findingsDetailSendFuzzer", chord: () => "mod+i", when: findingHasRecord },
-  {
-    selector: "#colorTagFilter .color-dot-btn",
-    chord: (_el, index) => `${IS_APPLE_PLATFORM ? "ctrl+mod" : "ctrl+shift"}+${index + 1}`,
-    when: () => state.activeTool === "proxy" && state.activeProxyTab === "http-history",
-  },
-];
-
-// Long enough that ⌘C and friends do not flash the badges on their way past,
-// short enough that holding the key deliberately feels immediate.
-const SHORTCUT_BADGE_HOLD_MS = 300;
-
-let shortcutBadgeTimer = 0;
-let shortcutBadgeLayer = null;
-
-function hideShortcutBadges() {
-  clearTimeout(shortcutBadgeTimer);
-  shortcutBadgeTimer = 0;
-  shortcutBadgeLayer?.remove();
-  shortcutBadgeLayer = null;
-}
-
-function showShortcutBadges() {
-  hideShortcutBadges();
-  const layer = document.createElement("div");
-  layer.className = "shortcut-badge-layer";
-  for (const entry of SHORTCUT_BADGES) {
-    if (!entry.when()) continue;
-    const elements = Array.from(document.querySelectorAll(entry.selector));
-    elements.forEach((element, index) => {
-      // Inside an open context menu the item already draws its own hint.
-      if (element.closest(".context-menu")) return;
-      const bounds = element.getBoundingClientRect();
-      if (!bounds.width || !bounds.height) return;
-      if (bounds.bottom < 0 || bounds.top > window.innerHeight) return;
-      const text = formatShortcut(entry.chord(element, index));
-      if (!text) return;
-      const badge = document.createElement("span");
-      badge.className = "shortcut-badge";
-      badge.textContent = text;
-      // Anchored to the control's top-right in a fixed layer rather than
-      // positioned inside it: several of these live in table cells with their
-      // own overflow and stacking, and a child badge gets clipped there.
-      badge.style.left = `${bounds.right}px`;
-      badge.style.top = `${bounds.top}px`;
-      layer.appendChild(badge);
-    });
-  }
-  if (!layer.childElementCount) return;
-  document.body.appendChild(layer);
-  shortcutBadgeLayer = layer;
-}
-
-function wireShortcutBadges() {
-  const isModifierKey = (event) => (IS_APPLE_PLATFORM ? event.key === "Meta" : event.key === "Control");
-  document.addEventListener("keydown", (event) => {
-    if (!isModifierKey(event)) {
-      // Any real chord cancels the hold — the operator is using a shortcut, not
-      // asking what the shortcuts are.
-      hideShortcutBadges();
-      return;
-    }
-    if (event.repeat || shortcutBadgeTimer || shortcutBadgeLayer) return;
-    shortcutBadgeTimer = setTimeout(showShortcutBadges, SHORTCUT_BADGE_HOLD_MS);
-  });
-  document.addEventListener("keyup", (event) => {
-    if (isModifierKey(event)) hideShortcutBadges();
-  });
-  // A held modifier that leaves the window never gets its keyup.
-  window.addEventListener("blur", hideShortcutBadges);
-  document.addEventListener("mousedown", hideShortcutBadges);
-  window.addEventListener("scroll", hideShortcutBadges, true);
 }
 
 // ─── Intercept queue context menu ───
@@ -22812,7 +22715,6 @@ els.interceptContextMenu?.querySelectorAll("[data-intercept-action]").forEach((i
 });
 
 decorateContextMenuShortcuts();
-wireShortcutBadges();
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.contextMenu.classList.contains("hidden")) {
