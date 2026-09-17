@@ -20,6 +20,10 @@
   <img src="web/screenshot.png" width="800" alt="Sniper proxy UI — HTTP capture, replay, fuzzer" />
 </p>
 
+<p align="center">
+  <img src="web/architecture.svg" width="800" alt="How Sniper fits together: browser traffic, an operator and an AI agent each reach the same Sniper core — through the MITM proxy, the desktop app and sniper-cli — and the core writes captured sessions to disk" />
+</p>
+
 ---
 
 ## What is Sniper?
