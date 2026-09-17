@@ -1,0 +1,25 @@
+# Sniper
+
+> An open-source HTTP/HTTPS intercepting proxy for macOS and Windows. A desktop
+> UI and a JSON-first CLI drive the same local instance, so a person and a coding
+> agent can work on the same captured traffic. It is a forward proxy and a
+> traffic-inspection layer — not an LLM API gateway and not a reverse proxy.
+
+Sniper captures HTTP, HTTPS and WebSocket traffic from any client configured to
+use it, holds requests for editing, replays them, and stores sessions on disk.
+The desktop app, `sniper-cli` and an agent all reach the same records through one
+local HTTP API. Capture preserves cookies and authorization headers, so anything
+reading a capture — including an agent — receives them.
+
+## Docs
+
+- [Debugging HTTP with Sniper](https://smlee.io/Sniper/guides/http-debugging.md): using it as a plain intercepting proxy — starting it, trusting the CA, reading a transaction, scope, replay, and what it does not do
+- [Sniper in an agent harness](https://smlee.io/Sniper/guides/agent-harness.md): which part of a harness this is, a worked capture-and-query example, data boundaries, and when you do not need it
+- [Using Sniper from Claude Code](https://smlee.io/Sniper/integrations/claude-code.md): installing the bundled skill, confirming it loaded, what to ask for, and the failure modes
+- [Using Sniper from Codex](https://smlee.io/Sniper/integrations/codex.md): the same for Codex, including where the two skills differ
+- [Architecture](https://smlee.io/Sniper/architecture.md): why it is built this way
+
+## Source
+
+- [Repository](https://github.com/sm1ee/Sniper): README, install instructions and releases
+- [Contributor guide](https://github.com/sm1ee/Sniper/blob/main/AGENTS.md): build, test, persistence invariants and security posture
