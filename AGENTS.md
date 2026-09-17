@@ -164,8 +164,14 @@ invisible until the process comes back up.
 Sniper is a security tool that holds other people's traffic. Treat that
 seriously.
 
-- **The local API is unauthenticated** and is therefore forced to a loopback
-  address (`validate_ui_socket_addr` in `src/config.rs`). Never relax that.
+- **A loopback bind skips authentication; anything else must not.** Loopback is
+  the default and needs no auth because only this machine can reach it. Binding
+  the UI anywhere else turns auth on: `UiAccessControl::for_listener`
+  (`src/api.rs`) mints a one-time bootstrap token plus a session token, and
+  `remote_ui_auth_guard` rejects every request that is neither from this host nor
+  carrying the session cookie. Nothing validates the bind address itself, so that
+  guard is the only thing standing between a remote listener and someone else's
+  captured traffic. Do not remove it, and do not add a path that bypasses it.
 - **Never log captured traffic content** — bodies, headers, cookies, or tokens —
   into event logs, error messages, or temp files.
 - **Never put a real hostname in a test fixture, UI placeholder, or example.**

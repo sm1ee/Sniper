@@ -61,7 +61,7 @@ cargo run --bin sniper-desktop
 | **Fuzzer** | Payload-based request testing with markers |
 | **Tools** | Decode, encode, hash, JWT inspector, data transformations |
 | **Sessions** | Isolated workspaces — each with its own records, scope, and state |
-| **Scope** | Domain/path filtering with site map visualization |
+| **Scope** | Host and wildcard filtering with site map visualization |
 | **Themes** | 12 themes — 7 dark + 5 light, gold-accent design language |
 | **CLI** | `sniper-cli` — JSON-first automation for scripting |
 | **AI Skills** | Built-in Claude & Codex skill templates using `sniper-cli` |
@@ -179,6 +179,21 @@ sniper-cli skills install --all --yes
 ```
 
 AI agents can drive the full workflow through CLI — capture, scope, replay, fuzz — no UI scraping needed.
+
+- [Using Sniper from Claude Code](docs/integrations/claude-code.md)
+- [Using Sniper from Codex](docs/integrations/codex.md)
+- [Sniper in an agent harness](docs/guides/agent-harness.md) — which part of a harness this is, and when you do not need it
+
+## Documentation
+
+| Guide | Answers |
+| --- | --- |
+| [Debugging HTTP with Sniper](docs/guides/http-debugging.md) | What can I do with this as a plain intercepting proxy? |
+| [Sniper in an agent harness](docs/guides/agent-harness.md) | Which part of my harness is this, and what goes in and out? |
+| [Using Sniper from Claude Code](docs/integrations/claude-code.md) | How do I install it, confirm it works, and what can I ask for? |
+| [Using Sniper from Codex](docs/integrations/codex.md) | The same, for Codex |
+| [Architecture](docs/architecture.md) | Why it is built this way |
+| [Contributing](AGENTS.md) | Build, test, and the invariants to not break |
 
 ## Tech stack
 
