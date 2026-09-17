@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sniper — Open-Source Web Proxy for macOS</title>
-<meta name="description" content="Sniper is a lightweight, fast, open-source web security proxy for macOS. Intercept HTTP/HTTPS traffic, replay requests, fuzz parameters, and scan for vulnerabilities. A modern alternative to Burp Suite built in Rust." />
-<meta name="keywords" content="web proxy, MITM proxy, HTTP proxy, HTTPS proxy, security testing, penetration testing, bug bounty, Burp Suite alternative, macOS proxy, Rust proxy, open source proxy, vulnerability scanner, web security, OWASP, intercept proxy, API testing" />
-<meta property="og:title" content="Sniper — Open-Source Web Proxy for macOS" />
+<title>Sniper — Open-Source Web Proxy for macOS and Windows</title>
+<meta name="description" content="Sniper is a lightweight, fast, open-source web security proxy for macOS and Windows. Intercept HTTP/HTTPS traffic, replay requests, fuzz parameters, and scan for vulnerabilities. A modern alternative to Burp Suite built in Rust." />
+<meta name="keywords" content="web proxy, MITM proxy, HTTP proxy, HTTPS proxy, security testing, penetration testing, bug bounty, Burp Suite alternative, macOS proxy, Windows proxy, Rust proxy, open source proxy, vulnerability scanner, web security, OWASP, intercept proxy, API testing" />
+<meta property="og:title" content="Sniper — Open-Source Web Proxy for macOS and Windows" />
 <meta property="og:description" content="Lightweight, fast web security proxy built in Rust. Capture, replay, fuzz, and scan." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://sm1ee.github.io/Sniper/" />
@@ -51,15 +51,16 @@ footer{text-align:center;padding:40px 0;color:#484f58;font-size:.85rem;border-to
 
 <header>
   <img src="https://raw.githubusercontent.com/sm1ee/Sniper/main/web/sniper-logo-wide.png" alt="Sniper" />
-  <h1>Lightweight, fast, open-source web security proxy for macOS</h1>
+  <h1>Lightweight, fast, open-source web security proxy for macOS and Windows</h1>
   <div class="badges">
     <img src="https://img.shields.io/github/v/release/sm1ee/Sniper?style=flat-square&labelColor=1c1c1c&color=d4a017" alt="Release" />
     <img src="https://img.shields.io/github/downloads/sm1ee/Sniper/total?style=flat-square&label=downloads&labelColor=1c1c1c&color=d4a017" alt="Downloads" />
     <img src="https://img.shields.io/badge/lang-Rust-orange?style=flat-square&logo=rust" alt="Rust" />
     <img src="https://img.shields.io/badge/platform-macOS-blue?style=flat-square&logo=apple" alt="macOS" />
+    <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square" alt="Windows" />
     <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT" />
   </div>
-  <a class="cta" href="https://github.com/sm1ee/Sniper/releases/latest">Download DMG</a>
+  <a class="cta" href="https://github.com/sm1ee/Sniper/releases/latest">Download</a>
   <a class="cta cta-secondary" href="https://github.com/sm1ee/Sniper">View on GitHub</a>
 </header>
 
@@ -75,7 +76,7 @@ footer{text-align:center;padding:40px 0;color:#484f58;font-size:.85rem;border-to
 
 <section>
   <h2>What is Sniper?</h2>
-  <p>Sniper is an <strong>open-source MITM proxy</strong> that intercepts and modifies HTTP/HTTPS traffic between your browser and the internet. Built in Rust as a native macOS app, it provides the core workflow for web application security testing, penetration testing, and bug bounty hunting — without the overhead of Java-based tools.</p>
+  <p>Sniper is an <strong>open-source MITM proxy</strong> that intercepts and modifies HTTP/HTTPS traffic between your browser and the internet. Built in Rust as a native desktop app for macOS and Windows, it provides the core workflow for web application security testing, penetration testing, and bug bounty hunting — without the overhead of Java-based tools.</p>
 </section>
 
 <section>
@@ -120,7 +121,7 @@ footer{text-align:center;padding:40px 0;color:#484f58;font-size:.85rem;border-to
 <section>
   <h2>Quick Start</h2>
   <ol style="margin-top:12px;padding-left:20px;color:#8b949e">
-    <li>Download and open <a href="https://github.com/sm1ee/Sniper/releases/latest">Sniper.dmg</a></li>
+    <li>Download the <a href="https://github.com/sm1ee/Sniper/releases/latest">latest release</a> — the universal <code>.dmg</code> on macOS, the portable <code>.zip</code> on Windows</li>
     <li>Set your browser proxy to <code>127.0.0.1:8080</code></li>
     <li>Visit <code>https://sniper</code> to trust the root CA</li>
     <li>Start capturing traffic</li>
