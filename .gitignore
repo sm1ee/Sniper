@@ -3,3 +3,6 @@
 /dist
 .claude/
 .serena/
+
+# Local-only diagram source for web/architecture.svg
+docs/diagrams/
