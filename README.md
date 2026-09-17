@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="web/architecture.svg" width="800" alt="How Sniper fits together: browser traffic through the MITM proxy to the upstream target, an interception engine and session store behind a loopback-only HTTP API, driving the desktop UI, sniper-cli, and an AI agent" />
+  <img src="web/architecture.svg" width="800" alt="How Sniper fits together: browser traffic, an operator and an AI agent each reach the same Sniper core — through the MITM proxy, the desktop app and sniper-cli — and the core writes captured sessions to disk" />
 </p>
 
 ---
