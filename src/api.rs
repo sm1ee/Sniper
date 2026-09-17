@@ -1048,21 +1048,34 @@ pub(crate) fn validate_editable_request(
     validate_editable_request_with(request, false)
 }
 
+/// `stored_draft` means "this is being persisted, not sent". A draft is allowed
+/// to disagree with itself — the operator is mid-edit — and the strict checks run
+/// again at send time, where being wrong actually costs something.
 fn validate_editable_request_with(
     request: &EditableRequest,
-    lenient_path: bool,
+    stored_draft: bool,
 ) -> std::result::Result<(), String> {
     validate_http_scheme_field(&request.scheme, "request scheme")?;
     validate_editable_request_host(&request.host)?;
-    validate_editable_request_path_with(&request.path, lenient_path)?;
+    validate_editable_request_path_with(&request.path, stored_draft)?;
     validate_http_method(&request.method)?;
     for header in &request.headers {
         validate_editable_header(header)?;
     }
     validate_unique_host_header(&request.headers)?;
+    // Still parsed: a body that will not decode cannot be loaded back, which is a
+    // storage problem rather than an editing one.
     let body = request
         .try_body_bytes()
         .map_err(|_| "request body is not valid base64".to_string())?;
+    if stored_draft {
+        // Content-Length disagreeing with the body is the normal state of a draft:
+        // seeding a tab from a gzipped capture stores the decoded body beside the
+        // wire Content-Length, and editing a body with auto-update off does the
+        // same. Rejecting it here rejected the entire workspace save, so one such
+        // tab silently stopped every tab from being persisted at all.
+        return Ok(());
+    }
     validate_editable_body_framing(&request.headers, body.len(), false)
 }
 
@@ -1999,10 +2012,12 @@ fn validate_workspace_draft_request(request: &EditableRequest) -> std::result::R
     for header in &request.headers {
         validate_editable_header(header)?;
     }
-    let body = request
+    request
         .try_body_bytes()
         .map_err(|_| "request body is not valid base64".to_string())?;
-    validate_editable_body_framing(&request.headers, body.len(), false)
+    // Same reasoning as validate_editable_request_with: framing is a send-time
+    // concern, and enforcing it here wedges the whole workspace save.
+    Ok(())
 }
 
 fn validate_workspace_target_fields(
@@ -7492,6 +7507,43 @@ mod tests {
         let mut controlled = request.clone();
         controlled.path = "/user\u{7}/info".to_string();
         assert!(super::validate_workspace_draft_request(&controlled).is_err());
+    }
+
+    // The same lesson as the placeholder path above, for the body. Seeding a
+    // replay tab from a gzipped capture stores the decoded body next to the wire
+    // Content-Length, so the two disagree by construction. That used to fail the
+    // whole workspace save with "Content-Length N does not match body length M",
+    // which meant a single such tab stopped every tab from being persisted — the
+    // operator's only clue was a toast, and quitting lost the lot.
+    #[test]
+    fn a_draft_whose_content_length_disagrees_persists_but_will_not_send() {
+        let mut request = test_editable_request("/log");
+        request.host = "app.example.com".to_string();
+        request.method = "POST".to_string();
+        request.body = "decoded body that is longer than the header claims".to_string();
+        request.headers.push(HeaderRecord {
+            name: "content-length".to_string(),
+            value: "12".to_string(),
+        });
+
+        assert!(
+            super::validate_workspace_draft_request(&request).is_ok(),
+            "a draft whose Content-Length disagrees with its body must still persist"
+        );
+
+        let send_error = super::validate_runnable_editable_request(&request)
+            .expect_err("a mismatched Content-Length must not be sendable");
+        assert!(
+            send_error.contains("does not match body length"),
+            "{send_error}"
+        );
+
+        // A body that cannot be decoded is still refused: that breaks loading, not
+        // just sending.
+        let mut corrupt = request.clone();
+        corrupt.body_encoding = BodyEncoding::Base64;
+        corrupt.body = "!!! not base64 !!!".to_string();
+        assert!(super::validate_workspace_draft_request(&corrupt).is_err());
     }
 
     // The same placeholder, but sitting in a tab's *history* rather than its draft.
