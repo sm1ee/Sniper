@@ -230,4 +230,14 @@ fi
 
 /usr/bin/hdiutil verify "$DMG_PATH"
 
+# Same `<hash>  <name>` shape make-zip.ps1 writes for the Windows archive, so a
+# downloader can check either artifact with `shasum -a 256 -c`. Releases are
+# ad-hoc signed, so this is the only integrity check a downloader gets.
+DMG_NAME="$(basename "$DMG_PATH")"
+(
+  cd "$ROOT_DIR/dist"
+  shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256"
+  shasum -a 256 -c "$DMG_NAME.sha256"
+)
+
 echo "macOS release artifacts ready in $ROOT_DIR/dist"
