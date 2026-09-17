@@ -3,7 +3,7 @@
 <desc id="sniper-arch-desc">Client traffic reaches Sniper's MITM proxy and is forwarded unchanged to the upstream target. The proxy hands a copy down to the interception engine, which persists sessions to disk and exposes them over a loopback-only HTTP API. That API drives the desktop UI and sniper-cli, and an AI agent drives Sniper through the CLI.</desc>
 
 <defs>
-  <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#cacaca"/></marker>
+  <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6c6c6c"/></marker>
   <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9a96e"/></marker>
   <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6cb6d9"/></marker>
 </defs>
@@ -11,118 +11,118 @@
 <rect width="100%" height="100%" fill="#131313"/>
 
 <!-- ARROWS (drawn before boxes so z-order puts them behind) -->
-<line x1="200" y1="132" x2="276" y2="132" stroke="#6cb6d9" stroke-width="1.4" marker-end="url(#arrow-link)"/>
-<line x1="432" y1="132" x2="756" y2="132" stroke="#6cb6d9" stroke-width="1.4" marker-end="url(#arrow-link)"/>
-<line x1="356" y1="168" x2="356" y2="260" stroke="#cacaca" stroke-width="1.4" marker-end="url(#arrow)"/>
-<line x1="520" y1="300" x2="620" y2="300" stroke="#cacaca" stroke-width="1.4" marker-end="url(#arrow)"/>
-<line x1="356" y1="336" x2="356" y2="428" stroke="#cacaca" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="200" y1="132" x2="276" y2="132" stroke="#6c6c6c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="432" y1="132" x2="756" y2="132" stroke="#6c6c6c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="356" y1="168" x2="356" y2="260" stroke="#6c6c6c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="520" y1="300" x2="620" y2="300" stroke="#6c6c6c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="356" y1="336" x2="356" y2="428" stroke="#6c6c6c" stroke-width="1.4" marker-end="url(#arrow)"/>
 <path d="M 456,456 H 512 Q 520,456 520,448 V 416 Q 520,408 528,408 H 556"
-      fill="none" stroke="#cacaca" stroke-width="1.4" marker-end="url(#arrow)"/>
+      fill="none" stroke="#6c6c6c" stroke-width="1.4" marker-end="url(#arrow)"/>
 <path d="M 456,480 H 512 Q 520,480 520,488 V 524 Q 520,532 528,532 H 556"
-      fill="none" stroke="#cacaca" stroke-width="1.4" marker-end="url(#arrow)"/>
+      fill="none" stroke="#6c6c6c" stroke-width="1.4" marker-end="url(#arrow)"/>
 <line x1="780" y1="532" x2="716" y2="532" stroke="#c9a96e" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow-accent)"/>
 
 <!-- ARROW LABELS (mask + 8px visible gap above the stroke) -->
 <rect x="208" y="112" width="60" height="12" rx="2" fill="#131313"/>
-<text x="238" y="121" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">HTTP(S)</text>
+<text x="238" y="121" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">HTTP(S)</text>
 
 <rect x="562" y="112" width="64" height="12" rx="2" fill="#131313"/>
-<text x="594" y="121" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">FORWARD</text>
+<text x="594" y="121" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">FORWARD</text>
 
 <rect x="364" y="208" width="64" height="12" rx="2" fill="#131313"/>
-<text x="396" y="217" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">CAPTURE</text>
+<text x="396" y="217" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">CAPTURE</text>
 
 <rect x="542" y="280" width="60" height="12" rx="2" fill="#131313"/>
-<text x="572" y="289" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PERSIST</text>
+<text x="572" y="289" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PERSIST</text>
 
 <rect x="716" y="512" width="64" height="12" rx="2" fill="#131313"/>
 <text x="748" y="521" fill="#c9a96e" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SKILLS</text>
 
 <!-- ROW 1 — the wire -->
 <rect x="40" y="96" width="160" height="72" rx="6" fill="#131313"/>
-<rect x="40" y="96" width="160" height="72" rx="6" fill="rgba(241,241,241,0.03)" stroke="rgba(241,241,241,0.28)" stroke-width="1"/>
-<rect x="52" y="108" width="36" height="14" rx="2" fill="none" stroke="rgba(241,241,241,0.28)" stroke-width="0.8"/>
-<text x="70" y="118" fill="rgba(241,241,241,0.55)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+<rect x="40" y="96" width="160" height="72" rx="6" fill="#171717" stroke="#2e2e2e" stroke-width="1"/>
+<rect x="52" y="108" width="36" height="14" rx="2" fill="#242424" stroke="#3b3b3b" stroke-width="0.8"/>
+<text x="70" y="118" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
 <text x="120" y="142" fill="#f1f1f1" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Browser · app · curl</text>
 <text x="120" y="156" fill="#888888" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">127.0.0.1:8080</text>
 
 <rect x="280" y="96" width="152" height="72" rx="6" fill="#131313"/>
 <rect x="280" y="96" width="152" height="72" rx="6" fill="rgba(201,169,110,0.10)" stroke="#c9a96e" stroke-width="1"/>
-<rect x="292" y="108" width="36" height="14" rx="2" fill="none" stroke="rgba(201,169,110,0.55)" stroke-width="0.8"/>
+<rect x="292" y="108" width="36" height="14" rx="2" fill="rgba(201,169,110,0.08)" stroke="rgba(201,169,110,0.45)" stroke-width="0.8"/>
 <text x="310" y="118" fill="#c9a96e" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">TLS</text>
 <text x="356" y="142" fill="#f1f1f1" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">MITM proxy</text>
-<text x="356" y="156" fill="#cacaca" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Sniper CA</text>
+<text x="356" y="156" fill="#888888" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Sniper CA</text>
 
 <rect x="760" y="96" width="160" height="72" rx="6" fill="#131313"/>
-<rect x="760" y="96" width="160" height="72" rx="6" fill="rgba(241,241,241,0.03)" stroke="rgba(241,241,241,0.28)" stroke-width="1"/>
-<rect x="772" y="108" width="36" height="14" rx="2" fill="none" stroke="rgba(241,241,241,0.28)" stroke-width="0.8"/>
-<text x="790" y="118" fill="rgba(241,241,241,0.55)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">NET</text>
+<rect x="760" y="96" width="160" height="72" rx="6" fill="#171717" stroke="#2e2e2e" stroke-width="1"/>
+<rect x="772" y="108" width="36" height="14" rx="2" fill="#242424" stroke="#3b3b3b" stroke-width="0.8"/>
+<text x="790" y="118" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">NET</text>
 <text x="840" y="142" fill="#f1f1f1" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Upstream target</text>
 <text x="840" y="156" fill="#888888" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">real response</text>
 
 <!-- ROW 2 — capture and persistence -->
 <rect x="280" y="264" width="240" height="72" rx="6" fill="#131313"/>
-<rect x="280" y="264" width="240" height="72" rx="6" fill="#1b1b1b" stroke="rgba(241,241,241,0.70)" stroke-width="1"/>
-<rect x="292" y="276" width="40" height="14" rx="2" fill="none" stroke="rgba(241,241,241,0.40)" stroke-width="0.8"/>
-<text x="312" y="286" fill="rgba(241,241,241,0.70)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CORE</text>
+<rect x="280" y="264" width="240" height="72" rx="6" fill="#1b1b1b" stroke="#3b3b3b" stroke-width="1"/>
+<rect x="292" y="276" width="40" height="14" rx="2" fill="#242424" stroke="#3b3b3b" stroke-width="0.8"/>
+<text x="312" y="286" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CORE</text>
 <text x="400" y="310" fill="#f1f1f1" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Interception engine</text>
 <text x="400" y="324" fill="#888888" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">capture · intercept · replay · scope</text>
 
 <rect x="624" y="264" width="152" height="72" rx="6" fill="#131313"/>
-<rect x="624" y="264" width="152" height="72" rx="6" fill="rgba(241,241,241,0.05)" stroke="#cacaca" stroke-width="1"/>
-<rect x="636" y="276" width="36" height="14" rx="2" fill="none" stroke="rgba(202,202,202,0.50)" stroke-width="0.8"/>
-<text x="654" y="286" fill="rgba(202,202,202,0.80)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DISK</text>
+<rect x="624" y="264" width="152" height="72" rx="6" fill="#161616" stroke="#333333" stroke-width="1"/>
+<rect x="636" y="276" width="36" height="14" rx="2" fill="#242424" stroke="#3b3b3b" stroke-width="0.8"/>
+<text x="654" y="286" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DISK</text>
 <text x="700" y="310" fill="#f1f1f1" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Session store</text>
 <text x="700" y="324" fill="#888888" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">~/.sniper</text>
 
 <!-- ROW 3 — the API and everything that drives it -->
 <rect x="560" y="368" width="152" height="72" rx="6" fill="#131313"/>
-<rect x="560" y="368" width="152" height="72" rx="6" fill="#1b1b1b" stroke="rgba(202,202,202,0.45)" stroke-width="1"/>
-<rect x="572" y="380" width="36" height="14" rx="2" fill="none" stroke="rgba(202,202,202,0.40)" stroke-width="0.8"/>
-<text x="590" y="390" fill="rgba(202,202,202,0.70)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">APP</text>
+<rect x="560" y="368" width="152" height="72" rx="6" fill="#1b1b1b" stroke="#3b3b3b" stroke-width="1"/>
+<rect x="572" y="380" width="36" height="14" rx="2" fill="#242424" stroke="#3b3b3b" stroke-width="0.8"/>
+<text x="590" y="390" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">APP</text>
 <text x="636" y="414" fill="#f1f1f1" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Desktop UI</text>
 <text x="636" y="428" fill="#888888" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">sniper-desktop</text>
 
 <rect x="280" y="432" width="176" height="72" rx="6" fill="#131313"/>
-<rect x="280" y="432" width="176" height="72" rx="6" fill="#1b1b1b" stroke="rgba(241,241,241,0.70)" stroke-width="1"/>
-<rect x="292" y="444" width="36" height="14" rx="2" fill="none" stroke="rgba(241,241,241,0.40)" stroke-width="0.8"/>
-<text x="310" y="454" fill="rgba(241,241,241,0.70)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+<rect x="280" y="432" width="176" height="72" rx="6" fill="#1b1b1b" stroke="#3b3b3b" stroke-width="1"/>
+<rect x="292" y="444" width="36" height="14" rx="2" fill="#242424" stroke="#3b3b3b" stroke-width="0.8"/>
+<text x="310" y="454" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
 <text x="368" y="478" fill="#f1f1f1" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Local HTTP API</text>
 <text x="368" y="492" fill="#888888" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">loopback only</text>
 
 <rect x="560" y="496" width="152" height="72" rx="6" fill="#131313"/>
-<rect x="560" y="496" width="152" height="72" rx="6" fill="#1b1b1b" stroke="rgba(202,202,202,0.45)" stroke-width="1"/>
-<rect x="572" y="508" width="36" height="14" rx="2" fill="none" stroke="rgba(202,202,202,0.40)" stroke-width="0.8"/>
-<text x="590" y="518" fill="rgba(202,202,202,0.70)" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CLI</text>
+<rect x="560" y="496" width="152" height="72" rx="6" fill="#1b1b1b" stroke="#3b3b3b" stroke-width="1"/>
+<rect x="572" y="508" width="36" height="14" rx="2" fill="#242424" stroke="#3b3b3b" stroke-width="0.8"/>
+<text x="590" y="518" fill="#9a9a9a" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CLI</text>
 <text x="636" y="542" fill="#f1f1f1" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">sniper-cli</text>
 <text x="636" y="556" fill="#888888" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">JSON in, JSON out</text>
 
 <rect x="784" y="496" width="136" height="72" rx="6" fill="#131313"/>
 <rect x="784" y="496" width="136" height="72" rx="6" fill="rgba(201,169,110,0.10)" stroke="#c9a96e" stroke-width="1"/>
-<rect x="796" y="508" width="48" height="14" rx="2" fill="none" stroke="rgba(201,169,110,0.55)" stroke-width="0.8"/>
+<rect x="796" y="508" width="48" height="14" rx="2" fill="rgba(201,169,110,0.08)" stroke="rgba(201,169,110,0.45)" stroke-width="0.8"/>
 <text x="820" y="518" fill="#c9a96e" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AGENT</text>
 <text x="852" y="542" fill="#f1f1f1" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">AI agent</text>
-<text x="852" y="556" fill="#cacaca" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Claude Code</text>
+<text x="852" y="556" fill="#888888" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Claude Code</text>
 
 <!-- LEGEND — horizontal strip, bottom 60px -->
-<line x1="40" y1="600" x2="920" y2="600" stroke="rgba(241,241,241,0.10)" stroke-width="0.8"/>
-<text x="40" y="624" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+<line x1="40" y1="600" x2="920" y2="600" stroke="#282828" stroke-width="0.8"/>
+<text x="40" y="624" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
 
 <rect x="108" y="616" width="10" height="10" rx="2" fill="rgba(201,169,110,0.10)" stroke="#c9a96e" stroke-width="0.8"/>
-<text x="124" y="624" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">FOCAL</text>
+<text x="124" y="624" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">FOCAL</text>
 
-<rect x="196" y="616" width="10" height="10" rx="2" fill="#1b1b1b" stroke="rgba(241,241,241,0.70)" stroke-width="0.8"/>
-<text x="212" y="624" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">SNIPER COMPONENT</text>
+<rect x="196" y="616" width="10" height="10" rx="2" fill="#1b1b1b" stroke="#3b3b3b" stroke-width="0.8"/>
+<text x="212" y="624" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">SNIPER COMPONENT</text>
 
-<rect x="380" y="616" width="10" height="10" rx="2" fill="rgba(241,241,241,0.05)" stroke="#cacaca" stroke-width="0.8"/>
-<text x="396" y="624" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">ON DISK</text>
+<rect x="380" y="616" width="10" height="10" rx="2" fill="#161616" stroke="#333333" stroke-width="0.8"/>
+<text x="396" y="624" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">ON DISK</text>
 
-<rect x="484" y="616" width="10" height="10" rx="2" fill="rgba(241,241,241,0.03)" stroke="rgba(241,241,241,0.28)" stroke-width="0.8"/>
-<text x="500" y="624" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">EXTERNAL</text>
+<rect x="484" y="616" width="10" height="10" rx="2" fill="#171717" stroke="#2e2e2e" stroke-width="0.8"/>
+<text x="500" y="624" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">EXTERNAL</text>
 
-<line x1="600" y1="621" x2="624" y2="621" stroke="#6cb6d9" stroke-width="1.4"/>
-<text x="632" y="624" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">PROXIED TRAFFIC</text>
+<line x1="600" y1="621" x2="624" y2="621" stroke="#6c6c6c" stroke-width="1.4"/>
+<text x="632" y="624" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">DATA PATH</text>
 
 <line x1="772" y1="621" x2="796" y2="621" stroke="#c9a96e" stroke-width="1.2" stroke-dasharray="4,3"/>
-<text x="804" y="624" fill="#888888" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">DRIVES</text>
+<text x="804" y="624" fill="#7a7a7a" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">DRIVES</text>
     </svg>
