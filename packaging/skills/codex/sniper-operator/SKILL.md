@@ -1,6 +1,6 @@
 ---
 name: sniper-operator
-description: Use when operating a local Sniper proxy through sniper-cli for session switching, Capture record review, Scope updates, Replay tabs, fuzzer runs, held-request control, Web Socket inspection, auto-replace updates, color tag and note annotations, or Sniper skill installation.
+description: Inspect captured HTTP/HTTPS traffic and debug APIs through a local Sniper proxy, driving it with sniper-cli rather than the desktop UI. Covers reviewing captured requests and responses, replaying them with changes, holding and editing live traffic, scope, fuzzer runs, WebSocket frames, match-replace rules, colour tags and notes, and session switching. Not for routing LLM API calls or hosting a reverse proxy.
 ---
 
 # Sniper Operator
