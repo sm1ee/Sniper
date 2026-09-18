@@ -21,8 +21,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use regex::{Regex, RegexBuilder};
 
 use crate::model::{
-    compact_annotation_client_versions_for_insert, TrafficKind, TransactionRecord,
-    TransactionSummary,
+    compact_annotation_client_versions_for_insert, BodyEncoding, MessageRecord, TrafficKind,
+    TransactionRecord, TransactionSummary,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -55,6 +55,62 @@ pub struct ListFilters {
     pub advanced_regex: bool,
     pub advanced_case_sensitive: bool,
     pub advanced_negative: bool,
+}
+
+/// What a body search may look at. Headers are held in memory, so including them
+/// costs nothing; bodies come off disk and are what the byte budget governs.
+#[derive(Clone, Copy, Debug)]
+pub struct BodySearchSides {
+    pub request_body: bool,
+    pub response_body: bool,
+    pub headers: bool,
+}
+
+impl Default for BodySearchSides {
+    fn default() -> Self {
+        Self {
+            request_body: true,
+            response_body: true,
+            headers: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BodySearchRequest {
+    pub value: String,
+    pub sides: BodySearchSides,
+    pub case_sensitive: bool,
+    /// Stop after this many matches. Reported through `complete`.
+    pub max_matches: usize,
+    /// Stop after reading this many body bytes. Reported through `complete`.
+    pub byte_budget: u64,
+    pub context_bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct BodySearchMatch {
+    pub id: Uuid,
+    pub sequence: u64,
+    pub side: &'static str,
+    /// Byte offset of the match inside that side, not inside the file.
+    pub offset: usize,
+    pub context: String,
+}
+
+/// A search answers "where is this value" and, just as importantly, "how much did
+/// you actually look at". Without the second half an agent reads an exhausted
+/// budget as proof the value is absent.
+#[derive(Clone, Debug)]
+pub struct BodySearchOutcome {
+    pub matches: Vec<BodySearchMatch>,
+    pub records_considered: usize,
+    pub records_scanned: usize,
+    pub bytes_scanned: u64,
+    pub complete: bool,
+    /// Records whose bodies could not be read back, so their absence from the
+    /// matches proves nothing.
+    pub unsearchable: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -758,6 +814,160 @@ impl TransactionStore {
     /// Puts the body text back on a record whose bodies were dropped after loading.
     /// The in-memory copy carries the current annotations, which may be ahead of
     /// what is on disk, so those are kept and only the bodies come from the file.
+    /// Search request/response bodies and headers for a literal value.
+    ///
+    /// Bodies are not held in memory and are not in the metadata haystack that
+    /// `query` searches, so this is the only way to ask whether a value ever
+    /// crossed the wire. Candidates are narrowed with the ordinary filters first,
+    /// then their locators are read in file order — one forward pass rather than a
+    /// seek per record. No index is built: a locator map is already maintained for
+    /// every record, and an index would be a second copy to keep correct through
+    /// rewrites, trims and session switches.
+    pub async fn search_bodies(
+        &self,
+        filters: &ListFilters,
+        request: &BodySearchRequest,
+    ) -> BodySearchOutcome {
+        let needle = if request.case_sensitive {
+            request.value.clone()
+        } else {
+            request.value.to_ascii_lowercase()
+        };
+        let mut outcome = BodySearchOutcome {
+            matches: Vec::new(),
+            records_considered: 0,
+            records_scanned: 0,
+            bytes_scanned: 0,
+            complete: true,
+            unsearchable: 0,
+        };
+        if needle.is_empty() {
+            return outcome;
+        }
+
+        // Collect candidates under the lock, then let it go: the reads below are
+        // blocking file I/O and holding a read lock across them would stall every
+        // writer for the length of the scan. A rewrite in the meantime moves the
+        // offsets, and the id check in the read path turns that into a record we
+        // count as unsearchable rather than someone else's traffic.
+        struct Candidate {
+            id: Uuid,
+            sequence: u64,
+            locator: Option<crate::session::BodyLocator>,
+            in_memory: Option<TransactionRecord>,
+        }
+        let candidates: Vec<Candidate> = {
+            let inner = self.inner.read().await;
+            let query = filters
+                .query
+                .as_ref()
+                .map(|value| value.to_ascii_lowercase());
+            let method = filters
+                .method
+                .as_ref()
+                .map(|value| value.to_ascii_uppercase());
+            let host = filters
+                .host
+                .as_ref()
+                .map(|value| value.to_ascii_lowercase());
+            let since_dt = filters.since.as_deref().and_then(parse_since);
+            let status_pred = filters
+                .status
+                .map(StatusPredicate::Exact)
+                .or_else(|| filters.status_range.as_deref().and_then(parse_status_range));
+            let mime = filters
+                .mime
+                .as_ref()
+                .map(|value| value.to_ascii_lowercase());
+            let advanced_matcher = AdvancedSearchMatcher::new(filters);
+            inner
+                .summaries
+                .iter()
+                .enumerate()
+                .filter(|(_, cached)| {
+                    matches_filters(
+                        cached,
+                        query.as_deref(),
+                        method.as_deref(),
+                        host.as_deref(),
+                        status_pred.as_ref(),
+                        since_dt.as_ref(),
+                        mime.as_deref(),
+                        None,
+                        filters,
+                        advanced_matcher.as_ref(),
+                        filters.hide_connect,
+                    )
+                })
+                .map(|(index, cached)| {
+                    let id = cached.summary.id;
+                    let locator = inner.locators.get(&id).copied();
+                    Candidate {
+                        id,
+                        sequence: cached.summary.sequence,
+                        locator,
+                        // Anything captured since the last persist still holds its
+                        // bodies here, and has no locator to read them back from.
+                        in_memory: if locator.is_none() {
+                            inner.entries.get(index).cloned()
+                        } else {
+                            None
+                        },
+                    }
+                })
+                .collect()
+        };
+        outcome.records_considered = candidates.len();
+
+        // File order, so the pass over transactions.ndjson only moves forward.
+        let mut ordered: Vec<Candidate> = candidates;
+        ordered.sort_by_key(|candidate| candidate.locator.map(|l| l.offset).unwrap_or(0));
+
+        let storage_dir = self.storage_dir.clone();
+        for candidate in ordered {
+            if outcome.matches.len() >= request.max_matches
+                || outcome.bytes_scanned >= request.byte_budget
+            {
+                outcome.complete = false;
+                break;
+            }
+            let record = match (&candidate.in_memory, candidate.locator, &storage_dir) {
+                (Some(record), _, _) => record.clone(),
+                (None, Some(locator), Some(dir)) => {
+                    match crate::session::read_transaction_at(dir, locator) {
+                        // Same reason rehydrate checks: a byte range is not a key.
+                        Some(full) if full.id == candidate.id => full,
+                        _ => {
+                            outcome.unsearchable += 1;
+                            continue;
+                        }
+                    }
+                }
+                _ => {
+                    outcome.unsearchable += 1;
+                    continue;
+                }
+            };
+            outcome.records_scanned += 1;
+            outcome.bytes_scanned = outcome
+                .bytes_scanned
+                .saturating_add(record.request.body_size as u64)
+                .saturating_add(
+                    record
+                        .response
+                        .as_ref()
+                        .map(|message| message.body_size as u64)
+                        .unwrap_or(0),
+                );
+            collect_record_matches(&record, candidate.sequence, &needle, request, &mut outcome);
+        }
+        if outcome.matches.len() > request.max_matches {
+            outcome.matches.truncate(request.max_matches);
+            outcome.complete = false;
+        }
+        outcome
+    }
+
     fn rehydrate(&self, record: &TransactionRecord, inner: &StoreInner) -> TransactionRecord {
         let Some(locator) = inner.locators.get(&record.id).copied() else {
             return record.clone();
@@ -1679,6 +1889,145 @@ fn parse_since(input: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         return Some(dt.with_timezone(&chrono::Utc));
     }
     None
+}
+
+/// Pull the searchable text out of one message. A Base64 body is decoded first:
+/// searching the Base64 itself would match nothing a person ever sent.
+fn searchable_body(message: &MessageRecord) -> Option<String> {
+    match message.body_encoding {
+        BodyEncoding::Utf8 => Some(message.body_preview.clone()),
+        BodyEncoding::Base64 => {
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(message.body_preview.as_bytes())
+                .ok()?;
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    }
+}
+
+fn header_block(message: &MessageRecord) -> String {
+    message
+        .headers
+        .iter()
+        .map(|header| format!("{}: {}", header.name, header.value))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A window around the match, clamped to char boundaries so the result is still
+/// valid UTF-8 to serialize.
+fn match_context(haystack: &str, at: usize, width: usize) -> String {
+    let start = haystack[..at]
+        .char_indices()
+        .rev()
+        .nth(width)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let end_from = at.saturating_add(width);
+    let end = if end_from >= haystack.len() {
+        haystack.len()
+    } else {
+        haystack[end_from..]
+            .char_indices()
+            .next()
+            .map(|(index, _)| end_from + index)
+            .unwrap_or(haystack.len())
+    };
+    haystack[start..end].to_string()
+}
+
+fn push_matches(
+    haystack: &str,
+    side: &'static str,
+    id: Uuid,
+    sequence: u64,
+    needle: &str,
+    request: &BodySearchRequest,
+    outcome: &mut BodySearchOutcome,
+) {
+    let subject = if request.case_sensitive {
+        haystack.to_string()
+    } else {
+        haystack.to_ascii_lowercase()
+    };
+    let mut from = 0usize;
+    while let Some(found) = subject[from..].find(needle) {
+        let at = from + found;
+        if outcome.matches.len() >= request.max_matches {
+            outcome.complete = false;
+            return;
+        }
+        outcome.matches.push(BodySearchMatch {
+            id,
+            sequence,
+            side,
+            offset: at,
+            context: match_context(haystack, at, request.context_bytes),
+        });
+        from = at + needle.len().max(1);
+        if from >= subject.len() {
+            break;
+        }
+    }
+}
+
+fn collect_record_matches(
+    record: &TransactionRecord,
+    sequence: u64,
+    needle: &str,
+    request: &BodySearchRequest,
+    outcome: &mut BodySearchOutcome,
+) {
+    let id = record.id;
+    if request.sides.headers {
+        push_matches(
+            &header_block(&record.request),
+            "request-headers",
+            id,
+            sequence,
+            needle,
+            request,
+            outcome,
+        );
+        if let Some(response) = record.response.as_ref() {
+            push_matches(
+                &header_block(response),
+                "response-headers",
+                id,
+                sequence,
+                needle,
+                request,
+                outcome,
+            );
+        }
+    }
+    if request.sides.request_body {
+        if let Some(body) = searchable_body(&record.request) {
+            push_matches(
+                &body,
+                "request-body",
+                id,
+                sequence,
+                needle,
+                request,
+                outcome,
+            );
+        }
+    }
+    if request.sides.response_body {
+        if let Some(body) = record.response.as_ref().and_then(searchable_body) {
+            push_matches(
+                &body,
+                "response-body",
+                id,
+                sequence,
+                needle,
+                request,
+                outcome,
+            );
+        }
+    }
 }
 
 fn matches_filters(
@@ -2674,6 +3023,157 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    fn search_request(value: &str) -> super::BodySearchRequest {
+        super::BodySearchRequest {
+            value: value.to_string(),
+            sides: super::BodySearchSides::default(),
+            case_sensitive: false,
+            max_matches: 50,
+            byte_budget: 10_000_000,
+            context_bytes: 48,
+        }
+    }
+
+    fn record_with_bodies(
+        host: &str,
+        request_body: &str,
+        response_body: &str,
+    ) -> TransactionRecord {
+        let mut record = TransactionRecord::http(
+            Utc::now(),
+            "POST".to_string(),
+            "https".to_string(),
+            host.to_string(),
+            "/api/orders".to_string(),
+            Some(200),
+            1,
+            MessageRecord {
+                headers: vec![HeaderRecord {
+                    name: "x-trace".to_string(),
+                    value: "trace-in-a-header".to_string(),
+                }],
+                body_preview: request_body.to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: request_body.len(),
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            },
+            Some(MessageRecord {
+                headers: vec![],
+                body_preview: response_body.to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: response_body.len(),
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            }),
+            vec![],
+            None,
+            None,
+        );
+        record.sequence = 1;
+        record
+    }
+
+    // The gap this closes: the metadata haystack has no bodies in it, so a value
+    // that only ever appeared in one is invisible to `query` no matter how it is
+    // spelled. Both searches run against the same record here.
+    #[tokio::test]
+    async fn a_body_search_finds_what_the_metadata_query_cannot() {
+        let store = TransactionStore::from_records_with_max_entries(Vec::new(), None);
+        store
+            .insert(record_with_bodies(
+                "orders.example",
+                "{\"order_id\":\"A-9931\"}",
+                "{\"internalNote\":\"staff only\"}",
+            ))
+            .await;
+
+        let by_metadata = store
+            .list(&ListFilters {
+                query: Some("internalNote".to_string()),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            by_metadata.is_empty(),
+            "metadata search cannot see into a body"
+        );
+
+        let found = store
+            .search_bodies(&ListFilters::default(), &search_request("internalNote"))
+            .await;
+        assert_eq!(found.matches.len(), 1);
+        assert_eq!(found.matches[0].side, "response-body");
+        assert!(found.matches[0].context.contains("staff only"));
+        assert!(found.complete);
+        assert_eq!(found.unsearchable, 0);
+    }
+
+    // An analyst needs to know WHERE a value showed up, not just that it did:
+    // a token in a request the client sent means something different from the
+    // same token coming back in a response.
+    #[tokio::test]
+    async fn a_body_search_says_which_side_of_the_exchange_matched() {
+        let store = TransactionStore::from_records_with_max_entries(Vec::new(), None);
+        store
+            .insert(record_with_bodies(
+                "orders.example",
+                "shared-token-value",
+                "shared-token-value",
+            ))
+            .await;
+
+        let found = store
+            .search_bodies(
+                &ListFilters::default(),
+                &search_request("shared-token-value"),
+            )
+            .await;
+        let mut sides: Vec<&str> = found.matches.iter().map(|m| m.side).collect();
+        sides.sort_unstable();
+        assert_eq!(sides, vec!["request-body", "response-body"]);
+
+        let in_header = store
+            .search_bodies(
+                &ListFilters::default(),
+                &search_request("trace-in-a-header"),
+            )
+            .await;
+        assert_eq!(in_header.matches.len(), 1);
+        assert_eq!(in_header.matches[0].side, "request-headers");
+    }
+
+    // A budget that runs out must not look like an answer. An agent that reads
+    // "no matches" as "not present" would clear a finding that was never checked.
+    #[tokio::test]
+    async fn a_truncated_body_search_says_so_rather_than_reporting_absence() {
+        let store = TransactionStore::from_records_with_max_entries(Vec::new(), None);
+        for _ in 0..5 {
+            store
+                .insert(record_with_bodies("orders.example", "", "needle here"))
+                .await;
+        }
+
+        let mut request = search_request("needle");
+        request.byte_budget = 1;
+        let found = store.search_bodies(&ListFilters::default(), &request).await;
+        assert!(
+            !found.complete,
+            "a scan cut short by its budget must report complete = false"
+        );
+        assert!(found.records_scanned < found.records_considered);
+
+        let mut capped = search_request("needle");
+        capped.max_matches = 2;
+        let limited = store.search_bodies(&ListFilters::default(), &capped).await;
+        assert_eq!(limited.matches.len(), 2);
+        assert!(!limited.complete);
     }
 
     #[tokio::test]
