@@ -769,6 +769,18 @@ impl TransactionStore {
             warn!(record_id = %record.id, "could not read transaction bodies back from disk");
             return record.clone();
         };
+        // The locator is a byte range, not a key: nothing in the read path ties it
+        // to this record. A stale one that happens to land on another record's line
+        // parses cleanly, and the caller would be handed someone else's traffic with
+        // no error and no crash — the failure AGENTS.md section 5.1 warns about.
+        // Checking the id costs nothing and turns that into a missing body.
+        if full.id != record.id {
+            warn!(
+                record_id = %record.id,
+                "transaction locator pointed at a different record; serving the copy in memory"
+            );
+            return record.clone();
+        }
         full.notes = record.notes.clone();
         full.color_tag = record.color_tag.clone();
         full.user_note = record.user_note.clone();
@@ -2570,6 +2582,95 @@ mod tests {
             rewritten[0].0.notes,
             vec!["replayed from the journal".to_string()],
             "an update restored from the journal must reach the new file too"
+        );
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    // A BodyLocator is a byte range, not a key. If one goes stale and lands on
+    // another record's line, that line parses fine and the caller would be handed
+    // a different request's traffic with no error - the exact failure AGENTS.md
+    // section 5.1 describes. The read path has to notice.
+    #[tokio::test]
+    async fn a_locator_pointing_at_another_record_does_not_serve_its_traffic() {
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-crossed-locator-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+
+        let make = |host: &str, body: &str| {
+            let mut record = TransactionRecord::http(
+                Utc::now(),
+                "GET".to_string(),
+                "https".to_string(),
+                host.to_string(),
+                "/body".to_string(),
+                Some(200),
+                1,
+                MessageRecord {
+                    headers: vec![],
+                    body_preview: String::new(),
+                    body_encoding: BodyEncoding::Utf8,
+                    body_size: 0,
+                    decoded_body_size: None,
+                    preview_truncated: false,
+                    content_type: None,
+                    content_decoded: false,
+                },
+                Some(MessageRecord {
+                    headers: vec![],
+                    body_preview: body.to_string(),
+                    body_encoding: BodyEncoding::Utf8,
+                    body_size: body.len(),
+                    decoded_body_size: None,
+                    preview_truncated: false,
+                    content_type: None,
+                    content_decoded: false,
+                }),
+                vec![],
+                None,
+                None,
+            );
+            record.sequence = 1;
+            record
+        };
+        let mine = make("mine.example:443", "my own response");
+        let theirs = make("theirs.example:443", "SOMEONE ELSES TRAFFIC");
+        let mine_id = mine.id;
+
+        crate::session::write_transactions_file_for_test(&storage_dir, &[mine, theirs.clone()])
+            .unwrap();
+        let on_disk = crate::session::read_transactions_file_for_test(&storage_dir).unwrap();
+        let theirs_locator = on_disk
+            .iter()
+            .find(|(record, _)| record.id == theirs.id)
+            .map(|(_, locator)| *locator)
+            .unwrap();
+
+        // My record, stripped as a load leaves it, but pointed at their line.
+        let mut stripped = on_disk
+            .iter()
+            .find(|(record, _)| record.id == mine_id)
+            .map(|(record, _)| record.clone())
+            .unwrap();
+        super::strip_transaction_bodies(&mut stripped);
+        let store = TransactionStore::from_records_with_journal_and_event_sequence(
+            vec![stripped],
+            storage_dir.join("transactions.journal"),
+            None,
+            0,
+        );
+        // from_records_with_journal_and_event_sequence takes storage_dir from the
+        // journal path's parent, so the read path can already find the file.
+        store
+            .set_body_locator_for_test(mine_id, theirs_locator)
+            .await;
+
+        let fetched = store.get(mine_id).await.expect("record is in the store");
+        assert_eq!(fetched.id, mine_id);
+        assert_eq!(
+            fetched.response.as_ref().unwrap().body_preview,
+            "",
+            "a crossed locator must yield no body, never another record's traffic"
         );
 
         let _ = std::fs::remove_dir_all(storage_dir);
