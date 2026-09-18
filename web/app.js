@@ -3921,7 +3921,7 @@ function syncActiveHttpReplayDraftFromDom() {
     const requestText = cv
       ? cv.getContent()
       : (els.replayRequestEditor?.value ?? els.replayRequestHighlight?.innerText ?? null);
-    if (typeof requestText === "string" && requestText !== tab.requestText) {
+    if (typeof requestText === "string" && !replayRequestTextsEquivalent(requestText, tab.requestText)) {
       syncReplayRequestTextFromEditor(requestText);
       changed = true;
     }
@@ -11881,11 +11881,19 @@ function setReplayRequestEditorText(text, { preserveSelection = true } = {}) {
   }
 }
 
+// CodeMirror normalises CRLF to LF, so a round-trip through the editor can change
+// the string without changing the request. Comparing raw strings therefore reports
+// an edit that never happened.
+function replayRequestTextsEquivalent(left, right) {
+  return String(left ?? "").replace(/\r\n/g, "\n") === String(right ?? "").replace(/\r\n/g, "\n");
+}
+
 function syncReplayRequestTextFromEditor(newText) {
   const activeTab = getActiveReplayTab();
   if (!activeTab || activeTab.type === "websocket") {
     return;
   }
+  const previousText = activeTab.requestText;
   let nextText = newText;
   let parsed = null;
   try {
@@ -11904,7 +11912,15 @@ function syncReplayRequestTextFromEditor(newText) {
   activeTab.httpVersionMode = replayHttpVersionState(parsed, nextText, activeTab.httpVersionMode);
   activeTab.requestBytes = null;
   activeTab.requestOriginalBytes = null;
-  clearReplayResponseForDraftChange(activeTab);
+  // Only an actual edit invalidates the response. This is also the reconciliation
+  // path that runs when the window is about to hide — switching macOS Spaces or
+  // apps — where the editor and the stored draft can disagree without the request
+  // having changed. Clearing unconditionally threw away the response every time
+  // the operator looked at another window, and the only way back was to step the
+  // history with the arrows.
+  if (!replayRequestTextsEquivalent(previousText, nextText)) {
+    clearReplayResponseForDraftChange(activeTab);
+  }
   syncReplayToolbar(activeTab);
   refreshReplayTabLabel(activeTab.id);
   updateReplaySearchPane("request", nextText, { scrollToFirst: false });
