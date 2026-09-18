@@ -200,6 +200,23 @@ struct StoreInner {
 
 /// Drops the body text a record carries, leaving sizes, headers and metadata.
 /// Only safe for a record that has a locator, so the text can be read back.
+/// Whether any of a record's messages still holds its body in memory. A record
+/// loaded from `transactions.meta.ndjson` has none of them; one replayed from the
+/// journal has all of it.
+fn transaction_carries_bodies(record: &TransactionRecord) -> bool {
+    if !record.request.body_preview.is_empty() {
+        return true;
+    }
+    [
+        record.response.as_ref(),
+        record.original_request.as_ref(),
+        record.original_response.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|message| !message.body_preview.is_empty())
+}
+
 pub(crate) fn strip_transaction_bodies(record: &mut TransactionRecord) {
     record.request.body_preview = String::new();
     for message in [
@@ -413,7 +430,17 @@ impl TransactionStore {
             locators.remove(id);
         }
         for record in records.iter_mut() {
-            if locators.contains_key(&record.id) {
+            if !locators.contains_key(&record.id) {
+                continue;
+            }
+            if transaction_carries_bodies(record) {
+                // It has a locator, so a copy of it was persisted, yet it still
+                // holds its bodies: it came back from an Update entry in the
+                // journal, which means memory is the newer copy. Reading it from
+                // the stale line would serve the pre-update record, and copying
+                // that line on the next persist would discard the update for good.
+                locators.remove(&record.id);
+            } else {
                 strip_transaction_bodies(record);
             }
         }
@@ -844,7 +871,12 @@ impl TransactionStore {
             let Some(record) = inner.entries.get(index) else {
                 return Ok(None);
             };
-            record.clone()
+            // Pull the bodies back off disk before mutating. Once this record is
+            // updated the line on disk no longer matches it, so its locator has to
+            // go — and with no locator the writer serialises whatever is in memory,
+            // which has to be the whole record by then. Without this the update
+            // survives only in memory and the journal.
+            self.rehydrate(record, &inner)
         };
         update(&mut updated_record);
         updated_record.id = id;
@@ -883,6 +915,12 @@ impl TransactionStore {
         }
         inner.entries[index] = updated_record;
         inner.summaries[index] = CachedSummary::new(summary.clone());
+        // Memory is now newer than the line on disk. Leaving the locator in place
+        // makes the next persist copy that stale line byte for byte and throw this
+        // update away — silently, because the bodies it carries still look right.
+        // Symmetric with from_located_records_with_journal, which drops locators
+        // for records it replayed from the journal for the same reason.
+        inner.locators.remove(&id);
         drop(inner);
         self.publish_transaction_event(summary.clone());
         Ok(Some(summary))
@@ -2363,6 +2401,175 @@ mod tests {
         assert_eq!(
             rewritten[0].0.response.as_ref().unwrap().body_preview,
             "the response body"
+        );
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    // The test above proves the happy path: a stripped record plus its locator
+    // persists with its bodies intact, because the writer copies the original
+    // line. This one asks what happens when the record is UPDATED after it got
+    // that locator. The loader drops locators for records it replayed from the
+    // journal (from_located_records_with_journal), on the principle that memory
+    // newer than disk must not be served from disk. update_record does not.
+    #[tokio::test]
+    async fn an_update_after_persist_survives_the_next_persist() {
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-update-locator-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let mut record = TransactionRecord::http(
+            Utc::now(),
+            "GET".to_string(),
+            "https".to_string(),
+            "update.example:443".to_string(),
+            "/body".to_string(),
+            Some(200),
+            1,
+            MessageRecord {
+                headers: vec![],
+                body_preview: "the request body".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 16,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            },
+            Some(MessageRecord {
+                headers: vec![],
+                body_preview: "the response body".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 17,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            }),
+            vec![],
+            None,
+            None,
+        );
+        record.sequence = 1;
+        let record_id = record.id;
+        crate::session::write_transactions_file_for_test(&storage_dir, &[record.clone()]).unwrap();
+        let locator = crate::session::read_transactions_file_for_test(&storage_dir).unwrap()[0].1;
+
+        // The state a load leaves behind: bodies on disk, stripped in memory.
+        let mut stripped = record.clone();
+        super::strip_transaction_bodies(&mut stripped);
+        let store = TransactionStore::from_records_with_journal_and_event_sequence(
+            vec![stripped],
+            storage_dir.join("transactions.journal"),
+            None,
+            0,
+        );
+        store.set_body_locator_for_test(record_id, locator).await;
+
+        // Something the proxy does routinely: finish a record after it was first
+        // written. src/proxy.rs calls update_record/update_record_durable here.
+        store
+            .update_record(record_id, |record| {
+                record.duration_ms = 250;
+                record.notes = vec!["SSL passthrough: 10 bytes sent".to_string()];
+            })
+            .await
+            .unwrap();
+
+        let persisted = store.snapshot_for_persistence(None).await.unwrap();
+        assert_eq!(persisted.len(), 1);
+
+        crate::session::rewrite_transactions_file_for_test(&storage_dir, &persisted).unwrap();
+        let rewritten = crate::session::read_transactions_file_for_test(&storage_dir).unwrap();
+        assert_eq!(rewritten.len(), 1);
+
+        // The bodies still have to be there - that is what the locator is for.
+        assert_eq!(rewritten[0].0.request.body_preview, "the request body");
+        assert_eq!(
+            rewritten[0].0.response.as_ref().unwrap().body_preview,
+            "the response body"
+        );
+        // And so does the update.
+        assert_eq!(
+            rewritten[0].0.notes,
+            vec!["SSL passthrough: 10 bytes sent".to_string()],
+            "an update made after the record got a locator must reach the new file"
+        );
+        assert_eq!(rewritten[0].0.duration_ms, 250);
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    // The fix above covers one persist. This asks whether it holds across a
+    // restart: the loader keeps the locator for a record it replayed from an
+    // Update journal entry (only Insert ids reach replayed_transaction_ids), so
+    // the stale line could be copied again on the next persist.
+    #[tokio::test]
+    async fn an_update_replayed_from_the_journal_still_reaches_the_next_file() {
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-update-reload-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let mut record = TransactionRecord::http(
+            Utc::now(),
+            "GET".to_string(),
+            "https".to_string(),
+            "reload.example:443".to_string(),
+            "/body".to_string(),
+            Some(200),
+            1,
+            MessageRecord {
+                headers: vec![],
+                body_preview: "the request body".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 16,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            },
+            Some(MessageRecord {
+                headers: vec![],
+                body_preview: "the response body".to_string(),
+                body_encoding: BodyEncoding::Utf8,
+                body_size: 17,
+                decoded_body_size: None,
+                preview_truncated: false,
+                content_type: None,
+                content_decoded: false,
+            }),
+            vec![],
+            None,
+            None,
+        );
+        record.sequence = 1;
+        let record_id = record.id;
+        crate::session::write_transactions_file_for_test(&storage_dir, &[record.clone()]).unwrap();
+        let locator = crate::session::read_transactions_file_for_test(&storage_dir).unwrap()[0].1;
+
+        // A second load, through the real loader: the record came back from an
+        // Update entry in the journal, so it is whole in memory and carries the
+        // note, while the locator still points at the line written before it.
+        let mut updated = record.clone();
+        updated.notes = vec!["replayed from the journal".to_string()];
+        let mut locators = std::collections::HashMap::new();
+        locators.insert(record_id, locator);
+        let store = TransactionStore::from_located_records_with_journal(
+            vec![updated],
+            locators,
+            // Only Insert ids land here; an Update-replayed record does not.
+            &std::collections::HashSet::new(),
+            storage_dir.join("transactions.journal"),
+            0,
+        );
+
+        let persisted = store.snapshot_for_persistence(None).await.unwrap();
+        crate::session::rewrite_transactions_file_for_test(&storage_dir, &persisted).unwrap();
+        let rewritten = crate::session::read_transactions_file_for_test(&storage_dir).unwrap();
+
+        assert_eq!(rewritten[0].0.request.body_preview, "the request body");
+        assert_eq!(
+            rewritten[0].0.notes,
+            vec!["replayed from the journal".to_string()],
+            "an update restored from the journal must reach the new file too"
         );
 
         let _ = std::fs::remove_dir_all(storage_dir);
