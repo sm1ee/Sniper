@@ -17,12 +17,19 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --release
       - run: python tests/runtime_smoke.py
+      - run: python tests/proxy_chain_smoke.py
       - name: Build portable package
         shell: pwsh
         run: ./packaging/windows/make-zip.ps1
+      - name: Install setup compiler
+        run: choco install innosetup --no-progress -y
+      - name: Build setup installer
+        shell: pwsh
+        run: ./packaging/windows/make-setup.ps1 -SkipBuild -BinaryDirectory target/x86_64-pc-windows-msvc/release
       - uses: actions/upload-artifact@v4
         with:
           name: sniper-windows-x64
           path: |
             dist/*.zip
+            dist/*-setup.exe
             dist/*.sha256

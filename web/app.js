@@ -11379,6 +11379,12 @@ function renderProxySettings() {
   }
 
   const startup = state.settings.startup;
+  const chain = state.runtime.upstream_proxy || {};
+  document.getElementById("proxyChainEnabled").checked = Boolean(chain.enabled);
+  for (const [id, key] of [["proxyChainUrl", "url"], ["proxyChainUsername", "username"], ["proxyChainPassword", "password"]]) {
+    const input = document.getElementById(id);
+    if (document.activeElement !== input) input.value = chain[key] || "";
+  }
   els.proxySettingIntercept.checked = Boolean(state.runtime.intercept_enabled);
   els.proxySettingWebsocketCapture.checked = Boolean(state.runtime.websocket_capture_enabled);
   els.proxySettingUpstreamInsecure.checked = state.runtime.upstream_insecure !== false;
@@ -13908,6 +13914,12 @@ async function saveProxySettings() {
     intercept_enabled: els.proxySettingIntercept.checked,
     websocket_capture_enabled: els.proxySettingWebsocketCapture.checked,
     upstream_insecure: els.proxySettingUpstreamInsecure.checked,
+    upstream_proxy: {
+      enabled: document.getElementById("proxyChainEnabled").checked,
+      url: document.getElementById("proxyChainUrl").value.trim(),
+      username: document.getElementById("proxyChainUsername").value,
+      password: document.getElementById("proxyChainPassword").value,
+    },
     scope_patterns: scopePatterns,
     passthrough_hosts: passthroughHosts,
     oast_enabled: document.getElementById("proxySettingOastEnabled")?.checked ?? false,

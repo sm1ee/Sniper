@@ -40,7 +40,7 @@ use reqwest::{redirect::Policy, Client};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
-    connect_async_tls_with_config,
+    client_async_tls_with_config,
     tungstenite::{
         client::IntoClientRequest,
         handshake::derive_accept_key,
@@ -551,6 +551,7 @@ pub async fn try_send_replay_request_for_session(
         .map_err(ReplaySendError::without_record)?;
     let client = build_replay_client(
         upstream_insecure,
+        &session.runtime.upstream_proxy().await,
         &request,
         target.as_ref(),
         requested_http_version,
@@ -617,13 +618,18 @@ pub async fn try_send_replay_request_for_session(
     Ok(record)
 }
 
-fn build_client(upstream_insecure: bool) -> ProxyClient {
-    Client::builder()
+fn build_client(
+    upstream_insecure: bool,
+    proxy: &crate::upstream_proxy::UpstreamProxy,
+) -> Result<ProxyClient> {
+    proxy
+        .apply(Client::builder())?
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure)
+        .connect_timeout(REPLAY_CONNECT_TIMEOUT)
         .http1_only()
         .build()
-        .expect("failed to build upstream HTTP client")
+        .context("failed to build upstream HTTP client")
 }
 
 fn parse_replay_http_version(value: Option<&str>) -> Result<Option<Version>> {
@@ -640,11 +646,13 @@ fn parse_replay_http_version(value: Option<&str>) -> Result<Option<Version>> {
 
 async fn build_replay_client(
     upstream_insecure: bool,
+    proxy: &crate::upstream_proxy::UpstreamProxy,
     request: &EditableRequest,
     target: Option<&RequestTargetOverride>,
     http_version: Option<Version>,
 ) -> Result<ProxyClient> {
-    let mut builder = Client::builder()
+    let mut builder = proxy
+        .apply(Client::builder())?
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure)
         .timeout(REPLAY_REQUEST_TIMEOUT)
@@ -707,6 +715,9 @@ async fn build_replay_client(
                 return builder
                     .build()
                     .context("failed to build replay HTTP client");
+            }
+            if proxy.enabled {
+                bail!("Replay destination overrides cannot be combined with an upstream proxy; edit the request destination instead");
             }
             if request_authority.host.parse::<IpAddr>().is_ok() {
                 bail!(
@@ -991,7 +1002,16 @@ async fn handle_connect(
             }
         });
     } else if session.runtime.is_passthrough(&target).await {
-        let upstream_stream = match tokio::net::TcpStream::connect(&target).await {
+        let authority = target
+            .parse::<Authority>()
+            .expect("validated CONNECT authority");
+        let upstream_stream = match session
+            .runtime
+            .upstream_proxy()
+            .await
+            .connect(authority.host(), authority.port_u16().unwrap_or(443))
+            .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 warn!(
@@ -1470,7 +1490,7 @@ fn host_belongs_to_this_machine(host: &str, bound_ip: IpAddr) -> bool {
 /// the proxy forward the request to itself and spin in a tight loop until the
 /// process exhausts sockets. Port must match the listener; only then is the
 /// (potentially costly) host check performed.
-fn request_targets_own_listener(uri: &Uri, proxy_addr: SocketAddr) -> bool {
+pub(crate) fn request_targets_own_listener(uri: &Uri, proxy_addr: SocketAddr) -> bool {
     let Some(authority) = uri.authority() else {
         return false;
     };
@@ -2559,7 +2579,19 @@ async fn forward_http_request(
     // request, so its capture is not the true original once intercept changed it.
     let original_request_capture = intercept_original.or(match_replace_original);
 
-    let client = build_client(session.runtime.upstream_insecure().await);
+    let client = match build_client(
+        session.runtime.upstream_insecure().await,
+        &session.runtime.upstream_proxy().await,
+    ) {
+        Ok(client) => client,
+        Err(_) => {
+            return text_response_for_method(
+                StatusCode::BAD_GATEWAY,
+                "Invalid upstream proxy configuration".to_string(),
+                &forwarded_request.method,
+            )
+        }
+    };
     if should_stream_upstream_response(session.as_ref(), &forwarded_request).await {
         return execute_streaming_http_exchange(
             state.clone(),
@@ -2711,7 +2743,19 @@ async fn forward_websocket_request(
 
     if !is_websocket_upgrade_editable(&forwarded_request) {
         let response_method = forwarded_request.method.clone();
-        let client = build_client(session.runtime.upstream_insecure().await);
+        let client = match build_client(
+            session.runtime.upstream_insecure().await,
+            &session.runtime.upstream_proxy().await,
+        ) {
+            Ok(client) => client,
+            Err(_) => {
+                return text_response_for_method(
+                    StatusCode::BAD_GATEWAY,
+                    "Invalid upstream proxy configuration".to_string(),
+                    &forwarded_request.method,
+                )
+            }
+        };
         let exchange = execute_http_exchange(
             state.clone(),
             session.clone(),
@@ -2790,7 +2834,11 @@ async fn forward_websocket_request(
         let exchange = execute_http_exchange(
             state.clone(),
             session.clone(),
-            &build_client(session.runtime.upstream_insecure().await),
+            &build_client(
+                session.runtime.upstream_insecure().await,
+                &Default::default(),
+            )
+            .expect("direct client"),
             forwarded_request,
             started_at,
             started,
@@ -2826,6 +2874,7 @@ async fn forward_websocket_request(
     let response = match connect_upstream_websocket(
         &forwarded_request,
         session.runtime.upstream_insecure().await,
+        &session.runtime.upstream_proxy().await,
     )
     .await
     {
@@ -4693,6 +4742,7 @@ enum UpstreamWebSocketConnectError {
 async fn connect_upstream_websocket(
     request: &EditableRequest,
     upstream_insecure: bool,
+    proxy: &crate::upstream_proxy::UpstreamProxy,
 ) -> std::result::Result<ConnectedWebSocket, UpstreamWebSocketConnectError> {
     let url = websocket_url(request).map_err(UpstreamWebSocketConnectError::Other)?;
     let mut upstream_request = url
@@ -4710,10 +4760,25 @@ async fn connect_upstream_websocket(
         }
     }
 
-    let (websocket, response) = match connect_async_tls_with_config(
+    let host = upstream_request
+        .uri()
+        .host()
+        .ok_or_else(|| UpstreamWebSocketConnectError::Other(anyhow!("Missing WebSocket host")))?;
+    let port = upstream_request.uri().port_u16().unwrap_or(
+        if upstream_request.uri().scheme_str() == Some("wss") {
+            443
+        } else {
+            80
+        },
+    );
+    let stream = proxy
+        .connect(host, port)
+        .await
+        .map_err(UpstreamWebSocketConnectError::Other)?;
+    let (websocket, response) = match client_async_tls_with_config(
         upstream_request,
+        stream,
         None,
-        false,
         crate::ws_tls::insecure_connector(upstream_insecure),
     )
     .await
@@ -8320,7 +8385,7 @@ mod tests {
             port: "9443".to_string(),
         };
 
-        let error = build_replay_client(false, &request, Some(&target), None)
+        let error = build_replay_client(false, &Default::default(), &request, Some(&target), None)
             .await
             .unwrap_err();
 
@@ -8336,7 +8401,7 @@ mod tests {
             port: "443".to_string(),
         };
 
-        build_replay_client(false, &request, Some(&target), None)
+        build_replay_client(false, &Default::default(), &request, Some(&target), None)
             .await
             .expect("equivalent target override should be treated as a no-op");
     }
@@ -8350,7 +8415,7 @@ mod tests {
             port: "9443".to_string(),
         };
 
-        let _error = build_replay_client(false, &request, Some(&target), None)
+        let _error = build_replay_client(false, &Default::default(), &request, Some(&target), None)
             .await
             .unwrap_err();
     }
@@ -8571,7 +8636,7 @@ mod tests {
         let exchange = execute_http_exchange(
             state.clone(),
             session,
-            &build_client(false),
+            &build_client(false, &Default::default()).unwrap(),
             request,
             Utc::now(),
             Instant::now(),

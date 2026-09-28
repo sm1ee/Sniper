@@ -12,6 +12,8 @@ const MAX_RUNTIME_TEXT_FIELD_BYTES: usize = 8 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeSettingsSnapshot {
     #[serde(default)]
+    pub upstream_proxy: crate::upstream_proxy::UpstreamProxy,
+    #[serde(default)]
     pub intercept_enabled: bool,
     #[serde(default = "default_true")]
     pub websocket_capture_enabled: bool,
@@ -71,6 +73,7 @@ fn default_upstream_insecure() -> bool {
 impl Default for RuntimeSettingsSnapshot {
     fn default() -> Self {
         Self {
+            upstream_proxy: Default::default(),
             intercept_enabled: false,
             websocket_capture_enabled: true,
             scope_patterns: Vec::new(),
@@ -89,6 +92,9 @@ impl Default for RuntimeSettingsSnapshot {
 
 impl RuntimeSettingsSnapshot {
     pub fn redacted_for_read(mut self) -> Self {
+        if !self.upstream_proxy.password.is_empty() {
+            self.upstream_proxy.password = OAST_TOKEN_REDACTION.to_string();
+        }
         if !self.oast_token.is_empty() {
             self.oast_token = OAST_TOKEN_REDACTION.to_string();
         }
@@ -129,6 +135,7 @@ impl RuntimeSettingsSnapshot {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RuntimeSettingsUpdate {
+    pub upstream_proxy: Option<crate::upstream_proxy::UpstreamProxy>,
     pub session_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub expected_active_session_id: Option<uuid::Uuid>,
@@ -180,6 +187,13 @@ impl RuntimeSettings {
         }
         let mut current = self.inner.write().await;
         let mut candidate = current.clone();
+        if let Some(mut proxy) = update.upstream_proxy {
+            if proxy.password == OAST_TOKEN_REDACTION {
+                proxy.password = candidate.upstream_proxy.password.clone();
+            }
+            proxy.validate()?;
+            candidate.upstream_proxy = proxy;
+        }
         let requested_oast_provider = update.oast_provider.clone();
         let requested_oast_token = update.oast_token.clone();
         let target_oast_provider = requested_oast_provider
@@ -274,6 +288,10 @@ impl RuntimeSettings {
 
     pub async fn upstream_insecure(&self) -> bool {
         self.inner.read().await.upstream_insecure
+    }
+
+    pub async fn upstream_proxy(&self) -> crate::upstream_proxy::UpstreamProxy {
+        self.inner.read().await.upstream_proxy.clone()
     }
 
     pub async fn intercept_scope_only(&self) -> bool {
