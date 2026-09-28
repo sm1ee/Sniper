@@ -201,6 +201,8 @@ struct CallArgs {
 
 #[derive(Subcommand, Debug)]
 enum CaptureCommand {
+    /// Read proxy chain settings, or replace them with JSON from stdin.
+    Proxy(ProxyChainArgs),
     #[command(name = "http", visible_alias = "history")]
     Http {
         #[command(subcommand)]
@@ -234,6 +236,15 @@ enum CaptureCommand {
         #[command(subcommand)]
         command: OastCommand,
     },
+}
+
+#[derive(Args, Debug)]
+struct ProxyChainArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Replace settings using {enabled, url, username, password} from stdin.
+    #[arg(long)]
+    stdin: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1603,6 +1614,13 @@ impl CaptureCommand {
             CaptureCommand::InterceptRule { command } => command.operation_name(),
             CaptureCommand::WebSocket { command } => command.operation_name(),
             CaptureCommand::AutoReplace { command } => command.operation_name(),
+            CaptureCommand::Proxy(args) => {
+                if args.stdin {
+                    "capture.proxy.configure"
+                } else {
+                    "capture.proxy.get"
+                }
+            }
             CaptureCommand::Oast { command } => command.operation_name(),
         }
     }
@@ -2208,6 +2226,24 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"limit":20})],
         ),
         op(
+            "capture.proxy.get",
+            "capture proxy",
+            "Read proxy chain settings with a masked password.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "capture.proxy.configure",
+            "capture proxy --stdin",
+            "Replace proxy chain settings from stdin JSON.",
+            Write,
+            true,
+            &[],
+            vec![json!({})],
+        ),
+        op(
             "capture.oast.status",
             "capture oast status",
             "Read OAST provider status.",
@@ -2431,6 +2467,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         ],
         "sequence.create" => &["file", "stdin", "session_id"],
         "sequence.runs" | "capture.oast.list" => &["session_id", "limit"],
+        "capture.proxy.get" | "capture.proxy.configure" => &["session_id"],
         "capture.oast.configure" => &[
             "session_id",
             "provider",
@@ -2483,6 +2520,7 @@ fn command_input_preview(command: &Command) -> Value {
             CaptureCommand::InterceptRule { command } => intercept_rule_input_preview(command),
             CaptureCommand::WebSocket { command } => websocket_input_preview(command),
             CaptureCommand::AutoReplace { command } => auto_replace_input_preview(command),
+            CaptureCommand::Proxy(args) => json!({"session_id": args.session_id}),
             CaptureCommand::Oast { command } => oast_input_preview(command),
         },
         Command::Scope { command } => match command {
@@ -2802,6 +2840,21 @@ fn capture_api_preview(command: &CaptureCommand) -> Result<Value> {
         CaptureCommand::InterceptRule { command } => Ok(intercept_rule_api_preview(command)),
         CaptureCommand::WebSocket { command } => Ok(websocket_api_preview(command)),
         CaptureCommand::AutoReplace { command } => Ok(auto_replace_api_preview(command)),
+        CaptureCommand::Proxy(args) => Ok(if args.stdin {
+            api_preview(
+                "POST",
+                "/api/runtime",
+                Some(
+                    json!({"session_id": args.session_id, "note": "proxy settings read from stdin"}),
+                ),
+            )
+        } else {
+            api_preview(
+                "GET",
+                session_query_path("/api/runtime", args.session_id),
+                None,
+            )
+        }),
         CaptureCommand::Oast { command } => Ok(oast_api_preview(command)),
     }
 }
@@ -3802,6 +3855,12 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 }),
             },
         },
+        "capture.proxy.get" | "capture.proxy.configure" => Command::Capture {
+            command: CaptureCommand::Proxy(ProxyChainArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+                stdin: operation == "capture.proxy.configure",
+            }),
+        },
         "capture.oast.configure" => {
             let enable = call_bool(operation, input, "enable")?;
             let disable = call_bool(operation, input, "disable")?;
@@ -4128,6 +4187,9 @@ fn command_uses_stdin(command: &Command) -> bool {
                     command: OastCommand::Configure(args),
                 },
         } => args.token_stdin,
+        Command::Capture {
+            command: CaptureCommand::Proxy(args),
+        } => args.stdin,
         _ => false,
     }
 }
@@ -4247,6 +4309,7 @@ async fn run(cli: Cli) -> Result<()> {
                     CaptureCommand::InterceptRule { command } => {
                         handle_intercept_rule(api, command).await
                     }
+                    CaptureCommand::Proxy(args) => handle_proxy_chain(api, args).await,
                     CaptureCommand::Oast { command } => handle_oast(api, command).await,
                 },
                 Command::Scope { command } => handle_target(api, command).await,
@@ -4309,6 +4372,24 @@ fn history_annotate_args(command: &Command) -> Option<&HistoryAnnotateArgs> {
         } => Some(args),
         _ => None,
     }
+}
+
+async fn handle_proxy_chain(api: ApiClient, args: ProxyChainArgs) -> Result<()> {
+    let runtime: Value = if args.stdin {
+        let raw = read_text_input(None, true)?;
+        let proxy: sniper::upstream_proxy::UpstreamProxy =
+            serde_json::from_str(&raw).map_err(|_| {
+                anyhow!("Expected proxy settings JSON with enabled, url, username and password")
+            })?;
+        proxy.validate()?;
+        let (session_id, expected_active_session_id) =
+            runtime_write_session_ids(&api, args.session_id).await?;
+        api.post_json("/api/runtime", &json!({"session_id":session_id, "expected_active_session_id":expected_active_session_id, "upstream_proxy":proxy})).await?
+    } else {
+        api.get_json(&session_query_path("/api/runtime", args.session_id))
+            .await?
+    };
+    print_json_with_session(&runtime["upstream_proxy"], args.session_id)
 }
 
 async fn handle_session(api: ApiClient, command: SessionCommand) -> Result<()> {

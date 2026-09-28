@@ -766,6 +766,26 @@
                     <input id="proxySettingUpstreamInsecure" type="checkbox" />
                     <span>Accept invalid upstream TLS certificates</span>
                   </label>
+                  <div class="settings-divider"></div>
+                  <label class="settings-toggle">
+                    <input id="proxyChainEnabled" type="checkbox" />
+                    <span>Enable proxy chain</span>
+                  </label>
+                  <label class="settings-field">
+                    <span>Upstream proxy address</span>
+                    <input id="proxyChainUrl" type="text" placeholder="http://127.0.0.1:8081 or socks5h://127.0.0.1:1080" autocomplete="off" spellcheck="false" />
+                    <small>Forward captured traffic and Replay through an HTTP or SOCKS5 proxy. SOCKS5 resolves destination names remotely. Connection failures do not fall back to a direct connection.</small>
+                  </label>
+                  <label class="settings-field">
+                    <span>Proxy username (optional)</span>
+                    <input id="proxyChainUsername" type="text" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <label class="settings-field">
+                    <span>Proxy password</span>
+                    <input id="proxyChainPassword" type="password" autocomplete="new-password" />
+                    <small>A masked value keeps the saved password. Empty the field to remove it. Credentials are stored with this session on disk.</small>
+                  </label>
+                  <div class="settings-divider"></div>
                   <label class="settings-field">
                     <span>Scope patterns</span>
                     <textarea id="proxySettingScopePatterns" rows="6" placeholder="*.example.com&#10;api.example.com"></textarea>

@@ -13,7 +13,7 @@ use http::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::{
-    connect_async_tls_with_config,
+    client_async_tls_with_config,
     tungstenite::{client::IntoClientRequest, protocol::Message as WsMessage},
 };
 use tracing::warn;
@@ -334,6 +334,7 @@ impl WsReplayStore {
         url: &str,
         extra_headers: Vec<(String, String)>,
         upstream_insecure: bool,
+        proxy: crate::upstream_proxy::UpstreamProxy,
     ) -> Result<()> {
         // Build the tungstenite request with custom headers
         let mut request = url.into_client_request().context("invalid WebSocket URL")?;
@@ -376,14 +377,28 @@ impl WsReplayStore {
         let connections = Arc::clone(&self.connections);
         tokio::spawn(Abortable::new(
             async move {
-                match connect_async_tls_with_config(
-                    request,
-                    None,
-                    false,
-                    crate::ws_tls::insecure_connector(upstream_insecure),
-                )
-                .await
-                {
+                let result = async {
+                    let host = request.uri().host().context("Missing WebSocket host")?;
+                    let port = request.uri().port_u16().unwrap_or(
+                        if request.uri().scheme_str() == Some("wss") {
+                            443
+                        } else {
+                            80
+                        },
+                    );
+                    let stream = proxy.connect(host, port).await?;
+                    Ok::<_, anyhow::Error>(
+                        client_async_tls_with_config(
+                            request,
+                            stream,
+                            None,
+                            crate::ws_tls::insecure_connector(upstream_insecure),
+                        )
+                        .await?,
+                    )
+                }
+                .await;
+                match result {
                     Ok((mut ws_stream, _response)) => {
                         if !connection_is_current(&connections, id, &conn).await {
                             let _ = ws_stream.close(None).await;
@@ -1316,7 +1331,7 @@ mod tests {
         let owner = Uuid::new_v4();
         let url = format!("ws://{addr}/");
         store
-            .connect(id, owner, &url, Vec::new(), false)
+            .connect(id, owner, &url, Vec::new(), false, Default::default())
             .await
             .unwrap();
 
@@ -1356,7 +1371,14 @@ mod tests {
         store.connections.write().await.insert(id, previous.clone());
 
         store
-            .connect(id, owner, "ws://127.0.0.1:1/", Vec::new(), false)
+            .connect(
+                id,
+                owner,
+                "ws://127.0.0.1:1/",
+                Vec::new(),
+                false,
+                Default::default(),
+            )
             .await
             .unwrap();
 
@@ -1385,7 +1407,14 @@ mod tests {
             .insert(id, Arc::new(RwLock::new(existing)));
 
         let error = store
-            .connect(id, other_owner, "ws://127.0.0.1:1/", Vec::new(), false)
+            .connect(
+                id,
+                other_owner,
+                "ws://127.0.0.1:1/",
+                Vec::new(),
+                false,
+                Default::default(),
+            )
             .await
             .unwrap_err();
 
@@ -1418,7 +1447,14 @@ mod tests {
 
         let id = Uuid::new_v4();
         store
-            .connect(id, owner, "ws://127.0.0.1:1/", Vec::new(), false)
+            .connect(
+                id,
+                owner,
+                "ws://127.0.0.1:1/",
+                Vec::new(),
+                false,
+                Default::default(),
+            )
             .await
             .unwrap();
 
@@ -1443,7 +1479,14 @@ mod tests {
 
         let id = Uuid::new_v4();
         store
-            .connect(id, owner, "ws://127.0.0.1:1/", Vec::new(), false)
+            .connect(
+                id,
+                owner,
+                "ws://127.0.0.1:1/",
+                Vec::new(),
+                false,
+                Default::default(),
+            )
             .await
             .unwrap();
 
@@ -1474,6 +1517,7 @@ mod tests {
                 "ws://127.0.0.1:1/",
                 Vec::new(),
                 false,
+                Default::default(),
             )
             .await
             .unwrap_err();
