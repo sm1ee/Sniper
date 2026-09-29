@@ -46,7 +46,7 @@ use crate::{
     sequence::{self, SequenceDefinition},
     session::{SessionContext, SessionSummary},
     state::AppState,
-    store::{ListFilters, TransactionListPage},
+    store::{BodySearchRequest, BodySearchSides, ListFilters, TransactionListPage},
     target::{TargetHostNode, TargetPathNode},
     ui_settings::AppUiSettingsSnapshot,
     websocket::WebSocketListFilters,
@@ -420,6 +420,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             get(list_transactions).delete(clear_transactions),
         )
         .route("/api/transactions-page", get(list_transactions_page))
+        .route("/api/transactions-search", get(search_transactions))
         .route("/api/transactions/:id", get(get_transaction))
         .route(
             "/api/transactions/:id/annotations",
@@ -796,6 +797,19 @@ struct TransactionQuery {
     status_range: Option<String>,
     since: Option<String>,
     mime: Option<String>,
+}
+
+/// Read beside `TransactionQuery` from the same query string, so a search takes
+/// every history filter without a second copy of the filter parsing.
+#[derive(Debug, Default, Deserialize)]
+struct TransactionSearchQuery {
+    value: Option<String>,
+    /// Comma-separated: url, request-body, response-body, headers. All when absent.
+    sides: Option<String>,
+    case_sensitive: Option<bool>,
+    max_matches: Option<usize>,
+    byte_budget: Option<u64>,
+    context: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4526,6 +4540,89 @@ async fn list_transactions_page(
     );
     let page = session.store.list_page(&filters).await;
     Json(TransactionPageResponse::from(page)).into_response()
+}
+
+fn body_search_request(
+    query: TransactionSearchQuery,
+) -> std::result::Result<BodySearchRequest, String> {
+    const DEFAULT_MAX_MATCHES: usize = 200;
+    const MAX_MATCHES: usize = 10_000;
+    // Large enough for a working session in one call, small enough that a
+    // multi-gigabyte one comes back promptly with stopped_by = byte_budget
+    // instead of pinning a thread; the caller raises it when it needs to.
+    const DEFAULT_BYTE_BUDGET: u64 = 128 * 1024 * 1024;
+    const MAX_BYTE_BUDGET: u64 = 8 * 1024 * 1024 * 1024;
+    const DEFAULT_CONTEXT: usize = 40;
+    const MAX_CONTEXT: usize = 400;
+
+    let value = query.value.unwrap_or_default();
+    if value.is_empty() {
+        return Err("value is required".to_string());
+    }
+    let sides = match query.sides.as_deref().map(str::trim) {
+        None | Some("") => BodySearchSides::default(),
+        Some(list) => {
+            let mut sides = BodySearchSides {
+                url: false,
+                request_body: false,
+                response_body: false,
+                headers: false,
+            };
+            for side in list.split(',').map(str::trim) {
+                match side {
+                    "url" => sides.url = true,
+                    "request-body" => sides.request_body = true,
+                    "response-body" => sides.response_body = true,
+                    "headers" => sides.headers = true,
+                    other => {
+                        return Err(format!(
+                            "unknown side: {other} (expected url, request-body, response-body, headers)"
+                        ))
+                    }
+                }
+            }
+            sides
+        }
+    };
+    Ok(BodySearchRequest {
+        value,
+        sides,
+        case_sensitive: query.case_sensitive.unwrap_or(false),
+        max_matches: query
+            .max_matches
+            .unwrap_or(DEFAULT_MAX_MATCHES)
+            .clamp(1, MAX_MATCHES),
+        byte_budget: query
+            .byte_budget
+            .unwrap_or(DEFAULT_BYTE_BUDGET)
+            .clamp(1, MAX_BYTE_BUDGET),
+        context_bytes: query.context.unwrap_or(DEFAULT_CONTEXT).min(MAX_CONTEXT),
+    })
+}
+
+async fn search_transactions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TransactionQuery>,
+    Query(search): Query<TransactionSearchQuery>,
+) -> Response {
+    if let Err(error) = validate_transaction_query(&query) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
+    let request = match body_search_request(search) {
+        Ok(request) => request,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let session = match resolve_read_session_for_optional_id(&state, query.session_id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let runtime = session.runtime.snapshot().await;
+    let filters = transaction_list_filters(
+        query,
+        runtime.scope_patterns,
+        runtime.excluded_scope_patterns,
+    );
+    Json(session.store.search_bodies(&filters, &request).await).into_response()
 }
 
 async fn get_transaction(

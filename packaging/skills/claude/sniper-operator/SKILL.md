@@ -30,6 +30,7 @@ Use `sniper-cli` for all Sniper operations. Prefer `--output compact` JSON envel
 6. Treat Replay target override fields as the connection target only. The raw `Host:` header stays in the request text.
 7. For any manifest operation with `side_effect: "write"`, run `--dry-run` first and use `--yes` only after reviewing the plan.
 8. Sniper preserves captured sensitive values such as cookies and authorization headers; summarize large or sensitive JSON responses instead of pasting them in full.
+9. To find where a value appeared — a token, an id, a field name — use `capture http search --value <text>` instead of fetching records one by one. `capture http list --query` matches metadata only and returns nothing for a value that lives in a body. Treat an empty search as absence only when `complete` is `true`; otherwise `stopped_by` names the limit to raise.
 
 ## Common commands
 
@@ -44,6 +45,7 @@ sniper-cli session switch --id <uuid> --dry-run
 sniper-cli session switch --id <uuid> --yes
 sniper-cli --output compact capture http list --limit 20
 sniper-cli --output compact capture http get --id <uuid>
+sniper-cli --output compact capture http search --value <text> --side response-body
 sniper-cli capture http replay --id <uuid> --dry-run
 sniper-cli capture http replay --id <uuid> --yes
 sniper-cli capture http fuzzer --id <uuid> --dry-run

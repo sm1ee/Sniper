@@ -134,8 +134,9 @@ enum Command {
         kind: SchemaKind,
         operation: String,
     },
+    /// Example inputs for one operation, or for every operation when none is named.
     Examples {
-        operation: String,
+        operation: Option<String>,
     },
     /// Invoke an operation by canonical manifest name.
     Call(CallArgs),
@@ -284,6 +285,9 @@ struct SessionRevealArgs {
 enum HistoryCommand {
     List(HistoryListArgs),
     Get(HistoryGetArgs),
+    /// Find a literal value in URLs, headers and bodies. Says what it scanned,
+    /// so an empty result can be told apart from a search that stopped early.
+    Search(HistorySearchArgs),
     Clear(InterceptSessionArgs),
     Replay(HistoryReplayArgs),
     Fuzzer(HistoryFuzzerArgs),
@@ -294,6 +298,8 @@ enum HistoryCommand {
 struct HistoryListArgs {
     #[arg(long)]
     session_id: Option<Uuid>,
+    /// Filter by request metadata: method, host, path, status, MIME or id.
+    /// Headers and bodies are not searched — use `capture http search`.
     #[arg(long)]
     query: Option<String>,
     #[arg(long)]
@@ -330,6 +336,49 @@ struct HistoryListArgs {
     /// Sort direction for paged history output.
     #[arg(long, value_parser = ["asc", "desc"])]
     sort_direction: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+struct HistorySearchArgs {
+    /// Literal text to find. Case-insensitive unless --case-sensitive.
+    #[arg(long)]
+    value: String,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Where to look. Repeat or comma-separate. Default: all four.
+    #[arg(long, value_delimiter = ',', value_parser = ["url", "request-body", "response-body", "headers"])]
+    side: Vec<String>,
+    #[arg(long)]
+    case_sensitive: bool,
+    /// Stop after this many matches (server default 200).
+    #[arg(long, value_parser = parse_nonzero_usize)]
+    max_matches: Option<usize>,
+    /// Stop after reading this many body bytes (server default 128 MiB).
+    #[arg(long)]
+    byte_budget: Option<u64>,
+    /// Bytes of surrounding text to return either side of each match (default 40).
+    #[arg(long)]
+    context: Option<usize>,
+    /// Narrow the records searched by request metadata, as `list --query` does.
+    #[arg(long)]
+    query: Option<String>,
+    #[arg(long)]
+    method: Option<String>,
+    /// Filter by host (substring match)
+    #[arg(long)]
+    host: Option<String>,
+    /// Filter by exact HTTP status code
+    #[arg(long, value_parser = clap::value_parser!(u16).range(100..=599))]
+    status: Option<u16>,
+    /// Filter by status range, e.g. "4xx" or "200-299"
+    #[arg(long)]
+    status_range: Option<String>,
+    /// Filter by time, e.g. "2024-01-01" or "1h" (relative)
+    #[arg(long)]
+    since: Option<String>,
+    /// Filter by response MIME type (substring match), e.g. "json"
+    #[arg(long)]
+    mime: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1631,6 +1680,7 @@ impl HistoryCommand {
         match self {
             HistoryCommand::List(_) => "capture.http.list",
             HistoryCommand::Get(_) => "capture.http.get",
+            HistoryCommand::Search(_) => "capture.http.search",
             HistoryCommand::Clear(_) => "capture.http.clear",
             HistoryCommand::Replay(_) => "capture.http.replay",
             HistoryCommand::Fuzzer(_) => "capture.http.fuzzer",
@@ -1864,6 +1914,15 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &["id"],
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "capture.http.search",
+            "capture http search --value <text>",
+            "Find a literal value in captured URLs, headers and bodies. Check `complete` before treating no matches as absence.",
+            Read,
+            false,
+            &["value"],
+            vec![json!({"value":"access_token","side":["response-body"]})],
         ),
         op(
             "capture.http.replay",
@@ -2375,6 +2434,22 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "sort_direction",
         ],
         "capture.http.get" => &["id", "session_id"],
+        "capture.http.search" => &[
+            "value",
+            "session_id",
+            "side",
+            "case_sensitive",
+            "max_matches",
+            "byte_budget",
+            "context",
+            "query",
+            "method",
+            "host",
+            "status",
+            "status_range",
+            "since",
+            "mime",
+        ],
         "capture.http.replay" | "capture.http.fuzzer" => {
             &["id", "session_id", "scheme", "host", "port"]
         }
@@ -2572,6 +2647,22 @@ fn history_input_preview(command: &HistoryCommand) -> Value {
             "sort_direction": args.sort_direction,
         }),
         HistoryCommand::Get(args) => json!({ "id": args.id, "session_id": args.session_id }),
+        HistoryCommand::Search(args) => json!({
+            "value": args.value,
+            "session_id": args.session_id,
+            "side": args.side,
+            "case_sensitive": args.case_sensitive,
+            "max_matches": args.max_matches,
+            "byte_budget": args.byte_budget,
+            "context": args.context,
+            "query": args.query,
+            "method": args.method,
+            "host": args.host,
+            "status": args.status,
+            "status_range": args.status_range,
+            "since": args.since,
+            "mime": args.mime,
+        }),
         HistoryCommand::Replay(args) => json!({
             "id": args.id,
             "session_id": args.session_id,
@@ -2874,6 +2965,9 @@ fn history_api_preview(command: &HistoryCommand) -> Result<Value> {
             transaction_detail_path(args.id, args.session_id),
             None,
         ),
+        HistoryCommand::Search(args) => {
+            api_preview("GET", history_search_path(args.session_id, args), None)
+        }
         HistoryCommand::Replay(_) | HistoryCommand::Fuzzer(_) => api_preview(
             "POST",
             "/api/workspace-state",
@@ -3233,7 +3327,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             operation: call_required(operation, input, "operation")?,
         },
         "examples" => Command::Examples {
-            operation: call_required(operation, input, "operation")?,
+            operation: call_optional(operation, input, "operation")?,
         },
         "skills.install" => Command::Skills {
             command: SkillsCommand::Install(SkillsInstallArgs {
@@ -3324,6 +3418,26 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 command: HistoryCommand::Get(HistoryGetArgs {
                     id: call_required(operation, input, "id")?,
                     session_id: call_optional(operation, input, "session_id")?,
+                }),
+            },
+        },
+        "capture.http.search" => Command::Capture {
+            command: CaptureCommand::Http {
+                command: HistoryCommand::Search(HistorySearchArgs {
+                    value: call_required(operation, input, "value")?,
+                    session_id: call_optional(operation, input, "session_id")?,
+                    side: call_optional(operation, input, "side")?.unwrap_or_default(),
+                    case_sensitive: call_bool(operation, input, "case_sensitive")?,
+                    max_matches: call_optional_nonzero_usize(operation, input, "max_matches")?,
+                    byte_budget: call_optional(operation, input, "byte_budget")?,
+                    context: call_optional(operation, input, "context")?,
+                    query: call_optional(operation, input, "query")?,
+                    method: call_optional(operation, input, "method")?,
+                    host: call_optional(operation, input, "host")?,
+                    status: call_optional_http_status(operation, input, "status")?,
+                    status_range: call_optional(operation, input, "status_range")?,
+                    since: call_optional(operation, input, "since")?,
+                    mime: call_optional(operation, input, "mime")?,
                 }),
             },
         },
@@ -4278,7 +4392,9 @@ async fn run(cli: Cli) -> Result<()> {
                 "schema": schema,
             }))
         }
-        Command::Examples { operation } => {
+        Command::Examples {
+            operation: Some(operation),
+        } => {
             let spec = operation_spec(&operation)
                 .ok_or_else(|| anyhow!("unknown operation `{operation}`"))?;
             print_json(&json!({
@@ -4286,6 +4402,20 @@ async fn run(cli: Cli) -> Result<()> {
                 "examples": spec.examples,
             }))
         }
+        // Bare `examples` is how an agent asks "what can I do"; an error there
+        // costs a round trip for no information.
+        Command::Examples { operation: None } => print_json(
+            &manifest_operations()
+                .into_iter()
+                .map(|spec| {
+                    json!({
+                        "operation": spec.operation,
+                        "command": spec.command,
+                        "examples": spec.examples,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
         Command::Skills {
             command: SkillsCommand::Install(args),
         } => {
@@ -4536,6 +4666,16 @@ async fn handle_history(api: ApiClient, command: HistoryCommand) -> Result<()> {
                 .get_json(&transaction_detail_path(args.id, session_id))
                 .await?;
             print_json(&record)
+        }
+        HistoryCommand::Search(args) => {
+            let session_id = match args.session_id {
+                Some(session_id) => Some(session_id),
+                None => active_session_id(&api).await?,
+            };
+            let result: Value = api
+                .get_json(&history_search_path(session_id, &args))
+                .await?;
+            print_json(&result)
         }
         HistoryCommand::Replay(args) => {
             let (session_id, tab) = open_replay_tab(
@@ -5944,6 +6084,38 @@ fn transaction_detail_path(transaction_id: Uuid, session_id: Option<Uuid>) -> St
         }
         None => format!("/api/transactions/{transaction_id}"),
     }
+}
+
+fn history_search_path(session_id: Option<Uuid>, args: &HistorySearchArgs) -> String {
+    let mut params = vec![("value".to_string(), args.value.clone())];
+    let mut push = |key: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+            params.push((key.to_string(), value));
+        }
+    };
+    push("session_id", session_id.map(|id| id.to_string()));
+    push("sides", Some(args.side.join(",")));
+    push(
+        "case_sensitive",
+        args.case_sensitive.then(|| "true".to_string()),
+    );
+    push(
+        "max_matches",
+        args.max_matches.map(|value| value.to_string()),
+    );
+    push(
+        "byte_budget",
+        args.byte_budget.map(|value| value.to_string()),
+    );
+    push("context", args.context.map(|value| value.to_string()));
+    push("q", args.query.clone());
+    push("method", args.method.clone());
+    push("host", args.host.clone());
+    push("status", args.status.map(|value| value.to_string()));
+    push("status_range", args.status_range.clone());
+    push("since", args.since.clone());
+    push("mime", args.mime.clone());
+    format!("/api/transactions-search?{}", encode_query(params))
 }
 
 fn history_list_path(session_id: Option<Uuid>, args: &HistoryListArgs) -> Result<String> {
@@ -8277,8 +8449,8 @@ mod tests {
         default_editable_request, discover_api_base_url, discover_api_base_url_from_data_dir,
         dry_run_command, ensure_http_replay_tab, explicit_or_active_session_id,
         failed_record_output, fuzzer_active_target_for_request,
-        fuzzer_target_request_authority_for_request, history_list_path, install_skills,
-        json_value_with_session_and_workspace_save_error, manifest_operations,
+        fuzzer_target_request_authority_for_request, history_list_path, history_search_path,
+        install_skills, json_value_with_session_and_workspace_save_error, manifest_operations,
         next_replay_tab_sequence, normalize_api_base_url, normalize_replay_port,
         normalize_target_inputs, oast_fields_for_output, operation_spec,
         parse_editable_raw_request, parse_editable_raw_request_bytes_with_version,
@@ -8293,11 +8465,12 @@ mod tests {
         transaction_detail_path, validate_command_preflight, websocket_detail_path,
         websocket_list_path, workspace_conflict_message, workspace_state_conflict_detail,
         CaptureCommand, Cli, CliSideEffect, Command, FuzzerCommand, HistoryCommand,
-        HistoryListArgs, HistoryListResponse, InterceptRuleCommand, OastCommand, OastConfigureArgs,
-        OutputFormat, ReplayCommand, RuntimeUpdatePayload, SequenceCommand, SequenceCreateInput,
-        SessionCommand, SkillsInstallArgs, TargetCommand, WebSocketListArgs, WebSocketListResponse,
-        CLI_REPEATER_HISTORY_LIMIT, CLI_WORKSPACE_CLIENT_ID, MAX_CLI_INPUT_BYTES,
-        MAX_OAST_POLLING_INTERVAL_SECS, SNIPER_API_PROBE_RETRY_DELAYS, SNIPER_DATA_DIR_ENV,
+        HistoryListArgs, HistoryListResponse, HistorySearchArgs, InterceptRuleCommand, OastCommand,
+        OastConfigureArgs, OutputFormat, ReplayCommand, RuntimeUpdatePayload, SequenceCommand,
+        SequenceCreateInput, SessionCommand, SkillsInstallArgs, TargetCommand, WebSocketListArgs,
+        WebSocketListResponse, CLI_REPEATER_HISTORY_LIMIT, CLI_WORKSPACE_CLIENT_ID,
+        MAX_CLI_INPUT_BYTES, MAX_OAST_POLLING_INTERVAL_SECS, SNIPER_API_PROBE_RETRY_DELAYS,
+        SNIPER_DATA_DIR_ENV,
     };
     #[cfg(unix)]
     use super::{
@@ -10831,6 +11004,64 @@ mod tests {
             serde_json::from_value(serde_json::json!([item])).unwrap();
         let legacy_output = legacy.into_cli_output(false);
         assert_eq!(legacy_output[0]["sequence"], 42);
+    }
+
+    // The search value goes to the server verbatim — untrimmed, since leading
+    // whitespace can be part of what was sent — and --side accepts both repeats
+    // and commas, the two ways an agent is likely to spell a list.
+    #[test]
+    fn history_search_builds_its_query_from_every_flag() {
+        let parsed = Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "http",
+            "search",
+            "--value",
+            " order_id&x",
+            "--side",
+            "request-body,headers",
+            "--side",
+            "url",
+            "--case-sensitive",
+            "--host",
+            "shop.example",
+        ])
+        .unwrap();
+        let Command::Capture {
+            command:
+                CaptureCommand::Http {
+                    command: HistoryCommand::Search(args),
+                },
+        } = parsed.command
+        else {
+            panic!("expected capture http search");
+        };
+        assert_eq!(args.side, vec!["request-body", "headers", "url"]);
+        assert_eq!(
+            history_search_path(None, &args),
+            "/api/transactions-search?value=+order_id%26x&sides=request-body%2Cheaders%2Curl&case_sensitive=true&host=shop.example"
+        );
+
+        let minimal = HistorySearchArgs {
+            value: "token".to_string(),
+            ..HistorySearchArgs::default()
+        };
+        assert_eq!(
+            history_search_path(None, &minimal),
+            "/api/transactions-search?value=token",
+            "no --side means the server default: search everything"
+        );
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "http",
+            "search",
+            "--value",
+            "x",
+            "--side",
+            "body",
+        ])
+        .is_err());
     }
 
     #[test]

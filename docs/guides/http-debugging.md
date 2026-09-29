@@ -116,6 +116,26 @@ That returns a JSON array. Summarised, the two requests above are:
 `--status-range`, `--mime`, `--since` and `--query`, plus `--page` for
 pagination metadata.
 
+`--query` matches request metadata only — method, host, path, status, MIME.
+To find a value inside headers or bodies, search instead:
+
+```bash
+./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
+  capture http search --value A-1 --side request-body
+```
+
+```json
+{"bytes_scanned":106,"complete":true,"match_count":1,"records_considered":2,
+ "records_scanned":2,"stopped_by":null,"transactions":[{"host":"127.0.0.1:18911",
+ "id":"c7994659-…","matches":[{"context":"{\"sku\":\"A-1\"}","offset":8,
+ "side":"request-body"}],"method":"POST","path":"/api/orders","sequence":2}],
+ "unsearchable":0}
+```
+
+The result groups matches by transaction and reports `complete`. An empty
+result means the value is absent only when `complete` is `true`; otherwise
+`stopped_by` says whether `--max-matches` or `--byte-budget` ran out.
+
 ## Reading one transaction
 
 Clicking a row in the UI opens the detail panel. The CLI equivalent is:

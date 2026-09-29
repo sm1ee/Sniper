@@ -174,6 +174,7 @@ export PATH="/Applications/Sniper.app/Contents/MacOS:$PATH"
 ```bash
 sniper-cli session list
 sniper-cli --output compact capture http list --limit 10
+sniper-cli --output compact capture http search --value access_token
 sniper-cli capture http replay --id <id> --dry-run
 sniper-cli capture http replay --id <id> --yes
 sniper-cli scope set-scope --pattern '*.example.com' --dry-run
