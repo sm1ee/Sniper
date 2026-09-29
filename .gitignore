@@ -6,3 +6,6 @@
 
 # Local-only diagram source for web/architecture.svg
 docs/diagrams/
+
+# Release binaries belong on GitHub Releases, not in history
+/downloads/

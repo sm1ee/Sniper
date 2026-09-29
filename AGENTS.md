@@ -185,7 +185,7 @@ Version work happens on a branch (`release/0.2.9`), not on `main`.
 
 1. Bump `version` in `Cargo.toml`, then `cargo update -w` to sync `Cargo.lock`.
 2. Merge to `main` and push.
-3. Build the artifacts from a clean worktree at `origin/main`:
+3. Build the macOS artifacts from a clean worktree at `origin/main`:
 
 ```bash
 PATH="$HOME/.cargo/bin:$PATH" ALLOW_ADHOC_RELEASE=1 DMG_ARCH=universal \
@@ -193,7 +193,26 @@ PATH="$HOME/.cargo/bin:$PATH" ALLOW_ADHOC_RELEASE=1 DMG_ARCH=universal \
 ```
 
 4. Tag `vX.Y.Z` (lightweight, at the released commit), push the tag, and publish
-   with `gh release create` attaching `dist/Sniper-X.Y.Z-universal.dmg`.
+   with `gh release create` attaching `dist/Sniper-X.Y.Z-universal.dmg` and its
+   `.sha256`.
+5. The Windows archive attaches itself. Pushing the tag runs
+   `.github/workflows/windows.yml`, which builds the package and waits up to
+   fifteen minutes for the release to appear before uploading the `.zip` and its
+   `.sha256`. Create the release in step 4 within that window; if the job gives
+   up, download `dist/` from the run and attach it by hand.
+
+Both artifacts ship a `.sha256` in the `<hash>  <filename>` form, so a
+downloader can check either with `shasum -a 256 -c`. Releases are ad-hoc signed,
+which makes that checksum the only integrity signal a downloader gets — do not
+drop it.
+
+`packaging/windows/release-windows.ps1` is the Windows counterpart of
+`release-macos.sh`: same version, worktree, `origin/main` and duplicate-tag
+gates, then `make-zip.ps1`, then it verifies the recorded checksum and that all
+three executables are in the archive. Run it on a Windows machine to produce a
+publishable archive outside CI. CI runs it on every push with
+`ALLOW_ADHOC_RELEASE=1`, so the release path is exercised continuously rather
+than only at release time.
 
 Two constraints worth knowing:
 

@@ -38,8 +38,9 @@ If you've used an intercepting proxy before, the workflow will be familiar. Snip
 
 ### Windows
 
-Download the [Windows x64 setup executable](downloads/Sniper-0.2.10-windows-x64-setup.exe)
-and its [SHA-256 checksum](downloads/Sniper-0.2.10-windows-x64-setup.exe.sha256).
+**Download the latest `-setup.exe`** from [Releases](https://github.com/sm1ee/Sniper/releases/latest) and run it.
+Each installer ships with a `.sha256` beside it; check it with `Get-FileHash` before running,
+since releases are not yet code-signed.
 
 Run the Windows setup executable built by `packaging/windows/make-setup.ps1`, or extract a Windows ZIP built by `packaging/windows/make-zip.ps1` and open `sniper-desktop.exe`. Building from source requires the MSVC Rust toolchain. See [Windows setup and packaging](packaging/windows/README.md) for WebView2/runtime prerequisites, HTTPS certificates, CLI usage, and isolated testing. Windows x64 is the first port; Linux validation is still pending.
 

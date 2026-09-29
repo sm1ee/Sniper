@@ -978,6 +978,12 @@ mod tests {
         }
     }
 
+    fn fixed_time(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("test timestamp is valid RFC 3339")
+            .with_timezone(&Utc)
+    }
+
     fn session(frames: Vec<WebSocketFrameRecord>) -> WebSocketSessionRecord {
         WebSocketSessionRecord {
             id: Uuid::new_v4(),
@@ -1079,17 +1085,22 @@ mod tests {
 
     #[tokio::test]
     async fn list_page_filtered_searches_sorts_and_offsets_after_filtering() {
+        // Fixed timestamps, not Utc::now(): the search haystack includes
+        // started_at.to_rfc3339(), so a clock that happened to read .500 made the
+        // live session match the "500" query below and the filter count came back
+        // as 2. It fell over on Windows CI first, where the coarser clock lands on
+        // round fractions far more often, but every platform was rolling the dice.
         let mut live = session(vec![frame(1)]);
         live.host = "zeta.example.test".to_string();
         live.path = "/chat".to_string();
-        live.started_at = Utc::now();
+        live.started_at = fixed_time("2026-01-02T03:04:05.123Z");
 
         let mut closed = closed_session(vec![frame(1), frame(2)]);
         closed.host = "api.example.test".to_string();
         closed.path = "/socket".to_string();
         closed.status = Some(500);
         closed.duration_ms = Some(12);
-        closed.started_at = Utc::now();
+        closed.started_at = fixed_time("2026-01-02T03:04:06.789Z");
 
         let store = WebSocketStore::from_sessions(10, 10, vec![live, closed]);
 
