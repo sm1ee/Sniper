@@ -38,7 +38,10 @@ If you've used an intercepting proxy before, the workflow will be familiar. Snip
 
 ### Windows
 
-Build from source with the MSVC Rust toolchain and Microsoft Edge WebView2 Runtime, or extract a Windows ZIP built by `packaging/windows/make-zip.ps1` and open `sniper-desktop.exe`. See [Windows setup and packaging](packaging/windows/README.md) for prerequisites, HTTPS certificates, CLI usage, and isolated testing. Windows x64 is the first port; Linux validation is still pending.
+Download the [Windows x64 setup executable](downloads/Sniper-0.2.10-windows-x64-setup.exe)
+and its [SHA-256 checksum](downloads/Sniper-0.2.10-windows-x64-setup.exe.sha256).
+
+Run the Windows setup executable built by `packaging/windows/make-setup.ps1`, or extract a Windows ZIP built by `packaging/windows/make-zip.ps1` and open `sniper-desktop.exe`. Building from source requires the MSVC Rust toolchain. See [Windows setup and packaging](packaging/windows/README.md) for WebView2/runtime prerequisites, HTTPS certificates, CLI usage, and isolated testing. Windows x64 is the first port; Linux validation is still pending.
 
 ### macOS
 
@@ -54,7 +57,7 @@ cargo run --bin sniper-desktop
 
 | Category | What you get |
 |---|---|
-| **Proxy** | HTTP forwarding, HTTPS MITM, persistent root CA, `https://sniper` cert portal |
+| **Proxy** | HTTP forwarding, HTTPS MITM, authenticated HTTP/SOCKS5 proxy chaining, persistent root CA, `https://sniper` cert portal |
 | **Capture** | HTTP history, WebSocket sessions, intercept queue, match & replace rules |
 | **Findings** | Passive vulnerability scanner — sensitive data, CORS, missing headers, JWT issues |
 | **Replay** | Modify and resend any captured request |
@@ -126,6 +129,32 @@ Session → Scope → Capture → Replay → Fuzz
 - **Replay** — resend with modifications, override host/port
 - **Fuzzer** — insert markers, run payload lists
 - **Tools** — decode/encode/hash/JWT in one place
+
+## Proxy chain
+
+In **Capture → Settings**, enable **Proxy chain** and enter an upstream proxy
+address (`http://127.0.0.1:8081` or `socks5h://127.0.0.1:1080`). Optional username
+and password fields support HTTP Basic authentication and SOCKS5 authentication.
+`socks5://` is also accepted and resolves destination names remotely, like
+`socks5h://`. This configures an outbound chain; Sniper's incoming listener
+continues to accept HTTP proxy requests and CONNECT, not SOCKS client requests.
+
+The chain applies to captured HTTP/HTTPS traffic, TLS passthrough, WebSockets,
+Replay, and HTTP requests sent by Fuzzer/Sequence. Chain failures never fall
+back to direct connections. Existing WebSocket connections keep their current
+route until reconnected. Replay's separate connection-target override cannot
+be combined with a chain; edit the request destination instead.
+
+Settings belong to each session and persist across restart. Passwords are
+masked in API responses and stored in the session files on disk. Leaving the
+masked value unchanged preserves the saved password; clearing it removes the
+password. Environment proxy variables do not override this explicit setting.
+
+Automation can read settings with `sniper-cli capture proxy`. To replace them,
+pipe a JSON object with `enabled`, `url`, `username`, and `password` into
+`sniper-cli capture proxy --stdin --yes`; `--dry-run` previews the operation
+without consuming credentials. The manifest operations are `capture.proxy.get`
+and `capture.proxy.configure` (the latter reads settings from stdin).
 
 ## CLI
 

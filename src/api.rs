@@ -3817,6 +3817,29 @@ async fn update_runtime_settings(
     State(state): State<Arc<AppState>>,
     Json(update): Json<RuntimeSettingsUpdate>,
 ) -> Response {
+    if let Some(proxy) = &update.upstream_proxy {
+        if let Err(error) = proxy.validate() {
+            return (StatusCode::BAD_REQUEST, error.to_string()).into_response();
+        }
+        if proxy.enabled {
+            if let Ok(uri) = url::Url::parse(&proxy.url)
+                .expect("validated proxy address")
+                .as_str()
+                .parse::<http::Uri>()
+            {
+                if crate::proxy::request_targets_own_listener(
+                    &uri,
+                    state.get_active_proxy_addr().await,
+                ) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "Upstream proxy cannot be Sniper's own listener",
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     let target_session_id = update.session_id;
     let expected_active_session_id = update.expected_active_session_id;
     if let Some(response) = expected_active_session_conflict_response(
@@ -5845,6 +5868,7 @@ async fn ws_replay_connect(
             &url,
             extra_headers,
             upstream_insecure,
+            session.runtime.upstream_proxy().await,
         )
         .await
     {
