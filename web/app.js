@@ -705,6 +705,7 @@ const els = {
   eventLogStatus: document.getElementById("eventLogStatus"),
   displaySettingsModal: document.getElementById("displaySettingsModal"),
   openDisplaySettingsButton: document.getElementById("openDisplaySettingsButton"),
+  openBrowserButton: document.getElementById("openBrowserButton"),
   closeDisplaySettingsButton: document.getElementById("closeDisplaySettingsButton"),
   applyDisplaySettingsButton: document.getElementById("applyDisplaySettingsButton"),
   resetDisplaySettingsButton: document.getElementById("resetDisplaySettingsButton"),
@@ -1535,6 +1536,7 @@ function bindEvents() {
   });
 
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
+  onClickWithProgress(els.openBrowserButton, openSniperBrowser);
   els.openUpdateButton.addEventListener("click", performSelfUpdate);
   if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
@@ -14268,6 +14270,39 @@ function validateOastServerUrlForSettings(value) {
     throw new Error("OAST server URL must not include a path, query, or fragment.");
   }
   return serverUrl;
+}
+
+// The server chooses the browser and decides whether one can open at all (none
+// installed, proxy offline, already open), and its message says which. All this
+// has to do is surface that message rather than guess at a cause. The window opens
+// without a DevTools port: an agent attaches through `sniper-cli`, where asking for
+// one is an explicit choice.
+async function openSniperBrowser() {
+  try {
+    const response = await fetch("/api/browser/launch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    await requireOkResponse(response, "Could not open a browser.");
+    const launched = await response.json();
+    // A 200 is not proof a window appeared: a browser that ends at once still
+    // comes back as success with a warning saying why, and that warning is the
+    // only place the reason is.
+    if (Array.isArray(launched.warnings) && launched.warnings.length) {
+      showToast(launched.warnings.join(" "), "warning", 10000);
+      return;
+    }
+    showToast(
+      launched.reused
+        ? `Opened another ${launched.browser} window through Sniper`
+        : `Opened ${launched.browser} through Sniper`,
+      "success",
+      3000,
+    );
+  } catch (error) {
+    showToast(error?.message || "Could not open a browser.", "error", 6000);
+  }
 }
 
 async function requireOkResponse(response, fallbackMessage) {

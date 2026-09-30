@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod api;
+pub mod browser;
 pub mod certificate;
 pub mod cli_path;
 pub mod config;

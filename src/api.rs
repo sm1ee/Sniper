@@ -35,6 +35,7 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::{
+    browser::{self, BrowserKind, LaunchContext, LaunchError, LaunchRequest},
     config::{StartupSettingsUpdate, StartupSettingsView},
     event_log::{EventLevel, EventLogEntry},
     fuzzer::{self, FuzzerAttackPayload},
@@ -396,6 +397,8 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/certificates/root.pem", get(download_root_pem))
         .route("/api/certificates/root.der", get(download_root_der))
         .route("/api/certificates/reveal", post(reveal_certificate_folder))
+        .route("/api/browser/available", get(list_available_browsers))
+        .route("/api/browser/launch", post(launch_browser))
         .route("/api/cli-path", post(install_cli_on_path))
         .route(
             "/api/match-replace",
@@ -4625,6 +4628,91 @@ async fn search_transactions(
     Json(session.store.search_bodies(&filters, &request).await).into_response()
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BrowserLaunchPayload {
+    browser: Option<String>,
+    url: Option<String>,
+    fresh: bool,
+    debug_port: bool,
+}
+
+async fn list_available_browsers() -> Response {
+    Json(browser::installed()).into_response()
+}
+
+/// Opens a browser wired to this instance. A write behind the same guards as every
+/// other `/api` write: loopback Host, no cross-site requests, and the session
+/// cookie when the UI is bound beyond loopback.
+async fn launch_browser(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BrowserLaunchPayload>,
+) -> Response {
+    let requested = payload
+        .browser
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("auto"));
+    let kind = match requested {
+        None => None,
+        Some(name) => match BrowserKind::parse(name) {
+            Some(kind) => Some(kind),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                    "unknown browser: {name} (expected auto, chrome, edge, brave, chromium or ego)"
+                ),
+                )
+                    .into_response()
+            }
+        },
+    };
+    let proxy_addr = state.get_active_proxy_addr().await;
+    // The header guards only keep web pages out; a client that sends no Origin
+    // passes them. A proxy reachable from the network will relay such a request to
+    // this API, so a DevTools port, which hands over the browser's logged-in
+    // sessions and local files, is not opened unless the proxy is loopback-only.
+    if payload.debug_port && !proxy_addr.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            "a DevTools port is only opened while the proxy listens on loopback only",
+        )
+            .into_response();
+    }
+    if !state.is_proxy_online() {
+        return (
+            StatusCode::CONFLICT,
+            "the proxy is not listening, so a browser opened now would have nowhere to send its traffic",
+        )
+            .into_response();
+    }
+    let ctx = LaunchContext::new(
+        &state.config.data_dir,
+        proxy_addr,
+        state.certificates.root_der_bytes(),
+    );
+    let request = LaunchRequest {
+        browser: kind,
+        url: payload.url,
+        fresh: payload.fresh,
+        debug_port: payload.debug_port,
+    };
+    match browser::launch(&ctx, request).await {
+        Ok(launched) => Json(launched).into_response(),
+        Err(error) => {
+            let status = match error {
+                LaunchError::NotInstalled(_) => StatusCode::NOT_FOUND,
+                LaunchError::BadRequest(_) => StatusCode::BAD_REQUEST,
+                LaunchError::AlreadyRunning { .. } => StatusCode::CONFLICT,
+                LaunchError::TooMany(_) => StatusCode::TOO_MANY_REQUESTS,
+                LaunchError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, error.to_string()).into_response()
+        }
+    }
+}
+
 async fn get_transaction(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -7930,6 +8018,152 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    async fn serve_for_test(
+        name: &str,
+    ) -> (
+        Arc<AppState>,
+        PathBuf,
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (state, data_dir) = test_state(name);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = super::router(Arc::clone(&state));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (state, data_dir, addr, server)
+    }
+
+    // Opening a browser starts a process, so it must not be reachable by a page on
+    // another origin or through a rebound hostname. Both are refused before the
+    // handler runs, so no browser is launched by this test.
+    #[tokio::test]
+    async fn browser_launch_sits_behind_the_write_guards() {
+        let (_state, data_dir, addr, server) = serve_for_test("sniper-api-browser-guards").await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://{addr}/api/browser/launch");
+
+        let cross_site = client
+            .post(&url)
+            .header("sec-fetch-site", "cross-site")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cross_site.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let rebound = client
+            .post(&url)
+            .header(reqwest::header::HOST, "attacker.test:23001")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rebound.status(), reqwest::StatusCode::FORBIDDEN);
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn browser_launch_rejects_bad_input_before_starting_anything() {
+        let (state, data_dir, addr, server) = serve_for_test("sniper-api-browser-input").await;
+        state.set_proxy_online(true);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://{addr}/api/browser/launch");
+
+        let unknown = client
+            .post(&url)
+            .json(&serde_json::json!({"browser": "firefox"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body = unknown.text().await.unwrap();
+        assert!(
+            body.contains("firefox") && body.contains("chrome"),
+            "{body}"
+        );
+
+        // A misspelled field would otherwise be ignored and the default used, which
+        // for `debug_port` means silently opening without the port.
+        let typo = client
+            .post(&url)
+            .json(&serde_json::json!({"debug": true}))
+            .send()
+            .await
+            .unwrap();
+        // Exactly 422, not "any 4xx": without the field check the typo would fall
+        // through to a launch, and a machine with no browser installed would answer
+        // 404 and pass a looser assertion.
+        assert_eq!(typo.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(typo.text().await.unwrap().contains("unknown field"));
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A proxy reachable from the network relays a request to this API from
+    // loopback, past the header guards, so the DevTools port is withheld there.
+    #[tokio::test]
+    async fn browser_launch_withholds_the_devtools_port_from_a_network_proxy() {
+        let (state, data_dir, addr, server) = serve_for_test("sniper-api-browser-devtools").await;
+        state.set_proxy_online(true);
+        state
+            .set_active_proxy_addr("0.0.0.0:18890".parse().unwrap())
+            .await;
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{addr}/api/browser/launch"))
+            .json(&serde_json::json!({"debug_port": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        assert!(response.text().await.unwrap().contains("loopback"));
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn browser_launch_refuses_when_the_proxy_is_not_listening() {
+        let (state, data_dir, addr, server) = serve_for_test("sniper-api-browser-offline").await;
+        state.set_proxy_online(false);
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{addr}/api/browser/launch"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+
+        let listing = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/api/browser/available"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(listing.status(), reqwest::StatusCode::OK);
+        assert!(listing
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+            .is_array());
+
         server.abort();
         let _ = std::fs::remove_dir_all(data_dir);
     }

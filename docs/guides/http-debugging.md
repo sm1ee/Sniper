@@ -94,6 +94,79 @@ curl -s -x http://127.0.0.1:18902 -X POST http://127.0.0.1:18911/api/orders \
 The `unset` matters: a shell that exports `no_proxy` covering loopback makes
 curl ignore `-x` and connect directly, and nothing is captured.
 
+### Or open a browser that is already wired
+
+Setting a proxy and trusting a certificate by hand is the part most likely to go
+wrong, so Sniper can open a browser that needs neither. **Browser** in the top bar
+does it from the UI; from the CLI:
+
+```bash
+./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
+  capture browser list
+```
+
+```json
+[{"agent_control":"cdp","browser":"chrome","path":"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"},
+ {"agent_control":"ego-browser","browser":"ego","path":"/Applications/ego lite.app/Contents/MacOS/ego lite"}]
+```
+
+```bash
+./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
+  capture browser open --browser chrome --debug-port --yes
+```
+
+```json
+{"agent_control":"cdp","attach":"connect a CDP client to http://127.0.0.1:58323 (Playwright connectOverCDP, chrome-devtools-mcp --browserUrl)",
+ "browser":"chrome","devtools_port":58323,"fresh":false,"pid":87391,
+ "profile_dir":"…/browser-profiles/chrome","proxy":"127.0.0.1:18902","url":"about:blank"}
+```
+
+Opening a browser starts a process, so the CLI asks for `--yes` (or `--dry-run` to
+see the request first). What the browser is given:
+
+- **The proxy and the certificate, for that browser only.** Sniper's root CA is
+  trusted by its public-key hash for that one browser process. Nothing is added to
+  the operating system or to any browser's certificate store.
+- **Loopback through the proxy.** Chromium sends `localhost` and `127.0.0.1`
+  direct by default, which would leave an app you are testing locally out of the
+  history.
+- **A profile of its own**, kept under Sniper's data directory, so logins survive
+  between sessions and your everyday profile is untouched. `--fresh` uses a
+  throwaway profile that is deleted when the browser quits. Closing the last window
+  is not quitting on macOS. If Sniper exits first, the next launch removes the
+  profile once its browser is gone.
+- **A DevTools port only when asked** (`--debug-port`). It lets an agent drive the
+  browser over CDP, and it also lets any other local process do the same, so it is
+  off unless you turn it on, and it is refused while the proxy listens on anything
+  but loopback. The check happens when the browser opens: if you later rebind the
+  proxy beyond loopback, quit a browser that was opened with a DevTools port first.
+
+Opening again while a browser is running on the same profile opens another window
+in it (`"reused": true` in the result). That is what the button needs on macOS,
+where closing the last window leaves the browser running. A browser that is still
+opening its first window is not started a second time, and only a few windows can
+be opening in one browser at once. If the running browser was started for a
+different proxy, or without the DevTools port you are now asking for, the call is
+refused and says which, because Chromium would ignore the new settings. Different
+browsers each have a profile of their own and run side by side, and up to eight
+`--fresh` browsers can be open at once.
+
+A browser that cannot start, or that ends at once, is reported in the result's
+`warnings` with the last of what it printed. A persistent profile also keeps the
+whole output in `sniper-launch.log`; a throwaway profile is deleted with its log,
+which is why the text travels in the warning. The button shows that warning instead
+of "Opened".
+
+`--browser` takes `chrome`, `edge`, `brave`, `chromium` or `ego`; `auto` picks the
+first installed in that order. ego is macOS only and is driven with its own CLI
+instead of a DevTools port: the result carries `ego_server_name`, and
+`ego-browser --ego-server-name=<name> nodejs -e '<script>'` attaches to that
+instance rather than to your everyday ego.
+
+A freshly opened browser also talks to its vendor (updates, variations, crash
+reporting), and that traffic appears in the history. Filtering the history to your
+target's host leaves it out. The first launch on a new profile sends the most.
+
 ## Watching requests arrive
 
 In the UI: the **Capture** tab, **HTTP** sub-tab. Rows appear as traffic flows.

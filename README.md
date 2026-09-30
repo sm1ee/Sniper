@@ -79,9 +79,12 @@ cargo run --bin sniper-desktop
 ## Quick start
 
 1. Download and open Sniper
-2. Point your browser proxy to `127.0.0.1:8080`
-3. Visit `https://sniper` to download and trust the root CA
-4. Start capturing
+2. Click **Browser** in the top bar. It opens an installed Chrome, Edge, Brave or
+   Chromium already sending its traffic through Sniper and trusting its certificate,
+   so there is nothing to configure.
+   To use a browser of your own instead, point its proxy at `127.0.0.1:8080` and
+   visit `https://sniper` to download and trust the root CA.
+3. Start capturing
 
 Default listeners:
 - Proxy: `127.0.0.1:8080`
@@ -175,6 +178,7 @@ export PATH="/Applications/Sniper.app/Contents/MacOS:$PATH"
 sniper-cli session list
 sniper-cli --output compact capture http list --limit 10
 sniper-cli --output compact capture http search --value access_token
+sniper-cli capture browser open --yes
 sniper-cli capture http replay --id <id> --dry-run
 sniper-cli capture http replay --id <id> --yes
 sniper-cli scope set-scope --pattern '*.example.com' --dry-run

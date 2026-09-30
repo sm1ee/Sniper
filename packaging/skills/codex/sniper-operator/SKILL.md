@@ -1,6 +1,6 @@
 ---
 name: sniper-operator
-description: Inspect captured HTTP/HTTPS traffic and debug APIs through a local Sniper proxy, driving it with sniper-cli rather than the desktop UI. Covers reviewing captured requests and responses, replaying them with changes, holding and editing live traffic, scope, fuzzer runs, WebSocket frames, match-replace rules, colour tags and notes, and session switching. Not for routing LLM API calls or hosting a reverse proxy.
+description: Inspect captured HTTP/HTTPS traffic and debug APIs through a local Sniper proxy, driving it with sniper-cli rather than the desktop UI. Covers reviewing captured requests and responses, replaying them with changes, holding and editing live traffic, scope, fuzzer runs, WebSocket frames, match-replace rules, colour tags and notes, opening a browser already wired to Sniper, and session switching. Not for routing LLM API calls or hosting a reverse proxy.
 ---
 
 # Sniper Operator
@@ -18,6 +18,7 @@ Use `sniper-cli` for all Sniper operations. Prefer `--output compact` JSON envel
 - Toggle request holding and forward or drop held requests
 - List or replace auto-replace rules
 - Set color tags and notes on HTTP records
+- Open a browser that already sends its traffic through Sniper
 - Install Sniper skills into Codex or Claude
 
 ## Workflow
@@ -30,7 +31,8 @@ Use `sniper-cli` for all Sniper operations. Prefer `--output compact` JSON envel
 6. Treat Replay target override fields as the connection target only. The raw `Host:` header stays in the request text.
 7. For any manifest operation with `side_effect: "write"`, run `--dry-run` first and use `--yes` only after reviewing the plan.
 8. Sniper preserves captured sensitive values such as cookies and authorization headers; summarize large or sensitive JSON responses instead of pasting them in full.
-9. To find where a value appeared — a token, an id, a field name — use `capture http search --value <text>` instead of fetching records one by one. `capture http list --query` matches metadata only and returns nothing for a value that lives in a body. Treat an empty search as absence only when `complete` is `true`; otherwise `stopped_by` names the limit to raise.
+9. To open a browser that already sends its traffic through Sniper, run `sniper-cli capture browser open --dry-run`, review it, then run it with `--yes`, instead of asking the user to set a proxy or trust a certificate. Add `--debug-port` when you need to attach over CDP (Chromium-family only, and refused while the proxy listens beyond loopback), or use `--browser ego` and drive it with `ego-browser --ego-server-name=<ego_server_name from the result> nodejs`. If a browser is already open on that profile with the same settings you get another window in it (`"reused": true`); with different settings the call is refused and says why. `--fresh` gives a throwaway profile (up to eight at once). Read each `warnings` entry in the result before you rely on the browser: a browser that could not start is still a 200, and the warning carries what it printed.
+10. To find where a value appeared — a token, an id, a field name — use `capture http search --value <text>` instead of fetching records one by one. `capture http list --query` matches metadata only and returns nothing for a value that lives in a body. Treat an empty search as absence only when `complete` is `true`; otherwise `stopped_by` names the limit to raise.
 
 ## Common commands
 
@@ -46,6 +48,9 @@ sniper-cli session switch --id <uuid> --yes
 sniper-cli --output compact capture http list --limit 20
 sniper-cli --output compact capture http get --id <uuid>
 sniper-cli --output compact capture http search --value <text> --side response-body
+sniper-cli --output compact capture browser list
+sniper-cli capture browser open --debug-port --dry-run
+sniper-cli --output compact capture browser open --debug-port --yes
 sniper-cli capture http replay --id <uuid> --dry-run
 sniper-cli capture http replay --id <uuid> --yes
 sniper-cli capture http fuzzer --id <uuid> --dry-run

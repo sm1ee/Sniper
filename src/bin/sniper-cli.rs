@@ -237,6 +237,45 @@ enum CaptureCommand {
         #[command(subcommand)]
         command: OastCommand,
     },
+    /// Open a browser that already sends its traffic through this Sniper.
+    Browser {
+        #[command(subcommand)]
+        command: BrowserCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BrowserCommand {
+    /// List the browsers Sniper can open on this machine.
+    List,
+    /// Open a browser wired to this Sniper: proxy set, CA trusted, nothing to configure.
+    Open(BrowserOpenArgs),
+}
+
+#[derive(Args, Debug, Default)]
+struct BrowserOpenArgs {
+    /// auto picks the first installed of chrome, edge, brave, chromium, ego.
+    #[arg(long, value_parser = ["auto", "chrome", "edge", "brave", "chromium", "ego"])]
+    browser: Option<String>,
+    /// http(s) page to open. Default: about:blank.
+    #[arg(long)]
+    url: Option<String>,
+    /// Use a throwaway profile instead of the persistent Sniper one.
+    #[arg(long)]
+    fresh: bool,
+    /// Open a DevTools port so an agent can attach. Chromium-family browsers only;
+    /// ego is driven with `ego-browser --ego-server-name=<name>` instead.
+    #[arg(long)]
+    debug_port: bool,
+}
+
+impl BrowserCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            BrowserCommand::List => "capture.browser.list",
+            BrowserCommand::Open(_) => "capture.browser.open",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -1671,6 +1710,7 @@ impl CaptureCommand {
                 }
             }
             CaptureCommand::Oast { command } => command.operation_name(),
+            CaptureCommand::Browser { command } => command.operation_name(),
         }
     }
 }
@@ -1896,6 +1936,24 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &["id"],
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "capture.browser.list",
+            "capture browser list",
+            "List the browsers Sniper can open, and how an agent drives each.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "capture.browser.open",
+            "capture browser open",
+            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. Pass debug_port to let an agent attach over CDP.",
+            Write,
+            false,
+            &[],
+            vec![json!({"browser":"auto","debug_port":true})],
         ),
         op(
             "capture.http.list",
@@ -2433,6 +2491,8 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "sort_key",
             "sort_direction",
         ],
+        "capture.browser.list" => &[],
+        "capture.browser.open" => &["browser", "url", "fresh", "debug_port"],
         "capture.http.get" => &["id", "session_id"],
         "capture.http.search" => &[
             "value",
@@ -2597,6 +2657,10 @@ fn command_input_preview(command: &Command) -> Value {
             CaptureCommand::AutoReplace { command } => auto_replace_input_preview(command),
             CaptureCommand::Proxy(args) => json!({"session_id": args.session_id}),
             CaptureCommand::Oast { command } => oast_input_preview(command),
+            CaptureCommand::Browser { command } => match command {
+                BrowserCommand::List => json!({}),
+                BrowserCommand::Open(args) => browser_open_body(args),
+            },
         },
         Command::Scope { command } => match command {
             TargetCommand::GetScope(args) => json!({ "session_id": args.session_id }),
@@ -2931,6 +2995,12 @@ fn capture_api_preview(command: &CaptureCommand) -> Result<Value> {
         CaptureCommand::InterceptRule { command } => Ok(intercept_rule_api_preview(command)),
         CaptureCommand::WebSocket { command } => Ok(websocket_api_preview(command)),
         CaptureCommand::AutoReplace { command } => Ok(auto_replace_api_preview(command)),
+        CaptureCommand::Browser { command } => Ok(match command {
+            BrowserCommand::List => api_preview("GET", "/api/browser/available", None),
+            BrowserCommand::Open(args) => {
+                api_preview("POST", "/api/browser/launch", Some(browser_open_body(args)))
+            }
+        }),
         CaptureCommand::Proxy(args) => Ok(if args.stdin {
             api_preview(
                 "POST",
@@ -3418,6 +3488,26 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 command: HistoryCommand::Get(HistoryGetArgs {
                     id: call_required(operation, input, "id")?,
                     session_id: call_optional(operation, input, "session_id")?,
+                }),
+            },
+        },
+        "capture.browser.list" => Command::Capture {
+            command: CaptureCommand::Browser {
+                command: BrowserCommand::List,
+            },
+        },
+        "capture.browser.open" => Command::Capture {
+            command: CaptureCommand::Browser {
+                command: BrowserCommand::Open(BrowserOpenArgs {
+                    browser: call_optional_enum_string(
+                        operation,
+                        input,
+                        "browser",
+                        &["auto", "chrome", "edge", "brave", "chromium", "ego"],
+                    )?,
+                    url: call_optional(operation, input, "url")?,
+                    fresh: call_bool(operation, input, "fresh")?,
+                    debug_port: call_bool(operation, input, "debug_port")?,
                 }),
             },
         },
@@ -4441,6 +4531,7 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                     CaptureCommand::Proxy(args) => handle_proxy_chain(api, args).await,
                     CaptureCommand::Oast { command } => handle_oast(api, command).await,
+                    CaptureCommand::Browser { command } => handle_browser(api, command).await,
                 },
                 Command::Scope { command } => handle_target(api, command).await,
                 Command::Replay { command } => handle_replay(api, command).await,
@@ -4501,6 +4592,30 @@ fn history_annotate_args(command: &Command) -> Option<&HistoryAnnotateArgs> {
             command: HistoryCommand::Annotate(args),
         } => Some(args),
         _ => None,
+    }
+}
+
+fn browser_open_body(args: &BrowserOpenArgs) -> Value {
+    json!({
+        "browser": args.browser,
+        "url": args.url,
+        "fresh": args.fresh,
+        "debug_port": args.debug_port,
+    })
+}
+
+async fn handle_browser(api: ApiClient, command: BrowserCommand) -> Result<()> {
+    match command {
+        BrowserCommand::List => {
+            let browsers: Value = api.get_json("/api/browser/available").await?;
+            print_json(&browsers)
+        }
+        BrowserCommand::Open(args) => {
+            let launched: Value = api
+                .post_json("/api/browser/launch", &browser_open_body(&args))
+                .await?;
+            print_json(&launched)
+        }
     }
 }
 
@@ -7849,6 +7964,9 @@ fn cli_parse_error_operation(args: &[String]) -> String {
             format!("capture.auto_replace.{}", action.replace('-', "_"))
         }
         ["capture", "oast", action, ..] => format!("capture.oast.{}", action.replace('-', "_")),
+        ["capture", "browser", action, ..] => {
+            format!("capture.browser.{}", action.replace('-', "_"))
+        }
         ["call", operation, ..] => (*operation).to_string(),
         ["manifest", ..] => "manifest".to_string(),
         ["schema", ..] => "schema".to_string(),
@@ -8441,16 +8559,17 @@ fn parse_response_status_line(status_line: &str) -> Result<u16> {
 mod tests {
     use super::{
         active_session_id_from_summaries, api_failure_detail, api_url, attach_session_id,
-        attach_workspace_save_error, auto_replace_write_session_id, build_annotations_payload,
-        build_editable_raw_request, build_editable_raw_request_with_version,
-        build_oast_configure_update, clap_error_payload, cli_data_dir, cli_error_payload,
-        cli_output_format_from_raw_args, cli_parse_error_operation, cli_partial_apply_error,
-        command_from_call_args, command_from_operation_input, default_cli_data_dir,
-        default_editable_request, discover_api_base_url, discover_api_base_url_from_data_dir,
-        dry_run_command, ensure_http_replay_tab, explicit_or_active_session_id,
-        failed_record_output, fuzzer_active_target_for_request,
-        fuzzer_target_request_authority_for_request, history_list_path, history_search_path,
-        install_skills, json_value_with_session_and_workspace_save_error, manifest_operations,
+        attach_workspace_save_error, auto_replace_write_session_id, browser_open_body,
+        build_annotations_payload, build_editable_raw_request,
+        build_editable_raw_request_with_version, build_oast_configure_update, clap_error_payload,
+        cli_data_dir, cli_error_payload, cli_output_format_from_raw_args,
+        cli_parse_error_operation, cli_partial_apply_error, command_from_call_args,
+        command_from_operation_input, default_cli_data_dir, default_editable_request,
+        discover_api_base_url, discover_api_base_url_from_data_dir, dry_run_command,
+        ensure_http_replay_tab, explicit_or_active_session_id, failed_record_output,
+        fuzzer_active_target_for_request, fuzzer_target_request_authority_for_request,
+        history_list_path, history_search_path, install_skills,
+        json_value_with_session_and_workspace_save_error, manifest_operations,
         next_replay_tab_sequence, normalize_api_base_url, normalize_replay_port,
         normalize_target_inputs, oast_fields_for_output, operation_spec,
         parse_editable_raw_request, parse_editable_raw_request_bytes_with_version,
@@ -8464,7 +8583,7 @@ mod tests {
         sniper_settings_probe_matches, split_host_port, split_payload_lines, strip_host_port,
         transaction_detail_path, validate_command_preflight, websocket_detail_path,
         websocket_list_path, workspace_conflict_message, workspace_state_conflict_detail,
-        CaptureCommand, Cli, CliSideEffect, Command, FuzzerCommand, HistoryCommand,
+        BrowserCommand, CaptureCommand, Cli, CliSideEffect, Command, FuzzerCommand, HistoryCommand,
         HistoryListArgs, HistoryListResponse, HistorySearchArgs, InterceptRuleCommand, OastCommand,
         OastConfigureArgs, OutputFormat, ReplayCommand, RuntimeUpdatePayload, SequenceCommand,
         SequenceCreateInput, SessionCommand, SkillsInstallArgs, TargetCommand, WebSocketListArgs,
@@ -10561,6 +10680,16 @@ mod tests {
             OutputFormat::Compact
         );
         assert_eq!(cli_parse_error_operation(&raw_args), "replay.send");
+
+        // The flag's value is dropped and the value itself stays, so without an arm
+        // of its own the envelope named this "capture".
+        let browser_args: Vec<String> = ["capture", "browser", "open", "--browser", "firefox"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(
+            cli_parse_error_operation(&browser_args),
+            "capture.browser.open"
+        );
     }
 
     #[test]
@@ -10749,6 +10878,7 @@ mod tests {
                 "capture.intercept_rule.create",
                 json!({"all": true, "scope": "req"}),
             ),
+            ("capture.browser.open", json!({"browser": "firefox"})),
         ] {
             let error = command_from_operation_input(operation, &input)
                 .expect_err("call should preserve finite value parsers");
@@ -11062,6 +11192,74 @@ mod tests {
             "body",
         ])
         .is_err());
+    }
+
+    // Opening a browser starts a process, so the manifest must call it a write and
+    // an agent must pass --yes. The same body is what --dry-run shows and what the
+    // server receives.
+    #[test]
+    fn capture_browser_open_is_a_confirmed_write_with_one_request_body() {
+        let parsed = Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "browser",
+            "open",
+            "--browser",
+            "ego",
+            "--url",
+            "https://example.com",
+            "--fresh",
+        ])
+        .unwrap();
+        let Command::Capture {
+            command:
+                CaptureCommand::Browser {
+                    command: BrowserCommand::Open(args),
+                },
+        } = parsed.command
+        else {
+            panic!("expected capture browser open");
+        };
+        assert_eq!(
+            browser_open_body(&args),
+            json!({"browser":"ego","url":"https://example.com","fresh":true,"debug_port":false})
+        );
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "browser",
+            "open",
+            "--browser",
+            "firefox",
+        ])
+        .is_err());
+
+        let open = operation_spec("capture.browser.open").unwrap();
+        assert_eq!(open.side_effect, CliSideEffect::Write);
+        assert!(open.requires_confirmation);
+        let list = operation_spec("capture.browser.list").unwrap();
+        assert_eq!(list.side_effect, CliSideEffect::Read);
+        assert!(!list.requires_confirmation);
+
+        let mapped = command_from_operation_input(
+            "capture.browser.open",
+            &json!({"browser":"chrome","debug_port":true}),
+        )
+        .unwrap();
+        let Command::Capture {
+            command:
+                CaptureCommand::Browser {
+                    command: BrowserCommand::Open(mapped),
+                },
+        } = mapped
+        else {
+            panic!("expected the call mapper to build capture browser open");
+        };
+        assert_eq!(mapped.browser.as_deref(), Some("chrome"));
+        assert!(mapped.debug_port && !mapped.fresh);
+        assert!(
+            command_from_operation_input("capture.browser.open", &json!({"debug": true}),).is_err()
+        );
     }
 
     #[test]
