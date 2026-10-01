@@ -251,6 +251,15 @@ enum BrowserCommand {
     List,
     /// Open a browser wired to this Sniper: proxy set, CA trusted, nothing to configure.
     Open(BrowserOpenArgs),
+    /// Choose which browser opens when none is named. `auto` clears the choice.
+    Prefer(BrowserPreferArgs),
+}
+
+#[derive(Args, Debug)]
+struct BrowserPreferArgs {
+    /// A browser from `capture browser list`, or `auto` for the first installed.
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(browser_choices()))]
+    browser: String,
 }
 
 #[derive(Args, Debug, Default)]
@@ -276,6 +285,7 @@ impl BrowserCommand {
         match self {
             BrowserCommand::List => "capture.browser.list",
             BrowserCommand::Open(_) => "capture.browser.open",
+            BrowserCommand::Prefer(_) => "capture.browser.prefer",
         }
     }
 }
@@ -1958,6 +1968,15 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"browser":"auto","agent":true})],
         ),
         op(
+            "capture.browser.prefer",
+            "capture browser prefer --browser <name|auto>",
+            "Choose which browser opens when none is named, saved for this user. `auto` clears it. Refused for a browser that is not installed.",
+            Write,
+            false,
+            &["browser"],
+            vec![json!({"browser":"chrome"})],
+        ),
+        op(
             "capture.http.list",
             "capture http list",
             "List captured HTTP transactions.",
@@ -2495,6 +2514,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         ],
         "capture.browser.list" => &[],
         "capture.browser.open" => &["browser", "url", "fresh", "agent"],
+        "capture.browser.prefer" => &["browser"],
         "capture.http.get" => &["id", "session_id"],
         "capture.http.search" => &[
             "value",
@@ -2662,6 +2682,7 @@ fn command_input_preview(command: &Command) -> Value {
             CaptureCommand::Browser { command } => match command {
                 BrowserCommand::List => json!({}),
                 BrowserCommand::Open(args) => browser_open_body(args),
+                BrowserCommand::Prefer(args) => json!({ "browser": args.browser }),
             },
         },
         Command::Scope { command } => match command {
@@ -3002,6 +3023,11 @@ fn capture_api_preview(command: &CaptureCommand) -> Result<Value> {
             BrowserCommand::Open(args) => {
                 api_preview("POST", "/api/browser/launch", Some(browser_open_body(args)))
             }
+            BrowserCommand::Prefer(args) => api_preview(
+                "POST",
+                "/api/browser/preference",
+                Some(json!({ "browser": args.browser })),
+            ),
         }),
         CaptureCommand::Proxy(args) => Ok(if args.stdin {
             api_preview(
@@ -3496,6 +3522,18 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         "capture.browser.list" => Command::Capture {
             command: CaptureCommand::Browser {
                 command: BrowserCommand::List,
+            },
+        },
+        "capture.browser.prefer" => Command::Capture {
+            command: CaptureCommand::Browser {
+                command: BrowserCommand::Prefer(BrowserPreferArgs {
+                    browser: call_required_enum_string(
+                        operation,
+                        input,
+                        "browser",
+                        &browser_choices(),
+                    )?,
+                }),
             },
         },
         "capture.browser.open" => Command::Capture {
@@ -4201,6 +4239,16 @@ fn call_optional_oast_polling_interval(
     Ok(value)
 }
 
+fn call_required_enum_string(
+    operation: &str,
+    input: &Value,
+    field: &str,
+    allowed: &[&str],
+) -> Result<String> {
+    call_optional_enum_string(operation, input, field, allowed)?
+        .ok_or_else(|| anyhow!("missing required field `{field}` for `{operation}`"))
+}
+
 fn call_optional_enum_string(
     operation: &str,
     input: &Value,
@@ -4625,6 +4673,15 @@ async fn handle_browser(api: ApiClient, command: BrowserCommand) -> Result<()> {
                 .post_json("/api/browser/launch", &browser_open_body(&args))
                 .await?;
             print_json(&launched)
+        }
+        BrowserCommand::Prefer(args) => {
+            let saved: Value = api
+                .post_json(
+                    "/api/browser/preference",
+                    &json!({ "browser": args.browser }),
+                )
+                .await?;
+            print_json(&saved)
         }
     }
 }
@@ -11273,11 +11330,43 @@ mod tests {
         );
     }
 
+    // Saving a default changes stored settings, so an agent has to confirm it, and the
+    // call path must refuse a missing or unknown name rather than clear the default.
+    #[test]
+    fn capture_browser_prefer_is_a_confirmed_write_that_needs_a_valid_name() {
+        let prefer = operation_spec("capture.browser.prefer").unwrap();
+        assert_eq!(prefer.side_effect, CliSideEffect::Write);
+        assert!(prefer.requires_confirmation);
+
+        for bad in [
+            json!({}),
+            json!({"browser": "netscape"}),
+            json!({"browser": 7}),
+        ] {
+            let error = command_from_operation_input("capture.browser.prefer", &bad)
+                .expect_err("call must not accept this");
+            let payload = cli_error_payload("capture.browser.prefer", &error);
+            assert_eq!(payload.code, "INVALID_INPUT", "{bad}: {error}");
+        }
+        assert!(Cli::try_parse_from(["sniper-cli", "capture", "browser", "prefer"]).is_err());
+    }
+
     // The accepted names come from BrowserKind, so a browser added there must be
     // accepted by the flag and by `call` without anyone editing a list here.
     #[test]
     fn every_known_browser_is_accepted_by_the_flag_and_by_call() {
         for name in browser_choices() {
+            Cli::try_parse_from([
+                "sniper-cli",
+                "capture",
+                "browser",
+                "prefer",
+                "--browser",
+                name,
+            ])
+            .unwrap_or_else(|error| panic!("prefer --browser {name}: {error}"));
+            command_from_operation_input("capture.browser.prefer", &json!({"browser": name}))
+                .unwrap_or_else(|error| panic!("call prefer {name}: {error}"));
             Cli::try_parse_from([
                 "sniper-cli",
                 "capture",

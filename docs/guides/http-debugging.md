@@ -97,8 +97,11 @@ curl ignore `-x` and connect directly, and nothing is captured.
 ### Or open a browser that is already wired
 
 Setting a proxy and trusting a certificate by hand is the part most likely to go
-wrong, so Sniper can open a browser that needs neither. **Browser** in the top bar
-does it from the UI; from the CLI:
+wrong, so Sniper can open a browser that needs neither. **Open browser** on the
+Capture tab bar does it from the UI (an empty history offers the same button). Its
+arrow lists every browser, marks the one that opens by default, and has **Make
+default** to change it. Two boxes there apply to that one opening only: **Let an
+agent drive it** (`--agent`) and **Throwaway profile** (`--fresh`). From the CLI:
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
@@ -118,6 +121,13 @@ them, as returned on a Mac that has both:
  "requirements":[{"name":"ego-browser command","found":true},
                  {"name":"ego-browser agent skill","found":true}]}
 ```
+
+`"default": true` marks the browser that opens when none is named, and
+`"preferred": true` marks it when that is a saved choice rather than the first
+installed one (both are left out when false). `capture browser prefer --browser
+<name|auto> --yes` saves the choice, per user and not per session; `auto` clears
+it. A saved browser that is later uninstalled does not block opening: Sniper opens
+the first installed one and says so in `warnings`.
 
 A browser that is not installed has `"installed": false` and, where the answer is
 not obvious, an `install_hint`; a requirement that is missing carries a `hint` that

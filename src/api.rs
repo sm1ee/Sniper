@@ -398,6 +398,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/certificates/root.der", get(download_root_der))
         .route("/api/certificates/reveal", post(reveal_certificate_folder))
         .route("/api/browser/list", get(list_browsers))
+        .route("/api/browser/preference", post(set_browser_preference))
         .route("/api/browser/launch", post(launch_browser))
         .route("/api/cli-path", post(install_cli_on_path))
         .route(
@@ -4637,8 +4638,66 @@ struct BrowserLaunchPayload {
     agent: bool,
 }
 
-async fn list_browsers() -> Response {
-    Json(browser::catalog()).into_response()
+/// The saved default, or none if it is unset or names a browser this build does not
+/// know.
+async fn preferred_browser(state: &AppState) -> Option<BrowserKind> {
+    state
+        .ui_settings
+        .snapshot()
+        .await
+        .browser
+        .preferred
+        .and_then(|name| BrowserKind::parse(&name))
+}
+
+async fn list_browsers(State(state): State<Arc<AppState>>) -> Response {
+    Json(browser::catalog(preferred_browser(&state).await)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserPreferencePayload {
+    browser: String,
+}
+
+/// Saves which browser opens when none is named. Refuses one that cannot be opened
+/// here, so a typo or a browser that is not installed is an error now and not a
+/// default that quietly falls back later.
+async fn set_browser_preference(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BrowserPreferencePayload>,
+) -> Response {
+    let name = payload.browser.trim();
+    let kind = if name.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        match BrowserKind::parse(name) {
+            Some(kind) => Some(kind),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "unknown browser: {name} (expected auto, {})",
+                        BrowserKind::names().join(", ")
+                    ),
+                )
+                    .into_response()
+            }
+        }
+    };
+    if let Some(kind) = kind {
+        if browser::find_executable(kind).is_none() {
+            return (StatusCode::NOT_FOUND, browser::not_installed_message(kind)).into_response();
+        }
+    }
+    match state
+        .ui_settings
+        .set_browser_preferred(kind.map(|kind| kind.name().to_string()))
+        .await
+    {
+        Ok(preferred) => Json(serde_json::json!({ "preferred": preferred })).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
 }
 
 /// Opens a browser wired to this instance. A write behind the same guards as every
@@ -4677,11 +4736,12 @@ async fn launch_browser(
         )
             .into_response();
     }
-    let ctx = LaunchContext::new(
+    let mut ctx = LaunchContext::new(
         &state.config.data_dir,
         proxy_addr,
         state.certificates.root_der_bytes(),
     );
+    ctx.preferred = preferred_browser(&state).await;
     let request = LaunchRequest {
         browser: kind,
         url: payload.url,
@@ -8096,6 +8156,108 @@ mod tests {
         assert_eq!(typo.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
         assert!(typo.text().await.unwrap().contains("unknown field"));
 
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Which browsers are installed differs between machines, so each name is checked
+    // against what this one has: saved when installed, refused when not.
+    #[tokio::test]
+    async fn the_browser_preference_is_validated_saved_and_shown_in_the_list() {
+        let (_state, data_dir, addr, server) = serve_for_test("sniper-api-browser-pref").await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let preference = format!("http://{addr}/api/browser/preference");
+        let list = format!("http://{addr}/api/browser/list");
+
+        let unknown = client
+            .post(&preference)
+            .json(&serde_json::json!({"browser": "netscape"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let typo = client
+            .post(&preference)
+            .json(&serde_json::json!({"browser": "chrome", "default": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(typo.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+
+        let auto = client
+            .post(&preference)
+            .json(&serde_json::json!({"browser": "auto"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(auto.status(), reqwest::StatusCode::OK);
+        assert!(auto.json::<serde_json::Value>().await.unwrap()["preferred"].is_null());
+
+        for kind in crate::browser::BrowserKind::ALL {
+            let response = client
+                .post(&preference)
+                .json(&serde_json::json!({"browser": kind.name()}))
+                .send()
+                .await
+                .unwrap();
+            if crate::browser::find_executable(kind).is_none() {
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::NOT_FOUND,
+                    "{}",
+                    kind.name()
+                );
+                continue;
+            }
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::OK,
+                "{}",
+                kind.name()
+            );
+            let entries = client
+                .get(&list)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            let entry = entries
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["browser"] == kind.name())
+                .unwrap();
+            assert_eq!(entry["preferred"], true, "{}", kind.name());
+            assert_eq!(
+                entry["default"], true,
+                "a saved, installed choice is what opens"
+            );
+        }
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Choosing a default is a write to saved settings, so it sits behind the same
+    // guards as every other: a page on another origin cannot change it.
+    #[tokio::test]
+    async fn the_browser_preference_sits_behind_the_write_guards() {
+        let (_state, data_dir, addr, server) =
+            serve_for_test("sniper-api-browser-pref-guard").await;
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{addr}/api/browser/preference"))
+            .header("sec-fetch-site", "cross-site")
+            .json(&serde_json::json!({"browser": "auto"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
         server.abort();
         let _ = std::fs::remove_dir_all(data_dir);
     }

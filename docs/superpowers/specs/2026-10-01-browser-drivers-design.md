@@ -83,11 +83,21 @@ Not verified:
 1. **Done.** Driver-neutral contract (`--agent`, `control`, `driver`), catalog with
    capabilities and requirements, policy moved into the driver, documentation and
    skills updated (named ego instance, stderr, acting like a person).
-2. **Not started.** Persist the user's choice. Store `browser.preferred` in
-   `ui-settings.json` (user-level, not per session), expose it through the existing
-   `/api/ui-settings`, add `capture browser prefer`, and give the top-bar button a
-   menu: installed browsers, "make default", "agent control" (off by default).
-   Resolution order: explicit request, saved preference, automatic order.
+2. **Done.** The user's choice is saved as `browser.preferred` in `ui-settings.json`
+   (user-level, not per session) and set through `POST /api/browser/preference` or
+   `capture browser prefer`. Resolution order: explicit request, saved preference,
+   automatic order; a saved browser that has gone missing falls back with a warning.
+   The UI is one split-button component mounted by `[data-browser-launcher]`: the
+   button opens the default, the arrow lists browsers with "Make default" and the
+   one-shot "agent" and "throwaway" boxes. Two decisions worth keeping:
+   - `browser` is server-owned. A whole-snapshot save from the UI cannot change it,
+     so a stale page cannot overwrite a choice made from the CLI.
+   - Setting it does not bump `server_revision`. A bump would make a UI save that
+     was already in flight look stale and be rejected.
+   - Placement is provisional: the capture tab bar, plus the empty history. The
+     feature only feeds capture, so the top bar that every tab shares is the wrong
+     home; the filter row beside "Capturing" is the other candidate. Moving it is an
+     HTML edit, because the component mounts by attribute.
 3. **Not started.** Split `src/browser.rs` into a module: `kinds` (the table),
    `driver`, `profile`, `registry`, `launch`. A mechanical move; the tests move with
    it.

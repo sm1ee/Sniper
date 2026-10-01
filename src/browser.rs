@@ -306,6 +306,13 @@ pub struct CatalogEntry {
     pub driver: Driver,
     pub platforms: &'static [&'static str],
     pub capabilities: Capabilities,
+    /// The user's saved choice.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preferred: bool,
+    /// What opening without naming a browser does right now: the saved choice if it
+    /// is installed, otherwise the first installed one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub requirements: Vec<Requirement>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -324,21 +331,51 @@ fn current_platform() -> &'static str {
 
 /// Every browser Sniper knows on this platform, installed or not, so a caller can
 /// see what exists and how to get it instead of an empty list.
-pub fn catalog() -> Vec<CatalogEntry> {
-    catalog_for(current_platform(), find_executable, driver_requirements)
+pub fn catalog(preferred: Option<BrowserKind>) -> Vec<CatalogEntry> {
+    catalog_for(
+        current_platform(),
+        find_executable,
+        driver_requirements,
+        preferred,
+    )
+}
+
+/// What `auto` resolves to: the saved choice when it is installed, otherwise the
+/// first installed browser in the fixed order.
+fn resolve_default(
+    preferred: Option<BrowserKind>,
+    find: impl Fn(BrowserKind) -> Option<PathBuf>,
+) -> Option<BrowserKind> {
+    preferred.filter(|kind| find(*kind).is_some()).or_else(|| {
+        BrowserKind::ALL
+            .into_iter()
+            .find(|kind| find(*kind).is_some())
+    })
 }
 
 fn catalog_for(
     platform: &str,
     find: impl Fn(BrowserKind) -> Option<PathBuf>,
     requirements: impl Fn(Driver) -> Vec<Requirement>,
+    preferred: Option<BrowserKind>,
 ) -> Vec<CatalogEntry> {
+    let default = resolve_default(
+        preferred.filter(|kind| kind.platforms().contains(&platform)),
+        |kind| {
+            kind.platforms()
+                .contains(&platform)
+                .then(|| find(kind))
+                .flatten()
+        },
+    );
     BrowserKind::ALL
         .into_iter()
         .filter(|kind| kind.platforms().contains(&platform))
         .map(|kind| {
             let path = find(kind);
             CatalogEntry {
+                preferred: preferred == Some(kind),
+                default: default == Some(kind),
                 browser: kind.name(),
                 installed: path.is_some(),
                 install_hint: path.is_none().then(|| kind.install_hint()).flatten(),
@@ -470,6 +507,9 @@ pub struct LaunchContext<'a> {
     pub devtools_wait: Duration,
     pub early_exit_probe: Duration,
     pub startup_settle: Duration,
+    /// The browser the user chose as their default. Used only when the request names
+    /// none, and only if it is installed.
+    pub preferred: Option<BrowserKind>,
 }
 
 impl<'a> LaunchContext<'a> {
@@ -481,6 +521,7 @@ impl<'a> LaunchContext<'a> {
             devtools_wait: DEVTOOLS_WAIT,
             early_exit_probe: EARLY_EXIT_PROBE,
             startup_settle: STARTUP_SETTLE,
+            preferred: None,
         }
     }
 }
@@ -550,34 +591,53 @@ pub async fn launch(
     ctx: &LaunchContext<'_>,
     request: LaunchRequest,
 ) -> Result<LaunchedBrowser, LaunchError> {
-    let (kind, exe) = match request.browser {
-        Some(kind) => {
-            let exe = find_executable(kind)
-                .ok_or_else(|| LaunchError::NotInstalled(not_installed_message(kind)))?;
-            (kind, exe)
-        }
-        None => BrowserKind::ALL
-            .into_iter()
-            .find_map(|kind| find_executable(kind).map(|exe| (kind, exe)))
-            .ok_or_else(|| {
-                let looked_for: Vec<_> = BrowserKind::ALL
-                    .into_iter()
-                    .filter(|kind| kind.platforms().contains(&current_platform()))
-                    .map(BrowserKind::name)
-                    .collect();
-                LaunchError::NotInstalled(format!(
-                    "no supported browser found (looked for {})",
-                    looked_for.join(", ")
-                ))
-            })?,
-    };
-    launch_at(ctx, kind, &exe, request).await
+    let (kind, exe, fell_back_from) = choose(request.browser, ctx.preferred, find_executable)?;
+    let mut launched = launch_at(ctx, kind, &exe, request).await?;
+    if let Some(missing) = fell_back_from {
+        launched.warnings.push(format!(
+            "your default browser ({}) is not installed, so {} was opened instead",
+            missing.name(),
+            kind.name()
+        ));
+    }
+    Ok(launched)
+}
+
+/// Which browser a request resolves to, and which saved choice, if any, had to be
+/// passed over because it is not installed. A browser the caller named is never
+/// replaced. A saved default is honoured while it can be; once it has gone, opening
+/// something beats failing, but the caller is told so the window that appears is
+/// not a surprise.
+fn choose(
+    named: Option<BrowserKind>,
+    preferred: Option<BrowserKind>,
+    find: impl Fn(BrowserKind) -> Option<PathBuf>,
+) -> Result<(BrowserKind, PathBuf, Option<BrowserKind>), LaunchError> {
+    if let Some(kind) = named {
+        let exe =
+            find(kind).ok_or_else(|| LaunchError::NotInstalled(not_installed_message(kind)))?;
+        return Ok((kind, exe, None));
+    }
+    let fell_back_from = preferred.filter(|kind| find(*kind).is_none());
+    resolve_default(preferred, &find)
+        .and_then(|kind| find(kind).map(|exe| (kind, exe, fell_back_from)))
+        .ok_or_else(|| {
+            let looked_for: Vec<_> = BrowserKind::ALL
+                .into_iter()
+                .filter(|kind| kind.platforms().contains(&current_platform()))
+                .map(BrowserKind::name)
+                .collect();
+            LaunchError::NotInstalled(format!(
+                "no supported browser found (looked for {})",
+                looked_for.join(", ")
+            ))
+        })
 }
 
 /// The same answer the catalog gives, in the one place a caller who skipped the
 /// catalog will read: where the browser does not exist, and how to get it where it
 /// does.
-fn not_installed_message(kind: BrowserKind) -> String {
+pub fn not_installed_message(kind: BrowserKind) -> String {
     if !kind.platforms().contains(&current_platform()) {
         return format!("{} is not available on {}", kind.name(), current_platform());
     }
@@ -1428,6 +1488,115 @@ mod tests {
         assert!(Driver::EgoCli.control(None, None).is_none());
     }
 
+    fn installed(kinds: &'static [BrowserKind]) -> impl Fn(BrowserKind) -> Option<PathBuf> {
+        move |kind| {
+            kinds
+                .contains(&kind)
+                .then(|| PathBuf::from(format!("/apps/{}", kind.name())))
+        }
+    }
+
+    #[test]
+    fn the_default_is_the_saved_choice_while_it_is_installed_and_the_first_installed_otherwise() {
+        use BrowserKind::*;
+        let both = installed(&[Chrome, Ego]);
+        assert_eq!(
+            resolve_default(None, &both),
+            Some(Chrome),
+            "the fixed order"
+        );
+        assert_eq!(
+            resolve_default(Some(Ego), &both),
+            Some(Ego),
+            "the saved choice wins"
+        );
+        let only_chrome = installed(&[Chrome]);
+        assert_eq!(
+            resolve_default(Some(Ego), &only_chrome),
+            Some(Chrome),
+            "a saved choice that is gone does not block opening something"
+        );
+        assert_eq!(resolve_default(Some(Ego), installed(&[])), None);
+    }
+
+    #[test]
+    fn choosing_never_replaces_a_browser_that_was_named_and_says_when_a_default_was_passed_over() {
+        use BrowserKind::*;
+        let only_chrome = installed(&[Chrome]);
+
+        // Named: used as asked, or refused, whatever the saved choice is.
+        let (kind, _, fell_back) = choose(Some(Chrome), Some(Ego), &only_chrome).unwrap();
+        assert_eq!((kind, fell_back), (Chrome, None));
+        let missing = choose(Some(Ego), Some(Chrome), &only_chrome);
+        assert!(
+            matches!(missing, Err(LaunchError::NotInstalled(_))),
+            "{missing:?}"
+        );
+
+        // Not named: the saved choice when installed, no note.
+        let both = installed(&[Chrome, Ego]);
+        let (kind, _, fell_back) = choose(None, Some(Ego), &both).unwrap();
+        assert_eq!((kind, fell_back), (Ego, None));
+
+        // Not named, saved choice gone: opens the first installed and reports what it passed over.
+        let (kind, _, fell_back) = choose(None, Some(Ego), &only_chrome).unwrap();
+        assert_eq!((kind, fell_back), (Chrome, Some(Ego)));
+
+        // Nothing installed at all.
+        let none = choose(None, None, installed(&[]));
+        assert!(
+            matches!(&none, Err(LaunchError::NotInstalled(message)) if message.contains("looked for")),
+            "{none:?}"
+        );
+    }
+
+    #[test]
+    fn the_catalog_marks_the_saved_choice_and_what_opening_would_pick() {
+        use BrowserKind::*;
+        let find = installed(&[Chrome, Ego]);
+        let flags = |preferred| {
+            catalog_for("macos", &find, |_| Vec::new(), preferred)
+                .into_iter()
+                .map(|entry| (entry.browser, entry.preferred, entry.default))
+                .collect::<Vec<_>>()
+        };
+        let none = flags(None);
+        assert!(none.contains(&("chrome", false, true)), "{none:?}");
+        assert!(none.iter().all(|(_, preferred, _)| !preferred));
+
+        let ego = flags(Some(Ego));
+        assert!(ego.contains(&("ego", true, true)), "{ego:?}");
+        assert!(ego.contains(&("chrome", false, false)));
+
+        // A saved choice that is gone is still shown as saved, but is not the default.
+        let gone = catalog_for("macos", installed(&[Chrome]), |_| Vec::new(), Some(Ego));
+        let ego = gone.iter().find(|entry| entry.browser == "ego").unwrap();
+        assert!(ego.preferred && !ego.default);
+        assert!(
+            gone.iter()
+                .find(|entry| entry.browser == "chrome")
+                .unwrap()
+                .default
+        );
+
+        // A saved choice for a browser that does not exist on this platform is ignored.
+        let windows = catalog_for("windows", installed(&[Chrome]), |_| Vec::new(), Some(Ego));
+        assert!(windows.iter().all(|entry| entry.browser != "ego"));
+        assert!(
+            windows
+                .iter()
+                .find(|entry| entry.browser == "chrome")
+                .unwrap()
+                .default
+        );
+
+        let json = serde_json::to_value(catalog_for("macos", &find, |_| Vec::new(), None)).unwrap();
+        assert!(
+            json[1].get("default").is_none() && json[1].get("preferred").is_none(),
+            "absent, not false"
+        );
+    }
+
     #[test]
     fn the_catalog_lists_what_exists_on_this_platform_and_says_what_is_missing() {
         let requirements = |driver: Driver| match driver {
@@ -1442,7 +1611,7 @@ mod tests {
             (kind == BrowserKind::Chrome).then(|| PathBuf::from("/Apps/Chrome"))
         };
 
-        let mac = catalog_for("macos", only_chrome, requirements);
+        let mac = catalog_for("macos", only_chrome, requirements, None);
         let names: Vec<_> = mac.iter().map(|entry| entry.browser).collect();
         assert_eq!(names, ["chrome", "edge", "brave", "chromium", "ego"]);
         let chrome = &mac[0];
@@ -1461,12 +1630,12 @@ mod tests {
         assert_eq!(ego.requirements.len(), 1);
 
         // Not built for Windows, so it is not listed as "not installed" there.
-        let windows = catalog_for("windows", only_chrome, requirements);
+        let windows = catalog_for("windows", only_chrome, requirements, None);
         assert!(windows.iter().all(|entry| entry.browser != "ego"));
         assert_eq!(windows.len(), 4);
 
         // An installed browser carries no install hint even if it has one to give.
-        let ego_installed = catalog_for("macos", |_| Some(PathBuf::from("/x")), requirements);
+        let ego_installed = catalog_for("macos", |_| Some(PathBuf::from("/x")), requirements, None);
         assert!(ego_installed
             .iter()
             .all(|entry| entry.install_hint.is_none()));
@@ -1618,6 +1787,7 @@ mod tests {
                     devtools_wait,
                     early_exit_probe,
                     startup_settle: Duration::ZERO,
+                    preferred: None,
                 }
             }
         }

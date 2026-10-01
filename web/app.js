@@ -705,7 +705,6 @@ const els = {
   eventLogStatus: document.getElementById("eventLogStatus"),
   displaySettingsModal: document.getElementById("displaySettingsModal"),
   openDisplaySettingsButton: document.getElementById("openDisplaySettingsButton"),
-  openBrowserButton: document.getElementById("openBrowserButton"),
   closeDisplaySettingsButton: document.getElementById("closeDisplaySettingsButton"),
   applyDisplaySettingsButton: document.getElementById("applyDisplaySettingsButton"),
   resetDisplaySettingsButton: document.getElementById("resetDisplaySettingsButton"),
@@ -1536,7 +1535,8 @@ function bindEvents() {
   });
 
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
-  onClickWithProgress(els.openBrowserButton, openSniperBrowser);
+  mountBrowserLaunchers();
+  installBrowserMenuDismissal();
   els.openUpdateButton.addEventListener("click", performSelfUpdate);
   if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
@@ -10000,11 +10000,19 @@ function renderHistory() {
   state._historyEntries = visibleEntries;
 
   if (!visibleEntries.length) {
+    // A session with nothing in it yet is the one moment someone is looking for
+    // how to get traffic in, so the way to do that is offered here and not only in
+    // the toolbar. Any other empty list is a filter problem and keeps its message.
+    const nothingCaptured = isSessionEmpty(hiddenConnectCount, paging);
     els.historyTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="${state.historyColumnOrder.length}">${escapeHtml(historyEmptyMessage(hiddenConnectCount, paging))}</td>
+        <td colspan="${state.historyColumnOrder.length}">
+          ${escapeHtml(nothingCaptured ? emptySessionMessage() : historyEmptyMessage(hiddenConnectCount, paging))}
+          ${nothingCaptured ? '<div class="empty-row-action"><span data-browser-launcher></span></div>' : ""}
+        </td>
       </tr>
     `;
+    mountBrowserLaunchers(els.historyTableBody);
     if (paging.hasMore && !paging.loading && !paging.fullyLoaded) {
       scheduleHistoryBackfill(0, { allowAtCap: true });
     }
@@ -10069,6 +10077,14 @@ function renderHistoryVirtual() {
     measuredHistoryRowHeight = measured;
     renderHistoryVirtual();
   }
+}
+
+function isSessionEmpty(hiddenConnectCount, paging) {
+  return !state.historyListError && !hiddenConnectCount && paging.fullyLoaded && paging.total === 0;
+}
+
+function emptySessionMessage() {
+  return `Nothing captured yet. Open a browser that already sends its traffic through Sniper, or point any client at ${state.settings?.proxy_addr || "the proxy"}.`;
 }
 
 function historyEmptyMessage(hiddenConnectCount, paging) {
@@ -14274,15 +14290,19 @@ function validateOastServerUrlForSettings(value) {
 
 // The server chooses the browser and decides whether one can open at all (none
 // installed, proxy offline, already open), and its message says which. All this
-// has to do is surface that message rather than guess at a cause. The window opens
-// without a DevTools port: an agent attaches through `sniper-cli`, where asking for
-// one is an explicit choice.
-async function openSniperBrowser() {
+// has to do is surface that message rather than guess at a cause. With no body the
+// server opens the saved default, without a DevTools port: an agent attaches
+// through `sniper-cli`, or asks for one here with `agent`.
+async function openSniperBrowser({ browser, agent, fresh } = {}) {
+  const body = {};
+  if (browser) body.browser = browser;
+  if (agent) body.agent = true;
+  if (fresh) body.fresh = true;
   try {
     const response = await fetch("/api/browser/launch", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: "{}",
+      body: JSON.stringify(body),
     });
     await requireOkResponse(response, "Could not open a browser.");
     const launched = await response.json();
@@ -14293,15 +14313,153 @@ async function openSniperBrowser() {
       showToast(launched.warnings.join(" "), "warning", 10000);
       return;
     }
-    showToast(
-      launched.reused
-        ? `Opened another ${launched.browser} window through Sniper`
-        : `Opened ${launched.browser} through Sniper`,
-      "success",
-      3000,
-    );
+    const opened = launched.reused
+      ? `Opened another ${launched.browser} window through Sniper`
+      : `Opened ${launched.browser} through Sniper`;
+    const control = launched.control;
+    // The person who ticked "agent" is the one who has to pass this on, so it is
+    // shown rather than left in the API response they never see.
+    const how = control?.endpoint || control?.command;
+    showToast(how ? `${opened}. Agent control: ${how}` : opened, "success", how ? 12000 : 3000);
   } catch (error) {
     showToast(error?.message || "Could not open a browser.", "error", 6000);
+  }
+}
+
+// A launcher is any `[data-browser-launcher]` element: a button that opens the
+// default browser and a caret that lists the others. It is one component mounted
+// by attribute so where it sits is an HTML decision, not a code one.
+let browserMenu = null;
+
+function mountBrowserLaunchers(root = document) {
+  root.querySelectorAll("[data-browser-launcher]:not(.browser-launcher)").forEach((host) => {
+    host.classList.add("browser-launcher");
+    host.innerHTML = `
+      <button class="browser-launch-main" type="button" title="Open a browser that already sends its traffic through Sniper and trusts its certificate">Open browser</button>
+      <button class="browser-launch-caret" type="button" aria-haspopup="menu" aria-label="Choose a browser">&#9662;</button>
+    `;
+    const [main, caret] = host.children;
+    onClickWithProgress(main, () => openSniperBrowser());
+    caret.addEventListener("click", (event) => {
+      // The document-level outside-click handler would otherwise close the menu
+      // this click is about to open.
+      event.stopPropagation();
+      toggleBrowserMenu(caret);
+    });
+  });
+}
+
+function installBrowserMenuDismissal() {
+  document.addEventListener("click", (event) => {
+    if (browserMenu && !browserMenu.element.contains(event.target)) closeBrowserMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeBrowserMenu();
+  });
+  window.addEventListener("resize", closeBrowserMenu);
+}
+
+function closeBrowserMenu() {
+  if (!browserMenu) return false;
+  browserMenu.element.remove();
+  browserMenu = null;
+  return true;
+}
+
+async function toggleBrowserMenu(anchor) {
+  if (closeBrowserMenu()) return;
+  // Claims the slot before the list arrives, so a second click while it loads
+  // closes this menu instead of opening another one on top of it.
+  const menu = { anchor, element: document.createElement("div") };
+  browserMenu = menu;
+  const catalog = await fetchBrowserCatalog();
+  if (browserMenu !== menu) return;
+  if (!catalog) {
+    browserMenu = null;
+    return;
+  }
+  renderBrowserMenu(catalog);
+}
+
+async function fetchBrowserCatalog() {
+  try {
+    const response = await fetch("/api/browser/list");
+    await requireOkResponse(response, "Could not list browsers.");
+    return await response.json();
+  } catch (error) {
+    showToast(error?.message || "Could not list browsers.", "error", 6000);
+    return null;
+  }
+}
+
+function renderBrowserMenu(catalog) {
+  const { anchor, element } = browserMenu;
+  // Checked boxes survive a re-render after "Make default".
+  const wasChecked = (name) => element.querySelector(`[data-option="${name}"]`)?.checked ? "checked" : "";
+  const rows = catalog.map((entry) => {
+    const missing = entry.requirements?.filter((item) => !item.found) || [];
+    const note = !entry.installed ? "Not installed" : entry.default ? "Default" : "";
+    const title = !entry.installed ? entry.install_hint || "" : "";
+    const pin = !entry.installed
+      ? ""
+      : entry.preferred
+        ? `<button class="browser-menu-pin" type="button" data-prefer="auto" title="Go back to picking the first installed browser">Use auto</button>`
+        : `<button class="browser-menu-pin" type="button" data-prefer="${escapeHtml(entry.browser)}">Make default</button>`;
+    return `
+      <div class="browser-menu-row">
+        <button class="context-menu-item browser-menu-open" type="button" role="menuitem"
+          data-open="${escapeHtml(entry.browser)}" title="${escapeHtml(title)}" ${entry.installed ? "" : "disabled"}>
+          <span class="browser-menu-name">${escapeHtml(entry.browser)}</span>
+          <span class="browser-menu-note">${escapeHtml(note)}</span>
+        </button>
+        ${pin}
+      </div>
+      ${missing.length ? `<div class="browser-menu-hint">${escapeHtml(missing.map((item) => item.hint || item.name).join(" "))}</div>` : ""}
+    `;
+  });
+  element.className = "context-menu browser-menu";
+  element.setAttribute("role", "menu");
+  element.innerHTML = `
+    ${rows.join("")}
+    <div class="context-menu-divider"></div>
+    <label class="browser-menu-option"><input type="checkbox" data-option="agent" ${wasChecked("agent")}> Let an agent drive it</label>
+    <label class="browser-menu-option"><input type="checkbox" data-option="fresh" ${wasChecked("fresh")}> Throwaway profile</label>
+  `;
+  element.onclick = async (event) => {
+    const prefer = event.target.closest("[data-prefer]");
+    const open = event.target.closest("[data-open]");
+    if (prefer) {
+      await setPreferredBrowser(prefer.dataset.prefer);
+    } else if (open && !open.disabled) {
+      const options = {
+        browser: open.dataset.open,
+        agent: element.querySelector('[data-option="agent"]').checked,
+        fresh: element.querySelector('[data-option="fresh"]').checked,
+      };
+      closeBrowserMenu();
+      await openSniperBrowser(options);
+    }
+  };
+  document.body.appendChild(element);
+  const box = anchor.getBoundingClientRect();
+  const width = element.offsetWidth;
+  element.style.top = `${box.bottom + 4}px`;
+  element.style.left = `${Math.max(8, Math.min(box.right - width, window.innerWidth - width - 8))}px`;
+}
+
+async function setPreferredBrowser(name) {
+  try {
+    const response = await fetch("/api/browser/preference", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ browser: name }),
+    });
+    await requireOkResponse(response, "Could not save the default browser.");
+    showToast(name === "auto" ? "Browser default reset to auto" : `${name} is now the default browser`, "success", 2500);
+    const catalog = await fetchBrowserCatalog();
+    if (catalog && browserMenu) renderBrowserMenu(catalog);
+  } catch (error) {
+    showToast(error?.message || "Could not save the default browser.", "error", 6000);
   }
 }
 

@@ -292,6 +292,35 @@ impl HttpFilterSettingsSnapshot {
     }
 }
 
+/// Settings the server owns. The UI replaces the whole snapshot whenever it saves
+/// anything (a column width, a filter), so a field it does not know about would be
+/// reset every time. `replace_snapshot` therefore keeps these from the current copy,
+/// and they change only through their own methods.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserSettingsSnapshot {
+    /// The browser opened when none is named. Absent means automatic. A name rather
+    /// than a `BrowserKind`: a name this build does not know (after a downgrade)
+    /// must be dropped, not fail the parse and discard every other setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred: Option<String>,
+}
+
+impl BrowserSettingsSnapshot {
+    fn sanitized(self) -> Self {
+        Self {
+            preferred: self
+                .preferred
+                .map(|name| name.trim().to_ascii_lowercase())
+                .filter(|name| crate::browser::BrowserKind::parse(name).is_some()),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.preferred.is_none()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppUiSettingsSnapshot {
@@ -326,6 +355,8 @@ pub struct AppUiSettingsSnapshot {
     pub websocket_stack_height: Option<u16>,
     pub ws_replay_left_width: Option<u16>,
     pub ws_replay_frame_detail_height: Option<u16>,
+    #[serde(default, skip_serializing_if = "BrowserSettingsSnapshot::is_empty")]
+    pub browser: BrowserSettingsSnapshot,
 }
 
 impl Default for AppUiSettingsSnapshot {
@@ -356,6 +387,7 @@ impl Default for AppUiSettingsSnapshot {
             websocket_stack_height: None,
             ws_replay_left_width: None,
             ws_replay_frame_detail_height: None,
+            browser: BrowserSettingsSnapshot::default(),
         }
     }
 }
@@ -436,6 +468,9 @@ impl AppUiSettingsSnapshot {
             .into_iter()
             .filter(|key| !key.trim().is_empty())
             .collect();
+        // Copied here because this is also what reads the file back: a field left out
+        // would be written and then lost the next time the app starts.
+        sanitized.browser = self.browser.sanitized();
 
         sanitized
     }
@@ -474,10 +509,30 @@ impl AppUiSettingsStore {
             return Ok(current.clone());
         }
         let mut next = next;
+        // Whatever the client sent for a server-owned setting is ignored.
+        next.browser = current.browser.clone();
         next.server_revision = current.server_revision.saturating_add(1).max(1);
         persist_ui_settings(&self.path, &next)?;
         *current = next.clone();
         Ok(next)
+    }
+
+    /// Change the preferred browser without going through a whole-snapshot replace,
+    /// so it can neither be clobbered by the UI nor race a read-modify-write from the
+    /// CLI. `None` means automatic.
+    ///
+    /// The revision is left alone on purpose. It exists so a stale copy of what the
+    /// UI owns cannot overwrite a newer one. This setting is not the UI's, and
+    /// bumping it would make a UI that loaded a moment ago look stale: its next save,
+    /// a column width or a filter, would be refused and replaced by the server copy.
+    pub async fn set_browser_preferred(&self, preferred: Option<String>) -> Result<Option<String>> {
+        let preferred = BrowserSettingsSnapshot { preferred }.sanitized().preferred;
+        let mut current = self.inner.write().await;
+        let mut next = current.clone();
+        next.browser.preferred = preferred.clone();
+        persist_ui_settings(&self.path, &next)?;
+        *current = next;
+        Ok(preferred)
     }
 }
 
@@ -737,6 +792,150 @@ mod tests {
         assert_eq!(persisted.ws_replay_left_width, Some(555));
         assert_eq!(persisted.ws_replay_frame_detail_height, Some(222));
 
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    fn temp_data_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("sniper-ui-settings-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn the_preferred_browser_survives_a_restart() {
+        let data_dir = temp_data_dir();
+        let store = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        assert_eq!(
+            store
+                .set_browser_preferred(Some("ego".to_string()))
+                .await
+                .unwrap(),
+            Some("ego".to_string())
+        );
+
+        // Reading the file back goes through sanitized(), which copies fields one by one.
+        // A field left out of it is written and then lost the next time the app starts.
+        let reloaded = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        assert_eq!(
+            reloaded.snapshot().await.browser.preferred.as_deref(),
+            Some("ego")
+        );
+
+        reloaded.set_browser_preferred(None).await.unwrap();
+        let cleared = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        assert_eq!(cleared.snapshot().await.browser.preferred, None);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    // The UI sends the whole snapshot whenever it saves a column width or a filter, and
+    // it knows nothing about this field. Without the server keeping its own copy, the
+    // next resize would put the default back to automatic.
+    #[tokio::test]
+    async fn a_whole_snapshot_from_the_ui_cannot_change_the_preferred_browser() {
+        let data_dir = temp_data_dir();
+        let store = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        store
+            .set_browser_preferred(Some("chrome".to_string()))
+            .await
+            .unwrap();
+
+        let from_the_ui = AppUiSettingsSnapshot {
+            client_id: "ui".to_string(),
+            client_version: 1,
+            http_query: "login".to_string(),
+            ..AppUiSettingsSnapshot::default()
+        };
+        let saved = store.replace_snapshot(from_the_ui).await.unwrap();
+        assert_eq!(saved.http_query, "login", "the UI's own settings are saved");
+        assert_eq!(
+            saved.browser.preferred.as_deref(),
+            Some("chrome"),
+            "the default is not"
+        );
+
+        // Nor can it set one by sending the field.
+        let mut forged = AppUiSettingsSnapshot {
+            client_id: "ui".to_string(),
+            client_version: 2,
+            ..AppUiSettingsSnapshot::default()
+        };
+        forged.browser.preferred = Some("ego".to_string());
+        let saved = store.replace_snapshot(forged).await.unwrap();
+        assert_eq!(saved.browser.preferred.as_deref(), Some("chrome"));
+
+        let reloaded = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        assert_eq!(
+            reloaded.snapshot().await.browser.preferred.as_deref(),
+            Some("chrome")
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    // A name this build does not know can appear after a downgrade. It has to be
+    // dropped, not fail the whole file and discard every other setting with it.
+    #[tokio::test]
+    async fn an_unknown_browser_name_is_dropped_without_discarding_other_settings() {
+        let data_dir = temp_data_dir();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("ui-settings.json"),
+            r#"{"http_query":"keep me","browser":{"preferred":"netscape"}}"#,
+        )
+        .unwrap();
+
+        let store = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        let snapshot = store.snapshot().await;
+        assert_eq!(snapshot.http_query, "keep me");
+        assert_eq!(snapshot.browser.preferred, None);
+
+        // The setter drops one too, and tidies case and whitespace on a real name.
+        assert_eq!(
+            store
+                .set_browser_preferred(Some("netscape".to_string()))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .set_browser_preferred(Some(" Ego ".to_string()))
+                .await
+                .unwrap(),
+            Some("ego".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    // A UI that loaded a moment ago, then has a setting changed behind its back, must
+    // still be able to save its own settings. If changing the default browser moved the
+    // revision, that save would be refused as stale and the user's change thrown away.
+    #[tokio::test]
+    async fn changing_the_preferred_browser_does_not_make_a_ui_save_in_flight_stale() {
+        let data_dir = temp_data_dir();
+        let store = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        let loaded = store.snapshot().await;
+
+        store
+            .set_browser_preferred(Some("chrome".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.snapshot().await.server_revision,
+            loaded.server_revision,
+            "a server-owned change leaves the revision alone"
+        );
+
+        let ui_save = AppUiSettingsSnapshot {
+            client_id: "page-load-7".to_string(),
+            client_version: 1,
+            server_revision: loaded.server_revision,
+            http_query: "resized a column".to_string(),
+            ..AppUiSettingsSnapshot::default()
+        };
+        let saved = store.replace_snapshot(ui_save).await.unwrap();
+        assert_eq!(
+            saved.http_query, "resized a column",
+            "the save was not refused as stale"
+        );
+        assert_eq!(saved.browser.preferred.as_deref(), Some("chrome"));
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 

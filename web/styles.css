@@ -1382,6 +1382,133 @@ code {
   user-select: none;
 }
 
+/* The launcher is a split button: the left half opens the default browser, the
+   right half lists the others. Drawn like .scope-pill so it reads as a capture
+   control and not a navigation tab. */
+.browser-launcher {
+  display: inline-flex;
+  align-items: stretch;
+  margin: 0 6px 0 8px;
+  align-self: center;
+}
+
+.browser-launch-main,
+.browser-launch-caret {
+  min-height: var(--control-h);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  font-family: var(--sans);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.browser-launch-main {
+  padding: 4px 12px;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+}
+
+.browser-launch-caret {
+  padding: 4px 7px;
+  border-left: 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+
+.browser-launch-main:hover,
+.browser-launch-caret:hover {
+  color: var(--text-soft);
+  border-color: var(--text-dim);
+}
+
+.empty-row-action {
+  margin-top: 12px;
+}
+
+.empty-row-action .browser-launcher {
+  margin: 0;
+}
+
+.browser-launch-main:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.browser-menu {
+  min-width: 280px;
+  padding: 6px;
+}
+
+.browser-menu-row {
+  position: relative;
+}
+
+.browser-menu-name {
+  text-transform: capitalize;
+}
+
+.browser-menu-open:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.browser-menu-note {
+  color: var(--text-dim);
+  font-size: var(--font-2xs);
+  text-transform: none;
+}
+
+/* Takes the note's place while the row is hovered: the saved choice is something
+   the operator changes once, so it should not compete with the list of browsers. */
+.browser-menu-pin {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-elevated);
+  color: var(--text-soft);
+  font-size: var(--font-2xs);
+  font-family: var(--sans);
+  cursor: pointer;
+  white-space: nowrap;
+  visibility: hidden;
+}
+
+.browser-menu-row:hover .browser-menu-pin,
+.browser-menu-pin:focus-visible {
+  visibility: visible;
+}
+
+.browser-menu-row:hover .browser-menu-note {
+  visibility: hidden;
+}
+
+.browser-menu-pin:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.browser-menu-hint {
+  padding: 0 10px 6px;
+  color: var(--text-dim);
+  font-size: var(--font-2xs);
+  line-height: 1.4;
+}
+
+.browser-menu-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+
 .scope-pill:hover {
   color: var(--text-soft);
   border-color: var(--text-dim);
