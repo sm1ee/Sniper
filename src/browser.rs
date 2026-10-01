@@ -51,8 +51,9 @@ pub const STARTUP_SETTLE: Duration = Duration::from_secs(2);
 /// process until it hands over and exits.
 const MAX_HANDOFFS_PER_PROFILE: usize = 4;
 /// A browser that ran this long before ending may have handed its profile to a
-/// successor instead of quitting. ego does: about eight seconds in it relaunches
-/// itself, the process Sniper started exits, and a detached one carries on.
+/// successor instead of quitting. ego has been seen to: in most runs on a new
+/// profile, about nine seconds in, it relaunches itself, the process Sniper started
+/// exits, and a detached one carries on.
 const HANDOVER_MIN_LIFETIME: Duration = Duration::from_secs(2);
 /// How long that successor gets to take the profile's lock. It appears a fraction
 /// of a second after the first process lets go.
@@ -592,6 +593,8 @@ struct Owner {
 /// otherwise point to goes with the profile.
 struct Exit {
     status: String,
+    /// Ended with status 0. A second launch handed to a running browser does.
+    success: bool,
     output: String,
 }
 
@@ -775,7 +778,9 @@ async fn launch_at(
                 Started::Reused(owner)
             }
             Some(owner) => {
-                let detail = if owner.proxy != proxy {
+                let detail = if owner.proxy.is_empty() {
+                    format!("was started without a proxy, not {proxy}")
+                } else if owner.proxy != proxy {
                     format!("was started for the proxy at {}, not {proxy}", owner.proxy)
                 } else {
                     "was started without a DevTools port".to_string()
@@ -855,7 +860,7 @@ async fn launch_at(
     };
 
     let mut reused_has_port = false;
-    let (pid, reused, mut exited) = match started {
+    let (mut pid, mut reused, mut exited) = match started {
         Started::New { pid, exited } => {
             info!(
                 browser = kind.name(),
@@ -897,14 +902,23 @@ async fn launch_at(
         }
     } else if let Some(exited) = exited.as_mut() {
         if let Some(exit) = wait_for_exit(exited, ctx.early_exit_probe).await {
-            ended = true;
-            warnings.push(format!(
-                "the browser process ended within {} ms ({}): it either could not start or \
-                 handed the request to a browser already running elsewhere{}",
-                ctx.early_exit_probe.as_millis(),
-                exit.describe(),
-                log_hint(request.fresh, &log_path)
-            ));
+            if let Some(holder) = handed_off_to(&profile, exe, &exit) {
+                // The binary gave its window to a browser that holds the profile and
+                // exited, which is what a second window is. It lands here when the
+                // browser relaunched itself a moment before this open and no record
+                // named its new process yet.
+                pid = holder;
+                reused = true;
+            } else {
+                ended = true;
+                warnings.push(format!(
+                    "the browser process ended within {} ms ({}): it either could not start \
+                     or handed the request to a browser already running elsewhere{}",
+                    ctx.early_exit_probe.as_millis(),
+                    exit.describe(),
+                    log_hint(request.fresh, &log_path)
+                ));
+            }
         }
     }
     // A browser that ended has nothing to drive, whichever driver it has. Handing
@@ -971,6 +985,13 @@ async fn wait_for_exit(exited: &mut mpsc::Receiver<Exit>, within: Duration) -> O
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// The browser a launch that ended at once gave its window to: one that exited
+/// cleanly while a live browser of the same executable holds the profile's lock.
+/// Anything else that ends this fast is a browser that could not start.
+fn handed_off_to(profile: &Path, exe: &Path, exit: &Exit) -> Option<u32> {
+    exit.success.then(|| lock_holder(profile, exe)).flatten()
 }
 
 fn is_throwaway(profile: &Path) -> bool {
@@ -1083,19 +1104,23 @@ fn watch_browser(
     std::thread::Builder::new()
         .name("sniper-browser-wait".to_string())
         .spawn(move || {
-            let status = match child.wait() {
-                Ok(status) => status.to_string(),
-                Err(error) => format!("wait failed: {error}"),
+            let (status, success) = match child.wait() {
+                Ok(status) => (status.to_string(), status.success()),
+                Err(error) => (format!("wait failed: {error}"), false),
             };
             // Read before the profile, and the log in it, can be deleted below.
             let _ = exited.send(Exit {
                 status,
+                success,
                 output: read_log_tail(&profile),
             });
             // A throwaway profile is deleted below, and that must not happen under a
             // browser that is still using it. Persistent profiles need no wait: the
-            // next launch finds the successor through the profile's lock.
-            if fresh && started.elapsed() >= HANDOVER_MIN_LIFETIME {
+            // next launch finds the successor through the profile's lock, and an open
+            // in the instant before it takes the lock is recognised as a handoff.
+            // A handover is a clean exit after a while. A browser that failed, or
+            // that never got going, has no successor to wait for.
+            if fresh && cfg!(unix) && success && started.elapsed() >= HANDOVER_MIN_LIFETIME {
                 wait_out_successor(&profile, &exe, HANDOVER_WAIT);
             }
             {
@@ -1259,11 +1284,17 @@ fn lock_holder(profile: &Path, exe: &Path) -> Option<u32> {
 fn adopt_holder(profile: &Path, exe: &Path) -> Option<Owner> {
     let pid = lock_holder(profile, exe)?;
     let args = process_args(pid)?;
+    // A stale lock can name a pid that has since been given to the same browser
+    // running some other profile (the everyday one). The executable matches, so the
+    // command line is what says whose it is.
+    if !args.contains(&format!("--user-data-dir={}", profile.display())) {
+        return None;
+    }
     let owner = Owner {
         pid,
         exe: exe.to_path_buf(),
         proxy: switch_value(&args, "--proxy-server")
-            .unwrap_or("no proxy")
+            .unwrap_or_default()
             .to_string(),
         devtools_port: args.contains("--remote-debugging-port"),
         started: None,
@@ -1344,8 +1375,11 @@ fn sweep_stale_fresh_profiles(root: &Path) {
             .ok()
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age < FRESH_PROFILE_GRACE);
-        let still_running =
-            read_owner(&path).is_some_and(|owner| process_runs_as(owner.pid, &owner.exe));
+        // The record names the process Sniper started, which a browser that
+        // relaunched itself has left behind; its lock names the one that carries on.
+        let still_running = read_owner(&path).is_some_and(|owner| {
+            process_runs_as(owner.pid, &owner.exe) || lock_holder(&path, &owner.exe).is_some()
+        });
         if !recent && !still_running {
             remove_profile_with_retry(&path);
         }
@@ -1846,8 +1880,8 @@ mod tests {
         assert_eq!(BrowserKind::Chrome.driver(), Driver::Cdp);
     }
 
-    // ego relaunches itself about eight seconds after it starts: the process Sniper
-    // started exits and a detached one takes over the profile. These cover finding
+    // ego has been seen to relaunch itself about nine seconds after it starts: the
+    // process Sniper started exits and a detached one takes over the profile. These cover finding
     // that successor through the profile's lock, since the pid Sniper recorded is
     // dead by then.
     #[cfg(unix)]
@@ -1855,26 +1889,38 @@ mod tests {
         use super::*;
         use std::os::unix::fs::symlink;
 
-        fn profile_locked_by(target: &str) -> PathBuf {
-            let profile = std::env::temp_dir().join(format!("sniper-lock-{}", Uuid::new_v4()));
-            fs::create_dir_all(&profile).unwrap();
+        // bash and not sh: on macOS /bin/sh turns into /bin/bash a moment after it
+        // starts, and the executable is what a holder is checked against.
+        const SHELL: &str = "/bin/bash";
+
+        fn scratch(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("sniper-{name}-{}", Uuid::new_v4()));
+            fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn lock(profile: &Path, target: &str) {
+            let _ = fs::remove_file(profile.join("SingletonLock"));
             symlink(target, profile.join("SingletonLock")).unwrap();
-            profile
         }
 
         // A process that stays up for a few seconds with the command line a wired
         // browser would have. The compound command keeps the shell from replacing
-        // itself with `sleep`, which would drop the flags from `ps`. bash and not
-        // sh: on macOS /bin/sh turns into /bin/bash a moment after it starts, and
-        // the executable is what a holder is checked against.
-        fn wired_process(seconds: u32, flags: &[&str]) -> Child {
-            Command::new("/bin/bash")
+        // itself with `sleep`, which would drop the flags from `ps`.
+        fn browser_process(seconds: &str, flags: &[String]) -> Child {
+            Command::new(SHELL)
                 .args(["-c", &format!("sleep {seconds}; true"), "browser"])
                 .args(flags)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap()
+        }
+
+        fn flags(profile: &Path, rest: &[&str]) -> Vec<String> {
+            std::iter::once(format!("--user-data-dir={}", profile.display()))
+                .chain(rest.iter().map(|flag| flag.to_string()))
+                .collect()
         }
 
         fn stop(mut child: Child) {
@@ -1884,10 +1930,10 @@ mod tests {
 
         #[test]
         fn the_lock_names_its_holder_by_what_follows_the_last_dash() {
-            let profile = profile_locked_by("hex.ray-PC-79073");
+            let profile = scratch("lock");
+            lock(&profile, "example-host-79073");
             assert_eq!(singleton_lock_pid(&profile), Some(79073));
-            fs::remove_file(profile.join("SingletonLock")).unwrap();
-            symlink("not-a-pid", profile.join("SingletonLock")).unwrap();
+            lock(&profile, "not-a-pid");
             assert_eq!(singleton_lock_pid(&profile), None);
             fs::remove_file(profile.join("SingletonLock")).unwrap();
             assert_eq!(singleton_lock_pid(&profile), None, "no lock, no holder");
@@ -1896,15 +1942,19 @@ mod tests {
 
         #[test]
         fn a_holder_no_record_names_is_adopted_with_the_wiring_it_was_started_with() {
-            let shell = Path::new("/bin/bash");
-            let holder = wired_process(
-                8,
-                &[
-                    "--proxy-server=127.0.0.1:18890",
-                    "--remote-debugging-port=0",
-                ],
+            let shell = Path::new(SHELL);
+            let profile = scratch("adopt");
+            let holder = browser_process(
+                "8",
+                &flags(
+                    &profile,
+                    &[
+                        "--proxy-server=127.0.0.1:18890",
+                        "--remote-debugging-port=0",
+                    ],
+                ),
             );
-            let profile = profile_locked_by(&format!("some-host-{}", holder.id()));
+            lock(&profile, &format!("some-host-{}", holder.id()));
 
             let owner = current_owner(&profile, &HashMap::new(), shell).expect("adopted");
             assert_eq!(owner.pid, holder.id());
@@ -1917,15 +1967,16 @@ mod tests {
                 "recorded, so a restart of Sniper finds it too"
             );
 
-            // The browser being a different executable than expected is not adopted.
-            let other = profile_locked_by(&format!("some-host-{}", holder.id()));
+            // A different executable than the one expected is not adopted.
+            let other = scratch("adopt-other");
+            lock(&other, &format!("some-host-{}", holder.id()));
             assert!(current_owner(&other, &HashMap::new(), Path::new("/bin/ls")).is_none());
             // A lock left behind by a crash names a process that is gone.
-            let stale = profile_locked_by("some-host-4000000000");
+            let stale = scratch("adopt-stale");
+            lock(&stale, "some-host-4000000000");
             assert!(current_owner(&stale, &HashMap::new(), shell).is_none());
             // No lock at all.
-            let unlocked = profile_locked_by("x-1");
-            fs::remove_file(unlocked.join("SingletonLock")).unwrap();
+            let unlocked = scratch("adopt-unlocked");
             assert!(current_owner(&unlocked, &HashMap::new(), shell).is_none());
 
             stop(holder);
@@ -1935,12 +1986,35 @@ mod tests {
         }
 
         #[test]
+        fn a_stale_lock_whose_pid_is_now_the_same_browser_on_another_profile_is_not_adopted() {
+            let shell = Path::new(SHELL);
+            let ours = scratch("ours");
+            let everyday = browser_process(
+                "8",
+                &flags(
+                    Path::new("/somewhere/else"),
+                    &["--proxy-server=127.0.0.1:18890"],
+                ),
+            );
+            lock(&ours, &format!("some-host-{}", everyday.id()));
+            assert!(
+                current_owner(&ours, &HashMap::new(), shell).is_none(),
+                "the executable matches but the command line names another profile"
+            );
+            assert!(read_owner(&ours).is_none(), "nothing recorded for it");
+            stop(everyday);
+            let _ = fs::remove_dir_all(&ours);
+        }
+
+        #[test]
         fn an_adopted_holder_keeps_the_proxy_it_has_so_a_mismatch_is_visible() {
-            let shell = Path::new("/bin/bash");
-            let elsewhere = wired_process(8, &["--proxy-server=127.0.0.1:1"]);
-            let unwired = wired_process(8, &[]);
-            let one = profile_locked_by(&format!("host-{}", elsewhere.id()));
-            let two = profile_locked_by(&format!("host-{}", unwired.id()));
+            let shell = Path::new(SHELL);
+            let one = scratch("proxy-one");
+            let two = scratch("proxy-two");
+            let elsewhere = browser_process("8", &flags(&one, &["--proxy-server=127.0.0.1:1"]));
+            let unwired = browser_process("8", &flags(&two, &[]));
+            lock(&one, &format!("host-{}", elsewhere.id()));
+            lock(&two, &format!("host-{}", unwired.id()));
 
             let owner = current_owner(&one, &HashMap::new(), shell).unwrap();
             assert_eq!(owner.proxy, "127.0.0.1:1");
@@ -1948,7 +2022,8 @@ mod tests {
             assert!(!owner.devtools_port);
             assert_eq!(
                 current_owner(&two, &HashMap::new(), shell).unwrap().proxy,
-                "no proxy"
+                "",
+                "empty, so the refusal says it had no proxy rather than naming one"
             );
 
             stop(elsewhere);
@@ -1958,29 +2033,199 @@ mod tests {
         }
 
         #[test]
-        fn a_throwaway_profile_is_kept_until_the_successor_has_gone() {
-            let shell = Path::new("/bin/bash");
-            // No successor ever appears: gives up after the wait it was given.
-            let alone = profile_locked_by("x-1");
-            fs::remove_file(alone.join("SingletonLock")).unwrap();
-            let began = std::time::Instant::now();
-            wait_out_successor(&alone, shell, Duration::from_millis(200));
-            assert!(began.elapsed() < Duration::from_secs(2));
+        fn a_launch_that_ends_at_once_is_a_handoff_only_when_a_browser_holds_the_profile() {
+            let shell = Path::new(SHELL);
+            let profile = scratch("handoff");
+            let holder = browser_process("8", &flags(&profile, &[]));
+            let exit = |success| Exit {
+                status: "exit status".into(),
+                success,
+                output: String::new(),
+            };
 
-            // One appears and runs a while: the wait lasts as long as it does.
-            let mut successor = wired_process(2, &[]);
-            let profile = profile_locked_by(&format!("host-{}", successor.id()));
-            let reaper = std::thread::spawn(move || successor.wait());
+            assert_eq!(handed_off_to(&profile, shell, &exit(true)), None, "no lock");
+            lock(&profile, &format!("host-{}", holder.id()));
+            assert_eq!(
+                handed_off_to(&profile, shell, &exit(true)),
+                Some(holder.id())
+            );
+            assert_eq!(
+                handed_off_to(&profile, shell, &exit(false)),
+                None,
+                "a failure is a failure even with a browser running"
+            );
+            stop(holder);
+            let _ = fs::remove_dir_all(&profile);
+        }
+
+        #[test]
+        fn waiting_out_a_successor_covers_the_gap_before_it_takes_the_lock() {
+            let shell = Path::new(SHELL);
+            let profile = scratch("gap");
+            // The lock is absent when the wait begins and only appears afterwards,
+            // as it does between ego's first process exiting and its successor
+            // starting. Without the first loop this returns at once.
+            let successor = browser_process("2", &[]);
+            let target = format!("host-{}", successor.id());
+            let appear = {
+                let profile = profile.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    lock(&profile, &target);
+                })
+            };
+            let reaper = std::thread::spawn(move || {
+                let mut successor = successor;
+                successor.wait()
+            });
             let began = std::time::Instant::now();
-            wait_out_successor(&profile, shell, Duration::from_millis(200));
+            wait_out_successor(&profile, shell, Duration::from_secs(3));
             assert!(
                 began.elapsed() >= Duration::from_millis(1500),
                 "returned after {:?} while the successor was still running",
                 began.elapsed()
             );
+            appear.join().unwrap();
             reaper.join().unwrap().unwrap();
-            let _ = fs::remove_dir_all(&alone);
+
+            // None ever appears: gives up after the time it was given.
+            let alone = scratch("alone");
+            let began = std::time::Instant::now();
+            wait_out_successor(&alone, shell, Duration::from_millis(200));
+            assert!(began.elapsed() < Duration::from_secs(2));
             let _ = fs::remove_dir_all(&profile);
+            let _ = fs::remove_dir_all(&alone);
+        }
+
+        // Runs the real watcher on a browser that lived `lived` and exited cleanly,
+        // while a successor holds the profile for `successor_for` seconds.
+        fn watch_a_throwaway(
+            lived: &str,
+            ends_with: &str,
+            successor_for: &str,
+        ) -> (PathBuf, PathBuf, Child) {
+            let root = scratch("watch");
+            let profile = root.join("fresh-test");
+            fs::create_dir_all(&profile).unwrap();
+            fs::write(profile.join("Cookies"), b"x").unwrap();
+            let successor = browser_process(successor_for, &flags(&profile, &[]));
+            lock(&profile, &format!("host-{}", successor.id()));
+            let first = Command::new(SHELL)
+                .args(["-c", &format!("sleep {lived}; {ends_with}")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let (tx, _rx) = mpsc::channel();
+            let pid = first.id();
+            watch_browser(first, &profile, pid, Path::new(SHELL), true, tx).unwrap();
+            (root, profile, successor)
+        }
+
+        fn wait_until_gone(path: &Path, within: Duration) -> bool {
+            let deadline = std::time::Instant::now() + within;
+            while path.exists() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            true
+        }
+
+        #[test]
+        fn a_throwaway_profile_outlives_the_process_that_handed_it_over() {
+            // Lived past the gate, then exited; the successor runs 5 s in all.
+            let (root, profile, successor) = watch_a_throwaway("2.2", "true", "5");
+            std::thread::sleep(Duration::from_millis(3000));
+            assert!(profile.exists(), "deleted under the browser still using it");
+            assert!(
+                wait_until_gone(&profile, Duration::from_secs(8)),
+                "left behind after the browser ended"
+            );
+            stop(successor);
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn a_throwaway_browser_that_died_at_once_is_cleaned_up_without_waiting() {
+            // Ended before the gate: it did not hand anything over, whoever else
+            // holds the lock, so there is nothing to wait for.
+            let (root, profile, successor) = watch_a_throwaway("0.3", "true", "6");
+            assert!(
+                wait_until_gone(&profile, Duration::from_millis(1800)),
+                "waited for a successor that a browser which never started cannot have"
+            );
+            stop(successor);
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn a_throwaway_browser_that_failed_is_cleaned_up_however_long_it_ran() {
+            // Past the lifetime gate but not a clean exit: nothing was handed over.
+            let (root, profile, successor) = watch_a_throwaway("2.2", "false", "8");
+            let began = std::time::Instant::now();
+            assert!(
+                wait_until_gone(&profile, Duration::from_secs(5)),
+                "left behind after a failed browser"
+            );
+            assert!(
+                began.elapsed() < Duration::from_secs(3),
+                "waited {:?} for a successor after a failure",
+                began.elapsed()
+            );
+            stop(successor);
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn the_sweep_leaves_a_throwaway_profile_whose_successor_is_still_running() {
+            let shell = Path::new(SHELL);
+            let root = scratch("sweep");
+            let abandoned = root.join("fresh-abandoned");
+            let carried_on = root.join("fresh-carried-on");
+            fs::create_dir_all(&abandoned).unwrap();
+            fs::create_dir_all(&carried_on).unwrap();
+
+            // The record names the process Sniper started, long gone; the lock names
+            // the one that took over, still up.
+            let gone = browser_process("0", &[]);
+            let dead_pid = gone.id();
+            stop(gone);
+            let record = |dir: &Path| {
+                write_record_for(
+                    dir,
+                    &Owner {
+                        pid: dead_pid,
+                        exe: shell.to_path_buf(),
+                        proxy: PROXY_FOR_TESTS.to_string(),
+                        devtools_port: false,
+                        started: None,
+                    },
+                )
+            };
+            record(&abandoned);
+            record(&carried_on);
+            let successor = browser_process("8", &flags(&carried_on, &[]));
+            lock(&carried_on, &format!("host-{}", successor.id()));
+            for dir in [&abandoned, &carried_on] {
+                fs::File::open(dir)
+                    .unwrap()
+                    .set_modified(std::time::SystemTime::now() - Duration::from_secs(600))
+                    .unwrap();
+            }
+
+            sweep_stale_fresh_profiles(&root);
+            assert!(carried_on.exists(), "deleted under its running browser");
+            assert!(!abandoned.exists(), "an abandoned profile is still swept");
+            stop(successor);
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        const PROXY_FOR_TESTS: &str = "127.0.0.1:18890";
+
+        fn write_record_for(profile: &Path, owner: &Owner) {
+            write_owner(profile, owner).unwrap();
         }
     }
 

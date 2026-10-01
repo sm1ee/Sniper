@@ -66,15 +66,23 @@ Verified against a running Sniper:
   its skill CLI (`taskSpace`, `goto`, `snapshot`, `click`, `waitForURL`, `evaluate`,
   `finish`) and its traffic is captured. A click navigation reaches the server as a
   same-origin request with a `Referer`; a `goto` does not.
-- ego relaunches itself about nine seconds after it starts. The process Sniper
-  started exits with status 0 and a detached one (parent pid 1, same executable, the
-  same switches) takes the profile's `SingletonLock`; in between the lock is absent
-  for under half a second. Tracking the pid Sniper started therefore loses the
-  browser, and the next open ran the binary again, which handed its window to the
-  running browser and exited within 500 ms. That was reported as "could not start"
-  although the window had opened. Sniper now finds the browser through the lock,
-  reads the proxy it was started for from its command line, and keeps a throwaway
-  profile until the lock is released.
+- ego relaunches itself in four of six runs on a new profile, about nine seconds
+  after it starts. In the other two (one re-opened every 1.5 s while it started, one
+  was left alone for 40 s) it did not, and what decides it is unknown. When it does,
+  the process Sniper started exits with status 0 and a detached one (parent pid 1,
+  same executable, the same switches) takes the profile's `SingletonLock`; in
+  between the lock is absent for under half a second. Tracking the pid Sniper
+  started therefore loses the browser, and the next open ran the binary again, which
+  handed its window to the running browser and exited within 500 ms. That was
+  reported as "could not start" although the window had opened. Sniper now finds the
+  browser through the lock (macOS and Linux), reads the proxy it was started for
+  from its command line after checking that the command line names this profile,
+  treats a launch that exits cleanly while a browser holds the lock as a handed-off
+  window, and keeps a throwaway profile until the lock is released, including from
+  the startup sweep of abandoned profiles. Not covered by a test: the whole of
+  `launch_at` against a relaunching browser, because a fake browser script is not
+  the executable the lock holder is compared with. Verified by hand against real ego
+  instead.
 
 Not verified:
 

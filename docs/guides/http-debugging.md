@@ -241,13 +241,18 @@ cannot be added to a browser that is already running: quit it and open again wit
 browsers each have a profile of their own and run side by side, and up to eight
 `--fresh` browsers can be open at once.
 
-Some browsers end the process Sniper started and carry on under another one. ego
-does, about nine seconds after it opens. Sniper does not rely on the process it
-started: it finds the running browser through the profile's own lock and reads the
-proxy that browser was started for from its command line, so opening again right
-after that still gives another window in it, and a browser Sniper lost track of is
-picked up again. A throwaway profile is deleted only once its browser has gone, not
-when the first process ends.
+Some browsers end the process Sniper started and carry on under another one. ego has
+been seen to, usually about nine seconds after it opens. On macOS and Linux Sniper
+does not rely on the process it started: it finds the running browser through the
+profile's own lock and reads the proxy that browser was started for from its command
+line, so opening again right after that still gives another window in it, and a
+browser Sniper lost track of, including one left running by an earlier Sniper, is
+picked up again. An open in the instant before the new process takes the lock is
+recognised as a window handed to the running browser and is not reported as a
+failure. A throwaway profile is deleted only once its browser has gone, not when the
+first process ends, and the cleanup of abandoned throwaway profiles leaves one whose
+browser is still running. Windows has no such lock, so there a browser is tracked by
+the process Sniper started.
 
 A DevTools port is refused while the proxy listens on anything but loopback, since
 a proxy reachable from the network relays requests to local ports. The check
