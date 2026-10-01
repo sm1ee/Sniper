@@ -1954,7 +1954,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.browser.list",
             "capture browser list",
-            "List the browsers Sniper knows on this platform: whether each is installed, how an agent drives it, what that driver offers, and what is missing.",
+            "List the browsers Sniper knows on this platform: whether each is installed, how an agent drives it, what that driver offers, and what is missing. `default` marks the one that opens when none is named; `preferred` marks the one the user saved.",
             Read,
             false,
             &[],
@@ -1963,7 +1963,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.browser.open",
             "capture browser open",
-            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. Pass agent to get a `control` an agent can drive it with.",
+            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. With no browser named it opens the saved default, else ego when installed, else Chrome or another Chromium-family browser, so read `control` rather than assume a DevTools endpoint. Pass agent to get a `control` an agent can drive it with.",
             Write,
             false,
             &[],
