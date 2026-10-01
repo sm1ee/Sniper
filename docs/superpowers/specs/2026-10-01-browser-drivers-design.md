@@ -66,13 +66,24 @@ Verified against a running Sniper:
   its skill CLI (`taskSpace`, `goto`, `snapshot`, `click`, `waitForURL`, `evaluate`,
   `finish`) and its traffic is captured. A click navigation reaches the server as a
   same-origin request with a `Referer`; a `goto` does not.
+- ego relaunches itself about nine seconds after it starts. The process Sniper
+  started exits with status 0 and a detached one (parent pid 1, same executable, the
+  same switches) takes the profile's `SingletonLock`; in between the lock is absent
+  for under half a second. Tracking the pid Sniper started therefore loses the
+  browser, and the next open ran the binary again, which handed its window to the
+  running browser and exited within 500 ms. That was reported as "could not start"
+  although the window had opened. Sniper now finds the browser through the lock,
+  reads the proxy it was started for from its command line, and keeps a throwaway
+  profile until the lock is released.
 
 Not verified:
 
 - ego's handoff to the user and its visible cursor. `capabilities` reports them as
   ego documents them.
-- A brand-new ego profile. Every ego run used a copy of a profile that had been set
-  up by hand.
+- A brand-new ego profile beyond starting. One started, relaunched itself and held
+  its lock like any other, but its first-run screens and the capture of its traffic
+  were not exercised; the earlier capture runs used a copy of a profile set up by
+  hand.
 - That ego's CLI keeps its current behaviour. Sniper relies on `--ego-server-name`,
   on script output going to stderr, and on how the CLI finds the app; none of that
   is a versioned contract.

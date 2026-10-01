@@ -50,6 +50,14 @@ pub const STARTUP_SETTLE: Duration = Duration::from_secs(2);
 /// Windows being opened in one running browser at a time. Each is a full browser
 /// process until it hands over and exits.
 const MAX_HANDOFFS_PER_PROFILE: usize = 4;
+/// A browser that ran this long before ending may have handed its profile to a
+/// successor instead of quitting. ego does: about eight seconds in it relaunches
+/// itself, the process Sniper started exits, and a detached one carries on.
+const HANDOVER_MIN_LIFETIME: Duration = Duration::from_secs(2);
+/// How long that successor gets to take the profile's lock. It appears a fraction
+/// of a second after the first process lets go.
+const HANDOVER_WAIT: Duration = Duration::from_secs(3);
+const HANDOVER_POLL: Duration = Duration::from_millis(100);
 const LAUNCH_LOG_TAIL: u64 = 600;
 const PROFILE_REMOVE_ATTEMPTS: u32 = 5;
 const PROFILE_REMOVE_RETRY: Duration = Duration::from_millis(300);
@@ -741,7 +749,7 @@ async fn launch_at(
         let existing = if request.fresh {
             None
         } else {
-            current_owner(&profile, &live)
+            current_owner(&profile, &live, exe)
         };
         match existing {
             Some(owner) if owner.proxy == proxy && (owner.devtools_port || !wants_port) => {
@@ -832,7 +840,9 @@ async fn launch_at(
                 }
                 live.insert(profile.clone(), owner);
                 let (exited_tx, exited) = mpsc::channel();
-                if let Err(error) = watch_browser(child, &profile, pid, request.fresh, exited_tx) {
+                if let Err(error) =
+                    watch_browser(child, &profile, pid, exe, request.fresh, exited_tx)
+                {
                     // Without the watcher nothing would ever clear this entry. The
                     // record stays: it is checked against the running process, so it
                     // keeps protecting a live browser and is discarded once it is not.
@@ -1063,10 +1073,13 @@ fn watch_browser(
     mut child: Child,
     profile: &Path,
     pid: u32,
+    exe: &Path,
     fresh: bool,
     exited: mpsc::Sender<Exit>,
 ) -> io::Result<()> {
     let profile = profile.to_path_buf();
+    let exe = exe.to_path_buf();
+    let started = std::time::Instant::now();
     std::thread::Builder::new()
         .name("sniper-browser-wait".to_string())
         .spawn(move || {
@@ -1079,6 +1092,12 @@ fn watch_browser(
                 status,
                 output: read_log_tail(&profile),
             });
+            // A throwaway profile is deleted below, and that must not happen under a
+            // browser that is still using it. Persistent profiles need no wait: the
+            // next launch finds the successor through the profile's lock.
+            if fresh && started.elapsed() >= HANDOVER_MIN_LIFETIME {
+                wait_out_successor(&profile, &exe, HANDOVER_WAIT);
+            }
             {
                 let mut live = live_profiles()
                     .lock()
@@ -1195,17 +1214,107 @@ fn read_owner(profile: &Path) -> Option<Owner> {
 /// The browser running on a profile, whether this process started it or an earlier
 /// Sniper did. The record alone is not trusted: the pid must still be running that
 /// same executable, because a recycled pid would otherwise refuse the profile for
-/// good on the strength of a process that is not a browser.
-fn current_owner(profile: &Path, live: &HashMap<PathBuf, Owner>) -> Option<Owner> {
+/// good on the strength of a process that is not a browser. When no record names a
+/// live browser, the profile's own lock is asked: a browser that relaunched itself
+/// is running under a pid nobody wrote down.
+fn current_owner(profile: &Path, live: &HashMap<PathBuf, Owner>, exe: &Path) -> Option<Owner> {
     if let Some(owner) = live.get(profile) {
         return Some(owner.clone());
     }
-    let owner = read_owner(profile)?;
-    if process_runs_as(owner.pid, &owner.exe) {
-        Some(owner)
-    } else {
+    if let Some(owner) = read_owner(profile) {
+        if process_runs_as(owner.pid, &owner.exe) {
+            return Some(owner);
+        }
         let _ = fs::remove_file(profile.join(OWNER_FILE));
-        None
+    }
+    adopt_holder(profile, exe)
+}
+
+/// The pid Chromium recorded as holding a profile. Its lock is a symlink whose
+/// target is `<host>-<pid>`; the host can contain dashes itself, so the pid is what
+/// follows the last one. macOS and Linux only: Windows keeps its lock elsewhere and
+/// nothing is found there.
+#[cfg(unix)]
+fn singleton_lock_pid(profile: &Path) -> Option<u32> {
+    let target = fs::read_link(profile.join("SingletonLock")).ok()?;
+    target.to_str()?.rsplit('-').next()?.parse().ok()
+}
+
+#[cfg(not(unix))]
+fn singleton_lock_pid(_profile: &Path) -> Option<u32> {
+    None
+}
+
+/// The live browser holding the profile. The lock alone could name a recycled pid
+/// after a crash, so the process must also be the executable expected.
+fn lock_holder(profile: &Path, exe: &Path) -> Option<u32> {
+    singleton_lock_pid(profile).filter(|pid| process_runs_as(*pid, exe))
+}
+
+/// A browser that holds the profile although no record names it: one a Sniper
+/// started and lost track of when the browser relaunched itself, or that a crashed
+/// Sniper never finished recording. Its wiring is read from its command line, not
+/// assumed, because Chromium ignores the switches of a second launch and a window
+/// opened in a browser pointed at another proxy would capture nothing.
+fn adopt_holder(profile: &Path, exe: &Path) -> Option<Owner> {
+    let pid = lock_holder(profile, exe)?;
+    let args = process_args(pid)?;
+    let owner = Owner {
+        pid,
+        exe: exe.to_path_buf(),
+        proxy: switch_value(&args, "--proxy-server")
+            .unwrap_or("no proxy")
+            .to_string(),
+        devtools_port: args.contains("--remote-debugging-port"),
+        started: None,
+    };
+    // Recorded, so a restart of Sniper finds it without asking the process again.
+    let _ = write_owner(profile, &owner);
+    Some(owner)
+}
+
+fn switch_value<'a>(args: &'a str, switch: &str) -> Option<&'a str> {
+    let prefix = format!("{switch}=");
+    args.split(prefix.as_str())
+        .nth(1)?
+        .split_whitespace()
+        .next()
+}
+
+/// A process's command line as one string. Only read here to find which proxy a
+/// running browser was started for; it is not logged or returned to a caller.
+#[cfg(unix)]
+fn process_args(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(not(unix))]
+fn process_args(_pid: u32) -> Option<String> {
+    None
+}
+
+/// Blocks until no browser holds the profile. A browser that relaunches itself
+/// ends the process we waited on, and its successor takes the lock a moment later,
+/// so the first wait is for that successor to appear at all.
+fn wait_out_successor(profile: &Path, exe: &Path, appear_within: Duration) {
+    let deadline = std::time::Instant::now() + appear_within;
+    while lock_holder(profile, exe).is_none() {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(HANDOVER_POLL);
+    }
+    while lock_holder(profile, exe).is_some() {
+        std::thread::sleep(Duration::from_secs(1));
     }
 }
 
@@ -1735,6 +1844,144 @@ mod tests {
         assert_eq!(listed, picked, "both tables hold the same browsers");
         assert_eq!(BrowserKind::Ego.driver(), Driver::EgoCli);
         assert_eq!(BrowserKind::Chrome.driver(), Driver::Cdp);
+    }
+
+    // ego relaunches itself about eight seconds after it starts: the process Sniper
+    // started exits and a detached one takes over the profile. These cover finding
+    // that successor through the profile's lock, since the pid Sniper recorded is
+    // dead by then.
+    #[cfg(unix)]
+    mod relaunch {
+        use super::*;
+        use std::os::unix::fs::symlink;
+
+        fn profile_locked_by(target: &str) -> PathBuf {
+            let profile = std::env::temp_dir().join(format!("sniper-lock-{}", Uuid::new_v4()));
+            fs::create_dir_all(&profile).unwrap();
+            symlink(target, profile.join("SingletonLock")).unwrap();
+            profile
+        }
+
+        // A process that stays up for a few seconds with the command line a wired
+        // browser would have. The compound command keeps the shell from replacing
+        // itself with `sleep`, which would drop the flags from `ps`. bash and not
+        // sh: on macOS /bin/sh turns into /bin/bash a moment after it starts, and
+        // the executable is what a holder is checked against.
+        fn wired_process(seconds: u32, flags: &[&str]) -> Child {
+            Command::new("/bin/bash")
+                .args(["-c", &format!("sleep {seconds}; true"), "browser"])
+                .args(flags)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        }
+
+        fn stop(mut child: Child) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        #[test]
+        fn the_lock_names_its_holder_by_what_follows_the_last_dash() {
+            let profile = profile_locked_by("hex.ray-PC-79073");
+            assert_eq!(singleton_lock_pid(&profile), Some(79073));
+            fs::remove_file(profile.join("SingletonLock")).unwrap();
+            symlink("not-a-pid", profile.join("SingletonLock")).unwrap();
+            assert_eq!(singleton_lock_pid(&profile), None);
+            fs::remove_file(profile.join("SingletonLock")).unwrap();
+            assert_eq!(singleton_lock_pid(&profile), None, "no lock, no holder");
+            let _ = fs::remove_dir_all(&profile);
+        }
+
+        #[test]
+        fn a_holder_no_record_names_is_adopted_with_the_wiring_it_was_started_with() {
+            let shell = Path::new("/bin/bash");
+            let holder = wired_process(
+                8,
+                &[
+                    "--proxy-server=127.0.0.1:18890",
+                    "--remote-debugging-port=0",
+                ],
+            );
+            let profile = profile_locked_by(&format!("some-host-{}", holder.id()));
+
+            let owner = current_owner(&profile, &HashMap::new(), shell).expect("adopted");
+            assert_eq!(owner.pid, holder.id());
+            assert_eq!(owner.proxy, "127.0.0.1:18890");
+            assert!(owner.devtools_port);
+            assert!(owner.started.is_none(), "not a launch of this run");
+            assert_eq!(
+                read_owner(&profile).map(|record| record.pid),
+                Some(holder.id()),
+                "recorded, so a restart of Sniper finds it too"
+            );
+
+            // The browser being a different executable than expected is not adopted.
+            let other = profile_locked_by(&format!("some-host-{}", holder.id()));
+            assert!(current_owner(&other, &HashMap::new(), Path::new("/bin/ls")).is_none());
+            // A lock left behind by a crash names a process that is gone.
+            let stale = profile_locked_by("some-host-4000000000");
+            assert!(current_owner(&stale, &HashMap::new(), shell).is_none());
+            // No lock at all.
+            let unlocked = profile_locked_by("x-1");
+            fs::remove_file(unlocked.join("SingletonLock")).unwrap();
+            assert!(current_owner(&unlocked, &HashMap::new(), shell).is_none());
+
+            stop(holder);
+            for dir in [profile, other, stale, unlocked] {
+                let _ = fs::remove_dir_all(dir);
+            }
+        }
+
+        #[test]
+        fn an_adopted_holder_keeps_the_proxy_it_has_so_a_mismatch_is_visible() {
+            let shell = Path::new("/bin/bash");
+            let elsewhere = wired_process(8, &["--proxy-server=127.0.0.1:1"]);
+            let unwired = wired_process(8, &[]);
+            let one = profile_locked_by(&format!("host-{}", elsewhere.id()));
+            let two = profile_locked_by(&format!("host-{}", unwired.id()));
+
+            let owner = current_owner(&one, &HashMap::new(), shell).unwrap();
+            assert_eq!(owner.proxy, "127.0.0.1:1");
+            assert_ne!(owner.proxy, "127.0.0.1:18890", "launch_at refuses on this");
+            assert!(!owner.devtools_port);
+            assert_eq!(
+                current_owner(&two, &HashMap::new(), shell).unwrap().proxy,
+                "no proxy"
+            );
+
+            stop(elsewhere);
+            stop(unwired);
+            let _ = fs::remove_dir_all(&one);
+            let _ = fs::remove_dir_all(&two);
+        }
+
+        #[test]
+        fn a_throwaway_profile_is_kept_until_the_successor_has_gone() {
+            let shell = Path::new("/bin/bash");
+            // No successor ever appears: gives up after the wait it was given.
+            let alone = profile_locked_by("x-1");
+            fs::remove_file(alone.join("SingletonLock")).unwrap();
+            let began = std::time::Instant::now();
+            wait_out_successor(&alone, shell, Duration::from_millis(200));
+            assert!(began.elapsed() < Duration::from_secs(2));
+
+            // One appears and runs a while: the wait lasts as long as it does.
+            let mut successor = wired_process(2, &[]);
+            let profile = profile_locked_by(&format!("host-{}", successor.id()));
+            let reaper = std::thread::spawn(move || successor.wait());
+            let began = std::time::Instant::now();
+            wait_out_successor(&profile, shell, Duration::from_millis(200));
+            assert!(
+                began.elapsed() >= Duration::from_millis(1500),
+                "returned after {:?} while the successor was still running",
+                began.elapsed()
+            );
+            reaper.join().unwrap().unwrap();
+            let _ = fs::remove_dir_all(&alone);
+            let _ = fs::remove_dir_all(&profile);
+        }
     }
 
     #[test]

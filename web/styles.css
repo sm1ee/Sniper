@@ -1383,8 +1383,8 @@ code {
 }
 
 /* The launcher is a split button: the left half opens the default browser, the
-   right half lists the others. Drawn like .scope-pill so it reads as a capture
-   control and not a navigation tab. */
+   right half lists the others. Outlined like the pills beside it, but its text is
+   the primary colour: it is an action to press, where they report a state. */
 .browser-launcher {
   display: inline-flex;
   align-items: stretch;
@@ -1397,12 +1397,12 @@ code {
   min-height: var(--control-h);
   border: 1px solid var(--line);
   background: transparent;
-  color: var(--text-dim);
+  color: var(--text);
   font-size: var(--font-xs);
   font-family: var(--sans);
   cursor: pointer;
   white-space: nowrap;
-  transition: color 0.15s, border-color 0.15s;
+  transition: border-color 0.15s;
 }
 
 .browser-launch-main {
@@ -1418,8 +1418,7 @@ code {
 
 .browser-launch-main:hover,
 .browser-launch-caret:hover {
-  color: var(--text-soft);
-  border-color: var(--text-dim);
+  border-color: var(--text-soft);
 }
 
 .empty-row-action {
