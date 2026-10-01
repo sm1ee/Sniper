@@ -1435,8 +1435,13 @@ code {
   cursor: progress;
 }
 
-.browser-menu {
+/* Two classes: the menu element also carries .context-menu, which is declared
+   later in this file and would otherwise win on min-width and padding. A hint
+   wraps inside max-width instead of stretching the menu to one long line. */
+.context-menu.browser-menu {
+  width: max-content;
   min-width: 280px;
+  max-width: 340px;
   padding: 6px;
 }
 
@@ -1453,14 +1458,21 @@ code {
   cursor: not-allowed;
 }
 
+.browser-menu-open:disabled:hover {
+  background: transparent;
+  color: var(--text);
+}
+
 .browser-menu-note {
   color: var(--text-dim);
   font-size: var(--font-2xs);
   text-transform: none;
 }
 
-/* Takes the note's place while the row is hovered: the saved choice is something
-   the operator changes once, so it should not compete with the list of browsers. */
+/* Takes the note's place while the row is hovered or has focus: the saved choice
+   is something the operator changes once, so it should not compete with the list
+   of browsers. Transparent rather than visibility:hidden, because a hidden control
+   cannot take focus and the keyboard would never reach it. */
 .browser-menu-pin {
   position: absolute;
   top: 50%;
@@ -1475,15 +1487,16 @@ code {
   font-family: var(--sans);
   cursor: pointer;
   white-space: nowrap;
-  visibility: hidden;
+  opacity: 0;
 }
 
 .browser-menu-row:hover .browser-menu-pin,
-.browser-menu-pin:focus-visible {
-  visibility: visible;
+.browser-menu-row:focus-within .browser-menu-pin {
+  opacity: 1;
 }
 
-.browser-menu-row:hover .browser-menu-note {
+.browser-menu-row.has-pin:hover .browser-menu-note,
+.browser-menu-row.has-pin:focus-within .browser-menu-note {
   visibility: hidden;
 }
 

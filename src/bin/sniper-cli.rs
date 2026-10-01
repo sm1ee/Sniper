@@ -257,14 +257,16 @@ enum BrowserCommand {
 
 #[derive(Args, Debug)]
 struct BrowserPreferArgs {
-    /// A browser from `capture browser list`, or `auto` for the first installed.
+    /// The browser to open when none is named, from `capture browser list`; `auto` clears
+    /// the saved choice.
     #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(browser_choices()))]
     browser: String,
 }
 
 #[derive(Args, Debug, Default)]
 struct BrowserOpenArgs {
-    /// auto picks the first installed, in the order `capture browser list` shows.
+    /// auto opens the saved default, or ego when it is installed, then the first of
+    /// Chrome, Edge, Brave and Chromium that is.
     #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(browser_choices()))]
     browser: Option<String>,
     /// http(s) page to open. Default: about:blank.

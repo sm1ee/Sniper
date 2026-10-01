@@ -14311,16 +14311,13 @@ async function openSniperBrowser({ browser, agent, fresh } = {}) {
     // only place the reason is.
     if (Array.isArray(launched.warnings) && launched.warnings.length) {
       showToast(launched.warnings.join(" "), "warning", 10000);
-      return;
     }
-    const opened = launched.reused
-      ? `Opened another ${launched.browser} window through Sniper`
-      : `Opened ${launched.browser} through Sniper`;
+    // A window appearing is the confirmation, so success is silent. What is worth
+    // a toast is what cannot be seen: how to reach a browser an agent was asked to
+    // drive, which the person has to pass on.
     const control = launched.control;
-    // The person who ticked "agent" is the one who has to pass this on, so it is
-    // shown rather than left in the API response they never see.
     const how = control?.endpoint || control?.command;
-    showToast(how ? `${opened}. Agent control: ${how}` : opened, "success", how ? 12000 : 3000);
+    if (agent && how) showToast(`Agent control: ${how}`, "success", 12000);
   } catch (error) {
     showToast(error?.message || "Could not open a browser.", "error", 6000);
   }
@@ -14336,34 +14333,54 @@ function mountBrowserLaunchers(root = document) {
     host.classList.add("browser-launcher");
     host.innerHTML = `
       <button class="browser-launch-main" type="button" title="Open a browser that already sends its traffic through Sniper and trusts its certificate">Open browser</button>
-      <button class="browser-launch-caret" type="button" aria-haspopup="menu" aria-label="Choose a browser">&#9662;</button>
+      <button class="browser-launch-caret" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Choose a browser">&#9662;</button>
     `;
     const [main, caret] = host.children;
     onClickWithProgress(main, () => openSniperBrowser());
-    caret.addEventListener("click", (event) => {
-      // The document-level outside-click handler would otherwise close the menu
-      // this click is about to open.
-      event.stopPropagation();
-      toggleBrowserMenu(caret);
-    });
+    caret.addEventListener("click", () => toggleBrowserMenu(caret));
   });
 }
 
 function installBrowserMenuDismissal() {
   document.addEventListener("click", (event) => {
-    if (browserMenu && !browserMenu.element.contains(event.target)) closeBrowserMenu();
+    // A caret click is its own toggle. It is not swallowed here, so the rest of
+    // the page still sees it and closes any other popup that was open.
+    if (browserMenu && !browserMenu.element.contains(event.target) && !event.target.closest(".browser-launch-caret")) {
+      closeBrowserMenu();
+    }
   });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeBrowserMenu();
-  });
+  document.addEventListener("keydown", onBrowserMenuKeydown);
   window.addEventListener("resize", closeBrowserMenu);
 }
 
 function closeBrowserMenu() {
   if (!browserMenu) return false;
+  browserMenu.anchor.setAttribute("aria-expanded", "false");
   browserMenu.element.remove();
   browserMenu = null;
   return true;
+}
+
+// The menu lives at the end of <body>, so Tab alone would send a keyboard user
+// through the whole app to reach it. Opening moves focus in; the arrows walk its
+// controls; Escape puts focus back on the caret.
+function onBrowserMenuKeydown(event) {
+  if (!browserMenu) return;
+  const { anchor, element } = browserMenu;
+  if (event.key === "Escape") {
+    closeBrowserMenu();
+    anchor.focus();
+    return;
+  }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  // Arrow keys belong to the page unless focus is on the menu or its caret.
+  if (document.activeElement !== anchor && !element.contains(document.activeElement)) return;
+  const controls = [...element.querySelectorAll("button:not(:disabled), input")];
+  if (!controls.length) return;
+  const at = controls.indexOf(document.activeElement);
+  const step = event.key === "ArrowDown" ? 1 : -1;
+  controls[(at + step + controls.length) % controls.length].focus();
+  event.preventDefault();
 }
 
 async function toggleBrowserMenu(anchor) {
@@ -14378,7 +14395,16 @@ async function toggleBrowserMenu(anchor) {
     browserMenu = null;
     return;
   }
+  anchor.setAttribute("aria-expanded", "true");
+  // Tabbing out of the menu closes it; a click elsewhere is the handler above.
+  menu.element.addEventListener("focusout", (event) => {
+    if (event.relatedTarget && !menu.element.contains(event.relatedTarget) && event.relatedTarget !== anchor) {
+      closeBrowserMenu();
+    }
+  });
   renderBrowserMenu(catalog);
+  const opening = catalog.find((entry) => entry.default)?.browser;
+  (menu.element.querySelector(`[data-open="${opening}"]:not(:disabled)`) || menu.element.querySelector("button:not(:disabled)"))?.focus();
 }
 
 async function fetchBrowserCatalog() {
@@ -14400,13 +14426,15 @@ function renderBrowserMenu(catalog) {
     const missing = entry.requirements?.filter((item) => !item.found) || [];
     const note = !entry.installed ? "Not installed" : entry.default ? "Default" : "";
     const title = !entry.installed ? entry.install_hint || "" : "";
-    const pin = !entry.installed
-      ? ""
-      : entry.preferred
-        ? `<button class="browser-menu-pin" type="button" data-prefer="auto" title="Go back to picking the first installed browser">Use auto</button>`
-        : `<button class="browser-menu-pin" type="button" data-prefer="${escapeHtml(entry.browser)}">Make default</button>`;
+    // A saved choice that has since been uninstalled still has to be clearable,
+    // or every open would keep warning about it with no way to stop.
+    const pin = entry.preferred
+      ? `<button class="browser-menu-pin" type="button" data-prefer="auto" title="Go back to the automatic choice">Use auto</button>`
+      : entry.installed
+        ? `<button class="browser-menu-pin" type="button" data-prefer="${escapeHtml(entry.browser)}">Make default</button>`
+        : "";
     return `
-      <div class="browser-menu-row">
+      <div class="browser-menu-row${pin ? " has-pin" : ""}">
         <button class="context-menu-item browser-menu-open" type="button" role="menuitem"
           data-open="${escapeHtml(entry.browser)}" title="${escapeHtml(title)}" ${entry.installed ? "" : "disabled"}>
           <span class="browser-menu-name">${escapeHtml(entry.browser)}</span>
@@ -14440,11 +14468,16 @@ function renderBrowserMenu(catalog) {
       await openSniperBrowser(options);
     }
   };
-  document.body.appendChild(element);
-  const box = anchor.getBoundingClientRect();
-  const width = element.offsetWidth;
-  element.style.top = `${box.bottom + 4}px`;
-  element.style.left = `${Math.max(8, Math.min(box.right - width, window.innerWidth - width - 8))}px`;
+  // Placed once. A re-render after "Make default" keeps the position, because the
+  // anchor may be gone by then (the empty-history launcher is rebuilt whenever the
+  // table redraws) and measuring a detached element puts the menu in a corner.
+  if (!element.isConnected) {
+    document.body.appendChild(element);
+    const box = anchor.getBoundingClientRect();
+    const width = element.offsetWidth;
+    element.style.top = `${box.bottom + 4}px`;
+    element.style.left = `${Math.max(8, Math.min(box.right - width, window.innerWidth - width - 8))}px`;
+  }
 }
 
 async function setPreferredBrowser(name) {
@@ -14455,9 +14488,13 @@ async function setPreferredBrowser(name) {
       body: JSON.stringify({ browser: name }),
     });
     await requireOkResponse(response, "Could not save the default browser.");
-    showToast(name === "auto" ? "Browser default reset to auto" : `${name} is now the default browser`, "success", 2500);
     const catalog = await fetchBrowserCatalog();
-    if (catalog && browserMenu) renderBrowserMenu(catalog);
+    if (catalog && browserMenu) {
+      // The rows are rebuilt, which drops focus; put it back on the row just changed.
+      const hadFocus = browserMenu.element.contains(document.activeElement);
+      renderBrowserMenu(catalog);
+      if (hadFocus) browserMenu.element.querySelector(`[data-open="${name === "auto" ? catalog.find((entry) => entry.default)?.browser : name}"]`)?.focus();
+    }
   } catch (error) {
     showToast(error?.message || "Could not save the default browser.", "error", 6000);
   }

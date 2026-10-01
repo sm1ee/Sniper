@@ -79,10 +79,11 @@ cargo run --bin sniper-desktop
 ## Quick start
 
 1. Download and open Sniper
-2. Click **Open browser** on the Capture tab bar. It opens an installed Chrome, Edge,
-   Brave or Chromium already sending its traffic through Sniper and trusting its
-   certificate, so there is nothing to configure. The arrow beside it picks another
-   browser and saves your choice as the default.
+2. Click **Open browser** in the top bar. It opens the ego browser if you have it,
+   otherwise an installed Chrome, Edge, Brave or Chromium, already sending its
+   traffic through Sniper and trusting its certificate, so there is nothing to
+   configure. The arrow beside it lists the others, and **Make default** there saves
+   your choice.
    To use a browser of your own instead, point its proxy at `127.0.0.1:8080` and
    visit `https://sniper` to download and trust the root CA.
 3. Start capturing

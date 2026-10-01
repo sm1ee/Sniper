@@ -1,6 +1,6 @@
 # Browser drivers: opening a wired browser that people and agents can drive
 
-Status: phase 1 implemented on `release/0.2.12`. Phases 2 and 3 are not started.
+Status: phases 1 and 2 implemented on `release/0.2.12`. Phase 3 is not started.
 
 ## Problem
 
@@ -94,16 +94,22 @@ Not verified:
      so a stale page cannot overwrite a choice made from the CLI.
    - Setting it does not bump `server_revision`. A bump would make a UI save that
      was already in flight look stale and be rejected.
-   - Placement is provisional: the capture tab bar, plus the empty history. The
-     feature only feeds capture, so the top bar that every tab shares is the wrong
-     home; the filter row beside "Capturing" is the other candidate. Moving it is an
-     HTML edit, because the component mounts by attribute.
+   - Placement: the top bar, chosen by the user after the capture tab bar and the
+     filter row were compared on screen. An empty history offers the same button. The
+     component mounts by attribute, so moving it is an HTML edit.
+   - Automatic order: ego first when installed, then Chrome, Edge, Brave, Chromium.
+     The user chose this over "ego last". The menu still lists Chrome first with ego
+     under it, so there are two tables (`ALL` for listing, `AUTO_ORDER` for picking).
+   - A successful open is silent. Only warnings, errors, and the control endpoint of
+     an agent-driven browser are shown, since a window appearing is its own
+     confirmation.
 3. **Not started.** Split `src/browser.rs` into a module: `kinds` (the table),
    `driver`, `profile`, `registry`, `launch`. A mechanical move; the tests move with
    it.
 
 ## Open questions
 
-- Should `auto` prefer a driver the agent has a skill for? Today ego is last in the
-  order, so `auto` picks it only when no Chromium-family browser is installed.
+- Should `auto` prefer ego only when its command and skill are both present? Today
+  it prefers ego whenever the app is installed, and the window opens either way; only
+  agent control needs the command and skill.
 - Should the catalog report ego's version, so a change in its CLI is visible?

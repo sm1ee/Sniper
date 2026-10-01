@@ -65,15 +65,26 @@ pub enum BrowserKind {
 }
 
 impl BrowserKind {
-    /// The order is what "auto" picks. ego is last: an agent drives it through its
-    /// own CLI rather than a DevTools port, so choosing it silently would surprise
-    /// someone expecting to attach over CDP.
+    /// The order the catalog and the browser menu list them in. Not the order
+    /// "auto" picks in: see `AUTO_ORDER`.
     pub const ALL: [BrowserKind; 5] = [
+        BrowserKind::Chrome,
+        BrowserKind::Ego,
+        BrowserKind::Edge,
+        BrowserKind::Brave,
+        BrowserKind::Chromium,
+    ];
+
+    /// What "auto" picks, first installed wins. ego leads because it is the browser
+    /// an agent can drive without bringing a CDP client, and someone who installed
+    /// it did so to use it. It is still listed beside Chrome, where people look for
+    /// a browser, which is why this is a second table and not the order of `ALL`.
+    const AUTO_ORDER: [BrowserKind; 5] = [
+        BrowserKind::Ego,
         BrowserKind::Chrome,
         BrowserKind::Edge,
         BrowserKind::Brave,
         BrowserKind::Chromium,
-        BrowserKind::Ego,
     ];
 
     pub fn name(self) -> &'static str {
@@ -341,13 +352,13 @@ pub fn catalog(preferred: Option<BrowserKind>) -> Vec<CatalogEntry> {
 }
 
 /// What `auto` resolves to: the saved choice when it is installed, otherwise the
-/// first installed browser in the fixed order.
+/// first installed browser in `AUTO_ORDER`.
 fn resolve_default(
     preferred: Option<BrowserKind>,
     find: impl Fn(BrowserKind) -> Option<PathBuf>,
 ) -> Option<BrowserKind> {
     preferred.filter(|kind| find(*kind).is_some()).or_else(|| {
-        BrowserKind::ALL
+        BrowserKind::AUTO_ORDER
             .into_iter()
             .find(|kind| find(*kind).is_some())
     })
@@ -586,7 +597,8 @@ impl Exit {
     }
 }
 
-/// Open the requested browser, or the first installed one when none is named.
+/// Open the requested browser, or the default when none is named: the saved choice
+/// while it is installed, otherwise the first installed browser in `AUTO_ORDER`.
 pub async fn launch(
     ctx: &LaunchContext<'_>,
     request: LaunchRequest,
@@ -594,8 +606,16 @@ pub async fn launch(
     let (kind, exe, fell_back_from) = choose(request.browser, ctx.preferred, find_executable)?;
     let mut launched = launch_at(ctx, kind, &exe, request).await?;
     if let Some(missing) = fell_back_from {
+        // A choice saved on another platform (ego exists only on macOS) is not
+        // "not installed" here, and saying so would send someone looking for an
+        // installer that does not exist.
+        let why = if missing.platforms().contains(&current_platform()) {
+            "is not installed"
+        } else {
+            "is not available on this platform"
+        };
         launched.warnings.push(format!(
-            "your default browser ({}) is not installed, so {} was opened instead",
+            "your default browser ({}) {why}, so {} was opened instead",
             missing.name(),
             kind.name()
         ));
@@ -1426,7 +1446,7 @@ mod tests {
     fn the_browser_names_come_from_one_list() {
         assert_eq!(
             BrowserKind::names(),
-            ["chrome", "edge", "brave", "chromium", "ego"]
+            ["chrome", "ego", "edge", "brave", "chromium"]
         );
         assert!(BrowserKind::names()
             .into_iter()
@@ -1502,8 +1522,13 @@ mod tests {
         let both = installed(&[Chrome, Ego]);
         assert_eq!(
             resolve_default(None, &both),
+            Some(Ego),
+            "ego leads the automatic order"
+        );
+        assert_eq!(
+            resolve_default(None, installed(&[Edge, Chrome])),
             Some(Chrome),
-            "the fixed order"
+            "without ego, Chrome comes before the other Chromium-family browsers"
         );
         assert_eq!(
             resolve_default(Some(Ego), &both),
@@ -1561,12 +1586,21 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let none = flags(None);
-        assert!(none.contains(&("chrome", false, true)), "{none:?}");
+        assert!(none.contains(&("ego", false, true)), "{none:?}");
+        assert!(none.contains(&("chrome", false, false)), "{none:?}");
         assert!(none.iter().all(|(_, preferred, _)| !preferred));
+
+        let chrome = flags(Some(Chrome));
+        assert!(chrome.contains(&("chrome", true, true)), "{chrome:?}");
+        assert!(chrome.contains(&("ego", false, false)));
 
         let ego = flags(Some(Ego));
         assert!(ego.contains(&("ego", true, true)), "{ego:?}");
         assert!(ego.contains(&("chrome", false, false)));
+
+        // Listed with Chrome first and ego right under it, though ego is picked first.
+        let order: Vec<_> = none.iter().map(|(name, ..)| *name).collect();
+        assert_eq!(order, ["chrome", "ego", "edge", "brave", "chromium"]);
 
         // A saved choice that is gone is still shown as saved, but is not the default.
         let gone = catalog_for("macos", installed(&[Chrome]), |_| Vec::new(), Some(Ego));
@@ -1591,8 +1625,10 @@ mod tests {
         );
 
         let json = serde_json::to_value(catalog_for("macos", &find, |_| Vec::new(), None)).unwrap();
+        let chrome = &json[0];
+        assert_eq!(chrome["browser"], "chrome");
         assert!(
-            json[1].get("default").is_none() && json[1].get("preferred").is_none(),
+            chrome.get("default").is_none() && chrome.get("preferred").is_none(),
             "absent, not false"
         );
     }
@@ -1613,7 +1649,7 @@ mod tests {
 
         let mac = catalog_for("macos", only_chrome, requirements, None);
         let names: Vec<_> = mac.iter().map(|entry| entry.browser).collect();
-        assert_eq!(names, ["chrome", "edge", "brave", "chromium", "ego"]);
+        assert_eq!(names, ["chrome", "ego", "edge", "brave", "chromium"]);
         let chrome = &mac[0];
         assert!(chrome.installed && chrome.path.as_deref() == Some("/Apps/Chrome"));
         assert_eq!(chrome.driver, Driver::Cdp);
@@ -1642,7 +1678,7 @@ mod tests {
 
         let json = serde_json::to_value(&mac).unwrap();
         assert_eq!(json[0]["driver"], "cdp");
-        assert_eq!(json[4]["driver"], "ego-cli");
+        assert_eq!(json[1]["driver"], "ego-cli");
         assert!(json[0].get("install_hint").is_none(), "absent, not null");
     }
 
@@ -1680,11 +1716,23 @@ mod tests {
     }
 
     #[test]
-    fn names_parse_case_insensitively_and_auto_order_puts_ego_last() {
+    fn names_parse_case_insensitively_and_ego_is_listed_after_chrome_but_picked_before_it() {
         assert_eq!(BrowserKind::parse(" Chrome "), Some(BrowserKind::Chrome));
         assert_eq!(BrowserKind::parse("EGO"), Some(BrowserKind::Ego));
         assert_eq!(BrowserKind::parse("firefox"), None);
-        assert_eq!(BrowserKind::ALL.last(), Some(&BrowserKind::Ego));
+        assert_eq!(
+            BrowserKind::ALL[..2],
+            [BrowserKind::Chrome, BrowserKind::Ego]
+        );
+        assert_eq!(
+            BrowserKind::AUTO_ORDER[..2],
+            [BrowserKind::Ego, BrowserKind::Chrome]
+        );
+        let mut listed = BrowserKind::ALL.to_vec();
+        let mut picked = BrowserKind::AUTO_ORDER.to_vec();
+        listed.sort_by_key(|kind| kind.name());
+        picked.sort_by_key(|kind| kind.name());
+        assert_eq!(listed, picked, "both tables hold the same browsers");
         assert_eq!(BrowserKind::Ego.driver(), Driver::EgoCli);
         assert_eq!(BrowserKind::Chrome.driver(), Driver::Cdp);
     }

@@ -88,7 +88,7 @@ given change, including the parts that are easy to miss.
 | HTTP API and the UI server | `src/api.rs` (largest module, ~17k lines) |
 | Session lifecycle and on-disk format | `src/session.rs`, `src/state.rs` |
 | Transaction storage, filtering, sorting | `src/store.rs` |
-| Opening a pre-wired browser | `src/browser.rs` (launch, SPKI trust, profile), `launch_browser` in `src/api.rs`, `capture browser` in `src/bin/sniper-cli.rs`, the top-bar button in `web/` |
+| Opening a pre-wired browser | `src/browser.rs` (launch, SPKI trust, profile, which browser `auto` picks), `launch_browser` and `set_browser_preference` in `src/api.rs`, the saved default in `src/ui_settings.rs`, `capture browser` in `src/bin/sniper-cli.rs`, the launcher in `web/` (one component mounted by `[data-browser-launcher]`) |
 | Scope matching | `src/scope.rs` — **the only matcher**; do not add a second one |
 | Intercept queues | `src/intercept.rs` |
 | Frontend | `web/app.js`, `web/index.html`, `web/styles.css` |

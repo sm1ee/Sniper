@@ -97,10 +97,10 @@ curl ignore `-x` and connect directly, and nothing is captured.
 ### Or open a browser that is already wired
 
 Setting a proxy and trusting a certificate by hand is the part most likely to go
-wrong, so Sniper can open a browser that needs neither. **Open browser** on the
-Capture tab bar does it from the UI (an empty history offers the same button). Its
-arrow lists every browser, marks the one that opens by default, and has **Make
-default** to change it. Two boxes there apply to that one opening only: **Let an
+wrong, so Sniper can open a browser that needs neither. **Open browser** in the top
+bar does it from the UI (an empty history offers the same button). Its arrow lists
+every browser, marks the one that opens by default, and has **Make default** to
+change it. Two boxes there apply to that one opening only: **Let an
 agent drive it** (`--agent`) and **Throwaway profile** (`--fresh`). From the CLI:
 
 ```bash
@@ -118,16 +118,18 @@ them, as returned on a Mac that has both:
 {"browser":"ego","installed":true,"driver":"ego-cli","platforms":["macos"],
  "path":"/Applications/ego lite.app/Contents/MacOS/ego lite",
  "capabilities":{"ui_actions":"built-in","snapshot_refs":true,"handoff":true,"visible_cursor":true},
+ "default":true,
  "requirements":[{"name":"ego-browser command","found":true},
                  {"name":"ego-browser agent skill","found":true}]}
 ```
 
-`"default": true` marks the browser that opens when none is named, and
-`"preferred": true` marks it when that is a saved choice rather than the first
-installed one (both are left out when false). `capture browser prefer --browser
-<name|auto> --yes` saves the choice, per user and not per session; `auto` clears
-it. A saved browser that is later uninstalled does not block opening: Sniper opens
-the first installed one and says so in `warnings`.
+`"default": true` marks the browser that opens when none is named. `"preferred":
+true` marks the saved choice, and stays on it if that browser has since been
+uninstalled, in which case it is not the default (both are left out when false).
+`capture browser prefer --browser <name|auto> --yes` saves the choice, per user and
+not per session; `auto` clears it, and so does **Use auto** in the menu. A saved
+browser that is later uninstalled does not block opening: Sniper opens the next one
+in the automatic order and says so in `warnings`.
 
 A browser that is not installed has `"installed": false` and, where the answer is
 not obvious, an `install_hint`; a requirement that is missing carries a `hint` that
@@ -247,12 +249,16 @@ quit a browser that was opened with a DevTools port first.
 A browser that cannot start, or that ends at once, is reported in the result's
 `warnings` with the last of what it printed. A persistent profile also keeps the
 whole output in `sniper-launch.log`; a throwaway profile is deleted with its log,
-which is why the text travels in the warning. The button shows that warning instead
-of "Opened".
+which is why the text travels in the warning. The UI shows that warning in a toast;
+a browser that opened normally needs no confirmation, since its window is one.
 
-`--browser` takes `chrome`, `edge`, `brave`, `chromium` or `ego`; `auto` picks the
-first installed in that order, with ego last because choosing it silently would
-surprise someone expecting a DevTools endpoint.
+`--browser` takes `chrome`, `edge`, `brave`, `chromium` or `ego`. With none named,
+Sniper opens the saved default; with none saved, ego if it is installed, otherwise
+the first of Chrome, Edge, Brave and Chromium that is. ego leads because it is the
+one an agent can drive without bringing a CDP client. The list shows Chrome first
+and ego under it, which is not the order they are picked in. An agent that opens a
+browser without naming one should read `driver` and `control` in the result rather
+than assume a DevTools endpoint.
 
 A freshly opened browser also talks to its vendor (updates, variations, crash
 reporting), and that traffic appears in the history. Filtering the history to your
