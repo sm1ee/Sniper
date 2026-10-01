@@ -105,20 +105,35 @@ does it from the UI; from the CLI:
   capture browser list
 ```
 
+Every browser Sniper knows on this platform is listed, installed or not. Two of
+them, as returned on a Mac that has both:
+
 ```json
-[{"agent_control":"cdp","browser":"chrome","path":"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"},
- {"agent_control":"ego-browser","browser":"ego","path":"/Applications/ego lite.app/Contents/MacOS/ego lite"}]
+{"browser":"chrome","installed":true,"driver":"cdp","platforms":["macos","windows","linux"],
+ "path":"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+ "capabilities":{"ui_actions":"via-client","snapshot_refs":false,"handoff":false,"visible_cursor":false}}
+{"browser":"ego","installed":true,"driver":"ego-cli","platforms":["macos"],
+ "path":"/Applications/ego lite.app/Contents/MacOS/ego lite",
+ "capabilities":{"ui_actions":"built-in","snapshot_refs":true,"handoff":true,"visible_cursor":true},
+ "requirements":[{"name":"ego-browser command","found":true},
+                 {"name":"ego-browser agent skill","found":true}]}
 ```
+
+A browser that is not installed has `"installed": false` and, where the answer is
+not obvious, an `install_hint`; a requirement that is missing carries a `hint` that
+says where to look, never a command to run. Sniper never installs a browser or a
+skill for you. A browser that is not built for the platform is left out: ego does
+not appear on Windows. Opening one that is missing returns the same explanation.
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
-  capture browser open --browser chrome --debug-port --yes
+  capture browser open --browser chrome --agent --yes
 ```
 
 ```json
-{"agent_control":"cdp","attach":"connect a CDP client to http://127.0.0.1:58323 (Playwright connectOverCDP, chrome-devtools-mcp --browserUrl)",
- "browser":"chrome","devtools_port":58323,"fresh":false,"pid":87391,
- "profile_dir":"…/browser-profiles/chrome","proxy":"127.0.0.1:18902","url":"about:blank"}
+{"browser":"chrome","driver":"cdp","control":{"driver":"cdp","endpoint":"http://127.0.0.1:53469"},
+ "fresh":false,"pid":39189,"profile_dir":"…/browser-profiles/chrome",
+ "proxy":"127.0.0.1:18902","url":"about:blank"}
 ```
 
 Opening a browser starts a process, so the CLI asks for `--yes` (or `--dry-run` to
@@ -135,11 +150,72 @@ see the request first). What the browser is given:
   throwaway profile that is deleted when the browser quits. Closing the last window
   is not quitting on macOS. If Sniper exits first, the next launch removes the
   profile once its browser is gone.
-- **A DevTools port only when asked** (`--debug-port`). It lets an agent drive the
-  browser over CDP, and it also lets any other local process do the same, so it is
-  off unless you turn it on, and it is refused while the proxy listens on anything
-  but loopback. The check happens when the browser opens: if you later rebind the
-  proxy beyond loopback, quit a browser that was opened with a DevTools port first.
+- **A DevTools port only when asked** (`--agent`). For Chromium-family browsers
+  that is what the flag opens, and it is off unless you turn it on: the port lets
+  any other local process drive a browser holding your logged-in sessions. ego has
+  no port, so `--agent` changes nothing there; its `control` is always returned.
+
+#### Two ways to drive it
+
+Which browser it is decides how an agent drives it, and that is the `driver`. The
+result's `control` says what to use, in a shape that depends on the driver:
+
+| | `chrome`, `edge`, `brave`, `chromium` | `ego` |
+|---|---|---|
+| `driver` | `cdp` | `ego-cli` |
+| `control` | `{"driver":"cdp","endpoint":"http://127.0.0.1:<port>"}` | `{"driver":"ego-cli","server_name":"…","command":"ego-browser --ego-server-name=… nodejs -e '<script>'"}` |
+| Agent actions | a CDP client you bring | built in |
+| Snapshot with `@ref`s, handoff to the user, visible cursor | no | yes, as ego documents them |
+| Platforms | macOS, Windows, Linux | macOS |
+| Needs on this machine | nothing | ego lite, its command, and its agent skill |
+
+What Sniper itself does is the same for both: the wired browser, its proxy and
+certificate trust, its profile and its lifetime. It does not implement clicking or
+typing. An agent does that through the driver.
+
+**With `cdp`**, connect any CDP client to `control.endpoint`: Playwright's
+`connectOverCDP`, or chrome-devtools-mcp with `--browserUrl`. Sniper bundles none.
+A plain CDP client was checked against Sniper's Chrome for clicking by coordinates,
+typing, JavaScript dialogs, new windows, screenshots, file input, downloads and
+the accessibility tree, so everything ego's actions do has a protocol-level
+equivalent; what plain Chrome lacks is the layer ego adds on top of it.
+
+**With `ego-cli`**, use ego's own agent skill, and put the server name from
+`control` on every `ego-browser` command:
+
+```bash
+ego-browser --ego-server-name=sniper-18902-3f2a9c1d nodejs -e '
+const task = await taskSpace("check the menu");
+const page = task.page("p1");
+await page.goto("https://example.com/", { timeout: 40000 });
+console.log(String(await page.snapshot()));
+' 2>&1
+```
+
+The name is `sniper-<proxy port>-<hash of the profile>`: the same for a profile
+every time, and different for each data directory and each throwaway profile, so
+an ego left running by another run is never the one you reach.
+
+Three things that are easy to get wrong:
+
+- **Leave the server name off and you drive your own everyday ego**, with your
+  logged-in profile and none of this proxy, and nothing is captured. Sniper's
+  browser is a separate instance of ego, and ego's skill does not mention the flag
+  that addresses it.
+- **Script output arrives on stderr.** `console.log` inside `ego-browser nodejs`
+  is written to stderr and stdout stays empty, so a readiness check that discards
+  stderr (`2>/dev/null`) never succeeds. Read it with `2>&1`.
+- **Act on the page the way a person does.** Take a snapshot, pick an element by
+  its `@ref` or a `loc=` locator, `page.click` it, then `waitForURL` or take a new
+  snapshot. Jumping straight to a URL with `page.goto` skips what the site's own
+  script does on a click, and the request a click makes (a same-origin `Referer`,
+  a menu that opens before anything navigates) is not the request a `goto` makes.
+
+ego is a separate program. Sniper does not install it, does not bundle it and does
+not run its installer. The `requirements` in `capture browser list` say whether
+its command and skill are present.
+
+#### Opening again, limits and warnings
 
 Opening again while a browser is running on the same profile opens another window
 in it (`"reused": true` in the result). That is what the button needs on macOS,
@@ -147,9 +223,16 @@ where closing the last window leaves the browser running. A browser that is stil
 opening its first window is not started a second time, and only a few windows can
 be opening in one browser at once. If the running browser was started for a
 different proxy, or without the DevTools port you are now asking for, the call is
-refused and says which, because Chromium would ignore the new settings. Different
+refused and says which, because Chromium would ignore the new settings. A port
+cannot be added to a browser that is already running: quit it and open again with
+`--agent`, or open a separate throwaway one with `--agent --fresh`. Different
 browsers each have a profile of their own and run side by side, and up to eight
 `--fresh` browsers can be open at once.
+
+A DevTools port is refused while the proxy listens on anything but loopback, since
+a proxy reachable from the network relays requests to local ports. The check
+happens when the browser opens: if you later rebind the proxy beyond loopback,
+quit a browser that was opened with a DevTools port first.
 
 A browser that cannot start, or that ends at once, is reported in the result's
 `warnings` with the last of what it printed. A persistent profile also keeps the
@@ -158,10 +241,8 @@ which is why the text travels in the warning. The button shows that warning inst
 of "Opened".
 
 `--browser` takes `chrome`, `edge`, `brave`, `chromium` or `ego`; `auto` picks the
-first installed in that order. ego is macOS only and is driven with its own CLI
-instead of a DevTools port: the result carries `ego_server_name`, and
-`ego-browser --ego-server-name=<name> nodejs -e '<script>'` attaches to that
-instance rather than to your everyday ego.
+first installed in that order, with ego last because choosing it silently would
+surprise someone expecting a DevTools endpoint.
 
 A freshly opened browser also talks to its vendor (updates, variations, crash
 reporting), and that traffic appears in the history. Filtering the history to your

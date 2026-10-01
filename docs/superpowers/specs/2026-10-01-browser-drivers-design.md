@@ -1,0 +1,99 @@
+# Browser drivers: opening a wired browser that people and agents can drive
+
+Status: phase 1 implemented on `release/0.2.12`. Phases 2 and 3 are not started.
+
+## Problem
+
+`capture browser open` opens a browser that already sends its traffic through
+Sniper and trusts its certificate. People use it from the UI; agents use it from the
+CLI. Agents need to *drive* that browser, and the ways to do so differ:
+
+- Chromium-family browsers are driven over the DevTools protocol (CDP). Sniper can
+  open the port, but the agent has to bring a client.
+- ego lite ships its own agent CLI and skill: a snapshot of the page with `@ref`s,
+  clicks and typing, dialogs, uploads, handoff to the user, a visible cursor.
+
+Both must keep working, the user must be able to choose, and adding the next
+browser must not mean another `if` in five places. Before this design the launcher
+branched on "is it ego" in six places.
+
+## Decisions
+
+1. **Two axes, kept apart.** *Which executable* is a row in `BrowserKind`. *How an
+   agent drives it* is a `Driver` (`cdp`, `ego-cli`). Every decision about driving
+   lives in `Driver`; `launch_at` never asks which browser it has.
+2. **Sniper wires the browser; it does not drive it.** Sniper owns the proxy, the
+   certificate trust, the profile and the lifetime, which is the same for every
+   driver. It hands out a *control* and stops. It does not implement clicking or
+   typing.
+3. **One contract for callers.** `open --agent` means "make this drivable" whatever
+   the driver does for that. The result carries `control`, tagged by `driver`:
+   `{"driver":"cdp","endpoint":…}` or `{"driver":"ego-cli","server_name":…,"command":…}`.
+   Callers read `control`; they do not know which browser they opened.
+4. **The catalog is data.** `capture browser list` returns every browser Sniper
+   knows on the platform with `installed`, `driver`, `platforms`, `capabilities`,
+   `requirements` and `install_hint`. Docs and UI read it instead of hard-coding
+   per-browser knowledge. A browser not built for the platform is left out.
+5. **Sniper never installs a browser or its skill.** ego is a third-party program
+   whose app is a separate download and whose installer does not verify what it
+   fetches and removes the macOS quarantine flag. Sniper detects, reports
+   `requirements` and an `install_hint`, and leaves installing to the user.
+6. **A DevTools port is opt-in.** It lets any local process drive a browser that
+   holds the profile's logged-in sessions, so it is opened only when asked, and
+   refused while the proxy listens beyond loopback (a network-reachable proxy relays
+   requests to local ports). The check sits with the driver. A port cannot be added
+   to a running browser: getting one means quitting it, or opening a throwaway
+   profile.
+7. **ego is always named, so `--agent` changes nothing for it.** It gets a server
+   name on every launch, whether or not `--agent` was passed, and `control` is always
+   returned. The name is derived from the proxy port *and the profile*, so it is
+   stable for a profile and a leftover ego from another data directory never
+   answers to it. The opt-in in decision 6 is about the port only: ego's CLI is
+   reachable by any process of the same user either way.
+8. **Rich actions come from the driver, not from Sniper.** A thin action layer in
+   Sniper (`browser snapshot|click|fill`) is deliberately deferred. The driver
+   structure lets it be added later without touching the launcher. Build it if
+   people hit "no CDP client available".
+
+## What was verified, and what was not
+
+Verified against a running Sniper:
+
+- A plain CDP client drives Sniper's Chrome: click by coordinates, typing,
+  JavaScript dialogs, new windows, screenshots, file input, downloads, the
+  accessibility tree.
+- ego, started by the launcher with its own profile and server name, is driven by
+  its skill CLI (`taskSpace`, `goto`, `snapshot`, `click`, `waitForURL`, `evaluate`,
+  `finish`) and its traffic is captured. A click navigation reaches the server as a
+  same-origin request with a `Referer`; a `goto` does not.
+
+Not verified:
+
+- ego's handoff to the user and its visible cursor. `capabilities` reports them as
+  ego documents them.
+- A brand-new ego profile. Every ego run used a copy of a profile that had been set
+  up by hand.
+- That ego's CLI keeps its current behaviour. Sniper relies on `--ego-server-name`,
+  on script output going to stderr, and on how the CLI finds the app; none of that
+  is a versioned contract.
+- The Windows code paths. They could not be compiled locally.
+
+## Phases
+
+1. **Done.** Driver-neutral contract (`--agent`, `control`, `driver`), catalog with
+   capabilities and requirements, policy moved into the driver, documentation and
+   skills updated (named ego instance, stderr, acting like a person).
+2. **Not started.** Persist the user's choice. Store `browser.preferred` in
+   `ui-settings.json` (user-level, not per session), expose it through the existing
+   `/api/ui-settings`, add `capture browser prefer`, and give the top-bar button a
+   menu: installed browsers, "make default", "agent control" (off by default).
+   Resolution order: explicit request, saved preference, automatic order.
+3. **Not started.** Split `src/browser.rs` into a module: `kinds` (the table),
+   `driver`, `profile`, `registry`, `launch`. A mechanical move; the tests move with
+   it.
+
+## Open questions
+
+- Should `auto` prefer a driver the agent has a skill for? Today ego is last in the
+  order, so `auto` picks it only when no Chromium-family browser is installed.
+- Should the catalog report ego's version, so a change in its CLI is visible?

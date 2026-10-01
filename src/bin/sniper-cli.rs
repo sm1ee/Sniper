@@ -246,7 +246,8 @@ enum CaptureCommand {
 
 #[derive(Subcommand, Debug)]
 enum BrowserCommand {
-    /// List the browsers Sniper can open on this machine.
+    /// List every browser Sniper knows on this platform, installed or not, with its
+    /// driver, what that driver offers, and what is missing.
     List,
     /// Open a browser wired to this Sniper: proxy set, CA trusted, nothing to configure.
     Open(BrowserOpenArgs),
@@ -254,8 +255,8 @@ enum BrowserCommand {
 
 #[derive(Args, Debug, Default)]
 struct BrowserOpenArgs {
-    /// auto picks the first installed of chrome, edge, brave, chromium, ego.
-    #[arg(long, value_parser = ["auto", "chrome", "edge", "brave", "chromium", "ego"])]
+    /// auto picks the first installed, in the order `capture browser list` shows.
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(browser_choices()))]
     browser: Option<String>,
     /// http(s) page to open. Default: about:blank.
     #[arg(long)]
@@ -263,10 +264,11 @@ struct BrowserOpenArgs {
     /// Use a throwaway profile instead of the persistent Sniper one.
     #[arg(long)]
     fresh: bool,
-    /// Open a DevTools port so an agent can attach. Chromium-family browsers only;
-    /// ego is driven with `ego-browser --ego-server-name=<name>` instead.
+    /// Open a DevTools port so an agent can drive a Chromium-family browser; the
+    /// result's `control` carries its endpoint. ego has no port and always returns
+    /// its server name in `control`, so this changes nothing for it.
     #[arg(long)]
-    debug_port: bool,
+    agent: bool,
 }
 
 impl BrowserCommand {
@@ -1940,7 +1942,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.browser.list",
             "capture browser list",
-            "List the browsers Sniper can open, and how an agent drives each.",
+            "List the browsers Sniper knows on this platform: whether each is installed, how an agent drives it, what that driver offers, and what is missing.",
             Read,
             false,
             &[],
@@ -1949,11 +1951,11 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.browser.open",
             "capture browser open",
-            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. Pass debug_port to let an agent attach over CDP.",
+            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. Pass agent to get a `control` an agent can drive it with.",
             Write,
             false,
             &[],
-            vec![json!({"browser":"auto","debug_port":true})],
+            vec![json!({"browser":"auto","agent":true})],
         ),
         op(
             "capture.http.list",
@@ -2492,7 +2494,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "sort_direction",
         ],
         "capture.browser.list" => &[],
-        "capture.browser.open" => &["browser", "url", "fresh", "debug_port"],
+        "capture.browser.open" => &["browser", "url", "fresh", "agent"],
         "capture.http.get" => &["id", "session_id"],
         "capture.http.search" => &[
             "value",
@@ -2996,7 +2998,7 @@ fn capture_api_preview(command: &CaptureCommand) -> Result<Value> {
         CaptureCommand::WebSocket { command } => Ok(websocket_api_preview(command)),
         CaptureCommand::AutoReplace { command } => Ok(auto_replace_api_preview(command)),
         CaptureCommand::Browser { command } => Ok(match command {
-            BrowserCommand::List => api_preview("GET", "/api/browser/available", None),
+            BrowserCommand::List => api_preview("GET", "/api/browser/list", None),
             BrowserCommand::Open(args) => {
                 api_preview("POST", "/api/browser/launch", Some(browser_open_body(args)))
             }
@@ -3503,11 +3505,11 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                         operation,
                         input,
                         "browser",
-                        &["auto", "chrome", "edge", "brave", "chromium", "ego"],
+                        &browser_choices(),
                     )?,
                     url: call_optional(operation, input, "url")?,
                     fresh: call_bool(operation, input, "fresh")?,
-                    debug_port: call_bool(operation, input, "debug_port")?,
+                    agent: call_bool(operation, input, "agent")?,
                 }),
             },
         },
@@ -4595,19 +4597,27 @@ fn history_annotate_args(command: &Command) -> Option<&HistoryAnnotateArgs> {
     }
 }
 
+/// `auto` and every browser Sniper knows, from the one list in `BrowserKind`, so a
+/// browser added there is accepted here without anyone remembering this place.
+fn browser_choices() -> Vec<&'static str> {
+    std::iter::once("auto")
+        .chain(sniper::browser::BrowserKind::names())
+        .collect()
+}
+
 fn browser_open_body(args: &BrowserOpenArgs) -> Value {
     json!({
         "browser": args.browser,
         "url": args.url,
         "fresh": args.fresh,
-        "debug_port": args.debug_port,
+        "agent": args.agent,
     })
 }
 
 async fn handle_browser(api: ApiClient, command: BrowserCommand) -> Result<()> {
     match command {
         BrowserCommand::List => {
-            let browsers: Value = api.get_json("/api/browser/available").await?;
+            let browsers: Value = api.get_json("/api/browser/list").await?;
             print_json(&browsers)
         }
         BrowserCommand::Open(args) => {
@@ -8559,8 +8569,8 @@ fn parse_response_status_line(status_line: &str) -> Result<u16> {
 mod tests {
     use super::{
         active_session_id_from_summaries, api_failure_detail, api_url, attach_session_id,
-        attach_workspace_save_error, auto_replace_write_session_id, browser_open_body,
-        build_annotations_payload, build_editable_raw_request,
+        attach_workspace_save_error, auto_replace_write_session_id, browser_choices,
+        browser_open_body, build_annotations_payload, build_editable_raw_request,
         build_editable_raw_request_with_version, build_oast_configure_update, clap_error_payload,
         cli_data_dir, cli_error_payload, cli_output_format_from_raw_args,
         cli_parse_error_operation, cli_partial_apply_error, command_from_call_args,
@@ -11222,7 +11232,7 @@ mod tests {
         };
         assert_eq!(
             browser_open_body(&args),
-            json!({"browser":"ego","url":"https://example.com","fresh":true,"debug_port":false})
+            json!({"browser":"ego","url":"https://example.com","fresh":true,"agent":false})
         );
         assert!(Cli::try_parse_from([
             "sniper-cli",
@@ -11243,7 +11253,7 @@ mod tests {
 
         let mapped = command_from_operation_input(
             "capture.browser.open",
-            &json!({"browser":"chrome","debug_port":true}),
+            &json!({"browser":"chrome","agent":true}),
         )
         .unwrap();
         let Command::Capture {
@@ -11256,10 +11266,31 @@ mod tests {
             panic!("expected the call mapper to build capture browser open");
         };
         assert_eq!(mapped.browser.as_deref(), Some("chrome"));
-        assert!(mapped.debug_port && !mapped.fresh);
+        assert!(mapped.agent && !mapped.fresh);
         assert!(
-            command_from_operation_input("capture.browser.open", &json!({"debug": true}),).is_err()
+            command_from_operation_input("capture.browser.open", &json!({"debug_port": true}),)
+                .is_err()
         );
+    }
+
+    // The accepted names come from BrowserKind, so a browser added there must be
+    // accepted by the flag and by `call` without anyone editing a list here.
+    #[test]
+    fn every_known_browser_is_accepted_by_the_flag_and_by_call() {
+        for name in browser_choices() {
+            Cli::try_parse_from([
+                "sniper-cli",
+                "capture",
+                "browser",
+                "open",
+                "--browser",
+                name,
+            ])
+            .unwrap_or_else(|error| panic!("--browser {name}: {error}"));
+            command_from_operation_input("capture.browser.open", &json!({"browser": name}))
+                .unwrap_or_else(|error| panic!("call browser {name}: {error}"));
+        }
+        assert!(browser_choices().contains(&"auto") && browser_choices().contains(&"ego"));
     }
 
     #[test]

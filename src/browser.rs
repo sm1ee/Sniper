@@ -86,6 +86,12 @@ impl BrowserKind {
         }
     }
 
+    /// Every name `parse` accepts, so a message or an argument parser never carries a
+    /// copy of the list that a new browser would have to remember to update.
+    pub fn names() -> Vec<&'static str> {
+        Self::ALL.into_iter().map(BrowserKind::name).collect()
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -93,10 +99,31 @@ impl BrowserKind {
     }
 
     /// How an agent drives this browser once it is open.
-    pub fn agent_control(self) -> &'static str {
+    pub fn driver(self) -> Driver {
         match self {
-            BrowserKind::Ego => "ego-browser",
-            _ => "cdp",
+            BrowserKind::Ego => Driver::EgoCli,
+            _ => Driver::Cdp,
+        }
+    }
+
+    /// Where the browser exists at all. A browser that is not built for a platform
+    /// is left out of the catalog there rather than listed as "not installed".
+    pub fn platforms(self) -> &'static [&'static str] {
+        match self {
+            BrowserKind::Ego => &["macos"],
+            _ => &["macos", "windows", "linux"],
+        }
+    }
+
+    /// What to tell someone who picked a browser that is missing. Only where the
+    /// answer is not obvious: ego is installed by the user and never by Sniper.
+    fn install_hint(self) -> Option<&'static str> {
+        match self {
+            BrowserKind::Ego => Some(
+                "Download ego lite from https://lite.ego.app in a browser and open it as usual. \
+                 Sniper does not install it.",
+            ),
+            _ => None,
         }
     }
 
@@ -153,24 +180,229 @@ fn first_existing(candidates: Vec<PathBuf>, exists: impl Fn(&Path) -> bool) -> O
     candidates.into_iter().find(|path| exists(path))
 }
 
-#[derive(Debug, Serialize)]
-pub struct InstalledBrowser {
-    pub browser: &'static str,
-    pub path: String,
-    pub agent_control: &'static str,
+/// How an agent drives a browser once it is open. This, not the browser's name, is
+/// what differs between launches, so every decision about it lives here and
+/// `launch_at` never asks which browser it has. A new browser is a row in
+/// `BrowserKind`; a new way of driving one is a variant here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Driver {
+    /// Chromium's DevTools protocol on a loopback port. The agent brings the client.
+    Cdp,
+    /// ego's own CLI, addressed by the name of a named browser service.
+    EgoCli,
 }
 
-pub fn installed() -> Vec<InstalledBrowser> {
+/// What an agent is given to drive a browser, whatever the driver.
+#[derive(Debug, Serialize)]
+#[serde(tag = "driver", rename_all = "kebab-case")]
+pub enum Control {
+    Cdp {
+        endpoint: String,
+    },
+    EgoCli {
+        server_name: String,
+        command: String,
+    },
+}
+
+/// What a driver offers an agent beyond the wired browser itself. These describe
+/// the driver as its own documentation states it; they are not a promise Sniper
+/// tests for every driver.
+#[derive(Debug, Serialize)]
+pub struct Capabilities {
+    /// `via-client`: the agent needs a CDP client such as Playwright. `built-in`:
+    /// the driver ships the actions itself.
+    pub ui_actions: &'static str,
+    pub snapshot_refs: bool,
+    pub handoff: bool,
+    pub visible_cursor: bool,
+}
+
+impl Driver {
+    /// Whether this launch has to open a DevTools port. Off unless an agent asks:
+    /// the port lets any local process drive a browser that holds the profile's
+    /// logged-in sessions.
+    fn opens_port(self, agent: bool) -> bool {
+        self == Driver::Cdp && agent
+    }
+
+    /// A name that lets the agent's CLI find this instance rather than the user's
+    /// own everyday one. The profile is part of it: the proxy port alone is the same
+    /// for every data directory on the default settings, and a stale ego left by an
+    /// earlier run would then answer to the name a new one was given. The same
+    /// profile always gets the same name, so reuse and a restart keep agreeing.
+    fn server_name(self, proxy_port: u16, profile: &Path) -> Option<String> {
+        (self == Driver::EgoCli).then(|| {
+            let digest = Sha256::digest(profile.to_string_lossy().as_bytes());
+            format!("sniper-{proxy_port}-{}", &format!("{digest:x}")[..8])
+        })
+    }
+
+    /// The switches this driver adds so that something can drive the browser.
+    fn launch_args(self, agent: bool, server_name: Option<&str>) -> Vec<String> {
+        match self {
+            // Port 0 lets the OS pick, and the browser writes the choice to
+            // DevToolsActivePort. A fixed port would collide with any other browser
+            // already holding it. Chrome 136+ honours this only with a non-default
+            // profile, which this always is.
+            Driver::Cdp if agent => vec!["--remote-debugging-port=0".to_string()],
+            Driver::Cdp => Vec::new(),
+            // Gives this instance its own name so `ego-browser` can be pointed at it
+            // instead of at the user's everyday ego. It costs nothing, so it is
+            // always set, which keeps an agent from reaching the wrong instance.
+            Driver::EgoCli => server_name
+                .map(|name| format!("--ego-server-name={name}"))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn control(self, devtools_port: Option<u16>, server_name: Option<&str>) -> Option<Control> {
+        match self {
+            Driver::Cdp => devtools_port.map(|port| Control::Cdp {
+                endpoint: format!("http://127.0.0.1:{port}"),
+            }),
+            Driver::EgoCli => server_name.map(|name| Control::EgoCli {
+                server_name: name.to_string(),
+                command: format!("ego-browser --ego-server-name={name} nodejs -e '<script>'"),
+            }),
+        }
+    }
+
+    fn capabilities(self) -> Capabilities {
+        match self {
+            Driver::Cdp => Capabilities {
+                ui_actions: "via-client",
+                snapshot_refs: false,
+                handoff: false,
+                visible_cursor: false,
+            },
+            Driver::EgoCli => Capabilities {
+                ui_actions: "built-in",
+                snapshot_refs: true,
+                handoff: true,
+                visible_cursor: true,
+            },
+        }
+    }
+}
+
+/// Something a driver needs on this machine that Sniper can see but never installs.
+#[derive(Debug, Serialize)]
+pub struct Requirement {
+    pub name: &'static str,
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CatalogEntry {
+    pub browser: &'static str,
+    pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub driver: Driver,
+    pub platforms: &'static [&'static str],
+    pub capabilities: Capabilities,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<Requirement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<&'static str>,
+}
+
+fn current_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+/// Every browser Sniper knows on this platform, installed or not, so a caller can
+/// see what exists and how to get it instead of an empty list.
+pub fn catalog() -> Vec<CatalogEntry> {
+    catalog_for(current_platform(), find_executable, driver_requirements)
+}
+
+fn catalog_for(
+    platform: &str,
+    find: impl Fn(BrowserKind) -> Option<PathBuf>,
+    requirements: impl Fn(Driver) -> Vec<Requirement>,
+) -> Vec<CatalogEntry> {
     BrowserKind::ALL
         .into_iter()
-        .filter_map(|kind| {
-            find_executable(kind).map(|path| InstalledBrowser {
+        .filter(|kind| kind.platforms().contains(&platform))
+        .map(|kind| {
+            let path = find(kind);
+            CatalogEntry {
                 browser: kind.name(),
-                path: path.display().to_string(),
-                agent_control: kind.agent_control(),
-            })
+                installed: path.is_some(),
+                install_hint: path.is_none().then(|| kind.install_hint()).flatten(),
+                path: path.map(|path| path.display().to_string()),
+                driver: kind.driver(),
+                platforms: kind.platforms(),
+                capabilities: kind.driver().capabilities(),
+                requirements: requirements(kind.driver()),
+            }
         })
         .collect()
+}
+
+fn driver_requirements(driver: Driver) -> Vec<Requirement> {
+    match driver {
+        Driver::Cdp => Vec::new(),
+        Driver::EgoCli => {
+            // Hints appear only for what is missing, and they point at where to look.
+            // None of them is a command to run: this output is read by agents, and a
+            // line that installs software must not read as one they may execute.
+            let (command, skill) = (ego_cli_found(), ego_skill_found());
+            vec![
+                Requirement {
+                    name: "ego-browser command",
+                    found: command,
+                    hint: (!command)
+                        .then_some("ego lite registers it when its first-run setup finishes"),
+                },
+                Requirement {
+                    name: "ego-browser agent skill",
+                    found: skill,
+                    hint: (!skill).then_some(
+                        "ask the user to set up ego's agent skill; see https://github.com/citrolabs/ego-lite",
+                    ),
+                },
+            ]
+        }
+    }
+}
+
+fn ego_cli_found() -> bool {
+    let name = if cfg!(windows) {
+        "ego-browser.exe"
+    } else {
+        "ego-browser"
+    };
+    let on_path = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()));
+    // ego's setup puts the command here, which a desktop app's PATH often lacks.
+    on_path
+        || crate::platform::user_home_dir()
+            .is_some_and(|home| home.join(".local").join("bin").join(name).is_file())
+}
+
+fn ego_skill_found() -> bool {
+    [
+        crate::skills::default_claude_skills_dir(),
+        crate::skills::default_codex_skills_dir(),
+        // The shared location agents that follow the open skills convention read.
+        crate::platform::user_home_dir().map(|home| home.join(".agents").join("skills")),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|dir| dir.join("ego-browser").join("SKILL.md").is_file())
 }
 
 /// The hash Chromium's `--ignore-certificate-errors-spki-list` takes: base64 of
@@ -192,6 +424,9 @@ pub enum LaunchError {
         detail: String,
     },
     TooMany(String),
+    /// Refused by policy, not by a bad request: the same call would succeed once the
+    /// condition changes.
+    Forbidden(String),
     Failed(String),
 }
 
@@ -201,6 +436,7 @@ impl std::fmt::Display for LaunchError {
             LaunchError::NotInstalled(message)
             | LaunchError::BadRequest(message)
             | LaunchError::TooMany(message)
+            | LaunchError::Forbidden(message)
             | LaunchError::Failed(message) => f.write_str(message),
             LaunchError::AlreadyRunning { pid, detail } => write!(
                 f,
@@ -219,9 +455,12 @@ pub struct LaunchRequest {
     pub url: Option<String>,
     /// Use a throwaway profile instead of the persistent Sniper one.
     pub fresh: bool,
-    /// Open a DevTools port so an agent can attach. Off by default: it lets any
-    /// local process drive a browser that holds the profile's logged-in sessions.
-    pub debug_port: bool,
+    /// Ask for the way an agent drives this browser. For a driver that opens a port
+    /// that is what this switches on, and it is off by default because the port lets
+    /// any local process drive a browser holding the profile's logged-in sessions. A
+    /// driver with no port (ego) is always reachable by its name, so this changes
+    /// nothing there.
+    pub agent: bool,
 }
 
 pub struct LaunchContext<'a> {
@@ -254,17 +493,19 @@ pub struct LaunchedBrowser {
     pub fresh: bool,
     pub proxy: String,
     pub url: String,
-    pub agent_control: &'static str,
-    /// What to do next to drive it, so a caller does not have to know the browser.
-    pub attach: String,
+    pub driver: Driver,
     /// The browser was already running with these settings, so this opened another
     /// window in it instead of starting a second one.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reused: bool,
+    /// What an agent needs to drive it. Absent when the driver has nothing to offer
+    /// unless asked (a DevTools port) and was not, or when the browser ended or never
+    /// reported its port (see `warnings` and `hint`). For ego it is always a name
+    /// Sniper chose, present from the start, not proof the service is ready.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub devtools_port: Option<u16>,
+    pub control: Option<Control>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ego_server_name: Option<String>,
+    pub hint: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -277,7 +518,9 @@ struct Owner {
     pid: u32,
     exe: PathBuf,
     proxy: String,
-    debug_port: bool,
+    /// Whether the browser has a DevTools port, which a later launch may need.
+    #[serde(alias = "debug_port")]
+    devtools_port: bool,
     /// When this process started the browser. Not saved: a record read back from
     /// disk is from an earlier run, long past its first window.
     #[serde(skip)]
@@ -309,22 +552,39 @@ pub async fn launch(
 ) -> Result<LaunchedBrowser, LaunchError> {
     let (kind, exe) = match request.browser {
         Some(kind) => {
-            let exe = find_executable(kind).ok_or_else(|| {
-                LaunchError::NotInstalled(format!("{} is not installed", kind.name()))
-            })?;
+            let exe = find_executable(kind)
+                .ok_or_else(|| LaunchError::NotInstalled(not_installed_message(kind)))?;
             (kind, exe)
         }
         None => BrowserKind::ALL
             .into_iter()
             .find_map(|kind| find_executable(kind).map(|exe| (kind, exe)))
             .ok_or_else(|| {
-                LaunchError::NotInstalled(
-                    "no supported browser found (looked for chrome, edge, brave, chromium, ego)"
-                        .to_string(),
-                )
+                let looked_for: Vec<_> = BrowserKind::ALL
+                    .into_iter()
+                    .filter(|kind| kind.platforms().contains(&current_platform()))
+                    .map(BrowserKind::name)
+                    .collect();
+                LaunchError::NotInstalled(format!(
+                    "no supported browser found (looked for {})",
+                    looked_for.join(", ")
+                ))
             })?,
     };
     launch_at(ctx, kind, &exe, request).await
+}
+
+/// The same answer the catalog gives, in the one place a caller who skipped the
+/// catalog will read: where the browser does not exist, and how to get it where it
+/// does.
+fn not_installed_message(kind: BrowserKind) -> String {
+    if !kind.platforms().contains(&current_platform()) {
+        return format!("{} is not available on {}", kind.name(), current_platform());
+    }
+    match kind.install_hint() {
+        Some(hint) => format!("{} is not installed. {hint}", kind.name()),
+        None => format!("{} is not installed", kind.name()),
+    }
 }
 
 enum Started {
@@ -343,10 +603,14 @@ async fn launch_at(
     exe: &Path,
     request: LaunchRequest,
 ) -> Result<LaunchedBrowser, LaunchError> {
-    if request.debug_port && kind == BrowserKind::Ego {
-        return Err(LaunchError::BadRequest(
-            "ego is driven with `ego-browser --ego-server-name=<name>`, not a DevTools port"
-                .to_string(),
+    let driver = kind.driver();
+    let wants_port = driver.opens_port(request.agent);
+    if wants_port && !ctx.proxy_addr.ip().is_loopback() {
+        // The header guards on the API only keep web pages out, and a proxy that
+        // listens beyond loopback relays requests to local ports, including this
+        // one, which hands over the browser's logged-in sessions.
+        return Err(LaunchError::Forbidden(
+            "a DevTools port is only opened while the proxy listens on loopback only".to_string(),
         ));
     }
     let url = validate_url(request.url.as_deref().unwrap_or("about:blank"))?;
@@ -360,20 +624,12 @@ async fn launch_at(
     } else {
         profiles_root.join(kind.name())
     };
-    let ego_server_name = (kind == BrowserKind::Ego).then(|| {
-        let suffix = if request.fresh {
-            format!("-{}", &Uuid::new_v4().simple().to_string()[..8])
-        } else {
-            String::new()
-        };
-        format!("sniper-{}{suffix}", ctx.proxy_addr.port())
-    });
+    let server_name = driver.server_name(ctx.proxy_addr.port(), &profile);
     let args = build_args(
         &profile,
         &proxy,
         &spki,
-        request.debug_port,
-        ego_server_name.as_deref(),
+        &driver.launch_args(request.agent, server_name.as_deref()),
         &url,
     );
 
@@ -408,7 +664,7 @@ async fn launch_at(
             current_owner(&profile, &live)
         };
         match existing {
-            Some(owner) if owner.proxy == proxy && (owner.debug_port || !request.debug_port) => {
+            Some(owner) if owner.proxy == proxy && (owner.devtools_port || !wants_port) => {
                 // Same settings: the running browser is already wired correctly, so
                 // starting the binary again just opens another window in it. This
                 // is what makes the button work on macOS, where closing the last
@@ -456,7 +712,7 @@ async fn launch_at(
                         )));
                     }
                 }
-                if request.debug_port {
+                if wants_port {
                     // A leftover from an earlier run would be read as this run's
                     // port. Cleared here, after the decision above, so a launch
                     // that is refused never touches a running browser's file.
@@ -483,7 +739,7 @@ async fn launch_at(
                     pid,
                     exe: exe.to_path_buf(),
                     proxy: proxy.clone(),
-                    debug_port: request.debug_port,
+                    devtools_port: wants_port,
                     started: Some(std::time::Instant::now()),
                 };
                 if let Err(error) = write_owner(&profile, &owner) {
@@ -508,6 +764,7 @@ async fn launch_at(
         }
     };
 
+    let mut reused_has_port = false;
     let (pid, reused, mut exited) = match started {
         Started::New { pid, exited } => {
             info!(
@@ -524,20 +781,25 @@ async fn launch_at(
                 pid = owner.pid,
                 "opened another window in the running Sniper browser"
             );
+            reused_has_port = owner.devtools_port;
             (owner.pid, true, None)
         }
     };
 
     let log_path = profile.join(LAUNCH_LOG);
+    let mut ended = false;
     let mut devtools_port = None;
-    if request.debug_port {
+    if wants_port {
         match read_devtools_port(&profile, ctx.devtools_wait, exited.as_mut()).await {
             DevtoolsWait::Port(port) => devtools_port = Some(port),
-            DevtoolsWait::BrowserExited(exit) => warnings.push(format!(
-                "the browser exited ({}) before reporting a DevTools port{}",
-                exit.describe(),
-                log_hint(request.fresh, &log_path)
-            )),
+            DevtoolsWait::BrowserExited(exit) => {
+                ended = true;
+                warnings.push(format!(
+                    "the browser exited ({}) before reporting a DevTools port{}",
+                    exit.describe(),
+                    log_hint(request.fresh, &log_path)
+                ));
+            }
             DevtoolsWait::TimedOut => warnings.push(format!(
                 "the browser did not report a DevTools port within {} seconds",
                 ctx.devtools_wait.as_secs()
@@ -545,6 +807,7 @@ async fn launch_at(
         }
     } else if let Some(exited) = exited.as_mut() {
         if let Some(exit) = wait_for_exit(exited, ctx.early_exit_probe).await {
+            ended = true;
             warnings.push(format!(
                 "the browser process ended within {} ms ({}): it either could not start or \
                  handed the request to a browser already running elsewhere{}",
@@ -554,12 +817,31 @@ async fn launch_at(
             ));
         }
     }
-    let attach = attach_hint(
-        kind,
-        devtools_port,
-        ego_server_name.as_deref(),
-        request.debug_port,
-    );
+    // A browser that ended has nothing to drive, whichever driver it has. Handing
+    // out its name anyway sends the agent to a command that fails.
+    let control = if ended {
+        None
+    } else {
+        driver.control(devtools_port, server_name.as_deref())
+    };
+    let hint = if ended {
+        Some("the browser ended at once, so there is nothing to drive; see warnings".to_string())
+    } else if control.is_none() && !request.agent {
+        // Asking again is refused while this browser runs, because it was started
+        // without the port; saying so here saves the round trip that finds out.
+        Some(if reused_has_port {
+            "this browser already has a DevTools port from an earlier agent open; open \
+             again with agent to get its endpoint"
+                .to_string()
+        } else {
+            "opened without agent control; to get it, quit this browser (closing the window \
+             is not enough on macOS) and open again with agent, or add fresh for a separate \
+             throwaway browser"
+                .to_string()
+        })
+    } else {
+        None
+    };
 
     Ok(LaunchedBrowser {
         browser: kind.name(),
@@ -568,11 +850,10 @@ async fn launch_at(
         fresh: request.fresh,
         proxy,
         url,
-        agent_control: kind.agent_control(),
-        attach,
+        driver,
         reused,
-        devtools_port,
-        ego_server_name,
+        control,
+        hint,
         warnings,
     })
 }
@@ -608,26 +889,6 @@ fn is_throwaway(profile: &Path) -> bool {
         .is_some_and(|name| name.to_string_lossy().starts_with("fresh-"))
 }
 
-fn attach_hint(
-    kind: BrowserKind,
-    devtools_port: Option<u16>,
-    ego_server_name: Option<&str>,
-    debug_requested: bool,
-) -> String {
-    match (kind, devtools_port, ego_server_name) {
-        (BrowserKind::Ego, _, Some(name)) => {
-            format!("ego-browser --ego-server-name={name} nodejs -e '<script>'")
-        }
-        (_, Some(port), _) => format!(
-            "connect a CDP client to http://127.0.0.1:{port} (Playwright connectOverCDP, \
-             chrome-devtools-mcp --browserUrl)"
-        ),
-        _ if debug_requested => "no DevTools port was reported; see warnings".to_string(),
-        _ => "opened without a DevTools port; open again with debug_port to let an agent attach"
-            .to_string(),
-    }
-}
-
 /// Only http(s) URLs. The value becomes a command-line argument, and a string that
 /// parses as an absolute URL cannot also be read as a switch.
 fn validate_url(raw: &str) -> Result<String, LaunchError> {
@@ -659,8 +920,7 @@ fn build_args(
     profile: &Path,
     proxy: &str,
     spki: &str,
-    debug_port: bool,
-    ego_server_name: Option<&str>,
+    driver_args: &[String],
     url: &str,
 ) -> Vec<String> {
     let mut args = vec![
@@ -673,18 +933,7 @@ fn build_args(
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
     ];
-    if debug_port {
-        // Port 0 lets the OS pick, and the browser writes the choice to
-        // DevToolsActivePort. A fixed port would collide with any other browser
-        // already holding it. Chrome 136+ honours this only with a non-default
-        // profile, which this always is.
-        args.push("--remote-debugging-port=0".to_string());
-    }
-    if let Some(name) = ego_server_name {
-        // Gives this instance its own name so `ego-browser` can be pointed at it
-        // instead of at the user's everyday ego.
-        args.push(format!("--ego-server-name={name}"));
-    }
+    args.extend(driver_args.iter().cloned());
     args.push(url.to_string());
     args
 }
@@ -1024,8 +1273,7 @@ mod tests {
             Path::new("/data/browser-profiles/chrome"),
             "127.0.0.1:8080",
             "HASH=",
-            false,
-            None,
+            &[],
             "https://example.com/",
         );
         assert_eq!(args[0], "--user-data-dir=/data/browser-profiles/chrome");
@@ -1033,19 +1281,200 @@ mod tests {
         assert!(args.contains(&"--proxy-bypass-list=<-loopback>".to_string()));
         assert!(args.contains(&"--ignore-certificate-errors-spki-list=HASH=".to_string()));
         assert_eq!(args.last().unwrap(), "https://example.com/");
-        assert!(!args.iter().any(|arg| arg.contains("remote-debugging")));
-        assert!(!args.iter().any(|arg| arg.contains("ego-server-name")));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.contains("remote-debugging") || arg.contains("ego-server-name")),
+            "the shared switches know nothing about any driver"
+        );
 
-        let with_both = build_args(
+        // A driver's switches go in before the URL, which stays last.
+        let with_driver = build_args(
             Path::new("/p"),
             "h:1",
             "H=",
-            true,
-            Some("sniper-8080"),
+            &["--remote-debugging-port=0".to_string()],
             "about:blank",
         );
-        assert!(with_both.contains(&"--remote-debugging-port=0".to_string()));
-        assert!(with_both.contains(&"--ego-server-name=sniper-8080".to_string()));
+        let at = with_driver
+            .iter()
+            .position(|a| a == "--remote-debugging-port=0")
+            .unwrap();
+        assert_eq!(at, with_driver.len() - 2);
+        assert_eq!(with_driver.last().unwrap(), "about:blank");
+    }
+
+    // Everything that differs between ways of driving a browser is in Driver, so
+    // that is where it is pinned down.
+    #[test]
+    fn each_driver_adds_only_its_own_switches() {
+        assert!(Driver::Cdp.launch_args(false, None).is_empty());
+        assert_eq!(
+            Driver::Cdp.launch_args(true, None),
+            vec!["--remote-debugging-port=0".to_string()]
+        );
+        for agent in [false, true] {
+            assert_eq!(
+                Driver::EgoCli.launch_args(agent, Some("sniper-8080")),
+                vec!["--ego-server-name=sniper-8080".to_string()],
+                "ego is named whether or not an agent was asked for, so an agent can \
+                 never be pointed at the user's own instance by omission"
+            );
+        }
+        assert!(Driver::EgoCli.launch_args(true, None).is_empty());
+
+        assert!(Driver::Cdp.opens_port(true) && !Driver::Cdp.opens_port(false));
+        assert!(
+            !Driver::EgoCli.opens_port(true),
+            "ego has no DevTools port to open"
+        );
+
+        let profile = Path::new("/data/a/browser-profiles/ego");
+        assert_eq!(Driver::Cdp.server_name(8080, profile), None);
+        let name = Driver::EgoCli.server_name(8080, profile).unwrap();
+        assert!(
+            name.starts_with("sniper-8080-") && name.len() <= 64,
+            "{name}"
+        );
+        assert!(
+            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "only characters ego accepts in a name: {name}"
+        );
+    }
+
+    // The proxy port alone is the same for every data directory on default settings.
+    // A stale ego left by an earlier run would then answer to a new one's name.
+    #[test]
+    fn the_ego_name_follows_the_profile_not_just_the_proxy_port() {
+        let name = |port, path: &str| Driver::EgoCli.server_name(port, Path::new(path)).unwrap();
+        let one = name(8080, "/data/one/browser-profiles/ego");
+        assert_eq!(
+            one,
+            name(8080, "/data/one/browser-profiles/ego"),
+            "the same profile keeps its name, so reuse and a restart agree"
+        );
+        assert_ne!(one, name(8080, "/data/two/browser-profiles/ego"));
+        assert_ne!(one, name(8081, "/data/one/browser-profiles/ego"));
+        assert_ne!(
+            name(8080, "/data/one/browser-profiles/fresh-aaaa"),
+            name(8080, "/data/one/browser-profiles/fresh-bbbb"),
+            "two throwaway profiles never share a name"
+        );
+    }
+
+    #[test]
+    fn the_browser_names_come_from_one_list() {
+        assert_eq!(
+            BrowserKind::names(),
+            ["chrome", "edge", "brave", "chromium", "ego"]
+        );
+        assert!(BrowserKind::names()
+            .into_iter()
+            .all(|name| BrowserKind::parse(name).is_some()));
+    }
+
+    #[test]
+    fn a_missing_browser_says_where_it_does_not_exist_and_how_to_get_it() {
+        let ego = not_installed_message(BrowserKind::Ego);
+        if cfg!(target_os = "macos") {
+            assert!(ego.contains("not installed"), "{ego}");
+            assert!(ego.contains("Sniper does not install it"), "{ego}");
+        } else {
+            assert!(ego.contains("is not available on"), "{ego}");
+        }
+        assert_eq!(
+            not_installed_message(BrowserKind::Edge),
+            "edge is not installed"
+        );
+    }
+
+    // This output is read by agents. A hint that is a command to install software
+    // reads as one they may run, so the hints point at where to look, and only for
+    // what is actually missing.
+    #[test]
+    fn requirement_hints_appear_only_when_missing_and_are_never_commands() {
+        for requirement in driver_requirements(Driver::EgoCli) {
+            if requirement.found {
+                assert!(requirement.hint.is_none(), "{}", requirement.name);
+            } else {
+                let hint = requirement
+                    .hint
+                    .expect("a missing requirement says what to do");
+                assert!(
+                    !hint.contains("npx") && !hint.contains(" install "),
+                    "{hint}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_driver_hands_out_control_in_its_own_shape_under_one_contract() {
+        let cdp = Driver::Cdp.control(Some(4242), None).unwrap();
+        assert_eq!(
+            serde_json::to_value(&cdp).unwrap(),
+            serde_json::json!({"driver": "cdp", "endpoint": "http://127.0.0.1:4242"})
+        );
+        assert!(Driver::Cdp.control(None, None).is_none());
+
+        let ego = Driver::EgoCli.control(None, Some("sniper-8080")).unwrap();
+        let ego = serde_json::to_value(&ego).unwrap();
+        assert_eq!(ego["driver"], "ego-cli");
+        assert_eq!(ego["server_name"], "sniper-8080");
+        assert!(ego["command"]
+            .as_str()
+            .unwrap()
+            .contains("--ego-server-name=sniper-8080"));
+        assert!(Driver::EgoCli.control(None, None).is_none());
+    }
+
+    #[test]
+    fn the_catalog_lists_what_exists_on_this_platform_and_says_what_is_missing() {
+        let requirements = |driver: Driver| match driver {
+            Driver::Cdp => Vec::new(),
+            Driver::EgoCli => vec![Requirement {
+                name: "ego-browser command",
+                found: false,
+                hint: Some("registered by ego"),
+            }],
+        };
+        let only_chrome = |kind: BrowserKind| {
+            (kind == BrowserKind::Chrome).then(|| PathBuf::from("/Apps/Chrome"))
+        };
+
+        let mac = catalog_for("macos", only_chrome, requirements);
+        let names: Vec<_> = mac.iter().map(|entry| entry.browser).collect();
+        assert_eq!(names, ["chrome", "edge", "brave", "chromium", "ego"]);
+        let chrome = &mac[0];
+        assert!(chrome.installed && chrome.path.as_deref() == Some("/Apps/Chrome"));
+        assert_eq!(chrome.driver, Driver::Cdp);
+        assert_eq!(chrome.capabilities.ui_actions, "via-client");
+        assert!(chrome.requirements.is_empty() && chrome.install_hint.is_none());
+
+        let ego = mac.iter().find(|entry| entry.browser == "ego").unwrap();
+        assert!(!ego.installed && ego.path.is_none());
+        assert!(ego
+            .install_hint
+            .unwrap()
+            .contains("Sniper does not install it"));
+        assert_eq!(ego.capabilities.ui_actions, "built-in");
+        assert_eq!(ego.requirements.len(), 1);
+
+        // Not built for Windows, so it is not listed as "not installed" there.
+        let windows = catalog_for("windows", only_chrome, requirements);
+        assert!(windows.iter().all(|entry| entry.browser != "ego"));
+        assert_eq!(windows.len(), 4);
+
+        // An installed browser carries no install hint even if it has one to give.
+        let ego_installed = catalog_for("macos", |_| Some(PathBuf::from("/x")), requirements);
+        assert!(ego_installed
+            .iter()
+            .all(|entry| entry.install_hint.is_none()));
+
+        let json = serde_json::to_value(&mac).unwrap();
+        assert_eq!(json[0]["driver"], "cdp");
+        assert_eq!(json[4]["driver"], "ego-cli");
+        assert!(json[0].get("install_hint").is_none(), "absent, not null");
     }
 
     #[test]
@@ -1087,8 +1516,8 @@ mod tests {
         assert_eq!(BrowserKind::parse("EGO"), Some(BrowserKind::Ego));
         assert_eq!(BrowserKind::parse("firefox"), None);
         assert_eq!(BrowserKind::ALL.last(), Some(&BrowserKind::Ego));
-        assert_eq!(BrowserKind::Ego.agent_control(), "ego-browser");
-        assert_eq!(BrowserKind::Chrome.agent_control(), "cdp");
+        assert_eq!(BrowserKind::Ego.driver(), Driver::EgoCli);
+        assert_eq!(BrowserKind::Chrome.driver(), Driver::Cdp);
     }
 
     #[test]
@@ -1199,8 +1628,10 @@ mod tests {
             }
         }
 
+        // Generous because it only costs time when the file never comes: a two-second
+        // limit failed once right after a compile, when the machine was busy.
         async fn wait_for(path: &Path) -> String {
-            for _ in 0..100 {
+            for _ in 0..500 {
                 if let Ok(text) = fs::read_to_string(path) {
                     if !text.is_empty() {
                         return text;
@@ -1233,12 +1664,12 @@ mod tests {
             write_owner(profile, owner).unwrap();
         }
 
-        fn this_process(proxy: &str, debug_port: bool) -> Owner {
+        fn this_process(proxy: &str, devtools_port: bool) -> Owner {
             Owner {
                 pid: std::process::id(),
                 exe: std::env::current_exe().unwrap(),
                 proxy: proxy.to_string(),
-                debug_port,
+                devtools_port,
                 started: None,
             }
         }
@@ -1271,9 +1702,9 @@ mod tests {
             assert!(argv.contains("--ignore-certificate-errors-spki-list="));
             assert!(argv.trim_end().ends_with("https://example.com/"));
             assert_eq!(launched.browser, "chrome");
-            assert_eq!(launched.devtools_port, None);
+            assert!(launched.control.is_none(), "no agent asked, so no port");
             assert!(!launched.reused);
-            assert!(launched.attach.contains("debug_port"));
+            assert!(launched.hint.as_deref().unwrap().contains("agent"));
             let mode = fs::metadata(&profile).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "the profile holds logged-in sessions");
             assert!(
@@ -1483,7 +1914,7 @@ mod tests {
                 BrowserKind::Brave,
                 &exe,
                 LaunchRequest {
-                    debug_port: true,
+                    agent: true,
                     ..Default::default()
                 },
             )
@@ -1547,7 +1978,7 @@ mod tests {
                 pid: gone.id(),
                 exe: PathBuf::from("/bin/sh"),
                 proxy: "127.0.0.1:9".to_string(),
-                debug_port: false,
+                devtools_port: false,
                 started: None,
             };
             write_record(&fixture.profile("edge"), &stale);
@@ -1681,7 +2112,7 @@ mod tests {
                 BrowserKind::Edge,
                 &dies,
                 LaunchRequest {
-                    debug_port: true,
+                    agent: true,
                     ..Default::default()
                 },
             )
@@ -1692,7 +2123,7 @@ mod tests {
                 "waited out the DevTools limit"
             );
             assert!(quick.warnings[0].contains("exited"), "{:?}", quick.warnings);
-            assert_eq!(quick.devtools_port, None);
+            assert!(quick.control.is_none());
         }
 
         // A throwaway profile is deleted the moment its browser dies, log included,
@@ -1798,14 +2229,18 @@ mod tests {
                  printf '4242\\n/devtools/browser/new\\n' > \"$d/DevToolsActivePort\"",
             );
             let with_port = LaunchRequest {
-                debug_port: true,
+                agent: true,
                 ..Default::default()
             };
             let launched = launch_at(&fixture.ctx(), BrowserKind::Chrome, &reports, with_port)
                 .await
                 .unwrap();
-            assert_eq!(launched.devtools_port, Some(4242));
-            assert!(launched.attach.contains("4242"));
+            assert!(
+                matches!(&launched.control, Some(Control::Cdp { endpoint })
+                    if endpoint == "http://127.0.0.1:4242"),
+                "{:?}",
+                launched.control
+            );
 
             // A browser that never reports a port yields a warning, not a stale value.
             let silent = fixture.open_browser("");
@@ -1814,21 +2249,160 @@ mod tests {
                 BrowserKind::Edge,
                 &silent,
                 LaunchRequest {
-                    debug_port: true,
+                    agent: true,
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
-            assert_eq!(launched.devtools_port, None);
+            assert!(launched.control.is_none());
             assert_eq!(launched.warnings.len(), 1);
         }
 
+        // For ego the name exists before the process does, so `control` has to be
+        // withheld when the process turns out to have ended, or an agent is sent to a
+        // command against an instance that is not there.
         #[tokio::test]
-        async fn ego_gets_its_own_server_name_and_refuses_a_devtools_port() {
+        async fn a_browser_that_ended_at_once_hands_out_no_control_whatever_its_driver() {
+            let fixture = Fixture::new();
+            let dies = fixture.script("echo 'cannot start' >&2; exit 2");
+            let ctx = fixture.build(PROXY, Duration::from_secs(5), Duration::from_secs(5));
+
+            let ego = launch_at(&ctx, BrowserKind::Ego, &dies, LaunchRequest::default())
+                .await
+                .unwrap();
+            assert!(ego.control.is_none(), "{:?}", ego.control);
+            assert!(
+                ego.hint.as_deref().unwrap().contains("ended"),
+                "{:?}",
+                ego.hint
+            );
+            assert!(
+                ego.warnings[0].contains("cannot start"),
+                "{:?}",
+                ego.warnings
+            );
+
+            let chrome = launch_at(
+                &ctx,
+                BrowserKind::Chrome,
+                &dies,
+                LaunchRequest {
+                    agent: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(chrome.control.is_none());
+            assert!(chrome.hint.as_deref().unwrap().contains("ended"));
+        }
+
+        // Asking again is refused while the browser runs, so the hint has to say what
+        // actually works, not just "open again".
+        #[tokio::test]
+        async fn the_hint_states_what_getting_control_takes() {
+            let fixture = Fixture::new();
+            let exe = fixture.open_browser("");
+
+            let plain = launch_at(
+                &fixture.ctx(),
+                BrowserKind::Edge,
+                &exe,
+                LaunchRequest::default(),
+            )
+            .await
+            .unwrap();
+            let hint = plain.hint.unwrap();
+            assert!(hint.contains("quit") && hint.contains("fresh"), "{hint}");
+
+            // The advice must be true: opening again with agent really is refused.
+            let again = launch_at(
+                &fixture.ctx(),
+                BrowserKind::Edge,
+                &exe,
+                LaunchRequest {
+                    agent: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(
+                matches!(again, Err(LaunchError::AlreadyRunning { .. })),
+                "{again:?}"
+            );
+
+            // ...and the fresh alternative it names really works.
+            let fresh = launch_at(
+                &fixture.ctx(),
+                BrowserKind::Edge,
+                &exe,
+                LaunchRequest {
+                    agent: true,
+                    fresh: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(fresh.is_ok(), "{fresh:?}");
+        }
+
+        // A plain open of a browser an earlier agent open gave a port is not the same
+        // case as one with no port, and the hint must not claim otherwise.
+        #[tokio::test]
+        async fn a_plain_open_of_a_browser_that_already_has_a_port_says_so() {
+            let fixture = Fixture::new();
+            let exe = fixture.open_browser(
+                "for a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${a#--user-data-dir=}\";; esac; done\n\
+                 printf '4242\\n/devtools/browser/x\\n' > \"$d/DevToolsActivePort\"",
+            );
+            let with_agent = launch_at(
+                &fixture.ctx(),
+                BrowserKind::Brave,
+                &exe,
+                LaunchRequest {
+                    agent: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(with_agent.control.is_some());
+
+            let plain = launch_at(
+                &fixture.ctx(),
+                BrowserKind::Brave,
+                &exe,
+                LaunchRequest::default(),
+            )
+            .await
+            .unwrap();
+            assert!(plain.reused && plain.control.is_none());
+            let hint = plain.hint.unwrap();
+            assert!(hint.contains("already has a DevTools port"), "{hint}");
+        }
+
+        #[test]
+        fn a_record_written_under_the_earlier_field_name_still_reads() {
+            let fixture = Fixture::new();
+            let profile = fixture.profile("chrome");
+            fs::create_dir_all(&profile).unwrap();
+            fs::write(
+                profile.join(OWNER_FILE),
+                r#"{"pid":4242,"exe":"/x","proxy":"127.0.0.1:1","debug_port":true}"#,
+            )
+            .unwrap();
+            let owner = read_owner(&profile).expect("the old field name is still understood");
+            assert!(owner.devtools_port);
+        }
+
+        // ego is always given a name of its own and `agent` changes nothing for it:
+        // there is no port to open. An agent is handed the same `control` either way.
+        #[tokio::test]
+        async fn ego_always_gets_a_name_of_its_own_and_agent_changes_nothing() {
             let fixture = Fixture::new();
             let out = fixture.dir.join("ego-argv.txt");
-            let exe = fixture.script(&recording_script(&out));
+            let exe = fixture.open_browser(&recording_script(&out));
 
             let launched = launch_at(
                 &fixture.ctx(),
@@ -1838,23 +2412,87 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(launched.ego_server_name.as_deref(), Some("sniper-18890"));
+            assert_eq!(launched.driver, Driver::EgoCli);
+            let expected = Driver::EgoCli
+                .server_name(18890, &fixture.profile("ego"))
+                .unwrap();
             assert!(wait_for(&out)
                 .await
-                .contains("--ego-server-name=sniper-18890"));
-            assert!(launched.attach.contains("--ego-server-name=sniper-18890"));
+                .contains(&format!("--ego-server-name={expected}")));
+            assert!(
+                matches!(&launched.control, Some(Control::EgoCli { server_name, command })
+                    if *server_name == expected
+                        && command.contains(&format!("--ego-server-name={expected}"))),
+                "{:?}",
+                launched.control
+            );
+            assert!(launched.hint.is_none(), "control is already there");
 
-            let refused = launch_at(
+            let with_agent = launch_at(
                 &fixture.ctx(),
                 BrowserKind::Ego,
                 &exe,
                 LaunchRequest {
-                    debug_port: true,
+                    agent: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                with_agent.reused,
+                "same settings, so another window in the same ego"
+            );
+            assert!(matches!(with_agent.control, Some(Control::EgoCli { .. })));
+        }
+
+        // The DevTools port hands over the browser's sessions, and a proxy that
+        // listens beyond loopback relays requests to local ports. The check sits
+        // with the driver, which is what knows whether a port is opened.
+        #[tokio::test]
+        async fn a_devtools_port_is_withheld_while_the_proxy_listens_beyond_loopback() {
+            let fixture = Fixture::new();
+            let exe = fixture.open_browser("");
+            let network = fixture.build(
+                "0.0.0.0:18890",
+                Duration::from_secs(5),
+                Duration::from_millis(50),
+            );
+
+            let refused = launch_at(
+                &network,
+                BrowserKind::Chrome,
+                &exe,
+                LaunchRequest {
+                    agent: true,
                     ..Default::default()
                 },
             )
             .await;
-            assert!(matches!(refused, Err(LaunchError::BadRequest(_))));
+            assert!(
+                matches!(refused, Err(LaunchError::Forbidden(_))),
+                "{refused:?}"
+            );
+
+            // No port is involved without an agent, or for a driver with no port.
+            let plain =
+                launch_at(&network, BrowserKind::Edge, &exe, LaunchRequest::default()).await;
+            assert!(plain.is_ok(), "{plain:?}");
+            let ego = launch_at(
+                &network,
+                BrowserKind::Ego,
+                &exe,
+                LaunchRequest {
+                    agent: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(ego.is_ok(), "{ego:?}");
+            assert!(
+                !fixture.profile("chrome").exists(),
+                "nothing was started for the refused one"
+            );
         }
 
         #[tokio::test]

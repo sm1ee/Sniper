@@ -397,7 +397,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/certificates/root.pem", get(download_root_pem))
         .route("/api/certificates/root.der", get(download_root_der))
         .route("/api/certificates/reveal", post(reveal_certificate_folder))
-        .route("/api/browser/available", get(list_available_browsers))
+        .route("/api/browser/list", get(list_browsers))
         .route("/api/browser/launch", post(launch_browser))
         .route("/api/cli-path", post(install_cli_on_path))
         .route(
@@ -4634,11 +4634,11 @@ struct BrowserLaunchPayload {
     browser: Option<String>,
     url: Option<String>,
     fresh: bool,
-    debug_port: bool,
+    agent: bool,
 }
 
-async fn list_available_browsers() -> Response {
-    Json(browser::installed()).into_response()
+async fn list_browsers() -> Response {
+    Json(browser::catalog()).into_response()
 }
 
 /// Opens a browser wired to this instance. A write behind the same guards as every
@@ -4661,25 +4661,15 @@ async fn launch_browser(
                 return (
                     StatusCode::BAD_REQUEST,
                     format!(
-                    "unknown browser: {name} (expected auto, chrome, edge, brave, chromium or ego)"
-                ),
+                        "unknown browser: {name} (expected auto, {})",
+                        BrowserKind::names().join(", ")
+                    ),
                 )
                     .into_response()
             }
         },
     };
     let proxy_addr = state.get_active_proxy_addr().await;
-    // The header guards only keep web pages out; a client that sends no Origin
-    // passes them. A proxy reachable from the network will relay such a request to
-    // this API, so a DevTools port, which hands over the browser's logged-in
-    // sessions and local files, is not opened unless the proxy is loopback-only.
-    if payload.debug_port && !proxy_addr.ip().is_loopback() {
-        return (
-            StatusCode::FORBIDDEN,
-            "a DevTools port is only opened while the proxy listens on loopback only",
-        )
-            .into_response();
-    }
     if !state.is_proxy_online() {
         return (
             StatusCode::CONFLICT,
@@ -4696,7 +4686,7 @@ async fn launch_browser(
         browser: kind,
         url: payload.url,
         fresh: payload.fresh,
-        debug_port: payload.debug_port,
+        agent: payload.agent,
     };
     match browser::launch(&ctx, request).await {
         Ok(launched) => Json(launched).into_response(),
@@ -4706,6 +4696,7 @@ async fn launch_browser(
                 LaunchError::BadRequest(_) => StatusCode::BAD_REQUEST,
                 LaunchError::AlreadyRunning { .. } => StatusCode::CONFLICT,
                 LaunchError::TooMany(_) => StatusCode::TOO_MANY_REQUESTS,
+                LaunchError::Forbidden(_) => StatusCode::FORBIDDEN,
                 LaunchError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };
             (status, error.to_string()).into_response()
@@ -8091,11 +8082,11 @@ mod tests {
             "{body}"
         );
 
-        // A misspelled field would otherwise be ignored and the default used, which
-        // for `debug_port` means silently opening without the port.
+        // The old name of `agent`. An ignored unknown field would fall back to the
+        // default, which means silently opening a browser an agent cannot drive.
         let typo = client
             .post(&url)
-            .json(&serde_json::json!({"debug": true}))
+            .json(&serde_json::json!({"debug_port": true}))
             .send()
             .await
             .unwrap();
@@ -8104,31 +8095,6 @@ mod tests {
         // 404 and pass a looser assertion.
         assert_eq!(typo.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
         assert!(typo.text().await.unwrap().contains("unknown field"));
-
-        server.abort();
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    // A proxy reachable from the network relays a request to this API from
-    // loopback, past the header guards, so the DevTools port is withheld there.
-    #[tokio::test]
-    async fn browser_launch_withholds_the_devtools_port_from_a_network_proxy() {
-        let (state, data_dir, addr, server) = serve_for_test("sniper-api-browser-devtools").await;
-        state.set_proxy_online(true);
-        state
-            .set_active_proxy_addr("0.0.0.0:18890".parse().unwrap())
-            .await;
-        let response = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
-            .post(format!("http://{addr}/api/browser/launch"))
-            .json(&serde_json::json!({"debug_port": true}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
-        assert!(response.text().await.unwrap().contains("loopback"));
 
         server.abort();
         let _ = std::fs::remove_dir_all(data_dir);
@@ -8153,7 +8119,7 @@ mod tests {
             .no_proxy()
             .build()
             .unwrap()
-            .get(format!("http://{addr}/api/browser/available"))
+            .get(format!("http://{addr}/api/browser/list"))
             .send()
             .await
             .unwrap();
