@@ -18218,7 +18218,8 @@ mod web_assets {
         let start = source
             .find("function generateUuid()")
             .expect("generateUuid is defined");
-        let end = start + source[start..].find("\n}\n").expect("generateUuid ends");
+        // "\n}" and not "\n}\n": a Windows checkout turns every newline into CRLF.
+        let end = start + source[start..].find("\n}").expect("generateUuid ends");
         let helper = &source[start..end];
         assert!(
             helper.contains("typeof globalThis.crypto?.randomUUID === \"function\""),
