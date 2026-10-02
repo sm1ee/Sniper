@@ -1142,6 +1142,7 @@ code {
 
 .tools-input-editor {
   min-height: 240px;
+  max-height: 480px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel-code);

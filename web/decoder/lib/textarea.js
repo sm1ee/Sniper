@@ -5,8 +5,12 @@
     }
 
     textarea.style.height = "auto";
-    textarea.style.overflowY = "hidden";
-    textarea.style.height = textarea.scrollHeight + "px";
+    // A textarea with a max-height (the Tools input) stops growing there and
+    // scrolls; without one it grows to fit, as the read-only outputs do.
+    var maxHeight = parseFloat(window.getComputedStyle(textarea).maxHeight);
+    var capped = isFinite(maxHeight) && textarea.scrollHeight > maxHeight;
+    textarea.style.overflowY = capped ? "auto" : "hidden";
+    textarea.style.height = (capped ? maxHeight : textarea.scrollHeight) + "px";
   }
 
   function prepareTextarea(textarea) {
