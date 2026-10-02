@@ -53,6 +53,28 @@ there yourself, as the [CLI section of the README](../../README.md#cli) describe
 it needs no running Sniper: `"api": {"local": true}` means the whole operation is a
 local file write, so the install works before Sniper has ever been started.
 
+### OpenCode
+
+OpenCode reads the same skill, so there is no separate install for it. According to
+[OpenCode's documentation](https://opencode.ai/docs/skills/) it looks for
+`<name>/SKILL.md` in `~/.claude/skills`, `~/.config/opencode/skills` and
+`~/.agents/skills`, and in the `.claude/skills`, `.opencode/skills` and
+`.agents/skills` folders of a project, and it recognises only the `name` and
+`description` fields of the front matter, which is all this skill has.
+`sniper-cli skills install --claude --yes` therefore already makes it available to
+OpenCode. To give OpenCode its own copy and leave `~/.claude` alone, point
+`--claude-dir` at OpenCode's folder:
+
+```bash
+sniper-cli skills install --claude --claude-dir ~/.config/opencode/skills --yes
+```
+
+That was run against a scratch folder and wrote `sniper-operator/SKILL.md` there; the
+steps above for choosing the instance and reading the results apply unchanged. OpenCode
+itself was not run, so the folder names are the documentation's, not something this
+was tested against. Installing into both `~/.claude/skills` and OpenCode's folder
+leaves two skills with the same name, which OpenCode may flag.
+
 ## Confirm Claude Code picked it up
 
 ```bash

@@ -74,7 +74,7 @@ cargo run --bin sniper-desktop
 
 - **Native.** One Rust binary with no runtime to install. It opens immediately and stays small while it runs.
 - **Scriptable.** `sniper-cli` speaks JSON for the operations the UI exposes, so reviewing a capture or resending a request can be driven from a shell script.
-- **Agent-ready.** Claude Code and Codex skill templates ship in the repository, so a coding agent drives the same workflow through the same CLI.
+- **Agent-ready.** Claude Code and Codex skill templates ship in the repository, so a coding agent drives the same workflow through the same CLI. OpenCode reads the Claude Code one (see the [Claude Code guide](docs/integrations/claude-code.md#opencode)).
 
 ## Quick start
 
