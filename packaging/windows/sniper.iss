@@ -29,6 +29,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir={#OutputDirectory}
 OutputBaseFilename=Sniper-{#AppVersion}-windows-{#AppArch}-setup
+SetupIconFile=sniper.ico
 UninstallDisplayIcon={app}\sniper-desktop.exe
 Compression=lzma2
 SolidCompression=yes
