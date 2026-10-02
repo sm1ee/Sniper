@@ -18205,3 +18205,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 }
+
+#[cfg(test)]
+mod web_assets {
+    // crypto.randomUUID exists only in a secure context, and the authenticated UI is
+    // served over plain http from another address, so a direct call throws there.
+    // There is no browser in the test suite, so this guards the source instead: the
+    // one call that may remain is the feature-detected one inside generateUuid.
+    #[test]
+    fn the_ui_makes_ids_through_generate_uuid_and_not_crypto_random_uuid() {
+        let source = include_str!("../web/app.js");
+        let start = source
+            .find("function generateUuid()")
+            .expect("generateUuid is defined");
+        let end = start + source[start..].find("\n}\n").expect("generateUuid ends");
+        let helper = &source[start..end];
+        assert!(
+            helper.contains("typeof globalThis.crypto?.randomUUID === \"function\""),
+            "generateUuid must check randomUUID exists before calling it"
+        );
+        assert!(
+            helper.contains("getRandomValues"),
+            "generateUuid must have a fallback that works without randomUUID"
+        );
+        let outside = format!("{}{}", &source[..start], &source[end..]);
+        assert!(
+            !outside.contains("randomUUID()"),
+            "call generateUuid() instead of crypto.randomUUID()"
+        );
+    }
+}

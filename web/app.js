@@ -3072,7 +3072,7 @@ function hydrateReplayTab(tab) {
     const wsScheme = tab.ws_scheme || "wss";
     const wsFrames = normalizeWebsocketFrames(tab.ws_frames);
     const replayTab = {
-      id: isUuidString(tab.id) ? tab.id : crypto.randomUUID(),
+      id: isUuidString(tab.id) ? tab.id : generateUuid(),
       type: "websocket",
       sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
       customLabel: normalizeReplayTabCustomLabel(tab.custom_label || ""),
@@ -3122,7 +3122,7 @@ function hydrateReplayTab(tab) {
   const requestText = tab.request_text ?? buildEditableRawRequest(fallbackRequest);
   const hasHttpVersionMode = Object.prototype.hasOwnProperty.call(tab, "http_version_mode");
   return {
-    id: typeof tab.id === "string" && tab.id ? tab.id : crypto.randomUUID(),
+    id: typeof tab.id === "string" && tab.id ? tab.id : generateUuid(),
     sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
     customLabel: normalizeReplayTabCustomLabel(tab.custom_label || ""),
     pinned: !!tab.pinned,
@@ -3201,10 +3201,7 @@ function normalizeFuzzerTargetOverride(target) {
 }
 
 function createWorkspaceClientId() {
-  if (window.crypto?.randomUUID) {
-    return window.crypto.randomUUID();
-  }
-  return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return generateUuid();
 }
 
 function observeAnnotationRevision(source) {
@@ -3230,6 +3227,22 @@ function cloneWorkspaceSnapshotForBaseline(snapshot) {
 
 function isUuidString(value) {
   return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+// crypto.randomUUID exists only in a secure context (https or localhost), and the
+// authenticated UI can be served over plain http from another address, where
+// calling it throws. getRandomValues has no such restriction, so a v4 UUID is
+// built from it by hand. These ids label rules, tabs and clients; none of them is
+// a credential, and nothing that must be unguessable should be made with this.
+function generateUuid() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function createWsReplaySnapshotBudgetAllocator(replayTabs, options = {}) {
@@ -5354,7 +5367,7 @@ function renderInterceptRules() {
 async function addInterceptRule() {
   const sessionId = currentSessionId();
   const rule = {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     enabled: false,
     scope: "request",
     host_pattern: "",
@@ -9233,10 +9246,7 @@ function collectCustomRulesFromEditor() {
 function customRuleId(value) {
   const id = String(value || "").trim();
   if (id) return id;
-  if (globalThis.crypto?.randomUUID) {
-    return `custom_${globalThis.crypto.randomUUID()}`;
-  }
-  return `custom_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return `custom_${generateUuid()}`;
 }
 
 function collectScannerConfig() {
@@ -12861,7 +12871,7 @@ function hideFuzzerDetailPanel() {
 
 function createNewMatchReplaceRule() {
   const rule = {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     enabled: true,
     description: "",
     scope: "request",
@@ -13071,7 +13081,7 @@ async function sendRecordToSequence(record) {
     return;
   }
   state.editingSequence.steps.push({
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     label: `${request.method} ${request.path}`,
     request,
     source_transaction_id: record.id,
@@ -13541,7 +13551,7 @@ async function createNewSequence() {
   }
   const sessionId = currentSequenceSessionId();
   const def = {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     name: "New Sequence",
     steps: [],
   };
@@ -13607,7 +13617,7 @@ function markSequenceDraftDirty() {
 function addSequenceStep() {
   if (!state.editingSequence) return;
   state.editingSequence.steps.push({
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     label: `Step ${state.editingSequence.steps.length + 1}`,
     request: {
       scheme: "https", host: "", method: "GET", path: "/",
@@ -15777,7 +15787,7 @@ function createReplayTab(seed = {}) {
     seed.targetScheme || target.scheme,
   );
   return {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     sequence: state.replayTabSequence,
     customLabel: normalizeReplayTabCustomLabel(seed.customLabel || ""),
     pinned: !!seed.pinned,
@@ -21209,7 +21219,7 @@ function createWsReplayTab(seed = {}) {
     disableWhenOverflow: !seedHasSetupQueue,
   });
   const tab = {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     type: "websocket",
     sequence: state.replayTabSequence,
     customLabel: normalizeReplayTabCustomLabel(seed.customLabel || ""),
