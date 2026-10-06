@@ -23,6 +23,7 @@ use crate::{
     certificate::{CertificateAuthority, CertificateExport},
     config::{AppConfig, StartupSettingsStore, StartupSettingsView},
     event_log::EventLevel,
+    saved_operations::SavedOperationLedger,
     session::{SessionContext, SessionRegistry, SessionSummary},
     ui_settings::AppUiSettingsStore,
     ws_replay::WsReplayStore,
@@ -82,6 +83,8 @@ pub struct AppState {
     pub startup: Arc<StartupSettingsStore>,
     pub ui_settings: Arc<AppUiSettingsStore>,
     pub sessions: Arc<SessionRegistry>,
+    /// Durable receipts for explicitly identified saved-data mutations.
+    pub saved_operations: Arc<SavedOperationLedger>,
     pub proxy_online: Arc<AtomicBool>,
     proxy_listener_status: Arc<AtomicU64>,
     active_session: Arc<RwLock<Arc<SessionContext>>>,
@@ -167,6 +170,7 @@ impl AppState {
             MAX_WEBSOCKET_FRAMES_PER_SESSION,
         )?;
 
+        let saved_operations = Arc::new(SavedOperationLedger::new(&config.data_dir));
         let active_proxy_addr = config.proxy_addr;
         let active_ui_addr = config.ui_addr;
         let runtime_instance_id = uuid::Uuid::new_v4();
@@ -176,6 +180,7 @@ impl AppState {
             startup,
             ui_settings,
             sessions: Arc::new(sessions),
+            saved_operations,
             proxy_online: Arc::new(AtomicBool::new(false)),
             proxy_listener_status: Arc::new(AtomicU64::new(proxy_listener_status_word(0, false))),
             active_session: Arc::new(RwLock::new(active_session)),

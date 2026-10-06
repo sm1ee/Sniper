@@ -245,6 +245,9 @@ pub struct SiteMapRecord {
 }
 
 pub struct TransactionStore {
+    // Sequence numbers may be reused after reloading a trimmed/cleared store.
+    // Saved-data cursors expire when the underlying store is reconstructed.
+    saved_cursor_generation: Uuid,
     inner: RwLock<StoreInner>,
     insert_lock: AsyncMutex<()>,
     events: broadcast::Sender<TransactionEvent>,
@@ -531,6 +534,10 @@ impl StoreInner {
 }
 
 impl TransactionStore {
+    pub fn saved_cursor_generation(&self) -> Uuid {
+        self.saved_cursor_generation
+    }
+
     pub fn new() -> Self {
         Self::from_records(Vec::new())
     }
@@ -560,6 +567,7 @@ impl TransactionStore {
         // Resume sequence from the highest existing number.
         let max_seq = inner.entries.iter().map(|r| r.sequence).max().unwrap_or(0);
         Self {
+            saved_cursor_generation: Uuid::new_v4(),
             inner: RwLock::new(inner),
             insert_lock: AsyncMutex::new(()),
             events,

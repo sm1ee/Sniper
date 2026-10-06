@@ -1724,7 +1724,7 @@ impl Command {
             Command::Manifest => "manifest",
             Command::Schema { .. } => "schema",
             Command::Examples { .. } => "examples",
-            Command::Call { .. } => "call",
+            Command::Call(args) => saved_operation_name(&args.operation).unwrap_or("call"),
             Command::Session { command } => command.operation_name(),
             Command::Capture { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
@@ -1930,7 +1930,7 @@ impl SkillsCommand {
 
 fn manifest_operations() -> Vec<CliOperationSpec> {
     use CliSideEffect::{Read, Write};
-    vec![
+    let mut operations = vec![
         op(
             "manifest",
             "manifest",
@@ -2518,7 +2518,42 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             &[],
             vec![json!({"provider":"interactsh","url":"https://oast.example","token_stdin":true})],
         ),
-    ]
+    ];
+    operations.extend(saved_manifest_operations());
+    operations
+}
+
+fn saved_operation_name(operation: &str) -> Option<&'static str> {
+    sniper::saved_contract::OPERATIONS
+        .iter()
+        .copied()
+        .find(|name| *name == operation)
+}
+
+fn saved_manifest_operations() -> Vec<CliOperationSpec> {
+    let session_id = "00000000-0000-0000-0000-000000000000";
+    let operation_id = "22222222-2222-2222-2222-222222222222";
+    [
+        ("saved.v1.http.list", "Read saved HTTP summaries in bounded, session-pinned pages; default 50, maximum 200.", json!({"limit":20})),
+        ("saved.v1.http.select", "Preview a saved HTTP selection without changing data.", json!({"session_id":session_id,"host":"example.com"})),
+        ("saved.v1.http.delete", "Delete a reviewed saved HTTP selection once per operation UUID; repeated IDs never execute again.", json!({"session_id":session_id,"operation_id":operation_id,"ids":["11111111-1111-1111-1111-111111111111"]})),
+        ("saved.v1.http.clear", "Clear saved HTTP rows once per operation UUID. Reusing the ID never clears newer rows.", json!({"session_id":session_id,"operation_id":operation_id})),
+        ("saved.v1.session.list", "List saved sessions in bounded UUID-ordered pages.", json!({"limit":20})),
+        ("saved.v1.session.rename", "Rename a saved session with a durable operation receipt.", json!({"session_id":session_id,"operation_id":operation_id,"name":"Archive"})),
+        ("saved.v1.operation.get", "Read a durable mutation receipt after response loss. Unknown is not permission to retry.", json!({"operation_id":operation_id})),
+    ].into_iter().map(|(operation, description, example)| {
+        let write = sniper::saved_data::is_write(operation);
+        CliOperationSpec {
+            operation,
+            command: "call <saved.v1.operation> --input <json>",
+            description,
+            side_effect: if write { CliSideEffect::Write } else { CliSideEffect::Read },
+            requires_confirmation: write,
+            input_schema: sniper::saved_contract::input_schema(operation).expect("saved input schema"),
+            output_schema: sniper::saved_contract::output_schema(operation).expect("saved output schema"),
+            examples: vec![example],
+        }
+    }).collect()
 }
 
 fn op(
@@ -3583,6 +3618,20 @@ fn parse_call_input(source: Option<String>) -> Result<Value> {
 }
 
 fn command_from_operation_input(operation: &str, input: &Value) -> Result<Command> {
+    if saved_operation_name(operation).is_some() {
+        sniper::saved_contract::validate_input(operation, input).map_err(|_| {
+            saved_cli_error(
+                "INVALID_INPUT",
+                "Input does not satisfy the saved-data schema",
+                "not_applied",
+                input,
+            )
+        })?;
+        return Ok(Command::Call(CallArgs {
+            operation: operation.to_owned(),
+            input: Some(input.to_string()),
+        }));
+    }
     let Some(_) = operation_spec(operation) else {
         bail!("unknown operation `{operation}`");
     };
@@ -4709,6 +4758,9 @@ async fn run(cli: Cli) -> Result<()> {
     let dry_run = cli.dry_run;
     let yes = cli.yes;
     let command = match cli.command {
+        Command::Call(args) if args.operation.starts_with("saved.v1.") => {
+            return run_saved_call(api_override, args, dry_run, yes).await;
+        }
         Command::Call(args) => command_from_call_args(args)?,
         command => command,
     };
@@ -8201,6 +8253,233 @@ fn encode_query(params: Vec<(String, String)>) -> String {
     serializer.finish()
 }
 
+fn output_schema_version(operation: &str) -> &'static str {
+    if operation.starts_with("saved.v1.") {
+        sniper::saved_contract::CONTRACT_VERSION
+    } else {
+        CLI_SCHEMA_VERSION
+    }
+}
+
+#[derive(Debug)]
+struct SavedCliError {
+    code: &'static str,
+    message: String,
+    outcome: String,
+    operation_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+}
+
+impl fmt::Display for SavedCliError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+impl std::error::Error for SavedCliError {}
+
+fn saved_cli_error(
+    code: &'static str,
+    message: &str,
+    outcome: &str,
+    input: &Value,
+) -> anyhow::Error {
+    anyhow!(SavedCliError {
+        code,
+        message: message.to_owned(),
+        outcome: outcome.to_owned(),
+        operation_id: input
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok()),
+        session_id: input
+            .get("session_id")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok()),
+    })
+}
+
+fn saved_uuid_field(value: &Value, field: &str) -> Option<Uuid> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(|text| Uuid::parse_str(text).ok())
+}
+
+fn validate_saved_response_binding(operation: &str, input: &Value, data: &Value) -> Result<()> {
+    if sniper::saved_data::is_write(operation) {
+        if saved_uuid_field(&data["receipt"], "operation_id")
+            != saved_uuid_field(input, "operation_id")
+            || saved_uuid_field(&data["receipt"], "session_id")
+                != saved_uuid_field(input, "session_id")
+        {
+            bail!("saved mutation response is not bound to the request");
+        }
+    } else if operation == "saved.v1.operation.get" {
+        if saved_uuid_field(data, "operation_id") != saved_uuid_field(input, "operation_id") {
+            bail!("saved receipt lookup is not bound to the request");
+        }
+    } else if matches!(operation, "saved.v1.http.list" | "saved.v1.http.select") {
+        let requested = saved_uuid_field(input.get("continuation").unwrap_or(input), "session_id");
+        if requested.is_some() && requested != saved_uuid_field(data, "session_id") {
+            bail!("saved HTTP response is not bound to the requested session");
+        }
+    }
+    Ok(())
+}
+
+async fn run_saved_call(
+    api_override: Option<String>,
+    args: CallArgs,
+    dry_run: bool,
+    yes: bool,
+) -> Result<()> {
+    let input = parse_call_input(args.input).map_err(|_| {
+        saved_cli_error(
+            "INVALID_INPUT",
+            "Could not parse saved-data input JSON",
+            "not_applied",
+            &Value::Null,
+        )
+    })?;
+    let operation = args.operation;
+    if saved_operation_name(&operation).is_none() {
+        return Err(saved_cli_error(
+            "UNKNOWN_OPERATION",
+            "Unknown saved-data operation",
+            "not_applied",
+            &input,
+        ));
+    }
+    sniper::saved_contract::validate_input(&operation, &input).map_err(|_| {
+        saved_cli_error(
+            "INVALID_INPUT",
+            "Input does not satisfy the saved-data schema",
+            "not_applied",
+            &input,
+        )
+    })?;
+    let write = sniper::saved_data::is_write(&operation);
+    if dry_run {
+        return print_json(
+            &json!({"contract_version":sniper::saved_contract::CONTRACT_VERSION,
+            "dry_run":true,"operation":operation,"input":input,"requires_confirmation":write,
+            "outcome":"not_applied","method":"POST","path":"/api/saved/v1/call",
+            "notes":["Validates input only. Does not reserve an operation ID or resolve a selection."]}),
+        );
+    }
+    if write && !yes {
+        return Err(saved_cli_error(
+            "CONFIRMATION_REQUIRED",
+            "This saved-data mutation requires --dry-run or --yes",
+            "not_applied",
+            &input,
+        ));
+    }
+    let api = ApiClient::discover(api_override).await.map_err(|_| {
+        saved_cli_error(
+            "API_UNAVAILABLE",
+            "Could not reach a Sniper API; no saved-data call was sent",
+            "not_applied",
+            &input,
+        )
+    })?;
+    let uncertain_outcome = if write { "unknown" } else { "not_applied" };
+    // A redirect can transparently resend a destructive POST to another runtime.
+    // Keep this policy local to the opt-in contract; legacy clients are unchanged.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(CLI_API_TIMEOUT)
+        .build()
+        .map_err(|_| {
+            saved_cli_error(
+                "TRANSPORT_ERROR",
+                "Could not prepare the saved-data client; no call was sent",
+                "not_applied",
+                &input,
+            )
+        })?;
+    // One request only. A timeout can mean that a mutation committed; the caller
+    // keeps the supplied operation UUID for a subsequent read-only receipt lookup.
+    let response = client
+        .post(api.url("/api/saved/v1/call"))
+        .json(&json!({"operation":operation,"input":input}))
+        .send()
+        .await
+        .map_err(|_| {
+            saved_cli_error(
+                "TRANSPORT_ERROR",
+                "Saved-data response unavailable; inspect the operation receipt",
+                uncertain_outcome,
+                &input,
+            )
+        })?;
+    let status = response.status();
+    if status.is_redirection() {
+        return Err(saved_cli_error(
+            "REDIRECT_REFUSED",
+            "Saved-data redirects are not followed; inspect the original operation receipt",
+            uncertain_outcome,
+            &input,
+        ));
+    }
+    let wire: Value = response.json().await.map_err(|_| {
+        saved_cli_error(
+            "INVALID_RESPONSE",
+            "Could not decode the saved-data response; inspect the operation receipt",
+            uncertain_outcome,
+            &input,
+        )
+    })?;
+    if wire.get("contract_version").and_then(Value::as_str)
+        != Some(sniper::saved_contract::CONTRACT_VERSION)
+    {
+        return Err(saved_cli_error(
+            "INVALID_RESPONSE",
+            "Server did not identify a saved.v1 response; inspect the operation receipt",
+            uncertain_outcome,
+            &input,
+        ));
+    }
+    if status.is_success() && wire.get("ok") == Some(&Value::Bool(true)) {
+        if let Some(data) = wire.get("data") {
+            sniper::saved_contract::validate_output(&operation, data).map_err(|_| saved_cli_error(
+                "INVALID_RESPONSE", "Server data does not satisfy the saved.v1 output schema; inspect the operation receipt", uncertain_outcome, &input))?;
+            validate_saved_response_binding(&operation, &input, data).map_err(|_| saved_cli_error(
+                "INVALID_RESPONSE", "Saved-data response identifies a different request; inspect the original operation receipt", uncertain_outcome, &input))?;
+            return print_json(data);
+        }
+    }
+    if let Some(error) = wire.get("error").and_then(|value| {
+        serde_json::from_value::<sniper::saved_data::SavedApiError>(value.clone()).ok()
+    }) {
+        if wire.get("ok") != Some(&Value::Bool(false))
+            || error.retryable
+            || matches!(
+                error.outcome,
+                sniper::saved_operations::SavedOperationOutcome::Applied
+            )
+            || error.operation_id != saved_uuid_field(&input, "operation_id")
+            || error.session_id != saved_uuid_field(&input, "session_id")
+        {
+            return Err(saved_cli_error("INVALID_RESPONSE", "Saved-data error does not match this request; inspect the original operation receipt", uncertain_outcome, &input));
+        }
+        let outcome = match error.outcome {
+            sniper::saved_operations::SavedOperationOutcome::Applied => "applied",
+            sniper::saved_operations::SavedOperationOutcome::NotApplied => "not_applied",
+            sniper::saved_operations::SavedOperationOutcome::Unknown => "unknown",
+        };
+        return Err(saved_cli_error(
+            error.code.as_str(),
+            &error.message,
+            outcome,
+            &input,
+        ));
+    }
+    Err(saved_cli_error("INVALID_RESPONSE", "Server did not return a saved.v1 response; inspect the operation receipt before any further action", uncertain_outcome, &input))
+}
+
 #[derive(Debug)]
 struct CliPartialApplyError {
     message: String,
@@ -8325,7 +8604,7 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
     let envelope = json!({
         "ok": true,
         "operation": context.operation,
-        "schema_version": CLI_SCHEMA_VERSION,
+        "schema_version": output_schema_version(&context.operation),
         "data": data,
         "meta": {},
         "warnings": [],
@@ -8338,7 +8617,7 @@ fn print_error_json(operation: &str, exit_code: i32, payload: &CliErrorPayload) 
     let envelope = json!({
         "ok": false,
         "operation": operation,
-        "schema_version": CLI_SCHEMA_VERSION,
+        "schema_version": output_schema_version(&context.operation),
         "error": payload,
         "meta": {},
         "warnings": [],
@@ -8396,6 +8675,16 @@ fn clap_error_payload(error: &clap::Error) -> CliErrorPayload {
 }
 
 fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload {
+    if let Some(saved) = error.downcast_ref::<SavedCliError>() {
+        return CliErrorPayload {
+            code: saved.code,
+            message: saved.message.clone(),
+            hint: Some("Use saved.v1.operation.get with the original operation_id to inspect a receipt; never automatically retry a mutation."),
+            retryable: false,
+            details: json!({"outcome":saved.outcome,"operation_id":saved.operation_id,"session_id":saved.session_id}),
+            exit_code: if matches!(saved.code, "INVALID_INPUT" | "UNKNOWN_OPERATION" | "CONFIRMATION_REQUIRED") { 2 } else { 5 },
+        };
+    }
     if let Some(partial) = error.downcast_ref::<CliPartialApplyError>() {
         return CliErrorPayload {
             code: "PARTIAL_APPLY",
@@ -8886,6 +9175,7 @@ fn parse_response_status_line(status_line: &str) -> Result<u16> {
 
 #[cfg(test)]
 mod tests {
+    use super::validate_saved_response_binding;
     use super::{
         active_session_id_from_summaries, api_failure_detail, api_url, attach_session_id,
         attach_workspace_save_error, auto_replace_write_session_id, browser_choices,
@@ -12807,5 +13097,39 @@ mod tests {
         ])
         .unwrap();
         assert!(super::validate_command_preflight(&parsed.command).is_err());
+    }
+    #[test]
+    fn saved_response_binding_rejects_valid_shapes_for_other_requests() {
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let input = json!({"session_id":first,"operation_id":first});
+        let matched = json!({"receipt":{"session_id":first,"operation_id":first}});
+        let wrong = json!({"receipt":{"session_id":first,"operation_id":second}});
+        assert!(validate_saved_response_binding("saved.v1.http.clear", &input, &matched).is_ok());
+        assert!(validate_saved_response_binding("saved.v1.http.clear", &input, &wrong).is_err());
+        assert!(validate_saved_response_binding(
+            "saved.v1.operation.get",
+            &input,
+            &json!({"operation_id":second})
+        )
+        .is_err());
+        assert!(validate_saved_response_binding(
+            "saved.v1.http.list",
+            &json!({"continuation":{"session_id":first}}),
+            &json!({"session_id":second})
+        )
+        .is_err());
+        assert!(validate_saved_response_binding(
+            "saved.v1.http.select",
+            &input,
+            &json!({"session_id":second})
+        )
+        .is_err());
+        assert!(validate_saved_response_binding(
+            "saved.v1.http.list",
+            &json!({}),
+            &json!({"session_id":second})
+        )
+        .is_ok());
     }
 }

@@ -427,6 +427,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/transactions",
             get(list_transactions).delete(clear_transactions),
         )
+        .route("/api/saved/v1/call", post(crate::saved_data::call))
         .route("/api/transactions/select", post(select_transactions))
         .route(
             "/api/transactions/selected",
@@ -3671,7 +3672,7 @@ fn session_load_failure_response(session_id: Uuid, error: anyhow::Error) -> Resp
         .into_response()
 }
 
-async fn resolve_session_for_optional_id(
+pub(crate) async fn resolve_session_for_optional_id(
     state: &Arc<AppState>,
     target_session_id: Option<Uuid>,
 ) -> std::result::Result<Arc<SessionContext>, Response> {
@@ -3700,7 +3701,7 @@ async fn resolve_session_for_optional_id(
         .map_err(|error| session_load_failure_response(target_session_id, error))
 }
 
-async fn resolve_read_session_for_optional_id(
+pub(crate) async fn resolve_read_session_for_optional_id(
     state: &Arc<AppState>,
     target_session_id: Option<Uuid>,
 ) -> std::result::Result<Arc<SessionContext>, Response> {
@@ -3726,7 +3727,7 @@ async fn resolve_read_session_for_optional_id(
         .map_err(|error| session_load_failure_response(target_session_id, error))
 }
 
-async fn guard_session_write_operation(
+pub(crate) async fn guard_session_write_operation(
     state: &Arc<AppState>,
     session: &Arc<SessionContext>,
     require_still_active: bool,

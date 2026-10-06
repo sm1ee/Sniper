@@ -208,6 +208,10 @@ sniper-cli examples capture.http.list
 printf "%s" "$OAST_TOKEN" | sniper-cli capture oast configure --provider custom --url https://oast.example --token-stdin --yes
 ```
 
+For saved-data management, the opt-in `saved.v1.*` contract provides strict schemas,
+bounded session-pinned pages, and durable mutation receipts. Existing commands keep
+their output format. See [saved-data contract v1](docs/integrations/saved-data-v1.md).
+
 ## AI integration
 
 ```bash
