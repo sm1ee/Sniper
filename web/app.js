@@ -382,6 +382,7 @@ function createHistoryPagingState() {
   return {
     generation: 0,
     localRemovalGeneration: 0,
+    annotationMutationGeneration: 0,
     querySignature: "",
     pageSize: HTTP_HISTORY_PAGE_SIZE,
     offset: 0,
@@ -5037,7 +5038,21 @@ async function loadTransactions(preserveSelection = true, options = {}) {
     }
     let page;
     try {
-      page = await fetchTransactionPage({ offset: 0, queryState, querySignature });
+      while (true) {
+        const annotationGeneration = state.historyPaging.annotationMutationGeneration || 0;
+        page = await fetchTransactionPage({ offset: 0, queryState, querySignature });
+        if (
+          !page
+          || state.historyPaging.generation !== generation
+          || state.historyPaging.querySignature !== querySignature
+          || !isCurrentHistoryQuerySignature(querySignature)
+        ) {
+          return;
+        }
+        // A completed annotation save is no longer in the pending overlay. Read
+        // again so its values, filter membership, order, and counts stay current.
+        if (annotationGeneration === (state.historyPaging.annotationMutationGeneration || 0)) break;
+      }
     } catch (error) {
       if (
         state.historyPaging.generation === generation
@@ -5051,16 +5066,6 @@ async function loadTransactions(preserveSelection = true, options = {}) {
         clearHttpHistoryLoadedRowsForPendingQuery();
       }
       throw error;
-    }
-    if (!page) {
-      return;
-    }
-    if (
-      state.historyPaging.generation !== generation
-      || state.historyPaging.querySignature !== querySignature
-      || !isCurrentHistoryQuerySignature(querySignature)
-    ) {
-      return;
     }
     const freshItems = jsonArray(page.items);
 
@@ -7088,6 +7093,7 @@ function clearHttpHistorySelectionPreview() {
 
 function clearHttpHistoryLoadedRowsForPendingQuery() {
   state.items = [];
+  rebuildHistoryItemIndex();
   state._itemsVersion += 1;
   state._historyEntries = [];
   state._connectCount = 0;
@@ -17432,8 +17438,14 @@ function sanitizeActiveProxyTab(value) {
   return IMPLEMENTED_PROXY_TABS.has(proxyTab) ? proxyTab : "http-history";
 }
 
+function truncateUiSettingsText(value) {
+  // Match Rust's character limit without splitting a UTF-16 pair, which would
+  // make the entire settings snapshot invalid when the server parses its JSON.
+  return Array.from(value).slice(0, 512).join("");
+}
+
 function sanitizeHttpQuery(value) {
-  return String(value || "").trim().slice(0, 512);
+  return truncateUiSettingsText(String(value || "").trim());
 }
 
 function sanitizeHttpMethod(value) {
@@ -17490,14 +17502,14 @@ function sanitizeHttpFilterSettings(candidate) {
     hideWithoutResponses: Boolean(filters.hide_without_responses ?? filters.hideWithoutResponses ?? defaults.hideWithoutResponses),
     onlyParameterized: Boolean(filters.only_parameterized ?? filters.onlyParameterized ?? defaults.onlyParameterized),
     onlyNotes: Boolean(filters.only_notes ?? filters.onlyNotes ?? defaults.onlyNotes),
-    searchTerm: String(filters.search_term ?? filters.searchTerm ?? defaults.searchTerm).trim().slice(0, 512),
+    searchTerm: truncateUiSettingsText(String(filters.search_term ?? filters.searchTerm ?? defaults.searchTerm).trim()),
     regex: Boolean(filters.regex ?? defaults.regex),
     caseSensitive: Boolean(filters.case_sensitive ?? filters.caseSensitive ?? defaults.caseSensitive),
     negativeSearch: Boolean(filters.negative_search ?? filters.negativeSearch ?? defaults.negativeSearch),
     mime: sanitizeHttpBooleanMap(filters.mime, defaults.mime),
     status: sanitizeHttpBooleanMap(filters.status, defaults.status),
-    hiddenExtensions: String(filters.hidden_extensions ?? filters.hiddenExtensions ?? defaults.hiddenExtensions).trim().slice(0, 512),
-    port: String(filters.port ?? defaults.port).trim().slice(0, 512),
+    hiddenExtensions: truncateUiSettingsText(String(filters.hidden_extensions ?? filters.hiddenExtensions ?? defaults.hiddenExtensions).trim()),
+    port: truncateUiSettingsText(String(filters.port ?? defaults.port).trim()),
     colorTags: sanitizeHttpColorTags(filters.color_tags ?? filters.colorTags),
   };
 }
@@ -17528,7 +17540,7 @@ function serializeHttpFilterSettings() {
 }
 
 function sanitizeWebsocketQuery(value) {
-  return String(value || "").trim().slice(0, 512);
+  return truncateUiSettingsText(String(value || "").trim());
 }
 
 function sanitizeWebsocketSortKey(value) {
@@ -23250,7 +23262,9 @@ async function flushPendingAnnotations(transactionId, options = {}) {
     saved = true;
     if (currentSessionId() !== sessionId) {
       return saved;
-    } else if (pending.get(transactionId) === entry) {
+    }
+    state.historyPaging.annotationMutationGeneration = (state.historyPaging.annotationMutationGeneration || 0) + 1;
+    if (pending.get(transactionId) === entry) {
       const index = getHistoryItemIndex(transactionId);
       if (index !== -1) {
         // A cleared field is omitted from the response rather than sent as null

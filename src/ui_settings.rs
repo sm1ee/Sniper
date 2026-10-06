@@ -1187,6 +1187,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ui_settings_store_preserves_unicode_text_at_the_character_limit() {
+        let data_dir = temp_data_dir();
+        let store = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        let query = format!("{}😀", "a".repeat(super::HTTP_QUERY_MAX_CHARS - 1));
+        let filter = format!("{}z", "😀".repeat(super::HTTP_FILTER_TEXT_MAX_CHARS - 1));
+        let mut snapshot = AppUiSettingsSnapshot {
+            http_query: query.clone(),
+            websocket_query: format!("{query}extra"),
+            ..AppUiSettingsSnapshot::default()
+        };
+        snapshot.http_filter_settings.search_term = format!("{filter}extra");
+        snapshot.http_filter_settings.hidden_extensions = filter.clone();
+        snapshot.http_filter_settings.port = filter.clone();
+        store.replace_snapshot(snapshot).await.unwrap();
+
+        let reloaded = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        let saved = reloaded.snapshot().await;
+        assert_eq!(saved.http_query, query);
+        assert_eq!(saved.websocket_query, query);
+        assert_eq!(saved.http_filter_settings.search_term, filter);
+        assert_eq!(saved.http_filter_settings.hidden_extensions, filter);
+        assert_eq!(saved.http_filter_settings.port, filter);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
     async fn ui_settings_store_accepts_legacy_partial_snapshot() {
         let data_dir =
             std::env::temp_dir().join(format!("sniper-ui-settings-{}", uuid::Uuid::new_v4()));
