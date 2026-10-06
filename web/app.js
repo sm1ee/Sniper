@@ -10091,7 +10091,9 @@ function renderHistoryVirtual() {
   const viewportHeight = shell.clientHeight;
   const totalCount = entries.length;
   const colCount = state.historyColumnOrder.length;
-  const maxScrollTop = Math.max(0, totalCount * rowHeight - viewportHeight);
+  // Sticky headers still occupy table height; excluding them hides the final row.
+  const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
+  const maxScrollTop = Math.max(0, headerHeight + totalCount * rowHeight - viewportHeight);
   const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
   if (shell.scrollTop !== scrollTop) {
     shell.scrollTop = scrollTop;
