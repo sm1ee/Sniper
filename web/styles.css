@@ -888,44 +888,46 @@ code {
    becomes a ring. The percentage is drawn inside it, and the steps that cannot be
    measured spin an arc instead. */
 .utility-button.is-updating {
-  /* The ring is taller than the label it replaces; without this the button would
+  /* The disc is taller than the label it replaces; without this the button would
      grow past its row and push the header down. */
   padding-block: 0;
   cursor: default;
 }
+
 
 .utility-button.is-failed {
   color: var(--danger);
 }
 
 .update-ring {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
+  display: block;
+  width: 24px;
+  height: 24px;
 }
 
 .update-ring svg {
-  position: absolute;
-  inset: 0;
+  display: block;
   width: 100%;
   height: 100%;
   transform: rotate(-90deg);
 }
 
+.update-ring-disc {
+  fill: var(--point);
+}
+
 .update-ring-track,
 .update-ring-arc {
   fill: none;
-  stroke-width: 2.5;
+  stroke-width: 2.2;
 }
 
 .update-ring-track {
-  stroke: var(--line-strong);
+  stroke: rgba(255, 255, 255, 0.3);
 }
 
 .update-ring-arc {
-  stroke: var(--point);
+  stroke: #fff;
   stroke-linecap: round;
   stroke-dasharray: 0 100;
   transition: stroke-dasharray 0.3s ease;
@@ -938,15 +940,6 @@ code {
 .utility-button.is-busy .update-ring-arc {
   stroke-dasharray: 28 100;
   transition: none;
-}
-
-.update-percent {
-  position: relative;
-  color: var(--text);
-  font-size: 8px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
 }
 
 @keyframes update-spin {
@@ -969,7 +962,9 @@ code {
   line-height: 1;
 }
 
-.utility-button:hover,
+/* An updating button is not disabled, so its tooltip still shows; it just must not
+   look pressable. */
+.utility-button:not(.is-updating):hover,
 .modal-close:hover,
 .secondary-action:hover {
   border-color: var(--line-strong);

@@ -2787,16 +2787,16 @@ const UPDATE_STEPS = new Set([
   "Restarting...",
 ]);
 
-// A ring that fills with the download and a spinning arc for the steps that have
-// nothing to measure. No words: the button keeps the size it had, and the percentage
-// is the only text.
+// A filled disc with a ring in it: the ring's arc grows with the download, and
+// spins for the steps with nothing to measure. No text; the percentage is the
+// tooltip. The button keeps the size it had.
 const UPDATE_RING_MARKUP = `
   <span class="update-ring">
-    <svg viewBox="0 0 28 28" aria-hidden="true">
-      <circle class="update-ring-track" cx="14" cy="14" r="12"></circle>
-      <circle class="update-ring-arc" cx="14" cy="14" r="12" pathLength="100"></circle>
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle class="update-ring-disc" cx="12" cy="12" r="12"></circle>
+      <circle class="update-ring-track" cx="12" cy="12" r="6.5"></circle>
+      <circle class="update-ring-arc" cx="12" cy="12" r="6.5" pathLength="100"></circle>
     </svg>
-    <span class="update-percent"></span>
   </span>`;
 
 async function performSelfUpdate() {
@@ -2805,8 +2805,10 @@ async function performSelfUpdate() {
     return;
   }
   const button = els.openUpdateButton;
-  if (button.disabled) return;
-  button.disabled = true;
+  // aria-disabled and not `disabled`: a disabled button may show no tooltip, and the
+  // tooltip is where the percentage is.
+  if (button.getAttribute("aria-disabled") === "true") return;
+  button.setAttribute("aria-disabled", "true");
   const idleTitle = button.title;
   // Pinned before the content changes, so turning "Update" into a ring moves nothing.
   button.style.width = `${button.getBoundingClientRect().width}px`;
@@ -2815,19 +2817,19 @@ async function performSelfUpdate() {
   button.setAttribute("aria-busy", "true");
   button.innerHTML = UPDATE_RING_MARKUP;
   const arc = button.querySelector(".update-ring-arc");
-  const percentText = button.querySelector(".update-percent");
 
   // A percentage fills the ring; null spins it.
   const show = (percent) => {
     const measured = percent != null;
     button.classList.toggle("is-busy", !measured);
     arc.style.strokeDasharray = measured ? `${percent} 100` : "";
-    percentText.textContent = measured ? `${percent}%` : "";
+    button.title = measured ? `${percent}%` : "";
     button.setAttribute("aria-label", measured ? `Updating, ${percent} percent` : "Updating");
   };
   const reset = () => {
     button.classList.remove("is-updating", "is-busy", "is-failed");
     button.removeAttribute("aria-busy");
+    button.removeAttribute("aria-disabled");
     button.removeAttribute("aria-label");
     button.style.width = "";
     button.textContent = "Update";
@@ -2839,7 +2841,7 @@ async function performSelfUpdate() {
     button.removeAttribute("aria-busy");
     button.textContent = "Failed";
     button.title = reason;
-    button.disabled = false;
+    button.removeAttribute("aria-disabled");
     setTimeout(reset, 4000);
   };
 
