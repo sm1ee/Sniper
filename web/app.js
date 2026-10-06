@@ -23085,17 +23085,31 @@ function contextMenuSessionIsCurrent() {
 // click away to save, Escape to abandon. It used to live in the right-click
 // menu, which meant aiming at a menu to write one word.
 async function beginNoteEdit(cell, transactionId) {
-  if (!cell || cell.querySelector("input.note-inline-input")) return;
+  if (!cell || cell.dataset.noteLoading === "true" || cell.querySelector("input.note-inline-input")) return;
   const sessionId = currentSessionId();
   closeContextMenu();
 
   let current = "";
+  // Repeated opens must not let a late read replace a draft already being typed.
+  cell.dataset.noteLoading = "true";
   try {
     const response = await fetch(transactionPath(transactionId, sessionId));
-    if (response.ok) {
-      current = (await response.json()).user_note || "";
+    await requireOkResponse(response, "Failed to load note.");
+    const record = await response.json();
+    if (!record || typeof record !== "object" || Array.isArray(record)
+      || (record.user_note != null && typeof record.user_note !== "string")) {
+      throw new Error("Failed to load note: invalid response.");
     }
-  } catch { /* start from empty */ }
+    current = record.user_note || "";
+  } catch (error) {
+    // A failed read is not an empty note: editing it could overwrite saved text.
+    if (currentSessionId() === sessionId && cell.isConnected) {
+      showToast(error?.message || "Failed to load note.", "error");
+    }
+    return;
+  } finally {
+    delete cell.dataset.noteLoading;
+  }
   if (currentSessionId() !== sessionId || !cell.isConnected) return;
 
   const previous = cell.innerHTML;
