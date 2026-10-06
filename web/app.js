@@ -962,6 +962,7 @@ let proxySettingsSavePromise = null;
 let toolsBootPromise = null;
 let displaySettingsPreviewActive = false;
 let displaySettingsReturnFocus = null;
+let filterSettingsReturnFocus = null;
 let activeConfirmDialog = null;
 
 const WORKBENCH_STACK_BREAKPOINT = "(max-width: 1260px)";
@@ -17415,12 +17416,20 @@ function closeDisplaySettingsModal() {
 }
 
 function openFilterModal() {
+  if (isModalVisible(els.filterModal)) return;
+  filterSettingsReturnFocus = document.activeElement;
   hydrateFilterForm();
   els.filterModal.classList.remove("hidden");
+  els.closeFilterModalButton.focus();
 }
 
 function closeFilterModal() {
+  const wasVisible = isModalVisible(els.filterModal);
   els.filterModal.classList.add("hidden");
+  if (wasVisible) {
+    restoreModalFocus(filterSettingsReturnFocus, els.openFilterSettingsButton);
+    filterSettingsReturnFocus = null;
+  }
 }
 
 function isModalVisible(modal) {
@@ -17460,6 +17469,7 @@ function getActiveModalAction() {
 
   if (isModalVisible(els.filterModal)) {
     return {
+      modal: els.filterModal,
       close: closeFilterModal,
       apply: applyFilterSettings,
     };
@@ -17955,7 +17965,12 @@ function applyUiSettingsSnapshot(snapshot) {
   if (els.methodFilter) {
     els.methodFilter.value = state.method;
   }
-  hydrateFilterForm();
+  // A late load or save-conflict response must not replace an open form's draft.
+  if (!isModalVisible(els.filterModal)) {
+    hydrateFilterForm();
+  } else {
+    syncColorTagFilterUI();
+  }
   syncHttpInScopePill();
   syncHttpCapturePill();
   document.getElementById("wsInScopeOnly")?.classList.toggle("active", state.websocketInScopeOnly);
@@ -18564,13 +18579,17 @@ function renderBody(message) {
 }
 
 function buildMessageHexPresentation(target, record, fallbackText) {
+  const message = target === "request" ? record.request : record.response;
+  let text;
   if (target === "request") {
-    return toHexDumpFromHttpParts(buildRawRequestHead(record), record.request, fallbackText);
+    text = toHexDumpFromHttpParts(buildRawRequestHead(record), message, fallbackText);
+  } else if (message) {
+    text = toHexDumpFromHttpParts(buildRawResponseHead(record), message, fallbackText);
+  } else {
+    text = toHexDump(fallbackText);
   }
-  if (!record.response) {
-    return toHexDump(fallbackText);
-  }
-  return toHexDumpFromHttpParts(buildRawResponseHead(record), record.response, fallbackText);
+  // The notice describes the capture; it must never become apparent body bytes.
+  return message?.preview_truncated ? `${text}\n\n[preview truncated]` : text;
 }
 
 function toHexDumpFromHttpParts(head, message, fallbackText) {
@@ -18598,10 +18617,7 @@ function messageBodyBytes(message) {
   if (message.body_encoding === "base64") {
     return base64ToBytes(message.body_preview);
   }
-  const text = message.preview_truncated
-    ? `${message.body_preview}\n\n[preview truncated]`
-    : message.body_preview;
-  return new TextEncoder().encode(text);
+  return new TextEncoder().encode(message.body_preview);
 }
 
 function base64ToBytes(value) {
@@ -18615,6 +18631,40 @@ function base64ToBytes(value) {
   } catch (_error) {
     return null;
   }
+}
+
+function prettyJsonText(text) {
+  // Validate only. Re-serializing the parsed value rounds large numbers and
+  // discards duplicate keys, so formatting must retain the original tokens.
+  JSON.parse(text);
+  const tokens = text.match(/"(?:\\.|[^"\\])*"|[{}\[\],:]|[^\s{}\[\],:]+/g) || [];
+  const parts = [];
+  let depth = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "{" || token === "[") {
+      parts.push(token);
+      depth += 1;
+      // Deep nesting should not expand a small preview into megabytes of indent.
+      if (depth > 100) return text;
+      if (tokens[index + 1] !== "}" && tokens[index + 1] !== "]") {
+        parts.push("\n", "  ".repeat(depth));
+      }
+    } else if (token === "}" || token === "]") {
+      depth -= 1;
+      if (tokens[index - 1] !== "{" && tokens[index - 1] !== "[") {
+        parts.push("\n", "  ".repeat(depth));
+      }
+      parts.push(token);
+    } else if (token === ",") {
+      parts.push(",\n", "  ".repeat(depth));
+    } else if (token === ":") {
+      parts.push(": ");
+    } else {
+      parts.push(token);
+    }
+  }
+  return parts.join("");
 }
 
 function prettyFormat(text, message) {
@@ -18634,7 +18684,7 @@ function prettyFormat(text, message) {
 
   if (contentType.includes("json")) {
     try {
-      return `${head}${divider}${JSON.stringify(JSON.parse(body), null, 2)}`;
+      return `${head}${divider}${prettyJsonText(body)}`;
     } catch (_error) {
       return text;
     }
@@ -18644,7 +18694,7 @@ function prettyFormat(text, message) {
   const trimmed = body.trimStart();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
     try {
-      return `${head}${divider}${JSON.stringify(JSON.parse(body), null, 2)}`;
+      return `${head}${divider}${prettyJsonText(body)}`;
     } catch (_error) {
       // not valid JSON, return as-is
     }
@@ -18918,8 +18968,7 @@ function showFrameDetail(frame) {
 
   // Try to pretty-print JSON
   try {
-    const parsed = JSON.parse(body);
-    body = JSON.stringify(parsed, null, 2);
+    body = prettyJsonText(body);
   } catch {
     // not JSON, keep as-is
   }
@@ -19246,7 +19295,7 @@ function renderHexHtml(text) {
   return String(text)
     .split("\n")
     .map((line) => {
-      if (line.length < 10) {
+      if (!/^[0-9a-f]{8}  /i.test(line)) {
         return wrapCodeLine(escapeHtml(line), "code-line code-line-hex");
       }
       const offset = line.substring(0, 8);
@@ -20329,7 +20378,7 @@ function highlightBodyLine(line, mode = "plain") {
   }
 
   if (mode === "form" && looksLikeFormEncoded(trimmed)) {
-    return highlightQueryString(trimmed);
+    return highlightQueryString(line);
   }
 
   if (mode === "html" || mode === "xml") {
@@ -20353,7 +20402,7 @@ function highlightBodyLine(line, mode = "plain") {
   }
 
   if (looksLikeFormEncoded(trimmed)) {
-    return highlightQueryString(trimmed);
+    return highlightQueryString(line);
   }
 
   return `<span class="token-plain">${escapeHtml(line)}</span>`;
@@ -20538,7 +20587,10 @@ function highlightQueryString(query) {
   return query
     .split("&")
     .map((pair) => {
-      const [key, value = ""] = pair.split("=", 2);
+      const separator = pair.indexOf("=");
+      if (separator === -1) return `<span class="token-query-key">${escapeHtml(pair)}</span>`;
+      const key = pair.slice(0, separator);
+      const value = pair.slice(separator + 1);
       return `<span class="token-query-key">${escapeHtml(key)}</span><span class="token-punctuation">=</span><span class="token-query-value">${escapeHtml(value)}</span>`;
     })
     .join('<span class="token-punctuation">&amp;</span>');
@@ -25154,7 +25206,7 @@ function buildHexDecorations(view) {
   const builder = [];
   let offset = 0;
   for (const line of text.split("\n")) {
-    if (line.length >= 10) {
+    if (/^[0-9a-f]{8}  /i.test(line)) {
       // offset column: "00000000" (8 chars), same as non-CM .hex-col-offset
       builder.push(CM.Decoration.mark({ class: "tok-hex-offset" }).range(offset, offset + 8));
       if (line.length > 10) {
