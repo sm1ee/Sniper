@@ -2758,18 +2758,28 @@ async function loadAppVersionInfo() {
   }
 }
 
-// What the button says while updating. The server sends steps meant for logs as
-// well, such as where the installer's log file is; only the ones named here reach
-// the button, so an internal detail cannot end up in the top bar. The labels are
-// short on purpose: the button keeps one width, and the tabs beside it do not shift
-// as the steps change.
-const UPDATE_STEP_LABELS = {
-  "Checking for updates...": "Checking…",
-  "Downloading update...": "Downloading…",
-  "Installing update...": "Installing…",
-  "Verifying signature...": "Verifying…",
-  "Restarting...": "Restarting…",
-};
+// The steps the server reports that the button reacts to. It sends others meant
+// for logs, such as where the installer's log file is; those are ignored here, so an
+// internal detail cannot end up in the top bar.
+const UPDATE_STEPS = new Set([
+  "Checking for updates...",
+  "Downloading update...",
+  "Installing update...",
+  "Verifying signature...",
+  "Restarting...",
+]);
+
+// A ring that fills with the download and a spinning arc for the steps that have
+// nothing to measure. No words: the button keeps the size it had, and the percentage
+// is the only text.
+const UPDATE_RING_MARKUP = `
+  <span class="update-ring">
+    <svg viewBox="0 0 28 28" aria-hidden="true">
+      <circle class="update-ring-track" cx="14" cy="14" r="12"></circle>
+      <circle class="update-ring-arc" cx="14" cy="14" r="12" pathLength="100"></circle>
+    </svg>
+    <span class="update-percent"></span>
+  </span>`;
 
 async function performSelfUpdate() {
   if (state.appVersion?.self_update_supported === false) {
@@ -2780,26 +2790,39 @@ async function performSelfUpdate() {
   if (button.disabled) return;
   button.disabled = true;
   const idleTitle = button.title;
+  // Pinned before the content changes, so turning "Update" into a ring moves nothing.
+  button.style.width = `${button.getBoundingClientRect().width}px`;
   button.title = "";
   button.classList.add("is-updating");
-  button.innerHTML = '<span class="update-fill"></span><span class="update-label">Updating…</span>';
-  const fill = button.querySelector(".update-fill");
-  const label = button.querySelector(".update-label");
+  button.setAttribute("aria-busy", "true");
+  button.innerHTML = UPDATE_RING_MARKUP;
+  const arc = button.querySelector(".update-ring-arc");
+  const percentText = button.querySelector(".update-percent");
 
-  const show = (text, percent, busy = false) => {
-    label.textContent = text;
-    fill.style.width = `${percent}%`;
-    button.classList.toggle("is-busy", busy);
+  // A percentage fills the ring; null spins it.
+  const show = (percent) => {
+    const measured = percent != null;
+    button.classList.toggle("is-busy", !measured);
+    arc.style.strokeDasharray = measured ? `${percent} 100` : "";
+    percentText.textContent = measured ? `${percent}%` : "";
+    button.setAttribute("aria-label", measured ? `Updating, ${percent} percent` : "Updating");
+  };
+  const reset = () => {
+    button.classList.remove("is-updating", "is-busy", "is-failed");
+    button.removeAttribute("aria-busy");
+    button.removeAttribute("aria-label");
+    button.style.width = "";
+    button.textContent = "Update";
+    button.title = idleTitle;
   };
   const fail = (reason) => {
-    show("Update failed", 0);
+    button.classList.remove("is-busy");
+    button.classList.add("is-failed");
+    button.removeAttribute("aria-busy");
+    button.textContent = "Failed";
     button.title = reason;
     button.disabled = false;
-    setTimeout(() => {
-      button.classList.remove("is-updating");
-      button.textContent = "Update";
-      button.title = idleTitle;
-    }, 4000);
+    setTimeout(reset, 4000);
   };
 
   const handleProgress = (data) => {
@@ -2810,18 +2833,19 @@ async function performSelfUpdate() {
       return false;
     }
     if (data.percent != null) {
-      show(`Downloading ${data.percent}%`, data.percent);
-      return true;
+      show(data.percent);
+    } else if (UPDATE_STEPS.has(data.step)) {
+      show(null);
     }
-    const text = UPDATE_STEP_LABELS[data.step];
-    if (!text) return true;
-    // After the download there is nothing to measure, so the full bar pulses.
-    const downloaded = data.step !== "Checking for updates..." && data.step !== "Downloading update...";
-    show(text, downloaded ? 100 : 0, downloaded && data.step !== "Restarting...");
     return true;
   };
 
-  const markRestarting = () => show("Restarting…", 100);
+  let restarting = false;
+  const markRestarting = () => {
+    restarting = true;
+    show(null);
+  };
+  show(null);
 
   try {
     const response = await fetch("/api/self-update", { method: "POST" });
@@ -2847,7 +2871,9 @@ async function performSelfUpdate() {
           .join("\n");
         if (!dataText) continue;
         try {
-          if (!handleProgress(JSON.parse(dataText))) return;
+          const data = JSON.parse(dataText);
+          if (data.step === "Restarting...") restarting = true;
+          if (!handleProgress(data)) return;
         } catch (_error) {
           // Ignore malformed progress frames.
         }
@@ -2856,7 +2882,7 @@ async function performSelfUpdate() {
     markRestarting();
   } catch (error) {
     // Connection loss usually means the app is restarting after replacement.
-    if (label.textContent === "Restarting…") {
+    if (restarting) {
       markRestarting();
       return;
     }

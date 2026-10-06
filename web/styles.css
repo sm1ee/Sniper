@@ -884,37 +884,78 @@ code {
   text-decoration: none;
 }
 
-/* While updating the button keeps one width and fills from the left as the
-   download goes, so the top bar does not jump with each step's text. */
+/* While updating, the button is disabled and holds the width it had; its content
+   becomes a ring. The percentage is drawn inside it, and the steps that cannot be
+   measured spin an arc instead. */
 .utility-button.is-updating {
-  position: relative;
-  min-width: 140px;
-  overflow: hidden;
+  /* The ring is taller than the label it replaces; without this the button would
+     grow past its row and push the header down. */
+  padding-block: 0;
   cursor: default;
 }
 
-.update-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 0;
-  background: var(--point-soft);
-  transition: width 0.3s ease;
+.utility-button.is-failed {
+  color: var(--danger);
 }
 
-.utility-button.is-busy .update-fill {
-  animation: update-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes update-pulse {
-  50% {
-    opacity: 0.4;
-  }
-}
-
-.update-label {
+.update-ring {
   position: relative;
-  white-space: nowrap;
-  font-size: 0.85em;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+}
+
+.update-ring svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.update-ring-track,
+.update-ring-arc {
+  fill: none;
+  stroke-width: 2.5;
+}
+
+.update-ring-track {
+  stroke: var(--line-strong);
+}
+
+.update-ring-arc {
+  stroke: var(--point);
+  stroke-linecap: round;
+  stroke-dasharray: 0 100;
+  transition: stroke-dasharray 0.3s ease;
+}
+
+.utility-button.is-busy .update-ring svg {
+  animation: update-spin 0.9s linear infinite;
+}
+
+.utility-button.is-busy .update-ring-arc {
+  stroke-dasharray: 28 100;
+  transition: none;
+}
+
+.update-percent {
+  position: relative;
+  color: var(--text);
+  font-size: 8px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+@keyframes update-spin {
+  from {
+    transform: rotate(-90deg);
+  }
+  to {
+    transform: rotate(270deg);
+  }
 }
 
 .utility-button.icon-button {
