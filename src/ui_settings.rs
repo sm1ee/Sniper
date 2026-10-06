@@ -70,6 +70,7 @@ const HTTP_HISTORY_SORT_KEY_OPTIONS: &[&str] = &[
     "mime",
     "notes",
     "tls",
+    "edited",
     "started_at",
 ];
 const HTTP_HISTORY_METHOD_OPTIONS: &[&str] = &[
@@ -699,6 +700,31 @@ fn default_ws_column_widths() -> BTreeMap<String, u16> {
 #[cfg(test)]
 mod tests {
     use super::{AppUiSettingsSnapshot, AppUiSettingsStore};
+
+    #[tokio::test]
+    async fn ui_settings_store_preserves_modified_history_sort_after_reload() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-ui-settings-{}", uuid::Uuid::new_v4()));
+        let store = AppUiSettingsStore::load_or_create(&data_dir).expect("store should load");
+        let snapshot = AppUiSettingsSnapshot {
+            http_sort_key: "edited".to_string(),
+            http_sort_direction: "asc".to_string(),
+            ..AppUiSettingsSnapshot::default()
+        };
+
+        let saved = store
+            .replace_snapshot(snapshot)
+            .await
+            .expect("modified sort should persist");
+        assert_eq!(saved.http_sort_key, "edited");
+
+        let reloaded = AppUiSettingsStore::load_or_create(&data_dir).expect("store should reload");
+        let persisted = reloaded.snapshot().await;
+        assert_eq!(persisted.http_sort_key, "edited");
+        assert_eq!(persisted.http_sort_direction, "asc");
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
 
     #[tokio::test]
     async fn ui_settings_store_persists_snapshot() {

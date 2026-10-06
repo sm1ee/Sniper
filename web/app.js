@@ -369,7 +369,9 @@ function websocketPagePayload(value) {
   return {
     items,
     total: Number.isFinite(Number(payload.total)) ? Number(payload.total) : items.length,
-    filteredTotal: Number.isFinite(Number(payload.filtered_total)) ? Number(payload.filtered_total) : null,
+    filteredTotal: payload.filtered_total != null && Number.isFinite(Number(payload.filtered_total))
+      ? Number(payload.filtered_total)
+      : null,
     offset: Number.isFinite(Number(payload.offset)) ? Number(payload.offset) : 0,
     limit: Number.isFinite(Number(payload.limit)) ? Number(payload.limit) : items.length,
     has_more: Boolean(payload.has_more),
@@ -5006,7 +5008,10 @@ function adjustHistoryPagingAfterLocalRemoval(removedCount = 1, options = {}) {
   if (options.decrementFilteredTotal !== false && isKnownCount(paging.filteredTotal)) {
     paging.filteredTotal = Math.max(0, Number(paging.filteredTotal) - count);
   }
-  paging.offset = state.items.length;
+  // Offset paging includes earlier rows already trimmed from the loaded window.
+  paging.offset = canUseSequenceCursorForHistoryPaging()
+    ? state.items.length
+    : Math.max(state.items.length, (Number(paging.offset) || 0) - count);
 }
 
 async function loadTransactions(preserveSelection = true, options = {}) {
@@ -7173,7 +7178,9 @@ function reconcileHistorySelectionAfterTrim(removedItems = [], fallback = "first
 }
 
 function moveHistorySelectionIfMissing(fallback = "first") {
-  if (!state.selectedId || getHistoryItem(state.selectedId)) {
+  // Trimming reconciles selection before the cached ID lookup is rebuilt.
+  // Check the retained rows so an evicted record cannot keep the selection.
+  if (!state.selectedId || state.items.some((item) => item.id === state.selectedId)) {
     return false;
   }
   const nextItem = fallback === "last"

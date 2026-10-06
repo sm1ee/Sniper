@@ -251,6 +251,7 @@ cargo run --bin sniper-desktop   # Desktop app
 cargo run --bin sniper           # Headless proxy + UI server
 cargo run --bin sniper-cli       # CLI
 cargo test                       # Tests
+node --test tests/*.test.cjs      # Fixture-only frontend regressions (Node.js 18+)
 ./packaging/macos/release-macos.sh   # macOS .app + .dmg
 ```
 
