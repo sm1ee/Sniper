@@ -7,6 +7,7 @@ pub mod cli_path;
 pub mod config;
 pub mod event_log;
 pub mod fuzzer;
+pub mod history_selection;
 pub mod intercept;
 pub mod match_replace;
 pub mod model;

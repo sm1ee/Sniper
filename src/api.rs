@@ -39,6 +39,7 @@ use crate::{
     config::{StartupSettingsUpdate, StartupSettingsView},
     event_log::{EventLevel, EventLogEntry},
     fuzzer::{self, FuzzerAttackPayload},
+    history_selection::{selection_token, HistorySelection},
     match_replace::{MatchReplaceRule, MatchReplaceRulesPayload},
     model::{BodyEncoding, EditableRequest, EditableResponse, HeaderRecord, RequestTargetOverride},
     proxy,
@@ -368,7 +369,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/self-update", post(self_update))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/:id/activate", post(activate_session))
-        .route("/api/sessions/:id", delete(delete_session))
+        .route(
+            "/api/sessions/:id",
+            delete(delete_session).patch(rename_session),
+        )
         .route("/api/sessions/:id/reveal", post(reveal_session_folder))
         .route(
             "/api/runtime",
@@ -422,6 +426,11 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route(
             "/api/transactions",
             get(list_transactions).delete(clear_transactions),
+        )
+        .route("/api/transactions/select", post(select_transactions))
+        .route(
+            "/api/transactions/selected",
+            delete(delete_selected_transactions),
         )
         .route("/api/transactions-page", get(list_transactions_page))
         .route("/api/transactions-search", get(search_transactions))
@@ -2963,6 +2972,23 @@ async fn delete_session(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameSessionPayload {
+    name: String,
+}
+
+async fn rename_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<RenameSessionPayload>,
+) -> Response {
+    match state.rename_session(id, payload.name).await {
+        Ok(summary) => Json(summary).into_response(),
+        Err(error) => session_operation_error_response(error),
+    }
+}
+
 fn session_operation_error_response(error: anyhow::Error) -> Response {
     let message = error.to_string();
     let status = if message.contains("was not found") {
@@ -5091,6 +5117,83 @@ async fn forward_all_intercepts(
     .into_response()
 }
 
+async fn select_transactions(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<HistorySelection>,
+) -> Response {
+    if let Err(error) = payload.validate(false) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
+    let session = match resolve_read_session_for_optional_id(&state, Some(payload.session_id)).await
+    {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    match payload.resolve(&session.store).await {
+        Ok(rows) => Json(serde_json::json!({
+            "session_id": payload.session_id,
+            "count": rows.len(),
+            "ids": rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            "selection_token": selection_token(payload.session_id, &rows),
+        }))
+        .into_response(),
+        Err(error) => (StatusCode::CONFLICT, error).into_response(),
+    }
+}
+
+async fn delete_selected_transactions(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<HistorySelection>,
+) -> Response {
+    if let Err(error) = payload.validate(true) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
+    // Once a durable deletion starts, finish the journal/memory update even if
+    // its HTTP caller disconnects. Dropping a JoinHandle does not cancel it.
+    tokio::spawn(async move {
+        let session = match resolve_session_for_optional_id(&state, Some(payload.session_id)).await {
+            Ok(session) => session,
+            Err(response) => return response,
+        };
+        let _operation_guard = match guard_session_write_operation(&state, &session, false).await {
+            Ok(guard) => guard,
+            Err(response) => return response,
+        };
+        let _mutation_guard = session.mutation_guard().await;
+        match session.store.delete_selection(&payload).await {
+            Ok((removed, ids)) => Json(serde_json::json!({
+                "ok": true, "action": "delete", "session_id": payload.session_id, "removed": removed, "ids": ids,
+            })).into_response(),
+            Err(error) => saved_transaction_delete_error(error),
+        }
+    }).await.unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "deletion outcome unavailable; inspect current state before retrying").into_response())
+}
+
+fn saved_transaction_delete_error(error: std::io::Error) -> Response {
+    if error.kind() == std::io::ErrorKind::InvalidInput {
+        (StatusCode::CONFLICT, error.to_string()).into_response()
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to durably delete selected HTTP records; inspect current state before retrying",
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearTransactionsQuery {
+    session_id: Option<Uuid>,
+    expected_active_session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearTransactionsPayload {
+    session_id: Option<Uuid>,
+}
+
 /// Empty the HTTP history for one session.
 ///
 /// Findings and WebSocket sessions are left alone: a finding is a conclusion the
@@ -5098,23 +5201,32 @@ async fn forward_all_intercepts(
 /// not make it untrue. The detail panes already say when a finding's transaction
 /// is no longer there.
 ///
-/// The snapshot is rewritten before returning, rather than left to the usual
-/// journal-driven compaction: the journal still replays every cleared record, so
-/// a crash before the next compaction would bring them all back.
+/// A durable deletion tombstone is acknowledged before removing live rows.
+/// An acknowledgement failure leaves memory intact but can have an uncertain
+/// disk outcome, so callers must inspect state before retrying.
 async fn clear_transactions(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<SessionWriteQuery>,
-    payload: Option<Json<SessionActionPayload>>,
+    Query(query): Query<ClearTransactionsQuery>,
+    body: axum::body::Bytes,
 ) -> Response {
+    let payload = if body.is_empty() {
+        None
+    } else {
+        match serde_json::from_slice::<ClearTransactionsPayload>(&body) {
+            Ok(payload) => Some(payload),
+            Err(_) => return (StatusCode::BAD_REQUEST, "clear accepts only an optional session_id body; use selected deletion for IDs or filters").into_response(),
+        }
+    };
     let (target_session_id, session_id_is_explicit) = match reconcile_write_session_id(
         query.session_id,
-        payload
-            .map(|Json(payload)| payload.session_id)
-            .unwrap_or(None),
+        payload.and_then(|payload| payload.session_id),
     ) {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
+    // An expected-only request must remain pinned while waiting for the
+    // operation lock; resolving an implicit target later could select a new session.
+    let target_session_id = target_session_id.or(query.expected_active_session_id);
     if let Some(response) = expected_active_session_conflict_response(
         &state,
         query.expected_active_session_id,
@@ -5122,46 +5234,53 @@ async fn clear_transactions(
     ) {
         return response;
     }
-    let session = match resolve_session_for_optional_id(&state, target_session_id).await {
-        Ok(session) => session,
-        Err(response) => return response,
-    };
-    let _operation_guard = match guard_session_write_operation(
-        &state,
-        &session,
-        !session_id_is_explicit || query.expected_active_session_id.is_some(),
-    )
+    tokio::spawn(async move {
+        let session = match resolve_session_for_optional_id(&state, target_session_id).await {
+            Ok(session) => session,
+            Err(response) => return response,
+        };
+        let _operation_guard = match guard_session_write_operation(
+            &state,
+            &session,
+            !session_id_is_explicit || query.expected_active_session_id.is_some(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(response) => return response,
+        };
+        let _mutation_guard = session.mutation_guard().await;
+
+        let removed = match session.store.delete_all().await {
+            Ok(removed) => removed,
+            Err(error) => return saved_transaction_delete_error(error),
+        };
+        session
+            .event_log
+            .push(
+                EventLevel::Info,
+                "capture",
+                "History cleared",
+                format!("{removed} captured transaction(s) removed"),
+            )
+            .await;
+
+        Json(serde_json::json!({
+            "ok": true,
+            "action": "clear",
+            "session_id": session.id(),
+            "removed": removed,
+        }))
+        .into_response()
+    })
     .await
-    {
-        Ok(guard) => guard,
-        Err(response) => return response,
-    };
-    let _mutation_guard = session.mutation_guard().await;
-
-    let removed = session.store.clear().await;
-    if let Err(error) = session.persist_mutation_locked().await {
-        return (
+    .unwrap_or_else(|_| {
+        (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("cleared the history but could not persist it: {error:#}"),
+            "clear outcome unavailable; inspect current state before retrying",
         )
-            .into_response();
-    }
-    session
-        .event_log
-        .push(
-            EventLevel::Info,
-            "capture",
-            "History cleared",
-            format!("{removed} captured transaction(s) removed"),
-        )
-        .await;
-
-    Json(serde_json::json!({
-        "ok": true,
-        "action": "clear",
-        "removed": removed,
-    }))
-    .into_response()
+            .into_response()
+    })
 }
 
 async fn list_intercept_rules(
@@ -18202,6 +18321,161 @@ mod tests {
         assert!(session.sequence.list_runs(None).await.is_empty());
 
         let _ = std::fs::remove_file(storage_dir);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+    #[tokio::test]
+    async fn saved_http_selection_rejects_stale_wrong_session_and_invalid_requests() {
+        let (state, data_dir) = test_state("sniper-saved-http-selection");
+        let session = state.session().await;
+        let session_id = session.id();
+        let record = test_replay_response_record("/saved", 200);
+        let id = record.id;
+        session.store.insert(record).await;
+        let selection = serde_json::json!({"session_id":session_id,"host":"example.test"});
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/transactions/select",
+            selection.clone(),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        let selected: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(selected["count"], 1);
+        assert!(session.store.get(id).await.is_some());
+        for bad in [
+            serde_json::json!({"session_id":session_id}),
+            serde_json::json!({"session_id":session_id,"host":" "}),
+            serde_json::json!({"session_id":session_id,"hots":"example.test"}),
+            serde_json::json!({"session_id":session_id,"status_range":"bogus"}),
+            serde_json::json!({"session_id":session_id,"ids":[id],"host":"example.test"}),
+            serde_json::json!({"session_id":session_id,"ids":[id,Uuid::new_v4()]}),
+            serde_json::json!({"session_id":session_id,"host":"example.test"}),
+        ] {
+            let (status, _) = api_route_json(
+                state.clone(),
+                reqwest::Method::DELETE,
+                "/api/transactions/selected",
+                bad,
+            )
+            .await;
+            assert!(status.is_client_error());
+            assert!(session.store.get(id).await.is_some());
+        }
+        let another = state.create_session(Some("Other".into())).await.unwrap();
+        let (status, _) = api_route_json(
+            state.clone(),
+            reqwest::Method::DELETE,
+            "/api/transactions/selected",
+            serde_json::json!({"session_id":another.id,"ids":[id]}),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert!(session.store.get(id).await.is_some());
+        let next = test_replay_response_record("/new", 200);
+        let next_id = next.id;
+        session.store.insert(next).await;
+        let mut deletion = selection.clone();
+        deletion["selection_token"] = selected["selection_token"].clone();
+        let (status, _) = api_route_json(
+            state.clone(),
+            reqwest::Method::DELETE,
+            "/api/transactions/selected",
+            deletion,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert!(session.store.get(id).await.is_some());
+        assert!(session.store.get(next_id).await.is_some());
+        let (status, _) = api_route_json(
+            state.clone(),
+            reqwest::Method::DELETE,
+            "/api/transactions/selected",
+            serde_json::json!({"session_id":session_id,"ids":[id,id]}),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert!(session.store.get(id).await.is_none());
+        assert!(session.store.get(next_id).await.is_some());
+        assert_eq!(state.session().await.id(), another.id);
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/transactions/select",
+            selection.clone(),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        let selected: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let mut deletion = selection;
+        deletion["selection_token"] = selected["selection_token"].clone();
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::DELETE,
+            "/api/transactions/selected",
+            deletion,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert!(session.store.get(next_id).await.is_none());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn saved_http_clear_refuses_filters_and_rename_is_strict() {
+        let (state, data_dir) = test_state("sniper-saved-http-clear");
+        let session = state.session().await;
+        let record = test_replay_response_record("/saved", 200);
+        let id = record.id;
+        session.store.insert(record).await;
+        for (path, payload) in [
+            (
+                format!(
+                    "/api/transactions?session_id={}&host=example.test",
+                    session.id()
+                ),
+                None,
+            ),
+            (
+                format!("/api/transactions?session_id={}", session.id()),
+                Some(serde_json::json!({"ids":[id]})),
+            ),
+        ] {
+            let (status, _) =
+                api_route_response(state.clone(), reqwest::Method::DELETE, &path, payload).await;
+            assert!(status.is_client_error());
+            assert!(session.store.get(id).await.is_some());
+        }
+        let path = format!("/api/sessions/{}", session.id());
+        for payload in [
+            serde_json::json!({"name":" "}),
+            serde_json::json!({"name":"Updated","path":"../other"}),
+        ] {
+            let (status, _) =
+                api_route_json(state.clone(), reqwest::Method::PATCH, &path, payload).await;
+            assert!(status.is_client_error());
+        }
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::PATCH,
+            &path,
+            serde_json::json!({"name":"  Updated  "}),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"],
+            "Updated"
+        );
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::DELETE,
+            &format!("/api/transactions?session_id={}", session.id()),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert!(session.store.get(id).await.is_none());
         let _ = std::fs::remove_dir_all(data_dir);
     }
 }

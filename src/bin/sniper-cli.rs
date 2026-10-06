@@ -14,6 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sniper::{
     fuzzer::FuzzerAttackRecord,
+    history_selection::HistorySelection,
     intercept::{
         InterceptRecord, InterceptRule, InterceptSummary, ResponseInterceptRecord,
         ResponseInterceptSummary,
@@ -307,6 +308,7 @@ enum SessionCommand {
     Create(CreateSessionArgs),
     Switch(SessionSwitchArgs),
     Delete(SessionDeleteArgs),
+    Rename(SessionRenameArgs),
     Reveal(SessionRevealArgs),
 }
 
@@ -329,6 +331,14 @@ struct SessionDeleteArgs {
 }
 
 #[derive(Args, Debug)]
+struct SessionRenameArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long)]
+    name: String,
+}
+
+#[derive(Args, Debug)]
 struct SessionRevealArgs {
     #[arg(long)]
     id: Uuid,
@@ -341,10 +351,58 @@ enum HistoryCommand {
     /// Find a literal value in URLs, headers and bodies. Says what it scanned,
     /// so an empty result can be told apart from a search that stopped early.
     Search(HistorySearchArgs),
+    /// Preview a session-pinned ID or filter selection without changing saved data.
+    Select(HistorySelectionArgs),
+    /// Delete explicitly selected saved records; filters require a reviewed selection token.
+    Delete(HistorySelectionArgs),
+    /// Delete every saved HTTP record in the selected session.
     Clear(InterceptSessionArgs),
     Replay(HistoryReplayArgs),
     Fuzzer(HistoryFuzzerArgs),
     Annotate(HistoryAnnotateArgs),
+}
+
+#[derive(Args, Debug)]
+struct HistorySelectionArgs {
+    #[arg(long)]
+    session_id: Uuid,
+    /// Repeat --id or comma-separate UUIDs; cannot be combined with filters.
+    #[arg(long = "id", value_delimiter = ',')]
+    ids: Vec<Uuid>,
+    #[arg(long)]
+    query: Option<String>,
+    #[arg(long)]
+    method: Option<String>,
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(100..=599))]
+    status: Option<u16>,
+    #[arg(long)]
+    status_range: Option<String>,
+    #[arg(long)]
+    since: Option<String>,
+    #[arg(long)]
+    mime: Option<String>,
+    /// Token returned by capture http select. Required for filtered deletion.
+    #[arg(long)]
+    selection_token: Option<String>,
+}
+
+impl HistorySelectionArgs {
+    fn payload(&self) -> HistorySelection {
+        HistorySelection {
+            session_id: self.session_id,
+            ids: self.ids.clone(),
+            query: self.query.clone(),
+            method: self.method.clone(),
+            host: self.host.clone(),
+            status: self.status,
+            status_range: self.status_range.clone(),
+            since: self.since.clone(),
+            mime: self.mime.clone(),
+            selection_token: self.selection_token.clone(),
+        }
+    }
 }
 
 #[derive(Args, Debug, Default)]
@@ -1702,6 +1760,7 @@ impl SessionCommand {
             SessionCommand::Create(_) => "session.create",
             SessionCommand::Switch(_) => "session.switch",
             SessionCommand::Delete(_) => "session.delete",
+            SessionCommand::Rename(_) => "session.rename",
             SessionCommand::Reveal(_) => "session.reveal",
         }
     }
@@ -1736,6 +1795,8 @@ impl HistoryCommand {
             HistoryCommand::Get(_) => "capture.http.get",
             HistoryCommand::Search(_) => "capture.http.search",
             HistoryCommand::Clear(_) => "capture.http.clear",
+            HistoryCommand::Select(_) => "capture.http.select",
+            HistoryCommand::Delete(_) => "capture.http.delete",
             HistoryCommand::Replay(_) => "capture.http.replay",
             HistoryCommand::Fuzzer(_) => "capture.http.fuzzer",
             HistoryCommand::Annotate(_) => "capture.http.annotate",
@@ -1943,6 +2004,11 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
         ),
         op(
+            "session.rename", "session rename --id <uuid> --name <name>",
+            "Rename a session without changing its ID, storage or active state.", Write, false,
+            &["id", "name"], vec![json!({"id":"00000000-0000-0000-0000-000000000000","name":"Review archive"})],
+        ),
+        op(
             "session.reveal",
             "session reveal --id <uuid>",
             "Reveal a session folder in Finder.",
@@ -2004,6 +2070,21 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &["value"],
             vec![json!({"value":"access_token","side":["response-body"]})],
+        ),
+        op(
+            "capture.http.select", "capture http select --session-id <uuid> [--id <uuid>|filters]",
+            "Preview exactly which saved HTTP records match IDs or nonempty metadata filters. Returns count, IDs and a session-bound selection_token; writes nothing.",
+            Read, false, &["session_id"], vec![json!({"session_id":"00000000-0000-0000-0000-000000000000","host":"example.com"})],
+        ),
+        op(
+            "capture.http.delete", "capture http delete --session-id <uuid> [--id <uuid>|filters --selection-token <token>]",
+            "Delete selected saved HTTP records. IDs and filters are exclusive; filtered deletion requires a reviewed selection_token from capture.http.select. Missing IDs or a changed selection delete nothing.",
+            Write, true, &["session_id"], vec![json!({"session_id":"00000000-0000-0000-0000-000000000000","ids":["11111111-1111-1111-1111-111111111111"]})],
+        ),
+        op(
+            "capture.http.clear", "capture http clear [--session-id <uuid>]",
+            "Delete every saved HTTP transaction in one session. Omitted session_id pins the active session; filters and IDs are not accepted. WebSockets, findings and workspace tabs are retained.",
+            Write, true, &[], vec![json!({"session_id":"00000000-0000-0000-0000-000000000000"})],
         ),
         op(
             "capture.http.replay",
@@ -2476,12 +2557,59 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
             }),
         );
     }
-    json!({
+    if matches!(
+        operation,
+        "capture.http.select" | "capture.http.delete" | "capture.http.clear" | "session.rename"
+    ) {
+        for (field, schema) in [
+            ("id", json!({"type":"string","format":"uuid"})),
+            ("session_id", json!({"type":"string","format":"uuid"})),
+            (
+                "ids",
+                json!({"type":"array","items":{"type":"string","format":"uuid"},"description":"Explicit transaction UUIDs; repeat --id in the legacy command. Cannot be combined with filters."}),
+            ),
+            (
+                "name",
+                json!({"type":"string","minLength":1,"description":"Trimmed nonblank session name, at most 256 UTF-8 bytes, no control characters."}),
+            ),
+            (
+                "status",
+                json!({"type":"integer","minimum":100,"maximum":599}),
+            ),
+            (
+                "selection_token",
+                json!({"type":"string","pattern":"^[0-9a-f]{64}$","description":"Returned by capture.http.select; required for filtered deletion. Any changed match rejects the entire deletion."}),
+            ),
+        ] {
+            if properties.contains_key(field) {
+                properties.insert(field.to_string(), schema);
+            }
+        }
+        for field in ["query", "method", "host", "status_range", "since", "mime"] {
+            if properties.contains_key(field) {
+                properties.insert(field.into(), json!({"type":"string","minLength":1,"pattern":"\\S","description":"Nonblank metadata filter. All supplied filters must match; invalid filters are rejected."}));
+            }
+        }
+    }
+    let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "required": required_fields,
         "properties": properties,
-    })
+    });
+    if matches!(operation, "capture.http.select" | "capture.http.delete") {
+        let filters = json!([{"required":["query"]},{"required":["method"]},{"required":["host"]},{"required":["status"]},{"required":["status_range"]},{"required":["since"]},{"required":["mime"]}]);
+        let mut filtered = json!({"anyOf":filters,"properties":{"ids":{"maxItems":0}}});
+        if operation == "capture.http.delete" {
+            filtered["required"] = json!(["selection_token"]);
+        }
+        schema["allOf"] = json!([{"not":{"required":["status","status_range"]}}]);
+        schema["oneOf"] = json!([
+            {"required":["ids"],"properties":{"ids":{"minItems":1}},"not":{"anyOf":filters}},
+            filtered
+        ]);
+    }
+    schema
 }
 
 fn operation_spec(operation: &str) -> Option<CliOperationSpec> {
@@ -2497,6 +2625,20 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "examples" => &["operation"],
         "skills.install" => &["codex", "claude", "all", "codex_dir", "claude_dir"],
         "session.create" => &["name"],
+        "session.rename" => &["id", "name"],
+        "capture.http.clear" => &["session_id"],
+        "capture.http.select" | "capture.http.delete" => &[
+            "session_id",
+            "ids",
+            "query",
+            "method",
+            "host",
+            "status",
+            "status_range",
+            "since",
+            "mime",
+            "selection_token",
+        ],
         "session.switch" | "session.delete" | "session.reveal" => &["id"],
         "capture.http.list" => &[
             "session_id",
@@ -2668,6 +2810,7 @@ fn command_input_preview(command: &Command) -> Value {
             SessionCommand::Create(args) => json!({ "name": args.name }),
             SessionCommand::Switch(args) => json!({ "id": args.id }),
             SessionCommand::Delete(args) => json!({ "id": args.id }),
+            SessionCommand::Rename(args) => json!({ "id": args.id, "name": args.name }),
             SessionCommand::Reveal(args) => json!({ "id": args.id }),
         },
         Command::Capture { command } => match command {
@@ -2719,6 +2862,9 @@ fn command_input_preview(command: &Command) -> Value {
 fn history_input_preview(command: &HistoryCommand) -> Value {
     match command {
         HistoryCommand::Clear(args) => json!({ "session_id": args.session_id }),
+        HistoryCommand::Select(args) | HistoryCommand::Delete(args) => {
+            serde_json::to_value(args.payload()).expect("selection serializes")
+        }
         HistoryCommand::List(args) => json!({
             "session_id": args.session_id,
             "query": args.query,
@@ -2977,6 +3123,11 @@ fn command_api_preview(command: &Command) -> Result<Value> {
             SessionCommand::Delete(args) => {
                 api_preview("DELETE", format!("/api/sessions/{}", args.id), None)
             }
+            SessionCommand::Rename(args) => api_preview(
+                "PATCH",
+                format!("/api/sessions/{}", args.id),
+                Some(json!({"name": args.name})),
+            ),
             SessionCommand::Reveal(args) => api_preview(
                 "POST",
                 format!("/api/sessions/{}/reveal", args.id),
@@ -3052,10 +3203,20 @@ fn capture_api_preview(command: &CaptureCommand) -> Result<Value> {
 
 fn history_api_preview(command: &HistoryCommand) -> Result<Value> {
     Ok(match command {
+        HistoryCommand::Select(args) => api_preview(
+            "POST",
+            "/api/transactions/select",
+            Some(serde_json::to_value(args.payload())?),
+        ),
+        HistoryCommand::Delete(args) => api_preview(
+            "DELETE",
+            "/api/transactions/selected",
+            Some(serde_json::to_value(args.payload())?),
+        ),
         HistoryCommand::Clear(args) => api_preview(
             "DELETE",
             session_query_path("/api/transactions", args.session_id),
-            Some(json!({ "note": "removes every captured request in the session" })),
+            None,
         ),
         HistoryCommand::List(args) => {
             api_preview("GET", history_list_path(args.session_id, args)?, None)
@@ -3377,6 +3538,12 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     }
     if matches!(
         command.operation_name(),
+        "capture.http.select" | "capture.http.delete" | "capture.http.clear"
+    ) {
+        notes.push("Dry-run validates and describes the request only; it does not contact Sniper or resolve matching records. Use capture.http.select to review count, IDs and selection_token.");
+    }
+    if matches!(
+        command.operation_name(),
         "replay.send" | "fuzzer.run" | "sequence.run"
     ) {
         notes.push("This operation may send traffic; failed sends should not be retried blindly.");
@@ -3456,6 +3623,45 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 id: call_required(operation, input, "id")?,
             }),
         },
+        "session.rename" => Command::Session {
+            command: SessionCommand::Rename(SessionRenameArgs {
+                id: call_required(operation, input, "id")?,
+                name: call_required(operation, input, "name")?,
+            }),
+        },
+        "capture.http.clear" => Command::Capture {
+            command: CaptureCommand::Http {
+                command: HistoryCommand::Clear(InterceptSessionArgs {
+                    session_id: call_optional(operation, input, "session_id")?,
+                }),
+            },
+        },
+        "capture.http.select" | "capture.http.delete" => {
+            let args = HistorySelectionArgs {
+                session_id: call_required(operation, input, "session_id")?,
+                ids: call_optional(operation, input, "ids")?.unwrap_or_default(),
+                query: call_optional(operation, input, "query")?,
+                method: call_optional(operation, input, "method")?,
+                host: call_optional(operation, input, "host")?,
+                status: call_optional_http_status(operation, input, "status")?,
+                status_range: call_optional(operation, input, "status_range")?,
+                since: call_optional(operation, input, "since")?,
+                mime: call_optional(operation, input, "mime")?,
+                selection_token: call_optional(operation, input, "selection_token")?,
+            };
+            args.payload()
+                .validate(operation == "capture.http.delete")
+                .map_err(|error| anyhow!(error))?;
+            Command::Capture {
+                command: CaptureCommand::Http {
+                    command: if operation == "capture.http.select" {
+                        HistoryCommand::Select(args)
+                    } else {
+                        HistoryCommand::Delete(args)
+                    },
+                },
+            }
+        }
         "session.reveal" => Command::Session {
             command: SessionCommand::Reveal(SessionRevealArgs {
                 id: call_required(operation, input, "id")?,
@@ -4604,6 +4810,34 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Session {
+        command: SessionCommand::Rename(args),
+    } = command
+    {
+        let name = args.name.trim();
+        if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+            bail!(
+                "name must be nonblank, at most 256 UTF-8 bytes and contain no control characters"
+            );
+        }
+    }
+    if let Command::Capture {
+        command: CaptureCommand::Http { command: history },
+    }
+    | Command::History { command: history } = command
+    {
+        match history {
+            HistoryCommand::Select(args) => args
+                .payload()
+                .validate(false)
+                .map_err(|error| anyhow!(error))?,
+            HistoryCommand::Delete(args) => args
+                .payload()
+                .validate(true)
+                .map_err(|error| anyhow!(error))?,
+            _ => (),
+        }
+    }
     if let Some(args) = oast_configure_args(command) {
         if args.token.is_some() {
             bail!("--token is unsafe because it can be stored in shell history; pipe the token with --token-stdin");
@@ -4732,6 +4966,16 @@ async fn handle_session(api: ApiClient, command: SessionCommand) -> Result<()> {
                 "id": args.id,
             }))
         }
+        SessionCommand::Rename(args) => {
+            let session: SessionSummary = api
+                .request_json(
+                    Method::PATCH,
+                    &format!("/api/sessions/{}", args.id),
+                    Some(json!({"name": args.name})),
+                )
+                .await?;
+            print_json(&session)
+        }
         SessionCommand::Reveal(args) => {
             let result: serde_json::Value = api
                 .post_json(&format!("/api/sessions/{}/reveal", args.id), &json!({}))
@@ -4820,6 +5064,22 @@ fn auto_replace_write_session_id(
 
 async fn handle_history(api: ApiClient, command: HistoryCommand) -> Result<()> {
     match command {
+        HistoryCommand::Select(args) => {
+            let result: Value = api
+                .post_json("/api/transactions/select", &args.payload())
+                .await?;
+            print_json(&result)
+        }
+        HistoryCommand::Delete(args) => {
+            let result: Value = api
+                .request_json(
+                    Method::DELETE,
+                    "/api/transactions/selected",
+                    Some(args.payload()),
+                )
+                .await?;
+            print_json(&result)
+        }
         HistoryCommand::Clear(args) => {
             let (session_id, expected_active_session_id) =
                 runtime_write_session_ids(&api, args.session_id).await?;
@@ -12382,5 +12642,170 @@ mod tests {
         assert!(error
             .to_string()
             .contains("could not determine Codex skills directory"));
+    }
+    #[test]
+    fn data_management_manifest_call_schema_and_confirmation_match() {
+        for (operation, input) in [
+            (
+                "session.rename",
+                serde_json::json!({"id":Uuid::nil(),"name":"Archive"}),
+            ),
+            (
+                "capture.http.clear",
+                serde_json::json!({"session_id":Uuid::nil()}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil(),"ids":[Uuid::new_v4()]}),
+            ),
+            (
+                "capture.http.select",
+                serde_json::json!({"session_id":Uuid::nil(),"host":"example.com"}),
+            ),
+        ] {
+            let command = super::command_from_operation_input(operation, &input).unwrap();
+            super::validate_command_preflight(&command).unwrap();
+            assert_eq!(command.operation_name(), operation);
+            assert_eq!(
+                command.requires_confirmation(),
+                operation != "capture.http.select"
+            );
+            let plan = super::dry_run_command(&command).unwrap();
+            assert_eq!(plan["operation"], operation);
+            let spec = super::operation_spec(operation).unwrap();
+            assert_eq!(spec.input_schema["additionalProperties"], false);
+            assert_eq!(
+                spec.input_schema["properties"][if operation == "session.rename" {
+                    "id"
+                } else {
+                    "session_id"
+                }]["format"],
+                "uuid"
+            );
+        }
+    }
+
+    #[test]
+    fn data_management_rejects_ambiguous_or_malformed_call_inputs() {
+        for (operation, input) in [
+            (
+                "capture.http.clear",
+                serde_json::json!({"host":"example.com"}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"ids":[Uuid::nil()]}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil()}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil(),"ids":[]}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil(),"ids":[Uuid::nil()],"host":"example.com"}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil(),"host":"example.com"}),
+            ),
+            (
+                "capture.http.select",
+                serde_json::json!({"session_id":Uuid::nil(),"since":"bad"}),
+            ),
+            (
+                "capture.http.select",
+                serde_json::json!({"session_id":Uuid::nil(),"status_range":"oops"}),
+            ),
+            (
+                "capture.http.select",
+                serde_json::json!({"session_id":Uuid::nil(),"hots":"example.com"}),
+            ),
+        ] {
+            assert!(
+                super::command_from_operation_input(operation, &input).is_err(),
+                "{operation} accepted {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_management_legacy_parsing_and_preflight_match_calls() {
+        let sid = Uuid::nil().to_string();
+        let id = Uuid::new_v4().to_string();
+        for argv in [
+            vec![
+                "sniper-cli",
+                "capture",
+                "http",
+                "clear",
+                "--session-id",
+                &sid,
+                "--dry-run",
+            ],
+            vec![
+                "sniper-cli",
+                "capture",
+                "http",
+                "delete",
+                "--session-id",
+                &sid,
+                "--id",
+                &id,
+                "--dry-run",
+            ],
+            vec![
+                "sniper-cli",
+                "capture",
+                "http",
+                "select",
+                "--session-id",
+                &sid,
+                "--host",
+                "example.com",
+            ],
+            vec![
+                "sniper-cli",
+                "session",
+                "rename",
+                "--id",
+                &sid,
+                "--name",
+                "Archive",
+                "--dry-run",
+            ],
+        ] {
+            let parsed = Cli::try_parse_from(argv).unwrap();
+            super::validate_command_preflight(&parsed.command).unwrap();
+            super::dry_run_command(&parsed.command).unwrap();
+        }
+        let parsed = Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "http",
+            "delete",
+            "--session-id",
+            &sid,
+            "--host",
+            " ",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(super::validate_command_preflight(&parsed.command).is_err());
+        let parsed = Cli::try_parse_from([
+            "sniper-cli",
+            "session",
+            "rename",
+            "--id",
+            &sid,
+            "--name",
+            " ",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(super::validate_command_preflight(&parsed.command).is_err());
     }
 }

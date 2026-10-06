@@ -57,6 +57,83 @@ pub struct ListFilters {
     pub advanced_negative: bool,
 }
 
+/// Destructive selections must never inherit the listing API's forgiving
+/// defaults: an ignored or empty criterion could otherwise select everything.
+pub fn validate_delete_filters(filters: &ListFilters) -> Result<(), String> {
+    if filters.limit.is_some_and(|limit| limit != 0)
+        || filters.offset.is_some()
+        || filters.before_sequence.is_some()
+        || filters.sort_key.is_some()
+        || filters.sort_direction.is_some()
+        || !filters.scope_patterns.is_empty()
+        || !filters.excluded_scope_patterns.is_empty()
+        || filters.in_scope_only
+        || filters.hide_connect
+        || filters.hide_without_responses
+        || filters.only_parameterized
+        || filters.only_notes
+        || filters.status_classes.is_some()
+        || filters.mime_types.is_some()
+        || !filters.hidden_extensions.is_empty()
+        || filters.port.is_some()
+        || !filters.color_tags.is_empty()
+        || filters.advanced_search.is_some()
+        || filters.advanced_regex
+        || filters.advanced_case_sensitive
+        || filters.advanced_negative
+    {
+        return Err("unsupported deletion filter; use query, method, host, status, status_range, since, or mime".to_string());
+    }
+    let criteria = [
+        ("query", filters.query.as_deref()),
+        ("method", filters.method.as_deref()),
+        ("host", filters.host.as_deref()),
+        ("status_range", filters.status_range.as_deref()),
+        ("since", filters.since.as_deref()),
+        ("mime", filters.mime.as_deref()),
+    ];
+    for (name, value) in criteria {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return Err(format!("{name} must not be blank"));
+        }
+    }
+    if filters.status.is_none() && criteria.iter().all(|(_, value)| value.is_none()) {
+        return Err("at least one deletion filter is required".to_string());
+    }
+    if filters.status.is_some() && filters.status_range.is_some() {
+        return Err("status and status_range cannot be combined".to_string());
+    }
+    if filters
+        .status
+        .is_some_and(|status| !(100..=599).contains(&status))
+    {
+        return Err("status must be between 100 and 599".to_string());
+    }
+    if let Some(range) = filters.status_range.as_deref() {
+        let valid = match parse_status_range(range) {
+            Some(StatusPredicate::Class(_)) => true,
+            Some(StatusPredicate::Range(lo, hi)) => {
+                (100..=599).contains(&lo) && (100..=599).contains(&hi)
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(
+                "status_range must be a class such as 4xx or an ordered range within 100-599"
+                    .to_string(),
+            );
+        }
+    }
+    if filters
+        .since
+        .as_deref()
+        .is_some_and(|since| parse_since(since).is_none())
+    {
+        return Err("since must be a valid date, RFC3339 timestamp, or nonnegative relative duration such as 30m".to_string());
+    }
+    Ok(())
+}
+
 /// What a body search may look at. The URL and headers are held in memory, so
 /// including them costs nothing; bodies come off disk and are what the byte
 /// budget governs. The URL is here so one search answers "did this value cross
@@ -226,6 +303,9 @@ pub(crate) enum TransactionJournalEntry {
     },
     Update {
         record: TransactionRecord,
+    },
+    Delete {
+        ids: Vec<Uuid>,
     },
     Annotation {
         id: Uuid,
@@ -607,6 +687,114 @@ impl TransactionStore {
 
     pub async fn len(&self) -> usize {
         self.inner.read().await.entries.len()
+    }
+
+    /// Commit a tombstone before touching memory. A missing id invalidates the
+    /// whole selection, including ids that belong to another session or a stale
+    /// preview. Keeping the journal mandatory avoids lossy snapshot rollback.
+    pub async fn delete_ids(&self, ids: &[Uuid]) -> io::Result<usize> {
+        let _mutation_guard = self.insert_lock.lock().await;
+        self.delete_ids_locked(ids).await
+    }
+
+    /// Resolve and check the reviewed selection while capture/update mutations
+    /// are excluded, so a changing response cannot invalidate it between the
+    /// token check and the durable deletion.
+    pub async fn delete_selection(
+        &self,
+        selection: &crate::history_selection::HistorySelection,
+    ) -> io::Result<(usize, Vec<Uuid>)> {
+        let _mutation_guard = self.insert_lock.lock().await;
+        selection
+            .validate(true)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let rows = selection
+            .resolve(self)
+            .await
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if selection.selection_token.as_ref().is_some_and(|token| {
+            *token != crate::history_selection::selection_token(selection.session_id, &rows)
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "selection changed since preview; nothing deleted",
+            ));
+        }
+        let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+        if ids.is_empty() {
+            return Ok((0, ids));
+        }
+        Ok((self.delete_ids_locked(&ids).await?, ids))
+    }
+
+    pub async fn delete_all(&self) -> io::Result<usize> {
+        let _mutation_guard = self.insert_lock.lock().await;
+        let ids: Vec<_> = self
+            .inner
+            .read()
+            .await
+            .entries
+            .iter()
+            .map(|record| record.id)
+            .collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.delete_ids_locked(&ids).await
+    }
+
+    async fn delete_ids_locked(&self, ids: &[Uuid]) -> io::Result<usize> {
+        if ids.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "at least one transaction id is required",
+            ));
+        }
+        let mut selected = HashSet::with_capacity(ids.len());
+        let ids: Vec<_> = ids
+            .iter()
+            .copied()
+            .filter(|id| selected.insert(*id))
+            .collect();
+        {
+            let inner = self.inner.read().await;
+            if ids.iter().any(|id| !inner.by_id.contains_key(id)) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "one or more transaction ids are not in this session",
+                ));
+            }
+        }
+        let tx = self.journal_tx.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "transaction journal writer is not available",
+            )
+        })?;
+        let line = encode_transaction_journal_line(&TransactionJournalEntry::Delete { ids })
+            .ok_or_else(|| {
+                io::Error::other("failed to encode transaction deletion journal entry")
+            })?;
+        append_transaction_journal(tx, line).await?;
+
+        let mut inner = self.inner.write().await;
+        inner
+            .entries
+            .retain(|record| !selected.contains(&record.id));
+        inner
+            .summaries
+            .retain(|cached| !selected.contains(&cached.summary.id));
+        inner.locators.retain(|id, _| !selected.contains(id));
+        inner.by_id = inner
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (record.id, index))
+            .collect();
+        drop(inner);
+        self.next_event_sequence.fetch_add(1, Ordering::Relaxed);
+        let _ = self.retention_events.send(());
+        Ok(selected.len())
     }
 
     pub async fn is_empty(&self) -> bool {
@@ -1446,6 +1634,7 @@ impl TransactionStore {
     }
 
     pub async fn replace_all(&self, records: Vec<TransactionRecord>) {
+        let _mutation_guard = self.insert_lock.lock().await;
         let mut inner = StoreInner::from_newest_first(records);
         if let Some(max_entries) = self.max_entries {
             inner.trim_to_max_entries(max_entries);
@@ -1466,29 +1655,15 @@ impl TransactionStore {
     }
 
     /// Points the store at where a compaction just put each record, and drops the
-    /// Drop every captured transaction, returning how many went.
-    ///
-    /// The locator map goes with them: an offset into transactions.ndjson only
-    /// means anything while the record it belongs to is still here, and the
-    /// caller rewrites that file immediately after.
-    pub async fn clear(&self) -> usize {
-        let mut inner = self.inner.write().await;
-        let removed = inner.entries.len();
-        inner.entries.clear();
-        inner.summaries.clear();
-        inner.by_id.clear();
-        inner.locators.clear();
-        removed
-    }
-
     /// bodies it no longer has to hold. Must be called after every rewrite of
     /// transactions.ndjson: the offsets from before it are stale, and a stale
     /// offset silently returns a different request's traffic.
     pub async fn adopt_written_locators(
         &self,
-        locators: HashMap<Uuid, crate::session::BodyLocator>,
+        mut locators: HashMap<Uuid, crate::session::BodyLocator>,
     ) {
         let mut inner = self.inner.write().await;
+        locators.retain(|id, _| inner.by_id.contains_key(id));
         for record in inner.entries.iter_mut() {
             if locators.contains_key(&record.id) {
                 strip_transaction_bodies(record);
@@ -1921,21 +2096,15 @@ fn parse_status_range(input: &str) -> Option<StatusPredicate> {
 fn parse_since(input: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let trimmed = input.trim();
     // Relative: "1h", "30m", "2d", "7d"
-    if let Some(rest) = trimmed.strip_suffix('h') {
-        let hours: i64 = rest.parse().ok()?;
-        return Some(chrono::Utc::now() - chrono::Duration::hours(hours));
-    }
-    if let Some(rest) = trimmed.strip_suffix('m') {
-        let minutes: i64 = rest.parse().ok()?;
-        return Some(chrono::Utc::now() - chrono::Duration::minutes(minutes));
-    }
-    if let Some(rest) = trimmed.strip_suffix('d') {
-        let days: i64 = rest.parse().ok()?;
-        return Some(chrono::Utc::now() - chrono::Duration::days(days));
-    }
-    if let Some(rest) = trimmed.strip_suffix('s') {
-        let secs: i64 = rest.parse().ok()?;
-        return Some(chrono::Utc::now() - chrono::Duration::seconds(secs));
+    for (unit, seconds_per_unit) in [('h', 3600_i64), ('m', 60), ('d', 86400), ('s', 1)] {
+        if let Some(rest) = trimmed.strip_suffix(unit) {
+            if rest.is_empty() || !rest.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let amount: i64 = rest.parse().ok()?;
+            let duration = chrono::Duration::try_seconds(amount.checked_mul(seconds_per_unit)?)?;
+            return chrono::Utc::now().checked_sub_signed(duration);
+        }
     }
     // Absolute: "2024-01-01" or "2024-01-01T12:00:00Z"
     if let Ok(dt) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
@@ -2546,6 +2715,371 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn deletion_filters_require_explicit_supported_nonempty_criteria() {
+        assert!(validate_delete_filters(&ListFilters::default()).is_err());
+        for filters in [
+            ListFilters {
+                query: Some(" ".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                method: Some("\t".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                mime: Some("\n".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                status_range: Some("".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                since: Some(" ".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                status: Some(200),
+                status_range: Some("2xx".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                status: Some(0),
+                ..Default::default()
+            },
+            ListFilters {
+                status: Some(600),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                offset: Some(0),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                limit: Some(10),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                hide_connect: true,
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                advanced_search: Some("".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_delete_filters(&filters).is_err(), "{filters:?}");
+        }
+        for filters in [
+            ListFilters {
+                query: Some("/login".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                method: Some("POST".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                limit: Some(0),
+                ..Default::default()
+            },
+            ListFilters {
+                mime: Some("application/json".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                status: Some(404),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_delete_filters(&filters).is_ok(), "{filters:?}");
+        }
+    }
+
+    #[test]
+    fn deletion_filters_reject_malformed_ranges_and_overflowing_times() {
+        for range in [
+            "garbage", "299-200", "99-199", "500-600", "0xx", "6xx", "200-", "200",
+        ] {
+            let filters = ListFilters {
+                status_range: Some(range.into()),
+                ..Default::default()
+            };
+            assert!(validate_delete_filters(&filters).is_err(), "{range}");
+        }
+        for since in [
+            "garbage",
+            "2026-02-30",
+            "-1h",
+            "+1h",
+            "1.5h",
+            "9223372036854775807d",
+            "9223372036854775807s",
+            "999999999999999999999h",
+            "999999999999m",
+        ] {
+            let filters = ListFilters {
+                since: Some(since.into()),
+                ..Default::default()
+            };
+            assert!(validate_delete_filters(&filters).is_err(), "{since}");
+        }
+        for range in ["4xx", "200-299", "100-599"] {
+            assert!(validate_delete_filters(&ListFilters {
+                status_range: Some(range.into()),
+                ..Default::default()
+            })
+            .is_ok());
+        }
+        for since in [
+            "30m",
+            "1h",
+            "2d",
+            "15s",
+            "0s",
+            "2026-01-01",
+            "2026-01-01T12:00:00Z",
+        ] {
+            assert!(
+                validate_delete_filters(&ListFilters {
+                    since: Some(since.into()),
+                    ..Default::default()
+                })
+                .is_ok(),
+                "{since}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_ids_deduplicates_and_preserves_surviving_indexes_and_bodies() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-delete-records-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let records: Vec<_> = (0..3)
+            .map(|index| {
+                let mut record = test_record("example.com");
+                record.path = format!("/{index}");
+                record.sequence = index + 1;
+                record.request.body_preview = format!("fixture body {index}");
+                record.request.body_size = record.request.body_preview.len();
+                record
+            })
+            .collect();
+        let ids: Vec<_> = records.iter().map(|record| record.id).collect();
+        let locators = crate::session::write_transactions_file_for_test_returning_locators(
+            &data_dir, &records,
+        )
+        .unwrap();
+        let store = TransactionStore::from_records_with_journal(
+            records.into_iter().rev().collect(),
+            data_dir.join("transactions.journal"),
+            None,
+        );
+        store.adopt_written_locators(locators).await;
+        let survivor_locator = store.inner.read().await.locators[&ids[1]];
+        let mut reload = store.subscribe_retention();
+        let event_sequence = store.latest_event_sequence();
+
+        assert_eq!(
+            store.delete_ids(&[ids[0], ids[2], ids[0]]).await.unwrap(),
+            2
+        );
+        assert_eq!(store.latest_event_sequence(), event_sequence + 1);
+        assert!(reload.try_recv().is_ok());
+        assert!(reload.try_recv().is_err());
+        assert!(store.get(ids[0]).await.is_none());
+        assert!(store.get(ids[2]).await.is_none());
+        let survivor = store.get(ids[1]).await.unwrap();
+        assert_eq!(survivor.request.body_preview, "fixture body 1");
+        assert_eq!(survivor.path, "/1");
+        let inner = store.inner.read().await;
+        assert_eq!(inner.entries.len(), 1);
+        assert_eq!(inner.summaries.len(), 1);
+        assert_eq!(inner.by_id[&ids[1]], 0);
+        assert_eq!(inner.locators.len(), 1);
+        assert_eq!(inner.locators[&ids[1]].offset, survivor_locator.offset);
+        drop(inner);
+        let lines = std::fs::read_to_string(data_dir.join("transactions.journal")).unwrap();
+        let entry: TransactionJournalEntry = serde_json::from_str(lines.trim()).unwrap();
+        let TransactionJournalEntry::Delete { ids: deleted } = entry else {
+            panic!("expected deletion tombstone")
+        };
+        assert_eq!(deleted, vec![ids[0], ids[2]]);
+        assert_eq!(store.delete_ids(&[ids[1]]).await.unwrap(), 1);
+        assert!(store.is_empty().await);
+        drop(store);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn delete_ids_rejects_empty_missing_and_wrong_session_without_appending() {
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        for ids in [vec![], vec![Uuid::new_v4()], vec![id, Uuid::new_v4()]] {
+            assert_eq!(
+                store.delete_ids(&ids).await.unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(store.len().await, 1);
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_selection_checks_token_after_concurrent_response_update_finishes() {
+        use crate::history_selection::{selection_token, HistorySelection};
+        use std::{sync::Arc, time::Duration};
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let store = Arc::new(store);
+        let mut selection: HistorySelection = serde_json::from_value(serde_json::json!({
+            "session_id": Uuid::new_v4(), "host": "example.com"
+        }))
+        .unwrap();
+        selection.selection_token = Some(selection_token(
+            selection.session_id,
+            &selection.resolve(&store).await.unwrap(),
+        ));
+        let update = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .update_record_durable(id, |record| record.status = Some(404))
+                    .await
+            })
+        };
+        let (rx, command) = tokio::task::spawn_blocking(move || {
+            let command = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            (rx, command)
+        })
+        .await
+        .unwrap();
+        let TransactionJournalCommand::Append { ack: Some(ack), .. } = command else {
+            panic!("expected acknowledged update")
+        };
+        let deletion = {
+            let store = store.clone();
+            tokio::spawn(async move { store.delete_selection(&selection).await })
+        };
+        ack.send(Ok(())).unwrap();
+        assert!(update.await.unwrap().unwrap().is_some());
+        assert_eq!(
+            deletion.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "stale selection must not append a tombstone"
+        );
+        assert_eq!(store.get(id).await.unwrap().status, Some(404));
+    }
+
+    #[tokio::test]
+    async fn delete_all_handles_empty_store_without_a_journal() {
+        let store = TransactionStore::new();
+        assert_eq!(store.delete_all().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn delete_ids_requires_available_journal() {
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        assert_eq!(
+            store.delete_ids(&[id]).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        store.journal_tx = Some(tx);
+        assert_eq!(
+            store.delete_ids(&[id]).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert!(store.get(id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_ids_waits_for_ack_and_keeps_memory_on_append_failure() {
+        use std::{sync::Arc, time::Duration};
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let store = Arc::new(store);
+        let mut reload = store.subscribe_retention();
+        let pending = {
+            let store = store.clone();
+            tokio::spawn(async move { store.delete_ids(&[id]).await })
+        };
+        let command = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+            .unwrap();
+        let TransactionJournalCommand::Append { ack: Some(ack), .. } = command else {
+            panic!("expected acknowledged append")
+        };
+        let count = tokio::time::timeout(Duration::from_millis(200), store.len())
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "pending persistence must not mutate or block reads"
+        );
+        assert!(reload.try_recv().is_err());
+        ack.send(Err(io::Error::other("injected journal failure")))
+            .unwrap();
+        assert!(pending.await.unwrap().is_err());
+        assert!(store.get(id).await.is_some());
+        assert!(reload.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_delete_waiting_for_ack_does_not_mutate_memory() {
+        use std::{sync::Arc, time::Duration};
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let store = Arc::new(store);
+        let pending = {
+            let store = store.clone();
+            tokio::spawn(async move { store.delete_ids(&[id]).await })
+        };
+        let command = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+            .unwrap();
+        let TransactionJournalCommand::Append { ack: Some(ack), .. } = command else {
+            panic!("expected acknowledged append")
+        };
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        assert!(ack
+            .send(Err(io::Error::other("injected failed append")))
+            .is_err());
+        assert!(store.get(id).await.is_some());
     }
 
     #[test]
