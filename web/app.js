@@ -381,6 +381,7 @@ function websocketPagePayload(value) {
 function createHistoryPagingState() {
   return {
     generation: 0,
+    localRemovalGeneration: 0,
     querySignature: "",
     pageSize: HTTP_HISTORY_PAGE_SIZE,
     offset: 0,
@@ -545,6 +546,7 @@ const state = {
 };
 
 let _historyPagingGeneration = 0;
+let _historyDetailGeneration = 0;
 let _historyDetailLoadingTimer = null;
 let _websocketLoadGeneration = 0;
 let _websocketDetailGeneration = 0;
@@ -4499,6 +4501,7 @@ function resetSessionScopedUiState() {
   _transactionDeltaTimer = 0;
   _pendingTransactionSummaries.length = 0;
   cancelHistoryDetailLoading();
+  _historyDetailGeneration += 1;
   state.items = [];
   state.historyPaging = createHistoryPagingState();
   state.historyListError = "";
@@ -5002,6 +5005,7 @@ function adjustHistoryPagingAfterLocalRemoval(removedCount = 1, options = {}) {
   const count = Math.max(0, Number(removedCount) || 0);
   if (!count || !state.historyPaging) return;
   const paging = state.historyPaging;
+  paging.localRemovalGeneration = (paging.localRemovalGeneration || 0) + 1;
   if (options.decrementTotal !== false && isKnownCount(paging.total)) {
     paging.total = Math.max(state.items.length, Number(paging.total) - count);
   }
@@ -5104,9 +5108,10 @@ async function loadTransactions(preserveSelection = true, options = {}) {
 }
 
 async function loadTransactionDetail(id) {
+  const generation = ++_historyDetailGeneration;
   const sessionId = currentSessionId();
   const response = await fetch(transactionPath(id, sessionId));
-  if (sessionId !== currentSessionId()) {
+  if (generation !== _historyDetailGeneration || sessionId !== currentSessionId()) {
     return null;
   }
   if (!response.ok) {
@@ -5135,7 +5140,7 @@ async function loadTransactionDetail(id) {
   }
 
   const record = await response.json();
-  if (state.selectedId !== id || sessionId !== currentSessionId()) {
+  if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
     return null;
   }
   state.loadingDetailId = null;
@@ -7211,23 +7216,28 @@ async function loadMoreTransactions({ background = false } = {}) {
   let shouldRenderAfterLoad = !background;
   let shouldBackfillAfterLoad = false;
   const generation = paging.generation;
-  const offset = paging.offset ?? state.items.length;
   paging.loading = true;
   if (!background) renderHistory();
   try {
-    const page = paging.beforeSequence == null
-      ? await fetchTransactionPage({ offset, queryState, querySignature })
-      : await fetchTransactionPage({ beforeSequence: paging.beforeSequence, queryState, querySignature });
-    if (!page) {
-      return 0;
-    }
-    if (
-      state.historyPaging !== paging
-      || state.historyPaging.generation !== generation
-      || state.historyPaging.querySignature !== querySignature
-      || !isCurrentHistoryQuerySignature(querySignature)
-    ) {
-      return 0;
+    let page;
+    let offset;
+    while (true) {
+      const removalGeneration = paging.localRemovalGeneration || 0;
+      offset = paging.offset ?? state.items.length;
+      page = paging.beforeSequence == null
+        ? await fetchTransactionPage({ offset, queryState, querySignature })
+        : await fetchTransactionPage({ beforeSequence: paging.beforeSequence, queryState, querySignature });
+      if (
+        !page
+        || state.historyPaging !== paging
+        || paging.generation !== generation
+        || paging.querySignature !== querySignature
+        || !isCurrentHistoryQuerySignature(querySignature)
+      ) {
+        return 0;
+      }
+      // Recompute the offset if a saved filter removal changed the loaded window.
+      if (removalGeneration === (paging.localRemovalGeneration || 0)) break;
     }
     const pageItems = jsonArray(page.items);
     updateHistoryPagingCursor(pageItems);
@@ -7272,22 +7282,27 @@ async function loadNewerTransactions({ background = false } = {}) {
 
   let shouldRenderAfterLoad = !background;
   const generation = paging.generation;
-  const newerOffset = Math.max(0, paging.trimmedHeadCount - paging.pageSize);
   const usesSequenceCursor = canUseSequenceCursorForHistoryPaging();
   paging.loading = true;
   if (!background) renderHistory();
   try {
-    const page = await fetchTransactionPage({ offset: newerOffset, queryState, querySignature });
-    if (!page) {
-      return 0;
-    }
-    if (
-      state.historyPaging !== paging
-      || state.historyPaging.generation !== generation
-      || state.historyPaging.querySignature !== querySignature
-      || !isCurrentHistoryQuerySignature(querySignature)
-    ) {
-      return 0;
+    let page;
+    let newerOffset;
+    while (true) {
+      const removalGeneration = paging.localRemovalGeneration || 0;
+      newerOffset = Math.max(0, paging.trimmedHeadCount - paging.pageSize);
+      page = await fetchTransactionPage({ offset: newerOffset, queryState, querySignature });
+      if (
+        !page
+        || state.historyPaging !== paging
+        || paging.generation !== generation
+        || paging.querySignature !== querySignature
+        || !isCurrentHistoryQuerySignature(querySignature)
+      ) {
+        return 0;
+      }
+      // A saved filter removal can invalidate an overlapping page and its counts.
+      if (removalGeneration === (paging.localRemovalGeneration || 0)) break;
     }
     const pageItems = jsonArray(page.items);
     const added = mergeHistoryItems(pageItems, { prepend: true });
@@ -11396,7 +11411,8 @@ function websocketRenderedSessionWindow(entries) {
       bottomPadding: 0,
     };
   }
-  const shell = document.querySelector("#websocketTable")?.closest(".history-table-shell");
+  const table = document.querySelector("#websocketTable");
+  const shell = table?.closest(".history-table-shell");
   const rowHeight = measuredWebsocketSessionRowHeight || WEBSOCKET_SESSION_ROW_HEIGHT;
   if (!shell || entries.length <= WEBSOCKET_MAX_RENDERED_SESSION_ROWS) {
     return {
@@ -11408,7 +11424,8 @@ function websocketRenderedSessionWindow(entries) {
     };
   }
   const viewportHeight = shell.clientHeight || rowHeight * WEBSOCKET_MAX_RENDERED_SESSION_ROWS;
-  const maxScrollTop = Math.max(0, entries.length * rowHeight - viewportHeight);
+  const headerHeight = table.tHead?.getBoundingClientRect().height || 0;
+  const maxScrollTop = Math.max(0, headerHeight + entries.length * rowHeight - viewportHeight);
   const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
   if (shell.scrollTop !== scrollTop) {
     shell.scrollTop = scrollTop;
@@ -11491,7 +11508,8 @@ function websocketRenderedFrameWindow(frames, options = {}) {
     };
   }
   const viewportHeight = shell.clientHeight || rowHeight * WEBSOCKET_MAX_RENDERED_FRAME_ROWS;
-  const maxScrollTop = Math.max(0, leadingHeight + frames.length * rowHeight - viewportHeight);
+  const headerHeight = els.websocketFramesBody?.closest("table")?.tHead?.getBoundingClientRect().height || 0;
+  const maxScrollTop = Math.max(0, headerHeight + leadingHeight + frames.length * rowHeight - viewportHeight);
   const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
   if (shell.scrollTop !== scrollTop) {
     shell.scrollTop = scrollTop;
