@@ -2758,50 +2758,70 @@ async function loadAppVersionInfo() {
   }
 }
 
+// What the button says while updating. The server sends steps meant for logs as
+// well, such as where the installer's log file is; only the ones named here reach
+// the button, so an internal detail cannot end up in the top bar. The labels are
+// short on purpose: the button keeps one width, and the tabs beside it do not shift
+// as the steps change.
+const UPDATE_STEP_LABELS = {
+  "Checking for updates...": "Checking…",
+  "Downloading update...": "Downloading…",
+  "Installing update...": "Installing…",
+  "Verifying signature...": "Verifying…",
+  "Restarting...": "Restarting…",
+};
+
 async function performSelfUpdate() {
   if (state.appVersion?.self_update_supported === false) {
     window.open(state.appVersion.latest_release_url || state.appVersion.releases_url, "_blank", "noopener,noreferrer");
     return;
   }
-  if (els.openUpdateButton.disabled) return;
-  els.openUpdateButton.disabled = true;
+  const button = els.openUpdateButton;
+  if (button.disabled) return;
+  button.disabled = true;
+  const idleTitle = button.title;
+  button.title = "";
+  button.classList.add("is-updating");
+  button.innerHTML = '<span class="update-fill"></span><span class="update-label">Updating…</span>';
+  const fill = button.querySelector(".update-fill");
+  const label = button.querySelector(".update-label");
 
-  // Show inline progress bar
-  els.openUpdateButton.innerHTML =
-    '<span class="update-label">Updating...</span>' +
-    '<span class="update-bar"><span class="update-bar-fill"></span></span>';
-
-  const fill = els.openUpdateButton.querySelector(".update-bar-fill");
-  const label = els.openUpdateButton.querySelector(".update-label");
+  const show = (text, percent, busy = false) => {
+    label.textContent = text;
+    fill.style.width = `${percent}%`;
+    button.classList.toggle("is-busy", busy);
+  };
+  const fail = (reason) => {
+    show("Update failed", 0);
+    button.title = reason;
+    button.disabled = false;
+    setTimeout(() => {
+      button.classList.remove("is-updating");
+      button.textContent = "Update";
+      button.title = idleTitle;
+    }, 4000);
+  };
 
   const handleProgress = (data) => {
     if (data.step?.startsWith("error:")) {
-      label.textContent = "Update failed";
-      fill.style.width = "0%";
-      els.openUpdateButton.disabled = false;
-      setTimeout(() => {
-        els.openUpdateButton.textContent = "Update";
-      }, 3000);
-      console.error("Self-update failed:", data.step);
+      const reason = data.step.slice("error:".length).trim();
+      console.error("Self-update failed:", reason);
+      fail(reason);
       return false;
     }
     if (data.percent != null) {
-      fill.style.width = data.percent + "%";
-      const mb = (data.downloaded / 1048576).toFixed(1);
-      const totalMb = (data.total / 1048576).toFixed(1);
-      label.textContent = `${mb} / ${totalMb} MB`;
-    } else {
-      label.textContent = data.step;
-      if (data.step === "Installing update...") fill.style.width = "90%";
-      if (data.step === "Restarting...") fill.style.width = "100%";
+      show(`Downloading ${data.percent}%`, data.percent);
+      return true;
     }
+    const text = UPDATE_STEP_LABELS[data.step];
+    if (!text) return true;
+    // After the download there is nothing to measure, so the full bar pulses.
+    const downloaded = data.step !== "Checking for updates..." && data.step !== "Downloading update...";
+    show(text, downloaded ? 100 : 0, downloaded && data.step !== "Restarting...");
     return true;
   };
 
-  const markRestarting = () => {
-    label.textContent = "Restarting...";
-    fill.style.width = "100%";
-  };
+  const markRestarting = () => show("Restarting…", 100);
 
   try {
     const response = await fetch("/api/self-update", { method: "POST" });
@@ -2836,17 +2856,12 @@ async function performSelfUpdate() {
     markRestarting();
   } catch (error) {
     // Connection loss usually means the app is restarting after replacement.
-    if (label.textContent === "Restarting..." || fill.style.width === "100%") {
+    if (label.textContent === "Restarting…") {
       markRestarting();
       return;
     }
-    label.textContent = "Update failed";
-    fill.style.width = "0%";
-    els.openUpdateButton.disabled = false;
-    setTimeout(() => {
-      els.openUpdateButton.textContent = "Update";
-    }, 3000);
     console.error("Self-update failed:", error);
+    fail(error?.message || "The update could not be started.");
   }
 }
 

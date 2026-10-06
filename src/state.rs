@@ -1137,12 +1137,12 @@ impl AppState {
                 return Err(error);
             }
         };
-        tx.send(UpdateProgress::step(&format!(
-            "Installer log: {}",
-            installer_log_path.display()
-        )))
-        .await
-        .ok();
+        // Where the log is belongs in the application log, not in the window: the
+        // person watching the update has no use for a path.
+        tracing::info!(
+            log = %installer_log_path.display(),
+            "starting the self-update installer"
+        );
 
         detach_update_targets(&detach_targets).await;
         artifact_guard.clear_detach_targets();
