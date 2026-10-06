@@ -131,8 +131,10 @@ not per session; `auto` clears it, and so does **Use auto** in the menu. A saved
 browser that is later uninstalled does not block opening: Sniper opens the next one
 in the automatic order and says so in `warnings`.
 
-A browser that is not installed has `"installed": false` and, where the answer is
-not obvious, an `install_hint`; a requirement that is missing carries a `hint` that
+A browser that is not installed has `"installed": false`, an `install_url` that is its
+vendor's own download page (the menu shows it as an **Install** link, and an open that
+names a missing browser says it too), and, where the answer is not obvious, an
+`install_hint`; a requirement that is missing carries a `hint` that
 says where to look, never a command to run. Sniper never installs a browser or a
 skill for you. A browser that is not built for the platform is left out: ego does
 not appear on Windows. Opening one that is missing returns the same explanation.

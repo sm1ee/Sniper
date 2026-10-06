@@ -14493,7 +14493,7 @@ function onBrowserMenuKeydown(event) {
   if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
   // Arrow keys belong to the page unless focus is on the menu or its caret.
   if (document.activeElement !== anchor && !element.contains(document.activeElement)) return;
-  const controls = [...element.querySelectorAll("button:not(:disabled), input")];
+  const controls = [...element.querySelectorAll("button:not(:disabled), input, a[href]")];
   if (!controls.length) return;
   const at = controls.indexOf(document.activeElement);
   const step = event.key === "ArrowDown" ? 1 : -1;
@@ -14536,33 +14536,43 @@ async function fetchBrowserCatalog() {
   }
 }
 
+// One row of the browser menu, as markup. Pure so it can be tested without a DOM.
+function browserMenuRowHtml(entry) {
+  const missing = entry.requirements?.filter((item) => !item.found) || [];
+  // The address comes from the server's catalog, and only an https one becomes a
+  // link: the page it points to is the vendor's, opened outside Sniper.
+  const installUrl = !entry.installed && /^https:\/\//.test(entry.install_url || "") ? entry.install_url : "";
+  const note = entry.installed ? (entry.default ? "Default" : "") : installUrl ? "" : "Not installed";
+  const title = !entry.installed ? entry.install_hint || "" : "";
+  // A saved choice that has since been uninstalled still has to be clearable,
+  // or every open would keep warning about it with no way to stop.
+  const pin = entry.preferred
+    ? `<button class="browser-menu-pin" type="button" data-prefer="auto" title="Go back to the automatic choice">Use auto</button>`
+    : entry.installed
+      ? `<button class="browser-menu-pin" type="button" data-prefer="${escapeHtml(entry.browser)}">Make default</button>`
+      : "";
+  const install = installUrl
+    ? `<a class="browser-menu-install" href="${escapeHtml(installUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Install ${escapeHtml(entry.browser)}">Install &#8599;</a>`
+    : "";
+  return `
+    <div class="browser-menu-row${pin ? " has-pin" : ""}${install ? " has-install" : ""}">
+      <button class="context-menu-item browser-menu-open" type="button" role="menuitem"
+        data-open="${escapeHtml(entry.browser)}" title="${escapeHtml(title)}" ${entry.installed ? "" : "disabled"}>
+        <span class="browser-menu-name">${escapeHtml(entry.browser)}</span>
+        <span class="browser-menu-note">${escapeHtml(note)}</span>
+      </button>
+      ${pin}
+      ${install}
+    </div>
+    ${missing.length ? `<div class="browser-menu-hint">${escapeHtml(missing.map((item) => item.hint || item.name).join(" "))}</div>` : ""}
+  `;
+}
+
 function renderBrowserMenu(catalog) {
   const { anchor, element } = browserMenu;
   // Checked boxes survive a re-render after "Make default".
   const wasChecked = (name) => element.querySelector(`[data-option="${name}"]`)?.checked ? "checked" : "";
-  const rows = catalog.map((entry) => {
-    const missing = entry.requirements?.filter((item) => !item.found) || [];
-    const note = !entry.installed ? "Not installed" : entry.default ? "Default" : "";
-    const title = !entry.installed ? entry.install_hint || "" : "";
-    // A saved choice that has since been uninstalled still has to be clearable,
-    // or every open would keep warning about it with no way to stop.
-    const pin = entry.preferred
-      ? `<button class="browser-menu-pin" type="button" data-prefer="auto" title="Go back to the automatic choice">Use auto</button>`
-      : entry.installed
-        ? `<button class="browser-menu-pin" type="button" data-prefer="${escapeHtml(entry.browser)}">Make default</button>`
-        : "";
-    return `
-      <div class="browser-menu-row${pin ? " has-pin" : ""}">
-        <button class="context-menu-item browser-menu-open" type="button" role="menuitem"
-          data-open="${escapeHtml(entry.browser)}" title="${escapeHtml(title)}" ${entry.installed ? "" : "disabled"}>
-          <span class="browser-menu-name">${escapeHtml(entry.browser)}</span>
-          <span class="browser-menu-note">${escapeHtml(note)}</span>
-        </button>
-        ${pin}
-      </div>
-      ${missing.length ? `<div class="browser-menu-hint">${escapeHtml(missing.map((item) => item.hint || item.name).join(" "))}</div>` : ""}
-    `;
-  });
+  const rows = catalog.map(browserMenuRowHtml);
   element.className = "context-menu browser-menu";
   element.setAttribute("role", "menu");
   element.innerHTML = `

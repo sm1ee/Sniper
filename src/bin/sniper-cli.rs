@@ -2020,7 +2020,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.browser.list",
             "capture browser list",
-            "List the browsers Sniper knows on this platform: whether each is installed, how an agent drives it, what that driver offers, and what is missing. `default` marks the one that opens when none is named; `preferred` marks the one the user saved.",
+            "List the browsers Sniper knows on this platform: whether each is installed, how an agent drives it, what that driver offers, and what is missing. `default` marks the one that opens when none is named; `preferred` marks the one the user saved; `install_url` is where to download one that is missing.",
             Read,
             false,
             &[],

@@ -1550,6 +1550,33 @@ code {
   color: var(--text);
 }
 
+/* Where a missing browser comes from. Always visible, unlike the pin: it is the one
+   thing to do with a row that cannot be opened. */
+.browser-menu-install {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-soft);
+  font-size: var(--font-2xs);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.browser-menu-install:hover,
+.browser-menu-install:focus-visible {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+/* A saved choice that is no longer installed has both: its pin sits left of the link. */
+.browser-menu-row.has-install .browser-menu-pin {
+  right: 72px;
+}
+
 .browser-menu-hint {
   padding: 0 10px 6px;
   color: var(--text-dim);

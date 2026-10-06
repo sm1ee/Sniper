@@ -147,6 +147,20 @@ impl BrowserKind {
         }
     }
 
+    /// The vendor's own download page, shown where a browser is missing. A fixed
+    /// https address in the program: it is never taken from anything the UI or a
+    /// caller sends, so rendering it as a link cannot be turned against the person
+    /// who clicks it.
+    fn install_url(self) -> &'static str {
+        match self {
+            BrowserKind::Chrome => "https://www.google.com/chrome/",
+            BrowserKind::Edge => "https://www.microsoft.com/edge/download",
+            BrowserKind::Brave => "https://brave.com/download/",
+            BrowserKind::Chromium => "https://www.chromium.org/getting-involved/download-chromium/",
+            BrowserKind::Ego => "https://lite.ego.app/",
+        }
+    }
+
     fn candidates(self) -> Vec<PathBuf> {
         if cfg!(target_os = "macos") {
             let app = match self {
@@ -337,6 +351,9 @@ pub struct CatalogEntry {
     pub requirements: Vec<Requirement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<&'static str>,
+    /// Where to download it, for a browser that is not installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_url: Option<&'static str>,
 }
 
 fn current_platform() -> &'static str {
@@ -399,6 +416,7 @@ fn catalog_for(
                 browser: kind.name(),
                 installed: path.is_some(),
                 install_hint: path.is_none().then(|| kind.install_hint()).flatten(),
+                install_url: path.is_none().then(|| kind.install_url()),
                 path: path.map(|path| path.display().to_string()),
                 driver: kind.driver(),
                 platforms: kind.platforms(),
@@ -674,7 +692,11 @@ pub fn not_installed_message(kind: BrowserKind) -> String {
     }
     match kind.install_hint() {
         Some(hint) => format!("{} is not installed. {hint}", kind.name()),
-        None => format!("{} is not installed", kind.name()),
+        None => format!(
+            "{} is not installed. Download it from {}",
+            kind.name(),
+            kind.install_url()
+        ),
     }
 }
 
@@ -1607,7 +1629,7 @@ mod tests {
         }
         assert_eq!(
             not_installed_message(BrowserKind::Edge),
-            "edge is not installed"
+            "edge is not installed. Download it from https://www.microsoft.com/edge/download"
         );
     }
 
@@ -1813,16 +1835,39 @@ mod tests {
         assert!(windows.iter().all(|entry| entry.browser != "ego"));
         assert_eq!(windows.len(), 4);
 
+        // Where to get a missing browser: its vendor's https page, and only for what is
+        // missing. The UI renders it as a link, so it must never be anything else.
+        assert_eq!(chrome.install_url, None);
+        assert!(mac
+            .iter()
+            .filter(|entry| !entry.installed)
+            .all(|entry| entry
+                .install_url
+                .is_some_and(|url| url.starts_with("https://"))));
+        for kind in BrowserKind::ALL {
+            assert!(kind.install_url().starts_with("https://"), "{kind:?}");
+        }
+
         // An installed browser carries no install hint even if it has one to give.
         let ego_installed = catalog_for("macos", |_| Some(PathBuf::from("/x")), requirements, None);
         assert!(ego_installed
             .iter()
-            .all(|entry| entry.install_hint.is_none()));
+            .all(|entry| entry.install_hint.is_none() && entry.install_url.is_none()));
 
         let json = serde_json::to_value(&mac).unwrap();
         assert_eq!(json[0]["driver"], "cdp");
         assert_eq!(json[1]["driver"], "ego-cli");
         assert!(json[0].get("install_hint").is_none(), "absent, not null");
+        assert!(json[0].get("install_url").is_none(), "absent, not null");
+        let edge = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["browser"] == "edge");
+        assert_eq!(
+            edge.unwrap()["install_url"],
+            "https://www.microsoft.com/edge/download"
+        );
     }
 
     #[test]
