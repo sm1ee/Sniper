@@ -961,6 +961,8 @@ let proxySettingsSaveInFlight = false;
 let proxySettingsSavePromise = null;
 let toolsBootPromise = null;
 let displaySettingsPreviewActive = false;
+let displaySettingsReturnFocus = null;
+let activeConfirmDialog = null;
 
 const WORKBENCH_STACK_BREAKPOINT = "(max-width: 1260px)";
 // The inspector keeps its handle well past the point where request and response
@@ -1119,7 +1121,7 @@ function bindEvents() {
       setActiveTool(tab.dataset.tool);
       renderToolPanels();
       if (state.activeTool === "dashboard") {
-        loadSessions({ reloadOnActiveChange: true }).catch((error) => console.error(error));
+        loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError);
       }
       if (state.activeTool === "target") {
         loadTargetSiteMap(true).catch((error) => console.error(error));
@@ -1614,7 +1616,7 @@ function bindEvents() {
     renderToolPanels();
   });
   onClickWithProgress(els.dashboardReloadSessionsButton, () =>
-    loadSessions({ reloadOnActiveChange: true }).catch((error) => console.error(error)));
+    loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError));
   onClickWithProgress(els.dashboardCreateSessionButton, () =>
     createSession().catch(handleWorkspaceActionError));
   onClickWithProgress(els.dashboardOpenStorageBtn, () => {
@@ -2223,6 +2225,11 @@ function bindEvents() {
   document.addEventListener("keydown", (event) => {
     const activeModalAction = getActiveModalAction();
     if (activeModalAction) {
+      if (event.defaultPrevented) return;
+      if (event.key === "Tab" && activeModalAction.modal) {
+        trapModalFocus(event, activeModalAction.modal);
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         activeModalAction.close();
@@ -2232,6 +2239,8 @@ function bindEvents() {
       if (
         event.key === "Enter" &&
         typeof activeModalAction.apply === "function" &&
+        event.target?.tagName === "INPUT" &&
+        ["text", "number", "search", "email", "url", "tel", "password"].includes(event.target.type) &&
         !event.metaKey &&
         !event.ctrlKey &&
         !event.altKey &&
@@ -2242,6 +2251,9 @@ function bindEvents() {
         activeModalAction.apply();
         return;
       }
+      // Leave native control activation alone instead of routing it through the
+      // workspace shortcuts below.
+      return;
     } else if (event.key === "Escape") {
       closeDisplaySettingsModal();
       closeCertificateModal();
@@ -2899,7 +2911,13 @@ async function performSelfUpdate() {
 async function loadSessions({ reloadOnActiveChange = false } = {}) {
   const response = await fetch("/api/sessions");
   await requireOkResponse(response, "Failed to load sessions.");
-  const sessions = jsonArray(await response.json());
+  const sessions = await response.json();
+  if (!Array.isArray(sessions) || sessions.some((session) =>
+    !session || typeof session.id !== "string" || !session.id
+    || typeof session.name !== "string" || typeof session.active !== "boolean"
+  )) {
+    throw new Error("Invalid session list response. Reload to try again.");
+  }
   const previousActiveSessionId = currentSessionId();
   const nextActiveSession = sessions.find((session) => session.active) || sessions[0] || null;
   if (
@@ -7940,7 +7958,11 @@ function loadScriptOnce(source) {
 
 function renderDashboard() {
   // Ensure selectedSessionId defaults to active session
-  const activeSession = state.activeSession || state.sessions.find((session) => session.active) || null;
+  const activeSession = state.sessions.find((session) => session.active)
+    || state.sessions.find((session) => session.id === state.activeSession?.id) || null;
+  if (!state.sessions.some((session) => session.id === state.selectedSessionId)) {
+    state.selectedSessionId = null;
+  }
   if (!state.selectedSessionId && activeSession) {
     state.selectedSessionId = activeSession.id;
   }
@@ -8115,15 +8137,17 @@ document.addEventListener("click", () => closeSessionContextMenu());
 document.addEventListener("contextmenu", () => closeSessionContextMenu());
 
 function showConfirmDialog(message, onConfirm, { title = "Confirm", confirmLabel = "Delete" } = {}) {
+  activeConfirmDialog?.close();
+  const returnFocus = document.activeElement;
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop confirm-dialog-backdrop";
   backdrop.innerHTML = `
-    <div class="modal-card" style="width: min(400px, 90%);">
+    <div class="modal-card" role="alertdialog" aria-modal="true" aria-label="${escapeHtml(title)}" aria-describedby="confirm-dialog-message" style="width: min(400px, 90%);">
       <div class="modal-header" style="padding: 16px 20px;">
         <h3 style="margin:0; font-size: var(--font-md);">${escapeHtml(title)}</h3>
       </div>
       <div class="modal-body" style="padding: 16px 20px;">
-        <p style="margin:0; white-space: pre-line; color: var(--text-dim);">${escapeHtml(message)}</p>
+        <p id="confirm-dialog-message" style="margin:0; white-space: pre-line; color: var(--text-dim);">${escapeHtml(message)}</p>
       </div>
       <div style="display:flex; justify-content:flex-end; gap:8px; padding: 12px 20px; border-top: 1px solid var(--line);">
         <button class="secondary-action confirm-dialog-cancel" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">Cancel</button>
@@ -8132,10 +8156,17 @@ function showConfirmDialog(message, onConfirm, { title = "Confirm", confirmLabel
     </div>
   `;
   document.body.appendChild(backdrop);
-  const close = () => backdrop.remove();
+  const close = () => {
+    if (!backdrop.isConnected) return;
+    backdrop.remove();
+    if (activeConfirmDialog?.modal === backdrop) activeConfirmDialog = null;
+    restoreModalFocus(returnFocus);
+  };
+  activeConfirmDialog = { modal: backdrop, close };
   backdrop.querySelector(".confirm-dialog-cancel").addEventListener("click", close);
   backdrop.querySelector(".confirm-dialog-ok").addEventListener("click", () => { close(); onConfirm(); });
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector(".confirm-dialog-cancel").focus();
 }
 
 async function deleteSessionById(id) {
@@ -17331,6 +17362,9 @@ function selectSettingsTab(name) {
 }
 
 function openDisplaySettingsModal() {
+  if (!isModalVisible(els.displaySettingsModal)) {
+    displaySettingsReturnFocus = document.activeElement;
+  }
   hydrateDisplaySettingsForm();
   applyDisplaySettingsState();
   renderShortcutReference();
@@ -17339,6 +17373,7 @@ function openDisplaySettingsModal() {
   // After the modal is shown: the tabs have no offsetWidth to measure while it
   // is still display:none.
   selectSettingsTab("runtime");
+  els.closeDisplaySettingsButton.focus();
 }
 
 async function installCliPath() {
@@ -17366,12 +17401,17 @@ async function installCliPath() {
 }
 
 function closeDisplaySettingsModal() {
+  const wasVisible = isModalVisible(els.displaySettingsModal);
   if (displaySettingsPreviewActive) {
     hydrateDisplaySettingsForm();
     applyDisplaySettingsState();
     displaySettingsPreviewActive = false;
   }
   els.displaySettingsModal.classList.add("hidden");
+  if (wasVisible) {
+    restoreModalFocus(displaySettingsReturnFocus, els.openDisplaySettingsButton);
+    displaySettingsReturnFocus = null;
+  }
 }
 
 function openFilterModal() {
@@ -17387,9 +17427,32 @@ function isModalVisible(modal) {
   return Boolean(modal) && !modal.classList.contains("hidden");
 }
 
+function restoreModalFocus(previous, fallback = document.querySelector(".main-tab.active")) {
+  const target = previous?.isConnected && !previous.disabled && previous.tabIndex >= 0
+    && previous.getClientRects().length && window.getComputedStyle(previous).visibility !== "hidden"
+    ? previous : fallback;
+  target?.focus({ preventScroll: true });
+}
+
+function trapModalFocus(event, modal) {
+  const controls = Array.from(modal.querySelectorAll("button, [href], input, select, textarea, [tabindex]"))
+    .filter((control) => !control.disabled && control.tabIndex >= 0 && control.getClientRects().length
+      && window.getComputedStyle(control).visibility !== "hidden");
+  const first = controls[0], last = controls[controls.length - 1];
+  if (!first) return;
+  const outsideControls = !controls.includes(document.activeElement);
+  if (event.shiftKey ? document.activeElement === first || outsideControls
+    : document.activeElement === last || outsideControls) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
+}
+
 function getActiveModalAction() {
+  if (activeConfirmDialog) return activeConfirmDialog;
   if (isModalVisible(els.displaySettingsModal)) {
     return {
+      modal: els.displaySettingsModal,
       close: closeDisplaySettingsModal,
       apply: saveDisplaySettingsFromForm,
     };
