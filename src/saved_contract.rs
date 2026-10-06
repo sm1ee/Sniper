@@ -120,6 +120,17 @@ pub fn is_write(name: &str) -> bool {
     )
 }
 
+/// Resolve the session identity for saved-data diagnostics and response binding.
+/// A present top-level member keeps precedence even when invalid, so malformed
+/// mixed inputs cannot substitute a continuation's session in their errors.
+pub fn input_session_id(input: &Value) -> Option<Uuid> {
+    input
+        .get("session_id")
+        .or_else(|| input.get("continuation")?.get("session_id"))
+        .and_then(Value::as_str)
+        .and_then(|text| Uuid::parse_str(text).ok())
+}
+
 /// Validate first, so serde's acceptance of null `Option`s cannot widen a contract.
 pub fn parse_input<T: DeserializeOwned>(name: &str, value: &Value) -> Result<T, String> {
     validate_input(name, value)?;
@@ -794,6 +805,40 @@ mod tests {
         assert!(input_schema("capture.replay.send").is_none());
         assert!(output_schema("saved.v2.http.list").is_none());
         assert!(validate_input("saved.v1.missing", &json!({})).is_err());
+    }
+
+    #[test]
+    fn error_session_identity_uses_cursor_without_overriding_top_level_input() {
+        let explicit = Uuid::nil();
+        let pinned = Uuid::new_v4();
+        assert_eq!(
+            input_session_id(&json!({"session_id":explicit})),
+            Some(explicit)
+        );
+        assert_eq!(
+            input_session_id(&json!({"continuation":{"session_id":pinned}})),
+            Some(pinned)
+        );
+        assert_eq!(
+            input_session_id(&json!({"session_id":explicit,"continuation":{"session_id":pinned}})),
+            Some(explicit)
+        );
+        for invalid in [json!(null), json!("invalid"), json!(12)] {
+            assert_eq!(
+                input_session_id(
+                    &json!({"session_id":invalid,"continuation":{"session_id":pinned}})
+                ),
+                None
+            );
+        }
+        for input in [
+            json!(null),
+            json!({}),
+            json!({"continuation":null}),
+            json!({"continuation":{"session_id":"invalid"}}),
+        ] {
+            assert_eq!(input_session_id(&input), None);
+        }
     }
 
     #[test]

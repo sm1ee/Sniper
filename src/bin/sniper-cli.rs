@@ -8291,10 +8291,7 @@ fn saved_cli_error(
             .get("operation_id")
             .and_then(Value::as_str)
             .and_then(|s| Uuid::parse_str(s).ok()),
-        session_id: input
-            .get("session_id")
-            .and_then(Value::as_str)
-            .and_then(|s| Uuid::parse_str(s).ok()),
+        session_id: sniper::saved_contract::input_session_id(input),
     })
 }
 
@@ -8461,7 +8458,7 @@ async fn run_saved_call(
                 sniper::saved_operations::SavedOperationOutcome::Applied
             )
             || error.operation_id != saved_uuid_field(&input, "operation_id")
-            || error.session_id != saved_uuid_field(&input, "session_id")
+            || error.session_id != sniper::saved_contract::input_session_id(&input)
         {
             return Err(saved_cli_error("INVALID_RESPONSE", "Saved-data error does not match this request; inspect the original operation receipt", uncertain_outcome, &input));
         }

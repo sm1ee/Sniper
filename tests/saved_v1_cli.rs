@@ -313,6 +313,76 @@ async fn saved_v1_cli_rejects_misattributed_and_malformed_responses() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_v1_cli_binds_continuation_errors_to_the_requested_session() {
+    use axum::{
+        http::StatusCode,
+        routing::{get, post},
+        Json, Router,
+    };
+    let dir = std::env::temp_dir().join(format!("sniper-v1-cli-cursor-error-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session_id = Uuid::new_v4();
+    let input = json!({"continuation":{
+        "session_id":session_id,"store_generation":Uuid::new_v4(),
+        "before_sequence":2,"limit":1
+    }});
+    let mut invalid = input.clone();
+    invalid["continuation"]["limit"] = json!(0);
+    let (ok, output) = call(
+        &dir,
+        "http://127.0.0.1:1",
+        "saved.v1.http.list",
+        invalid,
+        Some("--dry-run"),
+    )
+    .await;
+    assert!(!ok, "{output}");
+    assert_eq!(output["error"]["code"], "INVALID_INPUT");
+    assert_eq!(
+        output["error"]["details"]["session_id"],
+        session_id.to_string()
+    );
+    assert_eq!(output["error"]["details"]["outcome"], "not_applied");
+    for (error_session, expected) in [
+        (json!(session_id), "STALE_CONTINUATION"),
+        (json!(Uuid::new_v4()), "INVALID_RESPONSE"),
+        (Value::Null, "INVALID_RESPONSE"),
+    ] {
+        let wire = json!({"ok":false,"contract_version":"saved.v1","error":{
+            "code":"STALE_CONTINUATION","message":"Generated continuation error",
+            "outcome":"not_applied","operation_id":null,
+            "session_id":error_session,"retryable":false
+        }});
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let settings = json!({"runtime_instance_id":Uuid::new_v4(),"proxy_addr":"127.0.0.1:0",
+            "ui_addr":listener.local_addr().unwrap().to_string(),"data_dir":dir.to_string_lossy(),
+            "max_entries":100,"features":["http_capture","session_storage","replay"]});
+        let app = Router::new()
+            .route("/api/settings", get(move || async move { Json(settings) }))
+            .route(
+                "/api/saved/v1/call",
+                post(move || async move { (StatusCode::CONFLICT, Json(wire)) }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (ok, output) = call(&dir, &api, "saved.v1.http.list", input.clone(), None).await;
+        assert!(!ok, "{output}");
+        assert_eq!(output["error"]["code"], expected, "{output}");
+        assert_eq!(
+            output["error"]["details"]["session_id"],
+            session_id.to_string()
+        );
+        assert_eq!(output["error"]["details"]["outcome"], "not_applied");
+        assert_eq!(output["error"]["retryable"], false);
+        server.abort();
+        let _ = server.await;
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saved_v1_cli_transport_loss_reports_unknown_without_retry() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let dir = std::env::temp_dir().join(format!("sniper-v1-cli-loss-{}", Uuid::new_v4()));

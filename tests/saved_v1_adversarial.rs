@@ -438,11 +438,34 @@ async fn http_continuation_expires_after_restart_instead_of_admitting_reused_seq
     assert_eq!(status, reqwest::StatusCode::CONFLICT, "{output}");
     assert_eq!(output["error"]["code"], "STALE_CONTINUATION");
     assert_eq!(output["error"]["outcome"], "not_applied");
+    assert_eq!(output["error"]["session_id"], session_id.to_string());
     let fresh = reopened
         .ok("saved.v1.http.list", json!({"session_id":session_id}))
         .await;
     assert_eq!(ids(&fresh).len(), 1);
     reopened.remove().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_continuation_session_errors_keep_the_pinned_identity() {
+    let fixture = Fixture::new().await;
+    let session_id = Uuid::new_v4();
+    let (status, output) = fixture
+        .call(
+            "saved.v1.http.list",
+            json!({"continuation":{
+                "session_id":session_id,"store_generation":Uuid::new_v4(),
+                "before_sequence":2,"limit":1
+            }}),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{output}");
+    assert_eq!(output["error"]["code"], "SESSION_NOT_FOUND");
+    assert_eq!(output["error"]["outcome"], "not_applied");
+    assert_eq!(output["error"]["session_id"], session_id.to_string());
+    assert!(output["error"]["operation_id"].is_null());
+    assert_eq!(output["error"]["retryable"], false);
+    fixture.remove().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

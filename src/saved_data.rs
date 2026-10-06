@@ -79,10 +79,7 @@ fn error_response(
             .get("operation_id")
             .and_then(Value::as_str)
             .and_then(|s| Uuid::parse_str(s).ok()),
-        session_id: input
-            .get("session_id")
-            .and_then(Value::as_str)
-            .and_then(|s| Uuid::parse_str(s).ok()),
+        session_id: saved_contract::input_session_id(input),
         retryable: false,
     };
     (
