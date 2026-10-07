@@ -2655,7 +2655,6 @@ function bindEvents() {
   bindWorkbenchStackResizer(els.historyWorkbenchResizer);
   bindWebsocketPaneResizer(els.websocketSplitResizer);
   bindWebsocketStackResizer(els.websocketStackResizer);
-  bindHistoryColumnResizers();
   applyWsColumnWidths();
   bindWsColumnResizers();
 
@@ -8611,14 +8610,21 @@ function getFilteredFindings() {
 
   // Sort
   const dir = findingsSortDir === "asc" ? 1 : -1;
+  const timestampSortKey = (value) => {
+    const text = value || "";
+    const match = typeof text === "string"
+      && text.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{3}(?:\d{3}){0,2}))?Z$/);
+    // Chrono varies fractional precision; padding keeps Z from reversing prefix timestamps.
+    return match ? `${match[1]}.${(match[2] || "").padEnd(9, "0")}Z` : text;
+  };
   filtered.sort((a, b) => {
     let va, vb;
     if (findingsSortKey === "severity") {
       va = SEVERITY_ORDER[a.severity] ?? 5;
       vb = SEVERITY_ORDER[b.severity] ?? 5;
     } else if (findingsSortKey === "found_at") {
-      va = a.found_at || "";
-      vb = b.found_at || "";
+      va = timestampSortKey(a.found_at);
+      vb = timestampSortKey(b.found_at);
     } else {
       va = (a[findingsSortKey] || "").toLowerCase();
       vb = (b[findingsSortKey] || "").toLowerCase();
@@ -9939,12 +9945,14 @@ function applyFindingsColumnWidths() {
 }
 
 function bindFindingsColumnResizers() {
+  let finishResize = null;
   document.querySelectorAll(".findings-col-resize").forEach((handle) => {
     handle.addEventListener("mousedown", (event) => {
       const key = handle.dataset.findingsCol;
       const limits = FINDINGS_COL_RULES[key];
       if (!key || !limits) return;
 
+      finishResize?.();
       event.preventDefault();
       event.stopPropagation();
 
@@ -9954,20 +9962,29 @@ function bindFindingsColumnResizers() {
       handle.classList.add("active");
 
       const onMove = (moveEvent) => {
+        if (moveEvent.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = moveEvent.clientX - event.clientX;
         findingsColWidths[key] = Math.max(limits.min, Math.min(Math.round(startWidth + delta), limits.max));
         applyFindingsColumnWidths();
       };
 
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-x");
         handle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
       };
 
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
   });
 }
@@ -19539,6 +19556,7 @@ function applyWsColumnWidths() {
 }
 
 function bindWsColumnResizers() {
+  let finishResize = null;
   const handles = document.querySelectorAll("#websocketTable .ws-col-resize-handle");
   handles.forEach((handle) => {
     handle.addEventListener("dblclick", (event) => {
@@ -19556,6 +19574,7 @@ function bindWsColumnResizers() {
       const limits = WS_COLUMN_RULES[key];
       if (!key || !limits || limits.max === 0) return;
 
+      finishResize?.();
       event.preventDefault();
       event.stopPropagation();
 
@@ -19565,26 +19584,36 @@ function bindWsColumnResizers() {
       handle.classList.add("active");
 
       const onMove = (moveEvent) => {
+        if (moveEvent.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = moveEvent.clientX - event.clientX;
         state.wsColumnWidths[key] = clamp(Math.round(startWidth + delta), limits.min, limits.max);
         applyWsColumnWidths();
       };
 
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-x");
         handle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
         scheduleUiSettingsSave();
       };
 
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
   });
 }
 
 function bindHistoryColumnResizers() {
+  let finishResize = null;
   historyColumnHandles.forEach((handle) => {
     handle.addEventListener("dblclick", (event) => {
       event.preventDefault();
@@ -19605,6 +19634,7 @@ function bindHistoryColumnResizers() {
         return;
       }
 
+      finishResize?.();
       event.preventDefault();
       event.stopPropagation();
 
@@ -19614,6 +19644,10 @@ function bindHistoryColumnResizers() {
       handle.classList.add("active");
 
       const onMove = (moveEvent) => {
+        if (moveEvent.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = moveEvent.clientX - event.clientX;
         state.historyColumnWidths[key] = clamp(
           Math.round(startWidth + delta),
@@ -19624,15 +19658,20 @@ function bindHistoryColumnResizers() {
       };
 
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-x");
         handle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
         saveHistoryColumnWidths();
       };
 
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
   });
 }
