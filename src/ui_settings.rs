@@ -559,7 +559,7 @@ fn load_ui_settings_snapshot(data_dir: &Path) -> Result<AppUiSettingsSnapshot> {
                     path = %path.display(),
                     "discarding corrupt ui settings"
                 );
-                move_corrupt_ui_settings_aside(data_dir, &path);
+                move_corrupt_ui_settings_aside(data_dir, &path)?;
                 let snapshot = AppUiSettingsSnapshot::default();
                 persist_ui_settings(&path, &snapshot)?;
                 Ok(snapshot)
@@ -575,7 +575,7 @@ fn load_ui_settings_snapshot(data_dir: &Path) -> Result<AppUiSettingsSnapshot> {
                 path = %path.display(),
                 "discarding unreadable ui settings"
             );
-            move_corrupt_ui_settings_aside(data_dir, &path);
+            move_corrupt_ui_settings_aside(data_dir, &path)?;
             let snapshot = AppUiSettingsSnapshot::default();
             persist_ui_settings(&path, &snapshot)?;
             Ok(snapshot)
@@ -598,6 +598,7 @@ fn persist_ui_settings(path: &Path, snapshot: &AppUiSettingsSnapshot) -> Result<
 
     let data = serde_json::to_vec_pretty(snapshot).context("failed to serialize ui settings")?;
     let tmp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+    let mut tmp_guard = TempUiSettingsFile(Some(tmp_path.clone()));
     {
         let mut file = fs::File::create(&tmp_path)
             .with_context(|| format!("failed to write ui settings {}", tmp_path.display()))?;
@@ -612,7 +613,7 @@ fn persist_ui_settings(path: &Path, snapshot: &AppUiSettingsSnapshot) -> Result<
             "moving directory ui settings aside before replace"
         );
         if let Some(parent) = path.parent() {
-            move_corrupt_ui_settings_aside(parent, path);
+            move_corrupt_ui_settings_aside(parent, path)?;
         }
     }
     crate::platform::rename(&tmp_path, path).with_context(|| {
@@ -622,22 +623,38 @@ fn persist_ui_settings(path: &Path, snapshot: &AppUiSettingsSnapshot) -> Result<
             path.display()
         )
     })?;
+    tmp_guard.0 = None;
     if let Some(parent) = path.parent() {
         sync_directory(parent, "ui settings directory")?;
     }
     Ok(())
 }
 
-fn move_corrupt_ui_settings_aside(data_dir: &Path, path: &Path) {
-    let corrupt_path = data_dir.join(format!(".ui-settings.corrupt-{}.json", Uuid::new_v4()));
-    if let Err(rename_error) = crate::platform::rename(path, &corrupt_path) {
-        warn!(
-            ?rename_error,
-            path = %path.display(),
-            "failed to move corrupt ui settings aside"
-        );
-        let _ = fs::remove_file(path);
+struct TempUiSettingsFile(Option<PathBuf>);
+
+impl Drop for TempUiSettingsFile {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_file(path);
+        }
     }
+}
+
+fn move_corrupt_ui_settings_aside(data_dir: &Path, path: &Path) -> Result<()> {
+    let corrupt_path = data_dir.join(format!(".ui-settings.corrupt-{}.json", Uuid::new_v4()));
+    #[cfg(test)]
+    let result = tests::check_backup_rename(path)
+        .and_then(|()| crate::platform::rename(path, &corrupt_path));
+    #[cfg(not(test))]
+    let result = crate::platform::rename(path, &corrupt_path);
+    // Recovery must not discard the only copy when its backup cannot be created.
+    result.with_context(|| {
+        format!(
+            "failed to move corrupt ui settings {} to {}",
+            path.display(),
+            corrupt_path.display()
+        )
+    })
 }
 
 fn sync_directory(path: &Path, label: &str) -> Result<()> {
@@ -699,7 +716,261 @@ fn default_ws_column_widths() -> BTreeMap<String, u16> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+        sync::{LazyLock, Mutex},
+    };
+
     use super::{AppUiSettingsSnapshot, AppUiSettingsStore};
+
+    static BACKUP_FAILURE_PATHS: LazyLock<Mutex<BTreeMap<PathBuf, usize>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+    pub(super) fn check_backup_rename(path: &Path) -> std::io::Result<()> {
+        let should_fail = {
+            let mut paths = BACKUP_FAILURE_PATHS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(attempts) = paths.get_mut(path) {
+                *attempts += 1;
+                true
+            } else {
+                false
+            }
+        };
+        if should_fail {
+            Err(std::io::Error::other("injected ui settings backup failure"))
+        } else {
+            Ok(())
+        }
+    }
+
+    struct BackupRenameFailure(PathBuf);
+
+    impl BackupRenameFailure {
+        fn new(path: &Path) -> Self {
+            let previous = BACKUP_FAILURE_PATHS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(path.to_path_buf(), 0);
+            assert!(
+                previous.is_none(),
+                "backup failure is already armed for this path"
+            );
+            Self(path.to_path_buf())
+        }
+
+        fn attempts(&self) -> usize {
+            *BACKUP_FAILURE_PATHS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&self.0)
+                .unwrap()
+        }
+    }
+
+    impl Drop for BackupRenameFailure {
+        fn drop(&mut self) {
+            BACKUP_FAILURE_PATHS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.0);
+        }
+    }
+
+    struct TestDataDir(PathBuf);
+
+    impl TestDataDir {
+        fn new() -> Self {
+            let path = temp_data_dir();
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDataDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn directory_entries(path: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn ui_settings_backup_rename_failure_preserves_the_original_file() {
+        let data_dir = TestDataDir::new();
+        let path = data_dir.0.join(super::UI_SETTINGS_FILE);
+        let original = b"synthetic settings that must remain recoverable";
+        std::fs::write(&path, original).unwrap();
+        let blocked_parent = data_dir.0.join("not-a-directory");
+        std::fs::write(&blocked_parent, b"marker").unwrap();
+
+        let error = super::move_corrupt_ui_settings_aside(&blocked_parent, &path).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to move corrupt ui settings"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read(&blocked_parent).unwrap(), b"marker");
+        assert_eq!(
+            directory_entries(&data_dir.0),
+            vec!["not-a-directory", super::UI_SETTINGS_FILE]
+        );
+    }
+
+    #[test]
+    fn ui_settings_load_preserves_corrupt_file_when_backup_fails() {
+        for original in [
+            b"{not json".as_slice(),
+            br#"{"display_settings":{"theme":"paper"},"workbench_height":70000}"#.as_slice(),
+        ] {
+            let data_dir = TestDataDir::new();
+            let path = data_dir.0.join(super::UI_SETTINGS_FILE);
+            std::fs::write(&path, original).unwrap();
+            let failure = BackupRenameFailure::new(&path);
+
+            let error = AppUiSettingsStore::load_or_create(&data_dir.0)
+                .err()
+                .expect("loading must stop when backup fails");
+
+            assert!(format!("{error:#}").contains("injected ui settings backup failure"));
+            assert_eq!(
+                failure.attempts(),
+                1,
+                "load must stop after its failed backup"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(
+                directory_entries(&data_dir.0),
+                vec![super::UI_SETTINGS_FILE]
+            );
+        }
+    }
+
+    #[test]
+    fn ui_settings_load_preserves_unreadable_directory_when_backup_fails() {
+        let data_dir = TestDataDir::new();
+        let path = data_dir.0.join(super::UI_SETTINGS_FILE);
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("marker"), b"keep directory contents").unwrap();
+        let failure = BackupRenameFailure::new(&path);
+
+        let error = AppUiSettingsStore::load_or_create(&data_dir.0)
+            .err()
+            .expect("loading must stop when backup fails");
+
+        assert!(format!("{error:#}").contains("injected ui settings backup failure"));
+        assert_eq!(
+            failure.attempts(),
+            1,
+            "load must stop after its failed backup"
+        );
+        assert_eq!(
+            std::fs::read(path.join("marker")).unwrap(),
+            b"keep directory contents"
+        );
+        assert_eq!(directory_entries(&path), vec!["marker"]);
+        assert_eq!(
+            directory_entries(&data_dir.0),
+            vec![super::UI_SETTINGS_FILE]
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_settings_replace_preserves_state_and_cleans_temps_when_backup_fails() {
+        let data_dir = TestDataDir::new();
+        let store = AppUiSettingsStore::load_or_create(&data_dir.0).unwrap();
+        let mut initial = store.snapshot().await;
+        initial.client_id = "synthetic-client".to_string();
+        initial.client_version = 1;
+        initial.display_settings.theme = "paper".to_string();
+        let current = store.replace_snapshot(initial).await.unwrap();
+        let current_json = serde_json::to_value(&current).unwrap();
+        let mut next = current.clone();
+        next.client_version += 1;
+        next.display_settings.theme = "black".to_string();
+
+        let path = data_dir.0.join(super::UI_SETTINGS_FILE);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("marker"), b"keep directory contents").unwrap();
+        let failure = BackupRenameFailure::new(&path);
+        for attempt in 1..=3 {
+            let error = store.replace_snapshot(next.clone()).await.unwrap_err();
+            assert!(format!("{error:#}").contains("injected ui settings backup failure"));
+            assert_eq!(failure.attempts(), attempt);
+            assert_eq!(
+                serde_json::to_value(store.snapshot().await).unwrap(),
+                current_json
+            );
+            assert_eq!(
+                std::fs::read(path.join("marker")).unwrap(),
+                b"keep directory contents"
+            );
+            assert_eq!(directory_entries(&path), vec!["marker"]);
+            assert_eq!(
+                directory_entries(&data_dir.0),
+                vec![super::UI_SETTINGS_FILE]
+            );
+        }
+
+        drop(failure);
+        let saved = store.replace_snapshot(next).await.unwrap();
+        assert_eq!(saved.display_settings.theme, "black");
+        assert_eq!(saved.server_revision, current.server_revision + 1);
+        assert_eq!(saved.client_version, current.client_version + 1);
+        let names = directory_entries(&data_dir.0);
+        assert_eq!(
+            names.len(),
+            2,
+            "successful retry must leave no temporary files"
+        );
+        let backup = names
+            .iter()
+            .find(|name| name.starts_with(".ui-settings.corrupt-"))
+            .unwrap();
+        assert_eq!(
+            std::fs::read(data_dir.0.join(backup).join("marker")).unwrap(),
+            b"keep directory contents"
+        );
+        let reloaded = AppUiSettingsStore::load_or_create(&data_dir.0).unwrap();
+        assert_eq!(
+            serde_json::to_value(reloaded.snapshot().await).unwrap(),
+            serde_json::to_value(saved).unwrap()
+        );
+    }
+
+    #[test]
+    fn ui_settings_backup_failure_hook_is_path_scoped_and_released_on_drop() {
+        let data_dir = TestDataDir::new();
+        let path = data_dir.0.join(super::UI_SETTINGS_FILE);
+        let other_path = data_dir.0.join("other-settings.json");
+        {
+            let _failure = BackupRenameFailure::new(&path);
+            std::thread::scope(|scope| {
+                scope.spawn(|| assert!(check_backup_rename(&path).is_err()));
+                scope.spawn(|| assert!(check_backup_rename(&other_path).is_ok()));
+            });
+        }
+        assert!(check_backup_rename(&path).is_ok());
+        assert!(check_backup_rename(&other_path).is_ok());
+
+        let unwind = std::panic::catch_unwind(|| {
+            let _failure = BackupRenameFailure::new(&path);
+            assert!(check_backup_rename(&path).is_err());
+            panic!("synthetic test interruption");
+        });
+        assert!(unwind.is_err());
+        assert!(check_backup_rename(&path).is_ok());
+    }
 
     #[tokio::test]
     async fn ui_settings_store_preserves_modified_history_sort_after_reload() {
