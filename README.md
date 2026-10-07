@@ -59,6 +59,7 @@ cargo run --bin sniper-desktop
 | Category | What you get |
 |---|---|
 | **Proxy** | HTTP forwarding, HTTPS MITM, authenticated HTTP/SOCKS5 proxy chaining, persistent root CA, `https://sniper` cert portal |
+| **Browsers** | One click opens Chrome, Edge, Brave, Chromium, ego, Aside or BrowserOS neo already wired to the proxy and CA, and hands an AI agent the way to drive it |
 | **Capture** | HTTP history, WebSocket sessions, intercept queue, match & replace rules |
 | **Findings** | Passive vulnerability scanner — sensitive data, CORS, missing headers, JWT issues |
 | **Replay** | Modify and resend any captured request |
@@ -91,6 +92,26 @@ cargo run --bin sniper-desktop
 Default listeners:
 - Proxy: `127.0.0.1:8080`
 - UI: `127.0.0.1:23001` (headless mode)
+
+## Wired browsers
+
+**Open browser** starts a browser that is ready for testing: its traffic goes
+through Sniper, it trusts Sniper's certificate, and it keeps a profile of its own,
+apart from your everyday one. There is nothing to set up. `sniper-cli capture
+browser open` does the same from a script, and with `--agent` it also hands an AI
+agent what it needs to drive that browser while Sniper records every request.
+
+| Browser | Platforms | An agent drives it through |
+|---|---|---|
+| Chrome, Edge, Brave, Chromium | macOS, Windows, Linux | the DevTools protocol (Playwright, chrome-devtools-mcp) |
+| [ego](https://lite.ego.app/) | macOS | ego's own CLI and agent skill |
+| [Aside](https://aside.com/) | macOS, Windows | Aside's CLI REPL |
+| [BrowserOS neo](https://docs.browseros.com/neo/install) | macOS, Windows | its MCP server |
+
+Sniper never installs a browser: one that is missing appears in the menu with a link
+to its download page. Aside and BrowserOS neo have been checked on macOS, not yet on
+Windows. The [HTTP debugging guide](docs/guides/http-debugging.md#or-open-a-browser-that-is-already-wired)
+covers profiles, `--fresh` and what each driver offers.
 
 ### Remote headless UI
 
