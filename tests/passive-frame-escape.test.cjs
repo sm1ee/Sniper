@@ -65,7 +65,7 @@ function fixture(overrides = {}) {
     "closeBrowserMenu", "onBrowserMenuKeydown",
   ], {
     state, els, document, HTMLElement,
-    activeConfirmDialog: null, displaySettingsReturnFocus: null, filterSettingsReturnFocus: null,
+    activeConfirmDialog: null, displaySettingsReturnFocus: null, filterSettingsReturnFocus: null, filterSettingsEditedControls: new Set(),
     displaySettingsPreviewActive: false, wsFrameContextMenuTarget: null, browserMenu: null,
     window: { getComputedStyle: () => ({ visibility: "visible" }) },
     hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, selectSettingsTab() {},

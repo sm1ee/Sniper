@@ -200,6 +200,7 @@ const FUZZER_RESULT_ROW_HEIGHT = 27;
 let measuredFuzzerResultRowHeight = FUZZER_RESULT_ROW_HEIGHT;
 const FUZZER_RESULT_BUFFER_ROWS = 30;
 const FINDINGS_ROW_HEIGHT = 27;
+let measuredFindingsRowHeight = FINDINGS_ROW_HEIGHT;
 const FINDINGS_BUFFER_ROWS = 20;
 const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "fuzzer", "sequence", "replay", "tools", "logger"]);
 const IMPLEMENTED_PROXY_TABS = new Set(["intercept", "http-history", "websockets-history", "replace", "findings", "oast", "proxy-settings"]);
@@ -964,6 +965,7 @@ let toolsBootPromise = null;
 let displaySettingsPreviewActive = false;
 let displaySettingsReturnFocus = null;
 let filterSettingsReturnFocus = null;
+const filterSettingsEditedControls = new Set();
 let activeConfirmDialog = null;
 
 const WORKBENCH_STACK_BREAKPOINT = "(max-width: 1260px)";
@@ -1574,10 +1576,17 @@ function bindEvents() {
       closeFilterModal();
     }
   });
+  els.filterModal.querySelectorAll("input").forEach((control) => {
+    const markEdited = () => filterSettingsEditedControls.add(control);
+    control.addEventListener("input", markEdited);
+    control.addEventListener("change", markEdited);
+  });
   els.applyFilterSettingsButton.addEventListener("click", applyFilterSettings);
   els.resetFilterSettingsButton.addEventListener("click", () => {
     state.filterSettings = createDefaultFilterSettings();
     hydrateFilterForm();
+    filterSettingsEditedControls.clear();
+    els.filterModal.querySelectorAll("input").forEach((control) => filterSettingsEditedControls.add(control));
     syncHttpInScopePill();
   syncHttpCapturePill();
     scheduleUiSettingsSave();
@@ -8738,6 +8747,17 @@ function renderFindings() {
   renderFindingsVirtual();
 }
 
+function getFindingsRowHeight(options = {}) {
+  const previous = measuredFindingsRowHeight;
+  const measured = els.findingsBody.querySelector(".history-row")?.getBoundingClientRect().height;
+  if (Number.isFinite(measured) && measured > 0) {
+    measuredFindingsRowHeight = measured;
+  }
+  // A font change invalidates old spacers before selection can set scrollTop.
+  if (options.refreshLayout && measuredFindingsRowHeight !== previous) renderFindingsVirtual();
+  return measuredFindingsRowHeight || FINDINGS_ROW_HEIGHT;
+}
+
 function renderFindingsVirtual() {
   const entries = state._findingsEntries;
   if (!entries || !entries.length) return;
@@ -8748,36 +8768,41 @@ function renderFindingsVirtual() {
   const viewportHeight = shell.clientHeight;
   const totalCount = entries.length;
   const headerHeight = els.findingsBody.closest("table")?.tHead?.getBoundingClientRect().height || 0;
-  const maxScrollTop = Math.max(0, headerHeight + totalCount * FINDINGS_ROW_HEIGHT - viewportHeight);
-  const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
-  if (shell.scrollTop !== scrollTop) {
-    shell.scrollTop = scrollTop;
+  const requestedScrollTop = shell.scrollTop;
+  // Live rows reflect font changes; the first paint may need one correction.
+  // Keep the requested offset until the corrected spacers exist, before clamping.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const rowHeight = getFindingsRowHeight();
+    const maxScrollTop = Math.max(0, headerHeight + totalCount * rowHeight - viewportHeight);
+    const scrollTop = Math.max(0, Math.min(requestedScrollTop, maxScrollTop));
+    const startIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - FINDINGS_BUFFER_ROWS);
+    const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / rowHeight) + FINDINGS_BUFFER_ROWS);
+    const topPadding = startIdx * rowHeight;
+    const bottomPadding = Math.max(0, (totalCount - endIdx) * rowHeight);
+
+    const rows = [];
+    for (let i = startIdx; i < endIdx; i++) {
+      const f = entries[i];
+      const selected = f.id === selectedFindingId ? " selected" : "";
+      rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
+        <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
+        <td class="findings-col-category"><span class="detail-chip">${escapeHtml(f.category)}</span></td>
+        <td class="findings-col-title">${escapeHtml(f.title)}</td>
+        <td class="findings-col-host">${escapeHtml(f.host)}</td>
+        <td class="findings-col-path">${escapeHtml(f.path)}</td>
+        <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
+      </tr>`);
+    }
+
+    els.findingsBody.innerHTML =
+      (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
+      rows.join("") +
+      (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
+
+    if (attempt === 0 && getFindingsRowHeight() !== rowHeight) continue;
+    if (shell.scrollTop !== scrollTop) shell.scrollTop = scrollTop;
+    break;
   }
-
-  const startIdx = Math.max(0, Math.floor(scrollTop / FINDINGS_ROW_HEIGHT) - FINDINGS_BUFFER_ROWS);
-  const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / FINDINGS_ROW_HEIGHT) + FINDINGS_BUFFER_ROWS);
-
-  const topPadding = startIdx * FINDINGS_ROW_HEIGHT;
-  const bottomPadding = Math.max(0, (totalCount - endIdx) * FINDINGS_ROW_HEIGHT);
-
-  const rows = [];
-  for (let i = startIdx; i < endIdx; i++) {
-    const f = entries[i];
-    const selected = f.id === selectedFindingId ? " selected" : "";
-    rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
-      <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
-      <td class="findings-col-category"><span class="detail-chip">${escapeHtml(f.category)}</span></td>
-      <td class="findings-col-title">${escapeHtml(f.title)}</td>
-      <td class="findings-col-host">${escapeHtml(f.host)}</td>
-      <td class="findings-col-path">${escapeHtml(f.path)}</td>
-      <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
-    </tr>`);
-  }
-
-  els.findingsBody.innerHTML =
-    (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
-    rows.join("") +
-    (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
 }
 
 async function loadFindingDetail(id) {
@@ -9528,10 +9553,11 @@ function scrollFindingsToId(targetId) {
   const shell = els.findingsBody.closest(".history-table-shell");
   if (!shell || shell.clientHeight <= 0) return;
   const headerHeight = els.findingsBody.closest("table")?.tHead?.getBoundingClientRect().height || 0;
-  const rowTop = idx * FINDINGS_ROW_HEIGHT;
+  const rowHeight = getFindingsRowHeight({ refreshLayout: true });
+  const rowTop = idx * rowHeight;
   const centeredTop = Math.max(0, rowTop - shell.clientHeight / 2);
-  shell.scrollTop = shell.clientHeight >= headerHeight + FINDINGS_ROW_HEIGHT
-    ? Math.max(centeredTop, headerHeight + rowTop + FINDINGS_ROW_HEIGHT - shell.clientHeight)
+  shell.scrollTop = shell.clientHeight >= headerHeight + rowHeight
+    ? Math.max(centeredTop, headerHeight + rowTop + rowHeight - shell.clientHeight)
     : centeredTop;
 }
 
@@ -9555,14 +9581,17 @@ function findingsArrowNav(direction) {
   const shell = els.findingsBody.closest(".history-table-shell");
   if (shell && shell.clientHeight > 0) {
     const headerHeight = els.findingsBody.closest("table")?.tHead?.getBoundingClientRect().height || 0;
-    const rowTop = nextIdx * FINDINGS_ROW_HEIGHT;
-    const rowBottom = headerHeight + rowTop + FINDINGS_ROW_HEIGHT;
+    const rowHeight = getFindingsRowHeight({ refreshLayout: true });
+    const rowTop = nextIdx * rowHeight;
+    const rowBottom = headerHeight + rowTop + rowHeight;
     const viewTop = shell.scrollTop;
     const viewBottom = viewTop + shell.clientHeight;
     if (rowTop < viewTop) {
       shell.scrollTop = rowTop;
     } else if (rowBottom > viewBottom) {
-      shell.scrollTop = rowBottom - shell.clientHeight;
+      // A larger font can leave less than one row of usable viewport height.
+      const nextScrollTop = Math.min(rowTop, rowBottom - shell.clientHeight);
+      if (nextScrollTop !== viewTop) shell.scrollTop = nextScrollTop;
     }
   }
   loadFindingDetail(f.id);
@@ -10452,19 +10481,28 @@ async function moveHistorySelection(offset) {
 }
 
 function scrollSelectedHistoryRowIntoView() {
+  const shell = els.historyTable.closest(".history-table-shell");
+  if (!shell || shell.clientHeight <= 0) return;
+  const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
   const selectedRow = els.historyTableBody.querySelector(".history-row.selected");
   if (selectedRow) {
-    selectedRow.scrollIntoView({ block: "nearest" });
+    // Native nearest treats a row under the sticky header as already visible.
+    const rowRect = selectedRow.getBoundingClientRect();
+    const clientTop = shell.getBoundingClientRect().top + shell.clientTop;
+    const viewTop = clientTop + headerHeight;
+    const viewBottom = clientTop + shell.clientHeight;
+    // A row taller than the available space stays top-aligned on repeat.
+    const adjustment = rowRect.top < viewTop
+      ? rowRect.top - viewTop
+      : Math.max(0, Math.min(rowRect.top - viewTop, rowRect.bottom - viewBottom));
+    if (adjustment) shell.scrollTop = Math.max(0, shell.scrollTop + adjustment);
     return;
   }
   // Row not in DOM — use virtual scroll position
   if (!state.selectedId || !state._historyEntries) return;
   const idx = state._historyEntries.findIndex((e) => e.item.id === state.selectedId);
   if (idx === -1) return;
-  const shell = els.historyTable.closest(".history-table-shell");
-  if (!shell || shell.clientHeight <= 0) return;
   const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
-  const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
   const rowTop = idx * rowHeight;
   const rowBottom = headerHeight + rowTop + rowHeight;
   const viewTop = shell.scrollTop;
@@ -17624,6 +17662,7 @@ function closeDisplaySettingsModal() {
 function openFilterModal() {
   if (isModalVisible(els.filterModal)) return;
   filterSettingsReturnFocus = document.activeElement;
+  filterSettingsEditedControls.clear();
   hydrateFilterForm();
   els.filterModal.classList.remove("hidden");
   els.closeFilterModalButton.focus();
@@ -17632,6 +17671,7 @@ function openFilterModal() {
 function closeFilterModal() {
   const wasVisible = isModalVisible(els.filterModal);
   els.filterModal.classList.add("hidden");
+  filterSettingsEditedControls.clear();
   if (wasVisible) {
     restoreModalFocus(filterSettingsReturnFocus, els.openFilterSettingsButton);
     filterSettingsReturnFocus = null;
@@ -18114,7 +18154,7 @@ async function loadUiSettings() {
     if (!response.ok) {
       throw new Error(await response.text());
     }
-    applyUiSettingsSnapshot(await response.json());
+    applyUiSettingsSnapshot(await response.json(), { mergeFilterDraft: true });
   } catch (error) {
     console.error(error);
   }
@@ -18127,7 +18167,7 @@ function updateUiSettingsServerRevision(snapshot) {
   }
 }
 
-function applyUiSettingsSnapshot(snapshot) {
+function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   updateUiSettingsServerRevision(snapshot);
   state.displaySettings = sanitizeDisplaySettings({
     sizePx: snapshot?.display_settings?.size_px,
@@ -18171,9 +18211,10 @@ function applyUiSettingsSnapshot(snapshot) {
   if (els.methodFilter) {
     els.methodFilter.value = state.method;
   }
-  // A late load or save-conflict response must not replace an open form's draft.
-  if (!isModalVisible(els.filterModal)) {
-    hydrateFilterForm();
+  // The initial load fills untouched controls; a save conflict still leaves the
+  // whole open draft alone. Explicit edits, even back to defaults, must survive.
+  if (!isModalVisible(els.filterModal) || mergeFilterDraft) {
+    hydrateFilterForm({ preserveDraft: isModalVisible(els.filterModal) });
   } else {
     syncColorTagFilterUI();
   }
@@ -18412,30 +18453,35 @@ function syncHttpCapturePill() {
     : "Not recording. Traffic still passes through. Click to resume.";
 }
 
-function hydrateFilterForm() {
+function hydrateFilterForm({ preserveDraft = false } = {}) {
   const filters = state.filterSettings;
-  els.filterInScopeOnly.checked = filters.inScopeOnly;
-  els.filterHideWithoutResponses.checked = filters.hideWithoutResponses;
-  els.filterOnlyParameterized.checked = filters.onlyParameterized;
-  els.filterOnlyNotes.checked = filters.onlyNotes;
-  els.filterSearchTerm.value = filters.searchTerm;
-  els.filterRegex.checked = filters.regex;
-  els.filterCaseSensitive.checked = filters.caseSensitive;
-  els.filterNegativeSearch.checked = filters.negativeSearch;
-  els.filterMimeHtml.checked = filters.mime.html;
-  els.filterMimeScript.checked = filters.mime.script;
-  els.filterMimeJson.checked = filters.mime.json;
-  els.filterMimeCss.checked = filters.mime.css;
-  els.filterMimeImage.checked = filters.mime.image;
-  els.filterMimeWebsocket.checked = filters.mime.websocket !== false;
-  els.filterMimeOther.checked = filters.mime.other;
-  els.filterStatus2xx.checked = filters.status.success;
-  els.filterStatus3xx.checked = filters.status.redirect;
-  els.filterStatus4xx.checked = filters.status.clientError;
-  els.filterStatus5xx.checked = filters.status.serverError;
-  els.filterStatusOther.checked = filters.status.other;
-  els.filterHiddenExtensions.value = filters.hiddenExtensions;
-  els.filterPort.value = filters.port;
+  const update = (control, value) => {
+    if (!preserveDraft || !filterSettingsEditedControls.has(control)) {
+      control[control.type === "checkbox" ? "checked" : "value"] = value;
+    }
+  };
+  update(els.filterInScopeOnly, filters.inScopeOnly);
+  update(els.filterHideWithoutResponses, filters.hideWithoutResponses);
+  update(els.filterOnlyParameterized, filters.onlyParameterized);
+  update(els.filterOnlyNotes, filters.onlyNotes);
+  update(els.filterSearchTerm, filters.searchTerm);
+  update(els.filterRegex, filters.regex);
+  update(els.filterCaseSensitive, filters.caseSensitive);
+  update(els.filterNegativeSearch, filters.negativeSearch);
+  update(els.filterMimeHtml, filters.mime.html);
+  update(els.filterMimeScript, filters.mime.script);
+  update(els.filterMimeJson, filters.mime.json);
+  update(els.filterMimeCss, filters.mime.css);
+  update(els.filterMimeImage, filters.mime.image);
+  update(els.filterMimeWebsocket, filters.mime.websocket !== false);
+  update(els.filterMimeOther, filters.mime.other);
+  update(els.filterStatus2xx, filters.status.success);
+  update(els.filterStatus3xx, filters.status.redirect);
+  update(els.filterStatus4xx, filters.status.clientError);
+  update(els.filterStatus5xx, filters.status.serverError);
+  update(els.filterStatusOther, filters.status.other);
+  update(els.filterHiddenExtensions, filters.hiddenExtensions);
+  update(els.filterPort, filters.port);
   syncColorTagFilterUI();
 }
 
@@ -23572,6 +23618,9 @@ async function beginNoteEdit(cell, transactionId) {
 
   let settled = false;
   let debounce = null;
+  let composing = false;
+  let compositionFinishing = false;
+  let commitAfterComposition = false;
   // Compared against what was last written, not against what the note said when
   // the edit began: typing saves after a pause, so clearing the field back to
   // empty is still a change the server has to be told about.
@@ -23583,33 +23632,70 @@ async function beginNoteEdit(cell, transactionId) {
   };
   const restore = () => {
     if (settled) return;
+    window.clearTimeout(debounce);
     settled = true;
     if (cell.isConnected) cell.innerHTML = previous;
+  };
+  const readValue = () => {
+    const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES);
+    if (value !== input.value) input.value = value;
+    return value.trim();
   };
   const commit = () => {
     if (settled) return;
     window.clearTimeout(debounce);
-    const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES).trim();
+    if (composing || compositionFinishing) {
+      commitAfterComposition = true;
+      if (!composing) scheduleSave();
+      return;
+    }
+    const value = readValue();
     settled = true;
     if (cell.isConnected) cell.innerHTML = previous;
     save(value);
   };
+  const scheduleSave = () => {
+    if (settled) return;
+    window.clearTimeout(debounce);
+    debounce = window.setTimeout(() => {
+      if (settled || composing) return;
+      compositionFinishing = false;
+      if (commitAfterComposition) commit();
+      else save(readValue());
+    }, commitAfterComposition ? 0 : 500);
+  };
   // Save as you type as well as on commit: closing the window mid-edit should
   // not lose what was typed, and updateAnnotations is already flushed on unload.
-  input.addEventListener("input", () => {
-    const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES);
-    if (value !== input.value) input.value = value;
+  input.addEventListener("input", (event) => {
+    if (settled) return;
     window.clearTimeout(debounce);
-    debounce = window.setTimeout(() => save(value.trim()), 500);
+    if (composing || event.isComposing) return;
+    compositionFinishing = false;
+    readValue();
+    scheduleSave();
+  });
+  input.addEventListener("compositionstart", () => {
+    if (settled) return;
+    composing = true;
+    compositionFinishing = false;
+    window.clearTimeout(debounce);
+  });
+  input.addEventListener("compositionend", () => {
+    if (settled) return;
+    composing = false;
+    compositionFinishing = true;
+    // Some IMEs deliver their final input after compositionend. A pending blur
+    // must wait for it instead of saving the unfinished candidate or closing it.
+    scheduleSave();
   });
   input.addEventListener("keydown", (event) => {
     event.stopPropagation();
+    if (composing || event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter") {
       event.preventDefault();
       commit();
     } else if (event.key === "Escape") {
       event.preventDefault();
-      window.clearTimeout(debounce);
       restore();
     }
   });

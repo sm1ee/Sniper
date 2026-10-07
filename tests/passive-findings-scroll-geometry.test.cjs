@@ -18,7 +18,7 @@ function fixture(options = {}) {
     addEventListener(type, callback) { handlers.set(type, callback); },
   };
   const table = { tHead: options.missingHeader ? null : { getBoundingClientRect: () => ({ height: headerHeight }) } };
-  const node = { classList: { add() {}, remove() {} } };
+  const node = { getBoundingClientRect: () => ({ height: rowHeight }), classList: { add() {}, remove() {} } };
   const body = {
     innerHTML: "",
     closest(selector) { return selector === "table" ? table : (options.missingShell ? null : shell); },
@@ -32,10 +32,10 @@ function fixture(options = {}) {
     title: "Saved entry", host: "example.com", path: "/saved", found_at: "",
   })) };
   const c = loadFunctions([
-    "renderFindingsVirtual", "scrollFindingsToId", "findingsArrowNav", "updateFindingsSelection",
+    "getFindingsRowHeight", "renderFindingsVirtual", "scrollFindingsToId", "findingsArrowNav", "updateFindingsSelection",
     "escapeHtml", "severityClass", "severityLabel",
   ], {
-    ...constants, state, els: { findingsBody: body }, selectedFindingId: `saved-${options.selectedIndex ?? 0}`,
+    ...constants, measuredFindingsRowHeight: rowHeight, state, els: { findingsBody: body }, selectedFindingId: `saved-${options.selectedIndex ?? 0}`,
     formatTimestamp: () => "-", loadFindingDetail: id => loads.push(id),
     requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
   });
