@@ -79,8 +79,8 @@ cargo run --bin sniper-desktop
 ## Quick start
 
 1. Download and open Sniper
-2. Click **Open browser** in the top bar. It opens the ego or Aside browser if you
-   have one, otherwise an installed Chrome, Edge, Brave or Chromium, already sending its
+2. Click **Open browser** in the top bar. It opens ego, Aside or BrowserOS neo if
+   you have one, otherwise an installed Chrome, Edge, Brave or Chromium, already sending its
    traffic through Sniper and trusting its certificate, so there is nothing to
    configure. The arrow beside it lists the others, and **Make default** there saves
    your choice.

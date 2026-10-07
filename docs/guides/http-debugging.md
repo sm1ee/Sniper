@@ -174,14 +174,14 @@ see the request first). What the browser is given:
 Which browser it is decides how an agent drives it, and that is the `driver`. The
 result's `control` says what to use, in a shape that depends on the driver:
 
-| | `chrome`, `edge`, `brave`, `chromium` | `ego` | `aside` |
-|---|---|---|---|
-| `driver` | `cdp` | `ego-cli` | `aside-cli` |
-| `control` | `{"driver":"cdp","endpoint":"http://127.0.0.1:<port>"}` | `{"driver":"ego-cli","server_name":"…","command":"ego-browser --ego-server-name=… nodejs -e '<script>'"}` | `{"driver":"aside-cli","command":"aside repl '<code>'"}` |
-| Agent actions | a CDP client you bring | built in | built in, through its REPL |
-| Snapshot with `@ref`s, handoff to the user, visible cursor | no | yes, as ego documents them | not documented |
-| Platforms | macOS, Windows, Linux | macOS | macOS, Windows |
-| Needs on this machine | nothing | ego lite, its command, and its agent skill | Aside and its `aside` command |
+| | `chrome`, `edge`, `brave`, `chromium` | `ego` | `aside` | `browseros-neo` |
+|---|---|---|---|---|
+| `driver` | `cdp` | `ego-cli` | `aside-cli` | `browseros-mcp` |
+| `control` | `{"driver":"cdp","endpoint":"http://127.0.0.1:<port>"}` | `{"driver":"ego-cli","server_name":"…","command":"ego-browser --ego-server-name=… nodejs -e '<script>'"}` | `{"driver":"aside-cli","command":"aside repl '<code>'"}` | `{"driver":"browseros-mcp","endpoint":"http://127.0.0.1:9200/mcp"}` |
+| Agent actions | a CDP client you bring | built in | built in, through its REPL | built in, through MCP |
+| Snapshot with `@ref`s, handoff to the user, visible cursor | no | yes, as ego documents them | not documented | not documented |
+| Platforms | macOS, Windows, Linux | macOS | macOS, Windows | macOS, Windows |
+| Needs on this machine | nothing | ego lite, its command, and its agent skill | Aside and its `aside` command | BrowserOS neo |
 
 What Sniper itself does is the same for all of them: the wired browser, its proxy and
 certificate trust, its profile and its lifetime. It does not implement clicking or
@@ -194,6 +194,13 @@ agent that way. Aside's command has no option to choose a window, so it drives
 whichever Aside is running: quit any other Aside first, or what the agent does there
 is not captured. Neither this nor where Aside installs on Windows has been checked
 against a running Aside.
+
+**With `browseros-mcp`**, connect an MCP client (Streamable HTTP) to
+`control.endpoint`, the address BrowserOS neo's documentation gives; the app shows
+the one it serves on its MCP connect page. It is one address per machine, so quit any
+other BrowserOS neo first, or what the agent does there is not captured. BrowserOS
+neo has no Linux build. Whether it takes Sniper's switches, and where it installs on
+Windows, has not been checked against a running copy.
 
 **With `cdp`**, connect any CDP client to `control.endpoint`: Playwright's
 `connectOverCDP`, or chrome-devtools-mcp with `--browserUrl`. Sniper bundles none.
@@ -275,12 +282,12 @@ whole output in `sniper-launch.log`; a throwaway profile is deleted with its log
 which is why the text travels in the warning. The UI shows that warning in a toast;
 a browser that opened normally needs no confirmation, since its window is one.
 
-`--browser` takes `chrome`, `edge`, `brave`, `chromium`, `ego` or `aside`. With
-none named, Sniper opens the saved default; with none saved, ego if it is installed,
-then Aside, otherwise the first of Chrome, Edge, Brave and Chromium that is. ego and
-Aside lead because an agent drives them without bringing a CDP client, and Aside is
-the one of the two on Windows. The list shows Chrome first with ego and Aside under
-it, which is not the order they are picked in. An agent that opens a
+`--browser` takes `chrome`, `edge`, `brave`, `chromium`, `ego`, `aside` or
+`browseros-neo`. With none named, Sniper opens the saved default; with none saved,
+ego if it is installed, then Aside, then BrowserOS neo, otherwise the first of Chrome,
+Edge, Brave and Chromium that is. The three lead because an agent drives them
+without bringing a CDP client. The list shows Chrome first with them under it, which
+is not the order they are picked in. An agent that opens a
 browser without naming one should read `driver` and `control` in the result rather
 than assume a DevTools endpoint.
 

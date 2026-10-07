@@ -72,28 +72,32 @@ pub enum BrowserKind {
     Chromium,
     Ego,
     Aside,
+    #[serde(rename = "browseros-neo")]
+    BrowserosNeo,
 }
 
 impl BrowserKind {
     /// The order the catalog and the browser menu list them in. Not the order
     /// "auto" picks in: see `AUTO_ORDER`.
-    pub const ALL: [BrowserKind; 6] = [
+    pub const ALL: [BrowserKind; 7] = [
         BrowserKind::Chrome,
         BrowserKind::Ego,
         BrowserKind::Aside,
+        BrowserKind::BrowserosNeo,
         BrowserKind::Edge,
         BrowserKind::Brave,
         BrowserKind::Chromium,
     ];
 
-    /// What "auto" picks, first installed wins. The two browsers an agent drives
-    /// with their own command come first, because someone who installed one did so
-    /// to use it: ego, then Aside, which is also the one of the two on Windows. They
-    /// are still listed after Chrome, where people look for a browser, which is why
-    /// this is a second table and not the order of `ALL`.
-    const AUTO_ORDER: [BrowserKind; 6] = [
+    /// What "auto" picks, first installed wins. The browsers built for an agent to
+    /// drive come first, because someone who installed one did so to use it: ego,
+    /// then Aside, then BrowserOS neo. They are still listed after Chrome, where
+    /// people look for a browser, which is why this is a second table and not the
+    /// order of `ALL`.
+    const AUTO_ORDER: [BrowserKind; 7] = [
         BrowserKind::Ego,
         BrowserKind::Aside,
+        BrowserKind::BrowserosNeo,
         BrowserKind::Chrome,
         BrowserKind::Edge,
         BrowserKind::Brave,
@@ -108,6 +112,7 @@ impl BrowserKind {
             BrowserKind::Chromium => "chromium",
             BrowserKind::Ego => "ego",
             BrowserKind::Aside => "aside",
+            BrowserKind::BrowserosNeo => "browseros-neo",
         }
     }
 
@@ -128,6 +133,7 @@ impl BrowserKind {
         match self {
             BrowserKind::Ego => Driver::EgoCli,
             BrowserKind::Aside => Driver::AsideCli,
+            BrowserKind::BrowserosNeo => Driver::BrowserosMcp,
             _ => Driver::Cdp,
         }
     }
@@ -137,7 +143,7 @@ impl BrowserKind {
     pub fn platforms(self) -> &'static [&'static str] {
         match self {
             BrowserKind::Ego => &["macos"],
-            BrowserKind::Aside => &["macos", "windows"],
+            BrowserKind::Aside | BrowserKind::BrowserosNeo => &["macos", "windows"],
             _ => &["macos", "windows", "linux"],
         }
     }
@@ -153,6 +159,10 @@ impl BrowserKind {
             BrowserKind::Aside => Some(
                 "Download Aside from https://aside.com in a browser and install it as usual. \
                  Sniper does not install it.",
+            ),
+            BrowserKind::BrowserosNeo => Some(
+                "Download BrowserOS neo from https://browseros.com/neo in a browser and install \
+                 it as usual. Sniper does not install it.",
             ),
             _ => None,
         }
@@ -171,6 +181,7 @@ impl BrowserKind {
             BrowserKind::Ego => "https://lite.ego.app/",
             BrowserKind::Aside if cfg!(windows) => "https://aside.com/download?os=win",
             BrowserKind::Aside => "https://aside.com/download?os=mac",
+            BrowserKind::BrowserosNeo => "https://docs.browseros.com/neo/install",
         }
     }
 
@@ -183,6 +194,9 @@ impl BrowserKind {
                 BrowserKind::Chromium => "Chromium",
                 BrowserKind::Ego => "ego lite",
                 BrowserKind::Aside => "Aside",
+                // Not documented: the app is "BrowserOS neo", and its executable is
+                // taken to carry the same name, as Chromium-based apps' do.
+                BrowserKind::BrowserosNeo => "BrowserOS neo",
             };
             let relative = format!("{app}.app/Contents/MacOS/{app}");
             let mut found = vec![PathBuf::from("/Applications").join(&relative)];
@@ -203,6 +217,11 @@ impl BrowserKind {
                 BrowserKind::Aside => {
                     &[r"Aside\Application\aside.exe", r"Programs\Aside\Aside.exe"]
                 }
+                // Not documented either; unconfirmed the same way.
+                BrowserKind::BrowserosNeo => &[
+                    r"BrowserOS neo\Application\BrowserOS neo.exe",
+                    r"Programs\BrowserOS neo\BrowserOS neo.exe",
+                ],
             };
             ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
                 .into_iter()
@@ -219,7 +238,7 @@ impl BrowserKind {
                 BrowserKind::Edge => &["microsoft-edge", "microsoft-edge-stable"],
                 BrowserKind::Brave => &["brave-browser", "brave"],
                 BrowserKind::Chromium => &["chromium", "chromium-browser"],
-                BrowserKind::Ego | BrowserKind::Aside => &[],
+                BrowserKind::Ego | BrowserKind::Aside | BrowserKind::BrowserosNeo => &[],
             };
             let path = std::env::var_os("PATH").unwrap_or_default();
             std::env::split_paths(&path)
@@ -252,6 +271,8 @@ pub enum Driver {
     /// with its built-in assistant on the account signed in to it; that is not a
     /// way Sniper hands it to an agent.
     AsideCli,
+    /// The MCP server BrowserOS neo runs for an outside agent.
+    BrowserosMcp,
 }
 
 /// What an agent is given to drive a browser, whatever the driver.
@@ -267,6 +288,9 @@ pub enum Control {
     },
     AsideCli {
         command: String,
+    },
+    BrowserosMcp {
+        endpoint: String,
     },
 }
 
@@ -320,7 +344,7 @@ impl Driver {
                 .into_iter()
                 .collect(),
             // Aside's CLI documents no way to name or choose an instance.
-            Driver::AsideCli => Vec::new(),
+            Driver::AsideCli | Driver::BrowserosMcp => Vec::new(),
         }
     }
 
@@ -336,6 +360,29 @@ impl Driver {
             Driver::AsideCli => Some(Control::AsideCli {
                 command: "aside repl '<code>'".to_string(),
             }),
+            // The address its documentation gives; the app shows the one it serves on
+            // its MCP connect page.
+            Driver::BrowserosMcp => Some(Control::BrowserosMcp {
+                endpoint: "http://127.0.0.1:9200/mcp".to_string(),
+            }),
+        }
+    }
+
+    /// What an agent has to know when the driver cannot be pointed at the window
+    /// Sniper opened, unlike ego's named instance or a CDP port of its own: another
+    /// copy of the same browser would be driven instead, outside Sniper's proxy.
+    fn shared_instance_hint(self) -> Option<&'static str> {
+        match self {
+            Driver::AsideCli => Some(
+                "aside's command drives the Aside that is running and cannot be pointed at a \
+                 window; quit any other Aside first, or what the agent does there is not captured",
+            ),
+            Driver::BrowserosMcp => Some(
+                "BrowserOS neo serves its agent endpoint at one address and cannot be pointed at \
+                 a window; quit any other BrowserOS neo first, or what the agent does there is not \
+                 captured",
+            ),
+            Driver::Cdp | Driver::EgoCli => None,
         }
     }
 
@@ -353,7 +400,7 @@ impl Driver {
                 handoff: true,
                 visible_cursor: true,
             },
-            Driver::AsideCli => Capabilities {
+            Driver::AsideCli | Driver::BrowserosMcp => Capabilities {
                 ui_actions: "built-in",
                 snapshot_refs: false,
                 handoff: false,
@@ -470,7 +517,7 @@ fn catalog_for(
 
 fn driver_requirements(driver: Driver) -> Vec<Requirement> {
     match driver {
-        Driver::Cdp => Vec::new(),
+        Driver::Cdp | Driver::BrowserosMcp => Vec::new(),
         Driver::AsideCli => {
             let command = command_found("aside");
             vec![Requirement {
@@ -1004,13 +1051,8 @@ async fn launch_at(
     };
     let hint = if ended {
         Some("the browser ended at once, so there is nothing to drive; see warnings".to_string())
-    } else if driver == Driver::AsideCli {
-        // Its CLI cannot be pointed at this window, unlike ego's.
-        Some(
-            "aside's command drives the Aside that is running and cannot be pointed at a \
-             window; quit any other Aside first, or what the agent does there is not captured"
-                .to_string(),
-        )
+    } else if let Some(hint) = driver.shared_instance_hint() {
+        Some(hint.to_string())
     } else if control.is_none() && !request.agent {
         // Asking again is refused while this browser runs, because it was started
         // without the port; saying so here saves the round trip that finds out.
@@ -1670,7 +1712,15 @@ mod tests {
     fn the_browser_names_come_from_one_list() {
         assert_eq!(
             BrowserKind::names(),
-            ["chrome", "ego", "aside", "edge", "brave", "chromium"]
+            [
+                "chrome",
+                "ego",
+                "aside",
+                "browseros-neo",
+                "edge",
+                "brave",
+                "chromium"
+            ]
         );
         assert!(BrowserKind::names()
             .into_iter()
@@ -1832,7 +1882,15 @@ mod tests {
         let order: Vec<_> = none.iter().map(|(name, ..)| *name).collect();
         assert_eq!(
             order,
-            ["chrome", "ego", "aside", "edge", "brave", "chromium"]
+            [
+                "chrome",
+                "ego",
+                "aside",
+                "browseros-neo",
+                "edge",
+                "brave",
+                "chromium"
+            ]
         );
 
         // A saved choice that is gone is still shown as saved, but is not the default.
@@ -1869,7 +1927,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_what_exists_on_this_platform_and_says_what_is_missing() {
         let requirements = |driver: Driver| match driver {
-            Driver::Cdp | Driver::AsideCli => Vec::new(),
+            Driver::Cdp | Driver::AsideCli | Driver::BrowserosMcp => Vec::new(),
             Driver::EgoCli => vec![Requirement {
                 name: "ego-browser command",
                 found: false,
@@ -1884,7 +1942,15 @@ mod tests {
         let names: Vec<_> = mac.iter().map(|entry| entry.browser).collect();
         assert_eq!(
             names,
-            ["chrome", "ego", "aside", "edge", "brave", "chromium"]
+            [
+                "chrome",
+                "ego",
+                "aside",
+                "browseros-neo",
+                "edge",
+                "brave",
+                "chromium"
+            ]
         );
         let chrome = &mac[0];
         assert!(chrome.installed && chrome.path.as_deref() == Some("/Apps/Chrome"));
@@ -1909,8 +1975,15 @@ mod tests {
                 .iter()
                 .map(|entry| entry.browser)
                 .collect::<Vec<_>>(),
-            ["chrome", "aside", "edge", "brave", "chromium"],
-            "Aside is built for Windows; ego is not"
+            [
+                "chrome",
+                "aside",
+                "browseros-neo",
+                "edge",
+                "brave",
+                "chromium"
+            ],
+            "Aside and BrowserOS neo are built for Windows; ego is not"
         );
 
         // Where to get a missing browser: its vendor's https page, and only for what is
@@ -1991,8 +2064,13 @@ mod tests {
             [BrowserKind::Chrome, BrowserKind::Ego]
         );
         assert_eq!(
-            BrowserKind::AUTO_ORDER[..3],
-            [BrowserKind::Ego, BrowserKind::Aside, BrowserKind::Chrome]
+            BrowserKind::AUTO_ORDER[..4],
+            [
+                BrowserKind::Ego,
+                BrowserKind::Aside,
+                BrowserKind::BrowserosNeo,
+                BrowserKind::Chrome
+            ]
         );
         let mut listed = BrowserKind::ALL.to_vec();
         let mut picked = BrowserKind::AUTO_ORDER.to_vec();
@@ -2373,6 +2451,34 @@ mod tests {
             .install_url()
             .starts_with("https://aside.com/download?os="));
         assert_eq!(BrowserKind::parse("Aside"), Some(BrowserKind::Aside));
+    }
+
+    #[test]
+    fn browseros_neo_is_driven_through_its_mcp_endpoint_and_says_it_cannot_pick_a_window() {
+        let driver = BrowserKind::BrowserosNeo.driver();
+        assert_eq!(driver, Driver::BrowserosMcp);
+        assert!(!driver.opens_port(true));
+        assert!(driver.launch_args(true, None).is_empty());
+        let control = serde_json::to_value(driver.control(None, None).unwrap()).unwrap();
+        assert_eq!(control["driver"], "browseros-mcp");
+        assert_eq!(control["endpoint"], "http://127.0.0.1:9200/mcp");
+        assert!(driver
+            .shared_instance_hint()
+            .unwrap()
+            .contains("BrowserOS neo"));
+        assert!(Driver::AsideCli.shared_instance_hint().is_some());
+        assert!(Driver::Cdp.shared_instance_hint().is_none());
+        assert!(Driver::EgoCli.shared_instance_hint().is_none());
+        assert_eq!(
+            BrowserKind::parse("BrowserOS-Neo"),
+            Some(BrowserKind::BrowserosNeo)
+        );
+        assert_eq!(
+            serde_json::to_value(BrowserKind::BrowserosNeo).unwrap(),
+            "browseros-neo"
+        );
+        // No Linux build exists, so it is not offered there as missing either.
+        assert!(!BrowserKind::BrowserosNeo.platforms().contains(&"linux"));
     }
 
     #[test]
