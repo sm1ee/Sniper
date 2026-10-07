@@ -10254,7 +10254,7 @@ function updateProxyStatusIndicator(online) {
     : `Proxy failed to bind on ${state.settings?.proxy_addr || "..."}. Restart the app after freeing the port.`;
 }
 
-function renderHistory() {
+function renderHistory(options = {}) {
   const visibleEntries = getVisibleEntries();
   const hiddenConnectCount = countHiddenConnectItems();
   const paging = state.historyPaging || createHistoryPagingState();
@@ -10286,6 +10286,17 @@ function renderHistory() {
 
   // Store entries for virtual scroll
   state._historyEntries = visibleEntries;
+
+  // A save acknowledgement can arrive while an IME still owns the input.
+  // Keep that node attached until editing ends; metadata and summaries above
+  // remain current, and ordinary navigation/scroll renders are not deferred.
+  const noteInput = options.preserveNoteEditor
+    ? els.historyTableBody.querySelector("input.note-inline-input")
+    : null;
+  if (noteInput) {
+    noteInput.dataset.historyRenderPending = "true";
+    return;
+  }
 
   if (!visibleEntries.length) {
     // A session with nothing in it yet is the one moment someone is looking for
@@ -23642,11 +23653,16 @@ async function beginNoteEdit(cell, transactionId) {
     lastSaved = value;
     updateAnnotations(transactionId, { user_note: value || null }, sessionId);
   };
-  const restore = () => {
+  const closeEditor = () => {
     if (settled) return;
     window.clearTimeout(debounce);
     settled = true;
-    if (cell.isConnected) cell.innerHTML = previous;
+    if (cell.isConnected) {
+      cell.innerHTML = previous;
+      if (currentSessionId() === sessionId && input.dataset.historyRenderPending === "true") {
+        renderHistory({ preserveNoteEditor: true });
+      }
+    }
   };
   const readValue = (duringComposition = composing) => {
     const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES);
@@ -23663,8 +23679,7 @@ async function beginNoteEdit(cell, transactionId) {
       return;
     }
     const value = readValue();
-    settled = true;
-    if (cell.isConnected) cell.innerHTML = previous;
+    closeEditor();
     save(value);
   };
   const scheduleSave = () => {
@@ -23716,7 +23731,7 @@ async function beginNoteEdit(cell, transactionId) {
       commit();
     } else if (event.key === "Escape") {
       event.preventDefault();
-      restore();
+      closeEditor();
     }
   });
   input.addEventListener("blur", commit);
@@ -23863,7 +23878,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
         }
         state._itemsVersion += 1;
         invalidateVisibleEntriesCache();
-        renderHistory();
+        renderHistory({ preserveNoteEditor: true });
       }
       if (state.selectedRecord && state.selectedRecord.id === transactionId) {
         if (payload.color_tag !== undefined) {
