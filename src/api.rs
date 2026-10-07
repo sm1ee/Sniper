@@ -5162,9 +5162,15 @@ async fn delete_selected_transactions(
         };
         let _mutation_guard = session.mutation_guard().await;
         match session.store.delete_selection(&payload).await {
-            Ok((removed, ids)) => Json(serde_json::json!({
-                "ok": true, "action": "delete", "session_id": payload.session_id, "removed": removed, "ids": ids,
-            })).into_response(),
+            Ok((removed, ids)) => {
+                // Even when nothing was removed: a retry after a failed purge finds
+                // nothing to delete, and is the only way left to take it off disk.
+                let purged = state.purge_deleted_transactions_mutation_locked(&session).await;
+                Json(serde_json::json!({
+                    "ok": true, "action": "delete", "session_id": payload.session_id, "removed": removed, "ids": ids,
+                    "purged": purged,
+                })).into_response()
+            }
             Err(error) => saved_transaction_delete_error(error),
         }
     }).await.unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "deletion outcome unavailable; inspect current state before retrying").into_response())
@@ -5256,6 +5262,11 @@ async fn clear_transactions(
             Ok(removed) => removed,
             Err(error) => return saved_transaction_delete_error(error),
         };
+        // Even when nothing was removed: clearing again after a failed purge finds
+        // nothing to delete, and is the only way left to take it off disk.
+        let purged = state
+            .purge_deleted_transactions_mutation_locked(&session)
+            .await;
         session
             .event_log
             .push(
@@ -5271,6 +5282,7 @@ async fn clear_transactions(
             "action": "clear",
             "session_id": session.id(),
             "removed": removed,
+            "purged": purged,
         }))
         .into_response()
     })
@@ -18419,6 +18431,194 @@ mod tests {
         .await;
         assert_eq!(status, reqwest::StatusCode::OK, "{body}");
         assert!(session.store.get(next_id).await.is_none());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Clearing history is how someone gets rid of captured cookies and tokens. The
+    // deletion is durable as a journal tombstone, but the traffic itself sits in the
+    // session files (an older capture) or in the journal (a recent one) until those
+    // are rewritten, so each way of deleting has to rewrite them right away.
+    #[tokio::test]
+    async fn deleting_history_removes_the_traffic_from_the_session_files() {
+        fn record_with_cookie(secret: &str) -> TransactionRecord {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                http::header::COOKIE,
+                format!("session={secret}").parse().unwrap(),
+            );
+            TransactionRecord::http(
+                chrono::Utc::now(),
+                "GET".to_string(),
+                "https".to_string(),
+                "example.test".to_string(),
+                "/account".to_string(),
+                Some(200),
+                1,
+                MessageRecord::from_headers_and_body(&headers, &[], 0),
+                None,
+                Vec::new(),
+                None,
+                None,
+            )
+        }
+        fn files_containing(dir: &std::path::Path, needle: &str) -> Vec<String> {
+            let mut found = Vec::new();
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    found.extend(files_containing(&path, needle));
+                } else if std::fs::read(&path)
+                    .unwrap_or_default()
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+                {
+                    found.push(path.display().to_string());
+                }
+            }
+            found
+        }
+
+        for (way, inactive) in [
+            ("clear", false),
+            ("selected", false),
+            ("saved-v1-clear", false),
+            // Deleting from a session that is not the active one: nothing else would
+            // rewrite its files until it is opened again.
+            ("selected", true),
+        ] {
+            let (state, data_dir) = test_state(&format!("sniper-delete-purges-{way}-{inactive}"));
+            let session = state.session().await;
+            let session_id = session.id();
+            // One capture already written to the session files, one still only in
+            // the journal.
+            let older_secret = format!("older-{}", Uuid::new_v4().simple());
+            let older = record_with_cookie(&older_secret);
+            let older_id = older.id;
+            session.store.insert(older).await;
+            session.persist().await.unwrap();
+            let recent_secret = format!("recent-{}", Uuid::new_v4().simple());
+            let recent = record_with_cookie(&recent_secret);
+            let recent_id = recent.id;
+            session.store.insert(recent).await;
+            let dir = session.storage_dir().to_path_buf();
+            if inactive {
+                // Creating a session also makes it the active one.
+                state.create_session(Some("Other".into())).await.unwrap();
+                assert_ne!(state.session().await.id(), session_id, "precondition");
+            }
+            assert!(
+                !files_containing(&dir, &older_secret).is_empty(),
+                "{way}: precondition"
+            );
+            assert!(
+                !files_containing(&dir, &recent_secret).is_empty(),
+                "{way}: precondition"
+            );
+
+            let (status, body) = match way {
+                "clear" => {
+                    api_route_response(
+                        state.clone(),
+                        reqwest::Method::DELETE,
+                        &format!("/api/transactions?session_id={session_id}"),
+                        None,
+                    )
+                    .await
+                }
+                "selected" => {
+                    api_route_json(
+                        state.clone(),
+                        reqwest::Method::DELETE,
+                        "/api/transactions/selected",
+                        serde_json::json!({"session_id":session_id,"ids":[older_id,recent_id]}),
+                    )
+                    .await
+                }
+                _ => {
+                    api_route_json(
+                        state.clone(),
+                        reqwest::Method::POST,
+                        "/api/saved/v1/call",
+                        serde_json::json!({"operation":"saved.v1.http.clear","input":{
+                            "operation_id":Uuid::new_v4(),"session_id":session_id}}),
+                    )
+                    .await
+                }
+            };
+            assert_eq!(status, reqwest::StatusCode::OK, "{way}: {body}");
+            assert!(session.store.get(older_id).await.is_none(), "{way}");
+            assert!(session.store.get(recent_id).await.is_none(), "{way}");
+            assert_eq!(
+                files_containing(&dir, &older_secret),
+                Vec::<String>::new(),
+                "{way}: the older capture is still on disk"
+            );
+            assert_eq!(
+                files_containing(&dir, &recent_secret),
+                Vec::<String>::new(),
+                "{way}: the recent capture is still on disk"
+            );
+            let _ = std::fs::remove_dir_all(data_dir);
+        }
+    }
+
+    // A purge that failed leaves the rows gone from memory and the traffic on disk.
+    // Clearing again finds nothing to delete, and still has to rewrite the files:
+    // it is the only way left to take that traffic off disk.
+    #[tokio::test]
+    async fn clearing_again_after_a_failed_purge_still_takes_the_traffic_off_disk() {
+        let (state, data_dir) = test_state("sniper-clear-retry-purges");
+        let session = state.session().await;
+        let session_id = session.id();
+        let secret = format!("retry-{}", Uuid::new_v4().simple());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            format!("session={secret}").parse().unwrap(),
+        );
+        session
+            .store
+            .insert(TransactionRecord::http(
+                chrono::Utc::now(),
+                "GET".to_string(),
+                "https".to_string(),
+                "example.test".to_string(),
+                "/account".to_string(),
+                Some(200),
+                1,
+                MessageRecord::from_headers_and_body(&headers, &[], 0),
+                None,
+                Vec::new(),
+                None,
+                None,
+            ))
+            .await;
+        session.persist().await.unwrap();
+        // The deletion without its rewrite, as a failed purge leaves it.
+        assert_eq!(session.store.delete_all().await.unwrap(), 1);
+        let on_disk = |dir: &std::path::Path| {
+            std::fs::read_dir(dir).unwrap().flatten().any(|entry| {
+                std::fs::read(entry.path())
+                    .unwrap_or_default()
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes())
+            })
+        };
+        let dir = session.storage_dir().to_path_buf();
+        assert!(on_disk(&dir), "precondition: the traffic is still on disk");
+
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::DELETE,
+            &format!("/api/transactions?session_id={session_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["removed"], 0);
+        assert_eq!(body["purged"], true);
+        assert!(!on_disk(&dir), "clearing again left the traffic on disk");
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

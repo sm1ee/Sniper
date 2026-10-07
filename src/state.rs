@@ -764,6 +764,58 @@ impl AppState {
         self.finalize_session_persist(session, metadata)
     }
 
+    /// Deleting HTTP records is made durable by a journal tombstone, but their
+    /// bodies, headers and cookies stay in the session files, and a recent capture
+    /// in the journal, until those are rewritten. Clearing history is how someone
+    /// gets rid of captured credentials, so the rewrite happens now rather than at
+    /// the next save. If it fails the deletion still stands and the next save
+    /// purges the files; the event log says so instead of leaving it unseen.
+    pub async fn purge_deleted_transactions_mutation_locked(
+        &self,
+        session: &Arc<SessionContext>,
+    ) -> bool {
+        self.read_only_session_contexts
+            .lock()
+            .await
+            .remove(&session.id());
+        if !self.sessions.contains_session(session.id()) {
+            // Deleted meanwhile: its files go with it, and writing them now would
+            // bring them back.
+            return true;
+        }
+        let metadata = match session.persist_mutation_locked().await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    session_id = %session.id(),
+                    "deleted HTTP records are still in the session files until the next save"
+                );
+                session
+                    .event_log
+                    .push(
+                        EventLevel::Warn,
+                        "capture",
+                        "Deleted traffic still on disk",
+                        "The deleted records are gone from the history, but their data stays in the session files until the next save.",
+                    )
+                    .await;
+                return false;
+            }
+        };
+        // The traffic is off disk at this point. The session list's counts live in a
+        // separate file, so failing to update them must not be reported as the
+        // traffic still being there.
+        if let Err(error) = self.finalize_session_persist(session, metadata) {
+            tracing::warn!(
+                ?error,
+                session_id = %session.id(),
+                "deleted HTTP records were purged but the session list was not updated"
+            );
+        }
+        true
+    }
+
     pub async fn replace_workspace_state_and_persist(
         &self,
         session: &Arc<SessionContext>,

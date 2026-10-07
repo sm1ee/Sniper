@@ -412,13 +412,23 @@ async fn mutate(state: &Arc<AppState>, operation: &str, input: Value) -> Respons
                     .map(|(count, _)| count)
             };
             match deleted {
-                Ok(deleted_count) => SavedOperationCompletion::applied(
-                    if matches!(kind, SavedOperationKind::HttpClear) {
-                        SavedOperationResult::HttpCleared { deleted_count }
-                    } else {
-                        SavedOperationResult::HttpDeleted { deleted_count }
-                    },
-                ),
+                Ok(deleted_count) => {
+                    // The tombstone already made the deletion durable; this only takes
+                    // the deleted traffic off disk, so its failure does not change the
+                    // outcome (it is logged, and the next save purges the files). It
+                    // runs even when nothing was deleted, so a retry after a failed
+                    // purge still rewrites the files.
+                    state_for_mutation
+                        .purge_deleted_transactions_mutation_locked(&session)
+                        .await;
+                    SavedOperationCompletion::applied(
+                        if matches!(kind, SavedOperationKind::HttpClear) {
+                            SavedOperationResult::HttpCleared { deleted_count }
+                        } else {
+                            SavedOperationResult::HttpDeleted { deleted_count }
+                        },
+                    )
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
                     SavedOperationCompletion::not_applied(SavedOperationCode::SelectionMismatch)
                 }
