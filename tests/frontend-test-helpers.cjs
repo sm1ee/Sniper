@@ -3,7 +3,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const appSource = fs.readFileSync(path.join(__dirname, "../web/app.js"), "utf8");
+// Windows checkouts use CRLF, while fixture source markers use LF. Normalize
+// source text only; escaped line endings in runtime payloads stay untouched.
+const appSource = fs.readFileSync(path.join(__dirname, "../web/app.js"), "utf8").replace(/\r\n/g, "\n");
 
 // Load only the named functions: running app.js itself would start the UI and
 // make API requests. Top-level functions in this file end at column zero.
