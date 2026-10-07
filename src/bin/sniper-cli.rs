@@ -266,8 +266,8 @@ struct BrowserPreferArgs {
 
 #[derive(Args, Debug, Default)]
 struct BrowserOpenArgs {
-    /// auto opens the saved default, or ego when it is installed, then the first of
-    /// Chrome, Edge, Brave and Chromium that is.
+    /// auto opens the saved default, or ego, then Aside, when installed, then the
+    /// first of Chrome, Edge, Brave and Chromium that is.
     #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(browser_choices()))]
     browser: Option<String>,
     /// http(s) page to open. Default: about:blank.
@@ -277,8 +277,9 @@ struct BrowserOpenArgs {
     #[arg(long)]
     fresh: bool,
     /// Open a DevTools port so an agent can drive a Chromium-family browser; the
-    /// result's `control` carries its endpoint. ego has no port and always returns
-    /// its server name in `control`, so this changes nothing for it.
+    /// result's `control` carries its endpoint. ego and Aside are driven through
+    /// their own command and always return it in `control`, so this changes nothing
+    /// for them.
     #[arg(long)]
     agent: bool,
 }
@@ -2029,7 +2030,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.browser.open",
             "capture browser open",
-            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. With no browser named it opens the saved default, else ego when installed, else Chrome or another Chromium-family browser, so read `control` rather than assume a DevTools endpoint. Pass agent to get a `control` an agent can drive it with.",
+            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. With no browser named it opens the saved default, else ego or Aside when installed, else Chrome or another Chromium-family browser, so read `control` rather than assume a DevTools endpoint. Pass agent to get a `control` an agent can drive it with.",
             Write,
             false,
             &[],

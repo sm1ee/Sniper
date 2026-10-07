@@ -174,18 +174,26 @@ see the request first). What the browser is given:
 Which browser it is decides how an agent drives it, and that is the `driver`. The
 result's `control` says what to use, in a shape that depends on the driver:
 
-| | `chrome`, `edge`, `brave`, `chromium` | `ego` |
-|---|---|---|
-| `driver` | `cdp` | `ego-cli` |
-| `control` | `{"driver":"cdp","endpoint":"http://127.0.0.1:<port>"}` | `{"driver":"ego-cli","server_name":"…","command":"ego-browser --ego-server-name=… nodejs -e '<script>'"}` |
-| Agent actions | a CDP client you bring | built in |
-| Snapshot with `@ref`s, handoff to the user, visible cursor | no | yes, as ego documents them |
-| Platforms | macOS, Windows, Linux | macOS |
-| Needs on this machine | nothing | ego lite, its command, and its agent skill |
+| | `chrome`, `edge`, `brave`, `chromium` | `ego` | `aside` |
+|---|---|---|---|
+| `driver` | `cdp` | `ego-cli` | `aside-cli` |
+| `control` | `{"driver":"cdp","endpoint":"http://127.0.0.1:<port>"}` | `{"driver":"ego-cli","server_name":"…","command":"ego-browser --ego-server-name=… nodejs -e '<script>'"}` | `{"driver":"aside-cli","command":"aside repl '<code>'"}` |
+| Agent actions | a CDP client you bring | built in | built in, through its REPL |
+| Snapshot with `@ref`s, handoff to the user, visible cursor | no | yes, as ego documents them | not documented |
+| Platforms | macOS, Windows, Linux | macOS | macOS, Windows |
+| Needs on this machine | nothing | ego lite, its command, and its agent skill | Aside and its `aside` command |
 
-What Sniper itself does is the same for both: the wired browser, its proxy and
+What Sniper itself does is the same for all of them: the wired browser, its proxy and
 certificate trust, its profile and its lifetime. It does not implement clicking or
 typing. An agent does that through the driver.
+
+**With `aside-cli`**, drive it only through Aside's REPL, `aside repl '<code>'`, with
+deterministic steps. Aside can also run a task with its own assistant on the account
+signed in to it (`aside "<task>"`, `aside exec`); Sniper does not hand Aside to an
+agent that way. Aside's command has no option to choose a window, so it drives
+whichever Aside is running: quit any other Aside first, or what the agent does there
+is not captured. Neither this nor where Aside installs on Windows has been checked
+against a running Aside.
 
 **With `cdp`**, connect any CDP client to `control.endpoint`: Playwright's
 `connectOverCDP`, or chrome-devtools-mcp with `--browserUrl`. Sniper bundles none.
@@ -267,11 +275,12 @@ whole output in `sniper-launch.log`; a throwaway profile is deleted with its log
 which is why the text travels in the warning. The UI shows that warning in a toast;
 a browser that opened normally needs no confirmation, since its window is one.
 
-`--browser` takes `chrome`, `edge`, `brave`, `chromium` or `ego`. With none named,
-Sniper opens the saved default; with none saved, ego if it is installed, otherwise
-the first of Chrome, Edge, Brave and Chromium that is. ego leads because it is the
-one an agent can drive without bringing a CDP client. The list shows Chrome first
-and ego under it, which is not the order they are picked in. An agent that opens a
+`--browser` takes `chrome`, `edge`, `brave`, `chromium`, `ego` or `aside`. With
+none named, Sniper opens the saved default; with none saved, ego if it is installed,
+then Aside, otherwise the first of Chrome, Edge, Brave and Chromium that is. ego and
+Aside lead because an agent drives them without bringing a CDP client, and Aside is
+the one of the two on Windows. The list shows Chrome first with ego and Aside under
+it, which is not the order they are picked in. An agent that opens a
 browser without naming one should read `driver` and `control` in the result rather
 than assume a DevTools endpoint.
 

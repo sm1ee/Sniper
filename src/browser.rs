@@ -71,25 +71,29 @@ pub enum BrowserKind {
     Brave,
     Chromium,
     Ego,
+    Aside,
 }
 
 impl BrowserKind {
     /// The order the catalog and the browser menu list them in. Not the order
     /// "auto" picks in: see `AUTO_ORDER`.
-    pub const ALL: [BrowserKind; 5] = [
+    pub const ALL: [BrowserKind; 6] = [
         BrowserKind::Chrome,
         BrowserKind::Ego,
+        BrowserKind::Aside,
         BrowserKind::Edge,
         BrowserKind::Brave,
         BrowserKind::Chromium,
     ];
 
-    /// What "auto" picks, first installed wins. ego leads because it is the browser
-    /// an agent can drive without bringing a CDP client, and someone who installed
-    /// it did so to use it. It is still listed beside Chrome, where people look for
-    /// a browser, which is why this is a second table and not the order of `ALL`.
-    const AUTO_ORDER: [BrowserKind; 5] = [
+    /// What "auto" picks, first installed wins. The two browsers an agent drives
+    /// with their own command come first, because someone who installed one did so
+    /// to use it: ego, then Aside, which is also the one of the two on Windows. They
+    /// are still listed after Chrome, where people look for a browser, which is why
+    /// this is a second table and not the order of `ALL`.
+    const AUTO_ORDER: [BrowserKind; 6] = [
         BrowserKind::Ego,
+        BrowserKind::Aside,
         BrowserKind::Chrome,
         BrowserKind::Edge,
         BrowserKind::Brave,
@@ -103,6 +107,7 @@ impl BrowserKind {
             BrowserKind::Brave => "brave",
             BrowserKind::Chromium => "chromium",
             BrowserKind::Ego => "ego",
+            BrowserKind::Aside => "aside",
         }
     }
 
@@ -122,6 +127,7 @@ impl BrowserKind {
     pub fn driver(self) -> Driver {
         match self {
             BrowserKind::Ego => Driver::EgoCli,
+            BrowserKind::Aside => Driver::AsideCli,
             _ => Driver::Cdp,
         }
     }
@@ -131,6 +137,7 @@ impl BrowserKind {
     pub fn platforms(self) -> &'static [&'static str] {
         match self {
             BrowserKind::Ego => &["macos"],
+            BrowserKind::Aside => &["macos", "windows"],
             _ => &["macos", "windows", "linux"],
         }
     }
@@ -141,6 +148,10 @@ impl BrowserKind {
         match self {
             BrowserKind::Ego => Some(
                 "Download ego lite from https://lite.ego.app in a browser and open it as usual. \
+                 Sniper does not install it.",
+            ),
+            BrowserKind::Aside => Some(
+                "Download Aside from https://aside.com in a browser and install it as usual. \
                  Sniper does not install it.",
             ),
             _ => None,
@@ -158,6 +169,8 @@ impl BrowserKind {
             BrowserKind::Brave => "https://brave.com/download/",
             BrowserKind::Chromium => "https://www.chromium.org/getting-involved/download-chromium/",
             BrowserKind::Ego => "https://lite.ego.app/",
+            BrowserKind::Aside if cfg!(windows) => "https://aside.com/download?os=win",
+            BrowserKind::Aside => "https://aside.com/download?os=mac",
         }
     }
 
@@ -169,6 +182,7 @@ impl BrowserKind {
                 BrowserKind::Brave => "Brave Browser",
                 BrowserKind::Chromium => "Chromium",
                 BrowserKind::Ego => "ego lite",
+                BrowserKind::Aside => "Aside",
             };
             let relative = format!("{app}.app/Contents/MacOS/{app}");
             let mut found = vec![PathBuf::from("/Applications").join(&relative)];
@@ -177,18 +191,27 @@ impl BrowserKind {
             }
             found
         } else if cfg!(windows) {
-            let relative = match self {
-                BrowserKind::Chrome => r"Google\Chrome\Application\chrome.exe",
-                BrowserKind::Edge => r"Microsoft\Edge\Application\msedge.exe",
-                BrowserKind::Brave => r"BraveSoftware\Brave-Browser\Application\brave.exe",
-                BrowserKind::Chromium => r"Chromium\Application\chrome.exe",
+            let relatives: &[&str] = match self {
+                BrowserKind::Chrome => &[r"Google\Chrome\Application\chrome.exe"],
+                BrowserKind::Edge => &[r"Microsoft\Edge\Application\msedge.exe"],
+                BrowserKind::Brave => &[r"BraveSoftware\Brave-Browser\Application\brave.exe"],
+                BrowserKind::Chromium => &[r"Chromium\Application\chrome.exe"],
                 // ego ships for macOS only.
                 BrowserKind::Ego => return Vec::new(),
+                // Not documented by Aside: the usual places a per-user Chromium-based
+                // installer puts its browser. Unconfirmed until someone checks one.
+                BrowserKind::Aside => {
+                    &[r"Aside\Application\aside.exe", r"Programs\Aside\Aside.exe"]
+                }
             };
             ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
                 .into_iter()
                 .filter_map(std::env::var_os)
-                .map(|base| PathBuf::from(base).join(relative))
+                .flat_map(|base| {
+                    relatives
+                        .iter()
+                        .map(move |relative| PathBuf::from(&base).join(relative))
+                })
                 .collect()
         } else {
             let names: &[&str] = match self {
@@ -196,7 +219,7 @@ impl BrowserKind {
                 BrowserKind::Edge => &["microsoft-edge", "microsoft-edge-stable"],
                 BrowserKind::Brave => &["brave-browser", "brave"],
                 BrowserKind::Chromium => &["chromium", "chromium-browser"],
-                BrowserKind::Ego => &[],
+                BrowserKind::Ego | BrowserKind::Aside => &[],
             };
             let path = std::env::var_os("PATH").unwrap_or_default();
             std::env::split_paths(&path)
@@ -225,6 +248,10 @@ pub enum Driver {
     Cdp,
     /// ego's own CLI, addressed by the name of a named browser service.
     EgoCli,
+    /// Aside's own CLI, used only for its scripted REPL. Aside can also run tasks
+    /// with its built-in assistant on the account signed in to it; that is not a
+    /// way Sniper hands it to an agent.
+    AsideCli,
 }
 
 /// What an agent is given to drive a browser, whatever the driver.
@@ -236,6 +263,9 @@ pub enum Control {
     },
     EgoCli {
         server_name: String,
+        command: String,
+    },
+    AsideCli {
         command: String,
     },
 }
@@ -289,6 +319,8 @@ impl Driver {
                 .map(|name| format!("--ego-server-name={name}"))
                 .into_iter()
                 .collect(),
+            // Aside's CLI documents no way to name or choose an instance.
+            Driver::AsideCli => Vec::new(),
         }
     }
 
@@ -300,6 +332,9 @@ impl Driver {
             Driver::EgoCli => server_name.map(|name| Control::EgoCli {
                 server_name: name.to_string(),
                 command: format!("ego-browser --ego-server-name={name} nodejs -e '<script>'"),
+            }),
+            Driver::AsideCli => Some(Control::AsideCli {
+                command: "aside repl '<code>'".to_string(),
             }),
         }
     }
@@ -317,6 +352,12 @@ impl Driver {
                 snapshot_refs: true,
                 handoff: true,
                 visible_cursor: true,
+            },
+            Driver::AsideCli => Capabilities {
+                ui_actions: "built-in",
+                snapshot_refs: false,
+                handoff: false,
+                visible_cursor: false,
             },
         }
     }
@@ -430,11 +471,21 @@ fn catalog_for(
 fn driver_requirements(driver: Driver) -> Vec<Requirement> {
     match driver {
         Driver::Cdp => Vec::new(),
+        Driver::AsideCli => {
+            let command = command_found("aside");
+            vec![Requirement {
+                name: "aside command",
+                found: command,
+                hint: (!command).then_some(
+                    "Aside's agent command is installed separately from the browser; see https://docs.aside.com/help/developers.md",
+                ),
+            }]
+        }
         Driver::EgoCli => {
             // Hints appear only for what is missing, and they point at where to look.
             // None of them is a command to run: this output is read by agents, and a
             // line that installs software must not read as one they may execute.
-            let (command, skill) = (ego_cli_found(), ego_skill_found());
+            let (command, skill) = (command_found("ego-browser"), ego_skill_found());
             vec![
                 Requirement {
                     name: "ego-browser command",
@@ -454,18 +505,19 @@ fn driver_requirements(driver: Driver) -> Vec<Requirement> {
     }
 }
 
-fn ego_cli_found() -> bool {
+/// A driver's command on PATH, or in ~/.local/bin, where these CLIs' installers
+/// put it and which a desktop app's PATH often lacks.
+fn command_found(name: &str) -> bool {
     let name = if cfg!(windows) {
-        "ego-browser.exe"
+        format!("{name}.exe")
     } else {
-        "ego-browser"
+        name.to_string()
     };
     let on_path = std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()));
-    // ego's setup puts the command here, which a desktop app's PATH often lacks.
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(&name).is_file()));
     on_path
         || crate::platform::user_home_dir()
-            .is_some_and(|home| home.join(".local").join("bin").join(name).is_file())
+            .is_some_and(|home| home.join(".local").join("bin").join(&name).is_file())
 }
 
 fn ego_skill_found() -> bool {
@@ -952,6 +1004,13 @@ async fn launch_at(
     };
     let hint = if ended {
         Some("the browser ended at once, so there is nothing to drive; see warnings".to_string())
+    } else if driver == Driver::AsideCli {
+        // Its CLI cannot be pointed at this window, unlike ego's.
+        Some(
+            "aside's command drives the Aside that is running and cannot be pointed at a \
+             window; quit any other Aside first, or what the agent does there is not captured"
+                .to_string(),
+        )
     } else if control.is_none() && !request.agent {
         // Asking again is refused while this browser runs, because it was started
         // without the port; saying so here saves the round trip that finds out.
@@ -1611,7 +1670,7 @@ mod tests {
     fn the_browser_names_come_from_one_list() {
         assert_eq!(
             BrowserKind::names(),
-            ["chrome", "ego", "edge", "brave", "chromium"]
+            ["chrome", "ego", "aside", "edge", "brave", "chromium"]
         );
         assert!(BrowserKind::names()
             .into_iter()
@@ -1696,6 +1755,12 @@ mod tests {
             "without ego, Chrome comes before the other Chromium-family browsers"
         );
         assert_eq!(
+            resolve_default(None, installed(&[Chrome, Aside])),
+            Some(Aside),
+            "without ego, Aside comes before Chrome: on Windows it is the agent browser"
+        );
+        assert_eq!(resolve_default(None, installed(&[Aside, Ego])), Some(Ego));
+        assert_eq!(
             resolve_default(Some(Ego), &both),
             Some(Ego),
             "the saved choice wins"
@@ -1765,7 +1830,10 @@ mod tests {
 
         // Listed with Chrome first and ego right under it, though ego is picked first.
         let order: Vec<_> = none.iter().map(|(name, ..)| *name).collect();
-        assert_eq!(order, ["chrome", "ego", "edge", "brave", "chromium"]);
+        assert_eq!(
+            order,
+            ["chrome", "ego", "aside", "edge", "brave", "chromium"]
+        );
 
         // A saved choice that is gone is still shown as saved, but is not the default.
         let gone = catalog_for("macos", installed(&[Chrome]), |_| Vec::new(), Some(Ego));
@@ -1801,7 +1869,7 @@ mod tests {
     #[test]
     fn the_catalog_lists_what_exists_on_this_platform_and_says_what_is_missing() {
         let requirements = |driver: Driver| match driver {
-            Driver::Cdp => Vec::new(),
+            Driver::Cdp | Driver::AsideCli => Vec::new(),
             Driver::EgoCli => vec![Requirement {
                 name: "ego-browser command",
                 found: false,
@@ -1814,7 +1882,10 @@ mod tests {
 
         let mac = catalog_for("macos", only_chrome, requirements, None);
         let names: Vec<_> = mac.iter().map(|entry| entry.browser).collect();
-        assert_eq!(names, ["chrome", "ego", "edge", "brave", "chromium"]);
+        assert_eq!(
+            names,
+            ["chrome", "ego", "aside", "edge", "brave", "chromium"]
+        );
         let chrome = &mac[0];
         assert!(chrome.installed && chrome.path.as_deref() == Some("/Apps/Chrome"));
         assert_eq!(chrome.driver, Driver::Cdp);
@@ -1833,7 +1904,14 @@ mod tests {
         // Not built for Windows, so it is not listed as "not installed" there.
         let windows = catalog_for("windows", only_chrome, requirements, None);
         assert!(windows.iter().all(|entry| entry.browser != "ego"));
-        assert_eq!(windows.len(), 4);
+        assert_eq!(
+            windows
+                .iter()
+                .map(|entry| entry.browser)
+                .collect::<Vec<_>>(),
+            ["chrome", "aside", "edge", "brave", "chromium"],
+            "Aside is built for Windows; ego is not"
+        );
 
         // Where to get a missing browser: its vendor's https page, and only for what is
         // missing. The UI renders it as a link, so it must never be anything else.
@@ -1913,8 +1991,8 @@ mod tests {
             [BrowserKind::Chrome, BrowserKind::Ego]
         );
         assert_eq!(
-            BrowserKind::AUTO_ORDER[..2],
-            [BrowserKind::Ego, BrowserKind::Chrome]
+            BrowserKind::AUTO_ORDER[..3],
+            [BrowserKind::Ego, BrowserKind::Aside, BrowserKind::Chrome]
         );
         let mut listed = BrowserKind::ALL.to_vec();
         let mut picked = BrowserKind::AUTO_ORDER.to_vec();
@@ -2272,6 +2350,29 @@ mod tests {
         fn write_record_for(profile: &Path, owner: &Owner) {
             write_owner(profile, owner).unwrap();
         }
+    }
+
+    // Aside is handed to an agent only through its CLI's scripted REPL. Its built-in
+    // assistant, which works on the account signed in to Aside, is not a driver.
+    #[test]
+    fn aside_is_driven_through_its_cli_repl_and_says_it_cannot_pick_a_window() {
+        let driver = BrowserKind::Aside.driver();
+        assert_eq!(driver, Driver::AsideCli);
+        assert!(
+            !driver.opens_port(true),
+            "no DevTools port, even when an agent asks"
+        );
+        assert_eq!(driver.server_name(8080, Path::new("/p")), None);
+        assert!(driver.launch_args(true, None).is_empty());
+        let control = serde_json::to_value(driver.control(None, None).unwrap()).unwrap();
+        assert_eq!(control["driver"], "aside-cli");
+        assert_eq!(control["command"], "aside repl '<code>'");
+        assert!(control.get("server_name").is_none());
+        assert_eq!(BrowserKind::Aside.platforms(), ["macos", "windows"]);
+        assert!(BrowserKind::Aside
+            .install_url()
+            .starts_with("https://aside.com/download?os="));
+        assert_eq!(BrowserKind::parse("Aside"), Some(BrowserKind::Aside));
     }
 
     #[test]
