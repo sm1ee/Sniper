@@ -58,6 +58,8 @@ function fixture() {
   return { context, cell, requests, inputs, saves, toasts, timers };
 }
 
+const notes = (f) => f.saves.map((save) => save[1].user_note);
+
 function runTimers(f) {
   for (const [id, callback] of Array.from(f.timers)) {
     f.timers.delete(id);
@@ -206,7 +208,9 @@ for (const key of ["Enter", "Escape"]) {
       assert.equal(event.defaultPrevented, false, "the IME must receive its confirmation/cancel key");
       assert.equal(f.cell.querySelector(), input, "composition must not close the editor");
       runTimers(f);
-      assert.equal(f.saves.length, 0, "interim composition must not be saved");
+      assert.deepEqual(notes(f), ["にほん"], "what is typed is kept while the IME still owns it");
+      assert.equal(f.cell.querySelector(), input, "an autosave must not close the editor");
+      assert.equal(input.value, "にほん");
     });
   }
 }
@@ -223,17 +227,16 @@ for (const finalInputOrder of ["before-end", "after-end", "no-final-input"]) {
     input.value = "にほん";
     input.dispatch("input", undefined, { isComposing: true });
     runTimers(f);
-    assert.equal(f.saves.length, 0);
+    assert.deepEqual(notes(f), ["にほん"], "a pause mid-composition keeps the candidate");
     input.value = "日本";
     if (finalInputOrder === "before-end") input.dispatch("input", undefined, { isComposing: true });
     input.dispatch("compositionend");
     if (finalInputOrder === "after-end") input.dispatch("input", undefined, { isComposing: false });
-    assert.equal(f.saves.length, 0, "composition completion preserves the autosave debounce");
+    assert.equal(f.saves.length, 1, "composition completion preserves the autosave debounce");
     runTimers(f);
-    assert.equal(f.saves.length, 1);
-    assert.equal(f.saves[0][1].user_note, "日本");
+    assert.deepEqual(notes(f), ["にほん", "日本"], "the final text replaces the candidate");
     input.dispatch("blur");
-    assert.equal(f.saves.length, 1, "blur must not duplicate an acknowledged draft");
+    assert.equal(f.saves.length, 2, "blur must not duplicate an acknowledged draft");
   });
 }
 
@@ -258,20 +261,26 @@ for (const key of ["Enter", "Escape"]) {
   }
 }
 
-test("note successive Korean compositions cancel the previous autosave", async () => {
+// Korean makes each syllable its own composition and leaves the last one open
+// until the next key, so a pause there is when typed text has to be kept: a
+// redraw or a closed window would otherwise take the whole note with it.
+test("note Korean text is saved while its last syllable is still composing", async () => {
   const f = fixture();
   const input = await openSavedNote(f);
-  for (const syllable of ["ㅎ", "한"]) {
+  for (const text of ["로", "로그", "로그인"]) {
     input.dispatch("compositionstart");
-    input.value = syllable;
+    input.value = text;
     input.dispatch("input", undefined, { isComposing: true });
-    runTimers(f);
-    assert.equal(f.saves.length, 0);
-    input.dispatch("compositionend");
+    if (text !== "로그인") input.dispatch("compositionend");
   }
+  assert.equal(f.saves.length, 0, "typing without a pause saves nothing yet");
   runTimers(f);
-  assert.equal(f.saves.length, 1);
-  assert.equal(f.saves[0][1].user_note, "한");
+  assert.deepEqual(notes(f), ["로그인"]);
+  assert.equal(f.cell.querySelector(), input, "the editor stays open for the IME");
+  assert.equal(input.value, "로그인");
+  input.dispatch("compositionend");
+  runTimers(f);
+  assert.deepEqual(notes(f), ["로그인"], "the finished syllable is not saved twice");
 });
 
 for (const finalInputOrder of ["before-end", "after-end"]) {

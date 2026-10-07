@@ -23648,9 +23648,10 @@ async function beginNoteEdit(cell, transactionId) {
     settled = true;
     if (cell.isConnected) cell.innerHTML = previous;
   };
-  const readValue = () => {
+  const readValue = (duringComposition = composing) => {
     const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES);
-    if (value !== input.value) input.value = value;
+    // Rewriting the field mid-composition would cancel the IME's candidate.
+    if (value !== input.value && !duringComposition) input.value = value;
     return value.trim();
   };
   const commit = () => {
@@ -23670,7 +23671,14 @@ async function beginNoteEdit(cell, transactionId) {
     if (settled) return;
     window.clearTimeout(debounce);
     debounce = window.setTimeout(() => {
-      if (settled || composing) return;
+      if (settled) return;
+      if (composing) {
+        // Korean leaves the last syllable composing until the next key, so waiting
+        // for compositionend would skip the save that keeps a note when the window
+        // closes or a redraw replaces the row. Closing still waits for it.
+        if (!commitAfterComposition) save(readValue());
+        return;
+      }
       compositionFinishing = false;
       if (commitAfterComposition) commit();
       else save(readValue());
@@ -23681,9 +23689,9 @@ async function beginNoteEdit(cell, transactionId) {
   input.addEventListener("input", (event) => {
     if (settled) return;
     window.clearTimeout(debounce);
-    if (composing || event.isComposing) return;
-    compositionFinishing = false;
-    readValue();
+    const duringComposition = composing || event.isComposing;
+    if (!duringComposition) compositionFinishing = false;
+    readValue(duringComposition);
     scheduleSave();
   });
   input.addEventListener("compositionstart", () => {
