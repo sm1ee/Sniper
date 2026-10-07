@@ -40,7 +40,7 @@ function fixture({ joinAnnotations = false } = {}) {
     "truncateUtf8", "truncateUtf8Preview", "utf8ByteLength",
   ];
   if (joinAnnotations) functions.push(
-    "updateAnnotations", "flushPendingAnnotations", "renderHistory", "renderHistoryVirtual",
+    "updateAnnotations", "flushPendingAnnotations", "renderHistory", "getHistoryRowHeight", "renderHistoryVirtual",
     "renderHistoryCell", "escapeHtml", "isSessionEmpty", "historyEmptyMessage",
     "rebuildHistoryItemIndex", "getHistoryItemIndex", "resortLoadedHistoryItemsForCurrentSort",
     "visibleHistoryNoteCount", "compareHistorySequence",

@@ -10321,6 +10321,17 @@ function renderHistory(options = {}) {
   renderHistoryVirtual();
 }
 
+function getHistoryRowHeight(options = {}) {
+  const previous = measuredHistoryRowHeight;
+  const measured = measuredRowPitch(els.historyTableBody);
+  if (Number.isFinite(measured) && measured > 0) {
+    measuredHistoryRowHeight = measured;
+  }
+  // Refresh old spacers before a selection scroll can hit their physical limit.
+  if (options.refreshLayout && measuredHistoryRowHeight !== previous) renderHistoryVirtual();
+  return measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
+}
+
 function renderHistoryVirtual() {
   const entries = state._historyEntries;
   if (!entries || !entries.length) return;
@@ -10328,54 +10339,53 @@ function renderHistoryVirtual() {
   const shell = els.historyTable.closest(".history-table-shell");
   if (!shell) return;
 
-  const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
   const viewportHeight = shell.clientHeight;
   const totalCount = entries.length;
   const colCount = state.historyColumnOrder.length;
   // Sticky headers still occupy table height; excluding them hides the final row.
   const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
-  const maxScrollTop = Math.max(0, headerHeight + totalCount * rowHeight - viewportHeight);
-  const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
-  if (shell.scrollTop !== scrollTop) {
-    shell.scrollTop = scrollTop;
-  }
+  const requestedScrollTop = shell.scrollTop;
+  // Keep the original offset through first-paint calibration: replacing rows
+  // can physically clamp it before the corrected spacers have been installed.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const rowHeight = getHistoryRowHeight();
+    const maxScrollTop = Math.max(0, headerHeight + totalCount * rowHeight - viewportHeight);
+    const scrollTop = Math.max(0, Math.min(requestedScrollTop, maxScrollTop));
+    const startIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - HISTORY_BUFFER_ROWS);
+    const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / rowHeight) + HISTORY_BUFFER_ROWS);
+    const topPadding = startIdx * rowHeight;
+    const bottomPadding = Math.max(0, (totalCount - endIdx) * rowHeight);
 
-  const startIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - HISTORY_BUFFER_ROWS);
-  const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / rowHeight) + HISTORY_BUFFER_ROWS);
-  if (
-    startIdx <= HTTP_HISTORY_SCROLL_PREFETCH_ROWS
-    && state.historyPaging?.trimmedHeadCount > 0
-    && !state.historyPaging.loading
-  ) {
-    loadNewerTransactions({ background: true }).catch((error) => console.error(error));
-  }
-  if (totalCount - endIdx <= HTTP_HISTORY_SCROLL_PREFETCH_ROWS) {
-    const atLoadedBottom = scrollTop >= maxScrollTop - rowHeight;
-    scheduleHistoryBackfill(0, { allowAtCap: atLoadedBottom });
-  }
+    const rows = [];
+    for (let i = startIdx; i < endIdx; i++) {
+      const entry = entries[i];
+      const item = entry.item;
+      const selected = item.id === state.selectedId ? "selected" : "";
+      const tagClass = item.color_tag ? ` tagged-${escapeHtml(item.color_tag)}` : "";
+      const cells = state.historyColumnOrder.map((colKey) => renderHistoryCell(colKey, item, entry)).join("");
+      rows.push(`<tr class="history-row ${selected}${tagClass}" data-id="${item.id}">${cells}</tr>`);
+    }
 
-  const topPadding = startIdx * rowHeight;
-  const bottomPadding = Math.max(0, (totalCount - endIdx) * rowHeight);
+    els.historyTableBody.innerHTML =
+      (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
+      rows.join("") +
+      (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
 
-  const rows = [];
-  for (let i = startIdx; i < endIdx; i++) {
-    const entry = entries[i];
-    const item = entry.item;
-    const selected = item.id === state.selectedId ? "selected" : "";
-    const tagClass = item.color_tag ? ` tagged-${escapeHtml(item.color_tag)}` : "";
-    const cells = state.historyColumnOrder.map((colKey) => renderHistoryCell(colKey, item, entry)).join("");
-    rows.push(`<tr class="history-row ${selected}${tagClass}" data-id="${item.id}">${cells}</tr>`);
-  }
-
-  els.historyTableBody.innerHTML =
-    (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
-    rows.join("") +
-    (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
-
-  const measured = measuredRowPitch(els.historyTableBody) || 0;
-  if (measured > 0 && Math.abs(measured - rowHeight) >= 1) {
-    measuredHistoryRowHeight = measured;
-    renderHistoryVirtual();
+    if (attempt === 0 && getHistoryRowHeight() !== rowHeight) continue;
+    if (shell.scrollTop !== scrollTop) shell.scrollTop = scrollTop;
+    // Prefetch only for the final window, not an intermediate calibration pass.
+    if (
+      startIdx <= HTTP_HISTORY_SCROLL_PREFETCH_ROWS
+      && state.historyPaging?.trimmedHeadCount > 0
+      && !state.historyPaging.loading
+    ) {
+      loadNewerTransactions({ background: true }).catch((error) => console.error(error));
+    }
+    if (totalCount - endIdx <= HTTP_HISTORY_SCROLL_PREFETCH_ROWS) {
+      const atLoadedBottom = scrollTop >= maxScrollTop - rowHeight;
+      scheduleHistoryBackfill(0, { allowAtCap: atLoadedBottom });
+    }
+    break;
   }
 }
 
@@ -10425,7 +10435,7 @@ function scrollHistoryToId(targetId) {
   const shell = els.historyTable.closest(".history-table-shell");
   if (!shell || shell.clientHeight <= 0) return;
 
-  const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
+  const rowHeight = getHistoryRowHeight({ refreshLayout: true });
   const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
   const targetTop = idx * rowHeight;
   const centeredTop = Math.max(0, targetTop - shell.clientHeight / 2);
@@ -10506,6 +10516,7 @@ async function moveHistorySelection(offset) {
 function scrollSelectedHistoryRowIntoView() {
   const shell = els.historyTable.closest(".history-table-shell");
   if (!shell || shell.clientHeight <= 0) return;
+  const rowHeight = getHistoryRowHeight({ refreshLayout: true });
   const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
   const selectedRow = els.historyTableBody.querySelector(".history-row.selected");
   if (selectedRow) {
@@ -10525,7 +10536,6 @@ function scrollSelectedHistoryRowIntoView() {
   if (!state.selectedId || !state._historyEntries) return;
   const idx = state._historyEntries.findIndex((e) => e.item.id === state.selectedId);
   if (idx === -1) return;
-  const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
   const rowTop = idx * rowHeight;
   const rowBottom = headerHeight + rowTop + rowHeight;
   const viewTop = shell.scrollTop;

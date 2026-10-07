@@ -23,12 +23,16 @@ function physicalTable(options = {}) {
     getBoundingClientRect: () => ({ top: shellTop }),
   };
   const contentTop = () => shellTop + shell.clientTop;
-  const rowSize = row => row.spacer ?? height;
+  const rowPitch = () => options.rowPitch?.(writes) ?? height;
+  const rowSize = row => row.spacer ?? rowPitch();
   const maxScroll = () => Math.max(0, headerHeight + rows.reduce((sum, row) => sum + rowSize(row), 0) - shell.clientHeight);
   const rect = row => {
     const preceding = rows.slice(0, rows.indexOf(row)).reduce((sum, entry) => sum + rowSize(entry), 0);
     const top = contentTop() + headerHeight + preceding - scrollTop;
-    return { top, bottom: top + height, height: options.measurementHeight?.(writes) ?? height };
+    const index = rows.filter(entry => entry.id).indexOf(row);
+    const displayedHeight = options.displayedHeight?.(index, rowPitch()) ?? rowPitch();
+    const bounds = { top, bottom: top + displayedHeight, height: displayedHeight };
+    return options.measurementRect?.(bounds, writes, index) ?? bounds;
   };
   const table = {
     closest: () => options.missingShell ? null : shell,
@@ -46,7 +50,10 @@ function physicalTable(options = {}) {
           id: attrs.match(/data-(?:finding-)?id="([^"]+)"/)?.[1],
           selected: /class="[^"]*\bselected\b/.test(attrs),
         };
-        row.classList = { add() { row.selected = true; }, remove() { row.selected = false; } };
+        row.classList = {
+          contains(name) { return name === "history-row"; },
+          add() { row.selected = true; }, remove() { row.selected = false; },
+        };
         row.getBoundingClientRect = () => rect(row);
         row.scrollIntoView = options => {
           nativeScrolls.push(options);
@@ -58,6 +65,7 @@ function physicalTable(options = {}) {
         };
         return row;
       });
+      rows.forEach((row, index) => { row.nextElementSibling = rows[index + 1] ?? null; });
       scrollTop = Math.max(0, Math.min(scrollTop, maxScroll()));
     },
     closest: selector => selector === "table" ? table : (options.missingShell ? null : shell),
@@ -88,25 +96,27 @@ function physicalTable(options = {}) {
 }
 
 function historyFixture(options = {}) {
-  const dom = physicalTable(options), loads = [];
-  const entries = Array.from({ length: 200 }, (_, i) => ({ item: { id: `saved-${i}` }, index: i }));
+  const dom = physicalTable(options), loads = [], backfills = [], newerLoads = [];
+  const entries = Array.from({ length: options.rowCount ?? 200 }, (_, i) => ({ item: { id: `saved-${i}` }, index: i }));
   const state = {
     _historyEntries: entries, selectedId: `saved-${options.selectedIndex ?? 20}`,
-    historyColumnOrder: ["index"], historyPaging: { hasMore: false, trimmedHeadCount: 0 },
+    historyColumnOrder: ["index"], historyPaging: { hasMore: false, trimmedHeadCount: options.trimmedHeadCount ?? 0 },
   };
   const c = loadFunctions([
     "moveHistorySelection", "selectHistoryTransaction", "updateHistorySelection",
-    "scrollHistoryToId", "scrollSelectedHistoryRowIntoView", "measuredRowPitch", "renderHistoryVirtual", "clamp",
+    "scrollHistoryToId", "scrollSelectedHistoryRowIntoView", "measuredRowPitch", "getHistoryRowHeight", "renderHistoryVirtual", "clamp",
   ], {
     ...constants, state, els: { historyTable: dom.table, historyTableBody: dom.body },
-    measuredHistoryRowHeight: dom.height, HTTP_HISTORY_SCROLL_PREFETCH_ROWS: 120,
+    measuredHistoryRowHeight: options.cachedHeight ?? dom.height, HTTP_HISTORY_SCROLL_PREFETCH_ROWS: 120,
     getVisibleEntries: () => entries, canReuseSelectedHistoryRecord: () => false,
-    scheduleHistoryDetailLoading() {}, scheduleHistoryBackfill() {},
+    scheduleHistoryDetailLoading() {},
+    scheduleHistoryBackfill(...args) { backfills.push(args); },
+    loadNewerTransactions(options) { newerLoads.push(options); return Promise.resolve(0); },
     loadTransactionDetail(id) { loads.push(id); return Promise.resolve({ id }); },
     renderHistoryCell: (_col, item) => `<td>${item.id}</td>`,
   });
-  c.renderHistoryVirtual();
-  return { ...dom, dom, c, state, loads };
+  if (!options.deferRender) c.renderHistoryVirtual();
+  return { ...dom, dom, c, state, loads, backfills, newerLoads };
 }
 
 for (const scrollTop of [19 * 28 + 4, 20 * 28 + 12]) {
@@ -235,7 +245,9 @@ test("Findings live height changes update clamp, spacers, and selection without 
 
 for (const measurementHeight of [0, NaN, Infinity, -1]) {
   test(`Findings ignores unusable ${measurementHeight} row measurements`, () => {
-    const f = findingsFixture({ rowHeight: 27, measurementHeight: () => measurementHeight });
+    const f = findingsFixture({ rowHeight: 27, measurementRect: () => ({
+      top: measurementHeight, bottom: measurementHeight, height: measurementHeight,
+    }) });
     f.c.renderFindingsVirtual();
     assert.equal(f.c.measuredFindingsRowHeight, 27);
     assert.equal(f.dom.writes, 1);
@@ -244,7 +256,7 @@ for (const measurementHeight of [0, NaN, Infinity, -1]) {
 }
 
 test("Findings correction is bounded when supplied row measurements keep changing", () => {
-  const f = findingsFixture({ rowHeight: 28, measurementHeight: writes => 28 + writes });
+  const f = findingsFixture({ rowHeight: 28, rowPitch: writes => 28 + writes });
   f.c.renderFindingsVirtual();
   assert.ok(f.dom.writes <= 2);
 });
@@ -339,3 +351,146 @@ for (const viewportHeight of [29, 66]) {
     assert.equal(f.dom.scrollWrites.length, writes, "no repeated scroll assignments at the selected boundary");
   });
 }
+
+for (const rowHeight of [24, 27.5, 34.75, 41]) {
+  test(`HTTP first paint calibrates supplied ${rowHeight}px pitch before clamping its requested scroll`, () => {
+    const f = historyFixture({ rowHeight, cachedHeight: 27, scrollTop: 100000, deferRender: true,
+      displayedHeight: (index, pitch) => index === 0 ? pitch - 0.5 : pitch });
+    f.c.renderHistoryVirtual();
+    assert.equal(f.c.measuredHistoryRowHeight, rowHeight);
+    assert.equal(f.dom.writes, 2, "first paint gets one correction pass");
+    assert.equal(f.dom.shell.scrollTop, 38 + 200 * rowHeight - 300);
+    assert.equal(f.dom.maxScroll(), 38 + 200 * rowHeight - 300);
+    f.dom.assertVisible("saved-199");
+    const settled = f.dom.shell.scrollTop;
+    f.c.renderHistoryVirtual();
+    f.dom.assertVisible("saved-199");
+    assert.equal(f.dom.shell.scrollTop, settled);
+  });
+}
+
+for (const rowHeight of [27.5, 26.5]) {
+  test(`HTTP live fractional pitch ${rowHeight}px replaces its 27px cache and keeps the final row visible`, () => {
+    const f = historyFixture({ rowHeight: 27,
+      displayedHeight: (index, pitch) => index === 0 ? pitch - 0.5 : pitch });
+    f.dom.shell.scrollTop = f.dom.maxScroll();
+    f.c.renderHistoryVirtual();
+    f.dom.setHeight(rowHeight);
+    f.c.renderHistoryVirtual();
+    assert.equal(f.c.measuredHistoryRowHeight, rowHeight);
+    assert.equal(f.dom.maxScroll(), 38 + 200 * rowHeight - 300);
+    f.dom.shell.scrollTop = f.dom.maxScroll();
+    f.c.renderHistoryVirtual();
+    f.dom.assertVisible("saved-199");
+    const settled = f.dom.shell.scrollTop;
+    f.c.renderHistoryVirtual();
+    assert.equal(f.dom.shell.scrollTop, settled);
+    f.dom.assertVisible("saved-199");
+  });
+}
+
+test("HTTP live font growth preserves the valid requested offset until new spacers exist", () => {
+  const f = historyFixture({ rowHeight: 27 });
+  f.dom.setHeight(41);
+  f.dom.shell.scrollTop = f.dom.maxScroll();
+  const requested = f.dom.shell.scrollTop;
+  assert.equal(requested, 5726, "physical old spacers plus newly taller rows permit this offset");
+  const writes = f.dom.scrollWrites.length;
+  f.c.renderHistoryVirtual();
+  assert.equal(f.c.measuredHistoryRowHeight, 41);
+  assert.equal(f.dom.shell.scrollTop, requested);
+  assert.equal(f.dom.maxScroll(), 38 + 200 * 41 - 300);
+  assert.ok(f.dom.scrollWrites.slice(writes).every(value => value >= requested),
+    "never assign an old-pitch clamp before calibration");
+});
+
+for (const navigation of ["near-center", "selection", "keyboard", "rendered-keyboard"]) {
+  test(`HTTP ${navigation} caller refreshes font-changed spacers before physical scrolling`, async () => {
+    const f = historyFixture({ rowHeight: 27, selectedIndex: 198,
+      displayedHeight: (index, pitch) => index === 0 ? pitch - 0.5 : pitch });
+    if (navigation === "rendered-keyboard") {
+      f.dom.shell.scrollTop = f.dom.maxScroll();
+      f.c.renderHistoryVirtual();
+      assert.ok(f.dom.body.querySelector('.history-row[data-id="saved-199"]'));
+    }
+    f.dom.setHeight(41);
+    if (navigation === "near-center") f.c.scrollHistoryToId("saved-199");
+    else if (navigation === "selection") await f.c.selectHistoryTransaction("saved-199");
+    else await f.c.moveHistorySelection(1);
+    f.c.renderHistoryVirtual();
+    f.dom.assertVisible("saved-199");
+    assert.equal(f.c.measuredHistoryRowHeight, 41);
+    assert.equal(f.dom.shell.scrollTop, 38 + 200 * 41 - 300);
+    assert.equal(f.dom.nativeScrolls.length, 0);
+    if (navigation !== "near-center") assert.deepEqual(f.loads, ["saved-199"]);
+    const settled = f.dom.shell.scrollTop;
+    f.c.renderHistoryVirtual();
+    assert.equal(f.dom.shell.scrollTop, settled);
+    f.dom.assertVisible("saved-199");
+  });
+}
+
+test("HTTP live font shrink clamps only to the corrected physical bottom", () => {
+  const f = historyFixture({ rowHeight: 41, selectedIndex: 199 });
+  f.dom.shell.scrollTop = f.dom.maxScroll();
+  f.c.renderHistoryVirtual();
+  f.dom.setHeight(24);
+  f.c.renderHistoryVirtual();
+  assert.equal(f.dom.shell.scrollTop, 38 + 200 * 24 - 300);
+  assert.equal(f.dom.maxScroll(), 38 + 200 * 24 - 300);
+  f.dom.assertVisible("saved-199");
+});
+
+for (const measurementHeight of [0, NaN, Infinity, -1]) {
+  for (const rowCount of [1, 200]) {
+    test(`HTTP ignores unusable ${measurementHeight} measurements with ${rowCount} rows`, () => {
+      const f = historyFixture({ rowHeight: 27, rowCount, deferRender: true,
+        measurementRect: () => ({ top: measurementHeight, bottom: measurementHeight, height: measurementHeight }) });
+      f.c.renderHistoryVirtual();
+      assert.equal(f.c.measuredHistoryRowHeight, 27);
+      assert.equal(f.dom.writes, 1);
+      assert.equal(f.dom.maxScroll(), Math.max(0, 38 + rowCount * 27 - 300));
+    });
+  }
+}
+
+test("HTTP correction remains bounded when supplied physical pitch keeps changing", () => {
+  const f = historyFixture({ rowHeight: 28, rowPitch: writes => 28 + writes, deferRender: true });
+  f.c.renderHistoryVirtual();
+  assert.equal(f.dom.writes, 2);
+  assert.equal(f.c.measuredHistoryRowHeight, 29, "the final pass uses its own measured pitch");
+});
+
+test("HTTP first-paint correction schedules prefetch once using its final calibrated window", () => {
+  const f = historyFixture({ rowHeight: 41, cachedHeight: 27, rowCount: 100,
+    scrollTop: 100000, trimmedHeadCount: 2, deferRender: true });
+  f.c.renderHistoryVirtual();
+  assert.equal(f.dom.writes, 2);
+  assert.equal(f.newerLoads.length, 1);
+  assert.equal(f.newerLoads[0].background, true);
+  assert.equal(f.backfills.length, 1);
+  assert.equal(f.backfills[0][0], 0);
+  assert.equal(f.backfills[0][1].allowAtCap, true);
+  f.dom.assertVisible("saved-99");
+});
+
+test("Findings adjacent pitch remains authoritative over the shorter first displayed row", () => {
+  const f = findingsFixture({ rowHeight: 27, rowCount: 300,
+    displayedHeight: (index, pitch) => index === 0 ? 26.5 : pitch });
+  f.c.renderFindingsVirtual();
+  assert.equal(f.c.measuredFindingsRowHeight, 27);
+  f.dom.shell.scrollTop = f.dom.maxScroll();
+  f.scrollRender();
+  assert.equal(f.dom.shell.scrollTop, 29 + 300 * 27 - 300);
+  f.dom.assertVisible("saved-299");
+});
+
+test("HTTP calibration does not prefetch for a discarded old-pitch window", () => {
+  const f = historyFixture({ rowHeight: 41, cachedHeight: 27, rowCount: 1000,
+    scrollTop: 24000, trimmedHeadCount: 2, deferRender: true });
+  f.c.renderHistoryVirtual();
+  assert.equal(f.dom.writes, 2);
+  assert.equal(f.dom.shell.scrollTop, 24000);
+  assert.equal(f.newerLoads.length, 0);
+  assert.equal(f.backfills.length, 0, "the corrected window is far from both loaded boundaries");
+});
