@@ -336,13 +336,18 @@ impl SavedOperationLedger {
             stored.receipt.result = completion.result;
             stored.receipt.completed_at = Some(Utc::now());
             if ledger.persist(stored.clone(), true).await.is_err() {
-                stored.receipt.outcome = SavedOperationOutcome::Unknown;
-                stored.receipt.code = SavedOperationCode::ReceiptPersistenceFailed;
-                stored.receipt.message = SavedOperationCode::ReceiptPersistenceFailed
-                    .message()
-                    .to_owned();
-                stored.receipt.result = None;
-                stored.receipt.completed_at = None;
+                // A recovered intent never ran its mutation, so "not applied" is still
+                // known and stays the answer here; the reservation holds either way.
+                // Only a mutation that may have run has an unknown outcome.
+                if !recover_unstarted_intent {
+                    stored.receipt.outcome = SavedOperationOutcome::Unknown;
+                    stored.receipt.code = SavedOperationCode::ReceiptPersistenceFailed;
+                    stored.receipt.message = SavedOperationCode::ReceiptPersistenceFailed
+                        .message()
+                        .to_owned();
+                    stored.receipt.result = None;
+                    stored.receipt.completed_at = None;
+                }
                 ledger
                     .visible
                     .lock()
@@ -978,9 +983,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_terminal_write_failures_remain_unknown_without_mutation() {
+    async fn recovery_terminal_write_failures_keep_not_applied_without_mutation() {
         // Before terminal publication, after its directory sync, and after its
-        // rename but before directory sync must all preserve the reservation.
+        // rename but before directory sync must all preserve the reservation. The
+        // mutation never ran, so this process keeps answering not applied; after a
+        // restart only a surviving terminal file says so.
         for failpoint in [2, 3, 4] {
             let directory = TestDirectory::new();
             let ledger = directory.ledger();
@@ -1003,12 +1010,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(first.receipt.outcome, SavedOperationOutcome::Unknown);
-            assert_eq!(
-                first.receipt.code,
-                SavedOperationCode::ReceiptPersistenceFailed
-            );
-            assert!(first.receipt.completed_at.is_none());
+            assert_eq!(first.receipt.outcome, SavedOperationOutcome::NotApplied);
+            assert_eq!(first.receipt.code, SavedOperationCode::PersistenceFailed);
+            assert!(first.receipt.completed_at.is_some());
             for current in [ledger.clone(), directory.ledger()] {
                 let counted = calls.clone();
                 let repeated = current
@@ -1027,8 +1031,8 @@ mod tests {
                 assert!(repeated.replayed);
                 let expected = if Arc::ptr_eq(&current, &ledger) {
                     (
-                        SavedOperationOutcome::Unknown,
-                        SavedOperationCode::ReceiptPersistenceFailed,
+                        SavedOperationOutcome::NotApplied,
+                        SavedOperationCode::PersistenceFailed,
                     )
                 } else if failpoint == 2 {
                     (SavedOperationOutcome::Unknown, SavedOperationCode::Pending)
