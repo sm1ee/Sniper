@@ -35,9 +35,11 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::{
+    browser::{self, BrowserKind, LaunchContext, LaunchError, LaunchRequest},
     config::{StartupSettingsUpdate, StartupSettingsView},
     event_log::{EventLevel, EventLogEntry},
     fuzzer::{self, FuzzerAttackPayload},
+    history_selection::{selection_token, HistorySelection},
     match_replace::{MatchReplaceRule, MatchReplaceRulesPayload},
     model::{BodyEncoding, EditableRequest, EditableResponse, HeaderRecord, RequestTargetOverride},
     proxy,
@@ -46,7 +48,7 @@ use crate::{
     sequence::{self, SequenceDefinition},
     session::{SessionContext, SessionSummary},
     state::AppState,
-    store::{ListFilters, TransactionListPage},
+    store::{BodySearchRequest, BodySearchSides, ListFilters, TransactionListPage},
     target::{TargetHostNode, TargetPathNode},
     ui_settings::AppUiSettingsSnapshot,
     websocket::WebSocketListFilters,
@@ -367,7 +369,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/self-update", post(self_update))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/:id/activate", post(activate_session))
-        .route("/api/sessions/:id", delete(delete_session))
+        .route(
+            "/api/sessions/:id",
+            delete(delete_session).patch(rename_session),
+        )
         .route("/api/sessions/:id/reveal", post(reveal_session_folder))
         .route(
             "/api/runtime",
@@ -396,6 +401,9 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/certificates/root.pem", get(download_root_pem))
         .route("/api/certificates/root.der", get(download_root_der))
         .route("/api/certificates/reveal", post(reveal_certificate_folder))
+        .route("/api/browser/list", get(list_browsers))
+        .route("/api/browser/preference", post(set_browser_preference))
+        .route("/api/browser/launch", post(launch_browser))
         .route("/api/cli-path", post(install_cli_on_path))
         .route(
             "/api/match-replace",
@@ -419,7 +427,14 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/transactions",
             get(list_transactions).delete(clear_transactions),
         )
+        .route("/api/saved/v1/call", post(crate::saved_data::call))
+        .route("/api/transactions/select", post(select_transactions))
+        .route(
+            "/api/transactions/selected",
+            delete(delete_selected_transactions),
+        )
         .route("/api/transactions-page", get(list_transactions_page))
+        .route("/api/transactions-search", get(search_transactions))
         .route("/api/transactions/:id", get(get_transaction))
         .route(
             "/api/transactions/:id/annotations",
@@ -796,6 +811,19 @@ struct TransactionQuery {
     status_range: Option<String>,
     since: Option<String>,
     mime: Option<String>,
+}
+
+/// Read beside `TransactionQuery` from the same query string, so a search takes
+/// every history filter without a second copy of the filter parsing.
+#[derive(Debug, Default, Deserialize)]
+struct TransactionSearchQuery {
+    value: Option<String>,
+    /// Comma-separated: url, request-body, response-body, headers. All when absent.
+    sides: Option<String>,
+    case_sensitive: Option<bool>,
+    max_matches: Option<usize>,
+    byte_budget: Option<u64>,
+    context: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2945,6 +2973,23 @@ async fn delete_session(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameSessionPayload {
+    name: String,
+}
+
+async fn rename_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<RenameSessionPayload>,
+) -> Response {
+    match state.rename_session(id, payload.name).await {
+        Ok(summary) => Json(summary).into_response(),
+        Err(error) => session_operation_error_response(error),
+    }
+}
+
 fn session_operation_error_response(error: anyhow::Error) -> Response {
     let message = error.to_string();
     let status = if message.contains("was not found") {
@@ -3627,7 +3672,7 @@ fn session_load_failure_response(session_id: Uuid, error: anyhow::Error) -> Resp
         .into_response()
 }
 
-async fn resolve_session_for_optional_id(
+pub(crate) async fn resolve_session_for_optional_id(
     state: &Arc<AppState>,
     target_session_id: Option<Uuid>,
 ) -> std::result::Result<Arc<SessionContext>, Response> {
@@ -3656,7 +3701,7 @@ async fn resolve_session_for_optional_id(
         .map_err(|error| session_load_failure_response(target_session_id, error))
 }
 
-async fn resolve_read_session_for_optional_id(
+pub(crate) async fn resolve_read_session_for_optional_id(
     state: &Arc<AppState>,
     target_session_id: Option<Uuid>,
 ) -> std::result::Result<Arc<SessionContext>, Response> {
@@ -3682,7 +3727,7 @@ async fn resolve_read_session_for_optional_id(
         .map_err(|error| session_load_failure_response(target_session_id, error))
 }
 
-async fn guard_session_write_operation(
+pub(crate) async fn guard_session_write_operation(
     state: &Arc<AppState>,
     session: &Arc<SessionContext>,
     require_still_active: bool,
@@ -4528,6 +4573,224 @@ async fn list_transactions_page(
     Json(TransactionPageResponse::from(page)).into_response()
 }
 
+fn body_search_request(
+    query: TransactionSearchQuery,
+) -> std::result::Result<BodySearchRequest, String> {
+    const DEFAULT_MAX_MATCHES: usize = 200;
+    const MAX_MATCHES: usize = 10_000;
+    // Large enough for a working session in one call, small enough that a
+    // multi-gigabyte one comes back promptly with stopped_by = byte_budget
+    // instead of pinning a thread; the caller raises it when it needs to.
+    const DEFAULT_BYTE_BUDGET: u64 = 128 * 1024 * 1024;
+    const MAX_BYTE_BUDGET: u64 = 8 * 1024 * 1024 * 1024;
+    const DEFAULT_CONTEXT: usize = 40;
+    const MAX_CONTEXT: usize = 400;
+
+    let value = query.value.unwrap_or_default();
+    if value.is_empty() {
+        return Err("value is required".to_string());
+    }
+    let sides = match query.sides.as_deref().map(str::trim) {
+        None | Some("") => BodySearchSides::default(),
+        Some(list) => {
+            let mut sides = BodySearchSides {
+                url: false,
+                request_body: false,
+                response_body: false,
+                headers: false,
+            };
+            for side in list.split(',').map(str::trim) {
+                match side {
+                    "url" => sides.url = true,
+                    "request-body" => sides.request_body = true,
+                    "response-body" => sides.response_body = true,
+                    "headers" => sides.headers = true,
+                    other => {
+                        return Err(format!(
+                            "unknown side: {other} (expected url, request-body, response-body, headers)"
+                        ))
+                    }
+                }
+            }
+            sides
+        }
+    };
+    Ok(BodySearchRequest {
+        value,
+        sides,
+        case_sensitive: query.case_sensitive.unwrap_or(false),
+        max_matches: query
+            .max_matches
+            .unwrap_or(DEFAULT_MAX_MATCHES)
+            .clamp(1, MAX_MATCHES),
+        byte_budget: query
+            .byte_budget
+            .unwrap_or(DEFAULT_BYTE_BUDGET)
+            .clamp(1, MAX_BYTE_BUDGET),
+        context_bytes: query.context.unwrap_or(DEFAULT_CONTEXT).min(MAX_CONTEXT),
+    })
+}
+
+async fn search_transactions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TransactionQuery>,
+    Query(search): Query<TransactionSearchQuery>,
+) -> Response {
+    if let Err(error) = validate_transaction_query(&query) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
+    let request = match body_search_request(search) {
+        Ok(request) => request,
+        Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    let session = match resolve_read_session_for_optional_id(&state, query.session_id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let runtime = session.runtime.snapshot().await;
+    let filters = transaction_list_filters(
+        query,
+        runtime.scope_patterns,
+        runtime.excluded_scope_patterns,
+    );
+    Json(session.store.search_bodies(&filters, &request).await).into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BrowserLaunchPayload {
+    browser: Option<String>,
+    url: Option<String>,
+    fresh: bool,
+    agent: bool,
+}
+
+/// The saved default, or none if it is unset or names a browser this build does not
+/// know.
+async fn preferred_browser(state: &AppState) -> Option<BrowserKind> {
+    state
+        .ui_settings
+        .snapshot()
+        .await
+        .browser
+        .preferred
+        .and_then(|name| BrowserKind::parse(&name))
+}
+
+async fn list_browsers(State(state): State<Arc<AppState>>) -> Response {
+    Json(browser::catalog(preferred_browser(&state).await)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserPreferencePayload {
+    browser: String,
+}
+
+/// Saves which browser opens when none is named. Refuses one that cannot be opened
+/// here, so a typo or a browser that is not installed is an error now and not a
+/// default that quietly falls back later.
+async fn set_browser_preference(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BrowserPreferencePayload>,
+) -> Response {
+    let name = payload.browser.trim();
+    let kind = if name.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        match BrowserKind::parse(name) {
+            Some(kind) => Some(kind),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "unknown browser: {name} (expected auto, {})",
+                        BrowserKind::names().join(", ")
+                    ),
+                )
+                    .into_response()
+            }
+        }
+    };
+    if let Some(kind) = kind {
+        if browser::find_executable(kind).is_none() {
+            return (StatusCode::NOT_FOUND, browser::not_installed_message(kind)).into_response();
+        }
+    }
+    match state
+        .ui_settings
+        .set_browser_preferred(kind.map(|kind| kind.name().to_string()))
+        .await
+    {
+        Ok(preferred) => Json(serde_json::json!({ "preferred": preferred })).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// Opens a browser wired to this instance. A write behind the same guards as every
+/// other `/api` write: loopback Host, no cross-site requests, and the session
+/// cookie when the UI is bound beyond loopback.
+async fn launch_browser(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BrowserLaunchPayload>,
+) -> Response {
+    let requested = payload
+        .browser
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("auto"));
+    let kind = match requested {
+        None => None,
+        Some(name) => match BrowserKind::parse(name) {
+            Some(kind) => Some(kind),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "unknown browser: {name} (expected auto, {})",
+                        BrowserKind::names().join(", ")
+                    ),
+                )
+                    .into_response()
+            }
+        },
+    };
+    let proxy_addr = state.get_active_proxy_addr().await;
+    if !state.is_proxy_online() {
+        return (
+            StatusCode::CONFLICT,
+            "the proxy is not listening, so a browser opened now would have nowhere to send its traffic",
+        )
+            .into_response();
+    }
+    let mut ctx = LaunchContext::new(
+        &state.config.data_dir,
+        proxy_addr,
+        state.certificates.root_der_bytes(),
+    );
+    ctx.preferred = preferred_browser(&state).await;
+    let request = LaunchRequest {
+        browser: kind,
+        url: payload.url,
+        fresh: payload.fresh,
+        agent: payload.agent,
+    };
+    match browser::launch(&ctx, request).await {
+        Ok(launched) => Json(launched).into_response(),
+        Err(error) => {
+            let status = match error {
+                LaunchError::NotInstalled(_) => StatusCode::NOT_FOUND,
+                LaunchError::BadRequest(_) => StatusCode::BAD_REQUEST,
+                LaunchError::AlreadyRunning { .. } => StatusCode::CONFLICT,
+                LaunchError::TooMany(_) => StatusCode::TOO_MANY_REQUESTS,
+                LaunchError::Forbidden(_) => StatusCode::FORBIDDEN,
+                LaunchError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, error.to_string()).into_response()
+        }
+    }
+}
+
 async fn get_transaction(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -4855,6 +5118,89 @@ async fn forward_all_intercepts(
     .into_response()
 }
 
+async fn select_transactions(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<HistorySelection>,
+) -> Response {
+    if let Err(error) = payload.validate(false) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
+    let session = match resolve_read_session_for_optional_id(&state, Some(payload.session_id)).await
+    {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    match payload.resolve(&session.store).await {
+        Ok(rows) => Json(serde_json::json!({
+            "session_id": payload.session_id,
+            "count": rows.len(),
+            "ids": rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            "selection_token": selection_token(payload.session_id, &rows),
+        }))
+        .into_response(),
+        Err(error) => (StatusCode::CONFLICT, error).into_response(),
+    }
+}
+
+async fn delete_selected_transactions(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<HistorySelection>,
+) -> Response {
+    if let Err(error) = payload.validate(true) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
+    // Once a durable deletion starts, finish the journal/memory update even if
+    // its HTTP caller disconnects. Dropping a JoinHandle does not cancel it.
+    tokio::spawn(async move {
+        let session = match resolve_session_for_optional_id(&state, Some(payload.session_id)).await {
+            Ok(session) => session,
+            Err(response) => return response,
+        };
+        let _operation_guard = match guard_session_write_operation(&state, &session, false).await {
+            Ok(guard) => guard,
+            Err(response) => return response,
+        };
+        let _mutation_guard = session.mutation_guard().await;
+        match session.store.delete_selection(&payload).await {
+            Ok((removed, ids)) => {
+                // Even when nothing was removed: a retry after a failed purge finds
+                // nothing to delete, and is the only way left to take it off disk.
+                let purged = state.purge_deleted_transactions_mutation_locked(&session).await;
+                Json(serde_json::json!({
+                    "ok": true, "action": "delete", "session_id": payload.session_id, "removed": removed, "ids": ids,
+                    "purged": purged,
+                })).into_response()
+            }
+            Err(error) => saved_transaction_delete_error(error),
+        }
+    }).await.unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "deletion outcome unavailable; inspect current state before retrying").into_response())
+}
+
+fn saved_transaction_delete_error(error: std::io::Error) -> Response {
+    if error.kind() == std::io::ErrorKind::InvalidInput {
+        (StatusCode::CONFLICT, error.to_string()).into_response()
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to durably delete selected HTTP records; inspect current state before retrying",
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearTransactionsQuery {
+    session_id: Option<Uuid>,
+    expected_active_session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearTransactionsPayload {
+    session_id: Option<Uuid>,
+}
+
 /// Empty the HTTP history for one session.
 ///
 /// Findings and WebSocket sessions are left alone: a finding is a conclusion the
@@ -4862,23 +5208,32 @@ async fn forward_all_intercepts(
 /// not make it untrue. The detail panes already say when a finding's transaction
 /// is no longer there.
 ///
-/// The snapshot is rewritten before returning, rather than left to the usual
-/// journal-driven compaction: the journal still replays every cleared record, so
-/// a crash before the next compaction would bring them all back.
+/// A durable deletion tombstone is acknowledged before removing live rows.
+/// An acknowledgement failure leaves memory intact but can have an uncertain
+/// disk outcome, so callers must inspect state before retrying.
 async fn clear_transactions(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<SessionWriteQuery>,
-    payload: Option<Json<SessionActionPayload>>,
+    Query(query): Query<ClearTransactionsQuery>,
+    body: axum::body::Bytes,
 ) -> Response {
+    let payload = if body.is_empty() {
+        None
+    } else {
+        match serde_json::from_slice::<ClearTransactionsPayload>(&body) {
+            Ok(payload) => Some(payload),
+            Err(_) => return (StatusCode::BAD_REQUEST, "clear accepts only an optional session_id body; use selected deletion for IDs or filters").into_response(),
+        }
+    };
     let (target_session_id, session_id_is_explicit) = match reconcile_write_session_id(
         query.session_id,
-        payload
-            .map(|Json(payload)| payload.session_id)
-            .unwrap_or(None),
+        payload.and_then(|payload| payload.session_id),
     ) {
         Ok(value) => value,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
+    // An expected-only request must remain pinned while waiting for the
+    // operation lock; resolving an implicit target later could select a new session.
+    let target_session_id = target_session_id.or(query.expected_active_session_id);
     if let Some(response) = expected_active_session_conflict_response(
         &state,
         query.expected_active_session_id,
@@ -4886,46 +5241,59 @@ async fn clear_transactions(
     ) {
         return response;
     }
-    let session = match resolve_session_for_optional_id(&state, target_session_id).await {
-        Ok(session) => session,
-        Err(response) => return response,
-    };
-    let _operation_guard = match guard_session_write_operation(
-        &state,
-        &session,
-        !session_id_is_explicit || query.expected_active_session_id.is_some(),
-    )
+    tokio::spawn(async move {
+        let session = match resolve_session_for_optional_id(&state, target_session_id).await {
+            Ok(session) => session,
+            Err(response) => return response,
+        };
+        let _operation_guard = match guard_session_write_operation(
+            &state,
+            &session,
+            !session_id_is_explicit || query.expected_active_session_id.is_some(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(response) => return response,
+        };
+        let _mutation_guard = session.mutation_guard().await;
+
+        let removed = match session.store.delete_all().await {
+            Ok(removed) => removed,
+            Err(error) => return saved_transaction_delete_error(error),
+        };
+        // Even when nothing was removed: clearing again after a failed purge finds
+        // nothing to delete, and is the only way left to take it off disk.
+        let purged = state
+            .purge_deleted_transactions_mutation_locked(&session)
+            .await;
+        session
+            .event_log
+            .push(
+                EventLevel::Info,
+                "capture",
+                "History cleared",
+                format!("{removed} captured transaction(s) removed"),
+            )
+            .await;
+
+        Json(serde_json::json!({
+            "ok": true,
+            "action": "clear",
+            "session_id": session.id(),
+            "removed": removed,
+            "purged": purged,
+        }))
+        .into_response()
+    })
     .await
-    {
-        Ok(guard) => guard,
-        Err(response) => return response,
-    };
-    let _mutation_guard = session.mutation_guard().await;
-
-    let removed = session.store.clear().await;
-    if let Err(error) = session.persist_mutation_locked().await {
-        return (
+    .unwrap_or_else(|_| {
+        (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("cleared the history but could not persist it: {error:#}"),
+            "clear outcome unavailable; inspect current state before retrying",
         )
-            .into_response();
-    }
-    session
-        .event_log
-        .push(
-            EventLevel::Info,
-            "capture",
-            "History cleared",
-            format!("{removed} captured transaction(s) removed"),
-        )
-        .await;
-
-    Json(serde_json::json!({
-        "ok": true,
-        "action": "clear",
-        "removed": removed,
-    }))
-    .into_response()
+            .into_response()
+    })
 }
 
 async fn list_intercept_rules(
@@ -7833,6 +8201,229 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    async fn serve_for_test(
+        name: &str,
+    ) -> (
+        Arc<AppState>,
+        PathBuf,
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (state, data_dir) = test_state(name);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = super::router(Arc::clone(&state));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (state, data_dir, addr, server)
+    }
+
+    // Opening a browser starts a process, so it must not be reachable by a page on
+    // another origin or through a rebound hostname. Both are refused before the
+    // handler runs, so no browser is launched by this test.
+    #[tokio::test]
+    async fn browser_launch_sits_behind_the_write_guards() {
+        let (_state, data_dir, addr, server) = serve_for_test("sniper-api-browser-guards").await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://{addr}/api/browser/launch");
+
+        let cross_site = client
+            .post(&url)
+            .header("sec-fetch-site", "cross-site")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cross_site.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let rebound = client
+            .post(&url)
+            .header(reqwest::header::HOST, "attacker.test:23001")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rebound.status(), reqwest::StatusCode::FORBIDDEN);
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn browser_launch_rejects_bad_input_before_starting_anything() {
+        let (state, data_dir, addr, server) = serve_for_test("sniper-api-browser-input").await;
+        state.set_proxy_online(true);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://{addr}/api/browser/launch");
+
+        let unknown = client
+            .post(&url)
+            .json(&serde_json::json!({"browser": "firefox"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body = unknown.text().await.unwrap();
+        assert!(
+            body.contains("firefox") && body.contains("chrome"),
+            "{body}"
+        );
+
+        // The old name of `agent`. An ignored unknown field would fall back to the
+        // default, which means silently opening a browser an agent cannot drive.
+        let typo = client
+            .post(&url)
+            .json(&serde_json::json!({"debug_port": true}))
+            .send()
+            .await
+            .unwrap();
+        // Exactly 422, not "any 4xx": without the field check the typo would fall
+        // through to a launch, and a machine with no browser installed would answer
+        // 404 and pass a looser assertion.
+        assert_eq!(typo.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(typo.text().await.unwrap().contains("unknown field"));
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Which browsers are installed differs between machines, so each name is checked
+    // against what this one has: saved when installed, refused when not.
+    #[tokio::test]
+    async fn the_browser_preference_is_validated_saved_and_shown_in_the_list() {
+        let (_state, data_dir, addr, server) = serve_for_test("sniper-api-browser-pref").await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let preference = format!("http://{addr}/api/browser/preference");
+        let list = format!("http://{addr}/api/browser/list");
+
+        let unknown = client
+            .post(&preference)
+            .json(&serde_json::json!({"browser": "netscape"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let typo = client
+            .post(&preference)
+            .json(&serde_json::json!({"browser": "chrome", "default": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(typo.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+
+        let auto = client
+            .post(&preference)
+            .json(&serde_json::json!({"browser": "auto"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(auto.status(), reqwest::StatusCode::OK);
+        assert!(auto.json::<serde_json::Value>().await.unwrap()["preferred"].is_null());
+
+        for kind in crate::browser::BrowserKind::ALL {
+            let response = client
+                .post(&preference)
+                .json(&serde_json::json!({"browser": kind.name()}))
+                .send()
+                .await
+                .unwrap();
+            if crate::browser::find_executable(kind).is_none() {
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::NOT_FOUND,
+                    "{}",
+                    kind.name()
+                );
+                continue;
+            }
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::OK,
+                "{}",
+                kind.name()
+            );
+            let entries = client
+                .get(&list)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            let entry = entries
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["browser"] == kind.name())
+                .unwrap();
+            assert_eq!(entry["preferred"], true, "{}", kind.name());
+            assert_eq!(
+                entry["default"], true,
+                "a saved, installed choice is what opens"
+            );
+        }
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Choosing a default is a write to saved settings, so it sits behind the same
+    // guards as every other: a page on another origin cannot change it.
+    #[tokio::test]
+    async fn the_browser_preference_sits_behind_the_write_guards() {
+        let (_state, data_dir, addr, server) =
+            serve_for_test("sniper-api-browser-pref-guard").await;
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{addr}/api/browser/preference"))
+            .header("sec-fetch-site", "cross-site")
+            .json(&serde_json::json!({"browser": "auto"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn browser_launch_refuses_when_the_proxy_is_not_listening() {
+        let (state, data_dir, addr, server) = serve_for_test("sniper-api-browser-offline").await;
+        state.set_proxy_online(false);
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{addr}/api/browser/launch"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+
+        let listing = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/api/browser/list"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(listing.status(), reqwest::StatusCode::OK);
+        assert!(listing
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+            .is_array());
+
         server.abort();
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -17744,5 +18335,399 @@ mod tests {
 
         let _ = std::fs::remove_file(storage_dir);
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+    #[tokio::test]
+    async fn saved_http_selection_rejects_stale_wrong_session_and_invalid_requests() {
+        let (state, data_dir) = test_state("sniper-saved-http-selection");
+        let session = state.session().await;
+        let session_id = session.id();
+        let record = test_replay_response_record("/saved", 200);
+        let id = record.id;
+        session.store.insert(record).await;
+        let selection = serde_json::json!({"session_id":session_id,"host":"example.test"});
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/transactions/select",
+            selection.clone(),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        let selected: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(selected["count"], 1);
+        assert!(session.store.get(id).await.is_some());
+        for bad in [
+            serde_json::json!({"session_id":session_id}),
+            serde_json::json!({"session_id":session_id,"host":" "}),
+            serde_json::json!({"session_id":session_id,"hots":"example.test"}),
+            serde_json::json!({"session_id":session_id,"status_range":"bogus"}),
+            serde_json::json!({"session_id":session_id,"ids":[id],"host":"example.test"}),
+            serde_json::json!({"session_id":session_id,"ids":[id,Uuid::new_v4()]}),
+            serde_json::json!({"session_id":session_id,"host":"example.test"}),
+        ] {
+            let (status, _) = api_route_json(
+                state.clone(),
+                reqwest::Method::DELETE,
+                "/api/transactions/selected",
+                bad,
+            )
+            .await;
+            assert!(status.is_client_error());
+            assert!(session.store.get(id).await.is_some());
+        }
+        let another = state.create_session(Some("Other".into())).await.unwrap();
+        let (status, _) = api_route_json(
+            state.clone(),
+            reqwest::Method::DELETE,
+            "/api/transactions/selected",
+            serde_json::json!({"session_id":another.id,"ids":[id]}),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert!(session.store.get(id).await.is_some());
+        let next = test_replay_response_record("/new", 200);
+        let next_id = next.id;
+        session.store.insert(next).await;
+        let mut deletion = selection.clone();
+        deletion["selection_token"] = selected["selection_token"].clone();
+        let (status, _) = api_route_json(
+            state.clone(),
+            reqwest::Method::DELETE,
+            "/api/transactions/selected",
+            deletion,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert!(session.store.get(id).await.is_some());
+        assert!(session.store.get(next_id).await.is_some());
+        let (status, _) = api_route_json(
+            state.clone(),
+            reqwest::Method::DELETE,
+            "/api/transactions/selected",
+            serde_json::json!({"session_id":session_id,"ids":[id,id]}),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert!(session.store.get(id).await.is_none());
+        assert!(session.store.get(next_id).await.is_some());
+        assert_eq!(state.session().await.id(), another.id);
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/transactions/select",
+            selection.clone(),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        let selected: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let mut deletion = selection;
+        deletion["selection_token"] = selected["selection_token"].clone();
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::DELETE,
+            "/api/transactions/selected",
+            deletion,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert!(session.store.get(next_id).await.is_none());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn delete_ack_invalid_input_is_server_error_but_stale_selection_is_conflict() {
+        for clear in [false, true] {
+            let error = crate::store::tests::failed_delete_ack_for_test(clear, None).await;
+            let response = super::saved_transaction_delete_error(error);
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let message = std::str::from_utf8(&body).unwrap();
+            assert!(message.contains("inspect current state before retrying"));
+            assert!(!message.contains("injected sync failure"));
+        }
+        let stale = crate::store::tests::stale_delete_selection_error_for_test().await;
+        assert_eq!(
+            super::saved_transaction_delete_error(stale).status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    // Clearing history is how someone gets rid of captured cookies and tokens. The
+    // deletion is durable as a journal tombstone, but the traffic itself sits in the
+    // session files (an older capture) or in the journal (a recent one) until those
+    // are rewritten, so each way of deleting has to rewrite them right away.
+    #[tokio::test]
+    async fn deleting_history_removes_the_traffic_from_the_session_files() {
+        fn record_with_cookie(secret: &str) -> TransactionRecord {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                http::header::COOKIE,
+                format!("session={secret}").parse().unwrap(),
+            );
+            TransactionRecord::http(
+                chrono::Utc::now(),
+                "GET".to_string(),
+                "https".to_string(),
+                "example.test".to_string(),
+                "/account".to_string(),
+                Some(200),
+                1,
+                MessageRecord::from_headers_and_body(&headers, &[], 0),
+                None,
+                Vec::new(),
+                None,
+                None,
+            )
+        }
+        fn files_containing(dir: &std::path::Path, needle: &str) -> Vec<String> {
+            let mut found = Vec::new();
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    found.extend(files_containing(&path, needle));
+                } else if std::fs::read(&path)
+                    .unwrap_or_default()
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+                {
+                    found.push(path.display().to_string());
+                }
+            }
+            found
+        }
+
+        for (way, inactive) in [
+            ("clear", false),
+            ("selected", false),
+            ("saved-v1-clear", false),
+            // Deleting from a session that is not the active one: nothing else would
+            // rewrite its files until it is opened again.
+            ("selected", true),
+        ] {
+            let (state, data_dir) = test_state(&format!("sniper-delete-purges-{way}-{inactive}"));
+            let session = state.session().await;
+            let session_id = session.id();
+            // One capture already written to the session files, one still only in
+            // the journal.
+            let older_secret = format!("older-{}", Uuid::new_v4().simple());
+            let older = record_with_cookie(&older_secret);
+            let older_id = older.id;
+            session.store.insert(older).await;
+            session.persist().await.unwrap();
+            let recent_secret = format!("recent-{}", Uuid::new_v4().simple());
+            let recent = record_with_cookie(&recent_secret);
+            let recent_id = recent.id;
+            session.store.insert(recent).await;
+            let dir = session.storage_dir().to_path_buf();
+            if inactive {
+                // Creating a session also makes it the active one.
+                state.create_session(Some("Other".into())).await.unwrap();
+                assert_ne!(state.session().await.id(), session_id, "precondition");
+            }
+            assert!(
+                !files_containing(&dir, &older_secret).is_empty(),
+                "{way}: precondition"
+            );
+            assert!(
+                !files_containing(&dir, &recent_secret).is_empty(),
+                "{way}: precondition"
+            );
+
+            let (status, body) = match way {
+                "clear" => {
+                    api_route_response(
+                        state.clone(),
+                        reqwest::Method::DELETE,
+                        &format!("/api/transactions?session_id={session_id}"),
+                        None,
+                    )
+                    .await
+                }
+                "selected" => {
+                    api_route_json(
+                        state.clone(),
+                        reqwest::Method::DELETE,
+                        "/api/transactions/selected",
+                        serde_json::json!({"session_id":session_id,"ids":[older_id,recent_id]}),
+                    )
+                    .await
+                }
+                _ => {
+                    api_route_json(
+                        state.clone(),
+                        reqwest::Method::POST,
+                        "/api/saved/v1/call",
+                        serde_json::json!({"operation":"saved.v1.http.clear","input":{
+                            "operation_id":Uuid::new_v4(),"session_id":session_id}}),
+                    )
+                    .await
+                }
+            };
+            assert_eq!(status, reqwest::StatusCode::OK, "{way}: {body}");
+            assert!(session.store.get(older_id).await.is_none(), "{way}");
+            assert!(session.store.get(recent_id).await.is_none(), "{way}");
+            assert_eq!(
+                files_containing(&dir, &older_secret),
+                Vec::<String>::new(),
+                "{way}: the older capture is still on disk"
+            );
+            assert_eq!(
+                files_containing(&dir, &recent_secret),
+                Vec::<String>::new(),
+                "{way}: the recent capture is still on disk"
+            );
+            let _ = std::fs::remove_dir_all(data_dir);
+        }
+    }
+
+    // A purge that failed leaves the rows gone from memory and the traffic on disk.
+    // Clearing again finds nothing to delete, and still has to rewrite the files:
+    // it is the only way left to take that traffic off disk.
+    #[tokio::test]
+    async fn clearing_again_after_a_failed_purge_still_takes_the_traffic_off_disk() {
+        let (state, data_dir) = test_state("sniper-clear-retry-purges");
+        let session = state.session().await;
+        let session_id = session.id();
+        let secret = format!("retry-{}", Uuid::new_v4().simple());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            format!("session={secret}").parse().unwrap(),
+        );
+        session
+            .store
+            .insert(TransactionRecord::http(
+                chrono::Utc::now(),
+                "GET".to_string(),
+                "https".to_string(),
+                "example.test".to_string(),
+                "/account".to_string(),
+                Some(200),
+                1,
+                MessageRecord::from_headers_and_body(&headers, &[], 0),
+                None,
+                Vec::new(),
+                None,
+                None,
+            ))
+            .await;
+        session.persist().await.unwrap();
+        // The deletion without its rewrite, as a failed purge leaves it.
+        assert_eq!(session.store.delete_all().await.unwrap(), 1);
+        let on_disk = |dir: &std::path::Path| {
+            std::fs::read_dir(dir).unwrap().flatten().any(|entry| {
+                std::fs::read(entry.path())
+                    .unwrap_or_default()
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes())
+            })
+        };
+        let dir = session.storage_dir().to_path_buf();
+        assert!(on_disk(&dir), "precondition: the traffic is still on disk");
+
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::DELETE,
+            &format!("/api/transactions?session_id={session_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["removed"], 0);
+        assert_eq!(body["purged"], true);
+        assert!(!on_disk(&dir), "clearing again left the traffic on disk");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn saved_http_clear_refuses_filters_and_rename_is_strict() {
+        let (state, data_dir) = test_state("sniper-saved-http-clear");
+        let session = state.session().await;
+        let record = test_replay_response_record("/saved", 200);
+        let id = record.id;
+        session.store.insert(record).await;
+        for (path, payload) in [
+            (
+                format!(
+                    "/api/transactions?session_id={}&host=example.test",
+                    session.id()
+                ),
+                None,
+            ),
+            (
+                format!("/api/transactions?session_id={}", session.id()),
+                Some(serde_json::json!({"ids":[id]})),
+            ),
+        ] {
+            let (status, _) =
+                api_route_response(state.clone(), reqwest::Method::DELETE, &path, payload).await;
+            assert!(status.is_client_error());
+            assert!(session.store.get(id).await.is_some());
+        }
+        let path = format!("/api/sessions/{}", session.id());
+        for payload in [
+            serde_json::json!({"name":" "}),
+            serde_json::json!({"name":"Updated","path":"../other"}),
+        ] {
+            let (status, _) =
+                api_route_json(state.clone(), reqwest::Method::PATCH, &path, payload).await;
+            assert!(status.is_client_error());
+        }
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::PATCH,
+            &path,
+            serde_json::json!({"name":"  Updated  "}),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["name"],
+            "Updated"
+        );
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::DELETE,
+            &format!("/api/transactions?session_id={}", session.id()),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert!(session.store.get(id).await.is_none());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+}
+
+#[cfg(test)]
+mod web_assets {
+    // crypto.randomUUID exists only in a secure context, and the authenticated UI is
+    // served over plain http from another address, so a direct call throws there.
+    // There is no browser in the test suite, so this guards the source instead: the
+    // one call that may remain is the feature-detected one inside generateUuid.
+    #[test]
+    fn the_ui_makes_ids_through_generate_uuid_and_not_crypto_random_uuid() {
+        let source = include_str!("../web/app.js");
+        let start = source
+            .find("function generateUuid()")
+            .expect("generateUuid is defined");
+        // "\n}" and not "\n}\n": a Windows checkout turns every newline into CRLF.
+        let end = start + source[start..].find("\n}").expect("generateUuid ends");
+        let helper = &source[start..end];
+        assert!(
+            helper.contains("typeof globalThis.crypto?.randomUUID === \"function\""),
+            "generateUuid must check randomUUID exists before calling it"
+        );
+        assert!(
+            helper.contains("getRandomValues"),
+            "generateUuid must have a fallback that works without randomUUID"
+        );
+        let outside = format!("{}{}", &source[..start], &source[end..]);
+        assert!(
+            !outside.contains("randomUUID()"),
+            "call generateUuid() instead of crypto.randomUUID()"
+        );
     }
 }

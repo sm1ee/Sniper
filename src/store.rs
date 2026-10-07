@@ -57,10 +57,90 @@ pub struct ListFilters {
     pub advanced_negative: bool,
 }
 
-/// What a body search may look at. Headers are held in memory, so including them
-/// costs nothing; bodies come off disk and are what the byte budget governs.
+/// Destructive selections must never inherit the listing API's forgiving
+/// defaults: an ignored or empty criterion could otherwise select everything.
+pub fn validate_delete_filters(filters: &ListFilters) -> Result<(), String> {
+    if filters.limit.is_some_and(|limit| limit != 0)
+        || filters.offset.is_some()
+        || filters.before_sequence.is_some()
+        || filters.sort_key.is_some()
+        || filters.sort_direction.is_some()
+        || !filters.scope_patterns.is_empty()
+        || !filters.excluded_scope_patterns.is_empty()
+        || filters.in_scope_only
+        || filters.hide_connect
+        || filters.hide_without_responses
+        || filters.only_parameterized
+        || filters.only_notes
+        || filters.status_classes.is_some()
+        || filters.mime_types.is_some()
+        || !filters.hidden_extensions.is_empty()
+        || filters.port.is_some()
+        || !filters.color_tags.is_empty()
+        || filters.advanced_search.is_some()
+        || filters.advanced_regex
+        || filters.advanced_case_sensitive
+        || filters.advanced_negative
+    {
+        return Err("unsupported deletion filter; use query, method, host, status, status_range, since, or mime".to_string());
+    }
+    let criteria = [
+        ("query", filters.query.as_deref()),
+        ("method", filters.method.as_deref()),
+        ("host", filters.host.as_deref()),
+        ("status_range", filters.status_range.as_deref()),
+        ("since", filters.since.as_deref()),
+        ("mime", filters.mime.as_deref()),
+    ];
+    for (name, value) in criteria {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return Err(format!("{name} must not be blank"));
+        }
+    }
+    if filters.status.is_none() && criteria.iter().all(|(_, value)| value.is_none()) {
+        return Err("at least one deletion filter is required".to_string());
+    }
+    if filters.status.is_some() && filters.status_range.is_some() {
+        return Err("status and status_range cannot be combined".to_string());
+    }
+    if filters
+        .status
+        .is_some_and(|status| !(100..=599).contains(&status))
+    {
+        return Err("status must be between 100 and 599".to_string());
+    }
+    if let Some(range) = filters.status_range.as_deref() {
+        let valid = match parse_status_range(range) {
+            Some(StatusPredicate::Class(_)) => true,
+            Some(StatusPredicate::Range(lo, hi)) => {
+                (100..=599).contains(&lo) && (100..=599).contains(&hi)
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(
+                "status_range must be a class such as 4xx or an ordered range within 100-599"
+                    .to_string(),
+            );
+        }
+    }
+    if filters
+        .since
+        .as_deref()
+        .is_some_and(|since| parse_since(since).is_none())
+    {
+        return Err("since must be a valid date, RFC3339 timestamp, or nonnegative relative duration such as 30m".to_string());
+    }
+    Ok(())
+}
+
+/// What a body search may look at. The URL and headers are held in memory, so
+/// including them costs nothing; bodies come off disk and are what the byte
+/// budget governs. The URL is here so one search answers "did this value cross
+/// the wire at all" without a second pass through the metadata query.
 #[derive(Clone, Copy, Debug)]
 pub struct BodySearchSides {
+    pub url: bool,
     pub request_body: bool,
     pub response_body: bool,
     pub headers: bool,
@@ -69,6 +149,7 @@ pub struct BodySearchSides {
 impl Default for BodySearchSides {
     fn default() -> Self {
         Self {
+            url: true,
             request_body: true,
             response_body: true,
             headers: true,
@@ -88,29 +169,56 @@ pub struct BodySearchRequest {
     pub context_bytes: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct BodySearchMatch {
-    pub id: Uuid,
-    pub sequence: u64,
     pub side: &'static str,
     /// Byte offset of the match inside that side, not inside the file.
     pub offset: usize,
     pub context: String,
 }
 
+/// One transaction and every place in it the value turned up. Grouped because
+/// the question is almost always "which requests", and a flat list of
+/// occurrences makes the caller count distinct ids to answer it.
+#[derive(Clone, Debug, Serialize)]
+pub struct BodySearchHit {
+    pub id: Uuid,
+    pub sequence: u64,
+    // Carried so a caller can say which request matched without fetching each
+    // record again — the round trip the search exists to remove.
+    pub method: String,
+    pub host: String,
+    pub path: String,
+    pub matches: Vec<BodySearchMatch>,
+}
+
 /// A search answers "where is this value" and, just as importantly, "how much did
 /// you actually look at". Without the second half an agent reads an exhausted
 /// budget as proof the value is absent.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct BodySearchOutcome {
-    pub matches: Vec<BodySearchMatch>,
+    pub transactions: Vec<BodySearchHit>,
+    /// Occurrences across all transactions; what `max_matches` caps.
+    pub match_count: usize,
     pub records_considered: usize,
     pub records_scanned: usize,
     pub bytes_scanned: u64,
+    /// True only when every candidate was searched: nothing cut the scan short
+    /// and nothing was unreadable. "No matches" is an answer only when this is.
     pub complete: bool,
+    /// Which limit ended the scan early — `max_matches`, `byte_budget` or
+    /// `scan_failed` — so the caller knows what to raise rather than guessing.
+    pub stopped_by: Option<&'static str>,
     /// Records whose bodies could not be read back, so their absence from the
     /// matches proves nothing.
     pub unsearchable: usize,
+}
+
+impl BodySearchOutcome {
+    fn stop(&mut self, reason: &'static str) {
+        self.complete = false;
+        self.stopped_by.get_or_insert(reason);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +245,9 @@ pub struct SiteMapRecord {
 }
 
 pub struct TransactionStore {
+    // Sequence numbers may be reused after reloading a trimmed/cleared store.
+    // Saved-data cursors expire when the underlying store is reconstructed.
+    saved_cursor_generation: Uuid,
     inner: RwLock<StoreInner>,
     insert_lock: AsyncMutex<()>,
     events: broadcast::Sender<TransactionEvent>,
@@ -195,6 +306,9 @@ pub(crate) enum TransactionJournalEntry {
     },
     Update {
         record: TransactionRecord,
+    },
+    Delete {
+        ids: Vec<Uuid>,
     },
     Annotation {
         id: Uuid,
@@ -420,6 +534,10 @@ impl StoreInner {
 }
 
 impl TransactionStore {
+    pub fn saved_cursor_generation(&self) -> Uuid {
+        self.saved_cursor_generation
+    }
+
     pub fn new() -> Self {
         Self::from_records(Vec::new())
     }
@@ -449,6 +567,7 @@ impl TransactionStore {
         // Resume sequence from the highest existing number.
         let max_seq = inner.entries.iter().map(|r| r.sequence).max().unwrap_or(0);
         Self {
+            saved_cursor_generation: Uuid::new_v4(),
             inner: RwLock::new(inner),
             insert_lock: AsyncMutex::new(()),
             events,
@@ -576,6 +695,119 @@ impl TransactionStore {
 
     pub async fn len(&self) -> usize {
         self.inner.read().await.entries.len()
+    }
+
+    /// Commit a tombstone before touching memory. A missing id invalidates the
+    /// whole selection, including ids that belong to another session or a stale
+    /// preview. Keeping the journal mandatory avoids lossy snapshot rollback.
+    pub async fn delete_ids(&self, ids: &[Uuid]) -> io::Result<usize> {
+        let _mutation_guard = self.insert_lock.lock().await;
+        self.delete_ids_locked(ids).await
+    }
+
+    /// Resolve and check the reviewed selection while capture/update mutations
+    /// are excluded, so a changing response cannot invalidate it between the
+    /// token check and the durable deletion.
+    pub async fn delete_selection(
+        &self,
+        selection: &crate::history_selection::HistorySelection,
+    ) -> io::Result<(usize, Vec<Uuid>)> {
+        let _mutation_guard = self.insert_lock.lock().await;
+        selection
+            .validate(true)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let rows = selection
+            .resolve(self)
+            .await
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if selection.selection_token.as_ref().is_some_and(|token| {
+            *token != crate::history_selection::selection_token(selection.session_id, &rows)
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "selection changed since preview; nothing deleted",
+            ));
+        }
+        let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+        if ids.is_empty() {
+            return Ok((0, ids));
+        }
+        Ok((self.delete_ids_locked(&ids).await?, ids))
+    }
+
+    pub async fn delete_all(&self) -> io::Result<usize> {
+        let _mutation_guard = self.insert_lock.lock().await;
+        let ids: Vec<_> = self
+            .inner
+            .read()
+            .await
+            .entries
+            .iter()
+            .map(|record| record.id)
+            .collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.delete_ids_locked(&ids).await
+    }
+
+    async fn delete_ids_locked(&self, ids: &[Uuid]) -> io::Result<usize> {
+        if ids.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "at least one transaction id is required",
+            ));
+        }
+        let mut selected = HashSet::with_capacity(ids.len());
+        let ids: Vec<_> = ids
+            .iter()
+            .copied()
+            .filter(|id| selected.insert(*id))
+            .collect();
+        {
+            let inner = self.inner.read().await;
+            if ids.iter().any(|id| !inner.by_id.contains_key(id)) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "one or more transaction ids are not in this session",
+                ));
+            }
+        }
+        let tx = self.journal_tx.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "transaction journal writer is not available",
+            )
+        })?;
+        let line = encode_transaction_journal_line(&TransactionJournalEntry::Delete { ids })
+            .ok_or_else(|| {
+                io::Error::other("failed to encode transaction deletion journal entry")
+            })?;
+        // InvalidInput is reserved for selection checks before an append. Even
+        // that OS error can follow a written tombstone (for example at fsync),
+        // so callers must treat every append/ack failure as uncertain persistence.
+        append_transaction_journal(tx, line)
+            .await
+            .map_err(io::Error::other)?;
+
+        let mut inner = self.inner.write().await;
+        inner
+            .entries
+            .retain(|record| !selected.contains(&record.id));
+        inner
+            .summaries
+            .retain(|cached| !selected.contains(&cached.summary.id));
+        inner.locators.retain(|id, _| !selected.contains(id));
+        inner.by_id = inner
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (record.id, index))
+            .collect();
+        drop(inner);
+        self.next_event_sequence.fetch_add(1, Ordering::Relaxed);
+        let _ = self.retention_events.send(());
+        Ok(selected.len())
     }
 
     pub async fn is_empty(&self) -> bool {
@@ -811,9 +1043,6 @@ impl TransactionStore {
         snapshot_entries(&inner, limit)
     }
 
-    /// Puts the body text back on a record whose bodies were dropped after loading.
-    /// The in-memory copy carries the current annotations, which may be ahead of
-    /// what is on disk, so those are kept and only the bodies come from the file.
     /// Search request/response bodies and headers for a literal value.
     ///
     /// Bodies are not held in memory and are not in the metadata haystack that
@@ -834,11 +1063,13 @@ impl TransactionStore {
             request.value.to_ascii_lowercase()
         };
         let mut outcome = BodySearchOutcome {
-            matches: Vec::new(),
+            transactions: Vec::new(),
+            match_count: 0,
             records_considered: 0,
             records_scanned: 0,
             bytes_scanned: 0,
             complete: true,
+            stopped_by: None,
             unsearchable: 0,
         };
         if needle.is_empty() {
@@ -919,55 +1150,85 @@ impl TransactionStore {
         };
         outcome.records_considered = candidates.len();
 
-        // File order, so the pass over transactions.ndjson only moves forward.
-        let mut ordered: Vec<Candidate> = candidates;
-        ordered.sort_by_key(|candidate| candidate.locator.map(|l| l.offset).unwrap_or(0));
-
+        // The reads are blocking file I/O over as much as the byte budget allows,
+        // which is far too long to hold a runtime worker that proxy tasks share.
         let storage_dir = self.storage_dir.clone();
-        for candidate in ordered {
-            if outcome.matches.len() >= request.max_matches
-                || outcome.bytes_scanned >= request.byte_budget
-            {
-                outcome.complete = false;
-                break;
-            }
-            let record = match (&candidate.in_memory, candidate.locator, &storage_dir) {
-                (Some(record), _, _) => record.clone(),
-                (None, Some(locator), Some(dir)) => {
-                    match crate::session::read_transaction_at(dir, locator) {
-                        // Same reason rehydrate checks: a byte range is not a key.
-                        Some(full) if full.id == candidate.id => full,
-                        _ => {
-                            outcome.unsearchable += 1;
-                            continue;
+        let request = request.clone();
+        let scan = tokio::task::spawn_blocking(move || {
+            // File order, so the pass over transactions.ndjson only moves forward.
+            let mut ordered = candidates;
+            ordered.sort_by_key(|candidate| candidate.locator.map(|l| l.offset).unwrap_or(0));
+            for candidate in ordered {
+                if outcome.match_count >= request.max_matches {
+                    outcome.stop("max_matches");
+                    break;
+                }
+                if outcome.bytes_scanned >= request.byte_budget {
+                    outcome.stop("byte_budget");
+                    break;
+                }
+                let record = match (candidate.in_memory, candidate.locator, &storage_dir) {
+                    (Some(record), _, _) => record,
+                    (None, Some(locator), Some(dir)) => {
+                        match crate::session::read_transaction_at(dir, locator) {
+                            // Same reason rehydrate checks: a byte range is not a key.
+                            Some(full) if full.id == candidate.id => full,
+                            _ => {
+                                outcome.unsearchable += 1;
+                                continue;
+                            }
                         }
                     }
-                }
-                _ => {
-                    outcome.unsearchable += 1;
-                    continue;
-                }
-            };
-            outcome.records_scanned += 1;
-            outcome.bytes_scanned = outcome
-                .bytes_scanned
-                .saturating_add(record.request.body_size as u64)
-                .saturating_add(
-                    record
-                        .response
-                        .as_ref()
-                        .map(|message| message.body_size as u64)
-                        .unwrap_or(0),
+                    _ => {
+                        outcome.unsearchable += 1;
+                        continue;
+                    }
+                };
+                outcome.records_scanned += 1;
+                outcome.bytes_scanned = outcome
+                    .bytes_scanned
+                    .saturating_add(record.request.body_size as u64)
+                    .saturating_add(
+                        record
+                            .response
+                            .as_ref()
+                            .map(|message| message.body_size as u64)
+                            .unwrap_or(0),
+                    );
+                collect_record_matches(
+                    &record,
+                    candidate.sequence,
+                    &needle,
+                    &request,
+                    &mut outcome,
                 );
-            collect_record_matches(&record, candidate.sequence, &needle, request, &mut outcome);
-        }
-        if outcome.matches.len() > request.max_matches {
-            outcome.matches.truncate(request.max_matches);
-            outcome.complete = false;
-        }
-        outcome
+            }
+            if outcome.unsearchable > 0 {
+                outcome.complete = false;
+            }
+            // Scanned in file order for the disk; reported in capture order for
+            // the reader.
+            outcome.transactions.sort_by_key(|hit| hit.sequence);
+            outcome
+        });
+        scan.await.unwrap_or_else(|error| {
+            warn!(?error, "body search scan did not finish");
+            BodySearchOutcome {
+                transactions: Vec::new(),
+                match_count: 0,
+                records_considered: 0,
+                records_scanned: 0,
+                bytes_scanned: 0,
+                complete: false,
+                stopped_by: Some("scan_failed"),
+                unsearchable: 0,
+            }
+        })
     }
 
+    /// Puts the body text back on a record whose bodies were dropped after loading.
+    /// The in-memory copy carries the current annotations, which may be ahead of
+    /// what is on disk, so those are kept and only the bodies come from the file.
     fn rehydrate(&self, record: &TransactionRecord, inner: &StoreInner) -> TransactionRecord {
         let Some(locator) = inner.locators.get(&record.id).copied() else {
             return record.clone();
@@ -1386,6 +1647,7 @@ impl TransactionStore {
     }
 
     pub async fn replace_all(&self, records: Vec<TransactionRecord>) {
+        let _mutation_guard = self.insert_lock.lock().await;
         let mut inner = StoreInner::from_newest_first(records);
         if let Some(max_entries) = self.max_entries {
             inner.trim_to_max_entries(max_entries);
@@ -1406,29 +1668,15 @@ impl TransactionStore {
     }
 
     /// Points the store at where a compaction just put each record, and drops the
-    /// Drop every captured transaction, returning how many went.
-    ///
-    /// The locator map goes with them: an offset into transactions.ndjson only
-    /// means anything while the record it belongs to is still here, and the
-    /// caller rewrites that file immediately after.
-    pub async fn clear(&self) -> usize {
-        let mut inner = self.inner.write().await;
-        let removed = inner.entries.len();
-        inner.entries.clear();
-        inner.summaries.clear();
-        inner.by_id.clear();
-        inner.locators.clear();
-        removed
-    }
-
     /// bodies it no longer has to hold. Must be called after every rewrite of
     /// transactions.ndjson: the offsets from before it are stale, and a stale
     /// offset silently returns a different request's traffic.
     pub async fn adopt_written_locators(
         &self,
-        locators: HashMap<Uuid, crate::session::BodyLocator>,
+        mut locators: HashMap<Uuid, crate::session::BodyLocator>,
     ) {
         let mut inner = self.inner.write().await;
+        locators.retain(|id, _| inner.by_id.contains_key(id));
         for record in inner.entries.iter_mut() {
             if locators.contains_key(&record.id) {
                 strip_transaction_bodies(record);
@@ -1861,21 +2109,15 @@ fn parse_status_range(input: &str) -> Option<StatusPredicate> {
 fn parse_since(input: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let trimmed = input.trim();
     // Relative: "1h", "30m", "2d", "7d"
-    if let Some(rest) = trimmed.strip_suffix('h') {
-        let hours: i64 = rest.parse().ok()?;
-        return Some(chrono::Utc::now() - chrono::Duration::hours(hours));
-    }
-    if let Some(rest) = trimmed.strip_suffix('m') {
-        let minutes: i64 = rest.parse().ok()?;
-        return Some(chrono::Utc::now() - chrono::Duration::minutes(minutes));
-    }
-    if let Some(rest) = trimmed.strip_suffix('d') {
-        let days: i64 = rest.parse().ok()?;
-        return Some(chrono::Utc::now() - chrono::Duration::days(days));
-    }
-    if let Some(rest) = trimmed.strip_suffix('s') {
-        let secs: i64 = rest.parse().ok()?;
-        return Some(chrono::Utc::now() - chrono::Duration::seconds(secs));
+    for (unit, seconds_per_unit) in [('h', 3600_i64), ('m', 60), ('d', 86400), ('s', 1)] {
+        if let Some(rest) = trimmed.strip_suffix(unit) {
+            if rest.is_empty() || !rest.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let amount: i64 = rest.parse().ok()?;
+            let duration = chrono::Duration::try_seconds(amount.checked_mul(seconds_per_unit)?)?;
+            return chrono::Utc::now().checked_sub_signed(duration);
+        }
     }
     // Absolute: "2024-01-01" or "2024-01-01T12:00:00Z"
     if let Ok(dt) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
@@ -1915,35 +2157,31 @@ fn header_block(message: &MessageRecord) -> String {
         .join("\n")
 }
 
-/// A window around the match, clamped to char boundaries so the result is still
-/// valid UTF-8 to serialize.
-fn match_context(haystack: &str, at: usize, width: usize) -> String {
-    let start = haystack[..at]
-        .char_indices()
-        .rev()
-        .nth(width)
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    let end_from = at.saturating_add(width);
-    let end = if end_from >= haystack.len() {
-        haystack.len()
-    } else {
-        haystack[end_from..]
-            .char_indices()
-            .next()
-            .map(|(index, _)| end_from + index)
-            .unwrap_or(haystack.len())
-    };
+/// A window of `width` bytes either side of the match, widened to char
+/// boundaries: slicing inside a multi-byte character panics, and bodies are
+/// not ASCII. The trailing width is counted from the end of the match, so the
+/// matched value itself is never what gets cut off.
+fn match_context(haystack: &str, at: usize, len: usize, width: usize) -> String {
+    let mut start = at.saturating_sub(width);
+    while !haystack.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = at
+        .saturating_add(len)
+        .saturating_add(width)
+        .min(haystack.len());
+    while !haystack.is_char_boundary(end) {
+        end += 1;
+    }
     haystack[start..end].to_string()
 }
 
 fn push_matches(
     haystack: &str,
     side: &'static str,
-    id: Uuid,
-    sequence: u64,
     needle: &str,
     request: &BodySearchRequest,
+    found: &mut Vec<BodySearchMatch>,
     outcome: &mut BodySearchOutcome,
 ) {
     let subject = if request.case_sensitive {
@@ -1952,19 +2190,18 @@ fn push_matches(
         haystack.to_ascii_lowercase()
     };
     let mut from = 0usize;
-    while let Some(found) = subject[from..].find(needle) {
-        let at = from + found;
-        if outcome.matches.len() >= request.max_matches {
-            outcome.complete = false;
+    while let Some(offset) = subject[from..].find(needle) {
+        let at = from + offset;
+        if outcome.match_count >= request.max_matches {
+            outcome.stop("max_matches");
             return;
         }
-        outcome.matches.push(BodySearchMatch {
-            id,
-            sequence,
+        found.push(BodySearchMatch {
             side,
             offset: at,
-            context: match_context(haystack, at, request.context_bytes),
+            context: match_context(haystack, at, needle.len(), request.context_bytes),
         });
+        outcome.match_count += 1;
         from = at + needle.len().max(1);
         if from >= subject.len() {
             break;
@@ -1979,54 +2216,38 @@ fn collect_record_matches(
     request: &BodySearchRequest,
     outcome: &mut BodySearchOutcome,
 ) {
-    let id = record.id;
+    let mut found = Vec::new();
+    let mut search = |haystack: &str, side: &'static str| {
+        push_matches(haystack, side, needle, request, &mut found, outcome)
+    };
+    if request.sides.url {
+        search(&record.path, "url");
+    }
     if request.sides.headers {
-        push_matches(
-            &header_block(&record.request),
-            "request-headers",
-            id,
-            sequence,
-            needle,
-            request,
-            outcome,
-        );
+        search(&header_block(&record.request), "request-headers");
         if let Some(response) = record.response.as_ref() {
-            push_matches(
-                &header_block(response),
-                "response-headers",
-                id,
-                sequence,
-                needle,
-                request,
-                outcome,
-            );
+            search(&header_block(response), "response-headers");
         }
     }
     if request.sides.request_body {
         if let Some(body) = searchable_body(&record.request) {
-            push_matches(
-                &body,
-                "request-body",
-                id,
-                sequence,
-                needle,
-                request,
-                outcome,
-            );
+            search(&body, "request-body");
         }
     }
     if request.sides.response_body {
         if let Some(body) = record.response.as_ref().and_then(searchable_body) {
-            push_matches(
-                &body,
-                "response-body",
-                id,
-                sequence,
-                needle,
-                request,
-                outcome,
-            );
+            search(&body, "response-body");
         }
+    }
+    if !found.is_empty() {
+        outcome.transactions.push(BodySearchHit {
+            id: record.id,
+            sequence,
+            method: record.method.clone(),
+            host: record.host.clone(),
+            path: record.path.clone(),
+            matches: found,
+        });
     }
 }
 
@@ -2472,7 +2693,7 @@ impl AdvancedSearchMatcher {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use chrono::{Duration, Utc};
 
     use super::*;
@@ -2507,6 +2728,543 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn deletion_filters_require_explicit_supported_nonempty_criteria() {
+        assert!(validate_delete_filters(&ListFilters::default()).is_err());
+        for filters in [
+            ListFilters {
+                query: Some(" ".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                method: Some("\t".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                mime: Some("\n".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                status_range: Some("".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                since: Some(" ".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                status: Some(200),
+                status_range: Some("2xx".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                status: Some(0),
+                ..Default::default()
+            },
+            ListFilters {
+                status: Some(600),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                offset: Some(0),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                limit: Some(10),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                hide_connect: true,
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                advanced_search: Some("".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_delete_filters(&filters).is_err(), "{filters:?}");
+        }
+        for filters in [
+            ListFilters {
+                query: Some("/login".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                method: Some("POST".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                host: Some("example.com".into()),
+                limit: Some(0),
+                ..Default::default()
+            },
+            ListFilters {
+                mime: Some("application/json".into()),
+                ..Default::default()
+            },
+            ListFilters {
+                status: Some(404),
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_delete_filters(&filters).is_ok(), "{filters:?}");
+        }
+    }
+
+    #[test]
+    fn deletion_filters_reject_malformed_ranges_and_overflowing_times() {
+        for range in [
+            "garbage", "299-200", "99-199", "500-600", "0xx", "6xx", "200-", "200",
+        ] {
+            let filters = ListFilters {
+                status_range: Some(range.into()),
+                ..Default::default()
+            };
+            assert!(validate_delete_filters(&filters).is_err(), "{range}");
+        }
+        for since in [
+            "garbage",
+            "2026-02-30",
+            "-1h",
+            "+1h",
+            "1.5h",
+            "9223372036854775807d",
+            "9223372036854775807s",
+            "999999999999999999999h",
+            "999999999999m",
+        ] {
+            let filters = ListFilters {
+                since: Some(since.into()),
+                ..Default::default()
+            };
+            assert!(validate_delete_filters(&filters).is_err(), "{since}");
+        }
+        for range in ["4xx", "200-299", "100-599"] {
+            assert!(validate_delete_filters(&ListFilters {
+                status_range: Some(range.into()),
+                ..Default::default()
+            })
+            .is_ok());
+        }
+        for since in [
+            "30m",
+            "1h",
+            "2d",
+            "15s",
+            "0s",
+            "2026-01-01",
+            "2026-01-01T12:00:00Z",
+        ] {
+            assert!(
+                validate_delete_filters(&ListFilters {
+                    since: Some(since.into()),
+                    ..Default::default()
+                })
+                .is_ok(),
+                "{since}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_ids_deduplicates_and_preserves_surviving_indexes_and_bodies() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-delete-records-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let records: Vec<_> = (0..3)
+            .map(|index| {
+                let mut record = test_record("example.com");
+                record.path = format!("/{index}");
+                record.sequence = index + 1;
+                record.request.body_preview = format!("fixture body {index}");
+                record.request.body_size = record.request.body_preview.len();
+                record
+            })
+            .collect();
+        let ids: Vec<_> = records.iter().map(|record| record.id).collect();
+        let locators = crate::session::write_transactions_file_for_test_returning_locators(
+            &data_dir, &records,
+        )
+        .unwrap();
+        let store = TransactionStore::from_records_with_journal(
+            records.into_iter().rev().collect(),
+            data_dir.join("transactions.journal"),
+            None,
+        );
+        store.adopt_written_locators(locators).await;
+        let survivor_locator = store.inner.read().await.locators[&ids[1]];
+        let mut reload = store.subscribe_retention();
+        let event_sequence = store.latest_event_sequence();
+
+        assert_eq!(
+            store.delete_ids(&[ids[0], ids[2], ids[0]]).await.unwrap(),
+            2
+        );
+        assert_eq!(store.latest_event_sequence(), event_sequence + 1);
+        assert!(reload.try_recv().is_ok());
+        assert!(reload.try_recv().is_err());
+        assert!(store.get(ids[0]).await.is_none());
+        assert!(store.get(ids[2]).await.is_none());
+        let survivor = store.get(ids[1]).await.unwrap();
+        assert_eq!(survivor.request.body_preview, "fixture body 1");
+        assert_eq!(survivor.path, "/1");
+        let inner = store.inner.read().await;
+        assert_eq!(inner.entries.len(), 1);
+        assert_eq!(inner.summaries.len(), 1);
+        assert_eq!(inner.by_id[&ids[1]], 0);
+        assert_eq!(inner.locators.len(), 1);
+        assert_eq!(inner.locators[&ids[1]].offset, survivor_locator.offset);
+        drop(inner);
+        let lines = std::fs::read_to_string(data_dir.join("transactions.journal")).unwrap();
+        let entry: TransactionJournalEntry = serde_json::from_str(lines.trim()).unwrap();
+        let TransactionJournalEntry::Delete { ids: deleted } = entry else {
+            panic!("expected deletion tombstone")
+        };
+        assert_eq!(deleted, vec![ids[0], ids[2]]);
+        assert_eq!(store.delete_ids(&[ids[1]]).await.unwrap(), 1);
+        assert!(store.is_empty().await);
+        drop(store);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn delete_ids_rejects_empty_missing_and_wrong_session_without_appending() {
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        for ids in [vec![], vec![Uuid::new_v4()], vec![id, Uuid::new_v4()]] {
+            assert_eq!(
+                store.delete_ids(&ids).await.unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(store.len().await, 1);
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_selection_checks_token_after_concurrent_response_update_finishes() {
+        use crate::history_selection::{selection_token, HistorySelection};
+        use std::{sync::Arc, time::Duration};
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let store = Arc::new(store);
+        let mut selection: HistorySelection = serde_json::from_value(serde_json::json!({
+            "session_id": Uuid::new_v4(), "host": "example.com"
+        }))
+        .unwrap();
+        selection.selection_token = Some(selection_token(
+            selection.session_id,
+            &selection.resolve(&store).await.unwrap(),
+        ));
+        let update = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .update_record_durable(id, |record| record.status = Some(404))
+                    .await
+            })
+        };
+        let (rx, command) = tokio::task::spawn_blocking(move || {
+            let command = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            (rx, command)
+        })
+        .await
+        .unwrap();
+        let TransactionJournalCommand::Append { ack: Some(ack), .. } = command else {
+            panic!("expected acknowledged update")
+        };
+        let deletion = {
+            let store = store.clone();
+            tokio::spawn(async move { store.delete_selection(&selection).await })
+        };
+        ack.send(Ok(())).unwrap();
+        assert!(update.await.unwrap().unwrap().is_some());
+        assert_eq!(
+            deletion.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "stale selection must not append a tombstone"
+        );
+        assert_eq!(store.get(id).await.unwrap().status, Some(404));
+    }
+
+    #[tokio::test]
+    async fn delete_all_handles_empty_store_without_a_journal() {
+        let store = TransactionStore::new();
+        assert_eq!(store.delete_all().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn delete_ids_requires_available_journal() {
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        assert_eq!(
+            store.delete_ids(&[id]).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        store.journal_tx = Some(tx);
+        let error = store.delete_ids(&[id]).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert!(store.get(id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_ids_waits_for_ack_and_keeps_memory_on_append_failure() {
+        use std::{sync::Arc, time::Duration};
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let store = Arc::new(store);
+        let mut reload = store.subscribe_retention();
+        let pending = {
+            let store = store.clone();
+            tokio::spawn(async move { store.delete_ids(&[id]).await })
+        };
+        let command = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+            .unwrap();
+        let TransactionJournalCommand::Append { ack: Some(ack), .. } = command else {
+            panic!("expected acknowledged append")
+        };
+        let count = tokio::time::timeout(Duration::from_millis(200), store.len())
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "pending persistence must not mutate or block reads"
+        );
+        assert!(reload.try_recv().is_err());
+        ack.send(Err(io::Error::other("injected journal failure")))
+            .unwrap();
+        assert!(pending.await.unwrap().is_err());
+        assert!(store.get(id).await.is_some());
+        assert!(reload.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_ids_lost_ack_is_persistence_failure_without_memory_changes() {
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let writer = std::thread::spawn(move || {
+            let command = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                command,
+                TransactionJournalCommand::Append { ack: Some(_), .. }
+            ));
+            drop(command);
+        });
+        let error = store.delete_ids(&[id]).await.unwrap_err();
+        writer.join().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert!(store.get(id).await.is_some());
+    }
+
+    /// Shared fixture for the store, receipt and HTTP error classifications.
+    pub(crate) async fn failed_delete_ack_for_test(
+        clear: bool,
+        journal_path: Option<&Path>,
+    ) -> io::Error {
+        use std::{sync::Arc, time::Duration};
+        let mut selected = test_record("example.com");
+        selected.path = "/selected".into();
+        let selected_id = selected.id;
+        let mut survivor = test_record("example.com");
+        survivor.path = "/survivor".into();
+        let mut store = TransactionStore::from_records(vec![selected, survivor]);
+        let before = store.snapshot(None).await;
+        let before_json = serde_json::to_value(&before).unwrap();
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let store = Arc::new(store);
+        let event_sequence = store.latest_event_sequence();
+        let mut retention = store.subscribe_retention();
+        let pending = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                if clear {
+                    store.delete_all().await
+                } else {
+                    let selection = serde_json::from_value(serde_json::json!({
+                        "session_id": Uuid::new_v4(), "ids": [selected_id]
+                    }))
+                    .unwrap();
+                    store
+                        .delete_selection(&selection)
+                        .await
+                        .map(|(count, _)| count)
+                }
+            })
+        };
+        let command = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .unwrap();
+        let TransactionJournalCommand::Append {
+            line,
+            ack: Some(ack),
+        } = command
+        else {
+            panic!("expected acknowledged deletion")
+        };
+        assert_eq!(
+            serde_json::to_value(store.snapshot(None).await).unwrap(),
+            before_json
+        );
+        if let Some(path) = journal_path {
+            // Model a complete write followed by a failed fsync acknowledgement.
+            // These exact bytes may be recovered even though memory stays intact.
+            let mut file = fs::File::create(path).unwrap();
+            for record in before.iter().rev() {
+                file.write_all(&encode_transaction_insert_journal_line(record).unwrap())
+                    .unwrap();
+            }
+            file.write_all(&line).unwrap();
+            file.flush().unwrap();
+            file.sync_all().unwrap();
+        }
+        ack.send(Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "injected sync failure",
+        )))
+        .unwrap();
+        let error = pending.await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        let source = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(source.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(source.to_string(), "injected sync failure");
+        assert_eq!(
+            serde_json::to_value(store.snapshot(None).await).unwrap(),
+            before_json
+        );
+        assert_eq!(store.list(&ListFilters::default()).await.len(), 2);
+        assert!(store.get(selected_id).await.is_some());
+        assert_eq!(store.latest_event_sequence(), event_sequence);
+        assert!(retention.try_recv().is_err());
+        error
+    }
+
+    #[tokio::test]
+    async fn delete_invalid_input_ack_is_uncertain_and_tombstone_can_replay() {
+        for clear in [false, true] {
+            let data_dir =
+                std::env::temp_dir().join(format!("sniper-delete-ack-{}", Uuid::new_v4()));
+            let (registry, active) =
+                crate::session::SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            let journal_path = active.storage_dir().join("transactions.journal");
+            drop(active);
+            drop(registry);
+            failed_delete_ack_for_test(clear, Some(&journal_path)).await;
+            let (registry, reloaded) =
+                crate::session::SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            let rows = reloaded.store.list(&ListFilters::default()).await;
+            assert_eq!(rows.len(), usize::from(!clear));
+            assert!(rows.iter().all(|row| row.path == "/survivor"));
+            drop(reloaded);
+            drop(registry);
+            fs::remove_dir_all(data_dir).unwrap();
+        }
+    }
+
+    pub(crate) async fn stale_delete_selection_error_for_test() -> io::Error {
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let selection = serde_json::from_value(serde_json::json!({
+            "session_id": Uuid::new_v4(), "ids": [id], "selection_token": "0".repeat(64)
+        }))
+        .unwrap();
+        let error = store.delete_selection(&selection).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            rx.try_recv().is_err(),
+            "stale validation must not append anything"
+        );
+        assert!(store.get(id).await.is_some());
+        error
+    }
+
+    #[tokio::test]
+    async fn stale_delete_selection_remains_invalid_input_without_appending() {
+        stale_delete_selection_error_for_test().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_delete_waiting_for_ack_does_not_mutate_memory() {
+        use std::{sync::Arc, time::Duration};
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let store = Arc::new(store);
+        let pending = {
+            let store = store.clone();
+            tokio::spawn(async move { store.delete_ids(&[id]).await })
+        };
+        let command = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+            .unwrap();
+        let TransactionJournalCommand::Append { ack: Some(ack), .. } = command else {
+            panic!("expected acknowledged append")
+        };
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        assert!(ack
+            .send(Err(io::Error::other("injected failed append")))
+            .is_err());
+        assert!(store.get(id).await.is_some());
     }
 
     #[test]
@@ -3108,9 +3866,10 @@ mod tests {
         let found = store
             .search_bodies(&ListFilters::default(), &search_request("internalNote"))
             .await;
-        assert_eq!(found.matches.len(), 1);
-        assert_eq!(found.matches[0].side, "response-body");
-        assert!(found.matches[0].context.contains("staff only"));
+        assert_eq!(found.match_count, 1);
+        let hit = &found.transactions[0].matches[0];
+        assert_eq!(hit.side, "response-body");
+        assert!(hit.context.contains("staff only"));
         assert!(found.complete);
         assert_eq!(found.unsearchable, 0);
     }
@@ -3135,8 +3894,12 @@ mod tests {
                 &search_request("shared-token-value"),
             )
             .await;
-        let mut sides: Vec<&str> = found.matches.iter().map(|m| m.side).collect();
-        sides.sort_unstable();
+        assert_eq!(found.transactions.len(), 1, "one transaction, two places");
+        let sides: Vec<&str> = found.transactions[0]
+            .matches
+            .iter()
+            .map(|m| m.side)
+            .collect();
         assert_eq!(sides, vec!["request-body", "response-body"]);
 
         let in_header = store
@@ -3145,8 +3908,8 @@ mod tests {
                 &search_request("trace-in-a-header"),
             )
             .await;
-        assert_eq!(in_header.matches.len(), 1);
-        assert_eq!(in_header.matches[0].side, "request-headers");
+        assert_eq!(in_header.match_count, 1);
+        assert_eq!(in_header.transactions[0].matches[0].side, "request-headers");
     }
 
     // A budget that runs out must not look like an answer. An agent that reads
@@ -3172,8 +3935,80 @@ mod tests {
         let mut capped = search_request("needle");
         capped.max_matches = 2;
         let limited = store.search_bodies(&ListFilters::default(), &capped).await;
-        assert_eq!(limited.matches.len(), 2);
+        assert_eq!(limited.match_count, 2);
+        assert_eq!(limited.transactions.len(), 2);
         assert!(!limited.complete);
+        assert_eq!(limited.stopped_by, Some("max_matches"));
+    }
+
+    // After a restart every body lives on disk behind a locator, so this is the
+    // path a real search takes. A record whose locator no longer points at its
+    // own line is counted, not searched — and it makes the result incomplete,
+    // because "not found" says nothing about a record that was never read.
+    #[tokio::test]
+    async fn a_body_search_reads_bodies_back_from_disk() {
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-body-search-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let readable = record_with_bodies("readable.example", "", "disk-only-needle");
+        let mut crossed = record_with_bodies("crossed.example", "", "disk-only-needle");
+        crossed.sequence = 2;
+        crate::session::write_transactions_file_for_test(
+            &storage_dir,
+            &[readable.clone(), crossed.clone()],
+        )
+        .unwrap();
+        let on_disk = crate::session::read_transactions_file_for_test(&storage_dir).unwrap();
+        let readable_locator = on_disk[0].1;
+
+        let stripped: Vec<_> = on_disk
+            .iter()
+            .map(|(record, _)| {
+                let mut record = record.clone();
+                super::strip_transaction_bodies(&mut record);
+                record
+            })
+            .collect();
+        let store = TransactionStore::from_records_with_journal_and_event_sequence(
+            stripped,
+            storage_dir.join("transactions.journal"),
+            None,
+            0,
+        );
+        store
+            .set_body_locator_for_test(readable.id, readable_locator)
+            .await;
+        store
+            .set_body_locator_for_test(crossed.id, readable_locator)
+            .await;
+
+        let found = store
+            .search_bodies(&ListFilters::default(), &search_request("disk-only-needle"))
+            .await;
+        assert_eq!(found.transactions.len(), 1);
+        assert_eq!(found.transactions[0].id, readable.id);
+        assert_eq!(found.transactions[0].host, "readable.example");
+        assert_eq!(found.unsearchable, 1);
+        assert!(
+            !found.complete,
+            "an unreadable record makes the answer partial"
+        );
+        assert_eq!(found.stopped_by, None, "nothing cut the scan short");
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    // Bodies are not ASCII. A window edge that lands inside a multi-byte
+    // character must widen to the boundary, not panic the scan.
+    #[test]
+    fn match_context_never_splits_a_character() {
+        let body = "주문번호 A-9931 확인";
+        let at = body.find("A-9931").unwrap();
+        for width in 0..8 {
+            let context = super::match_context(body, at, "A-9931".len(), width);
+            assert!(context.contains("A-9931"), "width {width}: {context}");
+        }
+        assert_eq!(super::match_context(body, at, 6, 1000), body);
     }
 
     #[tokio::test]

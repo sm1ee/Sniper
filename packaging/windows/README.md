@@ -5,6 +5,11 @@ and the [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.
 Install the redistributable matching the package architecture if Windows reports a missing `VCRUNTIME140.dll` or `VCRUNTIME140_1.dll`.
 Install WebView2 if Sniper reports a WebView2 startup error. The headless server and CLI do not need WebView2.
 
+The executables carry the Sniper icon, which Explorer, the taskbar and the window
+switcher show, and the desktop window sets it for its title bar. `sniper.ico` was
+built from the macOS icon set by `make-icon.py`; run it from the repository root to
+rebuild it after the artwork changes.
+
 Run `Sniper-<version>-windows-x64-setup.exe` to install for the current user
 without administrator privileges. Setup adds a Start menu shortcut, an optional
 desktop shortcut, and an uninstaller. WebView2 and the Visual C++ runtime listed

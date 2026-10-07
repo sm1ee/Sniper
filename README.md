@@ -46,7 +46,15 @@ Run the Windows setup executable built by `packaging/windows/make-setup.ps1`, or
 
 ### macOS
 
-**Download the latest `.dmg`** from [Releases](https://github.com/sm1ee/Sniper/releases/latest), open it, and drag Sniper to your Applications folder.
+**Install with Homebrew**, which also puts `sniper-cli` on your `PATH`:
+
+```bash
+brew install --cask sm1ee/tap/sniper
+```
+
+Or **download the latest `.dmg`** from [Releases](https://github.com/sm1ee/Sniper/releases/latest), open it, and drag Sniper to your Applications folder.
+Releases are ad-hoc signed, not notarized, so on first launch macOS may ask you to
+allow Sniper under System Settings ▸ Privacy & Security ▸ **Open Anyway**.
 
 Or build from source:
 
@@ -59,6 +67,7 @@ cargo run --bin sniper-desktop
 | Category | What you get |
 |---|---|
 | **Proxy** | HTTP forwarding, HTTPS MITM, authenticated HTTP/SOCKS5 proxy chaining, persistent root CA, `https://sniper` cert portal |
+| **Browsers** | One click opens Chrome, Edge, Brave, Chromium, ego, Aside or BrowserOS neo already wired to the proxy and CA, and hands an AI agent the way to drive it |
 | **Capture** | HTTP history, WebSocket sessions, intercept queue, match & replace rules |
 | **Findings** | Passive vulnerability scanner — sensitive data, CORS, missing headers, JWT issues |
 | **Replay** | Modify and resend any captured request |
@@ -74,18 +83,43 @@ cargo run --bin sniper-desktop
 
 - **Native.** One Rust binary with no runtime to install. It opens immediately and stays small while it runs.
 - **Scriptable.** `sniper-cli` speaks JSON for the operations the UI exposes, so reviewing a capture or resending a request can be driven from a shell script.
-- **Agent-ready.** Claude Code and Codex skill templates ship in the repository, so a coding agent drives the same workflow through the same CLI.
+- **Agent-ready.** Claude Code and Codex skill templates ship in the repository, so a coding agent drives the same workflow through the same CLI. OpenCode reads the Claude Code one (see the [Claude Code guide](docs/integrations/claude-code.md#opencode)).
 
 ## Quick start
 
 1. Download and open Sniper
-2. Point your browser proxy to `127.0.0.1:8080`
-3. Visit `https://sniper` to download and trust the root CA
-4. Start capturing
+2. Click **Open browser** in the top bar. It opens ego, Aside or BrowserOS neo if
+   you have one, otherwise an installed Chrome, Edge, Brave or Chromium, already sending its
+   traffic through Sniper and trusting its certificate, so there is nothing to
+   configure. The arrow beside it lists the others, and **Make default** there saves
+   your choice.
+   To use a browser of your own instead, point its proxy at `127.0.0.1:8080` and
+   visit `https://sniper` to download and trust the root CA.
+3. Start capturing
 
 Default listeners:
 - Proxy: `127.0.0.1:8080`
 - UI: `127.0.0.1:23001` (headless mode)
+
+## Wired browsers
+
+**Open browser** starts a browser that is ready for testing: its traffic goes
+through Sniper, it trusts Sniper's certificate, and it keeps a profile of its own,
+apart from your everyday one. There is nothing to set up. `sniper-cli capture
+browser open` does the same from a script, and with `--agent` it also hands an AI
+agent what it needs to drive that browser while Sniper records every request.
+
+| Browser | Platforms | An agent drives it through |
+|---|---|---|
+| Chrome, Edge, Brave, Chromium | macOS, Windows, Linux | the DevTools protocol (Playwright, chrome-devtools-mcp) |
+| [ego](https://lite.ego.app/) | macOS | ego's own CLI and agent skill |
+| [Aside](https://aside.com/) | macOS, Windows | Aside's CLI REPL |
+| [BrowserOS neo](https://docs.browseros.com/neo/install) | macOS, Windows | its MCP server |
+
+Sniper never installs a browser: one that is missing appears in the menu with a link
+to its download page. Aside and BrowserOS neo have been checked on macOS, not yet on
+Windows. The [HTTP debugging guide](docs/guides/http-debugging.md#or-open-a-browser-that-is-already-wired)
+covers profiles, `--fresh` and what each driver offers.
 
 ### Remote headless UI
 
@@ -159,9 +193,9 @@ and `capture.proxy.configure` (the latter reads settings from stdin).
 
 ## CLI
 
-`sniper-cli` ships inside the app bundle. Sniper does not edit your shell
-profile on its own, so put it on `PATH` once. **Settings ▸ Command line ▸ Add
-sniper-cli to PATH** does it, or:
+`sniper-cli` ships inside the app bundle. Installed with Homebrew, it is already on
+`PATH`. Otherwise put it there once, since Sniper does not edit your shell profile
+on its own. **Settings ▸ Command line ▸ Add sniper-cli to PATH** does it, or:
 
 ```bash
 # Let the app add it to ~/.zshrc (and ~/.bashrc when present) on next launch
@@ -174,6 +208,8 @@ export PATH="/Applications/Sniper.app/Contents/MacOS:$PATH"
 ```bash
 sniper-cli session list
 sniper-cli --output compact capture http list --limit 10
+sniper-cli --output compact capture http search --value access_token
+sniper-cli capture browser open --yes
 sniper-cli capture http replay --id <id> --dry-run
 sniper-cli capture http replay --id <id> --yes
 sniper-cli scope set-scope --pattern '*.example.com' --dry-run
@@ -200,6 +236,10 @@ sniper-cli schema input replay.send
 sniper-cli examples capture.http.list
 printf "%s" "$OAST_TOKEN" | sniper-cli capture oast configure --provider custom --url https://oast.example --token-stdin --yes
 ```
+
+For saved-data management, the opt-in `saved.v1.*` contract provides strict schemas,
+bounded session-pinned pages, and durable mutation receipts. Existing commands keep
+their output format. See [saved-data contract v1](docs/integrations/saved-data-v1.md).
 
 ## AI integration
 
@@ -244,6 +284,7 @@ cargo run --bin sniper-desktop   # Desktop app
 cargo run --bin sniper           # Headless proxy + UI server
 cargo run --bin sniper-cli       # CLI
 cargo test                       # Tests
+node --test tests/*.test.cjs      # Fixture-only frontend regressions (Node.js 18+)
 ./packaging/macos/release-macos.sh   # macOS .app + .dmg
 ```
 

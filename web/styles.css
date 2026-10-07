@@ -884,28 +884,71 @@ code {
   text-decoration: none;
 }
 
-.update-label {
-  white-space: nowrap;
-  font-size: 0.85em;
+/* While updating, the button is disabled and holds the width it had; its content
+   becomes a ring. The percentage is drawn inside it, and the steps that cannot be
+   measured spin an arc instead. */
+.utility-button.is-updating {
+  /* The disc is taller than the label it replaces; without this the button would
+     grow past its row and push the header down. */
+  padding-block: 0;
+  cursor: default;
 }
 
-.update-bar {
+
+.utility-button.is-failed {
+  color: var(--danger);
+}
+
+.update-ring {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.update-ring svg {
   display: block;
   width: 100%;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--line);
-  margin-top: 3px;
-  overflow: hidden;
+  height: 100%;
+  transform: rotate(-90deg);
 }
 
-.update-bar-fill {
-  display: block;
-  width: 0%;
-  height: 100%;
-  background: var(--point);
-  border-radius: 2px;
-  transition: width 0.3s ease;
+.update-ring-disc {
+  fill: var(--point);
+}
+
+.update-ring-track,
+.update-ring-arc {
+  fill: none;
+  stroke-width: 2.2;
+}
+
+.update-ring-track {
+  stroke: rgba(255, 255, 255, 0.3);
+}
+
+.update-ring-arc {
+  stroke: #fff;
+  stroke-linecap: round;
+  stroke-dasharray: 0 100;
+  transition: stroke-dasharray 0.3s ease;
+}
+
+.utility-button.is-busy .update-ring svg {
+  animation: update-spin 0.9s linear infinite;
+}
+
+.utility-button.is-busy .update-ring-arc {
+  stroke-dasharray: 28 100;
+  transition: none;
+}
+
+@keyframes update-spin {
+  from {
+    transform: rotate(-90deg);
+  }
+  to {
+    transform: rotate(270deg);
+  }
 }
 
 .utility-button.icon-button {
@@ -919,7 +962,9 @@ code {
   line-height: 1;
 }
 
-.utility-button:hover,
+/* An updating button is not disabled, so its tooltip still shows; it just must not
+   look pressable. */
+.utility-button:not(.is-updating):hover,
 .modal-close:hover,
 .secondary-action:hover {
   border-color: var(--line-strong);
@@ -1142,6 +1187,7 @@ code {
 
 .tools-input-editor {
   min-height: 240px;
+  max-height: 480px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel-code);
@@ -1380,6 +1426,172 @@ code {
   white-space: nowrap;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
   user-select: none;
+}
+
+/* The launcher is a split button: the left half opens the default browser, the
+   right half lists the others. Outlined like the pills beside it, but its text is
+   the primary colour: it is an action to press, where they report a state. */
+.browser-launcher {
+  display: inline-flex;
+  align-items: stretch;
+  margin: 0 6px 0 8px;
+  align-self: center;
+}
+
+.browser-launch-main,
+.browser-launch-caret {
+  min-height: var(--control-h);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--font-xs);
+  font-family: var(--sans);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s;
+}
+
+.browser-launch-main {
+  padding: 4px 12px;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+}
+
+.browser-launch-caret {
+  padding: 4px 7px;
+  border-left: 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+
+.browser-launch-main:hover,
+.browser-launch-caret:hover {
+  border-color: var(--text-soft);
+}
+
+.empty-row-action {
+  margin-top: 12px;
+}
+
+.empty-row-action .browser-launcher {
+  margin: 0;
+}
+
+.browser-launch-main:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* Two classes: the menu element also carries .context-menu, which is declared
+   later in this file and would otherwise win on min-width and padding. A hint
+   wraps inside max-width instead of stretching the menu to one long line. */
+.context-menu.browser-menu {
+  width: max-content;
+  min-width: 280px;
+  max-width: 340px;
+  padding: 6px;
+}
+
+.browser-menu-row {
+  position: relative;
+}
+
+.browser-menu-name {
+  text-transform: capitalize;
+}
+
+.browser-menu-open:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.browser-menu-open:disabled:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.browser-menu-note {
+  color: var(--text-dim);
+  font-size: var(--font-2xs);
+  text-transform: none;
+}
+
+/* Takes the note's place while the row is hovered or has focus: the saved choice
+   is something the operator changes once, so it should not compete with the list
+   of browsers. Transparent rather than visibility:hidden, because a hidden control
+   cannot take focus and the keyboard would never reach it. */
+.browser-menu-pin {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-elevated);
+  color: var(--text-soft);
+  font-size: var(--font-2xs);
+  font-family: var(--sans);
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0;
+}
+
+.browser-menu-row:hover .browser-menu-pin,
+.browser-menu-row:focus-within .browser-menu-pin {
+  opacity: 1;
+}
+
+.browser-menu-row.has-pin:hover .browser-menu-note,
+.browser-menu-row.has-pin:focus-within .browser-menu-note {
+  visibility: hidden;
+}
+
+.browser-menu-pin:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+/* Where a missing browser comes from. Always visible, unlike the pin: it is the one
+   thing to do with a row that cannot be opened. */
+.browser-menu-install {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-soft);
+  font-size: var(--font-2xs);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.browser-menu-install:hover,
+.browser-menu-install:focus-visible {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+/* A saved choice that is no longer installed has both: its pin sits left of the link. */
+.browser-menu-row.has-install .browser-menu-pin {
+  right: 72px;
+}
+
+.browser-menu-hint {
+  padding: 0 10px 6px;
+  color: var(--text-dim);
+  font-size: var(--font-2xs);
+  line-height: 1.4;
+}
+
+.browser-menu-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+  cursor: pointer;
 }
 
 .scope-pill:hover {

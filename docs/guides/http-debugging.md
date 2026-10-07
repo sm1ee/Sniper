@@ -94,6 +94,220 @@ curl -s -x http://127.0.0.1:18902 -X POST http://127.0.0.1:18911/api/orders \
 The `unset` matters: a shell that exports `no_proxy` covering loopback makes
 curl ignore `-x` and connect directly, and nothing is captured.
 
+### Or open a browser that is already wired
+
+Setting a proxy and trusting a certificate by hand is the part most likely to go
+wrong, so Sniper can open a browser that needs neither. **Open browser** in the top
+bar does it from the UI (an empty history offers the same button). Its arrow lists
+every browser, marks the one that opens by default, and has **Make default** to
+change it. Two boxes there apply to that one opening only: **Let an
+agent drive it** (`--agent`) and **Throwaway profile** (`--fresh`). From the CLI:
+
+```bash
+./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
+  capture browser list
+```
+
+Every browser Sniper knows on this platform is listed, installed or not. Two of
+them, as returned on a Mac that has both:
+
+```json
+{"browser":"chrome","installed":true,"driver":"cdp","platforms":["macos","windows","linux"],
+ "path":"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+ "capabilities":{"ui_actions":"via-client","snapshot_refs":false,"handoff":false,"visible_cursor":false}}
+{"browser":"ego","installed":true,"driver":"ego-cli","platforms":["macos"],
+ "path":"/Applications/ego lite.app/Contents/MacOS/ego lite",
+ "capabilities":{"ui_actions":"built-in","snapshot_refs":true,"handoff":true,"visible_cursor":true},
+ "default":true,
+ "requirements":[{"name":"ego-browser command","found":true},
+                 {"name":"ego-browser agent skill","found":true}]}
+```
+
+`"default": true` marks the browser that opens when none is named. `"preferred":
+true` marks the saved choice, and stays on it if that browser has since been
+uninstalled, in which case it is not the default (both are left out when false).
+`capture browser prefer --browser <name|auto> --yes` saves the choice, per user and
+not per session; `auto` clears it, and so does **Use auto** in the menu. A saved
+browser that is later uninstalled does not block opening: Sniper opens the next one
+in the automatic order and says so in `warnings`.
+
+A browser that is not installed has `"installed": false`, an `install_url` that is its
+vendor's own download page (the menu shows it as an **Install** link, and an open that
+names a missing browser says it too), and, where the answer is not obvious, an
+`install_hint`; a requirement that is missing carries a `hint` that
+says where to look, never a command to run. Sniper never installs a browser or a
+skill for you. A browser that is not built for the platform is left out: ego does
+not appear on Windows. Opening one that is missing returns the same explanation.
+
+```bash
+./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
+  capture browser open --browser chrome --agent --yes
+```
+
+```json
+{"browser":"chrome","driver":"cdp","control":{"driver":"cdp","endpoint":"http://127.0.0.1:53469"},
+ "fresh":false,"pid":39189,"profile_dir":"…/browser-profiles/chrome",
+ "proxy":"127.0.0.1:18902","url":"about:blank"}
+```
+
+Opening a browser starts a process, so the CLI asks for `--yes` (or `--dry-run` to
+see the request first). What the browser is given:
+
+- **The proxy and the certificate, for that browser only.** Sniper's root CA is
+  trusted by its public-key hash for that one browser process. Nothing is added to
+  the operating system or to any browser's certificate store.
+- **Loopback through the proxy.** Chromium sends `localhost` and `127.0.0.1`
+  direct by default, which would leave an app you are testing locally out of the
+  history.
+- **A profile of its own**, kept under Sniper's data directory, so logins survive
+  between sessions and your everyday profile is untouched. `--fresh` uses a
+  throwaway profile that is deleted when the browser quits. Closing the last window
+  is not quitting on macOS. If Sniper exits first, the next launch removes the
+  profile once its browser is gone.
+- **A DevTools port only when asked** (`--agent`). For Chromium-family browsers
+  that is what the flag opens, and it is off unless you turn it on: the port lets
+  any other local process drive a browser holding your logged-in sessions. For
+  BrowserOS neo the flag turns on its own server, which is off otherwise. ego and
+  Aside have no port, so `--agent` changes nothing there; their `control` is always
+  returned.
+
+#### Two ways to drive it
+
+Which browser it is decides how an agent drives it, and that is the `driver`. The
+result's `control` says what to use, in a shape that depends on the driver:
+
+| | `chrome`, `edge`, `brave`, `chromium` | `ego` | `aside` | `browseros-neo` |
+|---|---|---|---|---|
+| `driver` | `cdp` | `ego-cli` | `aside-cli` | `browseros-mcp` |
+| `control` | `{"driver":"cdp","endpoint":"http://127.0.0.1:<port>"}` | `{"driver":"ego-cli","server_name":"…","command":"ego-browser --ego-server-name=… nodejs -e '<script>'"}` | `{"driver":"aside-cli","command":"aside repl '<code>'"}` | `{"driver":"browseros-mcp","endpoint":"http://127.0.0.1:<port>/mcp"}`, with `--agent` |
+| Agent actions | a CDP client you bring | built in | built in, through its REPL | built in, through MCP |
+| Snapshot with `@ref`s, handoff to the user, visible cursor | no | yes, as ego documents them | not documented | not documented |
+| Platforms | macOS, Windows, Linux | macOS | macOS, Windows | macOS, Windows |
+| Needs on this machine | nothing | ego lite, its command, and its agent skill | Aside and its `aside` command | BrowserOS neo |
+
+What Sniper itself does is the same for all of them: the wired browser, its proxy and
+certificate trust, its profile and its lifetime. It does not implement clicking or
+typing. An agent does that through the driver.
+
+**With `aside-cli`**, drive it only through Aside's REPL, `aside repl '<code>'`, with
+deterministic steps. Aside can also run a task with its own assistant on the account
+signed in to it (`aside "<task>"`, `aside exec`); Sniper does not hand Aside to an
+agent that way. Aside's command has no option to choose a window, so it drives
+whichever Aside is running: quit any other Aside first, or what the agent does there
+is not captured. Aside's extension talks to a daemon on `127.0.0.1:21420` that every
+Aside on the machine shares, and it answers with the signed-in account and its
+password manager, so Sniper sends that port direct and it stays out of the history.
+On macOS Aside takes Sniper's proxy, certificate and profile switches; it ignores
+the page on the first launch of a profile, and a second open shows it. Where Aside
+installs on Windows has not been checked against a running copy.
+
+**With `browseros-mcp`**, open with `--agent` and connect an MCP client (Streamable
+HTTP) to `control.endpoint`. Each profile runs its own server, and Sniper picks its
+port, so the address reaches this browser and not another BrowserOS neo. Without
+`--agent` the server stays off: it serves the agent endpoint, and the browser then
+also listens on every network interface for it (ports 9010 and 9011 by default).
+The browser opens a DevTools port of its own on loopback (9110 by default) either
+way, which Sniper cannot turn off. Calls its pages make to the server go direct and
+stay out of the history. The servers of all profiles share one database in
+`~/.browserclaw`, and the server bundled with the app will not open it once a newer
+server has updated it. A `--fresh` profile has only the bundled one, so it may give
+no `control` and a warning instead; the persistent profile keeps the newer server it
+downloads. On macOS BrowserOS neo takes Sniper's switches. It has no Linux build, and
+where it installs on Windows has not been checked against a running copy.
+
+**With `cdp`**, connect any CDP client to `control.endpoint`: Playwright's
+`connectOverCDP`, or chrome-devtools-mcp with `--browserUrl`. Sniper bundles none.
+A plain CDP client was checked against Sniper's Chrome for clicking by coordinates,
+typing, JavaScript dialogs, new windows, screenshots, file input, downloads and
+the accessibility tree, so everything ego's actions do has a protocol-level
+equivalent; what plain Chrome lacks is the layer ego adds on top of it.
+
+**With `ego-cli`**, use ego's own agent skill, and put the server name from
+`control` on every `ego-browser` command:
+
+```bash
+ego-browser --ego-server-name=sniper-18902-3f2a9c1d nodejs -e '
+const task = await taskSpace("check the menu");
+const page = task.page("p1");
+await page.goto("https://example.com/", { timeout: 40000 });
+console.log(String(await page.snapshot()));
+' 2>&1
+```
+
+The name is `sniper-<proxy port>-<hash of the profile>`: the same for a profile
+every time, and different for each data directory and each throwaway profile, so
+an ego left running by another run is never the one you reach.
+
+Three things that are easy to get wrong:
+
+- **Leave the server name off and you drive your own everyday ego**, with your
+  logged-in profile and none of this proxy, and nothing is captured. Sniper's
+  browser is a separate instance of ego, and ego's skill does not mention the flag
+  that addresses it.
+- **Script output arrives on stderr.** `console.log` inside `ego-browser nodejs`
+  is written to stderr and stdout stays empty, so a readiness check that discards
+  stderr (`2>/dev/null`) never succeeds. Read it with `2>&1`.
+- **Act on the page the way a person does.** Take a snapshot, pick an element by
+  its `@ref` or a `loc=` locator, `page.click` it, then `waitForURL` or take a new
+  snapshot. Jumping straight to a URL with `page.goto` skips what the site's own
+  script does on a click, and the request a click makes (a same-origin `Referer`,
+  a menu that opens before anything navigates) is not the request a `goto` makes.
+
+ego is a separate program. Sniper does not install it, does not bundle it and does
+not run its installer. The `requirements` in `capture browser list` say whether
+its command and skill are present.
+
+#### Opening again, limits and warnings
+
+Opening again while a browser is running on the same profile opens another window
+in it (`"reused": true` in the result). That is what the button needs on macOS,
+where closing the last window leaves the browser running. A browser that is still
+opening its first window is not started a second time, and only a few windows can
+be opening in one browser at once. If the running browser was started for a
+different proxy, or without the DevTools port you are now asking for, the call is
+refused and says which, because Chromium would ignore the new settings. A port
+cannot be added to a browser that is already running: quit it and open again with
+`--agent`, or open a separate throwaway one with `--agent --fresh`. Different
+browsers each have a profile of their own and run side by side, and up to eight
+`--fresh` browsers can be open at once.
+
+Some browsers end the process Sniper started and carry on under another one. ego has
+been seen to, usually about nine seconds after it opens. On macOS and Linux Sniper
+does not rely on the process it started: it finds the running browser through the
+profile's own lock and reads the proxy that browser was started for from its command
+line, so opening again right after that still gives another window in it, and a
+browser Sniper lost track of, including one left running by an earlier Sniper, is
+picked up again. An open in the instant before the new process takes the lock is
+recognised as a window handed to the running browser and is not reported as a
+failure. A throwaway profile is deleted only once its browser has gone, not when the
+first process ends, and the cleanup of abandoned throwaway profiles leaves one whose
+browser is still running. Windows has no such lock, so there a browser is tracked by
+the process Sniper started.
+
+A DevTools port is refused while the proxy listens on anything but loopback, since
+a proxy reachable from the network relays requests to local ports. The check
+happens when the browser opens: if you later rebind the proxy beyond loopback,
+quit a browser that was opened with a DevTools port first.
+
+A browser that cannot start, or that ends at once, is reported in the result's
+`warnings` with the last of what it printed. A persistent profile also keeps the
+whole output in `sniper-launch.log`; a throwaway profile is deleted with its log,
+which is why the text travels in the warning. The UI shows that warning in a toast;
+a browser that opened normally needs no confirmation, since its window is one.
+
+`--browser` takes `chrome`, `edge`, `brave`, `chromium`, `ego`, `aside` or
+`browseros-neo`. With none named, Sniper opens the saved default; with none saved,
+ego if it is installed, then Aside, then BrowserOS neo, otherwise the first of Chrome,
+Edge, Brave and Chromium that is. The three lead because an agent drives them
+without bringing a CDP client. The list shows Chrome first with them under it, which
+is not the order they are picked in. An agent that opens a
+browser without naming one should read `driver` and `control` in the result rather
+than assume a DevTools endpoint.
+
+A freshly opened browser also talks to its vendor (updates, variations, crash
+reporting), and that traffic appears in the history. Filtering the history to your
+target's host leaves it out. The first launch on a new profile sends the most.
+
 ## Watching requests arrive
 
 In the UI: the **Capture** tab, **HTTP** sub-tab. Rows appear as traffic flows.
@@ -115,6 +329,26 @@ That returns a JSON array. Summarised, the two requests above are:
 `capture http list` also takes `--host`, `--method`, `--status`,
 `--status-range`, `--mime`, `--since` and `--query`, plus `--page` for
 pagination metadata.
+
+`--query` matches request metadata only — method, host, path, status, MIME.
+To find a value inside headers or bodies, search instead:
+
+```bash
+./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
+  capture http search --value A-1 --side request-body
+```
+
+```json
+{"bytes_scanned":106,"complete":true,"match_count":1,"records_considered":2,
+ "records_scanned":2,"stopped_by":null,"transactions":[{"host":"127.0.0.1:18911",
+ "id":"c7994659-…","matches":[{"context":"{\"sku\":\"A-1\"}","offset":8,
+ "side":"request-body"}],"method":"POST","path":"/api/orders","sequence":2}],
+ "unsearchable":0}
+```
+
+The result groups matches by transaction and reports `complete`. An empty
+result means the value is absent only when `complete` is `true`; otherwise
+`stopped_by` says whether `--max-matches` or `--byte-budget` ran out.
 
 ## Reading one transaction
 

@@ -10,6 +10,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check frontend syntax
+        run: node --check web/app.js
+      - name: Test frontend regressions
+        run: node --test "tests/*.test.cjs"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

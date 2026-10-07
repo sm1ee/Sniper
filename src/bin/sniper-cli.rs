@@ -14,6 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sniper::{
     fuzzer::FuzzerAttackRecord,
+    history_selection::HistorySelection,
     intercept::{
         InterceptRecord, InterceptRule, InterceptSummary, ResponseInterceptRecord,
         ResponseInterceptSummary,
@@ -134,8 +135,9 @@ enum Command {
         kind: SchemaKind,
         operation: String,
     },
+    /// Example inputs for one operation, or for every operation when none is named.
     Examples {
-        operation: String,
+        operation: Option<String>,
     },
     /// Invoke an operation by canonical manifest name.
     Call(CallArgs),
@@ -236,6 +238,60 @@ enum CaptureCommand {
         #[command(subcommand)]
         command: OastCommand,
     },
+    /// Open a browser that already sends its traffic through this Sniper.
+    Browser {
+        #[command(subcommand)]
+        command: BrowserCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BrowserCommand {
+    /// List every browser Sniper knows on this platform, installed or not, with its
+    /// driver, what that driver offers, and what is missing.
+    List,
+    /// Open a browser wired to this Sniper: proxy set, CA trusted, nothing to configure.
+    Open(BrowserOpenArgs),
+    /// Choose which browser opens when none is named. `auto` clears the choice.
+    Prefer(BrowserPreferArgs),
+}
+
+#[derive(Args, Debug)]
+struct BrowserPreferArgs {
+    /// The browser to open when none is named, from `capture browser list`; `auto` clears
+    /// the saved choice.
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(browser_choices()))]
+    browser: String,
+}
+
+#[derive(Args, Debug, Default)]
+struct BrowserOpenArgs {
+    /// auto opens the saved default, or ego, Aside or BrowserOS neo, when installed,
+    /// then the first of Chrome, Edge, Brave and Chromium that is.
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(browser_choices()))]
+    browser: Option<String>,
+    /// http(s) page to open. Default: about:blank.
+    #[arg(long)]
+    url: Option<String>,
+    /// Use a throwaway profile instead of the persistent Sniper one.
+    #[arg(long)]
+    fresh: bool,
+    /// Open a DevTools port so an agent can drive a Chromium-family browser, or
+    /// BrowserOS neo's MCP server; the result's `control` carries its endpoint. ego
+    /// and Aside are driven through their own command and always return it in
+    /// `control`, so this changes nothing for them.
+    #[arg(long)]
+    agent: bool,
+}
+
+impl BrowserCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            BrowserCommand::List => "capture.browser.list",
+            BrowserCommand::Open(_) => "capture.browser.open",
+            BrowserCommand::Prefer(_) => "capture.browser.prefer",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -253,6 +309,7 @@ enum SessionCommand {
     Create(CreateSessionArgs),
     Switch(SessionSwitchArgs),
     Delete(SessionDeleteArgs),
+    Rename(SessionRenameArgs),
     Reveal(SessionRevealArgs),
 }
 
@@ -275,6 +332,14 @@ struct SessionDeleteArgs {
 }
 
 #[derive(Args, Debug)]
+struct SessionRenameArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long)]
+    name: String,
+}
+
+#[derive(Args, Debug)]
 struct SessionRevealArgs {
     #[arg(long)]
     id: Uuid,
@@ -284,16 +349,69 @@ struct SessionRevealArgs {
 enum HistoryCommand {
     List(HistoryListArgs),
     Get(HistoryGetArgs),
+    /// Find a literal value in URLs, headers and bodies. Says what it scanned,
+    /// so an empty result can be told apart from a search that stopped early.
+    Search(HistorySearchArgs),
+    /// Preview a session-pinned ID or filter selection without changing saved data.
+    Select(HistorySelectionArgs),
+    /// Delete explicitly selected saved records; filters require a reviewed selection token.
+    Delete(HistorySelectionArgs),
+    /// Delete every saved HTTP record in the selected session.
     Clear(InterceptSessionArgs),
     Replay(HistoryReplayArgs),
     Fuzzer(HistoryFuzzerArgs),
     Annotate(HistoryAnnotateArgs),
 }
 
+#[derive(Args, Debug)]
+struct HistorySelectionArgs {
+    #[arg(long)]
+    session_id: Uuid,
+    /// Repeat --id or comma-separate UUIDs; cannot be combined with filters.
+    #[arg(long = "id", value_delimiter = ',')]
+    ids: Vec<Uuid>,
+    #[arg(long)]
+    query: Option<String>,
+    #[arg(long)]
+    method: Option<String>,
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(100..=599))]
+    status: Option<u16>,
+    #[arg(long)]
+    status_range: Option<String>,
+    #[arg(long)]
+    since: Option<String>,
+    #[arg(long)]
+    mime: Option<String>,
+    /// Token returned by capture http select. Required for filtered deletion.
+    #[arg(long)]
+    selection_token: Option<String>,
+}
+
+impl HistorySelectionArgs {
+    fn payload(&self) -> HistorySelection {
+        HistorySelection {
+            session_id: self.session_id,
+            ids: self.ids.clone(),
+            query: self.query.clone(),
+            method: self.method.clone(),
+            host: self.host.clone(),
+            status: self.status,
+            status_range: self.status_range.clone(),
+            since: self.since.clone(),
+            mime: self.mime.clone(),
+            selection_token: self.selection_token.clone(),
+        }
+    }
+}
+
 #[derive(Args, Debug, Default)]
 struct HistoryListArgs {
     #[arg(long)]
     session_id: Option<Uuid>,
+    /// Filter by request metadata: method, host, path, status, MIME or id.
+    /// Headers and bodies are not searched — use `capture http search`.
     #[arg(long)]
     query: Option<String>,
     #[arg(long)]
@@ -330,6 +448,49 @@ struct HistoryListArgs {
     /// Sort direction for paged history output.
     #[arg(long, value_parser = ["asc", "desc"])]
     sort_direction: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+struct HistorySearchArgs {
+    /// Literal text to find. Case-insensitive unless --case-sensitive.
+    #[arg(long)]
+    value: String,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Where to look. Repeat or comma-separate. Default: all four.
+    #[arg(long, value_delimiter = ',', value_parser = ["url", "request-body", "response-body", "headers"])]
+    side: Vec<String>,
+    #[arg(long)]
+    case_sensitive: bool,
+    /// Stop after this many matches (server default 200).
+    #[arg(long, value_parser = parse_nonzero_usize)]
+    max_matches: Option<usize>,
+    /// Stop after reading this many body bytes (server default 128 MiB).
+    #[arg(long)]
+    byte_budget: Option<u64>,
+    /// Bytes of surrounding text to return either side of each match (default 40).
+    #[arg(long)]
+    context: Option<usize>,
+    /// Narrow the records searched by request metadata, as `list --query` does.
+    #[arg(long)]
+    query: Option<String>,
+    #[arg(long)]
+    method: Option<String>,
+    /// Filter by host (substring match)
+    #[arg(long)]
+    host: Option<String>,
+    /// Filter by exact HTTP status code
+    #[arg(long, value_parser = clap::value_parser!(u16).range(100..=599))]
+    status: Option<u16>,
+    /// Filter by status range, e.g. "4xx" or "200-299"
+    #[arg(long)]
+    status_range: Option<String>,
+    /// Filter by time, e.g. "2024-01-01" or "1h" (relative)
+    #[arg(long)]
+    since: Option<String>,
+    /// Filter by response MIME type (substring match), e.g. "json"
+    #[arg(long)]
+    mime: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1564,7 +1725,7 @@ impl Command {
             Command::Manifest => "manifest",
             Command::Schema { .. } => "schema",
             Command::Examples { .. } => "examples",
-            Command::Call { .. } => "call",
+            Command::Call(args) => saved_operation_name(&args.operation).unwrap_or("call"),
             Command::Session { command } => command.operation_name(),
             Command::Capture { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
@@ -1600,6 +1761,7 @@ impl SessionCommand {
             SessionCommand::Create(_) => "session.create",
             SessionCommand::Switch(_) => "session.switch",
             SessionCommand::Delete(_) => "session.delete",
+            SessionCommand::Rename(_) => "session.rename",
             SessionCommand::Reveal(_) => "session.reveal",
         }
     }
@@ -1622,6 +1784,7 @@ impl CaptureCommand {
                 }
             }
             CaptureCommand::Oast { command } => command.operation_name(),
+            CaptureCommand::Browser { command } => command.operation_name(),
         }
     }
 }
@@ -1631,7 +1794,10 @@ impl HistoryCommand {
         match self {
             HistoryCommand::List(_) => "capture.http.list",
             HistoryCommand::Get(_) => "capture.http.get",
+            HistoryCommand::Search(_) => "capture.http.search",
             HistoryCommand::Clear(_) => "capture.http.clear",
+            HistoryCommand::Select(_) => "capture.http.select",
+            HistoryCommand::Delete(_) => "capture.http.delete",
             HistoryCommand::Replay(_) => "capture.http.replay",
             HistoryCommand::Fuzzer(_) => "capture.http.fuzzer",
             HistoryCommand::Annotate(_) => "capture.http.annotate",
@@ -1765,7 +1931,7 @@ impl SkillsCommand {
 
 fn manifest_operations() -> Vec<CliOperationSpec> {
     use CliSideEffect::{Read, Write};
-    vec![
+    let mut operations = vec![
         op(
             "manifest",
             "manifest",
@@ -1839,6 +2005,11 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
         ),
         op(
+            "session.rename", "session rename --id <uuid> --name <name>",
+            "Rename a session without changing its ID, storage or active state.", Write, false,
+            &["id", "name"], vec![json!({"id":"00000000-0000-0000-0000-000000000000","name":"Review archive"})],
+        ),
+        op(
             "session.reveal",
             "session reveal --id <uuid>",
             "Reveal a session folder in Finder.",
@@ -1846,6 +2017,33 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &["id"],
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "capture.browser.list",
+            "capture browser list",
+            "List the browsers Sniper knows on this platform: whether each is installed, how an agent drives it, what that driver offers, and what is missing. `default` marks the one that opens when none is named; `preferred` marks the one the user saved; `install_url` is where to download one that is missing.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "capture.browser.open",
+            "capture browser open",
+            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. With no browser named it opens the saved default, else ego, Aside or BrowserOS neo when installed, else Chrome or another Chromium-family browser, so read `control` rather than assume a DevTools endpoint. Pass agent to get a `control` an agent can drive it with.",
+            Write,
+            false,
+            &[],
+            vec![json!({"browser":"auto","agent":true})],
+        ),
+        op(
+            "capture.browser.prefer",
+            "capture browser prefer --browser <name|auto>",
+            "Choose which browser opens when none is named, saved for this user. `auto` clears it. Refused for a browser that is not installed.",
+            Write,
+            false,
+            &["browser"],
+            vec![json!({"browser":"chrome"})],
         ),
         op(
             "capture.http.list",
@@ -1864,6 +2062,30 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &["id"],
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "capture.http.search",
+            "capture http search --value <text>",
+            "Find a literal value in captured URLs, headers and bodies. Check `complete` before treating no matches as absence.",
+            Read,
+            false,
+            &["value"],
+            vec![json!({"value":"access_token","side":["response-body"]})],
+        ),
+        op(
+            "capture.http.select", "capture http select --session-id <uuid> [--id <uuid>|filters]",
+            "Preview exactly which saved HTTP records match IDs or nonempty metadata filters. Returns count, IDs and a session-bound selection_token; writes nothing.",
+            Read, false, &["session_id"], vec![json!({"session_id":"00000000-0000-0000-0000-000000000000","host":"example.com"})],
+        ),
+        op(
+            "capture.http.delete", "capture http delete --session-id <uuid> [--id <uuid>|filters --selection-token <token>]",
+            "Delete selected saved HTTP records. IDs and filters are exclusive; filtered deletion requires a reviewed selection_token from capture.http.select. Missing IDs or a changed selection delete nothing.",
+            Write, true, &["session_id"], vec![json!({"session_id":"00000000-0000-0000-0000-000000000000","ids":["11111111-1111-1111-1111-111111111111"]})],
+        ),
+        op(
+            "capture.http.clear", "capture http clear [--session-id <uuid>]",
+            "Delete every saved HTTP transaction in one session. Omitted session_id pins the active session; filters and IDs are not accepted. WebSockets, findings and workspace tabs are retained.",
+            Write, true, &[], vec![json!({"session_id":"00000000-0000-0000-0000-000000000000"})],
         ),
         op(
             "capture.http.replay",
@@ -2297,7 +2519,42 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             &[],
             vec![json!({"provider":"interactsh","url":"https://oast.example","token_stdin":true})],
         ),
-    ]
+    ];
+    operations.extend(saved_manifest_operations());
+    operations
+}
+
+fn saved_operation_name(operation: &str) -> Option<&'static str> {
+    sniper::saved_contract::OPERATIONS
+        .iter()
+        .copied()
+        .find(|name| *name == operation)
+}
+
+fn saved_manifest_operations() -> Vec<CliOperationSpec> {
+    let session_id = "00000000-0000-0000-0000-000000000000";
+    let operation_id = "22222222-2222-2222-2222-222222222222";
+    [
+        ("saved.v1.http.list", "Read saved HTTP summaries in bounded, session-pinned pages; default 50, maximum 200.", json!({"limit":20})),
+        ("saved.v1.http.select", "Preview a saved HTTP selection without changing data.", json!({"session_id":session_id,"host":"example.com"})),
+        ("saved.v1.http.delete", "Delete a reviewed saved HTTP selection once per operation UUID; repeated IDs never execute again.", json!({"session_id":session_id,"operation_id":operation_id,"ids":["11111111-1111-1111-1111-111111111111"]})),
+        ("saved.v1.http.clear", "Clear saved HTTP rows once per operation UUID. Reusing the ID never clears newer rows.", json!({"session_id":session_id,"operation_id":operation_id})),
+        ("saved.v1.session.list", "List saved sessions in bounded UUID-ordered pages.", json!({"limit":20})),
+        ("saved.v1.session.rename", "Rename a saved session with a durable operation receipt.", json!({"session_id":session_id,"operation_id":operation_id,"name":"Archive"})),
+        ("saved.v1.operation.get", "Read a durable mutation receipt after response loss. Unknown is not permission to retry.", json!({"operation_id":operation_id})),
+    ].into_iter().map(|(operation, description, example)| {
+        let write = sniper::saved_data::is_write(operation);
+        CliOperationSpec {
+            operation,
+            command: "call <saved.v1.operation> --input <json>",
+            description,
+            side_effect: if write { CliSideEffect::Write } else { CliSideEffect::Read },
+            requires_confirmation: write,
+            input_schema: sniper::saved_contract::input_schema(operation).expect("saved input schema"),
+            output_schema: sniper::saved_contract::output_schema(operation).expect("saved output schema"),
+            examples: vec![example],
+        }
+    }).collect()
 }
 
 fn op(
@@ -2336,12 +2593,59 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
             }),
         );
     }
-    json!({
+    if matches!(
+        operation,
+        "capture.http.select" | "capture.http.delete" | "capture.http.clear" | "session.rename"
+    ) {
+        for (field, schema) in [
+            ("id", json!({"type":"string","format":"uuid"})),
+            ("session_id", json!({"type":"string","format":"uuid"})),
+            (
+                "ids",
+                json!({"type":"array","items":{"type":"string","format":"uuid"},"description":"Explicit transaction UUIDs; repeat --id in the legacy command. Cannot be combined with filters."}),
+            ),
+            (
+                "name",
+                json!({"type":"string","minLength":1,"description":"Trimmed nonblank session name, at most 256 UTF-8 bytes, no control characters."}),
+            ),
+            (
+                "status",
+                json!({"type":"integer","minimum":100,"maximum":599}),
+            ),
+            (
+                "selection_token",
+                json!({"type":"string","pattern":"^[0-9a-f]{64}$","description":"Returned by capture.http.select; required for filtered deletion. Any changed match rejects the entire deletion."}),
+            ),
+        ] {
+            if properties.contains_key(field) {
+                properties.insert(field.to_string(), schema);
+            }
+        }
+        for field in ["query", "method", "host", "status_range", "since", "mime"] {
+            if properties.contains_key(field) {
+                properties.insert(field.into(), json!({"type":"string","minLength":1,"pattern":"\\S","description":"Nonblank metadata filter. All supplied filters must match; invalid filters are rejected."}));
+            }
+        }
+    }
+    let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "required": required_fields,
         "properties": properties,
-    })
+    });
+    if matches!(operation, "capture.http.select" | "capture.http.delete") {
+        let filters = json!([{"required":["query"]},{"required":["method"]},{"required":["host"]},{"required":["status"]},{"required":["status_range"]},{"required":["since"]},{"required":["mime"]}]);
+        let mut filtered = json!({"anyOf":filters,"properties":{"ids":{"maxItems":0}}});
+        if operation == "capture.http.delete" {
+            filtered["required"] = json!(["selection_token"]);
+        }
+        schema["allOf"] = json!([{"not":{"required":["status","status_range"]}}]);
+        schema["oneOf"] = json!([
+            {"required":["ids"],"properties":{"ids":{"minItems":1}},"not":{"anyOf":filters}},
+            filtered
+        ]);
+    }
+    schema
 }
 
 fn operation_spec(operation: &str) -> Option<CliOperationSpec> {
@@ -2357,6 +2661,20 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "examples" => &["operation"],
         "skills.install" => &["codex", "claude", "all", "codex_dir", "claude_dir"],
         "session.create" => &["name"],
+        "session.rename" => &["id", "name"],
+        "capture.http.clear" => &["session_id"],
+        "capture.http.select" | "capture.http.delete" => &[
+            "session_id",
+            "ids",
+            "query",
+            "method",
+            "host",
+            "status",
+            "status_range",
+            "since",
+            "mime",
+            "selection_token",
+        ],
         "session.switch" | "session.delete" | "session.reveal" => &["id"],
         "capture.http.list" => &[
             "session_id",
@@ -2374,7 +2692,26 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "sort_key",
             "sort_direction",
         ],
+        "capture.browser.list" => &[],
+        "capture.browser.open" => &["browser", "url", "fresh", "agent"],
+        "capture.browser.prefer" => &["browser"],
         "capture.http.get" => &["id", "session_id"],
+        "capture.http.search" => &[
+            "value",
+            "session_id",
+            "side",
+            "case_sensitive",
+            "max_matches",
+            "byte_budget",
+            "context",
+            "query",
+            "method",
+            "host",
+            "status",
+            "status_range",
+            "since",
+            "mime",
+        ],
         "capture.http.replay" | "capture.http.fuzzer" => {
             &["id", "session_id", "scheme", "host", "port"]
         }
@@ -2509,6 +2846,7 @@ fn command_input_preview(command: &Command) -> Value {
             SessionCommand::Create(args) => json!({ "name": args.name }),
             SessionCommand::Switch(args) => json!({ "id": args.id }),
             SessionCommand::Delete(args) => json!({ "id": args.id }),
+            SessionCommand::Rename(args) => json!({ "id": args.id, "name": args.name }),
             SessionCommand::Reveal(args) => json!({ "id": args.id }),
         },
         Command::Capture { command } => match command {
@@ -2522,6 +2860,11 @@ fn command_input_preview(command: &Command) -> Value {
             CaptureCommand::AutoReplace { command } => auto_replace_input_preview(command),
             CaptureCommand::Proxy(args) => json!({"session_id": args.session_id}),
             CaptureCommand::Oast { command } => oast_input_preview(command),
+            CaptureCommand::Browser { command } => match command {
+                BrowserCommand::List => json!({}),
+                BrowserCommand::Open(args) => browser_open_body(args),
+                BrowserCommand::Prefer(args) => json!({ "browser": args.browser }),
+            },
         },
         Command::Scope { command } => match command {
             TargetCommand::GetScope(args) => json!({ "session_id": args.session_id }),
@@ -2555,6 +2898,9 @@ fn command_input_preview(command: &Command) -> Value {
 fn history_input_preview(command: &HistoryCommand) -> Value {
     match command {
         HistoryCommand::Clear(args) => json!({ "session_id": args.session_id }),
+        HistoryCommand::Select(args) | HistoryCommand::Delete(args) => {
+            serde_json::to_value(args.payload()).expect("selection serializes")
+        }
         HistoryCommand::List(args) => json!({
             "session_id": args.session_id,
             "query": args.query,
@@ -2572,6 +2918,22 @@ fn history_input_preview(command: &HistoryCommand) -> Value {
             "sort_direction": args.sort_direction,
         }),
         HistoryCommand::Get(args) => json!({ "id": args.id, "session_id": args.session_id }),
+        HistoryCommand::Search(args) => json!({
+            "value": args.value,
+            "session_id": args.session_id,
+            "side": args.side,
+            "case_sensitive": args.case_sensitive,
+            "max_matches": args.max_matches,
+            "byte_budget": args.byte_budget,
+            "context": args.context,
+            "query": args.query,
+            "method": args.method,
+            "host": args.host,
+            "status": args.status,
+            "status_range": args.status_range,
+            "since": args.since,
+            "mime": args.mime,
+        }),
         HistoryCommand::Replay(args) => json!({
             "id": args.id,
             "session_id": args.session_id,
@@ -2797,6 +3159,11 @@ fn command_api_preview(command: &Command) -> Result<Value> {
             SessionCommand::Delete(args) => {
                 api_preview("DELETE", format!("/api/sessions/{}", args.id), None)
             }
+            SessionCommand::Rename(args) => api_preview(
+                "PATCH",
+                format!("/api/sessions/{}", args.id),
+                Some(json!({"name": args.name})),
+            ),
             SessionCommand::Reveal(args) => api_preview(
                 "POST",
                 format!("/api/sessions/{}/reveal", args.id),
@@ -2840,6 +3207,17 @@ fn capture_api_preview(command: &CaptureCommand) -> Result<Value> {
         CaptureCommand::InterceptRule { command } => Ok(intercept_rule_api_preview(command)),
         CaptureCommand::WebSocket { command } => Ok(websocket_api_preview(command)),
         CaptureCommand::AutoReplace { command } => Ok(auto_replace_api_preview(command)),
+        CaptureCommand::Browser { command } => Ok(match command {
+            BrowserCommand::List => api_preview("GET", "/api/browser/list", None),
+            BrowserCommand::Open(args) => {
+                api_preview("POST", "/api/browser/launch", Some(browser_open_body(args)))
+            }
+            BrowserCommand::Prefer(args) => api_preview(
+                "POST",
+                "/api/browser/preference",
+                Some(json!({ "browser": args.browser })),
+            ),
+        }),
         CaptureCommand::Proxy(args) => Ok(if args.stdin {
             api_preview(
                 "POST",
@@ -2861,10 +3239,20 @@ fn capture_api_preview(command: &CaptureCommand) -> Result<Value> {
 
 fn history_api_preview(command: &HistoryCommand) -> Result<Value> {
     Ok(match command {
+        HistoryCommand::Select(args) => api_preview(
+            "POST",
+            "/api/transactions/select",
+            Some(serde_json::to_value(args.payload())?),
+        ),
+        HistoryCommand::Delete(args) => api_preview(
+            "DELETE",
+            "/api/transactions/selected",
+            Some(serde_json::to_value(args.payload())?),
+        ),
         HistoryCommand::Clear(args) => api_preview(
             "DELETE",
             session_query_path("/api/transactions", args.session_id),
-            Some(json!({ "note": "removes every captured request in the session" })),
+            None,
         ),
         HistoryCommand::List(args) => {
             api_preview("GET", history_list_path(args.session_id, args)?, None)
@@ -2874,6 +3262,9 @@ fn history_api_preview(command: &HistoryCommand) -> Result<Value> {
             transaction_detail_path(args.id, args.session_id),
             None,
         ),
+        HistoryCommand::Search(args) => {
+            api_preview("GET", history_search_path(args.session_id, args), None)
+        }
         HistoryCommand::Replay(_) | HistoryCommand::Fuzzer(_) => api_preview(
             "POST",
             "/api/workspace-state",
@@ -3183,6 +3574,12 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     }
     if matches!(
         command.operation_name(),
+        "capture.http.select" | "capture.http.delete" | "capture.http.clear"
+    ) {
+        notes.push("Dry-run validates and describes the request only; it does not contact Sniper or resolve matching records. Use capture.http.select to review count, IDs and selection_token.");
+    }
+    if matches!(
+        command.operation_name(),
         "replay.send" | "fuzzer.run" | "sequence.run"
     ) {
         notes.push("This operation may send traffic; failed sends should not be retried blindly.");
@@ -3222,6 +3619,20 @@ fn parse_call_input(source: Option<String>) -> Result<Value> {
 }
 
 fn command_from_operation_input(operation: &str, input: &Value) -> Result<Command> {
+    if saved_operation_name(operation).is_some() {
+        sniper::saved_contract::validate_input(operation, input).map_err(|_| {
+            saved_cli_error(
+                "INVALID_INPUT",
+                "Input does not satisfy the saved-data schema",
+                "not_applied",
+                input,
+            )
+        })?;
+        return Ok(Command::Call(CallArgs {
+            operation: operation.to_owned(),
+            input: Some(input.to_string()),
+        }));
+    }
     let Some(_) = operation_spec(operation) else {
         bail!("unknown operation `{operation}`");
     };
@@ -3233,7 +3644,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             operation: call_required(operation, input, "operation")?,
         },
         "examples" => Command::Examples {
-            operation: call_required(operation, input, "operation")?,
+            operation: call_optional(operation, input, "operation")?,
         },
         "skills.install" => Command::Skills {
             command: SkillsCommand::Install(SkillsInstallArgs {
@@ -3262,6 +3673,45 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 id: call_required(operation, input, "id")?,
             }),
         },
+        "session.rename" => Command::Session {
+            command: SessionCommand::Rename(SessionRenameArgs {
+                id: call_required(operation, input, "id")?,
+                name: call_required(operation, input, "name")?,
+            }),
+        },
+        "capture.http.clear" => Command::Capture {
+            command: CaptureCommand::Http {
+                command: HistoryCommand::Clear(InterceptSessionArgs {
+                    session_id: call_optional(operation, input, "session_id")?,
+                }),
+            },
+        },
+        "capture.http.select" | "capture.http.delete" => {
+            let args = HistorySelectionArgs {
+                session_id: call_required(operation, input, "session_id")?,
+                ids: call_optional(operation, input, "ids")?.unwrap_or_default(),
+                query: call_optional(operation, input, "query")?,
+                method: call_optional(operation, input, "method")?,
+                host: call_optional(operation, input, "host")?,
+                status: call_optional_http_status(operation, input, "status")?,
+                status_range: call_optional(operation, input, "status_range")?,
+                since: call_optional(operation, input, "since")?,
+                mime: call_optional(operation, input, "mime")?,
+                selection_token: call_optional(operation, input, "selection_token")?,
+            };
+            args.payload()
+                .validate(operation == "capture.http.delete")
+                .map_err(|error| anyhow!(error))?;
+            Command::Capture {
+                command: CaptureCommand::Http {
+                    command: if operation == "capture.http.select" {
+                        HistoryCommand::Select(args)
+                    } else {
+                        HistoryCommand::Delete(args)
+                    },
+                },
+            }
+        }
         "session.reveal" => Command::Session {
             command: SessionCommand::Reveal(SessionRevealArgs {
                 id: call_required(operation, input, "id")?,
@@ -3324,6 +3774,58 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 command: HistoryCommand::Get(HistoryGetArgs {
                     id: call_required(operation, input, "id")?,
                     session_id: call_optional(operation, input, "session_id")?,
+                }),
+            },
+        },
+        "capture.browser.list" => Command::Capture {
+            command: CaptureCommand::Browser {
+                command: BrowserCommand::List,
+            },
+        },
+        "capture.browser.prefer" => Command::Capture {
+            command: CaptureCommand::Browser {
+                command: BrowserCommand::Prefer(BrowserPreferArgs {
+                    browser: call_required_enum_string(
+                        operation,
+                        input,
+                        "browser",
+                        &browser_choices(),
+                    )?,
+                }),
+            },
+        },
+        "capture.browser.open" => Command::Capture {
+            command: CaptureCommand::Browser {
+                command: BrowserCommand::Open(BrowserOpenArgs {
+                    browser: call_optional_enum_string(
+                        operation,
+                        input,
+                        "browser",
+                        &browser_choices(),
+                    )?,
+                    url: call_optional(operation, input, "url")?,
+                    fresh: call_bool(operation, input, "fresh")?,
+                    agent: call_bool(operation, input, "agent")?,
+                }),
+            },
+        },
+        "capture.http.search" => Command::Capture {
+            command: CaptureCommand::Http {
+                command: HistoryCommand::Search(HistorySearchArgs {
+                    value: call_required(operation, input, "value")?,
+                    session_id: call_optional(operation, input, "session_id")?,
+                    side: call_optional(operation, input, "side")?.unwrap_or_default(),
+                    case_sensitive: call_bool(operation, input, "case_sensitive")?,
+                    max_matches: call_optional_nonzero_usize(operation, input, "max_matches")?,
+                    byte_budget: call_optional(operation, input, "byte_budget")?,
+                    context: call_optional(operation, input, "context")?,
+                    query: call_optional(operation, input, "query")?,
+                    method: call_optional(operation, input, "method")?,
+                    host: call_optional(operation, input, "host")?,
+                    status: call_optional_http_status(operation, input, "status")?,
+                    status_range: call_optional(operation, input, "status_range")?,
+                    since: call_optional(operation, input, "since")?,
+                    mime: call_optional(operation, input, "mime")?,
                 }),
             },
         },
@@ -3995,6 +4497,16 @@ fn call_optional_oast_polling_interval(
     Ok(value)
 }
 
+fn call_required_enum_string(
+    operation: &str,
+    input: &Value,
+    field: &str,
+    allowed: &[&str],
+) -> Result<String> {
+    call_optional_enum_string(operation, input, field, allowed)?
+        .ok_or_else(|| anyhow!("missing required field `{field}` for `{operation}`"))
+}
+
 fn call_optional_enum_string(
     operation: &str,
     input: &Value,
@@ -4247,6 +4759,9 @@ async fn run(cli: Cli) -> Result<()> {
     let dry_run = cli.dry_run;
     let yes = cli.yes;
     let command = match cli.command {
+        Command::Call(args) if args.operation.starts_with("saved.v1.") => {
+            return run_saved_call(api_override, args, dry_run, yes).await;
+        }
         Command::Call(args) => command_from_call_args(args)?,
         command => command,
     };
@@ -4278,7 +4793,9 @@ async fn run(cli: Cli) -> Result<()> {
                 "schema": schema,
             }))
         }
-        Command::Examples { operation } => {
+        Command::Examples {
+            operation: Some(operation),
+        } => {
             let spec = operation_spec(&operation)
                 .ok_or_else(|| anyhow!("unknown operation `{operation}`"))?;
             print_json(&json!({
@@ -4286,6 +4803,20 @@ async fn run(cli: Cli) -> Result<()> {
                 "examples": spec.examples,
             }))
         }
+        // Bare `examples` is how an agent asks "what can I do"; an error there
+        // costs a round trip for no information.
+        Command::Examples { operation: None } => print_json(
+            &manifest_operations()
+                .into_iter()
+                .map(|spec| {
+                    json!({
+                        "operation": spec.operation,
+                        "command": spec.command,
+                        "examples": spec.examples,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
         Command::Skills {
             command: SkillsCommand::Install(args),
         } => {
@@ -4311,6 +4842,7 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                     CaptureCommand::Proxy(args) => handle_proxy_chain(api, args).await,
                     CaptureCommand::Oast { command } => handle_oast(api, command).await,
+                    CaptureCommand::Browser { command } => handle_browser(api, command).await,
                 },
                 Command::Scope { command } => handle_target(api, command).await,
                 Command::Replay { command } => handle_replay(api, command).await,
@@ -4331,6 +4863,34 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Session {
+        command: SessionCommand::Rename(args),
+    } = command
+    {
+        let name = args.name.trim();
+        if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+            bail!(
+                "name must be nonblank, at most 256 UTF-8 bytes and contain no control characters"
+            );
+        }
+    }
+    if let Command::Capture {
+        command: CaptureCommand::Http { command: history },
+    }
+    | Command::History { command: history } = command
+    {
+        match history {
+            HistoryCommand::Select(args) => args
+                .payload()
+                .validate(false)
+                .map_err(|error| anyhow!(error))?,
+            HistoryCommand::Delete(args) => args
+                .payload()
+                .validate(true)
+                .map_err(|error| anyhow!(error))?,
+            _ => (),
+        }
+    }
     if let Some(args) = oast_configure_args(command) {
         if args.token.is_some() {
             bail!("--token is unsafe because it can be stored in shell history; pipe the token with --token-stdin");
@@ -4371,6 +4931,47 @@ fn history_annotate_args(command: &Command) -> Option<&HistoryAnnotateArgs> {
             command: HistoryCommand::Annotate(args),
         } => Some(args),
         _ => None,
+    }
+}
+
+/// `auto` and every browser Sniper knows, from the one list in `BrowserKind`, so a
+/// browser added there is accepted here without anyone remembering this place.
+fn browser_choices() -> Vec<&'static str> {
+    std::iter::once("auto")
+        .chain(sniper::browser::BrowserKind::names())
+        .collect()
+}
+
+fn browser_open_body(args: &BrowserOpenArgs) -> Value {
+    json!({
+        "browser": args.browser,
+        "url": args.url,
+        "fresh": args.fresh,
+        "agent": args.agent,
+    })
+}
+
+async fn handle_browser(api: ApiClient, command: BrowserCommand) -> Result<()> {
+    match command {
+        BrowserCommand::List => {
+            let browsers: Value = api.get_json("/api/browser/list").await?;
+            print_json(&browsers)
+        }
+        BrowserCommand::Open(args) => {
+            let launched: Value = api
+                .post_json("/api/browser/launch", &browser_open_body(&args))
+                .await?;
+            print_json(&launched)
+        }
+        BrowserCommand::Prefer(args) => {
+            let saved: Value = api
+                .post_json(
+                    "/api/browser/preference",
+                    &json!({ "browser": args.browser }),
+                )
+                .await?;
+            print_json(&saved)
+        }
     }
 }
 
@@ -4417,6 +5018,16 @@ async fn handle_session(api: ApiClient, command: SessionCommand) -> Result<()> {
                 "ok": true,
                 "id": args.id,
             }))
+        }
+        SessionCommand::Rename(args) => {
+            let session: SessionSummary = api
+                .request_json(
+                    Method::PATCH,
+                    &format!("/api/sessions/{}", args.id),
+                    Some(json!({"name": args.name})),
+                )
+                .await?;
+            print_json(&session)
         }
         SessionCommand::Reveal(args) => {
             let result: serde_json::Value = api
@@ -4506,6 +5117,22 @@ fn auto_replace_write_session_id(
 
 async fn handle_history(api: ApiClient, command: HistoryCommand) -> Result<()> {
     match command {
+        HistoryCommand::Select(args) => {
+            let result: Value = api
+                .post_json("/api/transactions/select", &args.payload())
+                .await?;
+            print_json(&result)
+        }
+        HistoryCommand::Delete(args) => {
+            let result: Value = api
+                .request_json(
+                    Method::DELETE,
+                    "/api/transactions/selected",
+                    Some(args.payload()),
+                )
+                .await?;
+            print_json(&result)
+        }
         HistoryCommand::Clear(args) => {
             let (session_id, expected_active_session_id) =
                 runtime_write_session_ids(&api, args.session_id).await?;
@@ -4536,6 +5163,16 @@ async fn handle_history(api: ApiClient, command: HistoryCommand) -> Result<()> {
                 .get_json(&transaction_detail_path(args.id, session_id))
                 .await?;
             print_json(&record)
+        }
+        HistoryCommand::Search(args) => {
+            let session_id = match args.session_id {
+                Some(session_id) => Some(session_id),
+                None => active_session_id(&api).await?,
+            };
+            let result: Value = api
+                .get_json(&history_search_path(session_id, &args))
+                .await?;
+            print_json(&result)
         }
         HistoryCommand::Replay(args) => {
             let (session_id, tab) = open_replay_tab(
@@ -5944,6 +6581,38 @@ fn transaction_detail_path(transaction_id: Uuid, session_id: Option<Uuid>) -> St
         }
         None => format!("/api/transactions/{transaction_id}"),
     }
+}
+
+fn history_search_path(session_id: Option<Uuid>, args: &HistorySearchArgs) -> String {
+    let mut params = vec![("value".to_string(), args.value.clone())];
+    let mut push = |key: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+            params.push((key.to_string(), value));
+        }
+    };
+    push("session_id", session_id.map(|id| id.to_string()));
+    push("sides", Some(args.side.join(",")));
+    push(
+        "case_sensitive",
+        args.case_sensitive.then(|| "true".to_string()),
+    );
+    push(
+        "max_matches",
+        args.max_matches.map(|value| value.to_string()),
+    );
+    push(
+        "byte_budget",
+        args.byte_budget.map(|value| value.to_string()),
+    );
+    push("context", args.context.map(|value| value.to_string()));
+    push("q", args.query.clone());
+    push("method", args.method.clone());
+    push("host", args.host.clone());
+    push("status", args.status.map(|value| value.to_string()));
+    push("status_range", args.status_range.clone());
+    push("since", args.since.clone());
+    push("mime", args.mime.clone());
+    format!("/api/transactions-search?{}", encode_query(params))
 }
 
 fn history_list_path(session_id: Option<Uuid>, args: &HistoryListArgs) -> Result<String> {
@@ -7585,6 +8254,230 @@ fn encode_query(params: Vec<(String, String)>) -> String {
     serializer.finish()
 }
 
+fn output_schema_version(operation: &str) -> &'static str {
+    if operation.starts_with("saved.v1.") {
+        sniper::saved_contract::CONTRACT_VERSION
+    } else {
+        CLI_SCHEMA_VERSION
+    }
+}
+
+#[derive(Debug)]
+struct SavedCliError {
+    code: &'static str,
+    message: String,
+    outcome: String,
+    operation_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+}
+
+impl fmt::Display for SavedCliError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+impl std::error::Error for SavedCliError {}
+
+fn saved_cli_error(
+    code: &'static str,
+    message: &str,
+    outcome: &str,
+    input: &Value,
+) -> anyhow::Error {
+    anyhow!(SavedCliError {
+        code,
+        message: message.to_owned(),
+        outcome: outcome.to_owned(),
+        operation_id: input
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok()),
+        session_id: sniper::saved_contract::input_session_id(input),
+    })
+}
+
+fn saved_uuid_field(value: &Value, field: &str) -> Option<Uuid> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(|text| Uuid::parse_str(text).ok())
+}
+
+fn validate_saved_response_binding(operation: &str, input: &Value, data: &Value) -> Result<()> {
+    if sniper::saved_data::is_write(operation) {
+        if saved_uuid_field(&data["receipt"], "operation_id")
+            != saved_uuid_field(input, "operation_id")
+            || saved_uuid_field(&data["receipt"], "session_id")
+                != saved_uuid_field(input, "session_id")
+        {
+            bail!("saved mutation response is not bound to the request");
+        }
+    } else if operation == "saved.v1.operation.get" {
+        if saved_uuid_field(data, "operation_id") != saved_uuid_field(input, "operation_id") {
+            bail!("saved receipt lookup is not bound to the request");
+        }
+    } else if matches!(operation, "saved.v1.http.list" | "saved.v1.http.select") {
+        let requested = saved_uuid_field(input.get("continuation").unwrap_or(input), "session_id");
+        if requested.is_some() && requested != saved_uuid_field(data, "session_id") {
+            bail!("saved HTTP response is not bound to the requested session");
+        }
+    }
+    Ok(())
+}
+
+async fn run_saved_call(
+    api_override: Option<String>,
+    args: CallArgs,
+    dry_run: bool,
+    yes: bool,
+) -> Result<()> {
+    let input = parse_call_input(args.input).map_err(|_| {
+        saved_cli_error(
+            "INVALID_INPUT",
+            "Could not parse saved-data input JSON",
+            "not_applied",
+            &Value::Null,
+        )
+    })?;
+    let operation = args.operation;
+    if saved_operation_name(&operation).is_none() {
+        return Err(saved_cli_error(
+            "UNKNOWN_OPERATION",
+            "Unknown saved-data operation",
+            "not_applied",
+            &input,
+        ));
+    }
+    sniper::saved_contract::validate_input(&operation, &input).map_err(|_| {
+        saved_cli_error(
+            "INVALID_INPUT",
+            "Input does not satisfy the saved-data schema",
+            "not_applied",
+            &input,
+        )
+    })?;
+    let write = sniper::saved_data::is_write(&operation);
+    if dry_run {
+        return print_json(
+            &json!({"contract_version":sniper::saved_contract::CONTRACT_VERSION,
+            "dry_run":true,"operation":operation,"input":input,"requires_confirmation":write,
+            "outcome":"not_applied","method":"POST","path":"/api/saved/v1/call",
+            "notes":["Validates input only. Does not reserve an operation ID or resolve a selection."]}),
+        );
+    }
+    if write && !yes {
+        return Err(saved_cli_error(
+            "CONFIRMATION_REQUIRED",
+            "This saved-data mutation requires --dry-run or --yes",
+            "not_applied",
+            &input,
+        ));
+    }
+    let api = ApiClient::discover(api_override).await.map_err(|_| {
+        saved_cli_error(
+            "API_UNAVAILABLE",
+            "Could not reach a Sniper API; no saved-data call was sent",
+            "not_applied",
+            &input,
+        )
+    })?;
+    let uncertain_outcome = if write { "unknown" } else { "not_applied" };
+    // A redirect can transparently resend a destructive POST to another runtime.
+    // Keep this policy local to the opt-in contract; legacy clients are unchanged.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(CLI_API_TIMEOUT)
+        .build()
+        .map_err(|_| {
+            saved_cli_error(
+                "TRANSPORT_ERROR",
+                "Could not prepare the saved-data client; no call was sent",
+                "not_applied",
+                &input,
+            )
+        })?;
+    // One request only. A timeout can mean that a mutation committed; the caller
+    // keeps the supplied operation UUID for a subsequent read-only receipt lookup.
+    let response = client
+        .post(api.url("/api/saved/v1/call"))
+        .json(&json!({"operation":operation,"input":input}))
+        .send()
+        .await
+        .map_err(|_| {
+            saved_cli_error(
+                "TRANSPORT_ERROR",
+                "Saved-data response unavailable; inspect the operation receipt",
+                uncertain_outcome,
+                &input,
+            )
+        })?;
+    let status = response.status();
+    if status.is_redirection() {
+        return Err(saved_cli_error(
+            "REDIRECT_REFUSED",
+            "Saved-data redirects are not followed; inspect the original operation receipt",
+            uncertain_outcome,
+            &input,
+        ));
+    }
+    let wire: Value = response.json().await.map_err(|_| {
+        saved_cli_error(
+            "INVALID_RESPONSE",
+            "Could not decode the saved-data response; inspect the operation receipt",
+            uncertain_outcome,
+            &input,
+        )
+    })?;
+    if wire.get("contract_version").and_then(Value::as_str)
+        != Some(sniper::saved_contract::CONTRACT_VERSION)
+    {
+        return Err(saved_cli_error(
+            "INVALID_RESPONSE",
+            "Server did not identify a saved.v1 response; inspect the operation receipt",
+            uncertain_outcome,
+            &input,
+        ));
+    }
+    if status.is_success() && wire.get("ok") == Some(&Value::Bool(true)) {
+        if let Some(data) = wire.get("data") {
+            sniper::saved_contract::validate_output(&operation, data).map_err(|_| saved_cli_error(
+                "INVALID_RESPONSE", "Server data does not satisfy the saved.v1 output schema; inspect the operation receipt", uncertain_outcome, &input))?;
+            validate_saved_response_binding(&operation, &input, data).map_err(|_| saved_cli_error(
+                "INVALID_RESPONSE", "Saved-data response identifies a different request; inspect the original operation receipt", uncertain_outcome, &input))?;
+            return print_json(data);
+        }
+    }
+    if let Some(error) = wire.get("error").and_then(|value| {
+        serde_json::from_value::<sniper::saved_data::SavedApiError>(value.clone()).ok()
+    }) {
+        if wire.get("ok") != Some(&Value::Bool(false))
+            || error.retryable
+            || matches!(
+                error.outcome,
+                sniper::saved_operations::SavedOperationOutcome::Applied
+            )
+            || error.operation_id != saved_uuid_field(&input, "operation_id")
+            || error.session_id != sniper::saved_contract::input_session_id(&input)
+        {
+            return Err(saved_cli_error("INVALID_RESPONSE", "Saved-data error does not match this request; inspect the original operation receipt", uncertain_outcome, &input));
+        }
+        let outcome = match error.outcome {
+            sniper::saved_operations::SavedOperationOutcome::Applied => "applied",
+            sniper::saved_operations::SavedOperationOutcome::NotApplied => "not_applied",
+            sniper::saved_operations::SavedOperationOutcome::Unknown => "unknown",
+        };
+        return Err(saved_cli_error(
+            error.code.as_str(),
+            &error.message,
+            outcome,
+            &input,
+        ));
+    }
+    Err(saved_cli_error("INVALID_RESPONSE", "Server did not return a saved.v1 response; inspect the operation receipt before any further action", uncertain_outcome, &input))
+}
+
 #[derive(Debug)]
 struct CliPartialApplyError {
     message: String,
@@ -7677,6 +8570,9 @@ fn cli_parse_error_operation(args: &[String]) -> String {
             format!("capture.auto_replace.{}", action.replace('-', "_"))
         }
         ["capture", "oast", action, ..] => format!("capture.oast.{}", action.replace('-', "_")),
+        ["capture", "browser", action, ..] => {
+            format!("capture.browser.{}", action.replace('-', "_"))
+        }
         ["call", operation, ..] => (*operation).to_string(),
         ["manifest", ..] => "manifest".to_string(),
         ["schema", ..] => "schema".to_string(),
@@ -7706,7 +8602,7 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
     let envelope = json!({
         "ok": true,
         "operation": context.operation,
-        "schema_version": CLI_SCHEMA_VERSION,
+        "schema_version": output_schema_version(&context.operation),
         "data": data,
         "meta": {},
         "warnings": [],
@@ -7719,7 +8615,7 @@ fn print_error_json(operation: &str, exit_code: i32, payload: &CliErrorPayload) 
     let envelope = json!({
         "ok": false,
         "operation": operation,
-        "schema_version": CLI_SCHEMA_VERSION,
+        "schema_version": output_schema_version(&context.operation),
         "error": payload,
         "meta": {},
         "warnings": [],
@@ -7777,6 +8673,16 @@ fn clap_error_payload(error: &clap::Error) -> CliErrorPayload {
 }
 
 fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload {
+    if let Some(saved) = error.downcast_ref::<SavedCliError>() {
+        return CliErrorPayload {
+            code: saved.code,
+            message: saved.message.clone(),
+            hint: Some("Use saved.v1.operation.get with the original operation_id to inspect a receipt; never automatically retry a mutation."),
+            retryable: false,
+            details: json!({"outcome":saved.outcome,"operation_id":saved.operation_id,"session_id":saved.session_id}),
+            exit_code: if matches!(saved.code, "INVALID_INPUT" | "UNKNOWN_OPERATION" | "CONFIRMATION_REQUIRED") { 2 } else { 5 },
+        };
+    }
     if let Some(partial) = error.downcast_ref::<CliPartialApplyError>() {
         return CliErrorPayload {
             code: "PARTIAL_APPLY",
@@ -8267,17 +9173,19 @@ fn parse_response_status_line(status_line: &str) -> Result<u16> {
 
 #[cfg(test)]
 mod tests {
+    use super::validate_saved_response_binding;
     use super::{
         active_session_id_from_summaries, api_failure_detail, api_url, attach_session_id,
-        attach_workspace_save_error, auto_replace_write_session_id, build_annotations_payload,
-        build_editable_raw_request, build_editable_raw_request_with_version,
-        build_oast_configure_update, clap_error_payload, cli_data_dir, cli_error_payload,
-        cli_output_format_from_raw_args, cli_parse_error_operation, cli_partial_apply_error,
-        command_from_call_args, command_from_operation_input, default_cli_data_dir,
-        default_editable_request, discover_api_base_url, discover_api_base_url_from_data_dir,
-        dry_run_command, ensure_http_replay_tab, explicit_or_active_session_id,
-        failed_record_output, fuzzer_active_target_for_request,
-        fuzzer_target_request_authority_for_request, history_list_path, install_skills,
+        attach_workspace_save_error, auto_replace_write_session_id, browser_choices,
+        browser_open_body, build_annotations_payload, build_editable_raw_request,
+        build_editable_raw_request_with_version, build_oast_configure_update, clap_error_payload,
+        cli_data_dir, cli_error_payload, cli_output_format_from_raw_args,
+        cli_parse_error_operation, cli_partial_apply_error, command_from_call_args,
+        command_from_operation_input, default_cli_data_dir, default_editable_request,
+        discover_api_base_url, discover_api_base_url_from_data_dir, dry_run_command,
+        ensure_http_replay_tab, explicit_or_active_session_id, failed_record_output,
+        fuzzer_active_target_for_request, fuzzer_target_request_authority_for_request,
+        history_list_path, history_search_path, install_skills,
         json_value_with_session_and_workspace_save_error, manifest_operations,
         next_replay_tab_sequence, normalize_api_base_url, normalize_replay_port,
         normalize_target_inputs, oast_fields_for_output, operation_spec,
@@ -8292,12 +9200,13 @@ mod tests {
         sniper_settings_probe_matches, split_host_port, split_payload_lines, strip_host_port,
         transaction_detail_path, validate_command_preflight, websocket_detail_path,
         websocket_list_path, workspace_conflict_message, workspace_state_conflict_detail,
-        CaptureCommand, Cli, CliSideEffect, Command, FuzzerCommand, HistoryCommand,
-        HistoryListArgs, HistoryListResponse, InterceptRuleCommand, OastCommand, OastConfigureArgs,
-        OutputFormat, ReplayCommand, RuntimeUpdatePayload, SequenceCommand, SequenceCreateInput,
-        SessionCommand, SkillsInstallArgs, TargetCommand, WebSocketListArgs, WebSocketListResponse,
-        CLI_REPEATER_HISTORY_LIMIT, CLI_WORKSPACE_CLIENT_ID, MAX_CLI_INPUT_BYTES,
-        MAX_OAST_POLLING_INTERVAL_SECS, SNIPER_API_PROBE_RETRY_DELAYS, SNIPER_DATA_DIR_ENV,
+        BrowserCommand, CaptureCommand, Cli, CliSideEffect, Command, FuzzerCommand, HistoryCommand,
+        HistoryListArgs, HistoryListResponse, HistorySearchArgs, InterceptRuleCommand, OastCommand,
+        OastConfigureArgs, OutputFormat, ReplayCommand, RuntimeUpdatePayload, SequenceCommand,
+        SequenceCreateInput, SessionCommand, SkillsInstallArgs, TargetCommand, WebSocketListArgs,
+        WebSocketListResponse, CLI_REPEATER_HISTORY_LIMIT, CLI_WORKSPACE_CLIENT_ID,
+        MAX_CLI_INPUT_BYTES, MAX_OAST_POLLING_INTERVAL_SECS, SNIPER_API_PROBE_RETRY_DELAYS,
+        SNIPER_DATA_DIR_ENV,
     };
     #[cfg(unix)]
     use super::{
@@ -10388,6 +11297,16 @@ mod tests {
             OutputFormat::Compact
         );
         assert_eq!(cli_parse_error_operation(&raw_args), "replay.send");
+
+        // The flag's value is dropped and the value itself stays, so without an arm
+        // of its own the envelope named this "capture".
+        let browser_args: Vec<String> = ["capture", "browser", "open", "--browser", "firefox"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(
+            cli_parse_error_operation(&browser_args),
+            "capture.browser.open"
+        );
     }
 
     #[test]
@@ -10576,6 +11495,7 @@ mod tests {
                 "capture.intercept_rule.create",
                 json!({"all": true, "scope": "req"}),
             ),
+            ("capture.browser.open", json!({"browser": "firefox"})),
         ] {
             let error = command_from_operation_input(operation, &input)
                 .expect_err("call should preserve finite value parsers");
@@ -10831,6 +11751,185 @@ mod tests {
             serde_json::from_value(serde_json::json!([item])).unwrap();
         let legacy_output = legacy.into_cli_output(false);
         assert_eq!(legacy_output[0]["sequence"], 42);
+    }
+
+    // The search value goes to the server verbatim — untrimmed, since leading
+    // whitespace can be part of what was sent — and --side accepts both repeats
+    // and commas, the two ways an agent is likely to spell a list.
+    #[test]
+    fn history_search_builds_its_query_from_every_flag() {
+        let parsed = Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "http",
+            "search",
+            "--value",
+            " order_id&x",
+            "--side",
+            "request-body,headers",
+            "--side",
+            "url",
+            "--case-sensitive",
+            "--host",
+            "shop.example",
+        ])
+        .unwrap();
+        let Command::Capture {
+            command:
+                CaptureCommand::Http {
+                    command: HistoryCommand::Search(args),
+                },
+        } = parsed.command
+        else {
+            panic!("expected capture http search");
+        };
+        assert_eq!(args.side, vec!["request-body", "headers", "url"]);
+        assert_eq!(
+            history_search_path(None, &args),
+            "/api/transactions-search?value=+order_id%26x&sides=request-body%2Cheaders%2Curl&case_sensitive=true&host=shop.example"
+        );
+
+        let minimal = HistorySearchArgs {
+            value: "token".to_string(),
+            ..HistorySearchArgs::default()
+        };
+        assert_eq!(
+            history_search_path(None, &minimal),
+            "/api/transactions-search?value=token",
+            "no --side means the server default: search everything"
+        );
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "http",
+            "search",
+            "--value",
+            "x",
+            "--side",
+            "body",
+        ])
+        .is_err());
+    }
+
+    // Opening a browser starts a process, so the manifest must call it a write and
+    // an agent must pass --yes. The same body is what --dry-run shows and what the
+    // server receives.
+    #[test]
+    fn capture_browser_open_is_a_confirmed_write_with_one_request_body() {
+        let parsed = Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "browser",
+            "open",
+            "--browser",
+            "ego",
+            "--url",
+            "https://example.com",
+            "--fresh",
+        ])
+        .unwrap();
+        let Command::Capture {
+            command:
+                CaptureCommand::Browser {
+                    command: BrowserCommand::Open(args),
+                },
+        } = parsed.command
+        else {
+            panic!("expected capture browser open");
+        };
+        assert_eq!(
+            browser_open_body(&args),
+            json!({"browser":"ego","url":"https://example.com","fresh":true,"agent":false})
+        );
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "browser",
+            "open",
+            "--browser",
+            "firefox",
+        ])
+        .is_err());
+
+        let open = operation_spec("capture.browser.open").unwrap();
+        assert_eq!(open.side_effect, CliSideEffect::Write);
+        assert!(open.requires_confirmation);
+        let list = operation_spec("capture.browser.list").unwrap();
+        assert_eq!(list.side_effect, CliSideEffect::Read);
+        assert!(!list.requires_confirmation);
+
+        let mapped = command_from_operation_input(
+            "capture.browser.open",
+            &json!({"browser":"chrome","agent":true}),
+        )
+        .unwrap();
+        let Command::Capture {
+            command:
+                CaptureCommand::Browser {
+                    command: BrowserCommand::Open(mapped),
+                },
+        } = mapped
+        else {
+            panic!("expected the call mapper to build capture browser open");
+        };
+        assert_eq!(mapped.browser.as_deref(), Some("chrome"));
+        assert!(mapped.agent && !mapped.fresh);
+        assert!(
+            command_from_operation_input("capture.browser.open", &json!({"debug_port": true}),)
+                .is_err()
+        );
+    }
+
+    // Saving a default changes stored settings, so an agent has to confirm it, and the
+    // call path must refuse a missing or unknown name rather than clear the default.
+    #[test]
+    fn capture_browser_prefer_is_a_confirmed_write_that_needs_a_valid_name() {
+        let prefer = operation_spec("capture.browser.prefer").unwrap();
+        assert_eq!(prefer.side_effect, CliSideEffect::Write);
+        assert!(prefer.requires_confirmation);
+
+        for bad in [
+            json!({}),
+            json!({"browser": "netscape"}),
+            json!({"browser": 7}),
+        ] {
+            let error = command_from_operation_input("capture.browser.prefer", &bad)
+                .expect_err("call must not accept this");
+            let payload = cli_error_payload("capture.browser.prefer", &error);
+            assert_eq!(payload.code, "INVALID_INPUT", "{bad}: {error}");
+        }
+        assert!(Cli::try_parse_from(["sniper-cli", "capture", "browser", "prefer"]).is_err());
+    }
+
+    // The accepted names come from BrowserKind, so a browser added there must be
+    // accepted by the flag and by `call` without anyone editing a list here.
+    #[test]
+    fn every_known_browser_is_accepted_by_the_flag_and_by_call() {
+        for name in browser_choices() {
+            Cli::try_parse_from([
+                "sniper-cli",
+                "capture",
+                "browser",
+                "prefer",
+                "--browser",
+                name,
+            ])
+            .unwrap_or_else(|error| panic!("prefer --browser {name}: {error}"));
+            command_from_operation_input("capture.browser.prefer", &json!({"browser": name}))
+                .unwrap_or_else(|error| panic!("call prefer {name}: {error}"));
+            Cli::try_parse_from([
+                "sniper-cli",
+                "capture",
+                "browser",
+                "open",
+                "--browser",
+                name,
+            ])
+            .unwrap_or_else(|error| panic!("--browser {name}: {error}"));
+            command_from_operation_input("capture.browser.open", &json!({"browser": name}))
+                .unwrap_or_else(|error| panic!("call browser {name}: {error}"));
+        }
+        assert!(browser_choices().contains(&"auto") && browser_choices().contains(&"ego"));
     }
 
     #[test]
@@ -11831,5 +12930,204 @@ mod tests {
         assert!(error
             .to_string()
             .contains("could not determine Codex skills directory"));
+    }
+    #[test]
+    fn data_management_manifest_call_schema_and_confirmation_match() {
+        for (operation, input) in [
+            (
+                "session.rename",
+                serde_json::json!({"id":Uuid::nil(),"name":"Archive"}),
+            ),
+            (
+                "capture.http.clear",
+                serde_json::json!({"session_id":Uuid::nil()}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil(),"ids":[Uuid::new_v4()]}),
+            ),
+            (
+                "capture.http.select",
+                serde_json::json!({"session_id":Uuid::nil(),"host":"example.com"}),
+            ),
+        ] {
+            let command = super::command_from_operation_input(operation, &input).unwrap();
+            super::validate_command_preflight(&command).unwrap();
+            assert_eq!(command.operation_name(), operation);
+            assert_eq!(
+                command.requires_confirmation(),
+                operation != "capture.http.select"
+            );
+            let plan = super::dry_run_command(&command).unwrap();
+            assert_eq!(plan["operation"], operation);
+            let spec = super::operation_spec(operation).unwrap();
+            assert_eq!(spec.input_schema["additionalProperties"], false);
+            assert_eq!(
+                spec.input_schema["properties"][if operation == "session.rename" {
+                    "id"
+                } else {
+                    "session_id"
+                }]["format"],
+                "uuid"
+            );
+        }
+    }
+
+    #[test]
+    fn data_management_rejects_ambiguous_or_malformed_call_inputs() {
+        for (operation, input) in [
+            (
+                "capture.http.clear",
+                serde_json::json!({"host":"example.com"}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"ids":[Uuid::nil()]}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil()}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil(),"ids":[]}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil(),"ids":[Uuid::nil()],"host":"example.com"}),
+            ),
+            (
+                "capture.http.delete",
+                serde_json::json!({"session_id":Uuid::nil(),"host":"example.com"}),
+            ),
+            (
+                "capture.http.select",
+                serde_json::json!({"session_id":Uuid::nil(),"since":"bad"}),
+            ),
+            (
+                "capture.http.select",
+                serde_json::json!({"session_id":Uuid::nil(),"status_range":"oops"}),
+            ),
+            (
+                "capture.http.select",
+                serde_json::json!({"session_id":Uuid::nil(),"hots":"example.com"}),
+            ),
+        ] {
+            assert!(
+                super::command_from_operation_input(operation, &input).is_err(),
+                "{operation} accepted {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_management_legacy_parsing_and_preflight_match_calls() {
+        let sid = Uuid::nil().to_string();
+        let id = Uuid::new_v4().to_string();
+        for argv in [
+            vec![
+                "sniper-cli",
+                "capture",
+                "http",
+                "clear",
+                "--session-id",
+                &sid,
+                "--dry-run",
+            ],
+            vec![
+                "sniper-cli",
+                "capture",
+                "http",
+                "delete",
+                "--session-id",
+                &sid,
+                "--id",
+                &id,
+                "--dry-run",
+            ],
+            vec![
+                "sniper-cli",
+                "capture",
+                "http",
+                "select",
+                "--session-id",
+                &sid,
+                "--host",
+                "example.com",
+            ],
+            vec![
+                "sniper-cli",
+                "session",
+                "rename",
+                "--id",
+                &sid,
+                "--name",
+                "Archive",
+                "--dry-run",
+            ],
+        ] {
+            let parsed = Cli::try_parse_from(argv).unwrap();
+            super::validate_command_preflight(&parsed.command).unwrap();
+            super::dry_run_command(&parsed.command).unwrap();
+        }
+        let parsed = Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "http",
+            "delete",
+            "--session-id",
+            &sid,
+            "--host",
+            " ",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(super::validate_command_preflight(&parsed.command).is_err());
+        let parsed = Cli::try_parse_from([
+            "sniper-cli",
+            "session",
+            "rename",
+            "--id",
+            &sid,
+            "--name",
+            " ",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(super::validate_command_preflight(&parsed.command).is_err());
+    }
+    #[test]
+    fn saved_response_binding_rejects_valid_shapes_for_other_requests() {
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let input = json!({"session_id":first,"operation_id":first});
+        let matched = json!({"receipt":{"session_id":first,"operation_id":first}});
+        let wrong = json!({"receipt":{"session_id":first,"operation_id":second}});
+        assert!(validate_saved_response_binding("saved.v1.http.clear", &input, &matched).is_ok());
+        assert!(validate_saved_response_binding("saved.v1.http.clear", &input, &wrong).is_err());
+        assert!(validate_saved_response_binding(
+            "saved.v1.operation.get",
+            &input,
+            &json!({"operation_id":second})
+        )
+        .is_err());
+        assert!(validate_saved_response_binding(
+            "saved.v1.http.list",
+            &json!({"continuation":{"session_id":first}}),
+            &json!({"session_id":second})
+        )
+        .is_err());
+        assert!(validate_saved_response_binding(
+            "saved.v1.http.select",
+            &input,
+            &json!({"session_id":second})
+        )
+        .is_err());
+        assert!(validate_saved_response_binding(
+            "saved.v1.http.list",
+            &json!({}),
+            &json!({"session_id":second})
+        )
+        .is_ok());
     }
 }

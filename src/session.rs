@@ -489,6 +489,15 @@ impl SessionContext {
             .expect("session metadata lock poisoned") = metadata;
     }
 
+    pub(crate) fn apply_renamed_metadata(&self, renamed: &SessionMetadata) {
+        let mut metadata = self
+            .metadata
+            .write()
+            .expect("session metadata lock poisoned");
+        metadata.name.clone_from(&renamed.name);
+        metadata.updated_at = metadata.updated_at.max(renamed.updated_at);
+    }
+
     pub async fn persist(&self) -> Result<SessionMetadata> {
         let _mutation_guard = self.mutation_lock.lock().await;
         self.persist_mutation_locked().await
@@ -1046,7 +1055,37 @@ impl SessionRegistry {
         self.touch_active_session(id)
     }
 
-    pub fn update_metadata(&self, metadata: SessionMetadata) -> Result<()> {
+    pub fn rename_session(&self, id: Uuid, name: &str) -> Result<SessionMetadata> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("session name cannot be blank");
+        }
+        if name.len() > MAX_SESSION_NAME_BYTES {
+            bail!("session name cannot exceed {MAX_SESSION_NAME_BYTES} bytes");
+        }
+        if name.chars().any(char::is_control) {
+            bail!("session name cannot contain control characters");
+        }
+
+        let mut registry = self.inner.write().expect("session registry lock poisoned");
+        let mut next = registry.clone();
+        let metadata = next
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .ok_or_else(|| anyhow!("session {id} was not found"))?;
+        if metadata.name == name {
+            return Ok(metadata.clone());
+        }
+        metadata.name = name.to_owned();
+        metadata.updated_at = metadata.updated_at.max(Utc::now());
+        let renamed = metadata.clone();
+        write_json(&self.registry_path, &next)?;
+        *registry = next;
+        Ok(renamed)
+    }
+
+    pub fn update_metadata(&self, mut metadata: SessionMetadata) -> Result<()> {
         let mut registry = self.inner.write().expect("session registry lock poisoned");
         let mut next = registry.clone();
         let Some(existing) = next
@@ -1056,6 +1095,12 @@ impl SessionRegistry {
         else {
             return Err(anyhow!("session {} was not found", metadata.id));
         };
+        // A snapshot writer can finish after a rename or activation. These
+        // fields belong to the registry, not to the writer's earlier snapshot.
+        metadata.name.clone_from(&existing.name);
+        metadata.created_at = existing.created_at;
+        metadata.last_opened_at = existing.last_opened_at;
+        metadata.updated_at = metadata.updated_at.max(existing.updated_at);
         *existing = metadata;
         write_json(&self.registry_path, &next)?;
         *registry = next;
@@ -1180,9 +1225,21 @@ impl SessionRegistry {
             // snapshot.json without them. Writing `snapshot` whole here would put
             // the ~1.2 GB of records back where they were just moved out of.
             let transactions = std::mem::take(&mut snapshot.transactions);
-            write_transactions_file(&transactions_path(&storage_dir), &transactions)?;
+            let entries: Vec<_> = transactions
+                .into_iter()
+                .map(|record| {
+                    let locator = snapshot.transaction_locators.get(&record.id).copied();
+                    (record, locator)
+                })
+                .collect();
+            let path = transactions_path(&storage_dir);
+            // Journal deletion can leave metadata-only survivors. Copy their
+            // existing body lines and adopt the new offsets before truncating
+            // the journal, rather than serializing empty bodies over the file.
+            snapshot.transaction_locators =
+                write_transactions_file_streaming(&path, &path, &entries)?;
             write_json(&snapshot_path(&storage_dir), &snapshot)?;
-            snapshot.transactions = transactions;
+            snapshot.transactions = entries.into_iter().map(|(record, _)| record).collect();
         }
         if replayed_transaction_journal {
             if let Err(error) = compact_replayed_transaction_journal(&storage_dir) {
@@ -2133,6 +2190,7 @@ fn write_transactions_file_streaming(
 /// changes every offset after the first record whose serialized form changed, so
 /// the caller must replace its locators with these — a stale locator does not
 /// error, it hands back a different request's traffic.
+#[cfg(test)]
 fn write_transactions_file(
     path: &Path,
     records: &[TransactionRecord],
@@ -2609,6 +2667,7 @@ fn replay_transaction_journal(
     );
 
     let mut annotation_mutated_record_ids = HashSet::new();
+    let mut replayed_deletion = false;
     annotation_mutated_record_ids.extend(replay_transaction_journal_file(
         &checkpoint_path,
         replay_insert_after_sequence,
@@ -2622,6 +2681,8 @@ fn replay_transaction_journal(
         max_entries,
         repair_files,
         &mut transaction_event_sequence,
+        &mut snapshot.transaction_locators,
+        &mut replayed_deletion,
     )?);
     annotation_mutated_record_ids.extend(replay_transaction_journal_file(
         &journal_path,
@@ -2636,6 +2697,8 @@ fn replay_transaction_journal(
         max_entries,
         repair_files,
         &mut transaction_event_sequence,
+        &mut snapshot.transaction_locators,
+        &mut replayed_deletion,
     )?);
     apply_transaction_journal_backfill(
         max_entries,
@@ -2646,6 +2709,29 @@ fn replay_transaction_journal(
         &mut backfill_order,
         &mut backfill_records,
     );
+
+    // An annotation replay changes metadata while its bodies may still exist
+    // only in the old transaction file. Materialize just those changed records
+    // so journal compaction cannot copy stale annotations into the durable line.
+    for id in &annotation_mutated_record_ids {
+        let Some(record) = records.get_mut(id) else {
+            continue;
+        };
+        let Some(locator) = snapshot.transaction_locators.remove(id) else {
+            continue;
+        };
+        let mut full = read_transaction_at(storage_dir, locator)
+            .filter(|full| full.id == *id)
+            .ok_or_else(|| {
+                anyhow!("failed to read stored transaction while replaying annotations")
+            })?;
+        full.notes = std::mem::take(&mut record.notes);
+        full.color_tag = record.color_tag.take();
+        full.user_note = record.user_note.take();
+        full.annotation_revision = record.annotation_revision;
+        full.annotation_client_versions = std::mem::take(&mut record.annotation_client_versions);
+        *record = full;
+    }
 
     snapshot.transactions = order
         .into_iter()
@@ -2659,6 +2745,7 @@ fn replay_transaction_journal(
         .collect();
     replayed_transaction_ids.retain(|id| retained_ids.contains(id));
     let mutated_snapshot = checkpoint_consumed
+        || replayed_deletion
         || !replayed_transaction_ids.is_empty()
         || annotation_mutated_record_ids
             .iter()
@@ -3099,6 +3186,8 @@ fn replay_transaction_journal_file(
     max_entries: usize,
     repair_files: bool,
     transaction_event_sequence: &mut u64,
+    transaction_locators: &mut HashMap<Uuid, BodyLocator>,
+    replayed_deletion: &mut bool,
 ) -> Result<HashSet<Uuid>> {
     let file = match fs::File::open(journal_path) {
         Ok(file) => file,
@@ -3220,11 +3309,29 @@ fn replay_transaction_journal_file(
                 let id = record.id;
                 if let Some(existing) = records.get_mut(&id) {
                     *existing = record;
+                    transaction_locators.remove(&id);
                     annotation_mutated_record_ids.insert(id);
                 } else if let Some(existing) = backfill_records.get_mut(&id) {
                     *existing = record;
+                    transaction_locators.remove(&id);
                     annotation_mutated_record_ids.insert(id);
                 }
+            }
+            TransactionJournalEntry::Delete { ids } => {
+                let deleted: HashSet<_> = ids.into_iter().collect();
+                *replayed_deletion |= !deleted.is_empty();
+                // Keep the ids in `seen`: a duplicate insert in an overlapping
+                // checkpoint or active journal must not resurrect a tombstone.
+                for id in &deleted {
+                    seen.insert(*id);
+                    records.remove(id);
+                    backfill_records.remove(id);
+                    replayed_transaction_ids.remove(id);
+                    transaction_locators.remove(id);
+                }
+                order.retain(|id| !deleted.contains(id));
+                inserted_order.retain(|id| !deleted.contains(id));
+                backfill_order.retain(|id| !deleted.contains(id));
             }
             TransactionJournalEntry::Annotation {
                 id,
@@ -4780,6 +4887,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_rename_session_preserves_storage_and_survives_restart() {
+        let data_dir = std::env::temp_dir().join(format!("sniper-rename-{}", Uuid::new_v4()));
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let before = registry.create_session(Some("Before".to_owned())).unwrap();
+        let storage = registry.session_storage_path(before.id).unwrap();
+        let snapshot = std::fs::read(storage.join("snapshot.json")).unwrap();
+
+        let renamed = registry
+            .rename_session(before.id, "  Review / ../ example.com  ")
+            .unwrap();
+        assert_eq!(renamed.name, "Review / ../ example.com");
+        assert_eq!(renamed.id, before.id);
+        assert_eq!(renamed.created_at, before.created_at);
+        assert_eq!(renamed.last_opened_at, before.last_opened_at);
+        assert!(renamed.updated_at >= before.updated_at);
+        assert_eq!(registry.active_session_id(), active.id());
+        assert_eq!(registry.session_storage_path(before.id).unwrap(), storage);
+        assert_eq!(
+            std::fs::read(storage.join("snapshot.json")).unwrap(),
+            snapshot
+        );
+        assert_eq!(std::fs::read_dir(&registry.root_dir).unwrap().count(), 3);
+        let unchanged = registry.rename_session(before.id, &renamed.name).unwrap();
+        assert_eq!(unchanged.updated_at, renamed.updated_at);
+        drop(active);
+        drop(registry);
+
+        let (reloaded, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let summary = reloaded
+            .summaries()
+            .into_iter()
+            .find(|session| session.id == before.id)
+            .unwrap();
+        assert_eq!(summary.name, renamed.name);
+        assert_eq!(summary.created_at, before.created_at);
+        assert_eq!(summary.last_opened_at, before.last_opened_at);
+        assert_eq!(summary.updated_at, renamed.updated_at);
+        assert!(!summary.active);
+        assert_eq!(reloaded.session_storage_path(before.id).unwrap(), storage);
+        drop(active);
+        drop(reloaded);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn registry_rename_session_validates_trimmed_utf8_names() {
+        let data_dir = std::env::temp_dir().join(format!("sniper-rename-name-{}", Uuid::new_v4()));
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let before = serde_json::to_value(registry.summaries()).unwrap();
+        for name in [
+            "",
+            " \t\n ",
+            "embedded\nnewline",
+            "nul\0byte",
+            "tab\there",
+            "del\u{7f}",
+        ] {
+            let error = registry.rename_session(active.id(), name).unwrap_err();
+            assert!(error.to_string().contains("session name"));
+        }
+        for name in [
+            "x".repeat(super::MAX_SESSION_NAME_BYTES + 1),
+            "é".repeat(129),
+        ] {
+            let error = registry.rename_session(active.id(), &name).unwrap_err();
+            assert!(error.to_string().contains("256 bytes"));
+        }
+        assert_eq!(serde_json::to_value(registry.summaries()).unwrap(), before);
+        let boundary = "é".repeat(128);
+        assert_eq!(
+            registry
+                .rename_session(active.id(), &format!("  {boundary}  "))
+                .unwrap()
+                .name,
+            boundary
+        );
+        let error = registry
+            .rename_session(Uuid::new_v4(), "Missing")
+            .unwrap_err();
+        assert!(error.to_string().contains("was not found"));
+        drop(active);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn registry_rename_session_failed_write_keeps_live_and_saved_metadata() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-rename-failure-{}", Uuid::new_v4()));
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let before = serde_json::to_value(registry.summaries()).unwrap();
+        let backup = registry.registry_path.with_extension("saved");
+        std::fs::rename(&registry.registry_path, &backup).unwrap();
+        std::fs::create_dir(&registry.registry_path).unwrap();
+
+        let error = registry.rename_session(active.id(), "After").unwrap_err();
+        assert!(error.to_string().contains("failed to rename"));
+        assert_eq!(serde_json::to_value(registry.summaries()).unwrap(), before);
+        assert!(
+            !std::fs::read_dir(&registry.root_dir).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp-")
+            })
+        );
+        std::fs::remove_dir(&registry.registry_path).unwrap();
+        std::fs::rename(backup, &registry.registry_path).unwrap();
+        let id = active.id();
+        let name = active.summary(true).name;
+        drop(active);
+        drop(registry);
+
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        assert_eq!(active.id(), id);
+        assert_eq!(active.summary(true).name, name);
+        drop(active);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn registry_rename_session_is_not_reverted_by_stale_snapshot_metadata() {
+        let data_dir = std::env::temp_dir().join(format!("sniper-rename-stale-{}", Uuid::new_v4()));
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let mut stale = registry.create_session(Some("Before".to_owned())).unwrap();
+        let renamed = registry.rename_session(stale.id, "After").unwrap();
+        let activated = registry.activate_session(stale.id).unwrap();
+        stale.request_count = 7;
+        registry.update_metadata(stale.clone()).unwrap();
+        let summary = registry
+            .summaries()
+            .into_iter()
+            .find(|s| s.id == stale.id)
+            .unwrap();
+        assert_eq!(summary.name, "After");
+        assert_eq!(summary.created_at, stale.created_at);
+        assert_eq!(summary.last_opened_at, activated.last_opened_at);
+        assert_eq!(summary.updated_at, renamed.updated_at);
+        assert_eq!(summary.request_count, 7);
+        drop(active);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
     async fn workspace_only_persist_keeps_transaction_journal_active() {
         let data_dir =
             std::env::temp_dir().join(format!("sniper-workspace-only-{}", uuid::Uuid::new_v4()));
@@ -5882,6 +6136,8 @@ mod tests {
             100,
             true,
             &mut transaction_event_sequence,
+            &mut HashMap::new(),
+            &mut false,
         )
         .expect("directory journal should be moved aside");
 
@@ -7428,6 +7684,227 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].host, "partial-utf8.example:443");
         assert_eq!(restored[0].path, "/before-partial-utf8");
+    }
+
+    fn deletion_test_record(sequence: u64) -> TransactionRecord {
+        let message = |side: &str| {
+            let body = format!("fixture {side} body {sequence}");
+            MessageRecord::from_headers_and_body(&http::HeaderMap::new(), body.as_bytes(), 1024)
+        };
+        let mut record = TransactionRecord::http(
+            Utc::now(),
+            "POST".into(),
+            "https".into(),
+            "example.com".into(),
+            format!("/{sequence}"),
+            Some(200),
+            1,
+            message("request"),
+            Some(message("response")),
+            vec![],
+            None,
+            Some(message("original response")),
+        );
+        record.original_request = Some(message("original request"));
+        record.sequence = sequence;
+        record
+    }
+
+    fn deletion_journal_bytes(entries: &[TransactionJournalEntry]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for entry in entries {
+            serde_json::to_writer(&mut bytes, entry).unwrap();
+            bytes.push(b'\n');
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn deletion_survives_restart_rotation_and_compaction_with_survivor_bodies() {
+        for mode in ["active", "rotated", "compacted"] {
+            let data_dir = std::env::temp_dir()
+                .join(format!("sniper-delete-restart-{mode}-{}", Uuid::new_v4()));
+            let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            let removed = deletion_test_record(1);
+            let survivor = deletion_test_record(2);
+            let removed_id = removed.id;
+            let survivor_id = survivor.id;
+            active.store.insert(removed).await;
+            active.store.insert(survivor.clone()).await;
+            active.persist().await.unwrap();
+            let session_id = active.id();
+            drop(active);
+            let loaded = registry.load_context(session_id).unwrap();
+            assert_eq!(loaded.store.delete_ids(&[removed_id]).await.unwrap(), 1);
+            if mode == "rotated" {
+                let entries = loaded.store.snapshot_for_persistence(None).await.unwrap();
+                assert_eq!(entries.len(), 1);
+            } else if mode == "compacted" {
+                loaded.persist().await.unwrap();
+            }
+            drop(loaded);
+            drop(registry);
+            let (registry, loaded) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            assert_eq!(loaded.store.len().await, 1, "{mode}");
+            assert!(loaded.store.get(removed_id).await.is_none(), "{mode}");
+            let restored = loaded.store.get(survivor_id).await.unwrap();
+            assert_eq!(
+                serde_json::to_value(restored).unwrap(),
+                serde_json::to_value(&survivor).unwrap(),
+                "{mode}"
+            );
+            let storage_dir = registry.session_storage_path(session_id).unwrap();
+            drop(loaded);
+            std::fs::remove_file(super::transactions_meta_path(&storage_dir)).unwrap();
+            let reloaded = registry.load_context(session_id).unwrap();
+            assert!(reloaded.store.get(removed_id).await.is_none(), "{mode}");
+            assert_eq!(
+                serde_json::to_value(reloaded.store.get(survivor_id).await.unwrap()).unwrap(),
+                serde_json::to_value(&survivor).unwrap(),
+                "{mode}"
+            );
+            drop(reloaded);
+            drop(registry);
+            let _ = std::fs::remove_dir_all(data_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn deletion_replay_preserves_survivor_annotations_when_metadata_is_rebuilt() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "sniper-delete-annotation-restart-{}",
+            Uuid::new_v4()
+        ));
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let removed = deletion_test_record(1);
+        let survivor = deletion_test_record(2);
+        let removed_id = removed.id;
+        let survivor_id = survivor.id;
+        active.store.insert(removed).await;
+        active.store.insert(survivor).await;
+        active.persist().await.unwrap();
+        let session_id = active.id();
+        drop(active);
+        let loaded = registry.load_context(session_id).unwrap();
+        loaded
+            .store
+            .update_annotations_durable(
+                survivor_id,
+                Some(Some("green".into())),
+                Some(Some("keep this fixture".into())),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let expected = loaded.store.get(survivor_id).await.unwrap();
+        loaded.store.delete_ids(&[removed_id]).await.unwrap();
+        drop(loaded);
+        let loaded = registry.load_context(session_id).unwrap();
+        assert_eq!(
+            serde_json::to_value(loaded.store.get(survivor_id).await.unwrap()).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let storage_dir = registry.session_storage_path(session_id).unwrap();
+        drop(loaded);
+        std::fs::remove_file(super::transactions_meta_path(&storage_dir)).unwrap();
+        let rebuilt = registry.load_context(session_id).unwrap();
+        assert!(rebuilt.store.get(removed_id).await.is_none());
+        assert_eq!(
+            serde_json::to_value(rebuilt.store.get(survivor_id).await.unwrap()).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        drop(rebuilt);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn deletion_replay_blocks_checkpoint_duplicates_and_backfill_resurrection() {
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-delete-replay-backfill-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let deleted_snapshot = deletion_test_record(3);
+        let survivor = deletion_test_record(4);
+        let deleted_backfill = deletion_test_record(1);
+        let retained_backfill = deletion_test_record(2);
+        let unseen_deleted = deletion_test_record(5);
+        let deleted_ids = vec![deleted_snapshot.id, deleted_backfill.id, unseen_deleted.id];
+        let journal = super::transaction_journal_path(&storage_dir);
+        let checkpoint = transaction_journal_checkpoint_path(&journal);
+        std::fs::write(
+            checkpoint,
+            deletion_journal_bytes(&[
+                TransactionJournalEntry::Insert {
+                    record: deleted_backfill.clone(),
+                },
+                TransactionJournalEntry::Insert {
+                    record: retained_backfill.clone(),
+                },
+                TransactionJournalEntry::Delete {
+                    ids: deleted_ids.clone(),
+                },
+            ]),
+        )
+        .unwrap();
+        std::fs::write(
+            &journal,
+            deletion_journal_bytes(&[
+                TransactionJournalEntry::Insert {
+                    record: deleted_snapshot.clone(),
+                },
+                TransactionJournalEntry::Insert {
+                    record: deleted_backfill,
+                },
+                TransactionJournalEntry::Insert {
+                    record: unseen_deleted,
+                },
+                TransactionJournalEntry::Update {
+                    record: deleted_snapshot.clone(),
+                },
+            ]),
+        )
+        .unwrap();
+        let mut snapshot = super::StoredSessionSnapshot {
+            transactions: vec![survivor.clone(), deleted_snapshot],
+            ..Default::default()
+        };
+        let result =
+            super::replay_transaction_journal(&storage_dir, 2, &mut snapshot, false).unwrap();
+        assert!(result.mutated_snapshot);
+        let retained: HashSet<_> = snapshot
+            .transactions
+            .iter()
+            .map(|record| record.id)
+            .collect();
+        assert_eq!(retained, HashSet::from([survivor.id, retained_backfill.id]));
+        assert!(deleted_ids
+            .iter()
+            .all(|id| !result.replayed_transaction_ids.contains(id)));
+        let _ = std::fs::remove_dir_all(storage_dir);
+    }
+
+    #[test]
+    fn deletion_replay_ignores_partial_tombstone_without_removing_records() {
+        let storage_dir =
+            std::env::temp_dir().join(format!("sniper-delete-partial-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let record = deletion_test_record(1);
+        let mut tombstone = deletion_journal_bytes(&[TransactionJournalEntry::Delete {
+            ids: vec![record.id],
+        }]);
+        tombstone.pop();
+        std::fs::write(super::transaction_journal_path(&storage_dir), tombstone).unwrap();
+        let mut snapshot = super::StoredSessionSnapshot {
+            transactions: vec![record.clone()],
+            ..Default::default()
+        };
+        let result =
+            super::replay_transaction_journal(&storage_dir, usize::MAX, &mut snapshot, false)
+                .unwrap();
+        assert!(!result.mutated_snapshot);
+        assert_eq!(snapshot.transactions.len(), 1);
+        assert_eq!(snapshot.transactions[0].id, record.id);
+        let _ = std::fs::remove_dir_all(storage_dir);
     }
 
     #[tokio::test]

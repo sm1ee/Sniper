@@ -325,12 +325,14 @@ fn run_desktop() -> Result<()> {
     let event_proxy = event_loop.create_proxy();
     let signal_task = runtime.spawn(wait_for_desktop_shutdown_signal(event_proxy));
     install_platform_app_menu();
-    let window = WindowBuilder::new()
-        .with_title("Sniper")
-        .with_inner_size(LogicalSize::new(1440.0, 920.0))
-        .with_min_inner_size(LogicalSize::new(1120.0, 720.0))
-        .build(&event_loop)
-        .context("failed to create desktop window")?;
+    let window = with_window_icons(
+        WindowBuilder::new()
+            .with_title("Sniper")
+            .with_inner_size(LogicalSize::new(1440.0, 920.0))
+            .with_min_inner_size(LogicalSize::new(1120.0, 720.0)),
+    )
+    .build(&event_loop)
+    .context("failed to create desktop window")?;
     enable_window_fullscreen_support(&window);
     hide_window_title_text(&window);
     forward_scroll_gesture_phase(event_loop.create_proxy());
@@ -934,6 +936,30 @@ fn install_platform_app_menu() {}
 
 /// tao does not mark its windows full-screen capable, so AppKit would leave the
 /// View > Enter Full Screen item (and its Ctrl+Cmd+F key equivalent) disabled.
+// The title bar shows the small icon and the taskbar and window switcher the large
+// one. Neither is taken from the executable on its own: a window with no icon set
+// gets the generic one. Both are loaded from the icon resource build.rs embeds
+// (id 1), and a build without it just keeps the default.
+#[cfg(windows)]
+fn with_window_icons(builder: WindowBuilder) -> WindowBuilder {
+    use tao::{
+        dpi::PhysicalSize,
+        platform::windows::{IconExtWindows, WindowBuilderExtWindows},
+        window::Icon,
+    };
+    const ICON_RESOURCE_ID: u16 = 1;
+    let icon =
+        |size| Icon::from_resource(ICON_RESOURCE_ID, Some(PhysicalSize::new(size, size))).ok();
+    builder
+        .with_window_icon(icon(16))
+        .with_taskbar_icon(icon(256))
+}
+
+#[cfg(not(windows))]
+fn with_window_icons(builder: WindowBuilder) -> WindowBuilder {
+    builder
+}
+
 #[cfg(target_os = "macos")]
 fn enable_window_fullscreen_support(window: &tao::window::Window) {
     use cocoa::{

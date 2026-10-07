@@ -200,6 +200,7 @@ const FUZZER_RESULT_ROW_HEIGHT = 27;
 let measuredFuzzerResultRowHeight = FUZZER_RESULT_ROW_HEIGHT;
 const FUZZER_RESULT_BUFFER_ROWS = 30;
 const FINDINGS_ROW_HEIGHT = 27;
+let measuredFindingsRowHeight = FINDINGS_ROW_HEIGHT;
 const FINDINGS_BUFFER_ROWS = 20;
 const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "fuzzer", "sequence", "replay", "tools", "logger"]);
 const IMPLEMENTED_PROXY_TABS = new Set(["intercept", "http-history", "websockets-history", "replace", "findings", "oast", "proxy-settings"]);
@@ -369,7 +370,9 @@ function websocketPagePayload(value) {
   return {
     items,
     total: Number.isFinite(Number(payload.total)) ? Number(payload.total) : items.length,
-    filteredTotal: Number.isFinite(Number(payload.filtered_total)) ? Number(payload.filtered_total) : null,
+    filteredTotal: payload.filtered_total != null && Number.isFinite(Number(payload.filtered_total))
+      ? Number(payload.filtered_total)
+      : null,
     offset: Number.isFinite(Number(payload.offset)) ? Number(payload.offset) : 0,
     limit: Number.isFinite(Number(payload.limit)) ? Number(payload.limit) : items.length,
     has_more: Boolean(payload.has_more),
@@ -379,6 +382,8 @@ function websocketPagePayload(value) {
 function createHistoryPagingState() {
   return {
     generation: 0,
+    localRemovalGeneration: 0,
+    annotationMutationGeneration: 0,
     querySignature: "",
     pageSize: HTTP_HISTORY_PAGE_SIZE,
     offset: 0,
@@ -543,9 +548,11 @@ const state = {
 };
 
 let _historyPagingGeneration = 0;
+let _historyDetailGeneration = 0;
 let _historyDetailLoadingTimer = null;
 let _websocketLoadGeneration = 0;
 let _websocketDetailGeneration = 0;
+let _eventLogLoadGeneration = 0;
 let _eventLogMutationGeneration = 0;
 let _eventLogClearGeneration = 0;
 let _websocketDetailPendingId = null;
@@ -906,8 +913,8 @@ const els = {
 };
 
 const mainTabs = Array.from(document.querySelectorAll(".main-tab"));
-const proxyTabs = Array.from(document.querySelectorAll(".sub-tab"));
-const viewTabs = Array.from(document.querySelectorAll(".view-tab"));
+const proxyTabs = Array.from(document.querySelectorAll(".sub-tab[data-proxy-tab]"));
+const viewTabs = Array.from(document.querySelectorAll(".view-tab[data-target][data-view]"));
 const railTabs = Array.from(document.querySelectorAll(".rail-tab"));
 const sectionToggles = Array.from(document.querySelectorAll(".section-toggle"));
 let sortHeaders = Array.from(document.querySelectorAll(".sort-header"));
@@ -956,6 +963,10 @@ let proxySettingsSaveInFlight = false;
 let proxySettingsSavePromise = null;
 let toolsBootPromise = null;
 let displaySettingsPreviewActive = false;
+let displaySettingsReturnFocus = null;
+let filterSettingsReturnFocus = null;
+const filterSettingsEditedControls = new Set();
+let activeConfirmDialog = null;
 
 const WORKBENCH_STACK_BREAKPOINT = "(max-width: 1260px)";
 // The inspector keeps its handle well past the point where request and response
@@ -1010,7 +1021,9 @@ async function init() {
   const aclInit = document.getElementById("proxySettingAutoContentLength");
   if (aclInit) aclInit.checked = localStorage.getItem("sniper_auto_content_length") !== "false";
   await loadUiSettings();
-  hydrateDisplaySettingsForm();
+  if (!isModalVisible(els.displaySettingsModal)) {
+    hydrateDisplaySettingsForm();
+  }
   await loadSessions();
   await loadSettings();
   const shouldLoadInitialHttpHistory = isHttpHistoryVisible();
@@ -1114,7 +1127,7 @@ function bindEvents() {
       setActiveTool(tab.dataset.tool);
       renderToolPanels();
       if (state.activeTool === "dashboard") {
-        loadSessions({ reloadOnActiveChange: true }).catch((error) => console.error(error));
+        loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError);
       }
       if (state.activeTool === "target") {
         loadTargetSiteMap(true).catch((error) => console.error(error));
@@ -1351,6 +1364,7 @@ function bindEvents() {
     if (!row || !els.websocketTableBody.contains(row)) {
       return;
     }
+    state._websocketSelectionGeneration = (state._websocketSelectionGeneration || 0) + 1;
     state.wsKeyboardFocus = "sessions";
     if (
       state.selectedWebsocketId === row.dataset.id
@@ -1535,6 +1549,8 @@ function bindEvents() {
   });
 
   els.openDisplaySettingsButton.addEventListener("click", openDisplaySettingsModal);
+  mountBrowserLaunchers();
+  installBrowserMenuDismissal();
   els.openUpdateButton.addEventListener("click", performSelfUpdate);
   if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
@@ -1560,10 +1576,17 @@ function bindEvents() {
       closeFilterModal();
     }
   });
+  els.filterModal.querySelectorAll("input").forEach((control) => {
+    const markEdited = () => filterSettingsEditedControls.add(control);
+    control.addEventListener("input", markEdited);
+    control.addEventListener("change", markEdited);
+  });
   els.applyFilterSettingsButton.addEventListener("click", applyFilterSettings);
   els.resetFilterSettingsButton.addEventListener("click", () => {
     state.filterSettings = createDefaultFilterSettings();
     hydrateFilterForm();
+    filterSettingsEditedControls.clear();
+    els.filterModal.querySelectorAll("input").forEach((control) => filterSettingsEditedControls.add(control));
     syncHttpInScopePill();
   syncHttpCapturePill();
     scheduleUiSettingsSave();
@@ -1603,11 +1626,15 @@ function bindEvents() {
   onClickWithProgress(els.openCertFolderButton, () => openCertificateFolder());
   onClickWithProgress(els.openEventLogButton, async () => {
     setActiveTool("logger");
-    await loadEventLog();
     renderToolPanels();
+    try {
+      await loadEventLog();
+    } catch (error) {
+      showToast(error?.message || "Failed to load event log.", "error");
+    }
   });
   onClickWithProgress(els.dashboardReloadSessionsButton, () =>
-    loadSessions({ reloadOnActiveChange: true }).catch((error) => console.error(error)));
+    loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError));
   onClickWithProgress(els.dashboardCreateSessionButton, () =>
     createSession().catch(handleWorkspaceActionError));
   onClickWithProgress(els.dashboardOpenStorageBtn, () => {
@@ -2216,6 +2243,11 @@ function bindEvents() {
   document.addEventListener("keydown", (event) => {
     const activeModalAction = getActiveModalAction();
     if (activeModalAction) {
+      if (event.defaultPrevented) return;
+      if (event.key === "Tab" && activeModalAction.modal) {
+        trapModalFocus(event, activeModalAction.modal);
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         activeModalAction.close();
@@ -2225,6 +2257,8 @@ function bindEvents() {
       if (
         event.key === "Enter" &&
         typeof activeModalAction.apply === "function" &&
+        event.target?.tagName === "INPUT" &&
+        ["text", "number", "search", "email", "url", "tel", "password"].includes(event.target.type) &&
         !event.metaKey &&
         !event.ctrlKey &&
         !event.altKey &&
@@ -2235,11 +2269,14 @@ function bindEvents() {
         activeModalAction.apply();
         return;
       }
+      // Leave native control activation alone instead of routing it through the
+      // workspace shortcuts below.
+      return;
     } else if (event.key === "Escape") {
+      if (event.defaultPrevented || event.isComposing) return;
       closeDisplaySettingsModal();
       closeCertificateModal();
       closeFilterModal();
-      return;
     }
 
     if (
@@ -2334,7 +2371,10 @@ function bindEvents() {
       event.preventDefault();
       const color = HTTP_COLOR_TAG_ORDER[parseInt(event.key, 10) - 1];
       const item = getHistoryItem(state.selectedId);
-      const newColor = item?.color_tag === color ? null : color;
+      // A selection live capture pushed out of the loaded rows has no row; the
+      // inspector's record still says which tag it carries.
+      const shown = item || (state.selectedRecord?.id === state.selectedId ? state.selectedRecord : null);
+      const newColor = shown?.color_tag === color ? null : color;
       if (item) item.color_tag = newColor;
       invalidateVisibleEntriesCache();
       renderHistory();
@@ -2627,7 +2667,6 @@ function bindEvents() {
   bindWorkbenchStackResizer(els.historyWorkbenchResizer);
   bindWebsocketPaneResizer(els.websocketSplitResizer);
   bindWebsocketStackResizer(els.websocketStackResizer);
-  bindHistoryColumnResizers();
   applyWsColumnWidths();
   bindWsColumnResizers();
 
@@ -2756,50 +2795,96 @@ async function loadAppVersionInfo() {
   }
 }
 
+// The steps the server reports that the button reacts to. It sends others meant
+// for logs, such as where the installer's log file is; those are ignored here, so an
+// internal detail cannot end up in the top bar.
+const UPDATE_STEPS = new Set([
+  "Checking for updates...",
+  "Downloading update...",
+  "Installing update...",
+  "Verifying signature...",
+  "Restarting...",
+]);
+
+// A filled disc with a ring in it: the ring's arc grows with the download, and
+// spins for the steps with nothing to measure. No text; the percentage is the
+// tooltip. The button keeps the size it had.
+const UPDATE_RING_MARKUP = `
+  <span class="update-ring">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle class="update-ring-disc" cx="12" cy="12" r="12"></circle>
+      <circle class="update-ring-track" cx="12" cy="12" r="6.5"></circle>
+      <circle class="update-ring-arc" cx="12" cy="12" r="6.5" pathLength="100"></circle>
+    </svg>
+  </span>`;
+
 async function performSelfUpdate() {
   if (state.appVersion?.self_update_supported === false) {
     window.open(state.appVersion.latest_release_url || state.appVersion.releases_url, "_blank", "noopener,noreferrer");
     return;
   }
-  if (els.openUpdateButton.disabled) return;
-  els.openUpdateButton.disabled = true;
+  const button = els.openUpdateButton;
+  // aria-disabled and not `disabled`: a disabled button may show no tooltip, and the
+  // tooltip is where the percentage is.
+  if (button.getAttribute("aria-disabled") === "true") return;
+  button.setAttribute("aria-disabled", "true");
+  const idleTitle = button.title;
+  // Pinned before the content changes, so turning "Update" into a ring moves nothing.
+  button.style.width = `${button.getBoundingClientRect().width}px`;
+  button.title = "";
+  button.classList.add("is-updating");
+  button.setAttribute("aria-busy", "true");
+  button.innerHTML = UPDATE_RING_MARKUP;
+  const arc = button.querySelector(".update-ring-arc");
 
-  // Show inline progress bar
-  els.openUpdateButton.innerHTML =
-    '<span class="update-label">Updating...</span>' +
-    '<span class="update-bar"><span class="update-bar-fill"></span></span>';
-
-  const fill = els.openUpdateButton.querySelector(".update-bar-fill");
-  const label = els.openUpdateButton.querySelector(".update-label");
+  // A percentage fills the ring; null spins it.
+  const show = (percent) => {
+    const measured = percent != null;
+    button.classList.toggle("is-busy", !measured);
+    arc.style.strokeDasharray = measured ? `${percent} 100` : "";
+    button.title = measured ? `${percent}%` : "";
+    button.setAttribute("aria-label", measured ? `Updating, ${percent} percent` : "Updating");
+  };
+  const reset = () => {
+    button.classList.remove("is-updating", "is-busy", "is-failed");
+    button.removeAttribute("aria-busy");
+    button.removeAttribute("aria-disabled");
+    button.removeAttribute("aria-label");
+    button.style.width = "";
+    button.textContent = "Update";
+    button.title = idleTitle;
+  };
+  const fail = (reason) => {
+    button.classList.remove("is-busy");
+    button.classList.add("is-failed");
+    button.removeAttribute("aria-busy");
+    button.textContent = "Failed";
+    button.title = reason;
+    button.removeAttribute("aria-disabled");
+    setTimeout(reset, 4000);
+  };
 
   const handleProgress = (data) => {
     if (data.step?.startsWith("error:")) {
-      label.textContent = "Update failed";
-      fill.style.width = "0%";
-      els.openUpdateButton.disabled = false;
-      setTimeout(() => {
-        els.openUpdateButton.textContent = "Update";
-      }, 3000);
-      console.error("Self-update failed:", data.step);
+      const reason = data.step.slice("error:".length).trim();
+      console.error("Self-update failed:", reason);
+      fail(reason);
       return false;
     }
     if (data.percent != null) {
-      fill.style.width = data.percent + "%";
-      const mb = (data.downloaded / 1048576).toFixed(1);
-      const totalMb = (data.total / 1048576).toFixed(1);
-      label.textContent = `${mb} / ${totalMb} MB`;
-    } else {
-      label.textContent = data.step;
-      if (data.step === "Installing update...") fill.style.width = "90%";
-      if (data.step === "Restarting...") fill.style.width = "100%";
+      show(data.percent);
+    } else if (UPDATE_STEPS.has(data.step)) {
+      show(null);
     }
     return true;
   };
 
+  let restarting = false;
   const markRestarting = () => {
-    label.textContent = "Restarting...";
-    fill.style.width = "100%";
+    restarting = true;
+    show(null);
   };
+  show(null);
 
   try {
     const response = await fetch("/api/self-update", { method: "POST" });
@@ -2825,7 +2910,9 @@ async function performSelfUpdate() {
           .join("\n");
         if (!dataText) continue;
         try {
-          if (!handleProgress(JSON.parse(dataText))) return;
+          const data = JSON.parse(dataText);
+          if (data.step === "Restarting...") restarting = true;
+          if (!handleProgress(data)) return;
         } catch (_error) {
           // Ignore malformed progress frames.
         }
@@ -2834,24 +2921,39 @@ async function performSelfUpdate() {
     markRestarting();
   } catch (error) {
     // Connection loss usually means the app is restarting after replacement.
-    if (label.textContent === "Restarting..." || fill.style.width === "100%") {
+    if (restarting) {
       markRestarting();
       return;
     }
-    label.textContent = "Update failed";
-    fill.style.width = "0%";
-    els.openUpdateButton.disabled = false;
-    setTimeout(() => {
-      els.openUpdateButton.textContent = "Update";
-    }, 3000);
     console.error("Self-update failed:", error);
+    fail(error?.message || "The update could not be started.");
   }
 }
 
+let sessionsLoadGeneration = 0;
+let sessionsAppliedLoadGeneration = 0;
+
 async function loadSessions({ reloadOnActiveChange = false } = {}) {
-  const response = await fetch("/api/sessions");
-  await requireOkResponse(response, "Failed to load sessions.");
-  const sessions = jsonArray(await response.json());
+  const generation = ++sessionsLoadGeneration;
+  let sessions;
+  try {
+    const response = await fetch("/api/sessions");
+    await requireOkResponse(response, "Failed to load sessions.");
+    sessions = await response.json();
+    if (!Array.isArray(sessions) || sessions.some((session) =>
+      !session || typeof session.id !== "string" || !session.id
+      || typeof session.name !== "string" || typeof session.active !== "boolean"
+    )) {
+      throw new Error("Invalid session list response. Reload to try again.");
+    }
+  } catch (error) {
+    if (generation < sessionsAppliedLoadGeneration) return;
+    throw error;
+  }
+  // Awaited startup/workspace reads still supply data while a refresh is pending.
+  // Only an already accepted newer list can supersede this read.
+  if (generation < sessionsAppliedLoadGeneration) return;
+  sessionsAppliedLoadGeneration = generation;
   const previousActiveSessionId = currentSessionId();
   const nextActiveSession = sessions.find((session) => session.active) || sessions[0] || null;
   if (
@@ -3070,7 +3172,7 @@ function hydrateReplayTab(tab) {
     const wsScheme = tab.ws_scheme || "wss";
     const wsFrames = normalizeWebsocketFrames(tab.ws_frames);
     const replayTab = {
-      id: isUuidString(tab.id) ? tab.id : crypto.randomUUID(),
+      id: isUuidString(tab.id) ? tab.id : generateUuid(),
       type: "websocket",
       sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
       customLabel: normalizeReplayTabCustomLabel(tab.custom_label || ""),
@@ -3120,7 +3222,7 @@ function hydrateReplayTab(tab) {
   const requestText = tab.request_text ?? buildEditableRawRequest(fallbackRequest);
   const hasHttpVersionMode = Object.prototype.hasOwnProperty.call(tab, "http_version_mode");
   return {
-    id: typeof tab.id === "string" && tab.id ? tab.id : crypto.randomUUID(),
+    id: typeof tab.id === "string" && tab.id ? tab.id : generateUuid(),
     sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
     customLabel: normalizeReplayTabCustomLabel(tab.custom_label || ""),
     pinned: !!tab.pinned,
@@ -3199,10 +3301,7 @@ function normalizeFuzzerTargetOverride(target) {
 }
 
 function createWorkspaceClientId() {
-  if (window.crypto?.randomUUID) {
-    return window.crypto.randomUUID();
-  }
-  return `client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return generateUuid();
 }
 
 function observeAnnotationRevision(source) {
@@ -3228,6 +3327,22 @@ function cloneWorkspaceSnapshotForBaseline(snapshot) {
 
 function isUuidString(value) {
   return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+// crypto.randomUUID exists only in a secure context (https or localhost), and the
+// authenticated UI can be served over plain http from another address, where
+// calling it throws. getRandomValues has no such restriction, so a v4 UUID is
+// built from it by hand. These ids label rules, tabs and clients; none of them is
+// a credential, and nothing that must be unguessable should be made with this.
+function generateUuid() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function createWsReplaySnapshotBudgetAllocator(replayTabs, options = {}) {
@@ -4441,6 +4556,7 @@ function resetSessionScopedUiState() {
   _transactionDeltaTimer = 0;
   _pendingTransactionSummaries.length = 0;
   cancelHistoryDetailLoading();
+  _historyDetailGeneration += 1;
   state.items = [];
   state.historyPaging = createHistoryPagingState();
   state.historyListError = "";
@@ -4493,7 +4609,7 @@ function resetSessionScopedUiState() {
   _websocketSummaryEventBuffer.clear();
   _lastWebsocketFallbackPoll = Date.now();
   _lastWebsocketPageRefreshAt = 0;
-  state.eventLog = [];
+  resetEventLogUiState();
   state.matchReplaceRules = [];
   state.selectedMatchReplaceRuleId = null;
   state.matchReplaceDirty = false;
@@ -4944,13 +5060,17 @@ function adjustHistoryPagingAfterLocalRemoval(removedCount = 1, options = {}) {
   const count = Math.max(0, Number(removedCount) || 0);
   if (!count || !state.historyPaging) return;
   const paging = state.historyPaging;
+  paging.localRemovalGeneration = (paging.localRemovalGeneration || 0) + 1;
   if (options.decrementTotal !== false && isKnownCount(paging.total)) {
     paging.total = Math.max(state.items.length, Number(paging.total) - count);
   }
   if (options.decrementFilteredTotal !== false && isKnownCount(paging.filteredTotal)) {
     paging.filteredTotal = Math.max(0, Number(paging.filteredTotal) - count);
   }
-  paging.offset = state.items.length;
+  // Offset paging includes earlier rows already trimmed from the loaded window.
+  paging.offset = canUseSequenceCursorForHistoryPaging()
+    ? state.items.length
+    : Math.max(state.items.length, (Number(paging.offset) || 0) - count);
 }
 
 async function loadTransactions(preserveSelection = true, options = {}) {
@@ -4972,7 +5092,21 @@ async function loadTransactions(preserveSelection = true, options = {}) {
     }
     let page;
     try {
-      page = await fetchTransactionPage({ offset: 0, queryState, querySignature });
+      while (true) {
+        const annotationGeneration = state.historyPaging.annotationMutationGeneration || 0;
+        page = await fetchTransactionPage({ offset: 0, queryState, querySignature });
+        if (
+          !page
+          || state.historyPaging.generation !== generation
+          || state.historyPaging.querySignature !== querySignature
+          || !isCurrentHistoryQuerySignature(querySignature)
+        ) {
+          return;
+        }
+        // A completed annotation save is no longer in the pending overlay. Read
+        // again so its values, filter membership, order, and counts stay current.
+        if (annotationGeneration === (state.historyPaging.annotationMutationGeneration || 0)) break;
+      }
     } catch (error) {
       if (
         state.historyPaging.generation === generation
@@ -4986,16 +5120,6 @@ async function loadTransactions(preserveSelection = true, options = {}) {
         clearHttpHistoryLoadedRowsForPendingQuery();
       }
       throw error;
-    }
-    if (!page) {
-      return;
-    }
-    if (
-      state.historyPaging.generation !== generation
-      || state.historyPaging.querySignature !== querySignature
-      || !isCurrentHistoryQuerySignature(querySignature)
-    ) {
-      return;
     }
     const freshItems = jsonArray(page.items);
 
@@ -5043,9 +5167,10 @@ async function loadTransactions(preserveSelection = true, options = {}) {
 }
 
 async function loadTransactionDetail(id) {
+  const generation = ++_historyDetailGeneration;
   const sessionId = currentSessionId();
   const response = await fetch(transactionPath(id, sessionId));
-  if (sessionId !== currentSessionId()) {
+  if (generation !== _historyDetailGeneration || sessionId !== currentSessionId()) {
     return null;
   }
   if (!response.ok) {
@@ -5074,7 +5199,7 @@ async function loadTransactionDetail(id) {
   }
 
   const record = await response.json();
-  if (state.selectedId !== id || sessionId !== currentSessionId()) {
+  if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
     return null;
   }
   state.loadingDetailId = null;
@@ -5124,6 +5249,7 @@ function canReuseSelectedHistoryRecord(id) {
 }
 
 async function selectHistoryTransaction(id, options = {}) {
+  state._historySelectionGeneration = (state._historySelectionGeneration || 0) + 1;
   const nextId = id ?? null;
   if (nextId && state.selectedId === nextId && canReuseSelectedHistoryRecord(nextId)) {
     updateHistorySelection(nextId);
@@ -5352,7 +5478,7 @@ function renderInterceptRules() {
 async function addInterceptRule() {
   const sessionId = currentSessionId();
   const rule = {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     enabled: false,
     scope: "request",
     host_pattern: "",
@@ -5651,6 +5777,8 @@ async function loadMoreWebsockets() {
   const previousCount = (state.websocketSessions || []).length;
   const nextOffset = Math.max(0, Number(paging.loadedOffset ?? paging.limit ?? state.websocketSessions.length) || 0);
   const queryState = createWebsocketQueryState();
+  const querySignature = websocketQuerySignature(queryState);
+  const sessionId = currentSessionId();
   if (
     !websocketCursorPagingEnabled(queryState)
     && Number(paging.summaryMutationGeneration ?? 0) !== _websocketSummaryMutationGeneration
@@ -5665,7 +5793,13 @@ async function loadMoreWebsockets() {
     return 0;
   }
   state.websocketPaging = { ...paging, offset: nextOffset, afterId: nextAfterId };
-  await loadWebsockets(true, { append: true, offset: nextOffset, afterId: nextAfterId });
+  const loading = loadWebsockets(true, { append: true, offset: nextOffset, afterId: nextAfterId });
+  const generation = _websocketLoadGeneration;
+  await loading;
+  // A superseding full read can grow the list too; only count this append.
+  if (generation !== _websocketLoadGeneration
+    || sessionId !== currentSessionId()
+    || querySignature !== websocketQuerySignature()) return 0;
   return Math.max(0, (state.websocketSessions || []).length - previousCount);
 }
 
@@ -5757,6 +5891,7 @@ function clearWebsocketSearchReload() {
 }
 
 function clearWebsocketSelectionPreview(options = {}) {
+  state._websocketSelectionGeneration = (state._websocketSelectionGeneration || 0) + 1;
   state.selectedWebsocketId = null;
   state.selectedFrameIdx = null;
   state.selectedWebsocketRecord = null;
@@ -5980,6 +6115,7 @@ function mergeWebsocketAppendPage(pageItems, currentItems, mutationGenerationAtR
 }
 
 function normalizeWebsocketFrameIndex(value) {
+  if (value == null) return null;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
 }
@@ -6227,7 +6363,17 @@ async function loadWebsocketDetail(id, options = {}) {
     state.selectedWebsocketDetailError = "";
     cancelWebsocketDetailLoading();
     renderWebsocketSessions();
-  })();
+  })().catch(() => {
+    if (
+      generation !== _websocketDetailGeneration
+      || sessionId !== currentSessionId()
+      || state.selectedWebsocketId !== id
+    ) return;
+    state.selectedWebsocketRecord = null;
+    state.selectedWebsocketDetailError = "Failed to load selected WebSocket session.";
+    cancelWebsocketDetailLoading();
+    renderWebsocketSessions();
+  });
   _websocketDetailPendingId = id;
   _websocketDetailPendingSessionId = sessionId;
   _websocketDetailPendingPromise = pending;
@@ -6441,10 +6587,16 @@ async function loadOlderWebsocketFrames() {
 
   const sessionId = currentSessionId();
   const generation = _websocketDetailGeneration;
+  const loadToken = {};
+  const isCurrent = () => generation === _websocketDetailGeneration
+    && sessionId === currentSessionId()
+    && state.selectedWebsocketId === id
+    && state.selectedWebsocketRecord?._olderFramesLoadToken === loadToken;
   const shell = websocketFramesShell();
   const previousScrollHeight = shell?.scrollHeight || 0;
   const previousScrollTop = shell?.scrollTop || 0;
   const newestAnchorFrameIndexes = newestWebsocketFrameIndexes(frames, WEBSOCKET_DETAIL_FRAME_LIMIT);
+  session._olderFramesLoadToken = loadToken;
   session.older_frames_loading = true;
   renderWebsocketFrameTable();
 
@@ -6452,17 +6604,12 @@ async function loadOlderWebsocketFrames() {
     const response = await fetch(websocketDetailRequestPath(id, sessionId, {
       beforeIndex: firstLoadedFrameIndex,
     }));
-    if (
-      generation !== _websocketDetailGeneration
-      || sessionId !== currentSessionId()
-      || state.selectedWebsocketId !== id
-    ) {
-      return;
-    }
+    if (!isCurrent()) return;
     if (!response.ok) {
       throw new Error(await response.text().catch(() => "Failed to load older WebSocket frames."));
     }
     const detail = await response.json();
+    if (!isCurrent()) return;
     const incomingFrames = normalizeWebsocketFrames(detail.frames)
       .filter((frame) => frame.index < firstLoadedFrameIndex);
     const current = state.selectedWebsocketRecord;
@@ -6497,6 +6644,7 @@ async function loadOlderWebsocketFrames() {
       shell.scrollTop = previousScrollTop + Math.max(0, nextScrollHeight - previousScrollHeight);
     }
   } catch (error) {
+    if (!isCurrent()) return;
     const current = state.selectedWebsocketRecord;
     if (current?.id === id) {
       current.older_frames_loading = false;
@@ -6504,6 +6652,22 @@ async function loadOlderWebsocketFrames() {
     }
     console.error("Failed to load older WebSocket frames:", error);
     showToast(error?.message || "Failed to load older WebSocket frames.", "error");
+  } finally {
+    // Summary-only clones keep this token; a newer detail/page owns a different
+    // loading state. A failed superseding detail read must still allow retries.
+    const finishLoading = (record) => {
+      if (record?._olderFramesLoadToken !== loadToken) return false;
+      const wasLoading = record.older_frames_loading;
+      record.older_frames_loading = false;
+      delete record._olderFramesLoadToken;
+      return wasLoading;
+    };
+    const current = state.selectedWebsocketRecord;
+    const shouldRender = finishLoading(current);
+    if (current !== session) finishLoading(session);
+    if (shouldRender && sessionId === currentSessionId() && state.selectedWebsocketId === id) {
+      renderWebsocketFrameTable();
+    }
   }
 }
 
@@ -6599,23 +6763,33 @@ function scheduleVisibleWebsocketSelectionSync(options = {}) {
   }, 100);
 }
 
+function resetEventLogUiState() {
+  _eventLogLoadGeneration += 1;
+  state.eventLog = [];
+}
+
 async function loadEventLog() {
   const sessionId = currentSessionId();
+  const loadGeneration = ++_eventLogLoadGeneration;
   const mutationGeneration = _eventLogMutationGeneration;
   const clearGeneration = _eventLogClearGeneration;
-  const response = await fetch(sessionQueryPath(`/api/event-log?limit=${EVENT_LOG_LIMIT}`, sessionId));
-  await requireOkResponse(response, "Failed to load event log.");
-  const entries = jsonArray(await response.json());
-  if (sessionId !== currentSessionId()) {
-    return;
+  const isCurrent = () => sessionId === currentSessionId()
+    && loadGeneration === _eventLogLoadGeneration
+    && clearGeneration === _eventLogClearGeneration;
+  try {
+    const response = await fetch(sessionQueryPath(`/api/event-log?limit=${EVENT_LOG_LIMIT}`, sessionId));
+    if (!isCurrent()) return;
+    await requireOkResponse(response, "Failed to load event log.");
+    const entries = jsonArray(await response.json());
+    if (!isCurrent()) return;
+    state.eventLog = mutationGeneration === _eventLogMutationGeneration
+      ? entries.slice(0, EVENT_LOG_LIMIT)
+      : mergeEventLogEntries(state.eventLog, entries);
+    renderEventLog();
+  } catch (error) {
+    if (!isCurrent()) return;
+    throw error;
   }
-  if (clearGeneration !== _eventLogClearGeneration) {
-    return;
-  }
-  state.eventLog = mutationGeneration === _eventLogMutationGeneration
-    ? entries.slice(0, EVENT_LOG_LIMIT)
-    : mergeEventLogEntries(state.eventLog, entries);
-  renderEventLog();
 }
 
 function applyEventLogEvent(event) {
@@ -7011,6 +7185,7 @@ function scheduleRefresh(options = {}) {
 }
 
 function clearHttpHistorySelectionPreview() {
+  state._historySelectionGeneration = (state._historySelectionGeneration || 0) + 1;
   if (!state.selectedId && !state.selectedRecord) {
     return;
   }
@@ -7022,6 +7197,7 @@ function clearHttpHistorySelectionPreview() {
 
 function clearHttpHistoryLoadedRowsForPendingQuery() {
   state.items = [];
+  rebuildHistoryItemIndex();
   state._itemsVersion += 1;
   state._historyEntries = [];
   state._connectCount = 0;
@@ -7030,7 +7206,7 @@ function clearHttpHistoryLoadedRowsForPendingQuery() {
   renderHistory();
 }
 
-function mergeHistoryItems(items, { prepend = false } = {}) {
+function mergeHistoryItems(items, { prepend = false, live = false } = {}) {
   applyPendingAnnotationsToItems(items);
   const newItems = [];
   const seen = new Set();
@@ -7053,14 +7229,14 @@ function mergeHistoryItems(items, { prepend = false } = {}) {
   if (state.historyPaging) {
     state.historyPaging._trimmedTailOnLastMerge = false;
   }
-  trimHistoryCache(prepend ? "recent" : "older");
+  trimHistoryCache(prepend ? "recent" : "older", { live });
   rebuildHistoryItemIndex();
   state._itemsVersion += 1;
   invalidateVisibleEntriesCache();
   return newItems.length;
 }
 
-function replaceHistoryItemsForGap(items) {
+function replaceHistoryItemsForGap(items, { live = false } = {}) {
   applyPendingAnnotationsToItems(items);
   const seen = new Set();
   const freshItems = [];
@@ -7078,12 +7254,16 @@ function replaceHistoryItemsForGap(items) {
   rebuildHistoryItemIndex();
   state._itemsVersion += 1;
   invalidateVisibleEntriesCache();
-  moveHistorySelectionIfMissing("first");
+  if (live) {
+    keepLiveEvictedSelection();
+  } else {
+    moveHistorySelectionIfMissing("first");
+  }
   refreshHistoryPagingCursorFromItems();
   return freshItems.length;
 }
 
-function trimHistoryCache(prefer = "recent") {
+function trimHistoryCache(prefer = "recent", { live = false } = {}) {
   const overflow = state.items.length - HTTP_HISTORY_MAX_LOADED_ITEMS;
   if (overflow <= 0) {
     refreshHistoryPagingCursorFromItems();
@@ -7104,9 +7284,27 @@ function trimHistoryCache(prefer = "recent") {
   }
 
   state._connectCount = state.items.reduce((count, item) => count + (item.method === "CONNECT" ? 1 : 0), 0);
-  reconcileHistorySelectionAfterTrim(removed, prefer === "older" ? "first" : "last");
+  // Live capture evicts rows nobody touched. Moving the selection for it swapped
+  // the inspector to a record the person never chose and scrolled the list to it,
+  // and once the replacement sat at the edge being trimmed, it happened again on
+  // every request. Paging, including the backfill an arrow key at the last loaded
+  // row sets off, keeps the fallback: that is how the key lands on the next row.
+  if (live) {
+    keepLiveEvictedSelection();
+  } else {
+    reconcileHistorySelectionAfterTrim(removed, prefer === "older" ? "first" : "last");
+  }
   refreshHistoryPagingCursorFromItems();
   return removed.length;
+}
+
+// Live capture pushed the selected record out of the loaded rows. It still
+// exists, so it stays selected and the inspector keeps showing it; this notes that
+// it now sits just past the last loaded row, which is where arrow keys resume.
+function keepLiveEvictedSelection() {
+  if (state.selectedId && !state.items.some((item) => item.id === state.selectedId)) {
+    state._selectionPastEndId = state.selectedId;
+  }
 }
 
 function reconcileHistorySelectionAfterTrim(removedItems = [], fallback = "first") {
@@ -7117,7 +7315,9 @@ function reconcileHistorySelectionAfterTrim(removedItems = [], fallback = "first
 }
 
 function moveHistorySelectionIfMissing(fallback = "first") {
-  if (!state.selectedId || getHistoryItem(state.selectedId)) {
+  // Trimming reconciles selection before the cached ID lookup is rebuilt.
+  // Check the retained rows so an evicted record cannot keep the selection.
+  if (!state.selectedId || state.items.some((item) => item.id === state.selectedId)) {
     return false;
   }
   const nextItem = fallback === "last"
@@ -7148,23 +7348,28 @@ async function loadMoreTransactions({ background = false } = {}) {
   let shouldRenderAfterLoad = !background;
   let shouldBackfillAfterLoad = false;
   const generation = paging.generation;
-  const offset = paging.offset ?? state.items.length;
   paging.loading = true;
   if (!background) renderHistory();
   try {
-    const page = paging.beforeSequence == null
-      ? await fetchTransactionPage({ offset, queryState, querySignature })
-      : await fetchTransactionPage({ beforeSequence: paging.beforeSequence, queryState, querySignature });
-    if (!page) {
-      return 0;
-    }
-    if (
-      state.historyPaging !== paging
-      || state.historyPaging.generation !== generation
-      || state.historyPaging.querySignature !== querySignature
-      || !isCurrentHistoryQuerySignature(querySignature)
-    ) {
-      return 0;
+    let page;
+    let offset;
+    while (true) {
+      const removalGeneration = paging.localRemovalGeneration || 0;
+      offset = paging.offset ?? state.items.length;
+      page = paging.beforeSequence == null
+        ? await fetchTransactionPage({ offset, queryState, querySignature })
+        : await fetchTransactionPage({ beforeSequence: paging.beforeSequence, queryState, querySignature });
+      if (
+        !page
+        || state.historyPaging !== paging
+        || paging.generation !== generation
+        || paging.querySignature !== querySignature
+        || !isCurrentHistoryQuerySignature(querySignature)
+      ) {
+        return 0;
+      }
+      // Recompute the offset if a saved filter removal changed the loaded window.
+      if (removalGeneration === (paging.localRemovalGeneration || 0)) break;
     }
     const pageItems = jsonArray(page.items);
     updateHistoryPagingCursor(pageItems);
@@ -7209,22 +7414,27 @@ async function loadNewerTransactions({ background = false } = {}) {
 
   let shouldRenderAfterLoad = !background;
   const generation = paging.generation;
-  const newerOffset = Math.max(0, paging.trimmedHeadCount - paging.pageSize);
   const usesSequenceCursor = canUseSequenceCursorForHistoryPaging();
   paging.loading = true;
   if (!background) renderHistory();
   try {
-    const page = await fetchTransactionPage({ offset: newerOffset, queryState, querySignature });
-    if (!page) {
-      return 0;
-    }
-    if (
-      state.historyPaging !== paging
-      || state.historyPaging.generation !== generation
-      || state.historyPaging.querySignature !== querySignature
-      || !isCurrentHistoryQuerySignature(querySignature)
-    ) {
-      return 0;
+    let page;
+    let newerOffset;
+    while (true) {
+      const removalGeneration = paging.localRemovalGeneration || 0;
+      newerOffset = Math.max(0, paging.trimmedHeadCount - paging.pageSize);
+      page = await fetchTransactionPage({ offset: newerOffset, queryState, querySignature });
+      if (
+        !page
+        || state.historyPaging !== paging
+        || paging.generation !== generation
+        || paging.querySignature !== querySignature
+        || !isCurrentHistoryQuerySignature(querySignature)
+      ) {
+        return 0;
+      }
+      // A saved filter removal can invalidate an overlapping page and its counts.
+      if (removalGeneration === (paging.localRemovalGeneration || 0)) break;
     }
     const pageItems = jsonArray(page.items);
     const added = mergeHistoryItems(pageItems, { prepend: true });
@@ -7398,7 +7608,7 @@ function flushTransactionDeltas() {
   }
 
   fresh.sort((a, b) => Number(b.sequence ?? 0) - Number(a.sequence ?? 0));
-  const added = mergeHistoryItems(fresh, { prepend: true });
+  const added = mergeHistoryItems(fresh, { prepend: true, live: true });
   if (state.historyPaging) {
     state.historyPaging.total += totalAdded;
     if (isKnownCount(state.historyPaging.filteredTotal)) {
@@ -7611,8 +7821,8 @@ function scheduleIncrementalRefresh() {
         state.historyPaging._trimmedTailOnLastMerge = false;
       }
       const added = hasGapBeforeLoadedWindow
-        ? replaceHistoryItemsForGap(recent)
-        : mergeHistoryItems(recent, { prepend: true });
+        ? replaceHistoryItemsForGap(recent, { live: true })
+        : mergeHistoryItems(recent, { prepend: true, live: true });
       if (state.historyPaging) {
         if (page.total != null) state.historyPaging.total = page.total;
         if (page.filtered_total != null) state.historyPaging.filteredTotal = page.filtered_total;
@@ -7856,14 +8066,18 @@ function loadScriptOnce(source) {
 
 function renderDashboard() {
   // Ensure selectedSessionId defaults to active session
-  const activeSession = state.activeSession || state.sessions.find((session) => session.active) || null;
+  const activeSession = state.sessions.find((session) => session.active)
+    || state.sessions.find((session) => session.id === state.activeSession?.id) || null;
+  if (!state.sessions.some((session) => session.id === state.selectedSessionId)) {
+    state.selectedSessionId = null;
+  }
   if (!state.selectedSessionId && activeSession) {
     state.selectedSessionId = activeSession.id;
   }
   const current = state.sessions.find((s) => s.id === state.selectedSessionId) || activeSession;
   els.dashboardCurrentSessionName.textContent = current?.name || "No active session";
-  const isActive = current?.active || current?.id === activeSession?.id;
-  els.dashboardCurrentSessionStatus.textContent = isActive ? "Active" : "Stored";
+  const isActive = Boolean(current && (current.active || current.id === activeSession?.id));
+  els.dashboardCurrentSessionStatus.textContent = current ? (isActive ? "Active" : "Stored") : "No session";
   els.dashboardCurrentSessionStatus.className = `detail-chip ${isActive ? "active-badge" : "none"}`;
   els.dashboardCurrentSessionPath.textContent = current?.storage_path || "No storage path";
   els.dashboardCurrentSessionRequests.textContent =
@@ -8031,15 +8245,17 @@ document.addEventListener("click", () => closeSessionContextMenu());
 document.addEventListener("contextmenu", () => closeSessionContextMenu());
 
 function showConfirmDialog(message, onConfirm, { title = "Confirm", confirmLabel = "Delete" } = {}) {
+  activeConfirmDialog?.close();
+  const returnFocus = document.activeElement;
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop confirm-dialog-backdrop";
   backdrop.innerHTML = `
-    <div class="modal-card" style="width: min(400px, 90%);">
+    <div class="modal-card" role="alertdialog" aria-modal="true" aria-label="${escapeHtml(title)}" aria-describedby="confirm-dialog-message" style="width: min(400px, 90%);">
       <div class="modal-header" style="padding: 16px 20px;">
         <h3 style="margin:0; font-size: var(--font-md);">${escapeHtml(title)}</h3>
       </div>
       <div class="modal-body" style="padding: 16px 20px;">
-        <p style="margin:0; white-space: pre-line; color: var(--text-dim);">${escapeHtml(message)}</p>
+        <p id="confirm-dialog-message" style="margin:0; white-space: pre-line; color: var(--text-dim);">${escapeHtml(message)}</p>
       </div>
       <div style="display:flex; justify-content:flex-end; gap:8px; padding: 12px 20px; border-top: 1px solid var(--line);">
         <button class="secondary-action confirm-dialog-cancel" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">Cancel</button>
@@ -8048,10 +8264,17 @@ function showConfirmDialog(message, onConfirm, { title = "Confirm", confirmLabel
     </div>
   `;
   document.body.appendChild(backdrop);
-  const close = () => backdrop.remove();
+  const close = () => {
+    if (!backdrop.isConnected) return;
+    backdrop.remove();
+    if (activeConfirmDialog?.modal === backdrop) activeConfirmDialog = null;
+    restoreModalFocus(returnFocus);
+  };
+  activeConfirmDialog = { modal: backdrop, close };
   backdrop.querySelector(".confirm-dialog-cancel").addEventListener("click", close);
   backdrop.querySelector(".confirm-dialog-ok").addEventListener("click", () => { close(); onConfirm(); });
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector(".confirm-dialog-cancel").focus();
 }
 
 async function deleteSessionById(id) {
@@ -8421,14 +8644,21 @@ function getFilteredFindings() {
 
   // Sort
   const dir = findingsSortDir === "asc" ? 1 : -1;
+  const timestampSortKey = (value) => {
+    const text = value || "";
+    const match = typeof text === "string"
+      && text.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{3}(?:\d{3}){0,2}))?Z$/);
+    // Chrono varies fractional precision; padding keeps Z from reversing prefix timestamps.
+    return match ? `${match[1]}.${(match[2] || "").padEnd(9, "0")}Z` : text;
+  };
   filtered.sort((a, b) => {
     let va, vb;
     if (findingsSortKey === "severity") {
       va = SEVERITY_ORDER[a.severity] ?? 5;
       vb = SEVERITY_ORDER[b.severity] ?? 5;
     } else if (findingsSortKey === "found_at") {
-      va = a.found_at || "";
-      vb = b.found_at || "";
+      va = timestampSortKey(a.found_at);
+      vb = timestampSortKey(b.found_at);
     } else {
       va = (a[findingsSortKey] || "").toLowerCase();
       vb = (b[findingsSortKey] || "").toLowerCase();
@@ -8517,6 +8747,30 @@ function renderFindings() {
   renderFindingsVirtual();
 }
 
+// The distance from one rendered row to the next, not the first row's own height:
+// with collapsed borders the row after a borderless spacer is half a border short,
+// and every scroll offset built on it drifts by that much per row.
+function measuredRowPitch(tbody) {
+  const first = tbody.querySelector(".history-row");
+  if (!first) return 0;
+  const next = first.nextElementSibling;
+  if (next?.classList?.contains("history-row")) {
+    return next.getBoundingClientRect().top - first.getBoundingClientRect().top;
+  }
+  return first.getBoundingClientRect().height;
+}
+
+function getFindingsRowHeight(options = {}) {
+  const previous = measuredFindingsRowHeight;
+  const measured = measuredRowPitch(els.findingsBody);
+  if (Number.isFinite(measured) && measured > 0) {
+    measuredFindingsRowHeight = measured;
+  }
+  // A font change invalidates old spacers before selection can set scrollTop.
+  if (options.refreshLayout && measuredFindingsRowHeight !== previous) renderFindingsVirtual();
+  return measuredFindingsRowHeight || FINDINGS_ROW_HEIGHT;
+}
+
 function renderFindingsVirtual() {
   const entries = state._findingsEntries;
   if (!entries || !entries.length) return;
@@ -8526,36 +8780,42 @@ function renderFindingsVirtual() {
 
   const viewportHeight = shell.clientHeight;
   const totalCount = entries.length;
-  const maxScrollTop = Math.max(0, totalCount * FINDINGS_ROW_HEIGHT - viewportHeight);
-  const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
-  if (shell.scrollTop !== scrollTop) {
-    shell.scrollTop = scrollTop;
+  const headerHeight = els.findingsBody.closest("table")?.tHead?.getBoundingClientRect().height || 0;
+  const requestedScrollTop = shell.scrollTop;
+  // Live rows reflect font changes; the first paint may need one correction.
+  // Keep the requested offset until the corrected spacers exist, before clamping.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const rowHeight = getFindingsRowHeight();
+    const maxScrollTop = Math.max(0, headerHeight + totalCount * rowHeight - viewportHeight);
+    const scrollTop = Math.max(0, Math.min(requestedScrollTop, maxScrollTop));
+    const startIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - FINDINGS_BUFFER_ROWS);
+    const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / rowHeight) + FINDINGS_BUFFER_ROWS);
+    const topPadding = startIdx * rowHeight;
+    const bottomPadding = Math.max(0, (totalCount - endIdx) * rowHeight);
+
+    const rows = [];
+    for (let i = startIdx; i < endIdx; i++) {
+      const f = entries[i];
+      const selected = f.id === selectedFindingId ? " selected" : "";
+      rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
+        <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
+        <td class="findings-col-category"><span class="detail-chip">${escapeHtml(f.category)}</span></td>
+        <td class="findings-col-title">${escapeHtml(f.title)}</td>
+        <td class="findings-col-host">${escapeHtml(f.host)}</td>
+        <td class="findings-col-path">${escapeHtml(f.path)}</td>
+        <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
+      </tr>`);
+    }
+
+    els.findingsBody.innerHTML =
+      (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
+      rows.join("") +
+      (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
+
+    if (attempt === 0 && getFindingsRowHeight() !== rowHeight) continue;
+    if (shell.scrollTop !== scrollTop) shell.scrollTop = scrollTop;
+    break;
   }
-
-  const startIdx = Math.max(0, Math.floor(scrollTop / FINDINGS_ROW_HEIGHT) - FINDINGS_BUFFER_ROWS);
-  const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / FINDINGS_ROW_HEIGHT) + FINDINGS_BUFFER_ROWS);
-
-  const topPadding = startIdx * FINDINGS_ROW_HEIGHT;
-  const bottomPadding = Math.max(0, (totalCount - endIdx) * FINDINGS_ROW_HEIGHT);
-
-  const rows = [];
-  for (let i = startIdx; i < endIdx; i++) {
-    const f = entries[i];
-    const selected = f.id === selectedFindingId ? " selected" : "";
-    rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
-      <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
-      <td class="findings-col-category"><span class="detail-chip">${escapeHtml(f.category)}</span></td>
-      <td class="findings-col-title">${escapeHtml(f.title)}</td>
-      <td class="findings-col-host">${escapeHtml(f.host)}</td>
-      <td class="findings-col-path">${escapeHtml(f.path)}</td>
-      <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
-    </tr>`);
-  }
-
-  els.findingsBody.innerHTML =
-    (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
-    rows.join("") +
-    (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
 }
 
 async function loadFindingDetail(id) {
@@ -8902,6 +9162,7 @@ function extractFindingKeywords(finding) {
 }
 
 function jumpToTransaction(recordId) {
+  state._historySelectionGeneration = (state._historySelectionGeneration || 0) + 1;
   setActiveTool("proxy");
   setActiveProxyTab("http-history");
   const hadRenderedDetail = Boolean(state.selectedRecord?.id);
@@ -9231,10 +9492,7 @@ function collectCustomRulesFromEditor() {
 function customRuleId(value) {
   const id = String(value || "").trim();
   if (id) return id;
-  if (globalThis.crypto?.randomUUID) {
-    return `custom_${globalThis.crypto.randomUUID()}`;
-  }
-  return `custom_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return `custom_${generateUuid()}`;
 }
 
 function collectScannerConfig() {
@@ -9306,8 +9564,14 @@ function scrollFindingsToId(targetId) {
   const idx = entries.findIndex((f) => f.id === targetId);
   if (idx === -1) return;
   const shell = els.findingsBody.closest(".history-table-shell");
-  if (!shell) return;
-  shell.scrollTop = Math.max(0, idx * FINDINGS_ROW_HEIGHT - shell.clientHeight / 2);
+  if (!shell || shell.clientHeight <= 0) return;
+  const headerHeight = els.findingsBody.closest("table")?.tHead?.getBoundingClientRect().height || 0;
+  const rowHeight = getFindingsRowHeight({ refreshLayout: true });
+  const rowTop = idx * rowHeight;
+  const centeredTop = Math.max(0, rowTop - shell.clientHeight / 2);
+  shell.scrollTop = shell.clientHeight >= headerHeight + rowHeight
+    ? Math.max(centeredTop, headerHeight + rowTop + rowHeight - shell.clientHeight)
+    : centeredTop;
 }
 
 function findingsArrowNav(direction) {
@@ -9328,15 +9592,19 @@ function findingsArrowNav(direction) {
 
   // Scroll into view
   const shell = els.findingsBody.closest(".history-table-shell");
-  if (shell) {
-    const rowTop = nextIdx * FINDINGS_ROW_HEIGHT;
-    const rowBottom = rowTop + FINDINGS_ROW_HEIGHT;
+  if (shell && shell.clientHeight > 0) {
+    const headerHeight = els.findingsBody.closest("table")?.tHead?.getBoundingClientRect().height || 0;
+    const rowHeight = getFindingsRowHeight({ refreshLayout: true });
+    const rowTop = nextIdx * rowHeight;
+    const rowBottom = headerHeight + rowTop + rowHeight;
     const viewTop = shell.scrollTop;
     const viewBottom = viewTop + shell.clientHeight;
     if (rowTop < viewTop) {
       shell.scrollTop = rowTop;
     } else if (rowBottom > viewBottom) {
-      shell.scrollTop = rowBottom - shell.clientHeight;
+      // A larger font can leave less than one row of usable viewport height.
+      const nextScrollTop = Math.min(rowTop, rowBottom - shell.clientHeight);
+      if (nextScrollTop !== viewTop) shell.scrollTop = nextScrollTop;
     }
   }
   loadFindingDetail(f.id);
@@ -9744,12 +10012,14 @@ function applyFindingsColumnWidths() {
 }
 
 function bindFindingsColumnResizers() {
+  let finishResize = null;
   document.querySelectorAll(".findings-col-resize").forEach((handle) => {
     handle.addEventListener("mousedown", (event) => {
       const key = handle.dataset.findingsCol;
       const limits = FINDINGS_COL_RULES[key];
       if (!key || !limits) return;
 
+      finishResize?.();
       event.preventDefault();
       event.stopPropagation();
 
@@ -9759,20 +10029,29 @@ function bindFindingsColumnResizers() {
       handle.classList.add("active");
 
       const onMove = (moveEvent) => {
+        if (moveEvent.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = moveEvent.clientX - event.clientX;
         findingsColWidths[key] = Math.max(limits.min, Math.min(Math.round(startWidth + delta), limits.max));
         applyFindingsColumnWidths();
       };
 
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-x");
         handle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
       };
 
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
   });
 }
@@ -9780,12 +10059,14 @@ function bindFindingsColumnResizers() {
 function initFindingsResizer() {
   const resizer = els.findingsDetailResizer;
   if (!resizer) return;
+  let finishResize = null;
 
   resizer.addEventListener("mousedown", (event) => {
     if (!els.findingsPanel || !els.findingsDetailPanel || resizer.classList.contains("hidden")) {
       return;
     }
 
+    finishResize?.();
     event.preventDefault();
     const tableShell = els.findingsPanel.querySelector(".history-table-shell");
     const start = {
@@ -9798,6 +10079,10 @@ function initFindingsResizer() {
     resizer.classList.add("active");
 
     const onMove = (moveEvent) => {
+      if (moveEvent.buttons === 0) {
+        onUp();
+        return;
+      }
       const delta = moveEvent.clientY - event.clientY;
       const nextDetail = Math.max(120, Math.min(start.detail - delta, combinedHeight - 60));
       const nextTable = combinedHeight - nextDetail;
@@ -9806,14 +10091,19 @@ function initFindingsResizer() {
     };
 
     const onUp = () => {
+      if (finishResize !== onUp) return;
+      finishResize = null;
       document.body.classList.remove("pane-resizing-y");
       resizer.classList.remove("active");
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
     };
 
+    finishResize = onUp;
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onUp);
   });
 }
 
@@ -9998,11 +10288,19 @@ function renderHistory() {
   state._historyEntries = visibleEntries;
 
   if (!visibleEntries.length) {
+    // A session with nothing in it yet is the one moment someone is looking for
+    // how to get traffic in, so the way to do that is offered here and not only in
+    // the toolbar. Any other empty list is a filter problem and keeps its message.
+    const nothingCaptured = isSessionEmpty(hiddenConnectCount, paging);
     els.historyTableBody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="${state.historyColumnOrder.length}">${escapeHtml(historyEmptyMessage(hiddenConnectCount, paging))}</td>
+        <td colspan="${state.historyColumnOrder.length}">
+          ${escapeHtml(nothingCaptured ? emptySessionMessage() : historyEmptyMessage(hiddenConnectCount, paging))}
+          ${nothingCaptured ? '<div class="empty-row-action"><span data-browser-launcher></span></div>' : ""}
+        </td>
       </tr>
     `;
+    mountBrowserLaunchers(els.historyTableBody);
     if (paging.hasMore && !paging.loading && !paging.fullyLoaded) {
       scheduleHistoryBackfill(0, { allowAtCap: true });
     }
@@ -10023,7 +10321,9 @@ function renderHistoryVirtual() {
   const viewportHeight = shell.clientHeight;
   const totalCount = entries.length;
   const colCount = state.historyColumnOrder.length;
-  const maxScrollTop = Math.max(0, totalCount * rowHeight - viewportHeight);
+  // Sticky headers still occupy table height; excluding them hides the final row.
+  const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
+  const maxScrollTop = Math.max(0, headerHeight + totalCount * rowHeight - viewportHeight);
   const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
   if (shell.scrollTop !== scrollTop) {
     shell.scrollTop = scrollTop;
@@ -10061,12 +10361,19 @@ function renderHistoryVirtual() {
     rows.join("") +
     (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
 
-  const measuredRow = els.historyTableBody.querySelector(".history-row");
-  const measured = measuredRow?.getBoundingClientRect().height || 0;
+  const measured = measuredRowPitch(els.historyTableBody) || 0;
   if (measured > 0 && Math.abs(measured - rowHeight) >= 1) {
     measuredHistoryRowHeight = measured;
     renderHistoryVirtual();
   }
+}
+
+function isSessionEmpty(hiddenConnectCount, paging) {
+  return !state.historyListError && !hiddenConnectCount && paging.fullyLoaded && paging.total === 0;
+}
+
+function emptySessionMessage() {
+  return `Nothing captured yet. Open a browser that already sends its traffic through Sniper, or point any client at ${state.settings?.proxy_addr || "the proxy"}.`;
 }
 
 function historyEmptyMessage(hiddenConnectCount, paging) {
@@ -10105,11 +10412,16 @@ function scrollHistoryToId(targetId) {
   if (idx === -1) return;
 
   const shell = els.historyTable.closest(".history-table-shell");
-  if (!shell) return;
+  if (!shell || shell.clientHeight <= 0) return;
 
-  // Scroll so that target row is near center of viewport
-  const targetTop = idx * (measuredHistoryRowHeight || HISTORY_ROW_HEIGHT);
-  shell.scrollTop = Math.max(0, targetTop - shell.clientHeight / 2);
+  const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
+  const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
+  const targetTop = idx * rowHeight;
+  const centeredTop = Math.max(0, targetTop - shell.clientHeight / 2);
+  // Keep the usual near-center position unless the sticky header clips the row.
+  shell.scrollTop = shell.clientHeight >= headerHeight + rowHeight
+    ? Math.max(centeredTop, headerHeight + targetTop + rowHeight - shell.clientHeight)
+    : centeredTop;
   renderHistoryVirtual();
 }
 
@@ -10119,7 +10431,12 @@ async function moveHistorySelection(offset) {
     return;
   }
 
-  const currentIndex = visibleEntries.findIndex((entry) => entry.item.id === state.selectedId);
+  let currentIndex = visibleEntries.findIndex((entry) => entry.item.id === state.selectedId);
+  // Live capture pushed the selected record out just past the last loaded row, so
+  // continue from there: up is the last row, down loads the next page after it.
+  if (currentIndex === -1 && state.selectedId && state._selectionPastEndId === state.selectedId) {
+    currentIndex = offset > 0 ? visibleEntries.length - 1 : visibleEntries.length;
+  }
   const fallbackIndex = offset > 0 ? 0 : visibleEntries.length - 1;
   if (offset > 0
     && currentIndex === visibleEntries.length - 1
@@ -10127,8 +10444,11 @@ async function moveHistorySelection(offset) {
     && !state.historyPaging.loading
     && state.historyPaging.fullyLoaded !== true) {
     const selectedIdBeforeLoad = state.selectedId;
+    const selectionGeneration = state._historySelectionGeneration || 0;
     const added = await loadMoreTransactions();
-    if (added <= 0) return;
+    if (added <= 0
+      || state.selectedId !== selectedIdBeforeLoad
+      || (state._historySelectionGeneration || 0) !== selectionGeneration) return;
     visibleEntries = getVisibleEntries();
     const loadedIndex = visibleEntries.findIndex((entry) => entry.item.id === selectedIdBeforeLoad);
     const loadedNextId = loadedIndex >= 0 ? visibleEntries[loadedIndex + 1]?.item.id : null;
@@ -10142,8 +10462,11 @@ async function moveHistorySelection(offset) {
     && state.historyPaging?.trimmedHeadCount > 0
     && !state.historyPaging.loading) {
     const selectedIdBeforeLoad = state.selectedId;
+    const selectionGeneration = state._historySelectionGeneration || 0;
     const added = await loadNewerTransactions();
-    if (added <= 0) return;
+    if (added <= 0
+      || state.selectedId !== selectedIdBeforeLoad
+      || (state._historySelectionGeneration || 0) !== selectionGeneration) return;
     visibleEntries = getVisibleEntries();
     const loadedIndex = visibleEntries.findIndex((entry) => entry.item.id === selectedIdBeforeLoad);
     const loadedPreviousId = loadedIndex >= 0
@@ -10164,24 +10487,36 @@ async function moveHistorySelection(offset) {
     return;
   }
 
+  // A repeated boundary key must not cancel the page read already serving it.
+  if (state.historyPaging?.loading && nextId === state.selectedId) return;
   await selectHistoryTransaction(nextId, { scroll: true });
 }
 
 function scrollSelectedHistoryRowIntoView() {
+  const shell = els.historyTable.closest(".history-table-shell");
+  if (!shell || shell.clientHeight <= 0) return;
+  const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
   const selectedRow = els.historyTableBody.querySelector(".history-row.selected");
   if (selectedRow) {
-    selectedRow.scrollIntoView({ block: "nearest" });
+    // Native nearest treats a row under the sticky header as already visible.
+    const rowRect = selectedRow.getBoundingClientRect();
+    const clientTop = shell.getBoundingClientRect().top + shell.clientTop;
+    const viewTop = clientTop + headerHeight;
+    const viewBottom = clientTop + shell.clientHeight;
+    // A row taller than the available space stays top-aligned on repeat.
+    const adjustment = rowRect.top < viewTop
+      ? rowRect.top - viewTop
+      : Math.max(0, Math.min(rowRect.top - viewTop, rowRect.bottom - viewBottom));
+    if (adjustment) shell.scrollTop = Math.max(0, shell.scrollTop + adjustment);
     return;
   }
   // Row not in DOM — use virtual scroll position
   if (!state.selectedId || !state._historyEntries) return;
   const idx = state._historyEntries.findIndex((e) => e.item.id === state.selectedId);
   if (idx === -1) return;
-  const shell = els.historyTable.closest(".history-table-shell");
-  if (!shell) return;
   const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
   const rowTop = idx * rowHeight;
-  const rowBottom = rowTop + rowHeight;
+  const rowBottom = headerHeight + rowTop + rowHeight;
   const viewTop = shell.scrollTop;
   const viewBottom = viewTop + shell.clientHeight;
   if (rowTop < viewTop) {
@@ -10206,8 +10541,11 @@ async function moveWebsocketSelection(offset) {
     && !state.websocketPaging.loading
   ) {
     const selectedIdBeforeLoad = state.selectedWebsocketId;
+    const selectionGeneration = state._websocketSelectionGeneration || 0;
     const added = await loadMoreWebsockets();
-    if (added <= 0) return;
+    if (added <= 0
+      || state.selectedWebsocketId !== selectedIdBeforeLoad
+      || (state._websocketSelectionGeneration || 0) !== selectionGeneration) return;
     sortedEntries = getSortedWebsocketEntries();
     const loadedIndex = sortedEntries.findIndex(({ session }) => session.id === selectedIdBeforeLoad);
     const loadedNextId = loadedIndex >= 0 ? sortedEntries[loadedIndex + 1]?.session?.id : null;
@@ -10224,12 +10562,15 @@ async function moveWebsocketSelection(offset) {
   const nextId = sortedEntries[nextIndex]?.session?.id;
   if (!nextId) return;
 
+  // A repeated boundary key must not cancel the page read already serving it.
+  if (state.websocketPaging?.loading && nextId === state.selectedWebsocketId) return;
   await selectWebsocketSession(nextId, { scroll: true });
 }
 
 async function selectWebsocketSession(id, options = {}) {
   const nextId = id ?? null;
   if (!nextId) return;
+  state._websocketSelectionGeneration = (state._websocketSelectionGeneration || 0) + 1;
 
   const hadRenderedWebsocketDetail = Boolean(state.selectedWebsocketRecord?.id);
   if (state.selectedWebsocketId !== nextId) {
@@ -10272,19 +10613,24 @@ function ensureWebsocketSessionInView(targetId, sortedEntries = getSortedWebsock
   if (!targetId) return false;
   const idx = sortedEntries.findIndex(({ session }) => session.id === targetId);
   if (idx === -1) return false;
-  const shell = document.querySelector("#websocketTable")?.closest(".history-table-shell");
-  if (!shell) return false;
-  if (sortedEntries.length <= WEBSOCKET_MAX_RENDERED_SESSION_ROWS) {
+  const table = document.querySelector("#websocketTable");
+  const shell = table?.closest(".history-table-shell");
+  if (!shell || shell.clientHeight <= 0) return false;
+  const rowHeight = measuredWebsocketSessionRowHeight || WEBSOCKET_SESSION_ROW_HEIGHT;
+  const headerHeight = table.tHead?.getBoundingClientRect().height || 0;
+  if (headerHeight + sortedEntries.length * rowHeight <= shell.clientHeight) {
     shell.scrollTop = 0;
     return true;
   }
-  const rowHeight = measuredWebsocketSessionRowHeight || WEBSOCKET_SESSION_ROW_HEIGHT;
   const rowTop = idx * rowHeight;
-  const rowBottom = rowTop + rowHeight;
+  const rowBottom = headerHeight + rowTop + rowHeight;
   const viewTop = shell.scrollTop;
   const viewBottom = viewTop + shell.clientHeight;
   if (options.center) {
-    shell.scrollTop = Math.max(0, rowTop - shell.clientHeight / 2);
+    const centeredTop = Math.max(0, rowTop - shell.clientHeight / 2);
+    shell.scrollTop = shell.clientHeight >= headerHeight + rowHeight
+      ? Math.max(centeredTop, rowBottom - shell.clientHeight)
+      : centeredTop;
     return true;
   }
   if (rowTop < viewTop) {
@@ -11158,7 +11504,7 @@ function renderWebsocketSessions(options = {}) {
   renderWebsocketFrameTable();
 }
 
-function renderWebsocketFrameTable() {
+function renderWebsocketFrameTable(options = {}) {
   const session = state.selectedWebsocketRecord;
   if (!session) return;
 
@@ -11190,10 +11536,20 @@ function renderWebsocketFrameTable() {
       : "",
   ].filter(Boolean).join(", ");
   const hasFrameWindowNotice = (session.frames_truncated || olderFrameCount > 0) && olderFrameCount > 0;
+  const frameShell = websocketFramesShell();
+  // Keep the numeric intent: an estimated clamp or an older DOM can lose it.
+  const intendedScrollTop = Number.isFinite(options.scrollTop) ? options.scrollTop : frameShell?.scrollTop;
+  const existingNoticeHeight = hasFrameWindowNotice
+    ? els.websocketFramesBody.querySelector(".ws-frame-window-row")?.getBoundingClientRect().height || 0
+    : 0;
+  const leadingHeight = hasFrameWindowNotice
+    ? (existingNoticeHeight > 0 && Number.isFinite(existingNoticeHeight)
+      ? existingNoticeHeight
+      : (measuredWebsocketFrameRowHeight || WEBSOCKET_FRAME_ROW_HEIGHT))
+    : 0;
   const frameWindow = websocketRenderedFrameWindow(frames, {
-    leadingHeight: hasFrameWindowNotice
-      ? (measuredWebsocketFrameRowHeight || WEBSOCKET_FRAME_ROW_HEIGHT)
-      : 0,
+    leadingHeight,
+    scrollTop: intendedScrollTop,
   });
   const renderedFrames = frameWindow.renderedFrames;
   const framePositions = new Map(frames.map((frame, index) => {
@@ -11241,11 +11597,23 @@ function renderWebsocketFrameTable() {
         </tr>
       `;
 
+  // Corrected spacers must exist before a scroll container can accept this offset.
+  if (frameShell?.clientHeight > 0 && Number.isFinite(frameWindow.scrollTop)
+    && frameShell.scrollTop !== frameWindow.scrollTop) {
+    frameShell.scrollTop = frameWindow.scrollTop;
+  }
   const measuredRow = els.websocketFramesBody.querySelector(".history-row");
   const measured = measuredRow?.getBoundingClientRect().height || 0;
-  if (measured > 0 && Math.abs(measured - measuredWebsocketFrameRowHeight) >= 1) {
-    measuredWebsocketFrameRowHeight = measured;
-    renderWebsocketFrameTable();
+  const rowHeightChanged = measured > 0 && Math.abs(measured - measuredWebsocketFrameRowHeight) >= 1;
+  if (rowHeightChanged) measuredWebsocketFrameRowHeight = measured;
+  const measuredNoticeHeight = hasFrameWindowNotice
+    ? els.websocketFramesBody.querySelector(".ws-frame-window-row")?.getBoundingClientRect().height || 0
+    : 0;
+  const noticeHeightChanged = measuredNoticeHeight > 0 && Number.isFinite(measuredNoticeHeight)
+    && measuredNoticeHeight !== leadingHeight;
+  // One measured correction is enough for stable geometry; never loop on changing bounds.
+  if (!options.remeasured && (rowHeightChanged || noticeHeightChanged)) {
+    renderWebsocketFrameTable({ remeasured: true, scrollTop: intendedScrollTop });
   }
 }
 
@@ -11318,7 +11686,8 @@ function websocketRenderedSessionWindow(entries) {
       bottomPadding: 0,
     };
   }
-  const shell = document.querySelector("#websocketTable")?.closest(".history-table-shell");
+  const table = document.querySelector("#websocketTable");
+  const shell = table?.closest(".history-table-shell");
   const rowHeight = measuredWebsocketSessionRowHeight || WEBSOCKET_SESSION_ROW_HEIGHT;
   if (!shell || entries.length <= WEBSOCKET_MAX_RENDERED_SESSION_ROWS) {
     return {
@@ -11330,7 +11699,8 @@ function websocketRenderedSessionWindow(entries) {
     };
   }
   const viewportHeight = shell.clientHeight || rowHeight * WEBSOCKET_MAX_RENDERED_SESSION_ROWS;
-  const maxScrollTop = Math.max(0, entries.length * rowHeight - viewportHeight);
+  const headerHeight = table.tHead?.getBoundingClientRect().height || 0;
+  const maxScrollTop = Math.max(0, headerHeight + entries.length * rowHeight - viewportHeight);
   const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
   if (shell.scrollTop !== scrollTop) {
     shell.scrollTop = scrollTop;
@@ -11365,18 +11735,22 @@ function resetWebsocketFrameScroll() {
 
 function ensureWebsocketFramePositionInView(position, options = {}) {
   const shell = websocketFramesShell();
-  if (!shell || !Number.isFinite(position) || position < 0) {
+  if (!shell || shell.clientHeight <= 0 || !Number.isFinite(position) || position < 0) {
     return false;
   }
   const rowHeight = measuredWebsocketFrameRowHeight || WEBSOCKET_FRAME_ROW_HEIGHT;
+  const headerHeight = els.websocketFramesBody?.closest("table")?.tHead?.getBoundingClientRect().height || 0;
   const noticeRow = els.websocketFramesBody?.querySelector(".ws-frame-window-row") || null;
   const leadingHeight = noticeRow?.getBoundingClientRect().height || 0;
   const rowTop = leadingHeight + position * rowHeight;
-  const rowBottom = rowTop + rowHeight;
+  const rowBottom = headerHeight + rowTop + rowHeight;
   const viewTop = shell.scrollTop;
   const viewBottom = viewTop + shell.clientHeight;
   if (options.center) {
-    shell.scrollTop = Math.max(0, rowTop - shell.clientHeight / 2);
+    const centeredTop = Math.max(0, rowTop - shell.clientHeight / 2);
+    shell.scrollTop = shell.clientHeight >= headerHeight + rowHeight
+      ? Math.max(centeredTop, rowBottom - shell.clientHeight)
+      : centeredTop;
     return true;
   }
   if (rowTop < viewTop) {
@@ -11413,9 +11787,11 @@ function websocketRenderedFrameWindow(frames, options = {}) {
     };
   }
   const viewportHeight = shell.clientHeight || rowHeight * WEBSOCKET_MAX_RENDERED_FRAME_ROWS;
-  const maxScrollTop = Math.max(0, leadingHeight + frames.length * rowHeight - viewportHeight);
-  const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
-  if (shell.scrollTop !== scrollTop) {
+  const headerHeight = els.websocketFramesBody?.closest("table")?.tHead?.getBoundingClientRect().height || 0;
+  const maxScrollTop = Math.max(0, headerHeight + leadingHeight + frames.length * rowHeight - viewportHeight);
+  const requestedScrollTop = Number.isFinite(options.scrollTop) ? options.scrollTop : shell.scrollTop;
+  const scrollTop = Math.min(requestedScrollTop, maxScrollTop);
+  if (shell.clientHeight > 0 && shell.scrollTop !== scrollTop) {
     shell.scrollTop = scrollTop;
   }
   const frameScrollTop = Math.max(0, scrollTop - leadingHeight);
@@ -11429,6 +11805,7 @@ function websocketRenderedFrameWindow(frames, options = {}) {
   }
   return {
     renderedFrames: frames.slice(startIdx, endIdx),
+    scrollTop,
     startIdx,
     endIdx,
     topPadding: startIdx * rowHeight,
@@ -12801,7 +13178,7 @@ function renderFuzzerDetailPanes(record) {
     const fakeMsg = { content_type: record.request?.content_type };
     reqText = prettyFormat(rawReq, fakeMsg);
   } else if (reqMode === "hex") {
-    reqText = toHexDump(rawReq);
+    reqText = buildMessageHexPresentation("request", record, rawReq);
   }
   const cmReqMode = reqMode === "hex" ? "hex" : "http";
   if (els.fuzzerDetailReqCM) {
@@ -12815,7 +13192,7 @@ function renderFuzzerDetailPanes(record) {
     if (resMode === "pretty") {
       resText = prettyFormat(rawRes, record.response);
     } else if (resMode === "hex") {
-      resText = toHexDump(rawRes);
+      resText = buildMessageHexPresentation("response", record, rawRes);
     }
     const cmResMode = resMode === "hex" ? "hex" : "http";
     if (els.fuzzerDetailResCM) {
@@ -12843,7 +13220,7 @@ function hideFuzzerDetailPanel() {
 
 function createNewMatchReplaceRule() {
   const rule = {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     enabled: true,
     description: "",
     scope: "request",
@@ -13053,7 +13430,7 @@ async function sendRecordToSequence(record) {
     return;
   }
   state.editingSequence.steps.push({
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     label: `${request.method} ${request.path}`,
     request,
     source_transaction_id: record.id,
@@ -13523,7 +13900,7 @@ async function createNewSequence() {
   }
   const sessionId = currentSequenceSessionId();
   const def = {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     name: "New Sequence",
     steps: [],
   };
@@ -13589,7 +13966,7 @@ function markSequenceDraftDirty() {
 function addSequenceStep() {
   if (!state.editingSequence) return;
   state.editingSequence.steps.push({
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     label: `Step ${state.editingSequence.steps.length + 1}`,
     request: {
       scheme: "https", host: "", method: "GET", path: "/",
@@ -14270,6 +14647,232 @@ function validateOastServerUrlForSettings(value) {
   return serverUrl;
 }
 
+// The server chooses the browser and decides whether one can open at all (none
+// installed, proxy offline, already open), and its message says which. All this
+// has to do is surface that message rather than guess at a cause. With no body the
+// server opens the saved default, without a DevTools port: an agent attaches
+// through `sniper-cli`, or asks for one here with `agent`.
+async function openSniperBrowser({ browser, agent, fresh } = {}) {
+  const body = {};
+  if (browser) body.browser = browser;
+  if (agent) body.agent = true;
+  if (fresh) body.fresh = true;
+  try {
+    const response = await fetch("/api/browser/launch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await requireOkResponse(response, "Could not open a browser.");
+    const launched = await response.json();
+    // A 200 is not proof a window appeared: a browser that ends at once still
+    // comes back as success with a warning saying why, and that warning is the
+    // only place the reason is.
+    if (Array.isArray(launched.warnings) && launched.warnings.length) {
+      showToast(launched.warnings.join(" "), "warning", 10000);
+    }
+    // A window appearing is the confirmation, so success is silent. What is worth
+    // a toast is what cannot be seen: how to reach a browser an agent was asked to
+    // drive, which the person has to pass on.
+    const control = launched.control;
+    const how = control?.endpoint || control?.command;
+    if (agent && how) showToast(`Agent control: ${how}`, "success", 12000);
+  } catch (error) {
+    showToast(error?.message || "Could not open a browser.", "error", 6000);
+  }
+}
+
+// A launcher is any `[data-browser-launcher]` element: a button that opens the
+// default browser and a caret that lists the others. It is one component mounted
+// by attribute so where it sits is an HTML decision, not a code one.
+let browserMenu = null;
+
+function mountBrowserLaunchers(root = document) {
+  root.querySelectorAll("[data-browser-launcher]:not(.browser-launcher)").forEach((host) => {
+    host.classList.add("browser-launcher");
+    host.innerHTML = `
+      <button class="browser-launch-main" type="button" title="Open a browser that already sends its traffic through Sniper and trusts its certificate">Open browser</button>
+      <button class="browser-launch-caret" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Choose a browser">&#9662;</button>
+    `;
+    const [main, caret] = host.children;
+    onClickWithProgress(main, () => openSniperBrowser());
+    caret.addEventListener("click", () => toggleBrowserMenu(caret));
+  });
+}
+
+function installBrowserMenuDismissal() {
+  document.addEventListener("click", (event) => {
+    // A caret click is its own toggle. It is not swallowed here, so the rest of
+    // the page still sees it and closes any other popup that was open.
+    if (browserMenu && !browserMenu.element.contains(event.target) && !event.target.closest(".browser-launch-caret")) {
+      closeBrowserMenu();
+    }
+  });
+  document.addEventListener("keydown", onBrowserMenuKeydown);
+  window.addEventListener("resize", closeBrowserMenu);
+}
+
+function closeBrowserMenu() {
+  if (!browserMenu) return false;
+  browserMenu.anchor.setAttribute("aria-expanded", "false");
+  browserMenu.element.remove();
+  browserMenu = null;
+  return true;
+}
+
+// The menu lives at the end of <body>, so Tab alone would send a keyboard user
+// through the whole app to reach it. Opening moves focus in; the arrows walk its
+// controls; Escape puts focus back on the caret.
+function onBrowserMenuKeydown(event) {
+  if (!browserMenu) return;
+  const { anchor, element } = browserMenu;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeBrowserMenu();
+    anchor.focus();
+    return;
+  }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  // Arrow keys belong to the page unless focus is on the menu or its caret.
+  if (document.activeElement !== anchor && !element.contains(document.activeElement)) return;
+  const controls = [...element.querySelectorAll("button:not(:disabled), input, a[href]")];
+  if (!controls.length) return;
+  const at = controls.indexOf(document.activeElement);
+  const step = event.key === "ArrowDown" ? 1 : -1;
+  const next = at < 0
+    ? (step > 0 ? 0 : controls.length - 1)
+    : (at + step + controls.length) % controls.length;
+  controls[next].focus();
+  event.preventDefault();
+}
+
+async function toggleBrowserMenu(anchor) {
+  if (closeBrowserMenu()) return;
+  // Claims the slot before the list arrives, so a second click while it loads
+  // closes this menu instead of opening another one on top of it.
+  const menu = { anchor, element: document.createElement("div") };
+  browserMenu = menu;
+  const catalog = await fetchBrowserCatalog();
+  if (browserMenu !== menu) return;
+  if (!catalog) {
+    browserMenu = null;
+    return;
+  }
+  anchor.setAttribute("aria-expanded", "true");
+  // Tabbing out of the menu closes it; a click elsewhere is the handler above.
+  menu.element.addEventListener("focusout", (event) => {
+    if (event.relatedTarget && !menu.element.contains(event.relatedTarget) && event.relatedTarget !== anchor) {
+      closeBrowserMenu();
+    }
+  });
+  renderBrowserMenu(catalog);
+  const opening = catalog.find((entry) => entry.default)?.browser;
+  (menu.element.querySelector(`[data-open="${opening}"]:not(:disabled)`) || menu.element.querySelector("button:not(:disabled)"))?.focus();
+}
+
+async function fetchBrowserCatalog() {
+  try {
+    const response = await fetch("/api/browser/list");
+    await requireOkResponse(response, "Could not list browsers.");
+    return await response.json();
+  } catch (error) {
+    showToast(error?.message || "Could not list browsers.", "error", 6000);
+    return null;
+  }
+}
+
+// One row of the browser menu, as markup. Pure so it can be tested without a DOM.
+function browserMenuRowHtml(entry) {
+  const missing = entry.requirements?.filter((item) => !item.found) || [];
+  // The address comes from the server's catalog, and only an https one becomes a
+  // link: the page it points to is the vendor's, opened outside Sniper.
+  const installUrl = !entry.installed && /^https:\/\//.test(entry.install_url || "") ? entry.install_url : "";
+  const note = entry.installed ? (entry.default ? "Default" : "") : installUrl ? "" : "Not installed";
+  const title = !entry.installed ? entry.install_hint || "" : "";
+  // A saved choice that has since been uninstalled still has to be clearable,
+  // or every open would keep warning about it with no way to stop.
+  const pin = entry.preferred
+    ? `<button class="browser-menu-pin" type="button" data-prefer="auto" title="Go back to the automatic choice">Use auto</button>`
+    : entry.installed
+      ? `<button class="browser-menu-pin" type="button" data-prefer="${escapeHtml(entry.browser)}">Make default</button>`
+      : "";
+  const install = installUrl
+    ? `<a class="browser-menu-install" href="${escapeHtml(installUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Install ${escapeHtml(entry.browser)}">Install &#8599;</a>`
+    : "";
+  return `
+    <div class="browser-menu-row${pin ? " has-pin" : ""}${install ? " has-install" : ""}">
+      <button class="context-menu-item browser-menu-open" type="button" role="menuitem"
+        data-open="${escapeHtml(entry.browser)}" title="${escapeHtml(title)}" ${entry.installed ? "" : "disabled"}>
+        <span class="browser-menu-name">${escapeHtml(entry.browser)}</span>
+        <span class="browser-menu-note">${escapeHtml(note)}</span>
+      </button>
+      ${pin}
+      ${install}
+    </div>
+    ${missing.length ? `<div class="browser-menu-hint">${escapeHtml(missing.map((item) => item.hint || item.name).join(" "))}</div>` : ""}
+  `;
+}
+
+function renderBrowserMenu(catalog) {
+  const { anchor, element } = browserMenu;
+  // Checked boxes survive a re-render after "Make default".
+  const wasChecked = (name) => element.querySelector(`[data-option="${name}"]`)?.checked ? "checked" : "";
+  const rows = catalog.map(browserMenuRowHtml);
+  element.className = "context-menu browser-menu";
+  element.setAttribute("role", "menu");
+  element.innerHTML = `
+    ${rows.join("")}
+    <div class="context-menu-divider"></div>
+    <label class="browser-menu-option"><input type="checkbox" data-option="agent" ${wasChecked("agent")}> Let an agent drive it</label>
+    <label class="browser-menu-option"><input type="checkbox" data-option="fresh" ${wasChecked("fresh")}> Throwaway profile</label>
+  `;
+  element.onclick = async (event) => {
+    const prefer = event.target.closest("[data-prefer]");
+    const open = event.target.closest("[data-open]");
+    if (prefer) {
+      await setPreferredBrowser(prefer.dataset.prefer);
+    } else if (open && !open.disabled) {
+      const options = {
+        browser: open.dataset.open,
+        agent: element.querySelector('[data-option="agent"]').checked,
+        fresh: element.querySelector('[data-option="fresh"]').checked,
+      };
+      closeBrowserMenu();
+      await openSniperBrowser(options);
+    }
+  };
+  // Placed once. A re-render after "Make default" keeps the position, because the
+  // anchor may be gone by then (the empty-history launcher is rebuilt whenever the
+  // table redraws) and measuring a detached element puts the menu in a corner.
+  if (!element.isConnected) {
+    document.body.appendChild(element);
+    const box = anchor.getBoundingClientRect();
+    const width = element.offsetWidth;
+    element.style.top = `${box.bottom + 4}px`;
+    element.style.left = `${Math.max(8, Math.min(box.right - width, window.innerWidth - width - 8))}px`;
+  }
+}
+
+async function setPreferredBrowser(name) {
+  try {
+    const response = await fetch("/api/browser/preference", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ browser: name }),
+    });
+    await requireOkResponse(response, "Could not save the default browser.");
+    const catalog = await fetchBrowserCatalog();
+    if (catalog && browserMenu) {
+      // The rows are rebuilt, which drops focus; put it back on the row just changed.
+      const hadFocus = browserMenu.element.contains(document.activeElement);
+      renderBrowserMenu(catalog);
+      if (hadFocus) browserMenu.element.querySelector(`[data-open="${name === "auto" ? catalog.find((entry) => entry.default)?.browser : name}"]`)?.focus();
+    }
+  } catch (error) {
+    showToast(error?.message || "Could not save the default browser.", "error", 6000);
+  }
+}
+
 async function requireOkResponse(response, fallbackMessage) {
   if (response.ok) return;
   const message = await readApiErrorMessage(response, fallbackMessage);
@@ -14288,7 +14891,7 @@ async function readApiErrorMessage(response, fallbackMessage = "") {
     }
   }
   const message = await response.text().catch(() => "");
-  return message || fallbackMessage;
+  return message.trim() ? message : fallbackMessage;
 }
 
 function formatStructuredApiErrorMessage(payload) {
@@ -15547,7 +16150,7 @@ function createReplayTab(seed = {}) {
     seed.targetScheme || target.scheme,
   );
   return {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     sequence: state.replayTabSequence,
     customLabel: normalizeReplayTabCustomLabel(seed.customLabel || ""),
     pinned: !!seed.pinned,
@@ -17017,6 +17620,8 @@ function selectSettingsTab(name) {
 }
 
 function openDisplaySettingsModal() {
+  if (isModalVisible(els.displaySettingsModal)) return;
+  displaySettingsReturnFocus = document.activeElement;
   hydrateDisplaySettingsForm();
   applyDisplaySettingsState();
   renderShortcutReference();
@@ -17025,6 +17630,7 @@ function openDisplaySettingsModal() {
   // After the modal is shown: the tabs have no offsetWidth to measure while it
   // is still display:none.
   selectSettingsTab("runtime");
+  els.closeDisplaySettingsButton.focus();
 }
 
 async function installCliPath() {
@@ -17052,30 +17658,68 @@ async function installCliPath() {
 }
 
 function closeDisplaySettingsModal() {
+  const wasVisible = isModalVisible(els.displaySettingsModal);
   if (displaySettingsPreviewActive) {
     hydrateDisplaySettingsForm();
     applyDisplaySettingsState();
     displaySettingsPreviewActive = false;
   }
   els.displaySettingsModal.classList.add("hidden");
+  if (wasVisible) {
+    restoreModalFocus(displaySettingsReturnFocus, els.openDisplaySettingsButton);
+    displaySettingsReturnFocus = null;
+  }
 }
 
 function openFilterModal() {
+  if (isModalVisible(els.filterModal)) return;
+  filterSettingsReturnFocus = document.activeElement;
+  filterSettingsEditedControls.clear();
   hydrateFilterForm();
   els.filterModal.classList.remove("hidden");
+  els.closeFilterModalButton.focus();
 }
 
 function closeFilterModal() {
+  const wasVisible = isModalVisible(els.filterModal);
   els.filterModal.classList.add("hidden");
+  filterSettingsEditedControls.clear();
+  if (wasVisible) {
+    restoreModalFocus(filterSettingsReturnFocus, els.openFilterSettingsButton);
+    filterSettingsReturnFocus = null;
+  }
 }
 
 function isModalVisible(modal) {
   return Boolean(modal) && !modal.classList.contains("hidden");
 }
 
+function restoreModalFocus(previous, fallback = document.querySelector(".main-tab.active")) {
+  const target = previous?.isConnected && !previous.disabled && previous.tabIndex >= 0
+    && previous.getClientRects().length && window.getComputedStyle(previous).visibility !== "hidden"
+    ? previous : fallback;
+  target?.focus({ preventScroll: true });
+}
+
+function trapModalFocus(event, modal) {
+  const controls = Array.from(modal.querySelectorAll("button, [href], input, select, textarea, [tabindex]"))
+    .filter((control) => !control.disabled && control.tabIndex >= 0 && control.getClientRects().length
+      && window.getComputedStyle(control).visibility !== "hidden");
+  const first = controls[0], last = controls[controls.length - 1];
+  if (!first) return;
+  const outsideControls = !controls.includes(document.activeElement);
+  if (event.shiftKey ? document.activeElement === first || outsideControls
+    : document.activeElement === last || outsideControls) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
+}
+
 function getActiveModalAction() {
+  if (activeConfirmDialog) return activeConfirmDialog;
   if (isModalVisible(els.displaySettingsModal)) {
     return {
+      modal: els.displaySettingsModal,
       close: closeDisplaySettingsModal,
       apply: saveDisplaySettingsFromForm,
     };
@@ -17083,6 +17727,7 @@ function getActiveModalAction() {
 
   if (isModalVisible(els.filterModal)) {
     return {
+      modal: els.filterModal,
       close: closeFilterModal,
       apply: applyFilterSettings,
     };
@@ -17124,8 +17769,14 @@ function sanitizeActiveProxyTab(value) {
   return IMPLEMENTED_PROXY_TABS.has(proxyTab) ? proxyTab : "http-history";
 }
 
+function truncateUiSettingsText(value) {
+  // Match Rust's character limit without splitting a UTF-16 pair, which would
+  // make the entire settings snapshot invalid when the server parses its JSON.
+  return Array.from(value).slice(0, 512).join("");
+}
+
 function sanitizeHttpQuery(value) {
-  return String(value || "").trim().slice(0, 512);
+  return truncateUiSettingsText(String(value || "").trim());
 }
 
 function sanitizeHttpMethod(value) {
@@ -17182,14 +17833,14 @@ function sanitizeHttpFilterSettings(candidate) {
     hideWithoutResponses: Boolean(filters.hide_without_responses ?? filters.hideWithoutResponses ?? defaults.hideWithoutResponses),
     onlyParameterized: Boolean(filters.only_parameterized ?? filters.onlyParameterized ?? defaults.onlyParameterized),
     onlyNotes: Boolean(filters.only_notes ?? filters.onlyNotes ?? defaults.onlyNotes),
-    searchTerm: String(filters.search_term ?? filters.searchTerm ?? defaults.searchTerm).trim().slice(0, 512),
+    searchTerm: truncateUiSettingsText(String(filters.search_term ?? filters.searchTerm ?? defaults.searchTerm).trim()),
     regex: Boolean(filters.regex ?? defaults.regex),
     caseSensitive: Boolean(filters.case_sensitive ?? filters.caseSensitive ?? defaults.caseSensitive),
     negativeSearch: Boolean(filters.negative_search ?? filters.negativeSearch ?? defaults.negativeSearch),
     mime: sanitizeHttpBooleanMap(filters.mime, defaults.mime),
     status: sanitizeHttpBooleanMap(filters.status, defaults.status),
-    hiddenExtensions: String(filters.hidden_extensions ?? filters.hiddenExtensions ?? defaults.hiddenExtensions).trim().slice(0, 512),
-    port: String(filters.port ?? defaults.port).trim().slice(0, 512),
+    hiddenExtensions: truncateUiSettingsText(String(filters.hidden_extensions ?? filters.hiddenExtensions ?? defaults.hiddenExtensions).trim()),
+    port: truncateUiSettingsText(String(filters.port ?? defaults.port).trim()),
     colorTags: sanitizeHttpColorTags(filters.color_tags ?? filters.colorTags),
   };
 }
@@ -17220,7 +17871,7 @@ function serializeHttpFilterSettings() {
 }
 
 function sanitizeWebsocketQuery(value) {
-  return String(value || "").trim().slice(0, 512);
+  return truncateUiSettingsText(String(value || "").trim());
 }
 
 function sanitizeWebsocketSortKey(value) {
@@ -17515,7 +18166,7 @@ async function loadUiSettings() {
     if (!response.ok) {
       throw new Error(await response.text());
     }
-    applyUiSettingsSnapshot(await response.json());
+    applyUiSettingsSnapshot(await response.json(), { mergeFilterDraft: true });
   } catch (error) {
     console.error(error);
   }
@@ -17528,7 +18179,7 @@ function updateUiSettingsServerRevision(snapshot) {
   }
 }
 
-function applyUiSettingsSnapshot(snapshot) {
+function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   updateUiSettingsServerRevision(snapshot);
   state.displaySettings = sanitizeDisplaySettings({
     sizePx: snapshot?.display_settings?.size_px,
@@ -17572,12 +18223,22 @@ function applyUiSettingsSnapshot(snapshot) {
   if (els.methodFilter) {
     els.methodFilter.value = state.method;
   }
-  hydrateFilterForm();
+  // The initial load fills untouched controls; a save conflict still leaves the
+  // whole open draft alone. Explicit edits, even back to defaults, must survive.
+  if (!isModalVisible(els.filterModal) || mergeFilterDraft) {
+    hydrateFilterForm({ preserveDraft: isModalVisible(els.filterModal) });
+  } else {
+    syncColorTagFilterUI();
+  }
   syncHttpInScopePill();
   syncHttpCapturePill();
   document.getElementById("wsInScopeOnly")?.classList.toggle("active", state.websocketInScopeOnly);
   document.getElementById("wsHideClosed")?.classList.toggle("active", state.websocketLiveOnly);
-  applyDisplaySettingsState();
+  if (isModalVisible(els.displaySettingsModal) && displaySettingsPreviewActive) {
+    previewDisplaySettingsFromForm();
+  } else {
+    applyDisplaySettingsState();
+  }
   renderHistoryHeader();
   applyHistoryColumnWidths();
   applyWsColumnWidths();
@@ -17669,27 +18330,33 @@ async function persistUiSettings() {
         const payloadSnapshot = nextUiSettingsSnapshot();
         const payload = JSON.stringify(payloadSnapshot);
         lastUiSettingsPayload = payload;
-        let response;
+        let savedSnapshot;
         try {
-          response = await fetch("/api/ui-settings", {
+          const response = await fetch("/api/ui-settings", {
             method: "POST",
             headers: {
               "content-type": "application/json",
             },
             body: payload,
           });
+          if (!response.ok) {
+            throw new Error(await response.text());
+          }
+          savedSnapshot = await response.json();
+          if (!savedSnapshot || typeof savedSnapshot !== "object" || Array.isArray(savedSnapshot)
+            || !Number.isInteger(savedSnapshot.server_revision) || savedSnapshot.server_revision < 0
+            || (savedSnapshot.client_id !== undefined && typeof savedSnapshot.client_id !== "string")
+            || (savedSnapshot.client_version !== undefined
+              && (!Number.isInteger(savedSnapshot.client_version) || savedSnapshot.client_version < 0))) {
+            throw new Error("Invalid UI settings response. Please try again.");
+          }
         } catch (error) {
           uiSettingsDirty = true;
+          // Wait for the response body too, so a slow failure cannot consume the
+          // retry timer while this attempt still owns the in-flight promise.
           scheduleUiSettingsRetry();
           throw error;
         }
-
-        if (!response.ok) {
-          uiSettingsDirty = true;
-          scheduleUiSettingsRetry();
-          throw new Error(await response.text());
-        }
-        const savedSnapshot = await response.json().catch(() => null);
         if (savedSnapshot && typeof savedSnapshot === "object") {
           updateUiSettingsServerRevision(savedSnapshot);
           const savedClientId = String(savedSnapshot.client_id || "");
@@ -17798,30 +18465,35 @@ function syncHttpCapturePill() {
     : "Not recording. Traffic still passes through. Click to resume.";
 }
 
-function hydrateFilterForm() {
+function hydrateFilterForm({ preserveDraft = false } = {}) {
   const filters = state.filterSettings;
-  els.filterInScopeOnly.checked = filters.inScopeOnly;
-  els.filterHideWithoutResponses.checked = filters.hideWithoutResponses;
-  els.filterOnlyParameterized.checked = filters.onlyParameterized;
-  els.filterOnlyNotes.checked = filters.onlyNotes;
-  els.filterSearchTerm.value = filters.searchTerm;
-  els.filterRegex.checked = filters.regex;
-  els.filterCaseSensitive.checked = filters.caseSensitive;
-  els.filterNegativeSearch.checked = filters.negativeSearch;
-  els.filterMimeHtml.checked = filters.mime.html;
-  els.filterMimeScript.checked = filters.mime.script;
-  els.filterMimeJson.checked = filters.mime.json;
-  els.filterMimeCss.checked = filters.mime.css;
-  els.filterMimeImage.checked = filters.mime.image;
-  els.filterMimeWebsocket.checked = filters.mime.websocket !== false;
-  els.filterMimeOther.checked = filters.mime.other;
-  els.filterStatus2xx.checked = filters.status.success;
-  els.filterStatus3xx.checked = filters.status.redirect;
-  els.filterStatus4xx.checked = filters.status.clientError;
-  els.filterStatus5xx.checked = filters.status.serverError;
-  els.filterStatusOther.checked = filters.status.other;
-  els.filterHiddenExtensions.value = filters.hiddenExtensions;
-  els.filterPort.value = filters.port;
+  const update = (control, value) => {
+    if (!preserveDraft || !filterSettingsEditedControls.has(control)) {
+      control[control.type === "checkbox" ? "checked" : "value"] = value;
+    }
+  };
+  update(els.filterInScopeOnly, filters.inScopeOnly);
+  update(els.filterHideWithoutResponses, filters.hideWithoutResponses);
+  update(els.filterOnlyParameterized, filters.onlyParameterized);
+  update(els.filterOnlyNotes, filters.onlyNotes);
+  update(els.filterSearchTerm, filters.searchTerm);
+  update(els.filterRegex, filters.regex);
+  update(els.filterCaseSensitive, filters.caseSensitive);
+  update(els.filterNegativeSearch, filters.negativeSearch);
+  update(els.filterMimeHtml, filters.mime.html);
+  update(els.filterMimeScript, filters.mime.script);
+  update(els.filterMimeJson, filters.mime.json);
+  update(els.filterMimeCss, filters.mime.css);
+  update(els.filterMimeImage, filters.mime.image);
+  update(els.filterMimeWebsocket, filters.mime.websocket !== false);
+  update(els.filterMimeOther, filters.mime.other);
+  update(els.filterStatus2xx, filters.status.success);
+  update(els.filterStatus3xx, filters.status.redirect);
+  update(els.filterStatus4xx, filters.status.clientError);
+  update(els.filterStatus5xx, filters.status.serverError);
+  update(els.filterStatusOther, filters.status.other);
+  update(els.filterHiddenExtensions, filters.hiddenExtensions);
+  update(els.filterPort, filters.port);
   syncColorTagFilterUI();
 }
 
@@ -18132,13 +18804,7 @@ function buildFindingsRawMessage(record, side) {
 }
 
 function findingsBodyPlaceholder(msg) {
-  if (!msg || !msg.body_preview) return "";
-  if (msg.body_encoding === "base64") {
-    return binaryBodyPlaceholder(msg);
-  }
-  return msg.preview_truncated
-    ? `${msg.body_preview}\n\n[preview truncated]`
-    : msg.body_preview;
+  return renderBody(msg);
 }
 
 function binaryBodyPlaceholder(msg) {
@@ -18152,7 +18818,8 @@ function buildRawWebsocketRequest(session) {
   const headers = mergeHeaders(session?.request?.headers)
     .map((header) => `${header.name}: ${header.value}`)
     .join("\n");
-  return `GET ${session?.path || "/"} HTTP/1.1\n${headers}`.trim();
+  const startLine = `GET ${session?.path || "/"} HTTP/1.1`;
+  return headers ? `${startLine}\n${headers}` : startLine;
 }
 
 function buildRawWebsocketResponse(session) {
@@ -18163,37 +18830,43 @@ function buildRawWebsocketResponse(session) {
   const headers = normalizedHeaders(session.response.headers)
     .map((header) => `${header.name}: ${header.value}`)
     .join("\n");
-  return `HTTP/1.1 ${session.status ?? 101}\n${headers}`.trim();
+  const statusLine = `HTTP/1.1 ${session.status ?? 101}`;
+  return headers ? `${statusLine}\n${headers}` : statusLine;
 }
 
 function renderBody(message) {
-  if (!message || !message.body_preview) {
+  if (!message) {
     return "";
   }
 
-  if (message.body_encoding === "base64") {
-    return binaryBodyPlaceholder(message);
+  let body = message.body_preview || "";
+  if (body && message.body_encoding === "base64") {
+    body = binaryBodyPlaceholder(message);
   }
 
   return message.preview_truncated
-    ? `${message.body_preview}\n\n[preview truncated]`
-    : message.body_preview;
+    ? `${body}${body ? "\n\n" : ""}[preview truncated]`
+    : body;
 }
 
 function buildMessageHexPresentation(target, record, fallbackText) {
+  const message = target === "request" ? record.request : record.response;
+  let text;
   if (target === "request") {
-    return toHexDumpFromHttpParts(buildRawRequestHead(record), record.request, fallbackText);
+    text = toHexDumpFromHttpParts(buildRawRequestHead(record), message);
+  } else if (message) {
+    text = toHexDumpFromHttpParts(buildRawResponseHead(record), message);
+  } else {
+    text = toHexDump(fallbackText);
   }
-  if (!record.response) {
-    return toHexDump(fallbackText);
-  }
-  return toHexDumpFromHttpParts(buildRawResponseHead(record), record.response, fallbackText);
+  // The notice describes the capture; it must never become apparent body bytes.
+  return message?.preview_truncated ? `${text}\n\n[preview truncated]` : text;
 }
 
-function toHexDumpFromHttpParts(head, message, fallbackText) {
+function toHexDumpFromHttpParts(head, message) {
   const bodyBytes = messageBodyBytes(message);
   if (!bodyBytes) {
-    return toHexDump(fallbackText);
+    return `${toHexDump(head || "")}\n\n[Invalid base64 preview; body bytes unavailable]`;
   }
   const encoder = new TextEncoder();
   const headBytes = encoder.encode(head || "");
@@ -18215,10 +18888,7 @@ function messageBodyBytes(message) {
   if (message.body_encoding === "base64") {
     return base64ToBytes(message.body_preview);
   }
-  const text = message.preview_truncated
-    ? `${message.body_preview}\n\n[preview truncated]`
-    : message.body_preview;
-  return new TextEncoder().encode(text);
+  return new TextEncoder().encode(message.body_preview);
 }
 
 function base64ToBytes(value) {
@@ -18232,6 +18902,40 @@ function base64ToBytes(value) {
   } catch (_error) {
     return null;
   }
+}
+
+function prettyJsonText(text) {
+  // Validate only. Re-serializing the parsed value rounds large numbers and
+  // discards duplicate keys, so formatting must retain the original tokens.
+  JSON.parse(text);
+  const tokens = text.match(/"(?:\\.|[^"\\])*"|[{}\[\],:]|[^\s{}\[\],:]+/g) || [];
+  const parts = [];
+  let depth = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "{" || token === "[") {
+      parts.push(token);
+      depth += 1;
+      // Deep nesting should not expand a small preview into megabytes of indent.
+      if (depth > 100) return text;
+      if (tokens[index + 1] !== "}" && tokens[index + 1] !== "]") {
+        parts.push("\n", "  ".repeat(depth));
+      }
+    } else if (token === "}" || token === "]") {
+      depth -= 1;
+      if (tokens[index - 1] !== "{" && tokens[index - 1] !== "[") {
+        parts.push("\n", "  ".repeat(depth));
+      }
+      parts.push(token);
+    } else if (token === ",") {
+      parts.push(",\n", "  ".repeat(depth));
+    } else if (token === ":") {
+      parts.push(": ");
+    } else {
+      parts.push(token);
+    }
+  }
+  return parts.join("");
 }
 
 function prettyFormat(text, message) {
@@ -18251,7 +18955,7 @@ function prettyFormat(text, message) {
 
   if (contentType.includes("json")) {
     try {
-      return `${head}${divider}${JSON.stringify(JSON.parse(body), null, 2)}`;
+      return `${head}${divider}${prettyJsonText(body)}`;
     } catch (_error) {
       return text;
     }
@@ -18261,7 +18965,7 @@ function prettyFormat(text, message) {
   const trimmed = body.trimStart();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
     try {
-      return `${head}${divider}${JSON.stringify(JSON.parse(body), null, 2)}`;
+      return `${head}${divider}${prettyJsonText(body)}`;
     } catch (_error) {
       // not valid JSON, return as-is
     }
@@ -18535,8 +19239,7 @@ function showFrameDetail(frame) {
 
   // Try to pretty-print JSON
   try {
-    const parsed = JSON.parse(body);
-    body = JSON.stringify(parsed, null, 2);
+    body = prettyJsonText(body);
   } catch {
     // not JSON, keep as-is
   }
@@ -18587,18 +19290,30 @@ function initFrameDetailResizer() {
 
   let startY = 0;
   let startHeight = 0;
+  let resizing = false;
+  let previousCursor = "";
+  let previousUserSelect = "";
 
   resizer.addEventListener("mousedown", (e) => {
+    onMouseUp();
     e.preventDefault();
     startY = e.clientY;
     startHeight = els.frameDetailPanel.getBoundingClientRect().height;
+    previousCursor = document.body.style.cursor;
+    previousUserSelect = document.body.style.userSelect;
+    resizing = true;
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("blur", onMouseUp);
     document.body.style.cursor = "row-resize";
     document.body.style.userSelect = "none";
   });
 
   function onMouseMove(e) {
+    if (e.buttons === 0) {
+      onMouseUp();
+      return;
+    }
     const delta = startY - e.clientY;
     const newHeight = Math.max(120, startHeight + delta);
     const maxHeight = container.getBoundingClientRect().height * 0.8;
@@ -18607,10 +19322,13 @@ function initFrameDetailResizer() {
   }
 
   function onMouseUp() {
+    if (!resizing) return;
+    resizing = false;
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mouseup", onMouseUp);
-    document.body.style.cursor = "";
-    document.body.style.userSelect = "";
+    window.removeEventListener("blur", onMouseUp);
+    document.body.style.cursor = previousCursor;
+    document.body.style.userSelect = previousUserSelect;
   }
 }
 
@@ -18863,7 +19581,7 @@ function renderHexHtml(text) {
   return String(text)
     .split("\n")
     .map((line) => {
-      if (line.length < 10) {
+      if (!/^[0-9a-f]{8}  /i.test(line)) {
         return wrapCodeLine(escapeHtml(line), "code-line code-line-hex");
       }
       const offset = line.substring(0, 8);
@@ -18926,6 +19644,7 @@ function applyWsColumnWidths() {
 }
 
 function bindWsColumnResizers() {
+  let finishResize = null;
   const handles = document.querySelectorAll("#websocketTable .ws-col-resize-handle");
   handles.forEach((handle) => {
     handle.addEventListener("dblclick", (event) => {
@@ -18943,6 +19662,7 @@ function bindWsColumnResizers() {
       const limits = WS_COLUMN_RULES[key];
       if (!key || !limits || limits.max === 0) return;
 
+      finishResize?.();
       event.preventDefault();
       event.stopPropagation();
 
@@ -18952,26 +19672,36 @@ function bindWsColumnResizers() {
       handle.classList.add("active");
 
       const onMove = (moveEvent) => {
+        if (moveEvent.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = moveEvent.clientX - event.clientX;
         state.wsColumnWidths[key] = clamp(Math.round(startWidth + delta), limits.min, limits.max);
         applyWsColumnWidths();
       };
 
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-x");
         handle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
         scheduleUiSettingsSave();
       };
 
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
   });
 }
 
 function bindHistoryColumnResizers() {
+  let finishResize = null;
   historyColumnHandles.forEach((handle) => {
     handle.addEventListener("dblclick", (event) => {
       event.preventDefault();
@@ -18992,6 +19722,7 @@ function bindHistoryColumnResizers() {
         return;
       }
 
+      finishResize?.();
       event.preventDefault();
       event.stopPropagation();
 
@@ -19001,6 +19732,10 @@ function bindHistoryColumnResizers() {
       handle.classList.add("active");
 
       const onMove = (moveEvent) => {
+        if (moveEvent.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = moveEvent.clientX - event.clientX;
         state.historyColumnWidths[key] = clamp(
           Math.round(startWidth + delta),
@@ -19011,15 +19746,20 @@ function bindHistoryColumnResizers() {
       };
 
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-x");
         handle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
         saveHistoryColumnWidths();
       };
 
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
   });
 }
@@ -19028,6 +19768,7 @@ function bindWorkbenchStackResizer(handle) {
   if (!handle) {
     return;
   }
+  let finishResize = null;
 
   handle.addEventListener("dblclick", () => {
     resetWorkbenchStackHeight();
@@ -19038,6 +19779,7 @@ function bindWorkbenchStackResizer(handle) {
       return;
     }
 
+    finishResize?.();
     event.preventDefault();
     const start = {
       history: els.trafficRegion.getBoundingClientRect().height,
@@ -19049,6 +19791,10 @@ function bindWorkbenchStackResizer(handle) {
     handle.classList.add("active");
 
     const onMove = (moveEvent) => {
+      if (moveEvent.buttons === 0) {
+        onUp();
+        return;
+      }
       const delta = moveEvent.clientY - event.clientY;
       const nextMessages = clamp(
         start.messages - delta,
@@ -19059,15 +19805,20 @@ function bindWorkbenchStackResizer(handle) {
     };
 
     const onUp = () => {
+      if (finishResize !== onUp) return;
+      finishResize = null;
       document.body.classList.remove("pane-resizing-y");
       handle.classList.remove("active");
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
       normalizeWorkbenchStackHeight({ persist: true });
     };
 
+    finishResize = onUp;
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onUp);
   });
 }
 
@@ -19308,7 +20059,7 @@ function bindWebsocketPaneResizer(handle) {
       const delta = moveEvent.clientX - event.clientX;
       const combinedWidth = start.handshake + start.frames;
       const nextHandshake = clamp(
-        start.handshake + delta,
+        start.left + delta,
         WEBSOCKET_WORKBENCH_MIN_WIDTHS.handshake,
         combinedWidth - WEBSOCKET_WORKBENCH_MIN_WIDTHS.frames,
       );
@@ -19334,11 +20085,14 @@ function getWebsocketWorkbenchWidths() {
     return null;
   }
 
+  const handshake = els.websocketHandshakeColumn.getBoundingClientRect().width;
+  const frames = els.websocketFramesColumn.getBoundingClientRect().width;
   return {
-    total: els.websocketHandshakeColumn.getBoundingClientRect().width
-      + els.websocketFramesColumn.getBoundingClientRect().width,
-    handshake: els.websocketHandshakeColumn.getBoundingClientRect().width,
-    frames: els.websocketFramesColumn.getBoundingClientRect().width,
+    total: handshake + frames,
+    handshake,
+    frames,
+    // The CSS width belongs to the physical left track even when panes swap.
+    left: els.websocketWorkbench.classList.contains("ws-swapped") ? frames : handshake,
   };
 }
 
@@ -19397,7 +20151,7 @@ function normalizeWebsocketPaneWidth(options = {}) {
   }
 
   const nextHandshake = clamp(
-    bounds.handshake,
+    bounds.left,
     WEBSOCKET_WORKBENCH_MIN_WIDTHS.handshake,
     bounds.total - WEBSOCKET_WORKBENCH_MIN_WIDTHS.frames,
   );
@@ -19623,6 +20377,52 @@ function resetWorkbenchStackHeight() {
   scheduleUiSettingsSave();
 }
 
+function forEachCodeSearchMatch(text, query, onMatch) {
+  if (!query) return;
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  const expansions = [];
+  if (lowerText.length !== text.length) {
+    let sourceOffset = 0;
+    let lowerOffset = 0;
+    for (const character of text) {
+      const lowerLength = character.toLowerCase().length;
+      if (lowerLength !== character.length) {
+        expansions.push({
+          from: lowerOffset,
+          to: lowerOffset + lowerLength,
+          sourceFrom: sourceOffset,
+          sourceTo: sourceOffset + character.length,
+          delta: lowerOffset + lowerLength - sourceOffset - character.length,
+        });
+      }
+      sourceOffset += character.length;
+      lowerOffset += lowerLength;
+    }
+  }
+
+  // Lowercasing can expand one character (İ → i + combining dot). Keep the
+  // full-string match semantics, but map each end back to the displayed text.
+  const offsetMapper = (isEnd) => {
+    let index = 0;
+    return (offset) => {
+      while (index < expansions.length && expansions[index].to <= offset) index += 1;
+      const expansion = expansions[index];
+      if (expansion && offset > expansion.from) {
+        return isEnd ? expansion.sourceTo : expansion.sourceFrom;
+      }
+      return offset - (index ? expansions[index - 1].delta : 0);
+    };
+  };
+  const sourceStart = offsetMapper(false);
+  const sourceEnd = offsetMapper(true);
+  let cursor = 0;
+  while ((cursor = lowerText.indexOf(lowerQuery, cursor)) !== -1) {
+    onMatch(sourceStart(cursor), sourceEnd(cursor + lowerQuery.length));
+    cursor += 1;
+  }
+}
+
 function applyCodeSearch(viewElement, query) {
   // Remove any previous search highlights first
   clearSearchHighlights(viewElement);
@@ -19634,7 +20434,6 @@ function applyCodeSearch(viewElement, query) {
 
   // Build a flat text map across all text nodes so we can match across
   // element boundaries (e.g. "<span>accept-encoding</span>: gzip").
-  const lowerQuery = normalizedQuery.toLowerCase();
   const walker = document.createTreeWalker(viewElement, NodeFilter.SHOW_TEXT, null);
   const textNodes = [];
   let fullText = "";
@@ -19646,15 +20445,8 @@ function applyCodeSearch(viewElement, query) {
     textNodes.push(node);
   }
 
-  const lowerFull = fullText.toLowerCase();
   const matches = []; // { start, end } in fullText coordinates
-  let cursor = 0;
-  while (true) {
-    const idx = lowerFull.indexOf(lowerQuery, cursor);
-    if (idx === -1) break;
-    matches.push({ start: idx, end: idx + normalizedQuery.length });
-    cursor = idx + 1;
-  }
+  forEachCodeSearchMatch(fullText, normalizedQuery, (start, end) => matches.push({ start, end }));
 
   if (!matches.length) {
     return { count: 0, firstMatch: null };
@@ -19808,27 +20600,29 @@ function renderSortHeaders() {
 }
 
 function highlightStartLine(line, target) {
-  const requestMatch = line.match(/^([A-Z]+)\s+(\S+)(?:\s+(HTTP\/[0-9.]+))?$/);
+  const requestMatch = line.match(/^([A-Z]+)(\s+)(\S+)(?:(\s+)(HTTP\/[0-9.]+))?$/);
   if (target === "request" && requestMatch) {
-    const [, method, path, version = "HTTP/1.1"] = requestMatch;
-    return `<span class="token-method">${escapeHtml(method)}</span> ${highlightRequestTarget(path)} <span class="token-version">${escapeHtml(version)}</span>`;
+    const [, method, separator, path, versionSeparator, version] = requestMatch;
+    return `<span class="token-method">${escapeHtml(method)}</span>${escapeHtml(separator)}${highlightRequestTarget(path)}${version ? `${escapeHtml(versionSeparator)}<span class="token-version">${escapeHtml(version)}</span>` : ""}`;
   }
 
-  const responseMatch = line.match(/^(HTTP\/[0-9.]+)\s+(\d{3})(?:\s+(.*))?$/);
+  const responseMatch = line.match(/^(HTTP\/[0-9.]+)(\s+)(\d{3})(?:(\s+)(.*))?$/);
   if (target === "response" && responseMatch) {
-    const [, version, status, detail = ""] = responseMatch;
-    return `<span class="token-version">${escapeHtml(version)}</span> <span class="token-status ${statusTone(Number(status))}">${escapeHtml(status)}</span>${detail ? ` <span class="token-plain">${escapeHtml(detail)}</span>` : ""}`;
+    const [, version, separator, status, detailSeparator = "", detail = ""] = responseMatch;
+    return `<span class="token-version">${escapeHtml(version)}</span>${escapeHtml(separator)}<span class="token-status ${statusTone(Number(status))}">${escapeHtml(status)}</span>${escapeHtml(detailSeparator)}${detail ? `<span class="token-plain">${escapeHtml(detail)}</span>` : ""}`;
   }
 
   return `<span class="token-plain">${escapeHtml(line)}</span>`;
 }
 
 function highlightRequestTarget(rawTarget) {
-  const [pathPart, queryPart] = rawTarget.split("?", 2);
-  if (!queryPart) {
+  const separator = rawTarget.indexOf("?");
+  if (separator === -1 || separator === rawTarget.length - 1) {
     return `<span class="token-target">${escapeHtml(rawTarget)}</span>`;
   }
 
+  const pathPart = rawTarget.slice(0, separator);
+  const queryPart = rawTarget.slice(separator + 1);
   return `<span class="token-target">${escapeHtml(pathPart)}</span><span class="token-punctuation">?</span>${highlightQueryString(queryPart)}`;
 }
 
@@ -19839,12 +20633,14 @@ function highlightHeaderLine(line) {
   }
 
   const name = line.slice(0, separator);
-  const value = line.slice(separator + 1).trimStart();
+  const rawValue = line.slice(separator + 1);
+  const value = rawValue.trimStart();
+  const whitespace = rawValue.slice(0, rawValue.length - value.length);
   const lowerName = name.trim().toLowerCase();
   if (lowerName === "cookie" || lowerName === "set-cookie") {
-    return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span> ${highlightCookieValue(value)}`;
+    return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span>${escapeHtml(whitespace)}${highlightCookieValue(value)}`;
   }
-  return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span> ${highlightHeaderValue(value)}`;
+  return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span>${escapeHtml(whitespace)}${highlightHeaderValue(value)}`;
 }
 
 function highlightHeaderValue(value) {
@@ -19934,7 +20730,7 @@ function highlightBodyLine(line, mode = "plain") {
   const trimmed = line.trim();
 
   if (!trimmed) {
-    return "&nbsp;";
+    return escapeHtml(line) || "&nbsp;";
   }
 
   if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
@@ -19946,7 +20742,7 @@ function highlightBodyLine(line, mode = "plain") {
   }
 
   if (mode === "form" && looksLikeFormEncoded(trimmed)) {
-    return highlightQueryString(trimmed);
+    return highlightQueryString(line);
   }
 
   if (mode === "html" || mode === "xml") {
@@ -19970,7 +20766,7 @@ function highlightBodyLine(line, mode = "plain") {
   }
 
   if (looksLikeFormEncoded(trimmed)) {
-    return highlightQueryString(trimmed);
+    return highlightQueryString(line);
   }
 
   return `<span class="token-plain">${escapeHtml(line)}</span>`;
@@ -19999,7 +20795,7 @@ function highlightJsonLine(line) {
 
     if (match[1]) {
       html += match[2]
-        ? `<span class="token-json-key">${escapeHtml(match[1])}</span><span class="token-punctuation">:</span>`
+        ? `<span class="token-json-key">${escapeHtml(match[1])}</span><span class="token-punctuation">${escapeHtml(match[2])}</span>`
         : `<span class="token-json-string">${escapeHtml(match[1])}</span>`;
     } else if (match[3]) {
       html += `<span class="token-json-boolean">${escapeHtml(match[3])}</span>`;
@@ -20155,7 +20951,10 @@ function highlightQueryString(query) {
   return query
     .split("&")
     .map((pair) => {
-      const [key, value = ""] = pair.split("=", 2);
+      const separator = pair.indexOf("=");
+      if (separator === -1) return `<span class="token-query-key">${escapeHtml(pair)}</span>`;
+      const key = pair.slice(0, separator);
+      const value = pair.slice(separator + 1);
       return `<span class="token-query-key">${escapeHtml(key)}</span><span class="token-punctuation">=</span><span class="token-query-value">${escapeHtml(value)}</span>`;
     })
     .join('<span class="token-punctuation">&amp;</span>');
@@ -20306,11 +21105,25 @@ function renderSummaryRows(rows) {
 }
 
 function inferProtocolState(record) {
-  const headerNames = normalizedHeaders(record.request?.headers).map((header) => header.name);
-  const looksLikeHttp2 = headerNames.some((name) => name.startsWith(":"));
+  let current;
+  switch (record.http_version) {
+    case "HTTP/1.0":
+    case "HTTP/1.1":
+      current = "HTTP/1";
+      break;
+    case "HTTP/0.9":
+    case "HTTP/2":
+    case "HTTP/3":
+      current = record.http_version;
+      break;
+    default: {
+      const headerNames = normalizedHeaders(record.request?.headers).map((header) => header.name);
+      current = headerNames.some((name) => name.startsWith(":")) ? "HTTP/2" : "HTTP/1";
+    }
+  }
   return {
-    current: looksLikeHttp2 ? "HTTP/2" : "HTTP/1",
-    supportsHttp2: looksLikeHttp2,
+    current,
+    supportsHttp2: current === "HTTP/2",
   };
 }
 
@@ -20322,6 +21135,7 @@ function renderProtocolStrip(protocolState) {
     <div class="protocol-pill-group" aria-label="Captured protocol">
       <span class="protocol-pill ${current === "HTTP/1" ? "active" : ""}">HTTP/1</span>
       <span class="protocol-pill ${current === "HTTP/2" ? "active" : ""} ${supportsHttp2 ? "" : "muted"}">HTTP/2</span>
+      ${current !== "HTTP/1" && current !== "HTTP/2" ? `<span class="protocol-pill active">${escapeHtml(current)}</span>` : ""}
     </div>
   `;
 }
@@ -20552,6 +21366,7 @@ function formatStatus(status) {
 }
 
 function statusTone(status) {
+  if (status == null) return "none";
   const code = Number(status);
   if (!Number.isFinite(code)) return "none";
   if (code >= 200 && code < 300) return "ok";
@@ -20979,7 +21794,7 @@ function createWsReplayTab(seed = {}) {
     disableWhenOverflow: !seedHasSetupQueue,
   });
   const tab = {
-    id: crypto.randomUUID(),
+    id: generateUuid(),
     type: "websocket",
     sequence: state.replayTabSequence,
     customLabel: normalizeReplayTabCustomLabel(seed.customLabel || ""),
@@ -22410,6 +23225,7 @@ let compareBaseSessionId = null;
 let compareActiveTab = "request";
 let compareBaseRecord = null;
 let compareTargetRecord = null;
+let compareLoadGeneration = 0;
 
 function computeUnifiedDiff(linesA, linesB, labelA, labelB) {
   const result = [`--- ${labelA}`, `+++ ${labelB}`];
@@ -22428,26 +23244,31 @@ function computeUnifiedDiff(linesA, linesB, labelA, labelB) {
 }
 
 async function setCompareBase(transactionId) {
+  compareLoadGeneration += 1;
   compareBaseId = transactionId;
   compareBaseSessionId = currentSessionId();
   const btn = document.getElementById("compareWithBaseBtn");
   if (btn) btn.disabled = false;
   const item = getHistoryItem(transactionId);
-  if (btn && item) btn.textContent = `Compare with #${item.index ?? "?"}`;
+  const sequence = item?.sequence ?? item?.index;
+  if (btn) btn.textContent = sequence == null ? "Compare with base" : `Compare with #${sequence}`;
 }
 
 async function openCompareModal(targetId) {
-  if (!compareBaseId || compareBaseId === targetId) return;
+  const generation = ++compareLoadGeneration;
+  const baseId = compareBaseId;
+  if (!baseId || baseId === targetId) return;
   const sessionId = currentSessionId();
   if (compareBaseSessionId !== sessionId) {
     clearCompareState();
     return;
   }
   const [baseRes, targetRes] = await Promise.all([
-    fetch(transactionPath(compareBaseId, sessionId)).then((r) => r.ok ? r.json() : null),
+    fetch(transactionPath(baseId, sessionId)).then((r) => r.ok ? r.json() : null),
     fetch(transactionPath(targetId, sessionId)).then((r) => r.ok ? r.json() : null),
   ]);
-  if (currentSessionId() !== sessionId) return;
+  // A dismissed or superseded comparison must not reopen from a late response.
+  if (generation !== compareLoadGeneration || currentSessionId() !== sessionId) return;
   if (!baseRes || !targetRes) return;
   compareBaseRecord = baseRes;
   compareTargetRecord = targetRes;
@@ -22460,8 +23281,10 @@ function renderCompareModal() {
   if (!compareBaseRecord || !compareTargetRecord) return;
   const baseItem = getHistoryItem(compareBaseRecord.id);
   const targetItem = getHistoryItem(compareTargetRecord.id);
-  const baseLabel = `#${baseItem?.index ?? "?"} ${compareBaseRecord.method} ${compareBaseRecord.host}${compareBaseRecord.path}`;
-  const targetLabel = `#${targetItem?.index ?? "?"} ${compareTargetRecord.method} ${compareTargetRecord.host}${compareTargetRecord.path}`;
+  const baseSequence = compareBaseRecord.sequence ?? baseItem?.sequence ?? baseItem?.index ?? "?";
+  const targetSequence = compareTargetRecord.sequence ?? targetItem?.sequence ?? targetItem?.index ?? "?";
+  const baseLabel = `#${baseSequence} ${compareBaseRecord.method} ${compareBaseRecord.host}${compareBaseRecord.path}`;
+  const targetLabel = `#${targetSequence} ${compareTargetRecord.method} ${compareTargetRecord.host}${compareTargetRecord.path}`;
   document.getElementById("compareKicker").textContent = `${baseLabel}  vs  ${targetLabel}`;
   document.getElementById("compareTitle").textContent = compareActiveTab === "request" ? "Request Diff" : "Response Diff";
   document.querySelectorAll("[data-compare-tab]").forEach((btn) => {
@@ -22482,10 +23305,12 @@ function renderCompareModal() {
 }
 
 function closeCompareModal() {
+  compareLoadGeneration += 1;
   document.getElementById("compareModal").classList.add("hidden");
 }
 
 function clearCompareState() {
+  compareLoadGeneration += 1;
   compareBaseId = null;
   compareBaseSessionId = null;
   compareBaseRecord = null;
@@ -22765,17 +23590,31 @@ function contextMenuSessionIsCurrent() {
 // click away to save, Escape to abandon. It used to live in the right-click
 // menu, which meant aiming at a menu to write one word.
 async function beginNoteEdit(cell, transactionId) {
-  if (!cell || cell.querySelector("input.note-inline-input")) return;
+  if (!cell || cell.dataset.noteLoading === "true" || cell.querySelector("input.note-inline-input")) return;
   const sessionId = currentSessionId();
   closeContextMenu();
 
   let current = "";
+  // Repeated opens must not let a late read replace a draft already being typed.
+  cell.dataset.noteLoading = "true";
   try {
     const response = await fetch(transactionPath(transactionId, sessionId));
-    if (response.ok) {
-      current = (await response.json()).user_note || "";
+    await requireOkResponse(response, "Failed to load note.");
+    const record = await response.json();
+    if (!record || typeof record !== "object" || Array.isArray(record)
+      || (record.user_note != null && typeof record.user_note !== "string")) {
+      throw new Error("Failed to load note: invalid response.");
     }
-  } catch { /* start from empty */ }
+    current = record.user_note || "";
+  } catch (error) {
+    // A failed read is not an empty note: editing it could overwrite saved text.
+    if (currentSessionId() === sessionId && cell.isConnected) {
+      showToast(error?.message || "Failed to load note.", "error");
+    }
+    return;
+  } finally {
+    delete cell.dataset.noteLoading;
+  }
   if (currentSessionId() !== sessionId || !cell.isConnected) return;
 
   const previous = cell.innerHTML;
@@ -22791,6 +23630,9 @@ async function beginNoteEdit(cell, transactionId) {
 
   let settled = false;
   let debounce = null;
+  let composing = false;
+  let compositionFinishing = false;
+  let commitAfterComposition = false;
   // Compared against what was last written, not against what the note said when
   // the edit began: typing saves after a pause, so clearing the field back to
   // empty is still a change the server has to be told about.
@@ -22802,33 +23644,78 @@ async function beginNoteEdit(cell, transactionId) {
   };
   const restore = () => {
     if (settled) return;
+    window.clearTimeout(debounce);
     settled = true;
     if (cell.isConnected) cell.innerHTML = previous;
+  };
+  const readValue = (duringComposition = composing) => {
+    const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES);
+    // Rewriting the field mid-composition would cancel the IME's candidate.
+    if (value !== input.value && !duringComposition) input.value = value;
+    return value.trim();
   };
   const commit = () => {
     if (settled) return;
     window.clearTimeout(debounce);
-    const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES).trim();
+    if (composing || compositionFinishing) {
+      commitAfterComposition = true;
+      if (!composing) scheduleSave();
+      return;
+    }
+    const value = readValue();
     settled = true;
     if (cell.isConnected) cell.innerHTML = previous;
     save(value);
   };
+  const scheduleSave = () => {
+    if (settled) return;
+    window.clearTimeout(debounce);
+    debounce = window.setTimeout(() => {
+      if (settled) return;
+      if (composing) {
+        // Korean leaves the last syllable composing until the next key, so waiting
+        // for compositionend would skip the save that keeps a note when the window
+        // closes or a redraw replaces the row. Closing still waits for it.
+        if (!commitAfterComposition) save(readValue());
+        return;
+      }
+      compositionFinishing = false;
+      if (commitAfterComposition) commit();
+      else save(readValue());
+    }, commitAfterComposition ? 0 : 500);
+  };
   // Save as you type as well as on commit: closing the window mid-edit should
   // not lose what was typed, and updateAnnotations is already flushed on unload.
-  input.addEventListener("input", () => {
-    const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES);
-    if (value !== input.value) input.value = value;
+  input.addEventListener("input", (event) => {
+    if (settled) return;
     window.clearTimeout(debounce);
-    debounce = window.setTimeout(() => save(value.trim()), 500);
+    const duringComposition = composing || event.isComposing;
+    if (!duringComposition) compositionFinishing = false;
+    readValue(duringComposition);
+    scheduleSave();
+  });
+  input.addEventListener("compositionstart", () => {
+    if (settled) return;
+    composing = true;
+    compositionFinishing = false;
+    window.clearTimeout(debounce);
+  });
+  input.addEventListener("compositionend", () => {
+    if (settled) return;
+    composing = false;
+    compositionFinishing = true;
+    // Some IMEs deliver their final input after compositionend. A pending blur
+    // must wait for it instead of saving the unfinished candidate or closing it.
+    scheduleSave();
   });
   input.addEventListener("keydown", (event) => {
     event.stopPropagation();
+    if (composing || event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter") {
       event.preventDefault();
       commit();
     } else if (event.key === "Escape") {
       event.preventDefault();
-      window.clearTimeout(debounce);
       restore();
     }
   });
@@ -22942,7 +23829,9 @@ async function flushPendingAnnotations(transactionId, options = {}) {
     saved = true;
     if (currentSessionId() !== sessionId) {
       return saved;
-    } else if (pending.get(transactionId) === entry) {
+    }
+    state.historyPaging.annotationMutationGeneration = (state.historyPaging.annotationMutationGeneration || 0) + 1;
+    if (pending.get(transactionId) === entry) {
       const index = getHistoryItemIndex(transactionId);
       if (index !== -1) {
         // A cleared field is omitted from the response rather than sent as null
@@ -23159,6 +24048,7 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.wsFrameContextMenu.classList.contains("hidden")) {
+    event.preventDefault();
     closeWsFrameContextMenu();
   }
 });
@@ -24658,17 +25548,23 @@ function mapTokenClass(legacyCls) {
 function extractTokenRanges(htmlStr, plainText) {
   const ranges = [];
   const tagRe = /<span class="([^"]+)">([^<]*)<\/span>/g;
+  const entities = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&#039;": "'", "&nbsp;": "\u00a0" };
+  const decodeText = (text) => text.replace(/&(?:amp|lt|gt|quot|#0?39|nbsp);/g, (entity) => entities[entity]);
   let m;
-  let searchFrom = 0;
+  let htmlOffset = 0;
+  let textOffset = 0;
   while ((m = tagRe.exec(htmlStr)) !== null) {
+    // Flat token spans share source coordinates with their unstyled gaps.
+    // Searching by token text can instead color an earlier duplicate substring.
+    textOffset += decodeText(htmlStr.slice(htmlOffset, m.index)).length;
+    const text = decodeText(m[2]);
+    const end = textOffset + text.length;
     const cls = mapTokenClass(m[1]);
-    if (!cls) continue;
-    const text = m[2].replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-    if (!text) continue;
-    const idx = plainText.indexOf(text, searchFrom);
-    if (idx === -1) continue;
-    ranges.push({ cls, from: idx, to: idx + text.length });
-    searchFrom = idx + text.length;
+    if (cls && text && plainText.slice(textOffset, end) === text) {
+      ranges.push({ cls, from: textOffset, to: end });
+    }
+    textOffset = end;
+    htmlOffset = tagRe.lastIndex;
   }
   return ranges;
 }
@@ -24755,7 +25651,7 @@ function buildHexDecorations(view) {
   const builder = [];
   let offset = 0;
   for (const line of text.split("\n")) {
-    if (line.length >= 10) {
+    if (/^[0-9a-f]{8}  /i.test(line)) {
       // offset column: "00000000" (8 chars), same as non-CM .hex-col-offset
       builder.push(CM.Decoration.mark({ class: "tok-hex-offset" }).range(offset, offset + 8));
       if (line.length > 10) {
@@ -24876,7 +25772,7 @@ function normalizeSearchEffectValue(value) {
   };
 }
 
-/** Build search highlight decorations. Returns { decos, matchCount, matchPositions }. */
+/** Build search highlight decorations and original-text navigation ranges. */
 function buildSearchDecorations(doc, query, activeIndex = -1, classes = CM_DEFAULT_SEARCH_CLASSES) {
   const searchClasses = normalizeSearchClasses(classes);
   if (!query) {
@@ -24887,27 +25783,26 @@ function buildSearchDecorations(doc, query, activeIndex = -1, classes = CM_DEFAU
       decos: CM.Decoration.none,
       matchCount: 0,
       matchPositions: [],
+      matchEnds: [],
     };
   }
   const text = doc.toString();
-  const lower = text.toLowerCase();
-  const lq = query.toLowerCase();
   const builder = [];
   const positions = [];
+  const ends = [];
   let matchCount = 0;
-  let pos = 0;
-  while ((pos = lower.indexOf(lq, pos)) !== -1) {
+  forEachCodeSearchMatch(text, query, (from, to) => {
     const matchIndex = matchCount;
     if (positions.length < CM_SEARCH_DECORATION_LIMIT) {
-      positions.push(pos);
+      positions.push(from);
+      ends.push(to);
     }
     if (matchIndex < CM_SEARCH_DECORATION_LIMIT) {
       const cls = matchIndex === activeIndex ? searchClasses.active : searchClasses.hit;
-      builder.push(CM.Decoration.mark({ class: cls }).range(pos, pos + lq.length));
+      builder.push(CM.Decoration.mark({ class: cls }).range(from, to));
     }
     matchCount += 1;
-    pos += 1;
-  }
+  });
   const safeActiveIndex = activeIndex >= 0 && activeIndex < positions.length ? activeIndex : -1;
   return {
     query,
@@ -24916,6 +25811,7 @@ function buildSearchDecorations(doc, query, activeIndex = -1, classes = CM_DEFAU
     decos: CM.Decoration.set(builder),
     matchCount,
     matchPositions: positions,
+    matchEnds: ends,
   };
 }
 
@@ -24980,6 +25876,7 @@ const searchDecoField = CM.StateField.define({
       decos: CM.Decoration.none,
       matchCount: 0,
       matchPositions: [],
+      matchEnds: [],
     };
   },
   update(value, tr) {
@@ -25129,7 +26026,7 @@ class SniperCodeView {
     const pos = field.matchPositions[this._searchNavIndex];
     this.view.dispatch({
       effects: setSearchActiveIndex.of(this._searchNavIndex),
-      selection: { anchor: pos, head: pos + field.query.length },
+      selection: { anchor: pos, head: field.matchEnds[this._searchNavIndex] },
       scrollIntoView: true,
     });
     return this._searchNavIndex;

@@ -23,6 +23,7 @@ use crate::{
     certificate::{CertificateAuthority, CertificateExport},
     config::{AppConfig, StartupSettingsStore, StartupSettingsView},
     event_log::EventLevel,
+    saved_operations::SavedOperationLedger,
     session::{SessionContext, SessionRegistry, SessionSummary},
     ui_settings::AppUiSettingsStore,
     ws_replay::WsReplayStore,
@@ -82,6 +83,8 @@ pub struct AppState {
     pub startup: Arc<StartupSettingsStore>,
     pub ui_settings: Arc<AppUiSettingsStore>,
     pub sessions: Arc<SessionRegistry>,
+    /// Durable receipts for explicitly identified saved-data mutations.
+    pub saved_operations: Arc<SavedOperationLedger>,
     pub proxy_online: Arc<AtomicBool>,
     proxy_listener_status: Arc<AtomicU64>,
     active_session: Arc<RwLock<Arc<SessionContext>>>,
@@ -167,6 +170,7 @@ impl AppState {
             MAX_WEBSOCKET_FRAMES_PER_SESSION,
         )?;
 
+        let saved_operations = Arc::new(SavedOperationLedger::new(&config.data_dir));
         let active_proxy_addr = config.proxy_addr;
         let active_ui_addr = config.ui_addr;
         let runtime_instance_id = uuid::Uuid::new_v4();
@@ -176,6 +180,7 @@ impl AppState {
             startup,
             ui_settings,
             sessions: Arc::new(sessions),
+            saved_operations,
             proxy_online: Arc::new(AtomicBool::new(false)),
             proxy_listener_status: Arc::new(AtomicU64::new(proxy_listener_status_word(0, false))),
             active_session: Arc::new(RwLock::new(active_session)),
@@ -459,6 +464,69 @@ impl AppState {
         }
     }
 
+    pub async fn rename_session(&self, id: uuid::Uuid, name: String) -> Result<SessionSummary> {
+        let state = self.clone();
+        // Once disk persistence starts, a disconnected requester must not cancel
+        // the cache update or release the session locks before the write finishes.
+        tokio::spawn(async move {
+            if !state.sessions.contains_session(id) {
+                anyhow::bail!("session {id} was not found");
+            }
+            let operation_lock = state.session_operation_lock(id).await;
+            let operation_guard = operation_lock.lock().await;
+            if !state.sessions.contains_session(id) {
+                drop(operation_guard);
+                state.remove_session_operation_lock(id).await;
+                anyhow::bail!("session {id} was not found");
+            }
+
+            let mut contexts = Vec::new();
+            let active = state.session().await;
+            if active.id() == id {
+                contexts.push(active);
+            }
+            for cache in [&state.session_contexts, &state.read_only_session_contexts] {
+                if let Some(context) = cache.lock().await.get(&id).cloned() {
+                    if !contexts
+                        .iter()
+                        .any(|current| Arc::ptr_eq(current, &context))
+                    {
+                        contexts.push(context);
+                    }
+                }
+            }
+            let mut mutation_guards = Vec::with_capacity(contexts.len());
+            for context in &contexts {
+                mutation_guards.push(context.mutation_guard().await);
+            }
+
+            let sessions = state.sessions.clone();
+            let renamed_contexts = contexts.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let metadata = sessions.rename_session(id, &name)?;
+                for context in renamed_contexts {
+                    context.apply_renamed_metadata(&metadata);
+                }
+                Ok(())
+            })
+            .await
+            .context("session rename writer panicked")??;
+
+            let mut summary = state
+                .sessions
+                .summaries()
+                .into_iter()
+                .find(|session| session.id == id)
+                .ok_or_else(|| anyhow::anyhow!("session {id} was not found"))?;
+            if let Some(context) = contexts.first() {
+                apply_live_session_counts(&mut summary, session_live_counts(context).await);
+            }
+            Ok(summary)
+        })
+        .await
+        .context("session rename task failed")?
+    }
+
     pub async fn activate_session(&self, id: uuid::Uuid) -> Result<SessionSummary> {
         self.activate_session_with_options(id, false).await
     }
@@ -694,6 +762,58 @@ impl AppState {
         }
         let metadata = session.persist_mutation_locked().await?;
         self.finalize_session_persist(session, metadata)
+    }
+
+    /// Deleting HTTP records is made durable by a journal tombstone, but their
+    /// bodies, headers and cookies stay in the session files, and a recent capture
+    /// in the journal, until those are rewritten. Clearing history is how someone
+    /// gets rid of captured credentials, so the rewrite happens now rather than at
+    /// the next save. If it fails the deletion still stands and the next save
+    /// purges the files; the event log says so instead of leaving it unseen.
+    pub async fn purge_deleted_transactions_mutation_locked(
+        &self,
+        session: &Arc<SessionContext>,
+    ) -> bool {
+        self.read_only_session_contexts
+            .lock()
+            .await
+            .remove(&session.id());
+        if !self.sessions.contains_session(session.id()) {
+            // Deleted meanwhile: its files go with it, and writing them now would
+            // bring them back.
+            return true;
+        }
+        let metadata = match session.persist_mutation_locked().await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    session_id = %session.id(),
+                    "deleted HTTP records are still in the session files until the next save"
+                );
+                session
+                    .event_log
+                    .push(
+                        EventLevel::Warn,
+                        "capture",
+                        "Deleted traffic still on disk",
+                        "The deleted records are gone from the history, but their data stays in the session files until the next save.",
+                    )
+                    .await;
+                return false;
+            }
+        };
+        // The traffic is off disk at this point. The session list's counts live in a
+        // separate file, so failing to update them must not be reported as the
+        // traffic still being there.
+        if let Err(error) = self.finalize_session_persist(session, metadata) {
+            tracing::warn!(
+                ?error,
+                session_id = %session.id(),
+                "deleted HTTP records were purged but the session list was not updated"
+            );
+        }
+        true
     }
 
     pub async fn replace_workspace_state_and_persist(
@@ -1137,12 +1257,12 @@ impl AppState {
                 return Err(error);
             }
         };
-        tx.send(UpdateProgress::step(&format!(
-            "Installer log: {}",
-            installer_log_path.display()
-        )))
-        .await
-        .ok();
+        // Where the log is belongs in the application log, not in the window: the
+        // person watching the update has no use for a path.
+        tracing::info!(
+            log = %installer_log_path.display(),
+            "starting the self-update installer"
+        );
 
         detach_update_targets(&detach_targets).await;
         artifact_guard.clear_detach_targets();
@@ -2903,6 +3023,300 @@ mod tests {
 
         assert_eq!(summary.last_opened_at, touched_last_opened_at);
 
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    fn rename_session_test_state() -> (std::path::PathBuf, AppState) {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-state-rename-{}", uuid::Uuid::new_v4()));
+        let state = AppState::new(AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 100,
+            max_transaction_entries: 100,
+            body_preview_bytes: 4096,
+            data_dir: data_dir.clone(),
+        })
+        .unwrap();
+        (data_dir, state)
+    }
+
+    #[tokio::test]
+    async fn rename_session_updates_active_context_and_survives_persist_and_restart() {
+        let (data_dir, state) = rename_session_test_state();
+        let context = state.session().await;
+        let before = state.active_session_summary().await;
+        let renamed = state
+            .rename_session(before.id, "  Renamed  ".to_owned())
+            .await
+            .unwrap();
+        assert!(renamed.active);
+        assert_eq!(renamed.name, "Renamed");
+        assert_eq!(renamed.storage_path, before.storage_path);
+        assert_eq!(renamed.created_at, before.created_at);
+        assert_eq!(renamed.last_opened_at, before.last_opened_at);
+        assert_eq!(context.summary(true).name, "Renamed");
+        assert_eq!(state.active_session_summary().await.name, "Renamed");
+        state.persist_active_session().await.unwrap();
+        assert_eq!(state.list_sessions().await[0].name, "Renamed");
+        let config = state.config.clone();
+        drop(context);
+        drop(state);
+
+        let reloaded = AppState::new(config).unwrap();
+        let summary = reloaded.active_session_summary().await;
+        assert_eq!(summary.id, before.id);
+        assert_eq!(summary.name, "Renamed");
+        assert_eq!(summary.storage_path, before.storage_path);
+        drop(reloaded);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn rename_session_updates_inactive_writable_and_read_only_caches() {
+        let (data_dir, state) = rename_session_test_state();
+        let original = state.session().await;
+        let second = state
+            .create_session(Some("Second".to_owned()))
+            .await
+            .unwrap();
+        let renamed = state
+            .rename_session(original.id(), "Writable".to_owned())
+            .await
+            .unwrap();
+        assert!(!renamed.active);
+        assert_eq!(original.summary(false).name, "Writable");
+        assert!(std::sync::Arc::ptr_eq(
+            &original,
+            &state.session_context_for_id(original.id()).await.unwrap()
+        ));
+        state.persist_session_context(&original).await.unwrap();
+        state.session_contexts.lock().await.remove(&original.id());
+        let read_only = state
+            .read_session_context_for_id(original.id())
+            .await
+            .unwrap();
+        state
+            .rename_session(original.id(), "Read only".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(read_only.summary(false).name, "Read only");
+        assert!(std::sync::Arc::ptr_eq(
+            &read_only,
+            &state
+                .read_session_context_for_id(original.id())
+                .await
+                .unwrap()
+        ));
+        assert_eq!(state.active_session_summary().await.id, second.id);
+        assert_eq!(
+            state.activate_session(original.id()).await.unwrap().name,
+            "Read only"
+        );
+        state.persist_active_session().await.unwrap();
+        assert_eq!(state.active_session_summary().await.name, "Read only");
+        drop(original);
+        drop(read_only);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn rename_session_does_not_load_uncached_inactive_storage() {
+        let (data_dir, state) = rename_session_test_state();
+        let active_id = state.active_session_summary().await.id;
+        let inactive = state
+            .sessions
+            .create_session(Some("Inactive".to_owned()))
+            .unwrap();
+        let storage = state.session_storage_path(inactive.id).unwrap();
+        let snapshot = std::fs::read(storage.join("snapshot.json")).unwrap();
+        let renamed = state
+            .rename_session(inactive.id, "Saved".to_owned())
+            .await
+            .unwrap();
+        assert!(!renamed.active);
+        assert_eq!(renamed.name, "Saved");
+        assert_eq!(renamed.last_opened_at, inactive.last_opened_at);
+        assert!(!state
+            .session_contexts
+            .lock()
+            .await
+            .contains_key(&inactive.id));
+        assert!(!state
+            .read_only_session_contexts
+            .lock()
+            .await
+            .contains_key(&inactive.id));
+        assert_eq!(
+            std::fs::read(storage.join("snapshot.json")).unwrap(),
+            snapshot
+        );
+        assert_eq!(std::fs::read_dir(&storage).unwrap().count(), 1);
+        assert_eq!(state.active_session_summary().await.id, active_id);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn rename_session_failed_persist_does_not_change_cached_metadata() {
+        let (data_dir, state) = rename_session_test_state();
+        let active = state.session().await;
+        let before = serde_json::to_value(active.summary(true)).unwrap();
+        let registry_path = data_dir.join("sessions/registry.json");
+        let backup = registry_path.with_extension("saved");
+        std::fs::rename(&registry_path, &backup).unwrap();
+        std::fs::create_dir(&registry_path).unwrap();
+        let error = state
+            .rename_session(active.id(), "Failed".to_owned())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("failed to rename"));
+        assert_eq!(serde_json::to_value(active.summary(true)).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(state.sessions.summaries()[0].clone()).unwrap(),
+            before
+        );
+        std::fs::remove_dir(&registry_path).unwrap();
+        std::fs::rename(backup, registry_path).unwrap();
+        assert_eq!(
+            state
+                .rename_session(active.id(), "Retried".to_owned())
+                .await
+                .unwrap()
+                .name,
+            "Retried"
+        );
+        drop(active);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn rename_session_waits_for_operation_and_context_mutation_locks() {
+        let (data_dir, state) = rename_session_test_state();
+        let active = state.session().await;
+        let operation_lock = state.session_operation_lock(active.id()).await;
+        let operation_guard = operation_lock.lock().await;
+        let mutation_guard = active.mutation_guard().await;
+        let mut rename = tokio::spawn({
+            let state = state.clone();
+            let id = active.id();
+            async move { state.rename_session(id, "After locks".to_owned()).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut rename)
+                .await
+                .is_err()
+        );
+        drop(operation_guard);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut rename)
+                .await
+                .is_err()
+        );
+        drop(mutation_guard);
+        let renamed = tokio::time::timeout(std::time::Duration::from_secs(2), rename)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.name, "After locks");
+        drop(active);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn rename_session_missing_id_does_not_create_operation_lock() {
+        let (data_dir, state) = rename_session_test_state();
+        let before = state.session_operation_lock_count().await;
+        let error = state
+            .rename_session(uuid::Uuid::new_v4(), "Missing".to_owned())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("was not found"));
+        assert_eq!(state.session_operation_lock_count().await, before);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn rename_session_finishes_coherently_after_request_cancellation() {
+        let (data_dir, state) = rename_session_test_state();
+        let active = state.session().await;
+        let operation_lock = state.session_operation_lock(active.id()).await;
+        let operation_guard = operation_lock.lock().await;
+        let mut request = tokio::spawn({
+            let state = state.clone();
+            let id = active.id();
+            async move {
+                state
+                    .rename_session(id, "After cancellation".to_owned())
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut request)
+                .await
+                .is_err()
+        );
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        drop(operation_guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if active.summary(true).name == "After cancellation" {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.list_sessions().await[0].name, "After cancellation");
+        state.persist_active_session().await.unwrap();
+        let config = state.config.clone();
+        drop(active);
+        drop(state);
+        let reloaded = AppState::new(config).unwrap();
+        assert_eq!(
+            reloaded.active_session_summary().await.name,
+            "After cancellation"
+        );
+        drop(reloaded);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn rename_session_prunes_lock_when_session_is_deleted_while_waiting() {
+        let (data_dir, state) = rename_session_test_state();
+        let inactive = state
+            .sessions
+            .create_session(Some("Inactive".to_owned()))
+            .unwrap();
+        let before = state.session_operation_lock_count().await;
+        let operation_lock = state.session_operation_lock(inactive.id).await;
+        let operation_guard = operation_lock.lock().await;
+        let mut rename = tokio::spawn({
+            let state = state.clone();
+            async move { state.rename_session(inactive.id, "Gone".to_owned()).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut rename)
+                .await
+                .is_err()
+        );
+        state.sessions.delete_session(inactive.id).unwrap();
+        drop(operation_guard);
+        assert!(rename
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("was not found"));
+        assert_eq!(state.session_operation_lock_count().await, before);
+        drop(state);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
