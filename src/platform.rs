@@ -175,6 +175,22 @@ pub fn running_process_path(pid: u32) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    struct TestDataDir(PathBuf);
+
+    impl TestDataDir {
+        fn new() -> Self {
+            let path = env::temp_dir().join(format!("sniper-platform-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDataDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn replaces_existing_file_and_syncs_directory() {
         let root = env::temp_dir()
@@ -202,6 +218,83 @@ mod tests {
         #[cfg(windows)]
         assert!(sync_directory(&target).is_err());
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn missing_replacement_source_preserves_existing_file() {
+        let root = TestDataDir::new();
+        let source = root.0.join("missing.tmp");
+        let target = root.0.join("settings.json");
+        fs::write(&target, b"old complete settings").unwrap();
+
+        assert!(rename(&source, &target).is_err());
+
+        assert_eq!(fs::read(&target).unwrap(), b"old complete settings");
+        assert!(!source.exists());
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn invalid_replacement_destination_preserves_both_files() {
+        let root = TestDataDir::new();
+        let source = root.0.join("settings.tmp");
+        let target = root.0.join("settings.json");
+        fs::write(&source, b"new complete settings").unwrap();
+        fs::write(&target, b"old complete settings").unwrap();
+
+        for destination in [
+            root.0.join("missing").join("settings.json"),
+            // A truncated NUL-terminated path would overwrite the existing file.
+            root.0.join("settings.json\0ignored"),
+        ] {
+            assert!(rename(&source, &destination).is_err());
+            assert_eq!(fs::read(&source).unwrap(), b"new complete settings");
+            assert_eq!(fs::read(&target).unwrap(), b"old complete settings");
+            assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn file_directory_replacement_conflicts_preserve_both() {
+        let root = TestDataDir::new();
+        let file = root.0.join("settings.json");
+        let directory = root.0.join("settings-directory");
+        fs::write(&file, b"complete settings").unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("marker"), b"keep directory contents").unwrap();
+
+        for (source, target) in [(&file, &directory), (&directory, &file)] {
+            assert!(rename(source, target).is_err());
+            assert_eq!(fs::read(&file).unwrap(), b"complete settings");
+            assert_eq!(
+                fs::read(directory.join("marker")).unwrap(),
+                b"keep directory contents"
+            );
+            assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+            assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn replaces_unicode_filenames_in_long_paths() {
+        let root = TestDataDir::new();
+        let mut directory = root.0.join("space 한글 😀");
+        for index in 0..4 {
+            directory = directory.join(format!("segment-{index}-{}", "a".repeat(60)));
+        }
+        fs::create_dir_all(&directory).unwrap();
+        assert!(directory.to_string_lossy().chars().count() > 260);
+        let source = directory.join("設定 e\u{301} 😀.tmp");
+        let target = directory.join("環境 설정 🐻.json");
+        fs::write(&source, b"new complete settings").unwrap();
+        fs::write(&target, b"old complete settings").unwrap();
+
+        rename(&source, &target).unwrap();
+        sync_directory(&directory).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new complete settings");
+        assert!(!source.exists());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
     }
 
     #[cfg(windows)]

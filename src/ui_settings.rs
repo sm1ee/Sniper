@@ -948,6 +948,114 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ui_settings_save_preserves_state_when_parent_is_blocked_then_recovers() {
+        let root = TestDataDir::new();
+        let data_dir = root.0.join("data");
+        let retained_dir = root.0.join("data-retained");
+        let store = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        let mut initial = store.snapshot().await;
+        initial.client_id = "synthetic-client".to_string();
+        initial.client_version = 1;
+        initial.display_settings.theme = "paper".to_string();
+        let current = store.replace_snapshot(initial).await.unwrap();
+        let current_json = serde_json::to_value(&current).unwrap();
+        let original = std::fs::read(data_dir.join(super::UI_SETTINGS_FILE)).unwrap();
+        let mut next = current.clone();
+        next.client_version += 1;
+        next.display_settings.theme = "black".to_string();
+
+        // A file in place of the parent gives a real, permission-independent error.
+        std::fs::rename(&data_dir, &retained_dir).unwrap();
+        std::fs::write(&data_dir, b"synthetic parent blocker").unwrap();
+        for save_browser_preference in [false, true] {
+            let error = if save_browser_preference {
+                store
+                    .set_browser_preferred(Some("chrome".to_string()))
+                    .await
+                    .unwrap_err()
+            } else {
+                store.replace_snapshot(next.clone()).await.unwrap_err()
+            };
+            assert!(error
+                .to_string()
+                .contains("failed to create ui settings directory"));
+            assert_eq!(
+                serde_json::to_value(store.snapshot().await).unwrap(),
+                current_json
+            );
+            assert_eq!(
+                std::fs::read(retained_dir.join(super::UI_SETTINGS_FILE)).unwrap(),
+                original
+            );
+            assert_eq!(
+                std::fs::read(&data_dir).unwrap(),
+                b"synthetic parent blocker"
+            );
+            assert_eq!(
+                directory_entries(&retained_dir),
+                vec![super::UI_SETTINGS_FILE]
+            );
+            assert_eq!(directory_entries(&root.0), vec!["data", "data-retained"]);
+        }
+
+        std::fs::remove_file(&data_dir).unwrap();
+        std::fs::rename(&retained_dir, &data_dir).unwrap();
+        let saved = store.replace_snapshot(next).await.unwrap();
+        assert_eq!(saved.display_settings.theme, "black");
+        assert_eq!(saved.client_version, current.client_version + 1);
+        assert_eq!(saved.server_revision, current.server_revision + 1);
+        assert_eq!(
+            store
+                .set_browser_preferred(Some("chrome".to_string()))
+                .await
+                .unwrap(),
+            Some("chrome".to_string())
+        );
+        let saved = store.snapshot().await;
+        assert_eq!(saved.server_revision, current.server_revision + 1);
+        let reloaded = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        assert_eq!(
+            serde_json::to_value(reloaded.snapshot().await).unwrap(),
+            serde_json::to_value(saved).unwrap()
+        );
+        assert_eq!(directory_entries(&data_dir), vec![super::UI_SETTINGS_FILE]);
+    }
+
+    #[tokio::test]
+    async fn ui_settings_replace_with_open_reader_preserves_old_bytes_and_reloads_new_state() {
+        use std::io::Read;
+
+        let root = TestDataDir::new();
+        let data_dir = root.0.join("settings 한글 😀");
+        let store = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+        let path = data_dir.join(super::UI_SETTINGS_FILE);
+        let original = std::fs::read(&path).unwrap();
+        let mut reader = std::fs::File::open(&path).unwrap();
+
+        for (index, theme) in ["paper", "black", "ivory"].into_iter().enumerate() {
+            let mut next = store.snapshot().await;
+            next.client_id = "synthetic-client".to_string();
+            next.client_version = index as u64 + 1;
+            next.display_settings.theme = theme.to_string();
+            let saved = store.replace_snapshot(next).await.unwrap();
+            assert_eq!(saved.display_settings.theme, theme);
+            assert_eq!(saved.server_revision, index as u64 + 1);
+            let reloaded = AppUiSettingsStore::load_or_create(&data_dir).unwrap();
+            assert_eq!(
+                serde_json::to_value(reloaded.snapshot().await).unwrap(),
+                serde_json::to_value(saved).unwrap()
+            );
+            assert_eq!(directory_entries(&data_dir), vec![super::UI_SETTINGS_FILE]);
+        }
+
+        let mut retained = Vec::new();
+        reader.read_to_end(&mut retained).unwrap();
+        assert_eq!(retained, original);
+        assert_ne!(std::fs::read(&path).unwrap(), original);
+        drop(reader);
+    }
+
     #[test]
     fn ui_settings_backup_failure_hook_is_path_scoped_and_released_on_drop() {
         let data_dir = TestDataDir::new();
