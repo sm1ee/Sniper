@@ -551,6 +551,7 @@ let _historyDetailGeneration = 0;
 let _historyDetailLoadingTimer = null;
 let _websocketLoadGeneration = 0;
 let _websocketDetailGeneration = 0;
+let _eventLogLoadGeneration = 0;
 let _eventLogMutationGeneration = 0;
 let _eventLogClearGeneration = 0;
 let _websocketDetailPendingId = null;
@@ -911,8 +912,8 @@ const els = {
 };
 
 const mainTabs = Array.from(document.querySelectorAll(".main-tab"));
-const proxyTabs = Array.from(document.querySelectorAll(".sub-tab"));
-const viewTabs = Array.from(document.querySelectorAll(".view-tab"));
+const proxyTabs = Array.from(document.querySelectorAll(".sub-tab[data-proxy-tab]"));
+const viewTabs = Array.from(document.querySelectorAll(".view-tab[data-target][data-view]"));
 const railTabs = Array.from(document.querySelectorAll(".rail-tab"));
 const sectionToggles = Array.from(document.querySelectorAll(".section-toggle"));
 let sortHeaders = Array.from(document.querySelectorAll(".sort-header"));
@@ -1018,7 +1019,9 @@ async function init() {
   const aclInit = document.getElementById("proxySettingAutoContentLength");
   if (aclInit) aclInit.checked = localStorage.getItem("sniper_auto_content_length") !== "false";
   await loadUiSettings();
-  hydrateDisplaySettingsForm();
+  if (!isModalVisible(els.displaySettingsModal)) {
+    hydrateDisplaySettingsForm();
+  }
   await loadSessions();
   await loadSettings();
   const shouldLoadInitialHttpHistory = isHttpHistoryVisible();
@@ -1359,6 +1362,7 @@ function bindEvents() {
     if (!row || !els.websocketTableBody.contains(row)) {
       return;
     }
+    state._websocketSelectionGeneration = (state._websocketSelectionGeneration || 0) + 1;
     state.wsKeyboardFocus = "sessions";
     if (
       state.selectedWebsocketId === row.dataset.id
@@ -1613,8 +1617,12 @@ function bindEvents() {
   onClickWithProgress(els.openCertFolderButton, () => openCertificateFolder());
   onClickWithProgress(els.openEventLogButton, async () => {
     setActiveTool("logger");
-    await loadEventLog();
     renderToolPanels();
+    try {
+      await loadEventLog();
+    } catch (error) {
+      showToast(error?.message || "Failed to load event log.", "error");
+    }
   });
   onClickWithProgress(els.dashboardReloadSessionsButton, () =>
     loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError));
@@ -2256,10 +2264,10 @@ function bindEvents() {
       // workspace shortcuts below.
       return;
     } else if (event.key === "Escape") {
+      if (event.defaultPrevented || event.isComposing) return;
       closeDisplaySettingsModal();
       closeCertificateModal();
       closeFilterModal();
-      return;
     }
 
     if (
@@ -2911,16 +2919,30 @@ async function performSelfUpdate() {
   }
 }
 
+let sessionsLoadGeneration = 0;
+let sessionsAppliedLoadGeneration = 0;
+
 async function loadSessions({ reloadOnActiveChange = false } = {}) {
-  const response = await fetch("/api/sessions");
-  await requireOkResponse(response, "Failed to load sessions.");
-  const sessions = await response.json();
-  if (!Array.isArray(sessions) || sessions.some((session) =>
-    !session || typeof session.id !== "string" || !session.id
-    || typeof session.name !== "string" || typeof session.active !== "boolean"
-  )) {
-    throw new Error("Invalid session list response. Reload to try again.");
+  const generation = ++sessionsLoadGeneration;
+  let sessions;
+  try {
+    const response = await fetch("/api/sessions");
+    await requireOkResponse(response, "Failed to load sessions.");
+    sessions = await response.json();
+    if (!Array.isArray(sessions) || sessions.some((session) =>
+      !session || typeof session.id !== "string" || !session.id
+      || typeof session.name !== "string" || typeof session.active !== "boolean"
+    )) {
+      throw new Error("Invalid session list response. Reload to try again.");
+    }
+  } catch (error) {
+    if (generation < sessionsAppliedLoadGeneration) return;
+    throw error;
   }
+  // Awaited startup/workspace reads still supply data while a refresh is pending.
+  // Only an already accepted newer list can supersede this read.
+  if (generation < sessionsAppliedLoadGeneration) return;
+  sessionsAppliedLoadGeneration = generation;
   const previousActiveSessionId = currentSessionId();
   const nextActiveSession = sessions.find((session) => session.active) || sessions[0] || null;
   if (
@@ -4576,7 +4598,7 @@ function resetSessionScopedUiState() {
   _websocketSummaryEventBuffer.clear();
   _lastWebsocketFallbackPoll = Date.now();
   _lastWebsocketPageRefreshAt = 0;
-  state.eventLog = [];
+  resetEventLogUiState();
   state.matchReplaceRules = [];
   state.selectedMatchReplaceRuleId = null;
   state.matchReplaceDirty = false;
@@ -5216,6 +5238,7 @@ function canReuseSelectedHistoryRecord(id) {
 }
 
 async function selectHistoryTransaction(id, options = {}) {
+  state._historySelectionGeneration = (state._historySelectionGeneration || 0) + 1;
   const nextId = id ?? null;
   if (nextId && state.selectedId === nextId && canReuseSelectedHistoryRecord(nextId)) {
     updateHistorySelection(nextId);
@@ -5743,6 +5766,8 @@ async function loadMoreWebsockets() {
   const previousCount = (state.websocketSessions || []).length;
   const nextOffset = Math.max(0, Number(paging.loadedOffset ?? paging.limit ?? state.websocketSessions.length) || 0);
   const queryState = createWebsocketQueryState();
+  const querySignature = websocketQuerySignature(queryState);
+  const sessionId = currentSessionId();
   if (
     !websocketCursorPagingEnabled(queryState)
     && Number(paging.summaryMutationGeneration ?? 0) !== _websocketSummaryMutationGeneration
@@ -5757,7 +5782,13 @@ async function loadMoreWebsockets() {
     return 0;
   }
   state.websocketPaging = { ...paging, offset: nextOffset, afterId: nextAfterId };
-  await loadWebsockets(true, { append: true, offset: nextOffset, afterId: nextAfterId });
+  const loading = loadWebsockets(true, { append: true, offset: nextOffset, afterId: nextAfterId });
+  const generation = _websocketLoadGeneration;
+  await loading;
+  // A superseding full read can grow the list too; only count this append.
+  if (generation !== _websocketLoadGeneration
+    || sessionId !== currentSessionId()
+    || querySignature !== websocketQuerySignature()) return 0;
   return Math.max(0, (state.websocketSessions || []).length - previousCount);
 }
 
@@ -5849,6 +5880,7 @@ function clearWebsocketSearchReload() {
 }
 
 function clearWebsocketSelectionPreview(options = {}) {
+  state._websocketSelectionGeneration = (state._websocketSelectionGeneration || 0) + 1;
   state.selectedWebsocketId = null;
   state.selectedFrameIdx = null;
   state.selectedWebsocketRecord = null;
@@ -6072,6 +6104,7 @@ function mergeWebsocketAppendPage(pageItems, currentItems, mutationGenerationAtR
 }
 
 function normalizeWebsocketFrameIndex(value) {
+  if (value == null) return null;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
 }
@@ -6319,7 +6352,17 @@ async function loadWebsocketDetail(id, options = {}) {
     state.selectedWebsocketDetailError = "";
     cancelWebsocketDetailLoading();
     renderWebsocketSessions();
-  })();
+  })().catch(() => {
+    if (
+      generation !== _websocketDetailGeneration
+      || sessionId !== currentSessionId()
+      || state.selectedWebsocketId !== id
+    ) return;
+    state.selectedWebsocketRecord = null;
+    state.selectedWebsocketDetailError = "Failed to load selected WebSocket session.";
+    cancelWebsocketDetailLoading();
+    renderWebsocketSessions();
+  });
   _websocketDetailPendingId = id;
   _websocketDetailPendingSessionId = sessionId;
   _websocketDetailPendingPromise = pending;
@@ -6533,10 +6576,16 @@ async function loadOlderWebsocketFrames() {
 
   const sessionId = currentSessionId();
   const generation = _websocketDetailGeneration;
+  const loadToken = {};
+  const isCurrent = () => generation === _websocketDetailGeneration
+    && sessionId === currentSessionId()
+    && state.selectedWebsocketId === id
+    && state.selectedWebsocketRecord?._olderFramesLoadToken === loadToken;
   const shell = websocketFramesShell();
   const previousScrollHeight = shell?.scrollHeight || 0;
   const previousScrollTop = shell?.scrollTop || 0;
   const newestAnchorFrameIndexes = newestWebsocketFrameIndexes(frames, WEBSOCKET_DETAIL_FRAME_LIMIT);
+  session._olderFramesLoadToken = loadToken;
   session.older_frames_loading = true;
   renderWebsocketFrameTable();
 
@@ -6544,17 +6593,12 @@ async function loadOlderWebsocketFrames() {
     const response = await fetch(websocketDetailRequestPath(id, sessionId, {
       beforeIndex: firstLoadedFrameIndex,
     }));
-    if (
-      generation !== _websocketDetailGeneration
-      || sessionId !== currentSessionId()
-      || state.selectedWebsocketId !== id
-    ) {
-      return;
-    }
+    if (!isCurrent()) return;
     if (!response.ok) {
       throw new Error(await response.text().catch(() => "Failed to load older WebSocket frames."));
     }
     const detail = await response.json();
+    if (!isCurrent()) return;
     const incomingFrames = normalizeWebsocketFrames(detail.frames)
       .filter((frame) => frame.index < firstLoadedFrameIndex);
     const current = state.selectedWebsocketRecord;
@@ -6589,6 +6633,7 @@ async function loadOlderWebsocketFrames() {
       shell.scrollTop = previousScrollTop + Math.max(0, nextScrollHeight - previousScrollHeight);
     }
   } catch (error) {
+    if (!isCurrent()) return;
     const current = state.selectedWebsocketRecord;
     if (current?.id === id) {
       current.older_frames_loading = false;
@@ -6596,6 +6641,22 @@ async function loadOlderWebsocketFrames() {
     }
     console.error("Failed to load older WebSocket frames:", error);
     showToast(error?.message || "Failed to load older WebSocket frames.", "error");
+  } finally {
+    // Summary-only clones keep this token; a newer detail/page owns a different
+    // loading state. A failed superseding detail read must still allow retries.
+    const finishLoading = (record) => {
+      if (record?._olderFramesLoadToken !== loadToken) return false;
+      const wasLoading = record.older_frames_loading;
+      record.older_frames_loading = false;
+      delete record._olderFramesLoadToken;
+      return wasLoading;
+    };
+    const current = state.selectedWebsocketRecord;
+    const shouldRender = finishLoading(current);
+    if (current !== session) finishLoading(session);
+    if (shouldRender && sessionId === currentSessionId() && state.selectedWebsocketId === id) {
+      renderWebsocketFrameTable();
+    }
   }
 }
 
@@ -6691,23 +6752,33 @@ function scheduleVisibleWebsocketSelectionSync(options = {}) {
   }, 100);
 }
 
+function resetEventLogUiState() {
+  _eventLogLoadGeneration += 1;
+  state.eventLog = [];
+}
+
 async function loadEventLog() {
   const sessionId = currentSessionId();
+  const loadGeneration = ++_eventLogLoadGeneration;
   const mutationGeneration = _eventLogMutationGeneration;
   const clearGeneration = _eventLogClearGeneration;
-  const response = await fetch(sessionQueryPath(`/api/event-log?limit=${EVENT_LOG_LIMIT}`, sessionId));
-  await requireOkResponse(response, "Failed to load event log.");
-  const entries = jsonArray(await response.json());
-  if (sessionId !== currentSessionId()) {
-    return;
+  const isCurrent = () => sessionId === currentSessionId()
+    && loadGeneration === _eventLogLoadGeneration
+    && clearGeneration === _eventLogClearGeneration;
+  try {
+    const response = await fetch(sessionQueryPath(`/api/event-log?limit=${EVENT_LOG_LIMIT}`, sessionId));
+    if (!isCurrent()) return;
+    await requireOkResponse(response, "Failed to load event log.");
+    const entries = jsonArray(await response.json());
+    if (!isCurrent()) return;
+    state.eventLog = mutationGeneration === _eventLogMutationGeneration
+      ? entries.slice(0, EVENT_LOG_LIMIT)
+      : mergeEventLogEntries(state.eventLog, entries);
+    renderEventLog();
+  } catch (error) {
+    if (!isCurrent()) return;
+    throw error;
   }
-  if (clearGeneration !== _eventLogClearGeneration) {
-    return;
-  }
-  state.eventLog = mutationGeneration === _eventLogMutationGeneration
-    ? entries.slice(0, EVENT_LOG_LIMIT)
-    : mergeEventLogEntries(state.eventLog, entries);
-  renderEventLog();
 }
 
 function applyEventLogEvent(event) {
@@ -7103,6 +7174,7 @@ function scheduleRefresh(options = {}) {
 }
 
 function clearHttpHistorySelectionPreview() {
+  state._historySelectionGeneration = (state._historySelectionGeneration || 0) + 1;
   if (!state.selectedId && !state.selectedRecord) {
     return;
   }
@@ -7971,8 +8043,8 @@ function renderDashboard() {
   }
   const current = state.sessions.find((s) => s.id === state.selectedSessionId) || activeSession;
   els.dashboardCurrentSessionName.textContent = current?.name || "No active session";
-  const isActive = current?.active || current?.id === activeSession?.id;
-  els.dashboardCurrentSessionStatus.textContent = isActive ? "Active" : "Stored";
+  const isActive = Boolean(current && (current.active || current.id === activeSession?.id));
+  els.dashboardCurrentSessionStatus.textContent = current ? (isActive ? "Active" : "Stored") : "No session";
   els.dashboardCurrentSessionStatus.className = `detail-chip ${isActive ? "active-badge" : "none"}`;
   els.dashboardCurrentSessionPath.textContent = current?.storage_path || "No storage path";
   els.dashboardCurrentSessionRequests.textContent =
@@ -8644,7 +8716,8 @@ function renderFindingsVirtual() {
 
   const viewportHeight = shell.clientHeight;
   const totalCount = entries.length;
-  const maxScrollTop = Math.max(0, totalCount * FINDINGS_ROW_HEIGHT - viewportHeight);
+  const headerHeight = els.findingsBody.closest("table")?.tHead?.getBoundingClientRect().height || 0;
+  const maxScrollTop = Math.max(0, headerHeight + totalCount * FINDINGS_ROW_HEIGHT - viewportHeight);
   const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
   if (shell.scrollTop !== scrollTop) {
     shell.scrollTop = scrollTop;
@@ -9020,6 +9093,7 @@ function extractFindingKeywords(finding) {
 }
 
 function jumpToTransaction(recordId) {
+  state._historySelectionGeneration = (state._historySelectionGeneration || 0) + 1;
   setActiveTool("proxy");
   setActiveProxyTab("http-history");
   const hadRenderedDetail = Boolean(state.selectedRecord?.id);
@@ -9421,8 +9495,13 @@ function scrollFindingsToId(targetId) {
   const idx = entries.findIndex((f) => f.id === targetId);
   if (idx === -1) return;
   const shell = els.findingsBody.closest(".history-table-shell");
-  if (!shell) return;
-  shell.scrollTop = Math.max(0, idx * FINDINGS_ROW_HEIGHT - shell.clientHeight / 2);
+  if (!shell || shell.clientHeight <= 0) return;
+  const headerHeight = els.findingsBody.closest("table")?.tHead?.getBoundingClientRect().height || 0;
+  const rowTop = idx * FINDINGS_ROW_HEIGHT;
+  const centeredTop = Math.max(0, rowTop - shell.clientHeight / 2);
+  shell.scrollTop = shell.clientHeight >= headerHeight + FINDINGS_ROW_HEIGHT
+    ? Math.max(centeredTop, headerHeight + rowTop + FINDINGS_ROW_HEIGHT - shell.clientHeight)
+    : centeredTop;
 }
 
 function findingsArrowNav(direction) {
@@ -9443,9 +9522,10 @@ function findingsArrowNav(direction) {
 
   // Scroll into view
   const shell = els.findingsBody.closest(".history-table-shell");
-  if (shell) {
+  if (shell && shell.clientHeight > 0) {
+    const headerHeight = els.findingsBody.closest("table")?.tHead?.getBoundingClientRect().height || 0;
     const rowTop = nextIdx * FINDINGS_ROW_HEIGHT;
-    const rowBottom = rowTop + FINDINGS_ROW_HEIGHT;
+    const rowBottom = headerHeight + rowTop + FINDINGS_ROW_HEIGHT;
     const viewTop = shell.scrollTop;
     const viewBottom = viewTop + shell.clientHeight;
     if (rowTop < viewTop) {
@@ -9895,12 +9975,14 @@ function bindFindingsColumnResizers() {
 function initFindingsResizer() {
   const resizer = els.findingsDetailResizer;
   if (!resizer) return;
+  let finishResize = null;
 
   resizer.addEventListener("mousedown", (event) => {
     if (!els.findingsPanel || !els.findingsDetailPanel || resizer.classList.contains("hidden")) {
       return;
     }
 
+    finishResize?.();
     event.preventDefault();
     const tableShell = els.findingsPanel.querySelector(".history-table-shell");
     const start = {
@@ -9913,6 +9995,10 @@ function initFindingsResizer() {
     resizer.classList.add("active");
 
     const onMove = (moveEvent) => {
+      if (moveEvent.buttons === 0) {
+        onUp();
+        return;
+      }
       const delta = moveEvent.clientY - event.clientY;
       const nextDetail = Math.max(120, Math.min(start.detail - delta, combinedHeight - 60));
       const nextTable = combinedHeight - nextDetail;
@@ -9921,14 +10007,19 @@ function initFindingsResizer() {
     };
 
     const onUp = () => {
+      if (finishResize !== onUp) return;
+      finishResize = null;
       document.body.classList.remove("pane-resizing-y");
       resizer.classList.remove("active");
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
     };
 
+    finishResize = onUp;
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onUp);
   });
 }
 
@@ -10238,11 +10329,16 @@ function scrollHistoryToId(targetId) {
   if (idx === -1) return;
 
   const shell = els.historyTable.closest(".history-table-shell");
-  if (!shell) return;
+  if (!shell || shell.clientHeight <= 0) return;
 
-  // Scroll so that target row is near center of viewport
-  const targetTop = idx * (measuredHistoryRowHeight || HISTORY_ROW_HEIGHT);
-  shell.scrollTop = Math.max(0, targetTop - shell.clientHeight / 2);
+  const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
+  const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
+  const targetTop = idx * rowHeight;
+  const centeredTop = Math.max(0, targetTop - shell.clientHeight / 2);
+  // Keep the usual near-center position unless the sticky header clips the row.
+  shell.scrollTop = shell.clientHeight >= headerHeight + rowHeight
+    ? Math.max(centeredTop, headerHeight + targetTop + rowHeight - shell.clientHeight)
+    : centeredTop;
   renderHistoryVirtual();
 }
 
@@ -10260,8 +10356,11 @@ async function moveHistorySelection(offset) {
     && !state.historyPaging.loading
     && state.historyPaging.fullyLoaded !== true) {
     const selectedIdBeforeLoad = state.selectedId;
+    const selectionGeneration = state._historySelectionGeneration || 0;
     const added = await loadMoreTransactions();
-    if (added <= 0) return;
+    if (added <= 0
+      || state.selectedId !== selectedIdBeforeLoad
+      || (state._historySelectionGeneration || 0) !== selectionGeneration) return;
     visibleEntries = getVisibleEntries();
     const loadedIndex = visibleEntries.findIndex((entry) => entry.item.id === selectedIdBeforeLoad);
     const loadedNextId = loadedIndex >= 0 ? visibleEntries[loadedIndex + 1]?.item.id : null;
@@ -10275,8 +10374,11 @@ async function moveHistorySelection(offset) {
     && state.historyPaging?.trimmedHeadCount > 0
     && !state.historyPaging.loading) {
     const selectedIdBeforeLoad = state.selectedId;
+    const selectionGeneration = state._historySelectionGeneration || 0;
     const added = await loadNewerTransactions();
-    if (added <= 0) return;
+    if (added <= 0
+      || state.selectedId !== selectedIdBeforeLoad
+      || (state._historySelectionGeneration || 0) !== selectionGeneration) return;
     visibleEntries = getVisibleEntries();
     const loadedIndex = visibleEntries.findIndex((entry) => entry.item.id === selectedIdBeforeLoad);
     const loadedPreviousId = loadedIndex >= 0
@@ -10297,6 +10399,8 @@ async function moveHistorySelection(offset) {
     return;
   }
 
+  // A repeated boundary key must not cancel the page read already serving it.
+  if (state.historyPaging?.loading && nextId === state.selectedId) return;
   await selectHistoryTransaction(nextId, { scroll: true });
 }
 
@@ -10311,10 +10415,11 @@ function scrollSelectedHistoryRowIntoView() {
   const idx = state._historyEntries.findIndex((e) => e.item.id === state.selectedId);
   if (idx === -1) return;
   const shell = els.historyTable.closest(".history-table-shell");
-  if (!shell) return;
+  if (!shell || shell.clientHeight <= 0) return;
   const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
+  const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
   const rowTop = idx * rowHeight;
-  const rowBottom = rowTop + rowHeight;
+  const rowBottom = headerHeight + rowTop + rowHeight;
   const viewTop = shell.scrollTop;
   const viewBottom = viewTop + shell.clientHeight;
   if (rowTop < viewTop) {
@@ -10339,8 +10444,11 @@ async function moveWebsocketSelection(offset) {
     && !state.websocketPaging.loading
   ) {
     const selectedIdBeforeLoad = state.selectedWebsocketId;
+    const selectionGeneration = state._websocketSelectionGeneration || 0;
     const added = await loadMoreWebsockets();
-    if (added <= 0) return;
+    if (added <= 0
+      || state.selectedWebsocketId !== selectedIdBeforeLoad
+      || (state._websocketSelectionGeneration || 0) !== selectionGeneration) return;
     sortedEntries = getSortedWebsocketEntries();
     const loadedIndex = sortedEntries.findIndex(({ session }) => session.id === selectedIdBeforeLoad);
     const loadedNextId = loadedIndex >= 0 ? sortedEntries[loadedIndex + 1]?.session?.id : null;
@@ -10357,12 +10465,15 @@ async function moveWebsocketSelection(offset) {
   const nextId = sortedEntries[nextIndex]?.session?.id;
   if (!nextId) return;
 
+  // A repeated boundary key must not cancel the page read already serving it.
+  if (state.websocketPaging?.loading && nextId === state.selectedWebsocketId) return;
   await selectWebsocketSession(nextId, { scroll: true });
 }
 
 async function selectWebsocketSession(id, options = {}) {
   const nextId = id ?? null;
   if (!nextId) return;
+  state._websocketSelectionGeneration = (state._websocketSelectionGeneration || 0) + 1;
 
   const hadRenderedWebsocketDetail = Boolean(state.selectedWebsocketRecord?.id);
   if (state.selectedWebsocketId !== nextId) {
@@ -10405,19 +10516,24 @@ function ensureWebsocketSessionInView(targetId, sortedEntries = getSortedWebsock
   if (!targetId) return false;
   const idx = sortedEntries.findIndex(({ session }) => session.id === targetId);
   if (idx === -1) return false;
-  const shell = document.querySelector("#websocketTable")?.closest(".history-table-shell");
-  if (!shell) return false;
-  if (sortedEntries.length <= WEBSOCKET_MAX_RENDERED_SESSION_ROWS) {
+  const table = document.querySelector("#websocketTable");
+  const shell = table?.closest(".history-table-shell");
+  if (!shell || shell.clientHeight <= 0) return false;
+  const rowHeight = measuredWebsocketSessionRowHeight || WEBSOCKET_SESSION_ROW_HEIGHT;
+  const headerHeight = table.tHead?.getBoundingClientRect().height || 0;
+  if (headerHeight + sortedEntries.length * rowHeight <= shell.clientHeight) {
     shell.scrollTop = 0;
     return true;
   }
-  const rowHeight = measuredWebsocketSessionRowHeight || WEBSOCKET_SESSION_ROW_HEIGHT;
   const rowTop = idx * rowHeight;
-  const rowBottom = rowTop + rowHeight;
+  const rowBottom = headerHeight + rowTop + rowHeight;
   const viewTop = shell.scrollTop;
   const viewBottom = viewTop + shell.clientHeight;
   if (options.center) {
-    shell.scrollTop = Math.max(0, rowTop - shell.clientHeight / 2);
+    const centeredTop = Math.max(0, rowTop - shell.clientHeight / 2);
+    shell.scrollTop = shell.clientHeight >= headerHeight + rowHeight
+      ? Math.max(centeredTop, rowBottom - shell.clientHeight)
+      : centeredTop;
     return true;
   }
   if (rowTop < viewTop) {
@@ -11291,7 +11407,7 @@ function renderWebsocketSessions(options = {}) {
   renderWebsocketFrameTable();
 }
 
-function renderWebsocketFrameTable() {
+function renderWebsocketFrameTable(options = {}) {
   const session = state.selectedWebsocketRecord;
   if (!session) return;
 
@@ -11323,10 +11439,20 @@ function renderWebsocketFrameTable() {
       : "",
   ].filter(Boolean).join(", ");
   const hasFrameWindowNotice = (session.frames_truncated || olderFrameCount > 0) && olderFrameCount > 0;
+  const frameShell = websocketFramesShell();
+  // Keep the numeric intent: an estimated clamp or an older DOM can lose it.
+  const intendedScrollTop = Number.isFinite(options.scrollTop) ? options.scrollTop : frameShell?.scrollTop;
+  const existingNoticeHeight = hasFrameWindowNotice
+    ? els.websocketFramesBody.querySelector(".ws-frame-window-row")?.getBoundingClientRect().height || 0
+    : 0;
+  const leadingHeight = hasFrameWindowNotice
+    ? (existingNoticeHeight > 0 && Number.isFinite(existingNoticeHeight)
+      ? existingNoticeHeight
+      : (measuredWebsocketFrameRowHeight || WEBSOCKET_FRAME_ROW_HEIGHT))
+    : 0;
   const frameWindow = websocketRenderedFrameWindow(frames, {
-    leadingHeight: hasFrameWindowNotice
-      ? (measuredWebsocketFrameRowHeight || WEBSOCKET_FRAME_ROW_HEIGHT)
-      : 0,
+    leadingHeight,
+    scrollTop: intendedScrollTop,
   });
   const renderedFrames = frameWindow.renderedFrames;
   const framePositions = new Map(frames.map((frame, index) => {
@@ -11374,11 +11500,23 @@ function renderWebsocketFrameTable() {
         </tr>
       `;
 
+  // Corrected spacers must exist before a scroll container can accept this offset.
+  if (frameShell?.clientHeight > 0 && Number.isFinite(frameWindow.scrollTop)
+    && frameShell.scrollTop !== frameWindow.scrollTop) {
+    frameShell.scrollTop = frameWindow.scrollTop;
+  }
   const measuredRow = els.websocketFramesBody.querySelector(".history-row");
   const measured = measuredRow?.getBoundingClientRect().height || 0;
-  if (measured > 0 && Math.abs(measured - measuredWebsocketFrameRowHeight) >= 1) {
-    measuredWebsocketFrameRowHeight = measured;
-    renderWebsocketFrameTable();
+  const rowHeightChanged = measured > 0 && Math.abs(measured - measuredWebsocketFrameRowHeight) >= 1;
+  if (rowHeightChanged) measuredWebsocketFrameRowHeight = measured;
+  const measuredNoticeHeight = hasFrameWindowNotice
+    ? els.websocketFramesBody.querySelector(".ws-frame-window-row")?.getBoundingClientRect().height || 0
+    : 0;
+  const noticeHeightChanged = measuredNoticeHeight > 0 && Number.isFinite(measuredNoticeHeight)
+    && measuredNoticeHeight !== leadingHeight;
+  // One measured correction is enough for stable geometry; never loop on changing bounds.
+  if (!options.remeasured && (rowHeightChanged || noticeHeightChanged)) {
+    renderWebsocketFrameTable({ remeasured: true, scrollTop: intendedScrollTop });
   }
 }
 
@@ -11500,18 +11638,22 @@ function resetWebsocketFrameScroll() {
 
 function ensureWebsocketFramePositionInView(position, options = {}) {
   const shell = websocketFramesShell();
-  if (!shell || !Number.isFinite(position) || position < 0) {
+  if (!shell || shell.clientHeight <= 0 || !Number.isFinite(position) || position < 0) {
     return false;
   }
   const rowHeight = measuredWebsocketFrameRowHeight || WEBSOCKET_FRAME_ROW_HEIGHT;
+  const headerHeight = els.websocketFramesBody?.closest("table")?.tHead?.getBoundingClientRect().height || 0;
   const noticeRow = els.websocketFramesBody?.querySelector(".ws-frame-window-row") || null;
   const leadingHeight = noticeRow?.getBoundingClientRect().height || 0;
   const rowTop = leadingHeight + position * rowHeight;
-  const rowBottom = rowTop + rowHeight;
+  const rowBottom = headerHeight + rowTop + rowHeight;
   const viewTop = shell.scrollTop;
   const viewBottom = viewTop + shell.clientHeight;
   if (options.center) {
-    shell.scrollTop = Math.max(0, rowTop - shell.clientHeight / 2);
+    const centeredTop = Math.max(0, rowTop - shell.clientHeight / 2);
+    shell.scrollTop = shell.clientHeight >= headerHeight + rowHeight
+      ? Math.max(centeredTop, rowBottom - shell.clientHeight)
+      : centeredTop;
     return true;
   }
   if (rowTop < viewTop) {
@@ -11550,8 +11692,9 @@ function websocketRenderedFrameWindow(frames, options = {}) {
   const viewportHeight = shell.clientHeight || rowHeight * WEBSOCKET_MAX_RENDERED_FRAME_ROWS;
   const headerHeight = els.websocketFramesBody?.closest("table")?.tHead?.getBoundingClientRect().height || 0;
   const maxScrollTop = Math.max(0, headerHeight + leadingHeight + frames.length * rowHeight - viewportHeight);
-  const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
-  if (shell.scrollTop !== scrollTop) {
+  const requestedScrollTop = Number.isFinite(options.scrollTop) ? options.scrollTop : shell.scrollTop;
+  const scrollTop = Math.min(requestedScrollTop, maxScrollTop);
+  if (shell.clientHeight > 0 && shell.scrollTop !== scrollTop) {
     shell.scrollTop = scrollTop;
   }
   const frameScrollTop = Math.max(0, scrollTop - leadingHeight);
@@ -11565,6 +11708,7 @@ function websocketRenderedFrameWindow(frames, options = {}) {
   }
   return {
     renderedFrames: frames.slice(startIdx, endIdx),
+    scrollTop,
     startIdx,
     endIdx,
     topPadding: startIdx * rowHeight,
@@ -12937,7 +13081,7 @@ function renderFuzzerDetailPanes(record) {
     const fakeMsg = { content_type: record.request?.content_type };
     reqText = prettyFormat(rawReq, fakeMsg);
   } else if (reqMode === "hex") {
-    reqText = toHexDump(rawReq);
+    reqText = buildMessageHexPresentation("request", record, rawReq);
   }
   const cmReqMode = reqMode === "hex" ? "hex" : "http";
   if (els.fuzzerDetailReqCM) {
@@ -12951,7 +13095,7 @@ function renderFuzzerDetailPanes(record) {
     if (resMode === "pretty") {
       resText = prettyFormat(rawRes, record.response);
     } else if (resMode === "hex") {
-      resText = toHexDump(rawRes);
+      resText = buildMessageHexPresentation("response", record, rawRes);
     }
     const cmResMode = resMode === "hex" ? "hex" : "http";
     if (els.fuzzerDetailResCM) {
@@ -14486,6 +14630,7 @@ function onBrowserMenuKeydown(event) {
   if (!browserMenu) return;
   const { anchor, element } = browserMenu;
   if (event.key === "Escape") {
+    event.preventDefault();
     closeBrowserMenu();
     anchor.focus();
     return;
@@ -14497,7 +14642,10 @@ function onBrowserMenuKeydown(event) {
   if (!controls.length) return;
   const at = controls.indexOf(document.activeElement);
   const step = event.key === "ArrowDown" ? 1 : -1;
-  controls[(at + step + controls.length) % controls.length].focus();
+  const next = at < 0
+    ? (step > 0 ? 0 : controls.length - 1)
+    : (at + step + controls.length) % controls.length;
+  controls[next].focus();
   event.preventDefault();
 }
 
@@ -14646,7 +14794,7 @@ async function readApiErrorMessage(response, fallbackMessage = "") {
     }
   }
   const message = await response.text().catch(() => "");
-  return message || fallbackMessage;
+  return message.trim() ? message : fallbackMessage;
 }
 
 function formatStructuredApiErrorMessage(payload) {
@@ -17375,9 +17523,8 @@ function selectSettingsTab(name) {
 }
 
 function openDisplaySettingsModal() {
-  if (!isModalVisible(els.displaySettingsModal)) {
-    displaySettingsReturnFocus = document.activeElement;
-  }
+  if (isModalVisible(els.displaySettingsModal)) return;
+  displaySettingsReturnFocus = document.activeElement;
   hydrateDisplaySettingsForm();
   applyDisplaySettingsState();
   renderShortcutReference();
@@ -17987,7 +18134,11 @@ function applyUiSettingsSnapshot(snapshot) {
   syncHttpCapturePill();
   document.getElementById("wsInScopeOnly")?.classList.toggle("active", state.websocketInScopeOnly);
   document.getElementById("wsHideClosed")?.classList.toggle("active", state.websocketLiveOnly);
-  applyDisplaySettingsState();
+  if (isModalVisible(els.displaySettingsModal) && displaySettingsPreviewActive) {
+    previewDisplaySettingsFromForm();
+  } else {
+    applyDisplaySettingsState();
+  }
   renderHistoryHeader();
   applyHistoryColumnWidths();
   applyWsColumnWidths();
@@ -18079,27 +18230,33 @@ async function persistUiSettings() {
         const payloadSnapshot = nextUiSettingsSnapshot();
         const payload = JSON.stringify(payloadSnapshot);
         lastUiSettingsPayload = payload;
-        let response;
+        let savedSnapshot;
         try {
-          response = await fetch("/api/ui-settings", {
+          const response = await fetch("/api/ui-settings", {
             method: "POST",
             headers: {
               "content-type": "application/json",
             },
             body: payload,
           });
+          if (!response.ok) {
+            throw new Error(await response.text());
+          }
+          savedSnapshot = await response.json();
+          if (!savedSnapshot || typeof savedSnapshot !== "object" || Array.isArray(savedSnapshot)
+            || !Number.isInteger(savedSnapshot.server_revision) || savedSnapshot.server_revision < 0
+            || (savedSnapshot.client_id !== undefined && typeof savedSnapshot.client_id !== "string")
+            || (savedSnapshot.client_version !== undefined
+              && (!Number.isInteger(savedSnapshot.client_version) || savedSnapshot.client_version < 0))) {
+            throw new Error("Invalid UI settings response. Please try again.");
+          }
         } catch (error) {
           uiSettingsDirty = true;
+          // Wait for the response body too, so a slow failure cannot consume the
+          // retry timer while this attempt still owns the in-flight promise.
           scheduleUiSettingsRetry();
           throw error;
         }
-
-        if (!response.ok) {
-          uiSettingsDirty = true;
-          scheduleUiSettingsRetry();
-          throw new Error(await response.text());
-        }
-        const savedSnapshot = await response.json().catch(() => null);
         if (savedSnapshot && typeof savedSnapshot === "object") {
           updateUiSettingsServerRevision(savedSnapshot);
           const savedClientId = String(savedSnapshot.client_id || "");
@@ -18542,13 +18699,7 @@ function buildFindingsRawMessage(record, side) {
 }
 
 function findingsBodyPlaceholder(msg) {
-  if (!msg || !msg.body_preview) return "";
-  if (msg.body_encoding === "base64") {
-    return binaryBodyPlaceholder(msg);
-  }
-  return msg.preview_truncated
-    ? `${msg.body_preview}\n\n[preview truncated]`
-    : msg.body_preview;
+  return renderBody(msg);
 }
 
 function binaryBodyPlaceholder(msg) {
@@ -18562,7 +18713,8 @@ function buildRawWebsocketRequest(session) {
   const headers = mergeHeaders(session?.request?.headers)
     .map((header) => `${header.name}: ${header.value}`)
     .join("\n");
-  return `GET ${session?.path || "/"} HTTP/1.1\n${headers}`.trim();
+  const startLine = `GET ${session?.path || "/"} HTTP/1.1`;
+  return headers ? `${startLine}\n${headers}` : startLine;
 }
 
 function buildRawWebsocketResponse(session) {
@@ -18573,30 +18725,32 @@ function buildRawWebsocketResponse(session) {
   const headers = normalizedHeaders(session.response.headers)
     .map((header) => `${header.name}: ${header.value}`)
     .join("\n");
-  return `HTTP/1.1 ${session.status ?? 101}\n${headers}`.trim();
+  const statusLine = `HTTP/1.1 ${session.status ?? 101}`;
+  return headers ? `${statusLine}\n${headers}` : statusLine;
 }
 
 function renderBody(message) {
-  if (!message || !message.body_preview) {
+  if (!message) {
     return "";
   }
 
-  if (message.body_encoding === "base64") {
-    return binaryBodyPlaceholder(message);
+  let body = message.body_preview || "";
+  if (body && message.body_encoding === "base64") {
+    body = binaryBodyPlaceholder(message);
   }
 
   return message.preview_truncated
-    ? `${message.body_preview}\n\n[preview truncated]`
-    : message.body_preview;
+    ? `${body}${body ? "\n\n" : ""}[preview truncated]`
+    : body;
 }
 
 function buildMessageHexPresentation(target, record, fallbackText) {
   const message = target === "request" ? record.request : record.response;
   let text;
   if (target === "request") {
-    text = toHexDumpFromHttpParts(buildRawRequestHead(record), message, fallbackText);
+    text = toHexDumpFromHttpParts(buildRawRequestHead(record), message);
   } else if (message) {
-    text = toHexDumpFromHttpParts(buildRawResponseHead(record), message, fallbackText);
+    text = toHexDumpFromHttpParts(buildRawResponseHead(record), message);
   } else {
     text = toHexDump(fallbackText);
   }
@@ -18604,10 +18758,10 @@ function buildMessageHexPresentation(target, record, fallbackText) {
   return message?.preview_truncated ? `${text}\n\n[preview truncated]` : text;
 }
 
-function toHexDumpFromHttpParts(head, message, fallbackText) {
+function toHexDumpFromHttpParts(head, message) {
   const bodyBytes = messageBodyBytes(message);
   if (!bodyBytes) {
-    return toHexDump(fallbackText);
+    return `${toHexDump(head || "")}\n\n[Invalid base64 preview; body bytes unavailable]`;
   }
   const encoder = new TextEncoder();
   const headBytes = encoder.encode(head || "");
@@ -19031,18 +19185,30 @@ function initFrameDetailResizer() {
 
   let startY = 0;
   let startHeight = 0;
+  let resizing = false;
+  let previousCursor = "";
+  let previousUserSelect = "";
 
   resizer.addEventListener("mousedown", (e) => {
+    onMouseUp();
     e.preventDefault();
     startY = e.clientY;
     startHeight = els.frameDetailPanel.getBoundingClientRect().height;
+    previousCursor = document.body.style.cursor;
+    previousUserSelect = document.body.style.userSelect;
+    resizing = true;
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("blur", onMouseUp);
     document.body.style.cursor = "row-resize";
     document.body.style.userSelect = "none";
   });
 
   function onMouseMove(e) {
+    if (e.buttons === 0) {
+      onMouseUp();
+      return;
+    }
     const delta = startY - e.clientY;
     const newHeight = Math.max(120, startHeight + delta);
     const maxHeight = container.getBoundingClientRect().height * 0.8;
@@ -19051,10 +19217,13 @@ function initFrameDetailResizer() {
   }
 
   function onMouseUp() {
+    if (!resizing) return;
+    resizing = false;
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mouseup", onMouseUp);
-    document.body.style.cursor = "";
-    document.body.style.userSelect = "";
+    window.removeEventListener("blur", onMouseUp);
+    document.body.style.cursor = previousCursor;
+    document.body.style.userSelect = previousUserSelect;
   }
 }
 
@@ -19472,6 +19641,7 @@ function bindWorkbenchStackResizer(handle) {
   if (!handle) {
     return;
   }
+  let finishResize = null;
 
   handle.addEventListener("dblclick", () => {
     resetWorkbenchStackHeight();
@@ -19482,6 +19652,7 @@ function bindWorkbenchStackResizer(handle) {
       return;
     }
 
+    finishResize?.();
     event.preventDefault();
     const start = {
       history: els.trafficRegion.getBoundingClientRect().height,
@@ -19493,6 +19664,10 @@ function bindWorkbenchStackResizer(handle) {
     handle.classList.add("active");
 
     const onMove = (moveEvent) => {
+      if (moveEvent.buttons === 0) {
+        onUp();
+        return;
+      }
       const delta = moveEvent.clientY - event.clientY;
       const nextMessages = clamp(
         start.messages - delta,
@@ -19503,15 +19678,20 @@ function bindWorkbenchStackResizer(handle) {
     };
 
     const onUp = () => {
+      if (finishResize !== onUp) return;
+      finishResize = null;
       document.body.classList.remove("pane-resizing-y");
       handle.classList.remove("active");
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
       normalizeWorkbenchStackHeight({ persist: true });
     };
 
+    finishResize = onUp;
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onUp);
   });
 }
 
@@ -19752,7 +19932,7 @@ function bindWebsocketPaneResizer(handle) {
       const delta = moveEvent.clientX - event.clientX;
       const combinedWidth = start.handshake + start.frames;
       const nextHandshake = clamp(
-        start.handshake + delta,
+        start.left + delta,
         WEBSOCKET_WORKBENCH_MIN_WIDTHS.handshake,
         combinedWidth - WEBSOCKET_WORKBENCH_MIN_WIDTHS.frames,
       );
@@ -19778,11 +19958,14 @@ function getWebsocketWorkbenchWidths() {
     return null;
   }
 
+  const handshake = els.websocketHandshakeColumn.getBoundingClientRect().width;
+  const frames = els.websocketFramesColumn.getBoundingClientRect().width;
   return {
-    total: els.websocketHandshakeColumn.getBoundingClientRect().width
-      + els.websocketFramesColumn.getBoundingClientRect().width,
-    handshake: els.websocketHandshakeColumn.getBoundingClientRect().width,
-    frames: els.websocketFramesColumn.getBoundingClientRect().width,
+    total: handshake + frames,
+    handshake,
+    frames,
+    // The CSS width belongs to the physical left track even when panes swap.
+    left: els.websocketWorkbench.classList.contains("ws-swapped") ? frames : handshake,
   };
 }
 
@@ -19841,7 +20024,7 @@ function normalizeWebsocketPaneWidth(options = {}) {
   }
 
   const nextHandshake = clamp(
-    bounds.handshake,
+    bounds.left,
     WEBSOCKET_WORKBENCH_MIN_WIDTHS.handshake,
     bounds.total - WEBSOCKET_WORKBENCH_MIN_WIDTHS.frames,
   );
@@ -20067,6 +20250,52 @@ function resetWorkbenchStackHeight() {
   scheduleUiSettingsSave();
 }
 
+function forEachCodeSearchMatch(text, query, onMatch) {
+  if (!query) return;
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  const expansions = [];
+  if (lowerText.length !== text.length) {
+    let sourceOffset = 0;
+    let lowerOffset = 0;
+    for (const character of text) {
+      const lowerLength = character.toLowerCase().length;
+      if (lowerLength !== character.length) {
+        expansions.push({
+          from: lowerOffset,
+          to: lowerOffset + lowerLength,
+          sourceFrom: sourceOffset,
+          sourceTo: sourceOffset + character.length,
+          delta: lowerOffset + lowerLength - sourceOffset - character.length,
+        });
+      }
+      sourceOffset += character.length;
+      lowerOffset += lowerLength;
+    }
+  }
+
+  // Lowercasing can expand one character (İ → i + combining dot). Keep the
+  // full-string match semantics, but map each end back to the displayed text.
+  const offsetMapper = (isEnd) => {
+    let index = 0;
+    return (offset) => {
+      while (index < expansions.length && expansions[index].to <= offset) index += 1;
+      const expansion = expansions[index];
+      if (expansion && offset > expansion.from) {
+        return isEnd ? expansion.sourceTo : expansion.sourceFrom;
+      }
+      return offset - (index ? expansions[index - 1].delta : 0);
+    };
+  };
+  const sourceStart = offsetMapper(false);
+  const sourceEnd = offsetMapper(true);
+  let cursor = 0;
+  while ((cursor = lowerText.indexOf(lowerQuery, cursor)) !== -1) {
+    onMatch(sourceStart(cursor), sourceEnd(cursor + lowerQuery.length));
+    cursor += 1;
+  }
+}
+
 function applyCodeSearch(viewElement, query) {
   // Remove any previous search highlights first
   clearSearchHighlights(viewElement);
@@ -20078,7 +20307,6 @@ function applyCodeSearch(viewElement, query) {
 
   // Build a flat text map across all text nodes so we can match across
   // element boundaries (e.g. "<span>accept-encoding</span>: gzip").
-  const lowerQuery = normalizedQuery.toLowerCase();
   const walker = document.createTreeWalker(viewElement, NodeFilter.SHOW_TEXT, null);
   const textNodes = [];
   let fullText = "";
@@ -20090,15 +20318,8 @@ function applyCodeSearch(viewElement, query) {
     textNodes.push(node);
   }
 
-  const lowerFull = fullText.toLowerCase();
   const matches = []; // { start, end } in fullText coordinates
-  let cursor = 0;
-  while (true) {
-    const idx = lowerFull.indexOf(lowerQuery, cursor);
-    if (idx === -1) break;
-    matches.push({ start: idx, end: idx + normalizedQuery.length });
-    cursor = idx + 1;
-  }
+  forEachCodeSearchMatch(fullText, normalizedQuery, (start, end) => matches.push({ start, end }));
 
   if (!matches.length) {
     return { count: 0, firstMatch: null };
@@ -20252,27 +20473,29 @@ function renderSortHeaders() {
 }
 
 function highlightStartLine(line, target) {
-  const requestMatch = line.match(/^([A-Z]+)\s+(\S+)(?:\s+(HTTP\/[0-9.]+))?$/);
+  const requestMatch = line.match(/^([A-Z]+)(\s+)(\S+)(?:(\s+)(HTTP\/[0-9.]+))?$/);
   if (target === "request" && requestMatch) {
-    const [, method, path, version = "HTTP/1.1"] = requestMatch;
-    return `<span class="token-method">${escapeHtml(method)}</span> ${highlightRequestTarget(path)} <span class="token-version">${escapeHtml(version)}</span>`;
+    const [, method, separator, path, versionSeparator, version] = requestMatch;
+    return `<span class="token-method">${escapeHtml(method)}</span>${escapeHtml(separator)}${highlightRequestTarget(path)}${version ? `${escapeHtml(versionSeparator)}<span class="token-version">${escapeHtml(version)}</span>` : ""}`;
   }
 
-  const responseMatch = line.match(/^(HTTP\/[0-9.]+)\s+(\d{3})(?:\s+(.*))?$/);
+  const responseMatch = line.match(/^(HTTP\/[0-9.]+)(\s+)(\d{3})(?:(\s+)(.*))?$/);
   if (target === "response" && responseMatch) {
-    const [, version, status, detail = ""] = responseMatch;
-    return `<span class="token-version">${escapeHtml(version)}</span> <span class="token-status ${statusTone(Number(status))}">${escapeHtml(status)}</span>${detail ? ` <span class="token-plain">${escapeHtml(detail)}</span>` : ""}`;
+    const [, version, separator, status, detailSeparator = "", detail = ""] = responseMatch;
+    return `<span class="token-version">${escapeHtml(version)}</span>${escapeHtml(separator)}<span class="token-status ${statusTone(Number(status))}">${escapeHtml(status)}</span>${escapeHtml(detailSeparator)}${detail ? `<span class="token-plain">${escapeHtml(detail)}</span>` : ""}`;
   }
 
   return `<span class="token-plain">${escapeHtml(line)}</span>`;
 }
 
 function highlightRequestTarget(rawTarget) {
-  const [pathPart, queryPart] = rawTarget.split("?", 2);
-  if (!queryPart) {
+  const separator = rawTarget.indexOf("?");
+  if (separator === -1 || separator === rawTarget.length - 1) {
     return `<span class="token-target">${escapeHtml(rawTarget)}</span>`;
   }
 
+  const pathPart = rawTarget.slice(0, separator);
+  const queryPart = rawTarget.slice(separator + 1);
   return `<span class="token-target">${escapeHtml(pathPart)}</span><span class="token-punctuation">?</span>${highlightQueryString(queryPart)}`;
 }
 
@@ -20283,12 +20506,14 @@ function highlightHeaderLine(line) {
   }
 
   const name = line.slice(0, separator);
-  const value = line.slice(separator + 1).trimStart();
+  const rawValue = line.slice(separator + 1);
+  const value = rawValue.trimStart();
+  const whitespace = rawValue.slice(0, rawValue.length - value.length);
   const lowerName = name.trim().toLowerCase();
   if (lowerName === "cookie" || lowerName === "set-cookie") {
-    return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span> ${highlightCookieValue(value)}`;
+    return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span>${escapeHtml(whitespace)}${highlightCookieValue(value)}`;
   }
-  return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span> ${highlightHeaderValue(value)}`;
+  return `<span class="token-header">${escapeHtml(name)}</span><span class="token-punctuation">:</span>${escapeHtml(whitespace)}${highlightHeaderValue(value)}`;
 }
 
 function highlightHeaderValue(value) {
@@ -20378,7 +20603,7 @@ function highlightBodyLine(line, mode = "plain") {
   const trimmed = line.trim();
 
   if (!trimmed) {
-    return "&nbsp;";
+    return escapeHtml(line) || "&nbsp;";
   }
 
   if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
@@ -20443,7 +20668,7 @@ function highlightJsonLine(line) {
 
     if (match[1]) {
       html += match[2]
-        ? `<span class="token-json-key">${escapeHtml(match[1])}</span><span class="token-punctuation">:</span>`
+        ? `<span class="token-json-key">${escapeHtml(match[1])}</span><span class="token-punctuation">${escapeHtml(match[2])}</span>`
         : `<span class="token-json-string">${escapeHtml(match[1])}</span>`;
     } else if (match[3]) {
       html += `<span class="token-json-boolean">${escapeHtml(match[3])}</span>`;
@@ -20753,11 +20978,25 @@ function renderSummaryRows(rows) {
 }
 
 function inferProtocolState(record) {
-  const headerNames = normalizedHeaders(record.request?.headers).map((header) => header.name);
-  const looksLikeHttp2 = headerNames.some((name) => name.startsWith(":"));
+  let current;
+  switch (record.http_version) {
+    case "HTTP/1.0":
+    case "HTTP/1.1":
+      current = "HTTP/1";
+      break;
+    case "HTTP/0.9":
+    case "HTTP/2":
+    case "HTTP/3":
+      current = record.http_version;
+      break;
+    default: {
+      const headerNames = normalizedHeaders(record.request?.headers).map((header) => header.name);
+      current = headerNames.some((name) => name.startsWith(":")) ? "HTTP/2" : "HTTP/1";
+    }
+  }
   return {
-    current: looksLikeHttp2 ? "HTTP/2" : "HTTP/1",
-    supportsHttp2: looksLikeHttp2,
+    current,
+    supportsHttp2: current === "HTTP/2",
   };
 }
 
@@ -20769,6 +21008,7 @@ function renderProtocolStrip(protocolState) {
     <div class="protocol-pill-group" aria-label="Captured protocol">
       <span class="protocol-pill ${current === "HTTP/1" ? "active" : ""}">HTTP/1</span>
       <span class="protocol-pill ${current === "HTTP/2" ? "active" : ""} ${supportsHttp2 ? "" : "muted"}">HTTP/2</span>
+      ${current !== "HTTP/1" && current !== "HTTP/2" ? `<span class="protocol-pill active">${escapeHtml(current)}</span>` : ""}
     </div>
   `;
 }
@@ -20999,6 +21239,7 @@ function formatStatus(status) {
 }
 
 function statusTone(status) {
+  if (status == null) return "none";
   const code = Number(status);
   if (!Number.isFinite(code)) return "none";
   if (code >= 200 && code < 300) return "ok";
@@ -22857,6 +23098,7 @@ let compareBaseSessionId = null;
 let compareActiveTab = "request";
 let compareBaseRecord = null;
 let compareTargetRecord = null;
+let compareLoadGeneration = 0;
 
 function computeUnifiedDiff(linesA, linesB, labelA, labelB) {
   const result = [`--- ${labelA}`, `+++ ${labelB}`];
@@ -22875,26 +23117,31 @@ function computeUnifiedDiff(linesA, linesB, labelA, labelB) {
 }
 
 async function setCompareBase(transactionId) {
+  compareLoadGeneration += 1;
   compareBaseId = transactionId;
   compareBaseSessionId = currentSessionId();
   const btn = document.getElementById("compareWithBaseBtn");
   if (btn) btn.disabled = false;
   const item = getHistoryItem(transactionId);
-  if (btn && item) btn.textContent = `Compare with #${item.index ?? "?"}`;
+  const sequence = item?.sequence ?? item?.index;
+  if (btn) btn.textContent = sequence == null ? "Compare with base" : `Compare with #${sequence}`;
 }
 
 async function openCompareModal(targetId) {
-  if (!compareBaseId || compareBaseId === targetId) return;
+  const generation = ++compareLoadGeneration;
+  const baseId = compareBaseId;
+  if (!baseId || baseId === targetId) return;
   const sessionId = currentSessionId();
   if (compareBaseSessionId !== sessionId) {
     clearCompareState();
     return;
   }
   const [baseRes, targetRes] = await Promise.all([
-    fetch(transactionPath(compareBaseId, sessionId)).then((r) => r.ok ? r.json() : null),
+    fetch(transactionPath(baseId, sessionId)).then((r) => r.ok ? r.json() : null),
     fetch(transactionPath(targetId, sessionId)).then((r) => r.ok ? r.json() : null),
   ]);
-  if (currentSessionId() !== sessionId) return;
+  // A dismissed or superseded comparison must not reopen from a late response.
+  if (generation !== compareLoadGeneration || currentSessionId() !== sessionId) return;
   if (!baseRes || !targetRes) return;
   compareBaseRecord = baseRes;
   compareTargetRecord = targetRes;
@@ -22907,8 +23154,10 @@ function renderCompareModal() {
   if (!compareBaseRecord || !compareTargetRecord) return;
   const baseItem = getHistoryItem(compareBaseRecord.id);
   const targetItem = getHistoryItem(compareTargetRecord.id);
-  const baseLabel = `#${baseItem?.index ?? "?"} ${compareBaseRecord.method} ${compareBaseRecord.host}${compareBaseRecord.path}`;
-  const targetLabel = `#${targetItem?.index ?? "?"} ${compareTargetRecord.method} ${compareTargetRecord.host}${compareTargetRecord.path}`;
+  const baseSequence = compareBaseRecord.sequence ?? baseItem?.sequence ?? baseItem?.index ?? "?";
+  const targetSequence = compareTargetRecord.sequence ?? targetItem?.sequence ?? targetItem?.index ?? "?";
+  const baseLabel = `#${baseSequence} ${compareBaseRecord.method} ${compareBaseRecord.host}${compareBaseRecord.path}`;
+  const targetLabel = `#${targetSequence} ${compareTargetRecord.method} ${compareTargetRecord.host}${compareTargetRecord.path}`;
   document.getElementById("compareKicker").textContent = `${baseLabel}  vs  ${targetLabel}`;
   document.getElementById("compareTitle").textContent = compareActiveTab === "request" ? "Request Diff" : "Response Diff";
   document.querySelectorAll("[data-compare-tab]").forEach((btn) => {
@@ -22929,10 +23178,12 @@ function renderCompareModal() {
 }
 
 function closeCompareModal() {
+  compareLoadGeneration += 1;
   document.getElementById("compareModal").classList.add("hidden");
 }
 
 function clearCompareState() {
+  compareLoadGeneration += 1;
   compareBaseId = null;
   compareBaseSessionId = null;
   compareBaseRecord = null;
@@ -23622,6 +23873,7 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.wsFrameContextMenu.classList.contains("hidden")) {
+    event.preventDefault();
     closeWsFrameContextMenu();
   }
 });
@@ -25121,17 +25373,23 @@ function mapTokenClass(legacyCls) {
 function extractTokenRanges(htmlStr, plainText) {
   const ranges = [];
   const tagRe = /<span class="([^"]+)">([^<]*)<\/span>/g;
+  const entities = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&#039;": "'", "&nbsp;": "\u00a0" };
+  const decodeText = (text) => text.replace(/&(?:amp|lt|gt|quot|#0?39|nbsp);/g, (entity) => entities[entity]);
   let m;
-  let searchFrom = 0;
+  let htmlOffset = 0;
+  let textOffset = 0;
   while ((m = tagRe.exec(htmlStr)) !== null) {
+    // Flat token spans share source coordinates with their unstyled gaps.
+    // Searching by token text can instead color an earlier duplicate substring.
+    textOffset += decodeText(htmlStr.slice(htmlOffset, m.index)).length;
+    const text = decodeText(m[2]);
+    const end = textOffset + text.length;
     const cls = mapTokenClass(m[1]);
-    if (!cls) continue;
-    const text = m[2].replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-    if (!text) continue;
-    const idx = plainText.indexOf(text, searchFrom);
-    if (idx === -1) continue;
-    ranges.push({ cls, from: idx, to: idx + text.length });
-    searchFrom = idx + text.length;
+    if (cls && text && plainText.slice(textOffset, end) === text) {
+      ranges.push({ cls, from: textOffset, to: end });
+    }
+    textOffset = end;
+    htmlOffset = tagRe.lastIndex;
   }
   return ranges;
 }
@@ -25339,7 +25597,7 @@ function normalizeSearchEffectValue(value) {
   };
 }
 
-/** Build search highlight decorations. Returns { decos, matchCount, matchPositions }. */
+/** Build search highlight decorations and original-text navigation ranges. */
 function buildSearchDecorations(doc, query, activeIndex = -1, classes = CM_DEFAULT_SEARCH_CLASSES) {
   const searchClasses = normalizeSearchClasses(classes);
   if (!query) {
@@ -25350,27 +25608,26 @@ function buildSearchDecorations(doc, query, activeIndex = -1, classes = CM_DEFAU
       decos: CM.Decoration.none,
       matchCount: 0,
       matchPositions: [],
+      matchEnds: [],
     };
   }
   const text = doc.toString();
-  const lower = text.toLowerCase();
-  const lq = query.toLowerCase();
   const builder = [];
   const positions = [];
+  const ends = [];
   let matchCount = 0;
-  let pos = 0;
-  while ((pos = lower.indexOf(lq, pos)) !== -1) {
+  forEachCodeSearchMatch(text, query, (from, to) => {
     const matchIndex = matchCount;
     if (positions.length < CM_SEARCH_DECORATION_LIMIT) {
-      positions.push(pos);
+      positions.push(from);
+      ends.push(to);
     }
     if (matchIndex < CM_SEARCH_DECORATION_LIMIT) {
       const cls = matchIndex === activeIndex ? searchClasses.active : searchClasses.hit;
-      builder.push(CM.Decoration.mark({ class: cls }).range(pos, pos + lq.length));
+      builder.push(CM.Decoration.mark({ class: cls }).range(from, to));
     }
     matchCount += 1;
-    pos += 1;
-  }
+  });
   const safeActiveIndex = activeIndex >= 0 && activeIndex < positions.length ? activeIndex : -1;
   return {
     query,
@@ -25379,6 +25636,7 @@ function buildSearchDecorations(doc, query, activeIndex = -1, classes = CM_DEFAU
     decos: CM.Decoration.set(builder),
     matchCount,
     matchPositions: positions,
+    matchEnds: ends,
   };
 }
 
@@ -25443,6 +25701,7 @@ const searchDecoField = CM.StateField.define({
       decos: CM.Decoration.none,
       matchCount: 0,
       matchPositions: [],
+      matchEnds: [],
     };
   },
   update(value, tr) {
@@ -25592,7 +25851,7 @@ class SniperCodeView {
     const pos = field.matchPositions[this._searchNavIndex];
     this.view.dispatch({
       effects: setSearchActiveIndex.of(this._searchNavIndex),
-      selection: { anchor: pos, head: pos + field.query.length },
+      selection: { anchor: pos, head: field.matchEnds[this._searchNavIndex] },
       scrollIntoView: true,
     });
     return this._searchNavIndex;

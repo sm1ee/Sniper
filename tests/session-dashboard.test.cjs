@@ -12,6 +12,7 @@ function fixture() {
   const errors = [], rendered = [];
   const context = loadFunctions(["loadSessions", "jsonArray"], {
     state, currentSessionId: () => state.activeSession?.id,
+    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
     fetch: async () => response([]),
     requireOkResponse: async res => { if (!res.ok) throw new Error("Failed to load sessions."); },
     renderDashboard: () => rendered.push([...state.sessions]),
@@ -112,4 +113,134 @@ test("a refreshed dashboard does not label the previous workspace session as sti
   f.context.renderDashboard();
   assert.equal(f.state.selectedSessionId, "fixture-old-active");
   assert.equal(f.els.dashboardCurrentSessionStatus.textContent, "Stored");
+});
+
+// Promise ordering is controlled here; these never call a real API or session action.
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+function raceFixture() {
+  const f = fixture();
+  f.requests = [];
+  f.context.fetch = (path, options) => {
+    assert.equal(path, "/api/sessions");
+    assert.equal(options, undefined, "list refresh must remain a read");
+    const request = deferred();
+    f.requests.push(request);
+    return request.promise;
+  };
+  return f;
+}
+
+for (const duringParsing of [false, true]) {
+  test(`older session list cannot replace newer rows ${duringParsing ? "after delayed JSON" : "after delayed headers"}`, async () => {
+    const f = raceFixture(), body = deferred();
+    const older = f.context.loadSessions();
+    if (duringParsing) {
+      f.requests[0].resolve({ ok: true, json: () => body.promise });
+      await nextTurn();
+    }
+    const newer = f.context.loadSessions();
+    const latest = [session("fixture-active", true), session("fixture-latest")];
+    f.requests[1].resolve(response(latest));
+    await newer;
+    if (duringParsing) body.resolve([session("fixture-active", true), session("fixture-obsolete")]);
+    else f.requests[0].resolve(response([session("fixture-active", true), session("fixture-obsolete")]));
+    await older;
+    assert.equal(f.state.sessions, latest);
+    assert.equal(f.state.activeSession, latest[0]);
+    assert.equal(f.rendered.length, 1);
+  });
+}
+
+for (const failure of ["network", "HTTP", "JSON", "shape"]) {
+  test(`superseded session-list ${failure} failure cannot report an obsolete error`, async () => {
+    const f = raceFixture(), body = deferred();
+    const older = f.context.loadSessions();
+    if (failure === "JSON") {
+      f.requests[0].resolve({ ok: true, json: () => body.promise });
+      await nextTurn();
+    }
+    const newer = f.context.loadSessions();
+    const latest = [session("fixture-active", true), session("fixture-latest")];
+    f.requests[1].resolve(response(latest));
+    await newer;
+    if (failure === "network") f.requests[0].reject(new Error("Old network failure"));
+    if (failure === "HTTP") f.requests[0].resolve({ ok: false });
+    if (failure === "JSON") body.reject(new Error("Old JSON failure"));
+    if (failure === "shape") f.requests[0].resolve(response({ obsolete: true }));
+    await assert.doesNotReject(older);
+    assert.equal(f.state.sessions, latest);
+    assert.equal(f.rendered.length, 1);
+  });
+}
+
+test("a session-list read still supplies its awaited result while a newer read is pending", async () => {
+  const f = raceFixture();
+  const older = f.context.loadSessions(), newer = f.context.loadSessions();
+  const first = [session("fixture-active", true), session("fixture-first")];
+  f.requests[0].resolve(response(first));
+  await older;
+  assert.equal(f.state.sessions, first);
+  const latest = [session("fixture-active", true), session("fixture-latest")];
+  f.requests[1].resolve(response(latest));
+  await newer;
+  assert.equal(f.state.sessions, latest);
+  assert.equal(f.rendered.length, 2);
+});
+
+test("a failed newer session-list read does not discard a successful older read", async () => {
+  const f = raceFixture();
+  const older = f.context.loadSessions(), newer = f.context.loadSessions();
+  const rejected = assert.rejects(newer, /Newest read unavailable/);
+  f.requests[1].reject(new Error("Newest read unavailable"));
+  await rejected;
+  const first = [session("fixture-active", true), session("fixture-first")];
+  f.requests[0].resolve(response(first));
+  await older;
+  assert.equal(f.state.sessions, first);
+  assert.equal(f.rendered.length, 1);
+});
+
+test("an obsolete list cannot resurrect rows after a newer empty list", async () => {
+  const f = raceFixture();
+  const older = f.context.loadSessions(), newer = f.context.loadSessions();
+  f.requests[1].resolve(response([]));
+  await newer;
+  f.requests[0].resolve(response([session("fixture-active", true)]));
+  await older;
+  assert.equal(f.state.sessions.length, 0);
+  assert.equal(f.state.activeSession, null);
+  assert.equal(f.rendered.length, 1);
+});
+
+test("a superseded read cannot announce a stale active-session change", async () => {
+  const f = raceFixture(), changes = [];
+  f.context.handleExternalSessionChanged = async id => changes.push(id);
+  const older = f.context.loadSessions({ reloadOnActiveChange: true });
+  const newer = f.context.loadSessions({ reloadOnActiveChange: true });
+  const latest = [session("fixture-active", true), session("fixture-latest")];
+  f.requests[1].resolve(response(latest));
+  await newer;
+  f.requests[0].resolve(response([session("fixture-obsolete", true)]));
+  await older;
+  assert.deepEqual(changes, []);
+  assert.equal(f.state.sessions, latest);
+});
+
+test("errors from a current external-session handler are not swallowed by a newer list", async () => {
+  const f = raceFixture(), change = deferred();
+  f.context.handleExternalSessionChanged = () => change.promise;
+  const first = f.context.loadSessions({ reloadOnActiveChange: true });
+  f.requests[0].resolve(response([session("fixture-new-active", true)]));
+  await nextTurn();
+  const newer = f.context.loadSessions();
+  f.requests[1].resolve(response([session("fixture-active", true)]));
+  await newer;
+  const rejected = assert.rejects(first, /Fixture transition error/);
+  change.reject(new Error("Fixture transition error"));
+  await rejected;
 });
