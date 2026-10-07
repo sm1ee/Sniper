@@ -3,6 +3,9 @@
 //! A durable unknown intent precedes every mutation. An intent is never removed
 //! or overwritten, including when the caller disconnects or the mutation panics.
 //! A repeated operation ID therefore never reruns a possibly completed mutation.
+//! If intent publication succeeds but its directory sync fails, only the same
+//! invocation may attempt a terminal not-applied receipt before mutation starts.
+//! Recovery is attempted once; persistent storage faults leave the intent pending.
 
 use std::{
     collections::HashMap,
@@ -204,6 +207,13 @@ struct StoredReceipt {
 }
 
 #[derive(Debug)]
+enum PersistenceFailure {
+    BeforePublication,
+    AfterPublication,
+    WorkerFailed,
+}
+
+#[derive(Debug)]
 pub struct SavedOperationLedger {
     root: PathBuf,
     // Pending entries stay visible while their mutation/final fsync runs.
@@ -214,6 +224,10 @@ pub struct SavedOperationLedger {
     visible: Mutex<HashMap<Uuid, StoredReceipt>>,
     #[cfg(test)]
     failpoint: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
+    directory_sync_failures: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    directory_sync_attempts: std::sync::atomic::AtomicUsize,
 }
 
 impl SavedOperationLedger {
@@ -224,6 +238,10 @@ impl SavedOperationLedger {
             visible: Mutex::new(HashMap::new()),
             #[cfg(test)]
             failpoint: std::sync::atomic::AtomicU8::new(0),
+            #[cfg(test)]
+            directory_sync_failures: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            directory_sync_attempts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -275,10 +293,11 @@ impl SavedOperationLedger {
                     completed_at: None,
                 },
             };
-            ledger
-                .persist(stored.clone(), false)
-                .await
-                .map_err(|_| SavedOperationError::IntentPersistenceFailed)?;
+            let recover_unstarted_intent = match ledger.persist(stored.clone(), false).await {
+                Ok(()) => false,
+                Err(PersistenceFailure::AfterPublication) => true,
+                Err(_) => return Err(SavedOperationError::IntentPersistenceFailed),
+            };
 
             ledger
                 .visible
@@ -286,12 +305,22 @@ impl SavedOperationLedger {
                 .unwrap_or_else(|poison| poison.into_inner())
                 .insert(operation_id, stored.clone());
 
-            let completion = AssertUnwindSafe(async move { mutation().await })
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| {
-                    SavedOperationCompletion::unknown(SavedOperationCode::WorkerFailed)
-                });
+            let completion = if recover_unstarted_intent {
+                // Only this invocation proves the closure has never run. Never
+                // recover an arbitrary pending intent discovered by read().
+                ledger
+                    .sync_unstarted_intent(stored.clone())
+                    .await
+                    .map_err(|_| SavedOperationError::IntentPersistenceFailed)?;
+                SavedOperationCompletion::not_applied(SavedOperationCode::PersistenceFailed)
+            } else {
+                AssertUnwindSafe(async move { mutation().await })
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| {
+                        SavedOperationCompletion::unknown(SavedOperationCode::WorkerFailed)
+                    })
+            };
             let completion = if completion
                 .result
                 .as_ref()
@@ -407,27 +436,93 @@ impl SavedOperationLedger {
         }
     }
 
-    async fn persist(self: &Arc<Self>, stored: StoredReceipt, complete: bool) -> io::Result<()> {
+    async fn persist(
+        self: &Arc<Self>,
+        stored: StoredReceipt,
+        complete: bool,
+    ) -> Result<(), PersistenceFailure> {
         let ledger = self.clone();
         tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if ledger.failpoint.load(std::sync::atomic::Ordering::SeqCst)
                 == if complete { 2 } else { 1 }
             {
-                return Err(io::Error::other("injected receipt write failure"));
+                return Err(PersistenceFailure::BeforePublication);
             }
-            ensure_ledger_directory(&ledger.root)?;
-            atomic_publish(&ledger.path(stored.receipt.operation_id, complete), &stored)?;
+            ensure_ledger_directory(&ledger.root)
+                .map_err(|_| PersistenceFailure::BeforePublication)?;
+            publish_record(&ledger.path(stored.receipt.operation_id, complete), &stored)
+                .map_err(|_| PersistenceFailure::BeforePublication)?;
+            #[cfg(test)]
+            {
+                let failpoint = ledger.failpoint.load(std::sync::atomic::Ordering::SeqCst);
+                if complete && failpoint == 4 {
+                    return Err(PersistenceFailure::AfterPublication);
+                }
+                if !complete && failpoint == 5 {
+                    panic!("injected worker failure after intent publication");
+                }
+            }
+            ledger
+                .sync_receipt_directory()
+                .map_err(|_| PersistenceFailure::AfterPublication)?;
             #[cfg(test)]
             if complete && ledger.failpoint.load(std::sync::atomic::Ordering::SeqCst) == 3 {
-                return Err(io::Error::other(
-                    "injected failure after terminal publication",
-                ));
+                return Err(PersistenceFailure::AfterPublication);
             }
             Ok(())
         })
         .await
-        .map_err(|_| io::Error::other("receipt persistence worker failed"))?
+        .map_err(|_| PersistenceFailure::WorkerFailed)?
+    }
+
+    async fn sync_unstarted_intent(self: &Arc<Self>, stored: StoredReceipt) -> io::Result<()> {
+        let ledger = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let existing = ledger
+                .read_sync(stored.receipt.operation_id)
+                .map_err(io::Error::other)?;
+            // Do not finalize a missing, altered, corrupt, or already completed
+            // record. The immutable intent must still be this invocation's.
+            if serde_json::to_value(existing).map_err(io::Error::other)?
+                != serde_json::to_value(&stored).map_err(io::Error::other)?
+            {
+                return Err(io::Error::other("operation intent changed before recovery"));
+            }
+            fs::OpenOptions::new()
+                .write(true)
+                .open(ledger.path(stored.receipt.operation_id, false))?
+                .sync_all()?;
+            if let Some(parent) = ledger.root.parent() {
+                crate::platform::sync_directory(parent)?;
+            }
+            ledger.sync_receipt_directory()
+        })
+        .await
+        .map_err(|_| io::Error::other("intent recovery worker failed"))?
+    }
+
+    fn sync_receipt_directory(&self) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            self.directory_sync_attempts.fetch_add(1, Ordering::SeqCst);
+            let mut remaining = self.directory_sync_failures.load(Ordering::SeqCst);
+            while remaining > 0 {
+                match self.directory_sync_failures.compare_exchange_weak(
+                    remaining,
+                    remaining - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => {
+                        return Err(io::Error::other("injected receipt directory sync failure"))
+                    }
+                    Err(current) => remaining = current,
+                }
+            }
+        }
+        crate::platform::sync_directory(&self.root)
     }
 
     fn path(&self, operation_id: Uuid, complete: bool) -> PathBuf {
@@ -520,7 +615,9 @@ fn ensure_ledger_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn atomic_publish(path: &Path, stored: &StoredReceipt) -> io::Result<()> {
+// Publishes synced file contents; the caller must then sync the directory and
+// distinguish failure there from failure before publication.
+fn publish_record(path: &Path, stored: &StoredReceipt) -> io::Result<()> {
     // Intent and result are separate immutable files. Never delete or replace
     // an existing receipt as a fallback for a failed rename.
     match fs::symlink_metadata(path) {
@@ -547,8 +644,7 @@ fn atomic_publish(path: &Path, stored: &StoredReceipt) -> io::Result<()> {
     file.flush()?;
     file.sync_all()?;
     drop(file);
-    crate::platform::rename(&temporary.0, path)?;
-    crate::platform::sync_directory(path.parent().expect("receipt has a parent"))
+    crate::platform::rename(&temporary.0, path)
 }
 
 struct TemporaryFile(PathBuf);
@@ -727,6 +823,427 @@ mod tests {
             Err(SavedOperationError::IntentPersistenceFailed)
         ));
         assert!(ledger.lookup(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn intent_directory_sync_failure_recovers_not_applied_without_mutation() {
+        let directory = TestDirectory::new();
+        let ledger = directory.ledger();
+        ledger.directory_sync_failures.store(1, Ordering::SeqCst);
+        let id = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let first = ledger
+            .execute(
+                id,
+                session,
+                SavedOperationKind::HttpDelete,
+                &(),
+                move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    async { applied() }
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.receipt.outcome, SavedOperationOutcome::NotApplied);
+        assert_eq!(first.receipt.code, SavedOperationCode::PersistenceFailed);
+        assert!(first.receipt.result.is_none());
+        assert!(first.receipt.completed_at.is_some());
+        assert_eq!(ledger.directory_sync_attempts.load(Ordering::SeqCst), 3);
+        let expected = serde_json::to_value(&first.receipt).unwrap();
+        let intent_bytes = fs::read(ledger.path(id, false)).unwrap();
+        let result_bytes = fs::read(ledger.path(id, true)).unwrap();
+        assert_eq!(fs::read_dir(&ledger.root).unwrap().count(), 2);
+        for current in [ledger.clone(), directory.ledger()] {
+            let counted = calls.clone();
+            let repeated = current
+                .execute(
+                    id,
+                    session,
+                    SavedOperationKind::HttpDelete,
+                    &(),
+                    move || {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        async { applied() }
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(repeated.replayed);
+            assert_eq!(serde_json::to_value(repeated.receipt).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_value(current.lookup(id).await.unwrap().unwrap()).unwrap(),
+                expected
+            );
+            for (session, kind, input) in [
+                (
+                    session,
+                    SavedOperationKind::HttpDelete,
+                    serde_json::json!(1),
+                ),
+                (
+                    Uuid::new_v4(),
+                    SavedOperationKind::HttpDelete,
+                    serde_json::Value::Null,
+                ),
+                (
+                    session,
+                    SavedOperationKind::HttpClear,
+                    serde_json::Value::Null,
+                ),
+            ] {
+                let counted = calls.clone();
+                assert!(matches!(
+                    current
+                        .execute(id, session, kind, &input, move || {
+                            counted.fetch_add(1, Ordering::SeqCst);
+                            async { applied() }
+                        })
+                        .await,
+                    Err(SavedOperationError::Conflict { .. })
+                ));
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fs::read(ledger.path(id, false)).unwrap(), intent_bytes);
+        assert_eq!(fs::read(ledger.path(id, true)).unwrap(), result_bytes);
+        assert_eq!(ledger.directory_sync_attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn persistent_intent_directory_sync_failure_stays_reserved_without_retry() {
+        let directory = TestDirectory::new();
+        let ledger = directory.ledger();
+        ledger
+            .directory_sync_failures
+            .store(usize::MAX, Ordering::SeqCst);
+        let id = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let first = ledger
+            .execute(
+                id,
+                session,
+                SavedOperationKind::HttpDelete,
+                &(),
+                move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    async { applied() }
+                },
+            )
+            .await;
+        assert!(matches!(
+            first,
+            Err(SavedOperationError::IntentPersistenceFailed)
+        ));
+        // Initial sync and one bounded recovery attempt. There is no retry loop.
+        assert_eq!(ledger.directory_sync_attempts.load(Ordering::SeqCst), 2);
+        let intent_bytes = fs::read(ledger.path(id, false)).unwrap();
+        assert!(!ledger.path(id, true).exists());
+        // Even once storage works again, neither a new request nor a new ledger
+        // has the original invocation's proof that no mutation was attempted.
+        ledger.directory_sync_failures.store(0, Ordering::SeqCst);
+        for current in [ledger.clone(), directory.ledger()] {
+            let counted = calls.clone();
+            let repeated = current
+                .execute(
+                    id,
+                    session,
+                    SavedOperationKind::HttpDelete,
+                    &(),
+                    move || {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        async { applied() }
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(repeated.replayed);
+            assert_eq!(repeated.receipt.outcome, SavedOperationOutcome::Unknown);
+            assert_eq!(repeated.receipt.code, SavedOperationCode::Pending);
+            assert!(repeated.receipt.completed_at.is_none());
+            assert_eq!(
+                current.lookup(id).await.unwrap().unwrap().code,
+                SavedOperationCode::Pending
+            );
+            assert!(!current.path(id, true).exists());
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(ledger.directory_sync_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(fs::read(ledger.path(id, false)).unwrap(), intent_bytes);
+    }
+
+    #[tokio::test]
+    async fn recovery_terminal_write_failures_remain_unknown_without_mutation() {
+        // Before terminal publication, after its directory sync, and after its
+        // rename but before directory sync must all preserve the reservation.
+        for failpoint in [2, 3, 4] {
+            let directory = TestDirectory::new();
+            let ledger = directory.ledger();
+            ledger.directory_sync_failures.store(1, Ordering::SeqCst);
+            ledger.failpoint.store(failpoint, Ordering::SeqCst);
+            let id = Uuid::new_v4();
+            let session = Uuid::new_v4();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counted = calls.clone();
+            let first = ledger
+                .execute(
+                    id,
+                    session,
+                    SavedOperationKind::HttpDelete,
+                    &(),
+                    move || {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        async { applied() }
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(first.receipt.outcome, SavedOperationOutcome::Unknown);
+            assert_eq!(
+                first.receipt.code,
+                SavedOperationCode::ReceiptPersistenceFailed
+            );
+            assert!(first.receipt.completed_at.is_none());
+            for current in [ledger.clone(), directory.ledger()] {
+                let counted = calls.clone();
+                let repeated = current
+                    .execute(
+                        id,
+                        session,
+                        SavedOperationKind::HttpDelete,
+                        &(),
+                        move || {
+                            counted.fetch_add(1, Ordering::SeqCst);
+                            async { applied() }
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(repeated.replayed);
+                let expected = if Arc::ptr_eq(&current, &ledger) {
+                    (
+                        SavedOperationOutcome::Unknown,
+                        SavedOperationCode::ReceiptPersistenceFailed,
+                    )
+                } else if failpoint == 2 {
+                    (SavedOperationOutcome::Unknown, SavedOperationCode::Pending)
+                } else {
+                    // Only a surviving, valid terminal file establishes the
+                    // not-applied result after a restart.
+                    (
+                        SavedOperationOutcome::NotApplied,
+                        SavedOperationCode::PersistenceFailed,
+                    )
+                };
+                assert_eq!((repeated.receipt.outcome, repeated.receipt.code), expected);
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn intent_worker_failure_does_not_recover_or_invoke_mutation() {
+        let directory = TestDirectory::new();
+        let ledger = directory.ledger();
+        ledger.failpoint.store(5, Ordering::SeqCst);
+        let id = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        assert!(matches!(
+            ledger
+                .execute(
+                    id,
+                    session,
+                    SavedOperationKind::HttpDelete,
+                    &(),
+                    move || {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        async { applied() }
+                    }
+                )
+                .await,
+            Err(SavedOperationError::IntentPersistenceFailed)
+        ));
+        assert!(ledger.path(id, false).exists());
+        assert!(!ledger.path(id, true).exists());
+        assert_eq!(ledger.directory_sync_attempts.load(Ordering::SeqCst), 0);
+        for current in [ledger, directory.ledger()] {
+            let counted = calls.clone();
+            let repeated = current
+                .execute(
+                    id,
+                    session,
+                    SavedOperationKind::HttpDelete,
+                    &(),
+                    move || {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        async { applied() }
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(repeated.replayed);
+            assert_eq!(repeated.receipt.code, SavedOperationCode::Pending);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unstarted_intent_recovery_rejects_inconsistent_records_without_writes() {
+        for changed in [
+            "missing",
+            "corrupt",
+            "fingerprint",
+            "session",
+            "operation",
+            "created",
+            "completed",
+        ] {
+            let directory = TestDirectory::new();
+            let ledger = directory.ledger();
+            let id = Uuid::new_v4();
+            let session = Uuid::new_v4();
+            let stored = StoredReceipt {
+                fingerprint: fingerprint(SavedOperationKind::HttpDelete, session, &()).unwrap(),
+                receipt: SavedOperationReceipt {
+                    contract_version: CONTRACT_VERSION.into(),
+                    operation_id: id,
+                    session_id: session,
+                    operation: SavedOperationKind::HttpDelete,
+                    outcome: SavedOperationOutcome::Unknown,
+                    code: SavedOperationCode::Pending,
+                    message: SavedOperationCode::Pending.message().into(),
+                    result: None,
+                    created_at: Utc::now(),
+                    completed_at: None,
+                },
+            };
+            ledger.directory_sync_failures.store(1, Ordering::SeqCst);
+            assert!(matches!(
+                ledger.persist(stored.clone(), false).await,
+                Err(PersistenceFailure::AfterPublication)
+            ));
+            let mut altered = stored.clone();
+            match changed {
+                "missing" => fs::remove_file(ledger.path(id, false)).unwrap(),
+                "corrupt" => fs::write(ledger.path(id, false), b"{}").unwrap(),
+                "completed" => {
+                    altered.receipt.outcome = SavedOperationOutcome::NotApplied;
+                    altered.receipt.code = SavedOperationCode::InvalidInput;
+                    altered.receipt.message = SavedOperationCode::InvalidInput.message().into();
+                    altered.receipt.completed_at = Some(Utc::now());
+                    ledger.persist(altered, true).await.unwrap();
+                }
+                field => {
+                    match field {
+                        "fingerprint" => altered.fingerprint = "0".repeat(64),
+                        "session" => altered.receipt.session_id = Uuid::new_v4(),
+                        "operation" => altered.receipt.operation = SavedOperationKind::HttpClear,
+                        "created" => altered.receipt.created_at += chrono::Duration::seconds(1),
+                        _ => unreachable!(),
+                    }
+                    fs::write(
+                        ledger.path(id, false),
+                        serde_json::to_vec(&altered).unwrap(),
+                    )
+                    .unwrap();
+                }
+            }
+            let before_intent = fs::read(ledger.path(id, false)).ok();
+            let before_result = fs::read(ledger.path(id, true)).ok();
+            let syncs = ledger.directory_sync_attempts.load(Ordering::SeqCst);
+            assert!(
+                ledger.sync_unstarted_intent(stored).await.is_err(),
+                "{changed}"
+            );
+            assert_eq!(
+                fs::read(ledger.path(id, false)).ok(),
+                before_intent,
+                "{changed}"
+            );
+            assert_eq!(
+                fs::read(ledger.path(id, true)).ok(),
+                before_result,
+                "{changed}"
+            );
+            assert_eq!(
+                ledger.directory_sync_attempts.load(Ordering::SeqCst),
+                syncs,
+                "{changed}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn applied_mutation_abrupt_process_exit_leaves_pending_and_blocks_restart() {
+        const CHILD_DIRECTORY: &str = "SNIPER_TEST_SAVED_OPERATION_CRASH_DIR";
+        const CHILD_ID: &str = "SNIPER_TEST_SAVED_OPERATION_CRASH_ID";
+        const CHILD_SESSION: &str = "SNIPER_TEST_SAVED_OPERATION_CRASH_SESSION";
+        if let Some(path) = std::env::var_os(CHILD_DIRECTORY) {
+            let ledger = Arc::new(SavedOperationLedger::new(&path));
+            let id = Uuid::parse_str(&std::env::var(CHILD_ID).unwrap()).unwrap();
+            let session = Uuid::parse_str(&std::env::var(CHILD_SESSION).unwrap()).unwrap();
+            ledger
+                .execute(
+                    id,
+                    session,
+                    SavedOperationKind::HttpDelete,
+                    &(),
+                    move || async move {
+                        // A temp-only stand-in mutation survives the process exit, while
+                        // no terminal receipt can be written and destructors cannot run.
+                        let marker = PathBuf::from(path).join("mutation-count");
+                        let mut file = fs::File::create(marker).unwrap();
+                        file.write_all(b"1").unwrap();
+                        file.sync_all().unwrap();
+                        std::process::exit(0);
+                    },
+                )
+                .await
+                .unwrap();
+            panic!("the child must exit during its mutation");
+        }
+        let directory = TestDirectory::new();
+        let id = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "saved_operations::tests::applied_mutation_abrupt_process_exit_leaves_pending_and_blocks_restart"])
+            .env(CHILD_DIRECTORY, &directory.0)
+            .env(CHILD_ID, id.to_string())
+            .env(CHILD_SESSION, session.to_string())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let marker = directory.0.join("mutation-count");
+        assert_eq!(fs::read(&marker).unwrap(), b"1");
+        let restarted = directory.ledger();
+        let retried_marker = marker.clone();
+        let repeated = restarted
+            .execute(
+                id,
+                session,
+                SavedOperationKind::HttpDelete,
+                &(),
+                move || async move {
+                    fs::write(retried_marker, b"2").unwrap();
+                    applied()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(repeated.replayed);
+        assert_eq!(repeated.receipt.outcome, SavedOperationOutcome::Unknown);
+        assert_eq!(repeated.receipt.code, SavedOperationCode::Pending);
+        assert!(repeated.receipt.completed_at.is_none());
+        assert_eq!(fs::read(marker).unwrap(), b"1");
+        assert!(!restarted.path(id, true).exists());
+        assert_eq!(restarted.directory_sync_attempts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
