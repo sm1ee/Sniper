@@ -18434,6 +18434,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    #[tokio::test]
+    async fn delete_ack_invalid_input_is_server_error_but_stale_selection_is_conflict() {
+        for clear in [false, true] {
+            let error = crate::store::tests::failed_delete_ack_for_test(clear, None).await;
+            let response = super::saved_transaction_delete_error(error);
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let message = std::str::from_utf8(&body).unwrap();
+            assert!(message.contains("inspect current state before retrying"));
+            assert!(!message.contains("injected sync failure"));
+        }
+        let stale = crate::store::tests::stale_delete_selection_error_for_test().await;
+        assert_eq!(
+            super::saved_transaction_delete_error(stale).status(),
+            StatusCode::CONFLICT
+        );
+    }
+
     // Clearing history is how someone gets rid of captured cookies and tokens. The
     // deletion is durable as a journal tombstone, but the traffic itself sits in the
     // session files (an older capture) or in the journal (a recent one) until those

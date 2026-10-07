@@ -429,10 +429,7 @@ async fn mutate(state: &Arc<AppState>, operation: &str, input: Value) -> Respons
                         },
                     )
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
-                    SavedOperationCompletion::not_applied(SavedOperationCode::SelectionMismatch)
-                }
-                Err(_) => SavedOperationCompletion::unknown(SavedOperationCode::PersistenceFailed),
+                Err(error) => deletion_error_completion(error),
             }
         })
         .await;
@@ -441,5 +438,64 @@ async fn mutate(state: &Arc<AppState>, operation: &str, input: Value) -> Respons
             json!({"contract_version":CONTRACT_VERSION,"receipt":execution.receipt,"replayed":execution.replayed}),
         ),
         Err(error) => ledger_error(error, &input),
+    }
+}
+
+fn deletion_error_completion(error: std::io::Error) -> SavedOperationCompletion {
+    if error.kind() == std::io::ErrorKind::InvalidInput {
+        SavedOperationCompletion::not_applied(SavedOperationCode::SelectionMismatch)
+    } else {
+        SavedOperationCompletion::unknown(SavedOperationCode::PersistenceFailed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::saved_operations::{SavedOperationLedger, SavedOperationReceipt};
+
+    async fn deletion_error_receipt(
+        kind: SavedOperationKind,
+        error: std::io::Error,
+    ) -> SavedOperationReceipt {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-delete-receipt-{}", Uuid::new_v4()));
+        let ledger = Arc::new(SavedOperationLedger::new(&data_dir));
+        let execution = ledger
+            .execute(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                kind,
+                &json!({}),
+                move || async move { deletion_error_completion(error) },
+            )
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(data_dir).unwrap();
+        execution.receipt
+    }
+
+    #[tokio::test]
+    async fn saved_delete_and_clear_invalid_input_ack_have_unknown_receipts() {
+        for (clear, kind) in [
+            (false, SavedOperationKind::HttpDelete),
+            (true, SavedOperationKind::HttpClear),
+        ] {
+            let error = crate::store::tests::failed_delete_ack_for_test(clear, None).await;
+            let receipt = deletion_error_receipt(kind, error).await;
+            assert_eq!(receipt.operation, kind);
+            assert_eq!(receipt.outcome, SavedOperationOutcome::Unknown);
+            assert_eq!(receipt.code, SavedOperationCode::PersistenceFailed);
+            assert!(receipt.result.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_saved_delete_selection_remains_not_applied() {
+        let error = crate::store::tests::stale_delete_selection_error_for_test().await;
+        let receipt = deletion_error_receipt(SavedOperationKind::HttpDelete, error).await;
+        assert_eq!(receipt.outcome, SavedOperationOutcome::NotApplied);
+        assert_eq!(receipt.code, SavedOperationCode::SelectionMismatch);
+        assert!(receipt.result.is_none());
     }
 }

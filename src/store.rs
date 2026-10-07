@@ -783,7 +783,12 @@ impl TransactionStore {
             .ok_or_else(|| {
                 io::Error::other("failed to encode transaction deletion journal entry")
             })?;
-        append_transaction_journal(tx, line).await?;
+        // InvalidInput is reserved for selection checks before an append. Even
+        // that OS error can follow a written tombstone (for example at fsync),
+        // so callers must treat every append/ack failure as uncertain persistence.
+        append_transaction_journal(tx, line)
+            .await
+            .map_err(io::Error::other)?;
 
         let mut inner = self.inner.write().await;
         inner
@@ -2688,7 +2693,7 @@ impl AdvancedSearchMatcher {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use chrono::{Duration, Utc};
 
     use super::*;
@@ -3019,8 +3024,15 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         drop(rx);
         store.journal_tx = Some(tx);
+        let error = store.delete_ids(&[id]).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(
-            store.delete_ids(&[id]).await.unwrap_err().kind(),
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
             io::ErrorKind::BrokenPipe
         );
         assert!(store.get(id).await.is_some());
@@ -3060,6 +3072,171 @@ mod tests {
         assert!(pending.await.unwrap().is_err());
         assert!(store.get(id).await.is_some());
         assert!(reload.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_ids_lost_ack_is_persistence_failure_without_memory_changes() {
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let writer = std::thread::spawn(move || {
+            let command = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                command,
+                TransactionJournalCommand::Append { ack: Some(_), .. }
+            ));
+            drop(command);
+        });
+        let error = store.delete_ids(&[id]).await.unwrap_err();
+        writer.join().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert!(store.get(id).await.is_some());
+    }
+
+    /// Shared fixture for the store, receipt and HTTP error classifications.
+    pub(crate) async fn failed_delete_ack_for_test(
+        clear: bool,
+        journal_path: Option<&Path>,
+    ) -> io::Error {
+        use std::{sync::Arc, time::Duration};
+        let mut selected = test_record("example.com");
+        selected.path = "/selected".into();
+        let selected_id = selected.id;
+        let mut survivor = test_record("example.com");
+        survivor.path = "/survivor".into();
+        let mut store = TransactionStore::from_records(vec![selected, survivor]);
+        let before = store.snapshot(None).await;
+        let before_json = serde_json::to_value(&before).unwrap();
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let store = Arc::new(store);
+        let event_sequence = store.latest_event_sequence();
+        let mut retention = store.subscribe_retention();
+        let pending = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                if clear {
+                    store.delete_all().await
+                } else {
+                    let selection = serde_json::from_value(serde_json::json!({
+                        "session_id": Uuid::new_v4(), "ids": [selected_id]
+                    }))
+                    .unwrap();
+                    store
+                        .delete_selection(&selection)
+                        .await
+                        .map(|(count, _)| count)
+                }
+            })
+        };
+        let command = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .unwrap();
+        let TransactionJournalCommand::Append {
+            line,
+            ack: Some(ack),
+        } = command
+        else {
+            panic!("expected acknowledged deletion")
+        };
+        assert_eq!(
+            serde_json::to_value(store.snapshot(None).await).unwrap(),
+            before_json
+        );
+        if let Some(path) = journal_path {
+            // Model a complete write followed by a failed fsync acknowledgement.
+            // These exact bytes may be recovered even though memory stays intact.
+            let mut file = fs::File::create(path).unwrap();
+            for record in before.iter().rev() {
+                file.write_all(&encode_transaction_insert_journal_line(record).unwrap())
+                    .unwrap();
+            }
+            file.write_all(&line).unwrap();
+            file.flush().unwrap();
+            file.sync_all().unwrap();
+        }
+        ack.send(Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "injected sync failure",
+        )))
+        .unwrap();
+        let error = pending.await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        let source = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(source.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(source.to_string(), "injected sync failure");
+        assert_eq!(
+            serde_json::to_value(store.snapshot(None).await).unwrap(),
+            before_json
+        );
+        assert_eq!(store.list(&ListFilters::default()).await.len(), 2);
+        assert!(store.get(selected_id).await.is_some());
+        assert_eq!(store.latest_event_sequence(), event_sequence);
+        assert!(retention.try_recv().is_err());
+        error
+    }
+
+    #[tokio::test]
+    async fn delete_invalid_input_ack_is_uncertain_and_tombstone_can_replay() {
+        for clear in [false, true] {
+            let data_dir =
+                std::env::temp_dir().join(format!("sniper-delete-ack-{}", Uuid::new_v4()));
+            let (registry, active) =
+                crate::session::SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            let journal_path = active.storage_dir().join("transactions.journal");
+            drop(active);
+            drop(registry);
+            failed_delete_ack_for_test(clear, Some(&journal_path)).await;
+            let (registry, reloaded) =
+                crate::session::SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            let rows = reloaded.store.list(&ListFilters::default()).await;
+            assert_eq!(rows.len(), usize::from(!clear));
+            assert!(rows.iter().all(|row| row.path == "/survivor"));
+            drop(reloaded);
+            drop(registry);
+            fs::remove_dir_all(data_dir).unwrap();
+        }
+    }
+
+    pub(crate) async fn stale_delete_selection_error_for_test() -> io::Error {
+        let record = test_record("example.com");
+        let id = record.id;
+        let mut store = TransactionStore::from_records(vec![record]);
+        let (tx, rx) = mpsc::channel();
+        store.journal_tx = Some(tx);
+        let selection = serde_json::from_value(serde_json::json!({
+            "session_id": Uuid::new_v4(), "ids": [id], "selection_token": "0".repeat(64)
+        }))
+        .unwrap();
+        let error = store.delete_selection(&selection).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            rx.try_recv().is_err(),
+            "stale validation must not append anything"
+        );
+        assert!(store.get(id).await.is_some());
+        error
+    }
+
+    #[tokio::test]
+    async fn stale_delete_selection_remains_invalid_input_without_appending() {
+        stale_delete_selection_error_for_test().await;
     }
 
     #[tokio::test]
