@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn file_directory_replacement_conflicts_preserve_both() {
+    fn file_over_populated_directory_preserves_both() {
         let root = TestDataDir::new();
         let file = root.0.join("settings.json");
         let directory = root.0.join("settings-directory");
@@ -263,16 +263,43 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         fs::write(directory.join("marker"), b"keep directory contents").unwrap();
 
-        for (source, target) in [(&file, &directory), (&directory, &file)] {
-            assert!(rename(source, target).is_err());
-            assert_eq!(fs::read(&file).unwrap(), b"complete settings");
-            assert_eq!(
-                fs::read(directory.join("marker")).unwrap(),
-                b"keep directory contents"
-            );
-            assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
-            assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
-        }
+        assert!(
+            rename(&file, &directory).is_err(),
+            "a file must not replace a populated directory"
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"complete settings");
+        assert_eq!(
+            fs::read(directory.join("marker")).unwrap(),
+            b"keep directory contents"
+        );
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+    }
+
+    // MoveFileExW can replace a file with a directory before the POSIX fallback.
+    // Only Unix guarantees rejection for this direction:
+    // https://doc.rust-lang.org/std/fs/fn.rename.html#platform-specific-behavior
+    #[cfg(unix)]
+    #[test]
+    fn directory_over_file_preserves_both_on_unix() {
+        let root = TestDataDir::new();
+        let file = root.0.join("settings.json");
+        let directory = root.0.join("settings-directory");
+        fs::write(&file, b"complete settings").unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("marker"), b"keep directory contents").unwrap();
+
+        assert!(
+            rename(&directory, &file).is_err(),
+            "a directory must not replace a file on Unix"
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"complete settings");
+        assert_eq!(
+            fs::read(directory.join("marker")).unwrap(),
+            b"keep directory contents"
+        );
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
     }
 
     #[test]
