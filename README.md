@@ -46,7 +46,15 @@ Run the Windows setup executable built by `packaging/windows/make-setup.ps1`, or
 
 ### macOS
 
-**Download the latest `.dmg`** from [Releases](https://github.com/sm1ee/Sniper/releases/latest), open it, and drag Sniper to your Applications folder.
+**Install with Homebrew**, which also puts `sniper-cli` on your `PATH`:
+
+```bash
+brew install --cask sm1ee/tap/sniper
+```
+
+Or **download the latest `.dmg`** from [Releases](https://github.com/sm1ee/Sniper/releases/latest), open it, and drag Sniper to your Applications folder.
+Releases are ad-hoc signed, not notarized, so on first launch macOS may ask you to
+allow Sniper under System Settings ▸ Privacy & Security ▸ **Open Anyway**.
 
 Or build from source:
 
@@ -185,9 +193,9 @@ and `capture.proxy.configure` (the latter reads settings from stdin).
 
 ## CLI
 
-`sniper-cli` ships inside the app bundle. Sniper does not edit your shell
-profile on its own, so put it on `PATH` once. **Settings ▸ Command line ▸ Add
-sniper-cli to PATH** does it, or:
+`sniper-cli` ships inside the app bundle. Installed with Homebrew, it is already on
+`PATH`. Otherwise put it there once, since Sniper does not edit your shell profile
+on its own. **Settings ▸ Command line ▸ Add sniper-cli to PATH** does it, or:
 
 ```bash
 # Let the app add it to ~/.zshrc (and ~/.bashrc when present) on next launch

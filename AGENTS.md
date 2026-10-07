@@ -201,6 +201,11 @@ PATH="$HOME/.cargo/bin:$PATH" ALLOW_ADHOC_RELEASE=1 DMG_ARCH=universal \
    fifteen minutes for the release to appear before uploading the `.zip` and its
    `.sha256`. Create the release in step 4 within that window; if the job gives
    up, download `dist/` from the run and attach it by hand.
+6. Update the Homebrew cask. `packaging/homebrew/render-cask.sh` fills the
+   version and the DMG's SHA-256 into `packaging/homebrew/sniper.rb`; write it to
+   `Casks/sniper.rb` in a clone of `sm1ee/homebrew-tap` and commit it as
+   `sniper X.Y.Z`. Until then `brew install --cask sm1ee/tap/sniper` installs the
+   previous release, which then updates itself.
 
 Both artifacts ship a `.sha256` in the `<hash>  <filename>` form, so a
 downloader can check either with `shasum -a 256 -c`. Releases are ad-hoc signed,
