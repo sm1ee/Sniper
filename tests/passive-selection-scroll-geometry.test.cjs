@@ -43,7 +43,7 @@ function createFixture(kind, options = {}) {
     historyPaging: { trimmedHeadCount: 0, loading: false },
   };
   const context = loadFunctions([
-    "scrollHistoryToId", "scrollSelectedHistoryRowIntoView", "renderHistoryVirtual",
+    "scrollHistoryToId", "scrollSelectedHistoryRowIntoView", "measuredRowPitch", "renderHistoryVirtual",
     "ensureWebsocketSessionInView", "websocketRenderedSessionWindow",
     "ensureWebsocketFramePositionInView", "websocketFramesShell", "websocketRenderedFrameWindow",
   ], {

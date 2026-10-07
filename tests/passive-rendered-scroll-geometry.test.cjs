@@ -96,7 +96,7 @@ function historyFixture(options = {}) {
   };
   const c = loadFunctions([
     "moveHistorySelection", "selectHistoryTransaction", "updateHistorySelection",
-    "scrollHistoryToId", "scrollSelectedHistoryRowIntoView", "renderHistoryVirtual", "clamp",
+    "scrollHistoryToId", "scrollSelectedHistoryRowIntoView", "measuredRowPitch", "renderHistoryVirtual", "clamp",
   ], {
     ...constants, state, els: { historyTable: dom.table, historyTableBody: dom.body },
     measuredHistoryRowHeight: dom.height, HTTP_HISTORY_SCROLL_PREFETCH_ROWS: 120,
@@ -156,7 +156,7 @@ function findingsFixture(options = {}) {
     title: "Saved fixture", host: "example.com", path: "/saved", found_at: "",
   })) };
   const functions = ["renderFindingsVirtual", "scrollFindingsToId", "findingsArrowNav", "updateFindingsSelection", "escapeHtml", "severityClass", "severityLabel"];
-  if (appSource.includes("function getFindingsRowHeight(")) functions.push("getFindingsRowHeight");
+  if (appSource.includes("function getFindingsRowHeight(")) functions.push("measuredRowPitch", "getFindingsRowHeight");
   const c = loadFunctions(functions, {
     ...constants, state, els: { findingsBody: dom.body },
     measuredFindingsRowHeight: options.cachedHeight ?? constants.FINDINGS_ROW_HEIGHT,

@@ -8747,9 +8747,22 @@ function renderFindings() {
   renderFindingsVirtual();
 }
 
+// The distance from one rendered row to the next, not the first row's own height:
+// with collapsed borders the row after a borderless spacer is half a border short,
+// and every scroll offset built on it drifts by that much per row.
+function measuredRowPitch(tbody) {
+  const first = tbody.querySelector(".history-row");
+  if (!first) return 0;
+  const next = first.nextElementSibling;
+  if (next?.classList?.contains("history-row")) {
+    return next.getBoundingClientRect().top - first.getBoundingClientRect().top;
+  }
+  return first.getBoundingClientRect().height;
+}
+
 function getFindingsRowHeight(options = {}) {
   const previous = measuredFindingsRowHeight;
-  const measured = els.findingsBody.querySelector(".history-row")?.getBoundingClientRect().height;
+  const measured = measuredRowPitch(els.findingsBody);
   if (Number.isFinite(measured) && measured > 0) {
     measuredFindingsRowHeight = measured;
   }
@@ -10348,8 +10361,7 @@ function renderHistoryVirtual() {
     rows.join("") +
     (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
 
-  const measuredRow = els.historyTableBody.querySelector(".history-row");
-  const measured = measuredRow?.getBoundingClientRect().height || 0;
+  const measured = measuredRowPitch(els.historyTableBody) || 0;
   if (measured > 0 && Math.abs(measured - rowHeight) >= 1) {
     measuredHistoryRowHeight = measured;
     renderHistoryVirtual();

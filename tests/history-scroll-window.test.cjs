@@ -17,7 +17,7 @@ function createFixture({ rowCount = 100, rowHeight = 27, headerHeight = 27, view
     innerHTML: "",
     querySelector: () => ({ getBoundingClientRect: () => ({ height: rowHeight }) }),
   };
-  const context = loadFunctions(["renderHistoryVirtual"], {
+  const context = loadFunctions(["measuredRowPitch", "renderHistoryVirtual"], {
     state,
     els: {
       historyTable: {

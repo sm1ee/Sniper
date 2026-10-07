@@ -32,7 +32,7 @@ function fixture(options = {}) {
     title: "Saved entry", host: "example.com", path: "/saved", found_at: "",
   })) };
   const c = loadFunctions([
-    "getFindingsRowHeight", "renderFindingsVirtual", "scrollFindingsToId", "findingsArrowNav", "updateFindingsSelection",
+    "measuredRowPitch", "getFindingsRowHeight", "renderFindingsVirtual", "scrollFindingsToId", "findingsArrowNav", "updateFindingsSelection",
     "escapeHtml", "severityClass", "severityLabel",
   ], {
     ...constants, measuredFindingsRowHeight: rowHeight, state, els: { findingsBody: body }, selectedFindingId: `saved-${options.selectedIndex ?? 0}`,
