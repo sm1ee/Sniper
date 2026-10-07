@@ -2362,7 +2362,10 @@ function bindEvents() {
       event.preventDefault();
       const color = HTTP_COLOR_TAG_ORDER[parseInt(event.key, 10) - 1];
       const item = getHistoryItem(state.selectedId);
-      const newColor = item?.color_tag === color ? null : color;
+      // A selection live capture pushed out of the loaded rows has no row; the
+      // inspector's record still says which tag it carries.
+      const shown = item || (state.selectedRecord?.id === state.selectedId ? state.selectedRecord : null);
+      const newColor = shown?.color_tag === color ? null : color;
       if (item) item.color_tag = newColor;
       invalidateVisibleEntriesCache();
       renderHistory();
@@ -7194,7 +7197,7 @@ function clearHttpHistoryLoadedRowsForPendingQuery() {
   renderHistory();
 }
 
-function mergeHistoryItems(items, { prepend = false } = {}) {
+function mergeHistoryItems(items, { prepend = false, live = false } = {}) {
   applyPendingAnnotationsToItems(items);
   const newItems = [];
   const seen = new Set();
@@ -7217,14 +7220,14 @@ function mergeHistoryItems(items, { prepend = false } = {}) {
   if (state.historyPaging) {
     state.historyPaging._trimmedTailOnLastMerge = false;
   }
-  trimHistoryCache(prepend ? "recent" : "older");
+  trimHistoryCache(prepend ? "recent" : "older", { live });
   rebuildHistoryItemIndex();
   state._itemsVersion += 1;
   invalidateVisibleEntriesCache();
   return newItems.length;
 }
 
-function replaceHistoryItemsForGap(items) {
+function replaceHistoryItemsForGap(items, { live = false } = {}) {
   applyPendingAnnotationsToItems(items);
   const seen = new Set();
   const freshItems = [];
@@ -7242,12 +7245,16 @@ function replaceHistoryItemsForGap(items) {
   rebuildHistoryItemIndex();
   state._itemsVersion += 1;
   invalidateVisibleEntriesCache();
-  moveHistorySelectionIfMissing("first");
+  if (live) {
+    keepLiveEvictedSelection();
+  } else {
+    moveHistorySelectionIfMissing("first");
+  }
   refreshHistoryPagingCursorFromItems();
   return freshItems.length;
 }
 
-function trimHistoryCache(prefer = "recent") {
+function trimHistoryCache(prefer = "recent", { live = false } = {}) {
   const overflow = state.items.length - HTTP_HISTORY_MAX_LOADED_ITEMS;
   if (overflow <= 0) {
     refreshHistoryPagingCursorFromItems();
@@ -7268,9 +7275,27 @@ function trimHistoryCache(prefer = "recent") {
   }
 
   state._connectCount = state.items.reduce((count, item) => count + (item.method === "CONNECT" ? 1 : 0), 0);
-  reconcileHistorySelectionAfterTrim(removed, prefer === "older" ? "first" : "last");
+  // Live capture evicts rows nobody touched. Moving the selection for it swapped
+  // the inspector to a record the person never chose and scrolled the list to it,
+  // and once the replacement sat at the edge being trimmed, it happened again on
+  // every request. Paging, including the backfill an arrow key at the last loaded
+  // row sets off, keeps the fallback: that is how the key lands on the next row.
+  if (live) {
+    keepLiveEvictedSelection();
+  } else {
+    reconcileHistorySelectionAfterTrim(removed, prefer === "older" ? "first" : "last");
+  }
   refreshHistoryPagingCursorFromItems();
   return removed.length;
+}
+
+// Live capture pushed the selected record out of the loaded rows. It still
+// exists, so it stays selected and the inspector keeps showing it; this notes that
+// it now sits just past the last loaded row, which is where arrow keys resume.
+function keepLiveEvictedSelection() {
+  if (state.selectedId && !state.items.some((item) => item.id === state.selectedId)) {
+    state._selectionPastEndId = state.selectedId;
+  }
 }
 
 function reconcileHistorySelectionAfterTrim(removedItems = [], fallback = "first") {
@@ -7574,7 +7599,7 @@ function flushTransactionDeltas() {
   }
 
   fresh.sort((a, b) => Number(b.sequence ?? 0) - Number(a.sequence ?? 0));
-  const added = mergeHistoryItems(fresh, { prepend: true });
+  const added = mergeHistoryItems(fresh, { prepend: true, live: true });
   if (state.historyPaging) {
     state.historyPaging.total += totalAdded;
     if (isKnownCount(state.historyPaging.filteredTotal)) {
@@ -7787,8 +7812,8 @@ function scheduleIncrementalRefresh() {
         state.historyPaging._trimmedTailOnLastMerge = false;
       }
       const added = hasGapBeforeLoadedWindow
-        ? replaceHistoryItemsForGap(recent)
-        : mergeHistoryItems(recent, { prepend: true });
+        ? replaceHistoryItemsForGap(recent, { live: true })
+        : mergeHistoryItems(recent, { prepend: true, live: true });
       if (state.historyPaging) {
         if (page.total != null) state.historyPaging.total = page.total;
         if (page.filtered_total != null) state.historyPaging.filteredTotal = page.filtered_total;
@@ -10365,7 +10390,12 @@ async function moveHistorySelection(offset) {
     return;
   }
 
-  const currentIndex = visibleEntries.findIndex((entry) => entry.item.id === state.selectedId);
+  let currentIndex = visibleEntries.findIndex((entry) => entry.item.id === state.selectedId);
+  // Live capture pushed the selected record out just past the last loaded row, so
+  // continue from there: up is the last row, down loads the next page after it.
+  if (currentIndex === -1 && state.selectedId && state._selectionPastEndId === state.selectedId) {
+    currentIndex = offset > 0 ? visibleEntries.length - 1 : visibleEntries.length;
+  }
   const fallbackIndex = offset > 0 ? 0 : visibleEntries.length - 1;
   if (offset > 0
     && currentIndex === visibleEntries.length - 1
