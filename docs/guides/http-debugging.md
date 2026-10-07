@@ -166,8 +166,10 @@ see the request first). What the browser is given:
   profile once its browser is gone.
 - **A DevTools port only when asked** (`--agent`). For Chromium-family browsers
   that is what the flag opens, and it is off unless you turn it on: the port lets
-  any other local process drive a browser holding your logged-in sessions. ego has
-  no port, so `--agent` changes nothing there; its `control` is always returned.
+  any other local process drive a browser holding your logged-in sessions. For
+  BrowserOS neo the flag turns on its own server, which is off otherwise. ego and
+  Aside have no port, so `--agent` changes nothing there; their `control` is always
+  returned.
 
 #### Two ways to drive it
 
@@ -177,7 +179,7 @@ result's `control` says what to use, in a shape that depends on the driver:
 | | `chrome`, `edge`, `brave`, `chromium` | `ego` | `aside` | `browseros-neo` |
 |---|---|---|---|---|
 | `driver` | `cdp` | `ego-cli` | `aside-cli` | `browseros-mcp` |
-| `control` | `{"driver":"cdp","endpoint":"http://127.0.0.1:<port>"}` | `{"driver":"ego-cli","server_name":"…","command":"ego-browser --ego-server-name=… nodejs -e '<script>'"}` | `{"driver":"aside-cli","command":"aside repl '<code>'"}` | `{"driver":"browseros-mcp","endpoint":"http://127.0.0.1:9200/mcp"}` |
+| `control` | `{"driver":"cdp","endpoint":"http://127.0.0.1:<port>"}` | `{"driver":"ego-cli","server_name":"…","command":"ego-browser --ego-server-name=… nodejs -e '<script>'"}` | `{"driver":"aside-cli","command":"aside repl '<code>'"}` | `{"driver":"browseros-mcp","endpoint":"http://127.0.0.1:<port>/mcp"}`, with `--agent` |
 | Agent actions | a CDP client you bring | built in | built in, through its REPL | built in, through MCP |
 | Snapshot with `@ref`s, handoff to the user, visible cursor | no | yes, as ego documents them | not documented | not documented |
 | Platforms | macOS, Windows, Linux | macOS | macOS, Windows | macOS, Windows |
@@ -192,15 +194,26 @@ deterministic steps. Aside can also run a task with its own assistant on the acc
 signed in to it (`aside "<task>"`, `aside exec`); Sniper does not hand Aside to an
 agent that way. Aside's command has no option to choose a window, so it drives
 whichever Aside is running: quit any other Aside first, or what the agent does there
-is not captured. Neither this nor where Aside installs on Windows has been checked
-against a running Aside.
+is not captured. Aside's extension talks to a daemon on `127.0.0.1:21420` that every
+Aside on the machine shares, and it answers with the signed-in account and its
+password manager, so Sniper sends that port direct and it stays out of the history.
+On macOS Aside takes Sniper's proxy, certificate and profile switches; it ignores
+the page on the first launch of a profile, and a second open shows it. Where Aside
+installs on Windows has not been checked against a running copy.
 
-**With `browseros-mcp`**, connect an MCP client (Streamable HTTP) to
-`control.endpoint`, the address BrowserOS neo's documentation gives; the app shows
-the one it serves on its MCP connect page. It is one address per machine, so quit any
-other BrowserOS neo first, or what the agent does there is not captured. BrowserOS
-neo has no Linux build. Whether it takes Sniper's switches, and where it installs on
-Windows, has not been checked against a running copy.
+**With `browseros-mcp`**, open with `--agent` and connect an MCP client (Streamable
+HTTP) to `control.endpoint`. Each profile runs its own server, and Sniper picks its
+port, so the address reaches this browser and not another BrowserOS neo. Without
+`--agent` the server stays off: it serves the agent endpoint, and the browser then
+also listens on every network interface for it (ports 9010 and 9011 by default).
+The browser opens a DevTools port of its own on loopback (9110 by default) either
+way, which Sniper cannot turn off. Calls its pages make to the server go direct and
+stay out of the history. The servers of all profiles share one database in
+`~/.browserclaw`, and the server bundled with the app will not open it once a newer
+server has updated it. A `--fresh` profile has only the bundled one, so it may give
+no `control` and a warning instead; the persistent profile keeps the newer server it
+downloads. On macOS BrowserOS neo takes Sniper's switches. It has no Linux build, and
+where it installs on Windows has not been checked against a running copy.
 
 **With `cdp`**, connect any CDP client to `control.endpoint`: Playwright's
 `connectOverCDP`, or chrome-devtools-mcp with `--browserUrl`. Sniper bundles none.

@@ -276,9 +276,9 @@ struct BrowserOpenArgs {
     /// Use a throwaway profile instead of the persistent Sniper one.
     #[arg(long)]
     fresh: bool,
-    /// Open a DevTools port so an agent can drive a Chromium-family browser; the
-    /// result's `control` carries its endpoint. ego, Aside and BrowserOS neo are
-    /// driven through their own command or endpoint and always return it in
+    /// Open a DevTools port so an agent can drive a Chromium-family browser, or
+    /// BrowserOS neo's MCP server; the result's `control` carries its endpoint. ego
+    /// and Aside are driven through their own command and always return it in
     /// `control`, so this changes nothing for them.
     #[arg(long)]
     agent: bool,

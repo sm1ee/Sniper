@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     fs, io,
     io::{Read, Seek, SeekFrom},
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{mpsc, Mutex, OnceLock},
@@ -307,12 +307,79 @@ pub struct Capabilities {
     pub visible_cursor: bool,
 }
 
+/// Turns off the server BrowserOS neo runs beside the browser: its MCP endpoint, a
+/// DevTools port of its own and a proxy for both that listens on every interface.
+const BROWSEROS_SERVER_OFF: &str = "--disable-browseros-server";
+
 impl Driver {
-    /// Whether this launch has to open a DevTools port. Off unless an agent asks:
-    /// the port lets any local process drive a browser that holds the profile's
-    /// logged-in sessions.
+    /// Whether this launch has to open a port an agent drives the browser through.
+    /// Off unless an agent asks: the port lets any local process drive a browser
+    /// that holds the profile's logged-in sessions.
     fn opens_port(self, agent: bool) -> bool {
-        self == Driver::Cdp && agent
+        matches!(self, Driver::Cdp | Driver::BrowserosMcp) && agent
+    }
+
+    /// The port named in messages, article included.
+    fn port_name(self) -> &'static str {
+        match self {
+            Driver::BrowserosMcp => "an MCP endpoint",
+            Driver::Cdp | Driver::EgoCli | Driver::AsideCli => "a DevTools port",
+        }
+    }
+
+    /// Where in the profile the browser writes the port it opened.
+    fn port_file(self) -> &'static str {
+        match self {
+            // Settings it writes for its server at every start.
+            Driver::BrowserosMcp => ".browseros/config.json",
+            Driver::Cdp | Driver::EgoCli | Driver::AsideCli => "DevToolsActivePort",
+        }
+    }
+
+    /// Whether the port is written down before anything listens on it. BrowserOS neo
+    /// writes its server's settings and then starts the server, which can fail: the
+    /// server bundled with the app will not open the database in `~/.browserclaw`
+    /// that every profile shares once a newer server has migrated it.
+    fn port_opens_late(self) -> bool {
+        self == Driver::BrowserosMcp
+    }
+
+    fn parse_port(self, text: &str) -> Option<u16> {
+        let port = match self {
+            Driver::BrowserosMcp => serde_json::from_str::<serde_json::Value>(text).ok()?["ports"]
+                ["server"]
+                .as_u64()
+                .and_then(|port| u16::try_from(port).ok()),
+            Driver::Cdp | Driver::EgoCli | Driver::AsideCli => text
+                .lines()
+                .next()
+                .and_then(|line| line.trim().parse().ok()),
+        };
+        port.filter(|port| *port != 0)
+    }
+
+    /// Whether a browser running with this command line has the port, for one whose
+    /// launch nobody recorded.
+    fn has_port(self, args: &str) -> bool {
+        match self {
+            Driver::Cdp => args.contains("--remote-debugging-port"),
+            Driver::BrowserosMcp => !args.contains(BROWSEROS_SERVER_OFF),
+            Driver::EgoCli | Driver::AsideCli => false,
+        }
+    }
+
+    /// The loopback port of a service the browser calls for itself, kept out of the
+    /// proxy: none of it is the site under test, and all of it would land in the
+    /// history. Aside's extension calls a daemon that every Aside on the machine
+    /// shares, which answers with the signed-in account and its password manager.
+    /// BrowserOS neo's pages poll its server every few seconds, even while the
+    /// server is switched off, so Sniper picks that port to know it in advance.
+    fn own_port(self) -> Option<u16> {
+        match self {
+            Driver::AsideCli => Some(21420),
+            Driver::BrowserosMcp => free_loopback_port(),
+            Driver::Cdp | Driver::EgoCli => None,
+        }
     }
 
     /// A name that lets the agent's CLI find this instance rather than the user's
@@ -328,7 +395,12 @@ impl Driver {
     }
 
     /// The switches this driver adds so that something can drive the browser.
-    fn launch_args(self, agent: bool, server_name: Option<&str>) -> Vec<String> {
+    fn launch_args(
+        self,
+        agent: bool,
+        server_name: Option<&str>,
+        own_port: Option<u16>,
+    ) -> Vec<String> {
         match self {
             // Port 0 lets the OS pick, and the browser writes the choice to
             // DevToolsActivePort. A fixed port would collide with any other browser
@@ -344,13 +416,18 @@ impl Driver {
                 .into_iter()
                 .collect(),
             // Aside's CLI documents no way to name or choose an instance.
-            Driver::AsideCli | Driver::BrowserosMcp => Vec::new(),
+            Driver::AsideCli => Vec::new(),
+            Driver::BrowserosMcp => own_port
+                .map(|port| format!("--browseros-server-port={port}"))
+                .into_iter()
+                .chain((!agent).then(|| BROWSEROS_SERVER_OFF.to_string()))
+                .collect(),
         }
     }
 
-    fn control(self, devtools_port: Option<u16>, server_name: Option<&str>) -> Option<Control> {
+    fn control(self, port: Option<u16>, server_name: Option<&str>) -> Option<Control> {
         match self {
-            Driver::Cdp => devtools_port.map(|port| Control::Cdp {
+            Driver::Cdp => port.map(|port| Control::Cdp {
                 endpoint: format!("http://127.0.0.1:{port}"),
             }),
             Driver::EgoCli => server_name.map(|name| Control::EgoCli {
@@ -360,29 +437,24 @@ impl Driver {
             Driver::AsideCli => Some(Control::AsideCli {
                 command: "aside repl '<code>'".to_string(),
             }),
-            // The address its documentation gives; the app shows the one it serves on
-            // its MCP connect page.
-            Driver::BrowserosMcp => Some(Control::BrowserosMcp {
-                endpoint: "http://127.0.0.1:9200/mcp".to_string(),
+            // Each profile's server takes the next free port, so the one read back
+            // reaches this browser and not another BrowserOS neo.
+            Driver::BrowserosMcp => port.map(|port| Control::BrowserosMcp {
+                endpoint: format!("http://127.0.0.1:{port}/mcp"),
             }),
         }
     }
 
     /// What an agent has to know when the driver cannot be pointed at the window
-    /// Sniper opened, unlike ego's named instance or a CDP port of its own: another
-    /// copy of the same browser would be driven instead, outside Sniper's proxy.
+    /// Sniper opened, unlike ego's named instance or a port of its own: another copy
+    /// of the same browser would be driven instead, outside Sniper's proxy.
     fn shared_instance_hint(self) -> Option<&'static str> {
         match self {
             Driver::AsideCli => Some(
                 "aside's command drives the Aside that is running and cannot be pointed at a \
                  window; quit any other Aside first, or what the agent does there is not captured",
             ),
-            Driver::BrowserosMcp => Some(
-                "BrowserOS neo serves its agent endpoint at one address and cannot be pointed at \
-                 a window; quit any other BrowserOS neo first, or what the agent does there is not \
-                 captured",
-            ),
-            Driver::Cdp | Driver::EgoCli => None,
+            Driver::Cdp | Driver::EgoCli | Driver::BrowserosMcp => None,
         }
     }
 
@@ -677,9 +749,10 @@ pub struct LaunchedBrowser {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub reused: bool,
     /// What an agent needs to drive it. Absent when the driver has nothing to offer
-    /// unless asked (a DevTools port) and was not, or when the browser ended or never
-    /// reported its port (see `warnings` and `hint`). For ego it is always a name
-    /// Sniper chose, present from the start, not proof the service is ready.
+    /// unless asked (a DevTools port, BrowserOS neo's server) and was not, or when the
+    /// browser ended or never reported its port (see `warnings` and `hint`). For ego
+    /// it is always a name Sniper chose, present from the start, not proof the
+    /// service is ready.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -696,7 +769,8 @@ struct Owner {
     pid: u32,
     exe: PathBuf,
     proxy: String,
-    /// Whether the browser has a DevTools port, which a later launch may need.
+    /// Whether the browser has the port an agent drives it through, which a later
+    /// launch may need. The name predates BrowserOS neo's server, which counts too.
     #[serde(alias = "debug_port")]
     devtools_port: bool,
     /// When this process started the browser. Not saved: a record read back from
@@ -821,9 +895,10 @@ async fn launch_at(
         // The header guards on the API only keep web pages out, and a proxy that
         // listens beyond loopback relays requests to local ports, including this
         // one, which hands over the browser's logged-in sessions.
-        return Err(LaunchError::Forbidden(
-            "a DevTools port is only opened while the proxy listens on loopback only".to_string(),
-        ));
+        return Err(LaunchError::Forbidden(format!(
+            "{} is only opened while the proxy listens on loopback only",
+            driver.port_name()
+        )));
     }
     let url = validate_url(request.url.as_deref().unwrap_or("about:blank"))?;
     let spki =
@@ -837,11 +912,13 @@ async fn launch_at(
         profiles_root.join(kind.name())
     };
     let server_name = driver.server_name(ctx.proxy_addr.port(), &profile);
+    let own_port = driver.own_port();
     let args = build_args(
         &profile,
         &proxy,
         &spki,
-        &driver.launch_args(request.agent, server_name.as_deref()),
+        own_port,
+        &driver.launch_args(request.agent, server_name.as_deref(), own_port),
         &url,
     );
 
@@ -873,7 +950,7 @@ async fn launch_at(
         let existing = if request.fresh {
             None
         } else {
-            current_owner(&profile, &live, exe)
+            current_owner(&profile, &live, exe, driver)
         };
         match existing {
             Some(owner) if owner.proxy == proxy && (owner.devtools_port || !wants_port) => {
@@ -904,7 +981,7 @@ async fn launch_at(
                 } else if owner.proxy != proxy {
                     format!("was started for the proxy at {}, not {proxy}", owner.proxy)
                 } else {
-                    "was started without a DevTools port".to_string()
+                    format!("was started without {}", driver.port_name())
                 };
                 return Err(LaunchError::AlreadyRunning {
                     pid: owner.pid,
@@ -930,11 +1007,9 @@ async fn launch_at(
                     // A leftover from an earlier run would be read as this run's
                     // port. Cleared here, after the decision above, so a launch
                     // that is refused never touches a running browser's file.
-                    match fs::remove_file(profile.join("DevToolsActivePort")) {
+                    match fs::remove_file(profile.join(driver.port_file())) {
                         Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                            warnings.push(format!(
-                                "could not clear a stale DevTools port file: {error}"
-                            ));
+                            warnings.push(format!("could not clear a stale port file: {error}"));
                         }
                         _ => {}
                     }
@@ -1004,20 +1079,22 @@ async fn launch_at(
 
     let log_path = profile.join(LAUNCH_LOG);
     let mut ended = false;
-    let mut devtools_port = None;
+    let mut port = None;
     if wants_port {
-        match read_devtools_port(&profile, ctx.devtools_wait, exited.as_mut()).await {
-            DevtoolsWait::Port(port) => devtools_port = Some(port),
-            DevtoolsWait::BrowserExited(exit) => {
+        match read_port(driver, &profile, ctx.devtools_wait, exited.as_mut()).await {
+            PortWait::Port(read) => port = Some(read),
+            PortWait::BrowserExited(exit) => {
                 ended = true;
                 warnings.push(format!(
-                    "the browser exited ({}) before reporting a DevTools port{}",
+                    "the browser exited ({}) before reporting {}{}",
                     exit.describe(),
+                    driver.port_name(),
                     log_hint(request.fresh, &log_path)
                 ));
             }
-            DevtoolsWait::TimedOut => warnings.push(format!(
-                "the browser did not report a DevTools port within {} seconds",
+            PortWait::TimedOut => warnings.push(format!(
+                "the browser did not report {} within {} seconds",
+                driver.port_name(),
                 ctx.devtools_wait.as_secs()
             )),
         }
@@ -1047,7 +1124,7 @@ async fn launch_at(
     let control = if ended {
         None
     } else {
-        driver.control(devtools_port, server_name.as_deref())
+        driver.control(port, server_name.as_deref())
     };
     let hint = if ended {
         Some("the browser ended at once, so there is nothing to drive; see warnings".to_string())
@@ -1057,9 +1134,11 @@ async fn launch_at(
         // Asking again is refused while this browser runs, because it was started
         // without the port; saying so here saves the round trip that finds out.
         Some(if reused_has_port {
-            "this browser already has a DevTools port from an earlier agent open; open \
-             again with agent to get its endpoint"
-                .to_string()
+            format!(
+                "this browser already has {} from an earlier agent open; open again with \
+                 agent to get its endpoint",
+                driver.port_name()
+            )
         } else {
             "opened without agent control; to get it, quit this browser (closing the window \
              is not enough on macOS) and open again with agent, or add fresh for a separate \
@@ -1139,6 +1218,16 @@ fn validate_url(raw: &str) -> Result<String, LaunchError> {
     Ok(parsed.to_string())
 }
 
+/// A port nothing listens on at this moment.
+// ponytail: another process can take it in the moment before the browser binds it.
+// Holding it until then would need a browser that accepts an open socket.
+fn free_loopback_port() -> Option<u16> {
+    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .and_then(|listener| listener.local_addr())
+        .map(|addr| addr.port())
+        .ok()
+}
+
 /// A wildcard bind is reachable at loopback, but `0.0.0.0` is not an address a
 /// browser can connect to.
 fn proxy_arg(addr: SocketAddr) -> String {
@@ -1154,6 +1243,7 @@ fn build_args(
     profile: &Path,
     proxy: &str,
     spki: &str,
+    own_port: Option<u16>,
     driver_args: &[String],
     url: &str,
 ) -> Vec<String> {
@@ -1161,8 +1251,14 @@ fn build_args(
         format!("--user-data-dir={}", profile.display()),
         format!("--proxy-server={proxy}"),
         // Chromium sends loopback traffic direct regardless of --proxy-server, which
-        // would leave anything the tester runs locally out of the history.
-        "--proxy-bypass-list=<-loopback>".to_string(),
+        // would leave anything the tester runs locally out of the history. A later
+        // rule wins in Chromium, so the browser's own port goes after it.
+        match own_port {
+            Some(port) => {
+                format!("--proxy-bypass-list=<-loopback>;127.0.0.1:{port};localhost:{port}")
+            }
+            None => "--proxy-bypass-list=<-loopback>".to_string(),
+        },
         format!("--ignore-certificate-errors-spki-list={spki}"),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
@@ -1365,7 +1461,12 @@ fn read_owner(profile: &Path) -> Option<Owner> {
 /// good on the strength of a process that is not a browser. When no record names a
 /// live browser, the profile's own lock is asked: a browser that relaunched itself
 /// is running under a pid nobody wrote down.
-fn current_owner(profile: &Path, live: &HashMap<PathBuf, Owner>, exe: &Path) -> Option<Owner> {
+fn current_owner(
+    profile: &Path,
+    live: &HashMap<PathBuf, Owner>,
+    exe: &Path,
+    driver: Driver,
+) -> Option<Owner> {
     if let Some(owner) = live.get(profile) {
         return Some(owner.clone());
     }
@@ -1375,7 +1476,7 @@ fn current_owner(profile: &Path, live: &HashMap<PathBuf, Owner>, exe: &Path) -> 
         }
         let _ = fs::remove_file(profile.join(OWNER_FILE));
     }
-    adopt_holder(profile, exe)
+    adopt_holder(profile, exe, driver)
 }
 
 /// The pid Chromium recorded as holding a profile. Its lock is a symlink whose
@@ -1404,7 +1505,7 @@ fn lock_holder(profile: &Path, exe: &Path) -> Option<u32> {
 /// Sniper never finished recording. Its wiring is read from its command line, not
 /// assumed, because Chromium ignores the switches of a second launch and a window
 /// opened in a browser pointed at another proxy would capture nothing.
-fn adopt_holder(profile: &Path, exe: &Path) -> Option<Owner> {
+fn adopt_holder(profile: &Path, exe: &Path, driver: Driver) -> Option<Owner> {
     let pid = lock_holder(profile, exe)?;
     let args = process_args(pid)?;
     // A stale lock can name a pid that has since been given to the same browser
@@ -1419,7 +1520,7 @@ fn adopt_holder(profile: &Path, exe: &Path) -> Option<Owner> {
         proxy: switch_value(&args, "--proxy-server")
             .unwrap_or_default()
             .to_string(),
-        devtools_port: args.contains("--remote-debugging-port"),
+        devtools_port: driver.has_port(&args),
         started: None,
     };
     // Recorded, so a restart of Sniper finds it without asking the process again.
@@ -1509,7 +1610,7 @@ fn sweep_stale_fresh_profiles(root: &Path) {
     }
 }
 
-enum DevtoolsWait {
+enum PortWait {
     Port(u16),
     BrowserExited(Exit),
     TimedOut,
@@ -1517,30 +1618,34 @@ enum DevtoolsWait {
 
 // `&mut` rather than `&`: a std Receiver is not Sync, and a shared reference held
 // across an await would make the whole request handler not Send.
-async fn read_devtools_port(
+async fn read_port(
+    driver: Driver,
     profile: &Path,
     wait: Duration,
     mut exited: Option<&mut mpsc::Receiver<Exit>>,
-) -> DevtoolsWait {
-    let file = profile.join("DevToolsActivePort");
+) -> PortWait {
+    let file = profile.join(driver.port_file());
     let deadline = tokio::time::Instant::now() + wait;
     loop {
+        // A file caught half written does not parse, and the next poll reads it whole.
         if let Ok(text) = tokio::fs::read_to_string(&file).await {
-            if let Some(port) = text
-                .lines()
-                .next()
-                .and_then(|line| line.trim().parse().ok())
-            {
-                return DevtoolsWait::Port(port);
+            if let Some(port) = driver.parse_port(&text) {
+                if !driver.port_opens_late()
+                    || tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+                        .await
+                        .is_ok()
+                {
+                    return PortWait::Port(port);
+                }
             }
         }
         // Waiting out the full limit on a browser that is already gone only delays
         // the answer to "why".
         if let Some(exit) = exited.as_mut().and_then(|channel| channel.try_recv().ok()) {
-            return DevtoolsWait::BrowserExited(exit);
+            return PortWait::BrowserExited(exit);
         }
         if tokio::time::Instant::now() >= deadline {
-            return DevtoolsWait::TimedOut;
+            return PortWait::TimedOut;
         }
         tokio::time::sleep(DEVTOOLS_POLL).await;
     }
@@ -1619,6 +1724,7 @@ mod tests {
             Path::new("/data/browser-profiles/chrome"),
             "127.0.0.1:8080",
             "HASH=",
+            None,
             &[],
             "https://example.com/",
         );
@@ -1639,6 +1745,7 @@ mod tests {
             Path::new("/p"),
             "h:1",
             "H=",
+            None,
             &["--remote-debugging-port=0".to_string()],
             "about:blank",
         );
@@ -1648,32 +1755,68 @@ mod tests {
             .unwrap();
         assert_eq!(at, with_driver.len() - 2);
         assert_eq!(with_driver.last().unwrap(), "about:blank");
+
+        // The later rule wins in Chromium, so the browser's own port must follow the
+        // rule that keeps loopback in the proxy, or it would be proxied anyway.
+        let aside = build_args(
+            Path::new("/p"),
+            "h:1",
+            "H=",
+            Driver::AsideCli.own_port(),
+            &[],
+            "about:blank",
+        );
+        assert!(aside.contains(
+            &"--proxy-bypass-list=<-loopback>;127.0.0.1:21420;localhost:21420".to_string()
+        ));
     }
 
     // Everything that differs between ways of driving a browser is in Driver, so
     // that is where it is pinned down.
     #[test]
     fn each_driver_adds_only_its_own_switches() {
-        assert!(Driver::Cdp.launch_args(false, None).is_empty());
+        assert!(Driver::Cdp.launch_args(false, None, None).is_empty());
         assert_eq!(
-            Driver::Cdp.launch_args(true, None),
+            Driver::Cdp.launch_args(true, None, None),
             vec!["--remote-debugging-port=0".to_string()]
         );
         for agent in [false, true] {
             assert_eq!(
-                Driver::EgoCli.launch_args(agent, Some("sniper-8080")),
+                Driver::EgoCli.launch_args(agent, Some("sniper-8080"), None),
                 vec!["--ego-server-name=sniper-8080".to_string()],
                 "ego is named whether or not an agent was asked for, so an agent can \
                  never be pointed at the user's own instance by omission"
             );
         }
-        assert!(Driver::EgoCli.launch_args(true, None).is_empty());
+        assert!(Driver::EgoCli.launch_args(true, None, None).is_empty());
+        assert_eq!(
+            Driver::BrowserosMcp.launch_args(true, None, Some(5000)),
+            vec!["--browseros-server-port=5000".to_string()]
+        );
+        assert_eq!(
+            Driver::BrowserosMcp.launch_args(false, None, Some(5000)),
+            vec![
+                "--browseros-server-port=5000".to_string(),
+                BROWSEROS_SERVER_OFF.to_string()
+            ],
+            "its server opens ports of its own, so it stays off unless an agent asks"
+        );
+        let picked = Driver::BrowserosMcp
+            .own_port()
+            .expect("a free loopback port");
+        assert_ne!(picked, 0);
+        assert_eq!(Driver::Cdp.own_port(), None);
 
         assert!(Driver::Cdp.opens_port(true) && !Driver::Cdp.opens_port(false));
+        assert!(Driver::BrowserosMcp.opens_port(true) && !Driver::BrowserosMcp.opens_port(false));
         assert!(
             !Driver::EgoCli.opens_port(true),
             "ego has no DevTools port to open"
         );
+        assert!(Driver::BrowserosMcp.has_port("neo --user-data-dir=/p"));
+        assert!(!Driver::BrowserosMcp.has_port("neo --disable-browseros-server"));
+        assert!(Driver::Cdp.has_port("chrome --remote-debugging-port=0"));
+        assert!(!Driver::Cdp.has_port("chrome --user-data-dir=/p"));
 
         let profile = Path::new("/data/a/browser-profiles/ego");
         assert_eq!(Driver::Cdp.server_name(8080, profile), None);
@@ -2157,7 +2300,8 @@ mod tests {
             );
             lock(&profile, &format!("some-host-{}", holder.id()));
 
-            let owner = current_owner(&profile, &HashMap::new(), shell).expect("adopted");
+            let owner =
+                current_owner(&profile, &HashMap::new(), shell, Driver::Cdp).expect("adopted");
             assert_eq!(owner.pid, holder.id());
             assert_eq!(owner.proxy, "127.0.0.1:18890");
             assert!(owner.devtools_port);
@@ -2171,14 +2315,16 @@ mod tests {
             // A different executable than the one expected is not adopted.
             let other = scratch("adopt-other");
             lock(&other, &format!("some-host-{}", holder.id()));
-            assert!(current_owner(&other, &HashMap::new(), Path::new("/bin/ls")).is_none());
+            assert!(
+                current_owner(&other, &HashMap::new(), Path::new("/bin/ls"), Driver::Cdp).is_none()
+            );
             // A lock left behind by a crash names a process that is gone.
             let stale = scratch("adopt-stale");
             lock(&stale, "some-host-4000000000");
-            assert!(current_owner(&stale, &HashMap::new(), shell).is_none());
+            assert!(current_owner(&stale, &HashMap::new(), shell, Driver::Cdp).is_none());
             // No lock at all.
             let unlocked = scratch("adopt-unlocked");
-            assert!(current_owner(&unlocked, &HashMap::new(), shell).is_none());
+            assert!(current_owner(&unlocked, &HashMap::new(), shell, Driver::Cdp).is_none());
 
             stop(holder);
             for dir in [profile, other, stale, unlocked] {
@@ -2199,7 +2345,7 @@ mod tests {
             );
             lock(&ours, &format!("some-host-{}", everyday.id()));
             assert!(
-                current_owner(&ours, &HashMap::new(), shell).is_none(),
+                current_owner(&ours, &HashMap::new(), shell, Driver::Cdp).is_none(),
                 "the executable matches but the command line names another profile"
             );
             assert!(read_owner(&ours).is_none(), "nothing recorded for it");
@@ -2217,12 +2363,14 @@ mod tests {
             lock(&one, &format!("host-{}", elsewhere.id()));
             lock(&two, &format!("host-{}", unwired.id()));
 
-            let owner = current_owner(&one, &HashMap::new(), shell).unwrap();
+            let owner = current_owner(&one, &HashMap::new(), shell, Driver::Cdp).unwrap();
             assert_eq!(owner.proxy, "127.0.0.1:1");
             assert_ne!(owner.proxy, "127.0.0.1:18890", "launch_at refuses on this");
             assert!(!owner.devtools_port);
             assert_eq!(
-                current_owner(&two, &HashMap::new(), shell).unwrap().proxy,
+                current_owner(&two, &HashMap::new(), shell, Driver::Cdp)
+                    .unwrap()
+                    .proxy,
                 "",
                 "empty, so the refusal says it had no proxy rather than naming one"
             );
@@ -2441,7 +2589,12 @@ mod tests {
             "no DevTools port, even when an agent asks"
         );
         assert_eq!(driver.server_name(8080, Path::new("/p")), None);
-        assert!(driver.launch_args(true, None).is_empty());
+        assert_eq!(
+            driver.own_port(),
+            Some(21420),
+            "its daemon stays out of the proxy"
+        );
+        assert!(driver.launch_args(true, None, Some(21420)).is_empty());
         let control = serde_json::to_value(driver.control(None, None).unwrap()).unwrap();
         assert_eq!(control["driver"], "aside-cli");
         assert_eq!(control["command"], "aside repl '<code>'");
@@ -2453,19 +2606,34 @@ mod tests {
         assert_eq!(BrowserKind::parse("Aside"), Some(BrowserKind::Aside));
     }
 
+    // Each BrowserOS neo profile runs its own server on the next free port, so the
+    // endpoint is the one this profile's server wrote down, not a fixed address.
     #[test]
-    fn browseros_neo_is_driven_through_its_mcp_endpoint_and_says_it_cannot_pick_a_window() {
+    fn browseros_neo_is_driven_through_the_mcp_endpoint_its_profile_reports() {
         let driver = BrowserKind::BrowserosNeo.driver();
         assert_eq!(driver, Driver::BrowserosMcp);
-        assert!(!driver.opens_port(true));
-        assert!(driver.launch_args(true, None).is_empty());
-        let control = serde_json::to_value(driver.control(None, None).unwrap()).unwrap();
+        assert!(driver.control(None, None).is_none());
+        let control = serde_json::to_value(driver.control(Some(9210), None).unwrap()).unwrap();
         assert_eq!(control["driver"], "browseros-mcp");
-        assert_eq!(control["endpoint"], "http://127.0.0.1:9200/mcp");
-        assert!(driver
-            .shared_instance_hint()
-            .unwrap()
-            .contains("BrowserOS neo"));
+        assert_eq!(control["endpoint"], "http://127.0.0.1:9210/mcp");
+        assert_eq!(driver.port_file(), ".browseros/config.json");
+        assert_eq!(
+            driver.parse_port(r#"{"ports":{"cdp":9110,"proxy":9010,"server":9210}}"#),
+            Some(9210)
+        );
+        for unusable in [
+            r#"{"ports":{"server":0}}"#,
+            r#"{"ports":{"server":70000}}"#,
+            r#"{"ports":{}}"#,
+            r#"{"ports":{"ser"#,
+        ] {
+            assert_eq!(driver.parse_port(unusable), None, "{unusable}");
+        }
+        assert_eq!(
+            Driver::Cdp.parse_port("4242\n/devtools/browser/x\n"),
+            Some(4242)
+        );
+        assert!(driver.shared_instance_hint().is_none());
         assert!(Driver::AsideCli.shared_instance_hint().is_some());
         assert!(Driver::Cdp.shared_instance_hint().is_none());
         assert!(Driver::EgoCli.shared_instance_hint().is_none());
@@ -3219,6 +3387,91 @@ mod tests {
             .unwrap();
             assert!(launched.control.is_none());
             assert_eq!(launched.warnings.len(), 1);
+        }
+
+        // Neo writes the port down before its server starts, and the server can fail to
+        // start, so the endpoint is only handed out once something answers there.
+        #[tokio::test]
+        async fn browseros_neo_hands_out_the_mcp_port_of_a_server_that_answers() {
+            let fixture = Fixture::new();
+            let profile = fixture.profile("browseros-neo");
+            fs::create_dir_all(profile.join(".browseros")).unwrap();
+            fs::write(
+                profile.join(".browseros/config.json"),
+                r#"{"ports":{"server":1111}}"#,
+            )
+            .unwrap();
+            let server = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = server.local_addr().unwrap().port();
+            let writes = |port: u16| {
+                fixture.open_browser(&format!(
+                    "for a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${{a#--user-data-dir=}}\";; esac; done\n\
+                     mkdir -p \"$d/.browseros\"\n\
+                     printf '{{\"ports\":{{\"server\":{port}}}}}' > \"$d/.browseros/config.json\""
+                ))
+            };
+
+            let reports = writes(port);
+            let agent = || LaunchRequest {
+                agent: true,
+                ..Default::default()
+            };
+            let launched = launch_at(&fixture.ctx(), BrowserKind::BrowserosNeo, &reports, agent())
+                .await
+                .unwrap();
+            let expected = format!("http://127.0.0.1:{port}/mcp");
+            assert!(
+                matches!(&launched.control, Some(Control::BrowserosMcp { endpoint })
+                    if *endpoint == expected),
+                "{:?}",
+                launched.control
+            );
+            assert!(launched.hint.is_none(), "{:?}", launched.hint);
+
+            // A plain open of the same browser is another window in it, and says the
+            // endpoint is there for an agent open to fetch.
+            let window = launch_at(
+                &fixture.ctx(),
+                BrowserKind::BrowserosNeo,
+                &reports,
+                LaunchRequest::default(),
+            )
+            .await
+            .unwrap();
+            assert!(window.reused && window.control.is_none());
+            assert!(
+                window
+                    .hint
+                    .as_deref()
+                    .is_some_and(|hint| hint.contains("already has an MCP endpoint")),
+                "{:?}",
+                window.hint
+            );
+
+            // A server that never starts leaves a warning, not an address nobody answers.
+            let closed = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let dead_port = closed.local_addr().unwrap().port();
+            drop(closed);
+            let dead = launch_at(
+                &fixture.build(PROXY, Duration::from_millis(300), Duration::from_millis(50)),
+                BrowserKind::BrowserosNeo,
+                &writes(dead_port),
+                LaunchRequest {
+                    fresh: true,
+                    ..agent()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(dead.control.is_none(), "{:?}", dead.control);
+            assert!(
+                dead.warnings
+                    .iter()
+                    .any(|warning| warning.contains("did not report an MCP endpoint")),
+                "{:?}",
+                dead.warnings
+            );
+            drop(server);
         }
 
         // For ego the name exists before the process does, so `control` has to be
