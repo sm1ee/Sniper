@@ -17838,6 +17838,9 @@ function renderCliPathUi() {
   }
   banner?.classList.toggle("hidden", cliPathState.banner === "hidden");
   banner?.setAttribute("aria-busy", cliPathState.action ? "true" : "false");
+  // Disabling a focused button blurs it outside the banner. Keep focus here
+  // so completion can restore it, unless the operator moves elsewhere first.
+  if (hadBannerFocus && showPrompt && busy) banner.focus({ preventScroll: true });
   for (const id of ["cliPathAddButton", "cliPathLaterButton"]) {
     const element = document.getElementById(id);
     if (!element) continue;

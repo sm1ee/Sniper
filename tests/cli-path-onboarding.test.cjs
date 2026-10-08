@@ -26,7 +26,7 @@ const SUCCESS = {
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 
 function fixture() {
-  const document = { activeElement: null, activeModal: null, querySelector() { return this.activeModal; } };
+  const document = { body: { tagName: "BODY" }, activeElement: null, activeModal: null, querySelector() { return this.activeModal; } };
   function element(id) {
     const classes = new Set();
     const listeners = new Map();
@@ -41,11 +41,18 @@ function fixture() {
           if (add) classes.add(name); else classes.delete(name);
           return add;
         },
-      }, attrs, textContent: "", disabled: false,
+      }, attrs, textContent: "", _disabled: false,
+      get disabled() { return this._disabled; },
+      set disabled(value) {
+        this._disabled = value;
+        // Native buttons lose focus when disabled; retaining it masked the
+        // banner's completion focus bug in the original synthetic DOM.
+        if (value && document.activeElement === this) document.activeElement = document.body;
+      },
       addEventListener(name, callback) { listeners.set(name, [...(listeners.get(name) || []), callback]); },
       click() { if (!this.disabled) for (const callback of listeners.get("click") || []) callback({ target: this }); },
-      focus() { document.activeElement = this; },
-      contains(node) { return id === "cliPathBanner" && BANNER_IDS.has(node?.id); },
+      focus() { if (!this.disabled) document.activeElement = this; },
+      contains(node) { return node === this || (id === "cliPathBanner" && BANNER_IDS.has(node?.id)); },
       setAttribute(name, value) { attrs.set(name, value); },
       listeners,
     };
@@ -168,6 +175,7 @@ test("only explicit Add starts installation and duplicate or conflicting choices
   assert.equal(f.nodes.cliPathLaterButton.disabled, true);
   assert.equal(f.nodes.refreshCliPathButton.disabled, true);
   assert.equal(f.nodes.cliPathBanner.attrs.get("aria-busy"), "true");
+  assert.equal(f.document.activeElement, f.nodes.cliPathBanner);
   f.json(1, SUCCESS); await nextTurn();
   assert.equal(f.nodes.cliPathBannerStatus.textContent, SUCCESS.message);
   assert.equal(f.nodes.installCliPathStatus.textContent, SUCCESS.message);
@@ -191,6 +199,7 @@ test("Later persists dismissal without installing and does not re-prompt on late
   assert.equal(f.requests[1].url, "/api/cli-path/defer");
   assert.equal(f.requests[1].options.method, "POST");
   assert.equal(f.requests[1].options.body, undefined);
+  assert.equal(f.document.activeElement, f.nodes.cliPathBanner);
   f.requests[1].resolve(new Response(null, { status: 204 })); await nextTurn();
   assert.equal(hidden(f.nodes.cliPathBanner), true);
   assert.equal(f.nodes.installCliPathButton.disabled, false);
@@ -321,14 +330,34 @@ for (const action of ["installCliPath", "deferCliPath"]) {
   });
 }
 
-test("completed work never reopens Settings or takes focus after the operator navigates away", async () => {
-  const f = fixture(); await f.ready();
-  f.nodes.cliPathAddButton.focus(); f.nodes.cliPathAddButton.click();
-  const elsewhere = { id: "other-tab" }; f.document.activeElement = elsewhere;
-  f.json(1, SUCCESS); await nextTurn();
-  assert.equal(f.document.activeElement, elsewhere);
-  assert.equal(f.settingsOpened(), 0);
-});
+for (const [action, button] of [["install", "cliPathAddButton"], ["defer", "cliPathLaterButton"]]) {
+  test(`failed ${action} keeps keyboard focus on the banner result`, async () => {
+    const f = fixture(); await f.ready();
+    f.nodes[button].focus(); f.nodes[button].click();
+    assert.equal(f.document.activeElement, f.nodes.cliPathBanner);
+    f.requests[1].reject(new Error("Synthetic failure.")); await nextTurn();
+    assert.equal(f.document.activeElement, f.nodes.cliPathDismissButton);
+    assert.equal(f.state.error, true);
+  });
+
+  for (const outcome of ["success", "failure"]) {
+    for (const destination of ["another control", "another dialog"]) {
+      test(`${action} ${outcome} leaves focus in ${destination} after navigating away`, async () => {
+        const f = fixture(); await f.ready();
+        f.nodes[button].focus(); f.nodes[button].click();
+        const elsewhere = { id: "other-input" };
+        f.document.activeElement = elsewhere;
+        if (destination === "another dialog") f.document.activeModal = { id: "other-dialog" };
+        if (outcome === "failure") f.requests[1].reject(new Error("Synthetic failure."));
+        else if (action === "defer") f.requests[1].resolve(new Response(null, { status: 204 }));
+        else f.json(1, SUCCESS);
+        await nextTurn();
+        assert.equal(f.document.activeElement, elsewhere);
+        assert.equal(f.settingsOpened(), 0);
+      });
+    }
+  }
+}
 
 test("event binding is idempotent and disposed controls cannot make requests", async () => {
   const f = fixture(); await f.ready();
@@ -345,6 +374,7 @@ test("HTML exposes accessible status regions and a disabled initial install cont
     assert.match(html, new RegExp(`id="${id}"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"`));
   }
   assert.match(html, /class="cli-path-banner hidden"[^>]*aria-labelledby="cliPathBannerTitle"/);
+  assert.match(html, /id="cliPathBanner"[^>]*tabindex="-1"/);
   assert.match(html, /id="installCliPathButton"[^>]*disabled/);
   const initStart = appSource.indexOf("async function init() {");
   const initEnd = appSource.indexOf("\nfunction resetLayoutTextareas()", initStart);
