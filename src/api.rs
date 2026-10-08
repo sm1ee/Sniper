@@ -790,6 +790,7 @@ fn authority_to_origin_parts(authority: &str, scheme: &str) -> Option<(String, u
 struct TransactionQuery {
     session_id: Option<Uuid>,
     q: Option<String>,
+    search_headers: Option<bool>,
     method: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -878,6 +879,7 @@ fn transaction_list_filters(
 ) -> ListFilters {
     ListFilters {
         query: query.q,
+        search_headers: query.search_headers.unwrap_or(false),
         method: query.method,
         limit: query.limit,
         offset: query.offset,
@@ -2714,6 +2716,8 @@ struct TransactionWriteQuery {
     session_id: Option<Uuid>,
     #[serde(default)]
     expected_active_session_id: Option<Uuid>,
+    #[serde(default)]
+    search_headers: bool,
 }
 
 fn reconcile_write_session_id(
@@ -4896,7 +4900,12 @@ async fn update_transaction_annotations(
         )
         .await
     {
-        Ok(Some(update)) => Json(update.summary).into_response(),
+        Ok(Some(mut update)) => {
+            if !query.search_headers {
+                update.summary.header_search_text = String::new();
+            }
+            Json(update.summary).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => {
             tracing::warn!(
@@ -7406,6 +7415,82 @@ mod tests {
         },
         ws_replay::WsReplayFrame,
     };
+
+    // Header-search regression also compiles against the pre-fix API: its
+    // TransactionQuery silently ignored search_headers and returned no matches.
+    #[tokio::test]
+    async fn history_header_search_api_opt_in_reaches_both_filters() {
+        let store = crate::store::TransactionStore::new();
+        let record: crate::model::TransactionRecord = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000020",
+            "started_at": "2026-01-01T00:00:00Z", "method": "GET",
+            "scheme": "https", "host": "example.com", "path": "/",
+            "request": { "headers": [{ "name": "X-Example-Request", "value": "RequestOnlyNeedle" }] },
+            "response": { "headers": [{ "name": "Server", "value": "ResponseOnlyNeedle" }] }
+        })).unwrap();
+        store.insert(record).await;
+        for query in [
+            serde_json::json!({"q":"requestonlyneedle", "search_headers":true}),
+            serde_json::json!({"advanced_search":"responseonlyneedle", "search_headers":true}),
+        ] {
+            let query = serde_json::from_value(query).unwrap();
+            let filters = super::transaction_list_filters(query, vec![], vec![]);
+            assert_eq!(store.list(&filters).await.len(), 1);
+        }
+        for query in [
+            serde_json::json!({"q":"requestonlyneedle"}),
+            serde_json::json!({"advanced_search":"responseonlyneedle", "search_headers":false}),
+        ] {
+            let query = serde_json::from_value(query).unwrap();
+            let filters = super::transaction_list_filters(query, vec![], vec![]);
+            assert!(store.list(&filters).await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn history_header_search_annotation_payload_is_opt_in() {
+        let (state, data_dir) = test_state("sniper-history-header-annotation");
+        let session = state.session().await;
+        let record: crate::model::TransactionRecord = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000021",
+            "started_at": "2026-01-01T00:00:00Z", "method": "GET",
+            "scheme": "https", "host": "example.com", "path": "/",
+            "request": { "headers": [{ "name": "Authorization", "value": "Bearer ExampleCredential" }] }
+        })).unwrap();
+        let id = record.id;
+        session.store.insert(record).await;
+        for search_headers in [false, true] {
+            let response = super::update_transaction_annotations(
+                State(state.clone()),
+                Path(id.to_string()),
+                Query(super::TransactionWriteQuery {
+                    session_id: Some(session.id()),
+                    expected_active_session_id: None,
+                    search_headers,
+                }),
+                Json(super::AnnotationsPayload {
+                    session_id: None,
+                    color_tag: Some(Some("blue".into())),
+                    user_note: None,
+                    client_id: None,
+                    client_version: None,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let value: serde_json::Value = response_json(response).await;
+            assert_eq!(value.get("header_search_text").is_some(), search_headers);
+            if search_headers {
+                assert_eq!(
+                    value["header_search_text"],
+                    "Authorization: Bearer ExampleCredential"
+                );
+            }
+        }
+        drop(session);
+        drop(state);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
 
     #[tokio::test]
     async fn cli_path_status_is_read_only_and_deferral_is_idempotent() {
@@ -12170,6 +12255,7 @@ mod tests {
             State(state.clone()),
             Path(record_id.to_string()),
             Query(super::TransactionWriteQuery {
+                search_headers: false,
                 session_id: Some(original_id),
                 expected_active_session_id: Some(original_id),
             }),
@@ -14150,6 +14236,7 @@ mod tests {
             State(state.clone()),
             Path(id.to_string()),
             Query(super::TransactionWriteQuery {
+                search_headers: false,
                 session_id: None,
                 expected_active_session_id: None,
             }),
@@ -16830,6 +16917,7 @@ mod tests {
             State(state.clone()),
             Path(record_id.to_string()),
             Query(super::TransactionWriteQuery {
+                search_headers: false,
                 session_id: None,
                 expected_active_session_id: None,
             }),
@@ -16851,6 +16939,7 @@ mod tests {
             State(state.clone()),
             Path(record_id.to_string()),
             Query(super::TransactionWriteQuery {
+                search_headers: false,
                 session_id: None,
                 expected_active_session_id: None,
             }),
@@ -16873,6 +16962,7 @@ mod tests {
             State(state.clone()),
             Path(record_id.to_string()),
             Query(super::TransactionWriteQuery {
+                search_headers: false,
                 session_id: Some(active_id),
                 expected_active_session_id: None,
             }),

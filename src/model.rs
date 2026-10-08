@@ -517,7 +517,25 @@ impl TransactionRecord {
             has_user_note: self.user_note.is_some(),
             note_preview: note_preview(self.user_note.as_ref(), &self.notes),
             annotation_revision: self.annotation_revision,
+            header_search_text: self.header_search_text(),
         }
+    }
+
+    fn header_search_text(&self) -> String {
+        let mut text = String::new();
+        for header in self.request.headers.iter().chain(
+            self.response
+                .iter()
+                .flat_map(|response| response.headers.iter()),
+        ) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&header.name);
+            text.push_str(": ");
+            text.push_str(&header.value);
+        }
+        text
     }
 
     pub fn editable_request(&self) -> EditableRequest {
@@ -585,6 +603,11 @@ pub struct TransactionSummary {
     pub note_preview: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub annotation_revision: u64,
+    /// Complete current request/response header lines for history filtering.
+    /// This is derived from the record, never persisted as a second header copy.
+    /// A preview cap would silently hide matches in long or later headers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub header_search_text: String,
 }
 
 /// Longest note text carried in a summary. Summaries are sent for every row in

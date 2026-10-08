@@ -28,6 +28,8 @@ use crate::model::{
 #[derive(Clone, Debug, Default)]
 pub struct ListFilters {
     pub query: Option<String>,
+    /// UI history opts in; legacy CLI and destructive selections remain metadata-only.
+    pub search_headers: bool,
     pub method: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
@@ -60,7 +62,8 @@ pub struct ListFilters {
 /// Destructive selections must never inherit the listing API's forgiving
 /// defaults: an ignored or empty criterion could otherwise select everything.
 pub fn validate_delete_filters(filters: &ListFilters) -> Result<(), String> {
-    if filters.limit.is_some_and(|limit| limit != 0)
+    if filters.search_headers
+        || filters.limit.is_some_and(|limit| limit != 0)
         || filters.offset.is_some()
         || filters.before_sequence.is_some()
         || filters.sort_key.is_some()
@@ -416,10 +419,12 @@ struct CachedSummary {
     quick_haystack: String,
     advanced_haystack: String,
     advanced_haystack_lower: String,
+    header_haystack: String,
+    header_haystack_lower: String,
 }
 
 impl CachedSummary {
-    fn new(summary: TransactionSummary) -> Self {
+    fn new(mut summary: TransactionSummary) -> Self {
         let method_upper = summary.method.to_ascii_uppercase();
         let host_lower = summary.host.to_ascii_lowercase();
         let content_type_lower = summary
@@ -460,6 +465,8 @@ impl CachedSummary {
             summary.content_type.as_deref().unwrap_or("")
         );
         let advanced_haystack_lower = advanced_haystack.to_ascii_lowercase();
+        let header_haystack = std::mem::take(&mut summary.header_search_text);
+        let header_haystack_lower = header_haystack.to_ascii_lowercase();
 
         Self {
             summary,
@@ -475,7 +482,18 @@ impl CachedSummary {
             quick_haystack,
             advanced_haystack,
             advanced_haystack_lower,
+            header_haystack,
+            header_haystack_lower,
         }
+    }
+
+    fn list_summary(&self, search_headers: bool) -> TransactionSummary {
+        let mut summary = self.summary.clone();
+        if search_headers {
+            // Keep default CLI/selection payloads and allocations metadata-only.
+            summary.header_search_text = self.header_haystack.clone();
+        }
+        summary
     }
 }
 
@@ -917,7 +935,7 @@ impl TransactionStore {
                 let matched_index = matched_count;
                 matched_count += 1;
                 if matched_index >= offset && (limit == 0 || items.len() < limit) {
-                    items.push(cached.summary.clone());
+                    items.push(cached.list_summary(filters.search_headers));
                 }
                 if stop_after.is_some_and(|threshold| matched_count >= threshold) {
                     exhausted = false;
@@ -987,14 +1005,14 @@ impl TransactionStore {
             filtered
                 .into_iter()
                 .skip(offset)
-                .map(|cached| cached.summary.clone())
+                .map(|cached| cached.list_summary(filters.search_headers))
                 .collect()
         } else {
             filtered
                 .into_iter()
                 .skip(offset)
                 .take(limit)
-                .map(|cached| cached.summary.clone())
+                .map(|cached| cached.list_summary(filters.search_headers))
                 .collect()
         };
 
@@ -2351,13 +2369,14 @@ fn matches_filters(
     }
 
     if let Some(matcher) = advanced_matcher {
-        if !matcher.matches(cached) {
+        if !matcher.matches(cached, filters.search_headers) {
             return false;
         }
     }
 
     let Some(value) = query else { return true };
     cached.quick_haystack.contains(value)
+        || (filters.search_headers && cached.header_haystack_lower.contains(value))
 }
 
 fn sort_filtered_records(records: &mut [&CachedSummary], filters: &ListFilters) {
@@ -2661,7 +2680,7 @@ impl AdvancedSearchMatcher {
         })
     }
 
-    fn matches(&self, cached: &CachedSummary) -> bool {
+    fn matches(&self, cached: &CachedSummary, search_headers: bool) -> bool {
         match self {
             Self::Plain {
                 needle,
@@ -2670,8 +2689,10 @@ impl AdvancedSearchMatcher {
             } => {
                 let matched = if *case_sensitive {
                     cached.advanced_haystack.contains(needle)
+                        || (search_headers && cached.header_haystack.contains(needle))
                 } else {
                     cached.advanced_haystack_lower.contains(needle)
+                        || (search_headers && cached.header_haystack_lower.contains(needle))
                 };
                 if *negative {
                     !matched
@@ -2680,7 +2701,10 @@ impl AdvancedSearchMatcher {
                 }
             }
             Self::Regex { regex, negative } => {
-                let matched = regex.is_match(&cached.advanced_haystack);
+                let matched = regex.is_match(&cached.advanced_haystack)
+                    || (search_headers
+                        && !cached.header_haystack.is_empty()
+                        && regex.is_match(&cached.header_haystack));
                 if *negative {
                     !matched
                 } else {
@@ -2728,6 +2752,418 @@ pub(crate) mod tests {
             None,
             None,
         )
+    }
+
+    fn history_header_record() -> TransactionRecord {
+        let mut record = test_record("example.com");
+        record.request.headers = vec![
+            HeaderRecord {
+                name: "Authorization".into(),
+                value: "Bearer ExampleCredential".into(),
+            },
+            HeaderRecord {
+                name: "X-Example-Request".into(),
+                value: "RequestValue".into(),
+            },
+        ];
+        let mut response = record.request.clone();
+        response.headers = vec![
+            HeaderRecord {
+                name: "Server".into(),
+                value: "ExampleServer/1.25".into(),
+            },
+            HeaderRecord {
+                name: "Set-Cookie".into(),
+                value: "first=One".into(),
+            },
+            HeaderRecord {
+                name: "Set-Cookie".into(),
+                value: "second=Two".into(),
+            },
+            HeaderRecord {
+                name: "Location".into(),
+                value: "/example-target".into(),
+            },
+        ];
+        record.response = Some(response);
+        record
+    }
+
+    #[tokio::test]
+    async fn history_header_search_matches_names_values_duplicates_and_combined_filters() {
+        let store = TransactionStore::new();
+        let record = history_header_record();
+        let id = record.id;
+        store.insert(record).await;
+        for query in [
+            "authorization",
+            "EXAMPLECREDENTIAL",
+            "requestvalue",
+            "server: exampleserver",
+            "set-cookie: second=two",
+            "/example-target",
+        ] {
+            let filters = ListFilters {
+                query: Some(query.into()),
+                search_headers: true,
+                ..Default::default()
+            };
+            let page = store.list_page(&filters).await;
+            assert_eq!(
+                page.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+                vec![id],
+                "{query}"
+            );
+            assert_eq!(page.filtered_total, Some(1));
+            let advanced = ListFilters {
+                advanced_search: Some(query.into()),
+                query: None,
+                ..filters.clone()
+            };
+            assert_eq!(store.list(&advanced).await.len(), 1, "advanced {query}");
+        }
+        let combined = ListFilters {
+            query: Some("ExampleCredential".into()),
+            advanced_search: Some("ExampleServer".into()),
+            search_headers: true,
+            method: Some("GET".into()),
+            in_scope_only: true,
+            scope_patterns: vec!["example.com".into()],
+            ..Default::default()
+        };
+        assert_eq!(store.list(&combined).await.len(), 1);
+        assert!(store
+            .list(&ListFilters {
+                excluded_scope_patterns: vec!["example.com".into()],
+                ..combined.clone()
+            })
+            .await
+            .is_empty());
+        assert!(store
+            .list(&ListFilters {
+                method: Some("POST".into()),
+                ..combined
+            })
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_header_search_preserves_case_regex_and_negative_rules() {
+        let store = TransactionStore::new();
+        let mut record = history_header_record();
+        record.request.headers.push(HeaderRecord {
+            name: "X-Unicode".into(),
+            value: "ÄBC".into(),
+        });
+        store.insert(record).await;
+        for (query, expected) in [("Äbc", 1), ("äbc", 0)] {
+            assert_eq!(
+                store
+                    .list(&ListFilters {
+                        query: Some(query.into()),
+                        search_headers: true,
+                        ..Default::default()
+                    })
+                    .await
+                    .len(),
+                expected
+            );
+            assert_eq!(
+                store
+                    .list(&ListFilters {
+                        advanced_search: Some(query.into()),
+                        search_headers: true,
+                        ..Default::default()
+                    })
+                    .await
+                    .len(),
+                expected
+            );
+        }
+        let filters = ListFilters {
+            search_headers: true,
+            advanced_search: Some("ExampleCredential".into()),
+            advanced_case_sensitive: true,
+            ..Default::default()
+        };
+        assert_eq!(store.list(&filters).await.len(), 1);
+        assert!(store
+            .list(&ListFilters {
+                advanced_search: Some("examplecredential".into()),
+                ..filters.clone()
+            })
+            .await
+            .is_empty());
+        let regex = ListFilters {
+            advanced_search: Some(r"Server: ExampleServer/[0-9]+\.[0-9]+".into()),
+            advanced_regex: true,
+            ..filters
+        };
+        assert_eq!(store.list(&regex).await.len(), 1);
+        let negative = ListFilters {
+            advanced_negative: true,
+            ..regex
+        };
+        assert!(store.list(&negative).await.is_empty());
+        assert!(store
+            .list(&ListFilters {
+                advanced_search: Some(r"example\.com".into()),
+                ..negative.clone()
+            })
+            .await
+            .is_empty());
+        assert_eq!(
+            store
+                .list(&ListFilters {
+                    advanced_search: Some("absent-header-value".into()),
+                    ..negative.clone()
+                })
+                .await
+                .len(),
+            1
+        );
+        assert!(store
+            .list(&ListFilters {
+                advanced_search: Some("[".into()),
+                ..negative
+            })
+            .await
+            .is_empty());
+        let headerless = TransactionStore::new();
+        headerless.insert(test_record("example.com")).await;
+        assert!(headerless
+            .list(&ListFilters {
+                advanced_search: Some("^$".into()),
+                advanced_regex: true,
+                search_headers: true,
+                ..Default::default()
+            })
+            .await
+            .is_empty());
+        assert_eq!(
+            store
+                .list(&ListFilters {
+                    advanced_search: Some(r"^example\.com GET / $".into()),
+                    advanced_regex: true,
+                    search_headers: true,
+                    ..Default::default()
+                })
+                .await
+                .len(),
+            1,
+            "adding headers preserves metadata anchors"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_header_search_does_not_cap_large_or_late_headers() {
+        let store = TransactionStore::new();
+        let mut record = history_header_record();
+        record.request.headers.insert(
+            0,
+            HeaderRecord {
+                name: "X-Padding".into(),
+                value: "界".repeat(100_000),
+            },
+        );
+        record
+            .response
+            .as_mut()
+            .unwrap()
+            .headers
+            .push(HeaderRecord {
+                name: "Set-Cookie".into(),
+                value: "tail=LastHeaderNeedle".into(),
+            });
+        record.request.body_preview = "body-only-sentinel".into();
+        let persisted = serde_json::to_value(&record).unwrap();
+        assert!(
+            persisted.get("header_search_text").is_none(),
+            "derived text must not enter the persisted record"
+        );
+        strip_transaction_bodies(&mut record);
+        store.insert(record).await;
+        let page = store
+            .list_page(&ListFilters {
+                query: Some("lastheaderneedle".into()),
+                search_headers: true,
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].header_search_text.len() > 300_000);
+        assert!(page.items[0]
+            .header_search_text
+            .ends_with("Set-Cookie: tail=LastHeaderNeedle"));
+        assert!(!page.items[0]
+            .header_search_text
+            .contains("body-only-sentinel"));
+        let mut legacy = serde_json::to_value(&page.items[0]).unwrap();
+        legacy.as_object_mut().unwrap().remove("header_search_text");
+        let legacy: TransactionSummary = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.header_search_text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_header_search_keeps_legacy_query_and_selection_contracts() {
+        let store = TransactionStore::new();
+        store.insert(history_header_record()).await;
+        assert!(store
+            .list(&ListFilters {
+                query: Some("ExampleCredential".into()),
+                ..Default::default()
+            })
+            .await
+            .is_empty());
+        let rows = store.list(&ListFilters::default()).await;
+        assert!(serde_json::to_value(&rows[0])
+            .unwrap()
+            .get("header_search_text")
+            .is_none());
+        let selection: crate::history_selection::HistorySelection = serde_json::from_value(
+            serde_json::json!({"session_id": Uuid::new_v4(), "query": "ExampleCredential"}),
+        )
+        .unwrap();
+        assert!(selection.resolve(&store).await.unwrap().is_empty());
+        assert!(validate_delete_filters(&ListFilters {
+            query: Some("ExampleCredential".into()),
+            search_headers: true,
+            ..Default::default()
+        })
+        .is_err());
+        let mut explicit = selection;
+        explicit.query = None;
+        explicit.ids = vec![rows[0].id];
+        assert_eq!(explicit.resolve(&store).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn history_header_search_updates_cache_and_live_summaries() {
+        let store = TransactionStore::new();
+        let mut receiver = store.subscribe();
+        let record = history_header_record();
+        let id = record.id;
+        store.insert(record).await;
+        let inserted = receiver.recv().await.unwrap();
+        assert!(inserted
+            .summary
+            .header_search_text
+            .contains("ExampleCredential"));
+        store
+            .update_record(id, |record| {
+                record.request.headers.clear();
+                record.response = None;
+            })
+            .await
+            .unwrap();
+        let updated = receiver.recv().await.unwrap();
+        assert!(updated.summary.header_search_text.is_empty());
+        assert!(store
+            .list(&ListFilters {
+                query: Some("ExampleCredential".into()),
+                search_headers: true,
+                ..Default::default()
+            })
+            .await
+            .is_empty());
+        let mut fresh = history_header_record();
+        fresh.id = id;
+        store.replace_all(vec![fresh]).await;
+        let annotated = store
+            .update_annotations(id, Some(Some("blue".into())), None)
+            .await
+            .unwrap();
+        assert!(annotated
+            .summary
+            .header_search_text
+            .contains("ExampleCredential"));
+        assert_eq!(
+            store
+                .list(&ListFilters {
+                    query: Some("ExampleCredential".into()),
+                    search_headers: true,
+                    ..Default::default()
+                })
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn history_header_search_preserves_cursor_sort_and_hidden_connect_counts() {
+        let store = TransactionStore::new();
+        for index in 0..5 {
+            let mut record = history_header_record();
+            record.path = format!("/{index}");
+            if index == 2 {
+                record.request.headers.clear();
+                record.response = None;
+            }
+            if index == 4 {
+                record.method = "CONNECT".into();
+            }
+            store.insert(record).await;
+        }
+        let filters = ListFilters {
+            query: Some("ExampleCredential".into()),
+            search_headers: true,
+            hide_connect: true,
+            limit: Some(2),
+            ..Default::default()
+        };
+        let first = store.list_page(&filters).await;
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/3", "/1"]
+        );
+        assert!(first.has_more);
+        let next = store
+            .list_page(&ListFilters {
+                before_sequence: first.items.last().map(|row| row.sequence),
+                ..filters.clone()
+            })
+            .await;
+        assert_eq!(
+            next.items
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/0"]
+        );
+        assert!(!next.has_more);
+        let complete = store
+            .list_page(&ListFilters {
+                limit: Some(0),
+                ..filters.clone()
+            })
+            .await;
+        assert_eq!(complete.total, 5);
+        assert_eq!(complete.filtered_total, Some(3));
+        assert_eq!(complete.hidden_connect_total, Some(1));
+        let sorted = store
+            .list_page(&ListFilters {
+                sort_key: Some("path".into()),
+                sort_direction: Some("asc".into()),
+                offset: Some(1),
+                ..filters
+            })
+            .await;
+        assert_eq!(
+            sorted
+                .items
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/1", "/3"]
+        );
+        assert_eq!(sorted.filtered_total, Some(3));
+        assert_eq!(sorted.hidden_connect_total, Some(1));
     }
 
     #[test]

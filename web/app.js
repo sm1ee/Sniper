@@ -5005,6 +5005,7 @@ function buildTransactionsPageUrl({ limit, offset = 0, beforeSequence = null, qu
   params.set("sort_direction", queryState.sortDirection);
   if (queryState.sessionId) params.set("session_id", queryState.sessionId);
   params.set("hide_connect", "true");
+  params.set("search_headers", "true");
   if (queryState.query) params.set("q", queryState.query);
   if (queryState.method) params.set("method", queryState.method);
   if (queryState.inScopeOnly) params.set("in_scope_only", "true");
@@ -7708,7 +7709,9 @@ function summaryMatchesActiveHistoryFilters(item, options = {}) {
   if (!summaryMatchesPortFilter(item, filters)) return false;
   if (!summaryMatchesColorTags(item, filters)) return false;
   if (!summaryMatchesAdvancedSearch(item, filters)) return false;
-  if (state.query && !summaryQuickSearchHaystack(item).includes(state.query.toLowerCase())) return false;
+  if (state.query
+    && !summaryQuickSearchHaystack(item).includes(state.query.toLowerCase())
+    && !foldHeaderSearchText(item.header_search_text).includes(foldHeaderSearchText(state.query))) return false;
   return true;
 }
 
@@ -7780,21 +7783,29 @@ function summaryMatchesColorTags(item, filters) {
   return tags.has(item.color_tag || "");
 }
 
+function foldHeaderSearchText(value) {
+  // Match the server's ASCII case folding without changing non-ASCII values.
+  return String(value || "").replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}
+
 function summaryMatchesAdvancedSearch(item, filters) {
   const term = String(filters.searchTerm || "").trim();
   if (!term) return true;
   const haystack = `${item.host || ""} ${item.method || ""} ${item.path || ""} ${item.content_type || ""}`;
+  const headers = item.header_search_text || "";
   let matched = false;
   if (filters.regex) {
     try {
-      matched = new RegExp(term, filters.caseSensitive ? "" : "i").test(haystack);
+      const regex = new RegExp(term, filters.caseSensitive ? "" : "i");
+      matched = regex.test(haystack) || (headers.length > 0 && regex.test(headers));
     } catch (_) {
       return !filters.negativeSearch;
     }
   } else {
     matched = filters.caseSensitive
-      ? haystack.includes(term)
-      : haystack.toLowerCase().includes(term.toLowerCase());
+      ? haystack.includes(term) || headers.includes(term)
+      : haystack.toLowerCase().includes(term.toLowerCase())
+        || foldHeaderSearchText(headers).includes(foldHeaderSearchText(term));
   }
   return filters.negativeSearch ? !matched : matched;
 }
@@ -24253,7 +24264,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
   let saved = false;
   try {
     const response = await fetch(sessionWritePath(
-      `/api/transactions/${encodeURIComponent(transactionId)}/annotations`,
+      `/api/transactions/${encodeURIComponent(transactionId)}/annotations?search_headers=true`,
       sessionId,
       options,
     ), {
@@ -24277,7 +24288,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
       let index = getHistoryItemIndex(transactionId);
       const removed = entry.noteEdit?.removed;
       if (index === -1 && removed && removed.window === window && window.order.has(transactionId)) {
-        const item = Object.assign(removed.item, { color_tag: null, note_preview: null, annotation_revision: 0 }, summary);
+        const item = Object.assign(removed.item, { color_tag: null, note_preview: null, annotation_revision: 0, header_search_text: "" }, summary);
         prepareHistoryItem(item);
         if (summaryMatchesActiveHistoryFilters(item)) {
           const rank = window.order.get(transactionId);
@@ -24298,12 +24309,11 @@ async function flushPendingAnnotations(transactionId, options = {}) {
       }
       if (index !== -1) {
         // A cleared field is omitted from the response rather than sent as null
-        // (color_tag, note_preview and annotation_revision are
-        // skip_serializing_if), so merging the response straight over the row
-        // keeps the old value — a deleted note kept rendering until a reload.
+        // (color_tag, note_preview, annotation_revision, header_search_text),
+        // so merging straight over the row keeps stale notes or header matches.
         Object.assign(
           state.items[index],
-          { color_tag: null, note_preview: null, annotation_revision: 0 },
+          { color_tag: null, note_preview: null, annotation_revision: 0, header_search_text: "" },
           summary,
         );
         prepareHistoryItem(state.items[index]);
