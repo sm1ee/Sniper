@@ -118,7 +118,7 @@ Not verified:
      component mounts by attribute, so moving it is an HTML edit.
    - Automatic order: ego first when installed, then Chrome, Edge, Brave, Chromium.
      The user chose this over "ego last". The menu still lists Chrome first with ego
-     under it, so there are two tables (`ALL` for listing, `AUTO_ORDER` for picking).
+     under it. Superseded on 2026-10-08: the agent browsers are now listed first too, so one table (`ALL`) serves both.
    - A successful open is silent. Only warnings, errors, and the control endpoint of
      an agent-driven browser are shown, since a window appearing is its own
      confirmation.

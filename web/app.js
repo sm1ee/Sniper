@@ -14888,6 +14888,12 @@ function browserMenuRowHtml(entry) {
     : entry.installed
       ? `<button class="browser-menu-pin" type="button" data-prefer="${escapeHtml(entry.browser)}">Make default</button>`
       : "";
+  // Anything but plain CDP is a browser built for an agent to drive, with its
+  // own driver. The driver, not a list of names, decides, so a new AI browser
+  // is marked without touching this.
+  const agentMark = entry.driver && entry.driver !== "cdp"
+    ? ` <span class="browser-menu-agent" title="Built for AI agents" aria-label="AI browser">✨</span>`
+    : "";
   const install = installUrl
     ? `<a class="browser-menu-install" href="${escapeHtml(installUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Install ${escapeHtml(entry.browser)}">Install &#8599;</a>`
     : "";
@@ -14895,7 +14901,7 @@ function browserMenuRowHtml(entry) {
     <div class="browser-menu-row${pin ? " has-pin" : ""}${install ? " has-install" : ""}">
       <button class="context-menu-item browser-menu-open" type="button" role="menuitem"
         data-open="${escapeHtml(entry.browser)}" title="${escapeHtml(title)}" ${entry.installed ? "" : "disabled"}>
-        <span class="browser-menu-name">${escapeHtml(entry.browser)}</span>
+        <span class="browser-menu-name">${escapeHtml(entry.browser)}${agentMark}</span>
         <span class="browser-menu-note">${escapeHtml(note)}</span>
       </button>
       ${pin}
