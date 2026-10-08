@@ -21,7 +21,7 @@
   <header class="site-header wrap">
     <a class="wordmark" href="./" aria-label="Sniper home">Sniper<span class="brand-dot" aria-hidden="true">.</span></a>
     <nav aria-label="Main navigation">
-      <a href="#workflow">The workflow</a><a href="#download">Download</a><a href="#docs">Docs</a>
+      <a href="#workflow">The workflow</a><a href="#ai-workflow">With AI</a><a href="#download">Download</a><a href="#docs">Docs</a>
       <a class="nav-source" href="https://github.com/sm1ee/Sniper">GitHub <span aria-hidden="true">↗</span></a>
     </nav>
   </header>
@@ -43,10 +43,10 @@
       <p><span>01</span> A native desktop app</p><p><span>02</span> Sessions saved locally</p><p><span>03</span> A scriptable CLI</p>
     </div>
     <figure class="product-preview wrap">
-      <a class="preview-image" href="assets/sniper-v0.2.12.jpg" aria-label="View the full Sniper v0.2.12 interface screenshot">
-        <img src="assets/sniper-v0.2.12.jpg" alt="Sniper v0.2.12 in an empty session: Capture and HTTP selected, Open browser in the toolbar, and request and response inspectors below." width="1180" height="757" loading="lazy">
+      <a class="preview-image" href="assets/sniper-v0.2.13-preview.jpg" aria-label="View the full Sniper v0.2.13 development interface screenshot">
+        <img src="assets/sniper-v0.2.13-preview.jpg" alt="Sniper v0.2.13 development preview in an empty session: Capture and HTTP selected, Open browser in the toolbar, and request and response inspectors below." width="1180" height="757" loading="lazy">
       </a>
-      <figcaption><span>THE WORKSPACE</span><span>Sniper v0.2.12 · empty session · <a href="assets/sniper-v0.2.12.jpg">View full image ↗</a></span></figcaption>
+      <figcaption><span>THE WORKSPACE</span><span>v0.2.13 development preview · empty session · <a href="assets/sniper-v0.2.13-preview.jpg">View full image ↗</a></span></figcaption>
     </figure>
     <section class="workflow wrap section-space" id="workflow" aria-labelledby="workflow-title">
       <div class="section-intro">
@@ -69,10 +69,25 @@
           <div><dt>Keep the context</dt><dd>Separate work into sessions, each with its own records, scope and state, saved on your machine.</dd></div>
           <div><dt>Review findings</dt><dd>Passive checks flag potential issues in captured traffic, including sensitive data and security-header configuration.</dd></div>
           <div><dt>Use the small tools</dt><dd>Decode, encode, hash and inspect JWTs without leaving the app. Payload-based testing is available in Fuzzer.</dd></div>
-          <div><dt>Work from a terminal</dt><dd>The bundled <code>sniper-cli</code> provides JSON-first access. Separate Claude Code and Codex skill templates are available in the repository.</dd></div>
+          <div><dt>Work from a terminal</dt><dd>The bundled <code>sniper-cli</code> provides JSON-first access for scripts and coding agents. <a href="#ai-workflow">See how an AI agent uses Sniper.</a></dd></div>
         </dl>
         <div class="source-note"><span>Open source, all the way down.</span><a href="https://github.com/sm1ee/Sniper">Read the code <span aria-hidden="true">↗</span></a></div>
       </div>
+    </section>
+    <section class="ai-section wrap section-space" id="ai-workflow" aria-labelledby="ai-title">
+      <div class="ai-workflow">
+        <div class="section-intro">
+          <p class="eyebrow">Sniper + your coding agent</p><h2 id="ai-title">Ask AI about<br>your traffic.</h2>
+          <p>Claude Code or Codex can use Sniper’s captured requests as context. The agent runs separately and reads your local session through the bundled <code>sniper-cli</code>, which returns structured JSON.</p>
+          <div class="integration-links"><a class="text-link" href="integrations/claude-code">Claude Code setup <span aria-hidden="true">↗</span></a><a class="text-link" href="integrations/codex">Codex setup <span aria-hidden="true">↗</span></a></div>
+        </div>
+        <ol class="steps">
+          <li><span class="step-number" aria-hidden="true">01</span><div><h3>Capture your test traffic</h3><p>Open Sniper and browse an application you own or have permission to test. Keep Sniper running so the agent can read the captured requests in your session.</p></div></li>
+          <li><span class="step-number" aria-hidden="true">02</span><div><h3>Add the optional Sniper skill</h3><p>Set up Claude Code or Codex separately, including its sign-in. Make <code>sniper-cli</code> available in your terminal, then follow the integration guide to install <code>sniper-operator</code>. The skill adds instructions; it does not install or sign in an AI app.</p></div></li>
+          <li><span class="step-number" aria-hidden="true">03</span><div><h3>Ask about a captured request</h3><p>Try: “Summarize failed requests in this session and explain one response I choose.” The agent uses the CLI to list captures and read selected request and response details, then helps you explain the behavior or draft a debugging note.</p></div></li>
+        </ol>
+      </div>
+      <aside class="ai-data-note" aria-labelledby="ai-data-title"><h3 id="ai-data-title">Check what you share.</h3><p>Sessions are saved on your machine, but records an external agent reads enter its context and may reach its model provider or transcripts. Captures can contain cookies, tokens and personal data; Sniper does not automatically redact them. Use a dedicated session with test data suitable for sharing.</p></aside>
     </section>
     <section class="download-section wrap section-space" id="download" aria-labelledby="download-title">
       <div class="section-heading"><div><p class="eyebrow">Make yourself at home</p><h2 id="download-title">Get Sniper.</h2></div><p>Pick your platform. Release files and their SHA-256 checksums are published on GitHub.</p></div>

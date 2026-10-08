@@ -70,7 +70,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; fo
 .preview-image img { width: 100%; }
 .product-preview figcaption { display: flex; justify-content: space-between; gap: 18px; margin-top: 13px; color: var(--muted); font-size: .7rem; }
 .product-preview figcaption > span:first-child { font-size: .62rem; letter-spacing: .11em; font-weight: 650; }
-.workflow, .docs-section { display: grid; grid-template-columns: 1fr 1.12fr; gap: 100px; }
+.workflow, .ai-workflow, .docs-section { display: grid; grid-template-columns: 1fr 1.12fr; gap: 100px; }
 .section-intro h2 { margin-top: 20px; }
 .section-intro > p:not(.eyebrow) { margin-top: 24px; max-width: 355px; color: var(--muted); }
 .section-intro .text-link { margin-top: 26px; }
@@ -92,6 +92,11 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; fo
 .source-note { display: flex; gap: 20px; justify-content: space-between; border-top: 1px solid #515246; margin-top: 49px; padding-top: 22px; font-size: .84rem; }
 .source-note > span { color: #bab9ab; }
 .source-note a { color: var(--gold); }
+.ai-section { border-bottom: 1px solid var(--rule); }
+.integration-links { display: flex; flex-wrap: wrap; column-gap: 24px; }
+.ai-data-note { display: grid; grid-template-columns: 1fr 1.12fr; gap: 100px; border-top: 1px solid var(--rule); margin-top: 44px; padding-top: 24px; }
+.ai-data-note h3 { font-size: 1rem; line-height: 1.5; }
+.ai-data-note p { color: var(--muted); font-size: .82rem; }
 .section-heading { display: grid; grid-template-columns: 1fr 1.12fr; gap: 100px; }
 .section-heading h2 { margin-top: 18px; }
 .section-heading > p { max-width: 340px; color: var(--muted); align-self: end; padding-bottom: 3px; }
@@ -130,7 +135,7 @@ pre { max-width: 100%; overflow-x: auto; padding: 16px 18px; margin: 22px 0; bor
   .hero { gap: 20px; padding-block: 70px; }
   .hero h1 { font-size: clamp(3.5rem, 7.2vw, 5.1rem); }
   .brand-note { margin-inline: 22px; }
-  .workflow, .docs-section, .tools-heading, .section-heading { column-gap: 48px; }
+  .workflow, .ai-workflow, .ai-data-note, .docs-section, .tools-heading, .section-heading { column-gap: 48px; }
   .tool-list { column-gap: 28px; }
   .download-option { padding-right: 28px; }
   .download-option + .download-option { padding-left: 28px; }
@@ -156,13 +161,14 @@ pre { max-width: 100%; overflow-x: auto; padding: 16px 18px; margin: 22px 0; bor
   .principles { grid-template-columns: 1fr; gap: 8px; padding-block: 18px; }
   .principles p, .principles p:nth-child(2), .principles p:last-child { justify-content: flex-start; }
   .section-space { padding-block: 62px; }
-  .workflow, .docs-section, .tools-heading, .section-heading { grid-template-columns: 1fr; gap: 32px; }
+  .workflow, .ai-workflow, .docs-section, .tools-heading, .section-heading { grid-template-columns: 1fr; gap: 32px; }
   .section-intro > p:not(.eyebrow) { max-width: 450px; margin-top: 20px; }
   .steps li { gap: 14px; padding-block: 22px; }
   .tools-heading { gap: 0; }
   .tools-heading > p:last-child { margin-top: 24px; }
   .tool-list { grid-template-columns: 1fr 1fr; margin-top: 38px; column-gap: 25px; row-gap: 27px; }
   .source-note { margin-top: 34px; }
+  .ai-data-note { grid-template-columns: 1fr; gap: 12px; margin-top: 32px; }
   .section-heading { gap: 24px; }
   .downloads { grid-template-columns: 1fr; margin-top: 32px; }
   .download-option, .download-option + .download-option { padding: 28px 0 0; border-left: 0; }
