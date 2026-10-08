@@ -524,7 +524,8 @@ pub fn transaction_summary_schema() -> Value {
             "has_response":{"type":"boolean"},"content_type":nullable(json!({"type":"string"})),
             "is_websocket":{"type":"boolean"},"has_match_replace":{"type":"boolean"},
             "color_tag":{"type":"string"},"has_user_note":{"type":"boolean"},
-            "note_preview":{"type":"string"},"annotation_revision":unsigned_schema(1,u64::MAX)
+            "note_preview":{"type":"string"},"annotation_revision":unsigned_schema(1,u64::MAX),
+            "header_search_text":{"type":"string"}
         }),
         &[
             "id",
@@ -1032,12 +1033,14 @@ mod tests {
             has_user_note: false,
             note_preview: None,
             annotation_revision: 0,
+            header_search_text: String::new(),
         };
         for annotated in [false, true] {
             if annotated {
                 summary.color_tag = Some("blue".into());
                 summary.note_preview = Some("Example".into());
                 summary.annotation_revision = 1;
+                summary.header_search_text = "Server: ExampleServer".into();
             }
             let value = json!({"contract_version":CONTRACT_VERSION,"session_id":id(),"items":[summary],"limit":1,"has_more":false,"continuation":null});
             validate_schema(

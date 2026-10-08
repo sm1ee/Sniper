@@ -964,6 +964,7 @@ let proxySettingsSavePromise = null;
 let toolsBootPromise = null;
 let displaySettingsPreviewActive = false;
 let displaySettingsReturnFocus = null;
+const cliPathState = createCliPathState();
 let filterSettingsReturnFocus = null;
 const filterSettingsEditedControls = new Set();
 let activeConfirmDialog = null;
@@ -1082,6 +1083,7 @@ async function init() {
       renderProxySettings();
     }
   }, 800);
+  initCliPathOnboarding();
 }
 
 function resetLayoutTextareas() {
@@ -1554,7 +1556,7 @@ function bindEvents() {
   els.openUpdateButton.addEventListener("click", performSelfUpdate);
   if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
-  document.getElementById("installCliPathButton")?.addEventListener("click", installCliPath);
+  bindCliPathControls();
   els.displaySettingsModal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
     tab.addEventListener("click", () => selectSettingsTab(tab.dataset.settingsTab));
   });
@@ -3077,7 +3079,13 @@ async function adoptExternalReplayTabs() {
     const existing = local.get(tab.id);
     if (!existing) {
       const hydrated = hydrateReplayTab(tab);
-      if (hydrated) added.push(hydrated);
+      if (hydrated) {
+        added.push(hydrated);
+        // The tab arrives already committed by its writer. Without a baseline
+        // entry a follow-up `replay update` would find nothing to compare against
+        // and be refused.
+        workspaceSaveCommittedSnapshot?.replay?.tabs?.push(cloneWorkspaceSnapshotForBaseline(tab));
+      }
       continue;
     }
     if (adoptExternalReplayResult(existing, tab)) updated += 1;
@@ -3114,12 +3122,14 @@ async function adoptExternalReplayTabs() {
 function adoptExternalReplayResult(existing, incoming) {
   if (existing.type === "websocket" || incoming.type === "websocket") return false;
 
+  const labelAdopted = adoptExternalReplayLabel(existing, incoming);
+  const requestAdopted = adoptExternalReplayRequest(existing, incoming) || labelAdopted;
   const entries = Array.isArray(incoming.history_entries) ? incoming.history_entries : [];
   const sameLength = entries.length === (existing.historyEntries?.length || 0);
   const sameResponse = (incoming.response_record?.id ?? null) === (existing.responseRecord?.id ?? null);
   // Length alone is not enough: sending from a point back in the history
   // truncates and re-pushes, which can leave the count unchanged.
-  if (sameLength && sameResponse) return false;
+  if (sameLength && sameResponse) return requestAdopted;
 
   const fallbackRequest = incoming.base_request
     ? cloneEditableRequest(incoming.base_request)
@@ -3135,6 +3145,63 @@ function adoptExternalReplayResult(existing, incoming) {
   );
   existing.responseRecord = incoming.response_record || null;
   existing.notice = incoming.notice || "";
+  return true;
+}
+
+// `sniper-cli replay update --label` names a tab this window already holds. Same
+// rule as the request below: take it unless the operator renamed the tab here
+// and has not saved yet.
+function adoptExternalReplayLabel(existing, incoming) {
+  const baseline = workspaceReplayTabsById(workspaceSaveCommittedSnapshot).get(existing.id);
+  if (!baseline) return false;
+  const committed = normalizeReplayTabCustomLabel(baseline.custom_label);
+  const next = normalizeReplayTabCustomLabel(incoming.custom_label);
+  if (normalizeReplayTabCustomLabel(existing.customLabel) !== committed || next === committed) return false;
+  existing.customLabel = next;
+  baseline.custom_label = next;
+  return true;
+}
+
+function replayTabRequestShape(tab) {
+  return {
+    request_text: tab?.request_text || "",
+    http_version_mode: normalizeReplayHttpVersionMode(tab?.http_version_mode),
+    target_scheme: tab?.target_scheme || "https",
+    target_host: tab?.target_host || "",
+    target_port: normalizePortValue(tab?.target_port),
+  };
+}
+
+// `sniper-cli replay update` rewrites the request of a tab this window already
+// holds. Ignoring it left the editor on the stale draft, and the next save wrote
+// that draft back over the CLI's request: a sent request ended up shown as the
+// example.com placeholder next to the real response. The request is taken only
+// while the local tab still matches what was last committed, so an operator's
+// unsaved edit still wins.
+function adoptExternalReplayRequest(existing, incoming) {
+  const baseline = workspaceReplayTabsById(workspaceSaveCommittedSnapshot).get(existing.id);
+  if (!baseline || existing.requestBytes) return false;
+  const baselineShape = replayTabRequestShape(baseline);
+  const localShape = replayTabRequestShape({
+    request_text: existing.requestText,
+    http_version_mode: existing.httpVersionMode,
+    target_scheme: existing.targetScheme,
+    target_host: existing.targetHost,
+    target_port: existing.targetPort,
+  });
+  if (workspaceSnapshotValueChanged(localShape, baselineShape)) return false;
+  const incomingShape = replayTabRequestShape(incoming);
+  if (!workspaceSnapshotValueChanged(incomingShape, baselineShape)) return false;
+
+  existing.requestText = incomingShape.request_text;
+  existing.httpVersionMode = incomingShape.http_version_mode;
+  existing.targetScheme = incomingShape.target_scheme;
+  existing.targetHost = incomingShape.target_host;
+  existing.targetPort = incomingShape.target_port;
+  if (incoming.base_request) existing.baseRequest = cloneEditableRequest(incoming.base_request);
+  // Move the baseline too, or the next external update would read this adopted
+  // request as a local edit and be refused.
+  Object.assign(baseline, incomingShape, { base_request: incoming.base_request || baseline.base_request });
   return true;
 }
 
@@ -4938,6 +5005,7 @@ function buildTransactionsPageUrl({ limit, offset = 0, beforeSequence = null, qu
   params.set("sort_direction", queryState.sortDirection);
   if (queryState.sessionId) params.set("session_id", queryState.sessionId);
   params.set("hide_connect", "true");
+  params.set("search_headers", "true");
   if (queryState.query) params.set("q", queryState.query);
   if (queryState.method) params.set("method", queryState.method);
   if (queryState.inScopeOnly) params.set("in_scope_only", "true");
@@ -7641,7 +7709,9 @@ function summaryMatchesActiveHistoryFilters(item, options = {}) {
   if (!summaryMatchesPortFilter(item, filters)) return false;
   if (!summaryMatchesColorTags(item, filters)) return false;
   if (!summaryMatchesAdvancedSearch(item, filters)) return false;
-  if (state.query && !summaryQuickSearchHaystack(item).includes(state.query.toLowerCase())) return false;
+  if (state.query
+    && !summaryQuickSearchHaystack(item).includes(state.query.toLowerCase())
+    && !foldHeaderSearchText(item.header_search_text).includes(foldHeaderSearchText(state.query))) return false;
   return true;
 }
 
@@ -7713,21 +7783,29 @@ function summaryMatchesColorTags(item, filters) {
   return tags.has(item.color_tag || "");
 }
 
+function foldHeaderSearchText(value) {
+  // Match the server's ASCII case folding without changing non-ASCII values.
+  return String(value || "").replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}
+
 function summaryMatchesAdvancedSearch(item, filters) {
   const term = String(filters.searchTerm || "").trim();
   if (!term) return true;
   const haystack = `${item.host || ""} ${item.method || ""} ${item.path || ""} ${item.content_type || ""}`;
+  const headers = item.header_search_text || "";
   let matched = false;
   if (filters.regex) {
     try {
-      matched = new RegExp(term, filters.caseSensitive ? "" : "i").test(haystack);
+      const regex = new RegExp(term, filters.caseSensitive ? "" : "i");
+      matched = regex.test(haystack) || (headers.length > 0 && regex.test(headers));
     } catch (_) {
       return !filters.negativeSearch;
     }
   } else {
     matched = filters.caseSensitive
-      ? haystack.includes(term)
-      : haystack.toLowerCase().includes(term.toLowerCase());
+      ? haystack.includes(term) || headers.includes(term)
+      : haystack.toLowerCase().includes(term.toLowerCase())
+        || foldHeaderSearchText(headers).includes(foldHeaderSearchText(term));
   }
   return filters.negativeSearch ? !matched : matched;
 }
@@ -10254,7 +10332,8 @@ function updateProxyStatusIndicator(online) {
     : `Proxy failed to bind on ${state.settings?.proxy_addr || "..."}. Restart the app after freeing the port.`;
 }
 
-function renderHistory() {
+function renderHistory(options = {}) {
+  if (state._historyNoteEditWindow) currentHistoryNoteEditWindow();
   const visibleEntries = getVisibleEntries();
   const hiddenConnectCount = countHiddenConnectItems();
   const paging = state.historyPaging || createHistoryPagingState();
@@ -10287,6 +10366,17 @@ function renderHistory() {
   // Store entries for virtual scroll
   state._historyEntries = visibleEntries;
 
+  // A save acknowledgement can arrive while an IME still owns the input.
+  // Keep that node attached until editing ends; metadata and summaries above
+  // remain current, and ordinary navigation/scroll renders are not deferred.
+  const noteInput = options.preserveNoteEditor
+    ? els.historyTableBody.querySelector("input.note-inline-input")
+    : null;
+  if (noteInput) {
+    noteInput.dataset.historyRenderPending = "true";
+    return;
+  }
+
   if (!visibleEntries.length) {
     // A session with nothing in it yet is the one moment someone is looking for
     // how to get traffic in, so the way to do that is offered here and not only in
@@ -10300,6 +10390,7 @@ function renderHistory() {
         </td>
       </tr>
     `;
+    if (state._historyNoteEditWindow) releaseDetachedHistoryNoteEdits();
     mountBrowserLaunchers(els.historyTableBody);
     if (paging.hasMore && !paging.loading && !paging.fullyLoaded) {
       scheduleHistoryBackfill(0, { allowAtCap: true });
@@ -10310,61 +10401,73 @@ function renderHistory() {
   renderHistoryVirtual();
 }
 
+function getHistoryRowHeight(options = {}) {
+  const previous = measuredHistoryRowHeight;
+  const measured = measuredRowPitch(els.historyTableBody);
+  if (Number.isFinite(measured) && measured > 0) {
+    measuredHistoryRowHeight = measured;
+  }
+  // Refresh old spacers before a selection scroll can hit their physical limit.
+  if (options.refreshLayout && measuredHistoryRowHeight !== previous) renderHistoryVirtual();
+  return measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
+}
+
 function renderHistoryVirtual() {
+  if (state._historyNoteEditWindow) currentHistoryNoteEditWindow();
   const entries = state._historyEntries;
   if (!entries || !entries.length) return;
 
   const shell = els.historyTable.closest(".history-table-shell");
   if (!shell) return;
 
-  const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
   const viewportHeight = shell.clientHeight;
   const totalCount = entries.length;
   const colCount = state.historyColumnOrder.length;
   // Sticky headers still occupy table height; excluding them hides the final row.
   const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
-  const maxScrollTop = Math.max(0, headerHeight + totalCount * rowHeight - viewportHeight);
-  const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
-  if (shell.scrollTop !== scrollTop) {
-    shell.scrollTop = scrollTop;
-  }
+  const requestedScrollTop = shell.scrollTop;
+  // Keep the original offset through first-paint calibration: replacing rows
+  // can physically clamp it before the corrected spacers have been installed.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const rowHeight = getHistoryRowHeight();
+    const maxScrollTop = Math.max(0, headerHeight + totalCount * rowHeight - viewportHeight);
+    const scrollTop = Math.max(0, Math.min(requestedScrollTop, maxScrollTop));
+    const startIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - HISTORY_BUFFER_ROWS);
+    const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / rowHeight) + HISTORY_BUFFER_ROWS);
+    const topPadding = startIdx * rowHeight;
+    const bottomPadding = Math.max(0, (totalCount - endIdx) * rowHeight);
 
-  const startIdx = Math.max(0, Math.floor(scrollTop / rowHeight) - HISTORY_BUFFER_ROWS);
-  const endIdx = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / rowHeight) + HISTORY_BUFFER_ROWS);
-  if (
-    startIdx <= HTTP_HISTORY_SCROLL_PREFETCH_ROWS
-    && state.historyPaging?.trimmedHeadCount > 0
-    && !state.historyPaging.loading
-  ) {
-    loadNewerTransactions({ background: true }).catch((error) => console.error(error));
-  }
-  if (totalCount - endIdx <= HTTP_HISTORY_SCROLL_PREFETCH_ROWS) {
-    const atLoadedBottom = scrollTop >= maxScrollTop - rowHeight;
-    scheduleHistoryBackfill(0, { allowAtCap: atLoadedBottom });
-  }
+    const rows = [];
+    for (let i = startIdx; i < endIdx; i++) {
+      const entry = entries[i];
+      const item = entry.item;
+      const selected = item.id === state.selectedId ? "selected" : "";
+      const tagClass = item.color_tag ? ` tagged-${escapeHtml(item.color_tag)}` : "";
+      const cells = state.historyColumnOrder.map((colKey) => renderHistoryCell(colKey, item, entry)).join("");
+      rows.push(`<tr class="history-row ${selected}${tagClass}" data-id="${item.id}">${cells}</tr>`);
+    }
 
-  const topPadding = startIdx * rowHeight;
-  const bottomPadding = Math.max(0, (totalCount - endIdx) * rowHeight);
+    els.historyTableBody.innerHTML =
+      (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
+      rows.join("") +
+      (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
+    if (state._historyNoteEditWindow) releaseDetachedHistoryNoteEdits();
 
-  const rows = [];
-  for (let i = startIdx; i < endIdx; i++) {
-    const entry = entries[i];
-    const item = entry.item;
-    const selected = item.id === state.selectedId ? "selected" : "";
-    const tagClass = item.color_tag ? ` tagged-${escapeHtml(item.color_tag)}` : "";
-    const cells = state.historyColumnOrder.map((colKey) => renderHistoryCell(colKey, item, entry)).join("");
-    rows.push(`<tr class="history-row ${selected}${tagClass}" data-id="${item.id}">${cells}</tr>`);
-  }
-
-  els.historyTableBody.innerHTML =
-    (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
-    rows.join("") +
-    (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
-
-  const measured = measuredRowPitch(els.historyTableBody) || 0;
-  if (measured > 0 && Math.abs(measured - rowHeight) >= 1) {
-    measuredHistoryRowHeight = measured;
-    renderHistoryVirtual();
+    if (attempt === 0 && getHistoryRowHeight() !== rowHeight) continue;
+    if (shell.scrollTop !== scrollTop) shell.scrollTop = scrollTop;
+    // Prefetch only for the final window, not an intermediate calibration pass.
+    if (
+      startIdx <= HTTP_HISTORY_SCROLL_PREFETCH_ROWS
+      && state.historyPaging?.trimmedHeadCount > 0
+      && !state.historyPaging.loading
+    ) {
+      loadNewerTransactions({ background: true }).catch((error) => console.error(error));
+    }
+    if (totalCount - endIdx <= HTTP_HISTORY_SCROLL_PREFETCH_ROWS) {
+      const atLoadedBottom = scrollTop >= maxScrollTop - rowHeight;
+      scheduleHistoryBackfill(0, { allowAtCap: atLoadedBottom });
+    }
+    break;
   }
 }
 
@@ -10414,7 +10517,7 @@ function scrollHistoryToId(targetId) {
   const shell = els.historyTable.closest(".history-table-shell");
   if (!shell || shell.clientHeight <= 0) return;
 
-  const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
+  const rowHeight = getHistoryRowHeight({ refreshLayout: true });
   const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
   const targetTop = idx * rowHeight;
   const centeredTop = Math.max(0, targetTop - shell.clientHeight / 2);
@@ -10495,6 +10598,7 @@ async function moveHistorySelection(offset) {
 function scrollSelectedHistoryRowIntoView() {
   const shell = els.historyTable.closest(".history-table-shell");
   if (!shell || shell.clientHeight <= 0) return;
+  const rowHeight = getHistoryRowHeight({ refreshLayout: true });
   const headerHeight = els.historyTable.tHead?.getBoundingClientRect().height || 0;
   const selectedRow = els.historyTableBody.querySelector(".history-row.selected");
   if (selectedRow) {
@@ -10514,7 +10618,6 @@ function scrollSelectedHistoryRowIntoView() {
   if (!state.selectedId || !state._historyEntries) return;
   const idx = state._historyEntries.findIndex((e) => e.item.id === state.selectedId);
   if (idx === -1) return;
-  const rowHeight = measuredHistoryRowHeight || HISTORY_ROW_HEIGHT;
   const rowTop = idx * rowHeight;
   const rowBottom = headerHeight + rowTop + rowHeight;
   const viewTop = shell.scrollTop;
@@ -14796,6 +14899,12 @@ function browserMenuRowHtml(entry) {
     : entry.installed
       ? `<button class="browser-menu-pin" type="button" data-prefer="${escapeHtml(entry.browser)}">Make default</button>`
       : "";
+  // Anything but plain CDP is a browser built for an agent to drive, with its
+  // own driver. The driver, not a list of names, decides, so a new AI browser
+  // is marked without touching this.
+  const agentMark = entry.driver && entry.driver !== "cdp"
+    ? ` <span class="browser-menu-agent" title="Built for AI agents" aria-label="AI browser">✨</span>`
+    : "";
   const install = installUrl
     ? `<a class="browser-menu-install" href="${escapeHtml(installUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Install ${escapeHtml(entry.browser)}">Install &#8599;</a>`
     : "";
@@ -14803,7 +14912,7 @@ function browserMenuRowHtml(entry) {
     <div class="browser-menu-row${pin ? " has-pin" : ""}${install ? " has-install" : ""}">
       <button class="context-menu-item browser-menu-open" type="button" role="menuitem"
         data-open="${escapeHtml(entry.browser)}" title="${escapeHtml(title)}" ${entry.installed ? "" : "disabled"}>
-        <span class="browser-menu-name">${escapeHtml(entry.browser)}</span>
+        <span class="browser-menu-name">${escapeHtml(entry.browser)}${agentMark}</span>
         <span class="browser-menu-note">${escapeHtml(note)}</span>
       </button>
       ${pin}
@@ -17633,28 +17742,263 @@ function openDisplaySettingsModal() {
   els.closeDisplaySettingsButton.focus();
 }
 
-async function installCliPath() {
-  const button = document.getElementById("installCliPathButton");
-  const status = document.getElementById("installCliPathStatus");
-  if (!button || !status) return;
-  button.disabled = true;
-  status.classList.remove("hidden", "error");
-  status.textContent = "Working...";
-  try {
-    const response = await fetch("/api/cli-path", { method: "POST" });
-    const text = await response.text();
-    if (!response.ok) throw new Error(text || `Request failed (${response.status})`);
-    const result = JSON.parse(text);
-    const written = [...result.updated, ...result.unchanged];
-    status.textContent = result.updated.length
-      ? `Updated ${written.join(", ")}. Open a new terminal and run sniper-cli.`
-      : `${written.join(", ")} already has it. Open a new terminal and run sniper-cli.`;
-  } catch (error) {
-    status.classList.add("error");
-    status.textContent = error?.message || "Could not update the shell profile.";
-  } finally {
-    button.disabled = false;
+function createCliPathState() {
+  return {
+    initialized: false,
+    wired: false,
+    disposed: false,
+    status: null,
+    loading: false,
+    readId: 0,
+    readController: null,
+    readPromise: null,
+    action: null,
+    actionId: 0,
+    actionController: null,
+    decided: false,
+    banner: "hidden",
+    message: "",
+    error: false,
+  };
+}
+
+function bindCliPathControls() {
+  if (cliPathState.wired) return;
+  cliPathState.wired = true;
+  document.getElementById("installCliPathButton")?.addEventListener("click", installCliPath);
+  document.getElementById("refreshCliPathButton")?.addEventListener("click", () => loadCliPathStatus());
+  document.getElementById("cliPathAddButton")?.addEventListener("click", installCliPath);
+  document.getElementById("cliPathLaterButton")?.addEventListener("click", deferCliPath);
+  document.getElementById("cliPathDismissButton")?.addEventListener("click", hideCliPathBanner);
+  document.getElementById("cliPathSettingsButton")?.addEventListener("click", () => {
+    hideCliPathBanner();
+    openDisplaySettingsModal();
+  });
+  // pagehide runs only when leaving, unlike a cancellable beforeunload. A
+  // restored back/forward-cache page rechecks the actual registration below.
+  window.addEventListener("pagehide", disposeCliPathUi);
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted || !cliPathState.disposed) return;
+    cliPathState.disposed = false;
+    loadCliPathStatus();
+  });
+}
+
+function initCliPathOnboarding() {
+  if (cliPathState.initialized) return;
+  cliPathState.initialized = true;
+  loadCliPathStatus({ allowPrompt: true });
+}
+
+function cliPathCanInstall() {
+  const status = cliPathState.status;
+  return Boolean(status?.supported && status.can_install && !status.registered);
+}
+
+function cliPathDescription() {
+  if (cliPathState.status?.platform === "macos") {
+    return "Optionally add this app's bundled sniper-cli to your shell PATH. This updates your zsh profile (ZDOTDIR/.zshrc or ~/.zshrc) and existing ~/.bash_profile and ~/.bashrc. Open a new terminal afterwards.";
   }
+  if (cliPathState.status?.platform === "windows") {
+    return "Optionally add this app's bundled sniper-cli to your user PATH. This changes only your account's PATH. Open a new terminal afterwards; you may need to restart your terminal app.";
+  }
+  return "Make this app's bundled sniper-cli available in a terminal. PATH setup is optional; availability depends on the platform and app package.";
+}
+
+function renderCliPathUi() {
+  if (cliPathState.disposed) return;
+  const busy = cliPathState.loading || Boolean(cliPathState.action);
+  const banner = document.getElementById("cliPathBanner");
+  const hadBannerFocus = banner?.contains(document.activeElement);
+  const showPrompt = cliPathState.banner === "prompt" || cliPathState.banner === "working";
+  const showResult = cliPathState.banner === "result";
+  const description = cliPathDescription();
+  for (const id of ["cliPathDescription", "cliPathBannerDescription"]) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = description;
+  }
+  const directory = document.getElementById("cliPathDirectory");
+  if (directory) {
+    directory.textContent = cliPathState.status?.directory ? `Bundled command directory: ${cliPathState.status.directory}` : "";
+    directory.classList.toggle("hidden", !directory.textContent);
+  }
+  const button = document.getElementById("installCliPathButton");
+  if (button) {
+    button.disabled = busy || !cliPathCanInstall();
+    button.textContent = cliPathState.action === "install" ? "Adding to PATH..." : "Add sniper-cli to PATH";
+  }
+  const refresh = document.getElementById("refreshCliPathButton");
+  if (refresh) refresh.disabled = busy;
+  const message = cliPathState.message || cliPathState.status?.message || "Checking command-line availability...";
+  for (const id of ["installCliPathStatus", "cliPathBannerStatus"]) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    element.textContent = id === "cliPathBannerStatus" && cliPathState.banner === "prompt" ? "" : message;
+    element.classList.toggle("error", cliPathState.error);
+  }
+  banner?.classList.toggle("hidden", cliPathState.banner === "hidden");
+  banner?.setAttribute("aria-busy", cliPathState.action ? "true" : "false");
+  // Disabling a focused button blurs it outside the banner. Keep focus here
+  // so completion can restore it, unless the operator moves elsewhere first.
+  if (hadBannerFocus && showPrompt && busy) banner.focus({ preventScroll: true });
+  for (const id of ["cliPathAddButton", "cliPathLaterButton"]) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    element.classList.toggle("hidden", !showPrompt);
+    element.disabled = busy;
+  }
+  document.getElementById("cliPathDismissButton")?.classList.toggle("hidden", !showResult);
+  document.getElementById("cliPathSettingsButton")?.classList.toggle("hidden", !showResult || !cliPathState.error);
+  if (hadBannerFocus) {
+    if (cliPathState.banner === "hidden") els.openDisplaySettingsButton?.focus();
+    else if (showResult) document.getElementById("cliPathDismissButton")?.focus();
+  }
+}
+
+function validCliPathStatus(status) {
+  return status && ["macos", "windows", "unsupported"].includes(status.platform)
+    && ["supported", "registered", "can_install", "should_prompt"].every((key) => typeof status[key] === "boolean")
+    && (status.directory === null || typeof status.directory === "string")
+    && typeof status.message === "string";
+}
+
+function loadCliPathStatus({ allowPrompt = false } = {}) {
+  if (cliPathState.disposed || cliPathState.action) return Promise.resolve();
+  if (cliPathState.readPromise) return cliPathState.readPromise;
+  const requestId = ++cliPathState.readId;
+  const controller = new AbortController();
+  cliPathState.readController = controller;
+  cliPathState.loading = true;
+  cliPathState.message = "Checking command-line availability...";
+  cliPathState.error = false;
+  renderCliPathUi();
+  const current = () => !cliPathState.disposed && requestId === cliPathState.readId;
+  cliPathState.readPromise = Promise.resolve().then(async () => {
+    try {
+      const response = await fetch("/api/cli-path", { signal: controller.signal });
+      await requireOkResponse(response, "Could not check command-line availability.");
+      const status = await response.json();
+      if (!current()) return;
+      if (!validCliPathStatus(status)) throw new Error("Invalid command-line availability response.");
+      cliPathState.status = status;
+      cliPathState.message = "";
+      const eligible = cliPathCanInstall() && status.should_prompt && !cliPathState.decided;
+      // Do not introduce onboarding behind a dialog the operator is already
+      // using. Settings remains available, and no choice is saved by this read.
+      if (allowPrompt && eligible && !document.querySelector(".modal-backdrop:not(.hidden), dialog[open]")) cliPathState.banner = "prompt";
+      else if (!eligible && cliPathState.banner === "prompt") cliPathState.banner = "hidden";
+    } catch (error) {
+      if (!current()) return;
+      cliPathState.status = null;
+      cliPathState.error = true;
+      cliPathState.message = `${error?.message || "Could not check command-line availability."} Use Refresh status in Settings → Runtime to try again.`;
+      if (cliPathState.banner === "prompt") cliPathState.banner = "hidden";
+    } finally {
+      if (current()) {
+        cliPathState.loading = false;
+        cliPathState.readController = null;
+        cliPathState.readPromise = null;
+        renderCliPathUi();
+      }
+    }
+  });
+  return cliPathState.readPromise;
+}
+
+async function installCliPath() {
+  if (cliPathState.disposed || cliPathState.action || cliPathState.loading || !cliPathCanInstall()) return;
+  const requestId = ++cliPathState.actionId;
+  const controller = new AbortController();
+  cliPathState.actionController = controller;
+  cliPathState.action = "install";
+  // A decision suppresses another prompt even if the response is lost. The
+  // server persists the same decision before attempting any PATH changes.
+  cliPathState.decided = true;
+  cliPathState.message = "Adding bundled sniper-cli to PATH...";
+  cliPathState.error = false;
+  if (cliPathState.banner !== "hidden") cliPathState.banner = "working";
+  renderCliPathUi();
+  const current = () => !cliPathState.disposed && requestId === cliPathState.actionId;
+  try {
+    const response = await fetch("/api/cli-path", { method: "POST", signal: controller.signal });
+    await requireOkResponse(response, "Could not add sniper-cli to PATH.");
+    const result = await response.json();
+    if (!current()) return;
+    if (![result?.updated, result?.unchanged, result?.warnings].every((items) => Array.isArray(items) && items.every((item) => typeof item === "string"))) {
+      throw new Error("Invalid PATH setup response.");
+    }
+    cliPathState.status.should_prompt = false;
+    cliPathState.status.registered = result.warnings.length === 0;
+    cliPathState.error = result.warnings.length > 0;
+    const message = typeof result.message === "string" && result.message.trim()
+      ? result.message : "PATH setup finished. Open a new terminal and run sniper-cli.";
+    cliPathState.message = result.warnings.length
+      ? `${message} ${result.warnings.join(" ")} You can retry from Settings → Runtime.` : message;
+  } catch (error) {
+    if (!current()) return;
+    cliPathState.error = true;
+    cliPathState.message = `${error?.message || "Could not add sniper-cli to PATH."} You can retry from Settings → Runtime.`;
+  } finally {
+    if (current()) {
+      cliPathState.action = null;
+      cliPathState.actionController = null;
+      if (cliPathState.banner !== "hidden") cliPathState.banner = "result";
+      renderCliPathUi();
+    }
+  }
+}
+
+async function deferCliPath() {
+  if (cliPathState.disposed || cliPathState.action || cliPathState.loading || cliPathState.banner !== "prompt") return;
+  const requestId = ++cliPathState.actionId;
+  const controller = new AbortController();
+  cliPathState.actionController = controller;
+  cliPathState.action = "defer";
+  cliPathState.decided = true;
+  cliPathState.banner = "working";
+  cliPathState.message = "Saving your choice...";
+  cliPathState.error = false;
+  renderCliPathUi();
+  const current = () => !cliPathState.disposed && requestId === cliPathState.actionId;
+  try {
+    const response = await fetch("/api/cli-path/defer", { method: "POST", signal: controller.signal });
+    await requireOkResponse(response, "Could not save your choice.");
+    if (!current()) return;
+    cliPathState.status.should_prompt = false;
+    cliPathState.banner = "hidden";
+    cliPathState.message = "You can add sniper-cli later from Settings → Runtime.";
+  } catch (error) {
+    if (!current()) return;
+    cliPathState.banner = "result";
+    cliPathState.error = true;
+    cliPathState.message = `${error?.message || "Could not save your choice."} The prompt may appear again next time. PATH setup remains optional in Settings → Runtime.`;
+  } finally {
+    if (current()) {
+      cliPathState.action = null;
+      cliPathState.actionController = null;
+      renderCliPathUi();
+    }
+  }
+}
+
+function hideCliPathBanner() {
+  if (cliPathState.action) return;
+  cliPathState.banner = "hidden";
+  renderCliPathUi();
+}
+
+function disposeCliPathUi() {
+  cliPathState.disposed = true;
+  cliPathState.readId += 1;
+  cliPathState.actionId += 1;
+  cliPathState.readController?.abort();
+  cliPathState.actionController?.abort();
+  cliPathState.readController = null;
+  cliPathState.actionController = null;
+  cliPathState.readPromise = null;
+  cliPathState.loading = false;
+  cliPathState.action = null;
+  cliPathState.banner = "hidden";
 }
 
 function closeDisplaySettingsModal() {
@@ -23591,6 +23935,10 @@ function contextMenuSessionIsCurrent() {
 // menu, which meant aiming at a menu to write one word.
 async function beginNoteEdit(cell, transactionId) {
   if (!cell || cell.dataset.noteLoading === "true" || cell.querySelector("input.note-inline-input")) return;
+  if (cell.dataset.noteFilteredOut === "true") {
+    if (getHistoryItemIndex(transactionId) === -1) return;
+    delete cell.dataset.noteFilteredOut;
+  }
   const sessionId = currentSessionId();
   closeContextMenu();
 
@@ -23616,6 +23964,11 @@ async function beginNoteEdit(cell, transactionId) {
     delete cell.dataset.noteLoading;
   }
   if (currentSessionId() !== sessionId || !cell.isConnected) return;
+  // Its last pending save may have released this cell while the read was pending.
+  if (cell.dataset.noteFilteredOut === "true") {
+    if (getHistoryItemIndex(transactionId) === -1) return;
+    delete cell.dataset.noteFilteredOut;
+  }
 
   const previous = cell.innerHTML;
   const input = document.createElement("input");
@@ -23637,16 +23990,26 @@ async function beginNoteEdit(cell, transactionId) {
   // the edit began: typing saves after a pause, so clearing the field back to
   // empty is still a change the server has to be told about.
   let lastSaved = current.trim();
+  const noteEdit = { cell, sessionId, closed: false, removed: null };
+  inheritPendingHistoryNoteEdit(transactionId, noteEdit);
   const save = (value) => {
     if (value === lastSaved) return;
     lastSaved = value;
-    updateAnnotations(transactionId, { user_note: value || null }, sessionId);
+    updateAnnotations(transactionId, { user_note: value || null }, sessionId, noteEdit);
   };
-  const restore = () => {
+  const closeEditor = (willCommit = false) => {
     if (settled) return;
     window.clearTimeout(debounce);
     settled = true;
-    if (cell.isConnected) cell.innerHTML = previous;
+    noteEdit.closed = true;
+    noteEdit.committing = willCommit;
+    if (cell.isConnected) {
+      cell.innerHTML = previous;
+      if (currentSessionId() === sessionId && input.dataset.historyRenderPending === "true") {
+        renderHistory({ preserveNoteEditor: true });
+      }
+    }
+    if (!willCommit) releaseHistoryNoteEdit(noteEdit);
   };
   const readValue = (duringComposition = composing) => {
     const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES);
@@ -23663,9 +24026,10 @@ async function beginNoteEdit(cell, transactionId) {
       return;
     }
     const value = readValue();
-    settled = true;
-    if (cell.isConnected) cell.innerHTML = previous;
+    closeEditor(true);
     save(value);
+    noteEdit.committing = false;
+    releaseHistoryNoteEdit(noteEdit);
   };
   const scheduleSave = () => {
     if (settled) return;
@@ -23716,7 +24080,7 @@ async function beginNoteEdit(cell, transactionId) {
       commit();
     } else if (event.key === "Escape") {
       event.preventDefault();
-      restore();
+      closeEditor();
     }
   });
   input.addEventListener("blur", commit);
@@ -23739,11 +24103,101 @@ async function loadUserNote(transactionId) {
   } catch { /* ignore */ }
 }
 
-async function updateAnnotations(transactionId, payload, sessionId = currentSessionId()) {
+// Recovery belongs to a note editor (or its final pending save), never to an
+// arbitrary missing row. Shared ID order keeps adjacent editors anchored when
+// both temporarily leave a filtered window; only their removed rows are retained.
+function currentHistoryNoteEditWindow() {
+  const window = state._historyNoteEditWindow;
+  if (!window) return null;
+  const paging = state.historyPaging;
+  if (window.items !== state.items || window.paging !== paging
+    || window.querySignature !== historyQuerySignature()
+    || window.version !== state._itemsVersion
+    || window.offset !== paging.offset || window.filteredTotal !== paging.filteredTotal
+    || window.beforeSequence !== paging.beforeSequence
+    || window.trimmedHeadCount !== paging.trimmedHeadCount
+    || window.trimmedTailCount !== paging.trimmedTailCount) {
+    for (const editor of window.editors) editor.removed = null;
+    state._historyNoteEditWindow = null;
+    return null;
+  }
+  return window;
+}
+
+function syncHistoryNoteEditWindow(window) {
+  if (!window || state._historyNoteEditWindow !== window) return;
+  if (!window.editors.size) {
+    state._historyNoteEditWindow = null;
+    return;
+  }
+  const paging = state.historyPaging;
+  Object.assign(window, {
+    version: state._itemsVersion, offset: paging.offset, filteredTotal: paging.filteredTotal,
+    beforeSequence: paging.beforeSequence, trimmedHeadCount: paging.trimmedHeadCount,
+    trimmedTailCount: paging.trimmedTailCount,
+  });
+}
+
+function retainFilteredHistoryNote(editor, item, window) {
+  if (!editor || editor.sessionId !== currentSessionId()) return window;
+  if (!window) {
+    window = {
+      items: state.items, paging: state.historyPaging,
+      querySignature: historyQuerySignature(),
+      order: new Map(state.items.map((row, index) => [row.id, index])),
+      editors: new Set(),
+    };
+    state._historyNoteEditWindow = window;
+  }
+  editor.removed = { item, window };
+  window.editors.add(editor);
+  return window;
+}
+
+function releaseHistoryNoteEdit(editor) {
+  if (!editor?.removed || editor.committing || (!editor.closed && editor.cell.isConnected)) return;
+  const pending = state._pendingAnnotations;
+  if (pending && [...pending.values()].some((entry) => entry.noteEdit === editor)) return;
+  const window = editor.removed.window;
+  // Another IME may defer the table repaint after this filtered-out editor ends.
+  // Its obsolete cell must not open a fresh edit after recovery has been released.
+  if (editor.cell.isConnected && getHistoryItemIndex(editor.removed.item.id) === -1) {
+    editor.cell.dataset.noteFilteredOut = "true";
+  }
+  window.editors.delete(editor);
+  editor.removed = null;
+  if (state._historyNoteEditWindow === window && !window.editors.size) state._historyNoteEditWindow = null;
+}
+
+function releaseDetachedHistoryNoteEdits() {
+  const window = state._historyNoteEditWindow;
+  if (!window) return;
+  for (const editor of window.editors) releaseHistoryNoteEdit(editor);
+}
+
+function inheritPendingHistoryNoteEdit(transactionId, editor) {
+  const entry = state._pendingAnnotations?.get(transactionId);
+  const previous = entry?.sessionId === editor.sessionId ? entry.noteEdit : null;
+  // Another IME can keep the cell visible after closing. Transfer at reopen,
+  // before the old editor's last save can finish and release the recovery.
+  if (previous && previous !== editor && previous.removed
+    && previous.removed.window === currentHistoryNoteEditWindow()) {
+    const window = previous.removed.window;
+    editor.removed = previous.removed;
+    previous.removed = null;
+    window.editors.delete(previous);
+    window.editors.add(editor);
+    entry.noteEdit = editor;
+  }
+}
+
+async function updateAnnotations(transactionId, payload, sessionId = currentSessionId(), noteEdit = null) {
   if (!state._pendingAnnotations) state._pendingAnnotations = new Map();
   if (!state._annotationInFlight) state._annotationInFlight = new Set();
   const pending = state._pendingAnnotations;
   const existing = pending.get(transactionId);
+  const previousEditor = existing?.sessionId === sessionId ? existing.noteEdit : null;
+  if (noteEdit) inheritPendingHistoryNoteEdit(transactionId, noteEdit);
   const mergedPayload = {
     ...(existing?.sessionId === sessionId ? existing.payload : {}),
     ...payload,
@@ -23753,6 +24207,7 @@ async function updateAnnotations(transactionId, payload, sessionId = currentSess
   pending.set(transactionId, {
     sessionId,
     payload: mergedPayload,
+    noteEdit: noteEdit || previousEditor,
   });
   if (!state._annotationInFlight.has(transactionId)) {
     flushPendingAnnotations(transactionId);
@@ -23812,7 +24267,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
   let saved = false;
   try {
     const response = await fetch(sessionWritePath(
-      `/api/transactions/${encodeURIComponent(transactionId)}/annotations`,
+      `/api/transactions/${encodeURIComponent(transactionId)}/annotations?search_headers=true`,
       sessionId,
       options,
     ), {
@@ -23832,19 +24287,41 @@ async function flushPendingAnnotations(transactionId, options = {}) {
     }
     state.historyPaging.annotationMutationGeneration = (state.historyPaging.annotationMutationGeneration || 0) + 1;
     if (pending.get(transactionId) === entry) {
-      const index = getHistoryItemIndex(transactionId);
+      let window = currentHistoryNoteEditWindow();
+      let index = getHistoryItemIndex(transactionId);
+      const removed = entry.noteEdit?.removed;
+      if (index === -1 && removed && removed.window === window && window.order.has(transactionId)) {
+        const item = Object.assign(removed.item, { color_tag: null, note_preview: null, annotation_revision: 0, header_search_text: "" }, summary);
+        prepareHistoryItem(item);
+        if (summaryMatchesActiveHistoryFilters(item)) {
+          const rank = window.order.get(transactionId);
+          index = state.items.findIndex((row) => window.order.get(row.id) > rank);
+          if (index === -1) index = state.items.length;
+          state.items.splice(index, 0, item);
+          const paging = state.historyPaging;
+          paging.localRemovalGeneration = (paging.localRemovalGeneration || 0) + 1;
+          if (isKnownCount(paging.filteredTotal)) paging.filteredTotal += 1;
+          paging.offset = canUseSequenceCursorForHistoryPaging()
+            ? state.items.length
+            : (Number(paging.offset) || 0) + 1;
+          rebuildHistoryItemIndex();
+          refreshHistoryPagingCursorFromItems();
+          window.editors.delete(entry.noteEdit);
+          entry.noteEdit.removed = null;
+        }
+      }
       if (index !== -1) {
         // A cleared field is omitted from the response rather than sent as null
-        // (color_tag, note_preview and annotation_revision are
-        // skip_serializing_if), so merging the response straight over the row
-        // keeps the old value — a deleted note kept rendering until a reload.
+        // (color_tag, note_preview, annotation_revision, header_search_text),
+        // so merging straight over the row keeps stale notes or header matches.
         Object.assign(
           state.items[index],
-          { color_tag: null, note_preview: null, annotation_revision: 0 },
+          { color_tag: null, note_preview: null, annotation_revision: 0, header_search_text: "" },
           summary,
         );
         prepareHistoryItem(state.items[index]);
         if (!summaryMatchesActiveHistoryFilters(state.items[index])) {
+          window = retainFilteredHistoryNote(entry.noteEdit, state.items[index], window);
           state.items.splice(index, 1);
           adjustHistoryPagingAfterLocalRemoval(1, { decrementTotal: false });
           if (state.selectedId === transactionId) {
@@ -23863,7 +24340,8 @@ async function flushPendingAnnotations(transactionId, options = {}) {
         }
         state._itemsVersion += 1;
         invalidateVisibleEntriesCache();
-        renderHistory();
+        syncHistoryNoteEditWindow(window);
+        renderHistory({ preserveNoteEditor: true });
       }
       if (state.selectedRecord && state.selectedRecord.id === transactionId) {
         if (payload.color_tag !== undefined) {
@@ -23897,6 +24375,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
     } else if (pending.has(transactionId)) {
       flushPendingAnnotations(transactionId);
     }
+    releaseHistoryNoteEdit(entry.noteEdit);
   }
   return saved;
 }

@@ -6980,6 +6980,46 @@ button.utility-button.replay-tab-add {
   border-top: 1px solid var(--line);
 }
 
+/* Optional bundled command-line setup stays out of the workspace and never
+   takes modal focus when it first appears. */
+.cli-path-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin-left: -8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--point-soft);
+}
+
+.cli-path-banner-copy {
+  flex: 1 1 340px;
+  min-width: 0;
+}
+
+.cli-path-banner-copy p {
+  margin: 4px 0 0;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.cli-path-banner-copy p:empty {
+  display: none;
+}
+
+.cli-path-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cli-path-directory {
+  overflow-wrap: anywhere;
+}
+
 /* Settings ▸ Command line */
 .settings-inline-status {
   margin-top: 8px;

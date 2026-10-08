@@ -617,6 +617,9 @@ struct ReplayOpenArgs {
     host: Option<String>,
     #[arg(long)]
     port: Option<String>,
+    /// Tab name shown in the Replay tab strip
+    #[arg(long)]
+    label: Option<String>,
 }
 
 #[derive(Args, Debug, Default)]
@@ -633,7 +636,7 @@ struct ReplayOpenArgs {
     ),
     group(
         ArgGroup::new("update_input")
-            .args(["request_file", "stdin", "scheme", "host", "port"])
+            .args(["request_file", "stdin", "scheme", "host", "port", "label"])
             .required(true)
             .multiple(true)
     )
@@ -653,6 +656,9 @@ struct ReplayUpdateArgs {
     host: Option<String>,
     #[arg(long)]
     port: Option<String>,
+    /// Tab name shown in the Replay tab strip; an empty value clears it
+    #[arg(long)]
+    label: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -2733,7 +2739,17 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "stdin",
         ],
         "replay.list" => &["session_id"],
-        "replay.open" | "fuzzer.set_template" => &[
+        "replay.open" => &[
+            "session_id",
+            "transaction_id",
+            "request_file",
+            "stdin",
+            "scheme",
+            "host",
+            "port",
+            "label",
+        ],
+        "fuzzer.set_template" => &[
             "session_id",
             "transaction_id",
             "request_file",
@@ -2750,6 +2766,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "scheme",
             "host",
             "port",
+            "label",
         ],
         "replay.send" => &["tab_id", "session_id"],
         "fuzzer.set_payloads" => &["session_id", "payloads", "payload", "file", "stdin"],
@@ -2970,6 +2987,7 @@ fn replay_input_preview(command: &ReplayCommand) -> Value {
             "scheme": args.scheme,
             "host": args.host,
             "port": args.port,
+            "label": args.label,
         }),
         ReplayCommand::Update(args) => json!({
             "tab_id": args.tab_id,
@@ -2979,6 +2997,7 @@ fn replay_input_preview(command: &ReplayCommand) -> Value {
             "scheme": args.scheme,
             "host": args.host,
             "port": args.port,
+            "label": args.label,
         }),
         ReplayCommand::Send(args) => {
             json!({ "tab_id": args.tab_id, "session_id": args.session_id })
@@ -3934,6 +3953,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     scheme: call_optional(operation, input, "scheme")?,
                     host: call_optional(operation, input, "host")?,
                     port: call_optional(operation, input, "port")?,
+                    label: call_optional(operation, input, "label")?,
                 }),
             }
         }
@@ -3943,6 +3963,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             let scheme = call_optional(operation, input, "scheme")?;
             let host = call_optional(operation, input, "host")?;
             let port = call_optional(operation, input, "port")?;
+            let label = call_optional(operation, input, "label")?;
             validate_call_at_most_one(
                 operation,
                 "request_source",
@@ -3957,6 +3978,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     ("scheme", scheme.is_some()),
                     ("host", host.is_some()),
                     ("port", port.is_some()),
+                    ("label", label.is_some()),
                 ],
             )?;
             Command::Replay {
@@ -3968,6 +3990,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     scheme,
                     host,
                     port,
+                    label,
                 }),
             }
         }
@@ -5185,6 +5208,7 @@ async fn handle_history(api: ApiClient, command: HistoryCommand) -> Result<()> {
                     scheme: args.scheme,
                     host: args.host,
                     port: args.port,
+                    label: None,
                 },
             )
             .await?;
@@ -5360,6 +5384,7 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
                     scheme: args.scheme,
                     host: args.host,
                     port: args.port,
+                    label: args.label,
                 },
             )
             .await?;
@@ -5369,6 +5394,9 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
             let mut workspace = load_workspace_state(&api, args.session_id).await?;
             let tab = find_replay_tab_mut(&mut workspace.replay, &args.tab_id)?;
             ensure_http_replay_tab(tab, &args.tab_id)?;
+            if let Some(label) = args.label.as_deref() {
+                tab.custom_label = normalize_replay_tab_label(label);
+            }
             let explicit_target_update =
                 args.scheme.is_some() || args.host.is_some() || args.port.is_some();
             if args.request_file.is_some() || args.stdin {
@@ -6406,6 +6434,7 @@ struct ReplayOpenInput {
     scheme: Option<String>,
     host: Option<String>,
     port: Option<String>,
+    label: Option<String>,
 }
 
 async fn open_replay_tab(
@@ -6420,6 +6449,7 @@ async fn open_replay_tab(
         scheme,
         host,
         port,
+        label,
     } = input;
     let mut workspace = load_workspace_state(api, session_id).await?;
     let (base_request, source_transaction_id, request_text) = resolve_request_source(
@@ -6435,6 +6465,10 @@ async fn open_replay_tab(
     let tab = ReplayTabState {
         id: Uuid::new_v4().to_string(),
         sequence,
+        custom_label: label
+            .as_deref()
+            .map(normalize_replay_tab_label)
+            .unwrap_or_default(),
         base_request,
         source_transaction_id,
         notice: String::new(),
@@ -6463,6 +6497,19 @@ async fn open_replay_tab(
     let snapshot = post_workspace_state(api, &mut workspace, session_id).await?;
     let tab = find_replay_tab(&snapshot.replay, &tab.id)?;
     Ok((workspace.session_id, tab.clone()))
+}
+
+// Same rule as the UI's tab rename (`normalizeReplayTabCustomLabel`), so a label
+// set here looks exactly like one typed into the tab strip and stays within the
+// server's 80-character limit instead of failing the whole workspace save.
+fn normalize_replay_tab_label(label: &str) -> String {
+    label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect()
 }
 
 fn next_replay_tab_sequence(replay: &ReplayWorkspaceState) -> Result<usize> {

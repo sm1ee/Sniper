@@ -77,24 +77,11 @@ pub enum BrowserKind {
 }
 
 impl BrowserKind {
-    /// The order the catalog and the browser menu list them in. Not the order
-    /// "auto" picks in: see `AUTO_ORDER`.
+    /// The order the browser menu lists them in, and the order "auto" picks in,
+    /// first installed wins. The browsers built for an agent to drive come first,
+    /// because someone who installed one did so to use it: ego, then Aside, then
+    /// BrowserOS neo. One table, so the menu's top row is what "auto" opens.
     pub const ALL: [BrowserKind; 7] = [
-        BrowserKind::Chrome,
-        BrowserKind::Ego,
-        BrowserKind::Aside,
-        BrowserKind::BrowserosNeo,
-        BrowserKind::Edge,
-        BrowserKind::Brave,
-        BrowserKind::Chromium,
-    ];
-
-    /// What "auto" picks, first installed wins. The browsers built for an agent to
-    /// drive come first, because someone who installed one did so to use it: ego,
-    /// then Aside, then BrowserOS neo. They are still listed after Chrome, where
-    /// people look for a browser, which is why this is a second table and not the
-    /// order of `ALL`.
-    const AUTO_ORDER: [BrowserKind; 7] = [
         BrowserKind::Ego,
         BrowserKind::Aside,
         BrowserKind::BrowserosNeo,
@@ -538,13 +525,13 @@ pub fn catalog(preferred: Option<BrowserKind>) -> Vec<CatalogEntry> {
 }
 
 /// What `auto` resolves to: the saved choice when it is installed, otherwise the
-/// first installed browser in `AUTO_ORDER`.
+/// first installed browser in `ALL`.
 fn resolve_default(
     preferred: Option<BrowserKind>,
     find: impl Fn(BrowserKind) -> Option<PathBuf>,
 ) -> Option<BrowserKind> {
     preferred.filter(|kind| find(*kind).is_some()).or_else(|| {
-        BrowserKind::AUTO_ORDER
+        BrowserKind::ALL
             .into_iter()
             .find(|kind| find(*kind).is_some())
     })
@@ -800,7 +787,7 @@ impl Exit {
 }
 
 /// Open the requested browser, or the default when none is named: the saved choice
-/// while it is installed, otherwise the first installed browser in `AUTO_ORDER`.
+/// while it is installed, otherwise the first installed browser in `ALL`.
 pub async fn launch(
     ctx: &LaunchContext<'_>,
     request: LaunchRequest,
@@ -1856,10 +1843,10 @@ mod tests {
         assert_eq!(
             BrowserKind::names(),
             [
-                "chrome",
                 "ego",
                 "aside",
                 "browseros-neo",
+                "chrome",
                 "edge",
                 "brave",
                 "chromium"
@@ -2021,15 +2008,15 @@ mod tests {
         assert!(ego.contains(&("ego", true, true)), "{ego:?}");
         assert!(ego.contains(&("chrome", false, false)));
 
-        // Listed with Chrome first and ego right under it, though ego is picked first.
+        // Listed in the order auto picks: the agent browsers first.
         let order: Vec<_> = none.iter().map(|(name, ..)| *name).collect();
         assert_eq!(
             order,
             [
-                "chrome",
                 "ego",
                 "aside",
                 "browseros-neo",
+                "chrome",
                 "edge",
                 "brave",
                 "chromium"
@@ -2059,8 +2046,12 @@ mod tests {
         );
 
         let json = serde_json::to_value(catalog_for("macos", &find, |_| Vec::new(), None)).unwrap();
-        let chrome = &json[0];
-        assert_eq!(chrome["browser"], "chrome");
+        let chrome = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["browser"] == "chrome")
+            .unwrap();
         assert!(
             chrome.get("default").is_none() && chrome.get("preferred").is_none(),
             "absent, not false"
@@ -2086,16 +2077,16 @@ mod tests {
         assert_eq!(
             names,
             [
-                "chrome",
                 "ego",
                 "aside",
                 "browseros-neo",
+                "chrome",
                 "edge",
                 "brave",
                 "chromium"
             ]
         );
-        let chrome = &mac[0];
+        let chrome = mac.iter().find(|entry| entry.browser == "chrome").unwrap();
         assert!(chrome.installed && chrome.path.as_deref() == Some("/Apps/Chrome"));
         assert_eq!(chrome.driver, Driver::Cdp);
         assert_eq!(chrome.capabilities.ui_actions, "via-client");
@@ -2119,9 +2110,9 @@ mod tests {
                 .map(|entry| entry.browser)
                 .collect::<Vec<_>>(),
             [
-                "chrome",
                 "aside",
                 "browseros-neo",
+                "chrome",
                 "edge",
                 "brave",
                 "chromium"
@@ -2149,10 +2140,11 @@ mod tests {
             .all(|entry| entry.install_hint.is_none() && entry.install_url.is_none()));
 
         let json = serde_json::to_value(&mac).unwrap();
-        assert_eq!(json[0]["driver"], "cdp");
-        assert_eq!(json[1]["driver"], "ego-cli");
-        assert!(json[0].get("install_hint").is_none(), "absent, not null");
-        assert!(json[0].get("install_url").is_none(), "absent, not null");
+        assert_eq!(json[0]["driver"], "ego-cli");
+        assert_eq!(json[3]["browser"], "chrome");
+        assert_eq!(json[3]["driver"], "cdp");
+        assert!(json[3].get("install_hint").is_none(), "absent, not null");
+        assert!(json[3].get("install_url").is_none(), "absent, not null");
         let edge = json
             .as_array()
             .unwrap()
@@ -2198,16 +2190,12 @@ mod tests {
     }
 
     #[test]
-    fn names_parse_case_insensitively_and_ego_is_listed_after_chrome_but_picked_before_it() {
+    fn names_parse_case_insensitively_and_agent_browsers_come_first() {
         assert_eq!(BrowserKind::parse(" Chrome "), Some(BrowserKind::Chrome));
         assert_eq!(BrowserKind::parse("EGO"), Some(BrowserKind::Ego));
         assert_eq!(BrowserKind::parse("firefox"), None);
         assert_eq!(
-            BrowserKind::ALL[..2],
-            [BrowserKind::Chrome, BrowserKind::Ego]
-        );
-        assert_eq!(
-            BrowserKind::AUTO_ORDER[..4],
+            BrowserKind::ALL[..4],
             [
                 BrowserKind::Ego,
                 BrowserKind::Aside,
@@ -2215,11 +2203,6 @@ mod tests {
                 BrowserKind::Chrome
             ]
         );
-        let mut listed = BrowserKind::ALL.to_vec();
-        let mut picked = BrowserKind::AUTO_ORDER.to_vec();
-        listed.sort_by_key(|kind| kind.name());
-        picked.sort_by_key(|kind| kind.name());
-        assert_eq!(listed, picked, "both tables hold the same browsers");
         assert_eq!(BrowserKind::Ego.driver(), Driver::EgoCli);
         assert_eq!(BrowserKind::Chrome.driver(), Driver::Cdp);
     }

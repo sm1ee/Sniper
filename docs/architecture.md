@@ -112,6 +112,27 @@ bootstrap token is generated in memory, printed once at startup, consumed on
 first use, and exchanged for an HttpOnly, SameSite session cookie that expires
 with the server process.
 
+### HTTP history search
+
+The desktop history opts into complete request/response header-name and value
+matching with `search_headers=true` on its existing transactions-page reads.
+Quick and advanced searches match either their existing metadata fields or the
+header block; they do not match across the boundary between those two fields.
+Plain header matching folds ASCII case unless advanced case-sensitive search is
+selected. Negative advanced search excludes matches in either field.
+
+The store caches one caseful and one ASCII-folded header string, without loading
+bodies or truncating late/large headers. UI pages and live summaries carry that
+complete derived text for local filtering, including ASCII-folded plain matching.
+Metadata and regex behavior otherwise retain their existing rules. This adds
+memory and UI-payload cost proportional to the captured header size. The derived
+text is not a second persisted copy and is never written to event logs. Default
+list responses, annotation acknowledgements, and saved-record selections remain
+metadata-only; the UI explicitly requests headers in annotation acknowledgements
+as well. This preserves the existing CLI output, query, and deletion contracts.
+The authenticated UI event stream carries full headers because its subscribers
+filter newly inserted history rows locally.
+
 ## Bootstrap and trust flow
 
 ```mermaid

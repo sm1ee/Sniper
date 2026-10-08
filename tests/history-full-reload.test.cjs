@@ -22,6 +22,8 @@ function fixture() {
   const context = loadFunctions([
     'createHistoryPagingState', 'loadTransactions', 'fetchTransactionPage',
     'applyPendingAnnotationsToItems', 'flushPendingAnnotations',
+    'currentHistoryNoteEditWindow', 'syncHistoryNoteEditWindow', 'retainFilteredHistoryNote',
+    'releaseHistoryNoteEdit', 'releaseDetachedHistoryNoteEdits', 'inheritPendingHistoryNoteEdit',
     'observeAnnotationRevision', 'rebuildHistoryItemIndex', 'getHistoryItemIndex',
     'getHistoryItem', 'clearHttpHistoryLoadedRowsForPendingQuery',
     'clearHttpHistorySelectionPreview', 'isKnownCount',

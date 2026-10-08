@@ -54,3 +54,8 @@ test("names and hints are escaped", () => {
   assert.doesNotMatch(html, /<b>/);
   assert.match(html, /title="say &quot;hi&quot; &lt;now&gt;"/);
 });
+
+test("a browser built for an agent is marked, a plain CDP one is not", () => {
+  assert.match(browserMenuRowHtml({ browser: "ego", installed: true, driver: "ego-cli" }), /browser-menu-agent/);
+  assert.doesNotMatch(browserMenuRowHtml({ browser: "chrome", installed: true, driver: "cdp" }), /browser-menu-agent/);
+});
