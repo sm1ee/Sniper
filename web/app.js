@@ -10255,6 +10255,7 @@ function updateProxyStatusIndicator(online) {
 }
 
 function renderHistory(options = {}) {
+  if (state._historyNoteEditWindow) currentHistoryNoteEditWindow();
   const visibleEntries = getVisibleEntries();
   const hiddenConnectCount = countHiddenConnectItems();
   const paging = state.historyPaging || createHistoryPagingState();
@@ -10311,6 +10312,7 @@ function renderHistory(options = {}) {
         </td>
       </tr>
     `;
+    if (state._historyNoteEditWindow) releaseDetachedHistoryNoteEdits();
     mountBrowserLaunchers(els.historyTableBody);
     if (paging.hasMore && !paging.loading && !paging.fullyLoaded) {
       scheduleHistoryBackfill(0, { allowAtCap: true });
@@ -10333,6 +10335,7 @@ function getHistoryRowHeight(options = {}) {
 }
 
 function renderHistoryVirtual() {
+  if (state._historyNoteEditWindow) currentHistoryNoteEditWindow();
   const entries = state._historyEntries;
   if (!entries || !entries.length) return;
 
@@ -10370,6 +10373,7 @@ function renderHistoryVirtual() {
       (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
       rows.join("") +
       (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="${colCount}" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
+    if (state._historyNoteEditWindow) releaseDetachedHistoryNoteEdits();
 
     if (attempt === 0 && getHistoryRowHeight() !== rowHeight) continue;
     if (shell.scrollTop !== scrollTop) shell.scrollTop = scrollTop;
@@ -23612,6 +23616,10 @@ function contextMenuSessionIsCurrent() {
 // menu, which meant aiming at a menu to write one word.
 async function beginNoteEdit(cell, transactionId) {
   if (!cell || cell.dataset.noteLoading === "true" || cell.querySelector("input.note-inline-input")) return;
+  if (cell.dataset.noteFilteredOut === "true") {
+    if (getHistoryItemIndex(transactionId) === -1) return;
+    delete cell.dataset.noteFilteredOut;
+  }
   const sessionId = currentSessionId();
   closeContextMenu();
 
@@ -23637,6 +23645,11 @@ async function beginNoteEdit(cell, transactionId) {
     delete cell.dataset.noteLoading;
   }
   if (currentSessionId() !== sessionId || !cell.isConnected) return;
+  // Its last pending save may have released this cell while the read was pending.
+  if (cell.dataset.noteFilteredOut === "true") {
+    if (getHistoryItemIndex(transactionId) === -1) return;
+    delete cell.dataset.noteFilteredOut;
+  }
 
   const previous = cell.innerHTML;
   const input = document.createElement("input");
@@ -23658,21 +23671,26 @@ async function beginNoteEdit(cell, transactionId) {
   // the edit began: typing saves after a pause, so clearing the field back to
   // empty is still a change the server has to be told about.
   let lastSaved = current.trim();
+  const noteEdit = { cell, sessionId, closed: false, removed: null };
+  inheritPendingHistoryNoteEdit(transactionId, noteEdit);
   const save = (value) => {
     if (value === lastSaved) return;
     lastSaved = value;
-    updateAnnotations(transactionId, { user_note: value || null }, sessionId);
+    updateAnnotations(transactionId, { user_note: value || null }, sessionId, noteEdit);
   };
-  const closeEditor = () => {
+  const closeEditor = (willCommit = false) => {
     if (settled) return;
     window.clearTimeout(debounce);
     settled = true;
+    noteEdit.closed = true;
+    noteEdit.committing = willCommit;
     if (cell.isConnected) {
       cell.innerHTML = previous;
       if (currentSessionId() === sessionId && input.dataset.historyRenderPending === "true") {
         renderHistory({ preserveNoteEditor: true });
       }
     }
+    if (!willCommit) releaseHistoryNoteEdit(noteEdit);
   };
   const readValue = (duringComposition = composing) => {
     const value = truncateUtf8(input.value, MAX_ANNOTATION_NOTE_BYTES);
@@ -23689,8 +23707,10 @@ async function beginNoteEdit(cell, transactionId) {
       return;
     }
     const value = readValue();
-    closeEditor();
+    closeEditor(true);
     save(value);
+    noteEdit.committing = false;
+    releaseHistoryNoteEdit(noteEdit);
   };
   const scheduleSave = () => {
     if (settled) return;
@@ -23764,11 +23784,101 @@ async function loadUserNote(transactionId) {
   } catch { /* ignore */ }
 }
 
-async function updateAnnotations(transactionId, payload, sessionId = currentSessionId()) {
+// Recovery belongs to a note editor (or its final pending save), never to an
+// arbitrary missing row. Shared ID order keeps adjacent editors anchored when
+// both temporarily leave a filtered window; only their removed rows are retained.
+function currentHistoryNoteEditWindow() {
+  const window = state._historyNoteEditWindow;
+  if (!window) return null;
+  const paging = state.historyPaging;
+  if (window.items !== state.items || window.paging !== paging
+    || window.querySignature !== historyQuerySignature()
+    || window.version !== state._itemsVersion
+    || window.offset !== paging.offset || window.filteredTotal !== paging.filteredTotal
+    || window.beforeSequence !== paging.beforeSequence
+    || window.trimmedHeadCount !== paging.trimmedHeadCount
+    || window.trimmedTailCount !== paging.trimmedTailCount) {
+    for (const editor of window.editors) editor.removed = null;
+    state._historyNoteEditWindow = null;
+    return null;
+  }
+  return window;
+}
+
+function syncHistoryNoteEditWindow(window) {
+  if (!window || state._historyNoteEditWindow !== window) return;
+  if (!window.editors.size) {
+    state._historyNoteEditWindow = null;
+    return;
+  }
+  const paging = state.historyPaging;
+  Object.assign(window, {
+    version: state._itemsVersion, offset: paging.offset, filteredTotal: paging.filteredTotal,
+    beforeSequence: paging.beforeSequence, trimmedHeadCount: paging.trimmedHeadCount,
+    trimmedTailCount: paging.trimmedTailCount,
+  });
+}
+
+function retainFilteredHistoryNote(editor, item, window) {
+  if (!editor || editor.sessionId !== currentSessionId()) return window;
+  if (!window) {
+    window = {
+      items: state.items, paging: state.historyPaging,
+      querySignature: historyQuerySignature(),
+      order: new Map(state.items.map((row, index) => [row.id, index])),
+      editors: new Set(),
+    };
+    state._historyNoteEditWindow = window;
+  }
+  editor.removed = { item, window };
+  window.editors.add(editor);
+  return window;
+}
+
+function releaseHistoryNoteEdit(editor) {
+  if (!editor?.removed || editor.committing || (!editor.closed && editor.cell.isConnected)) return;
+  const pending = state._pendingAnnotations;
+  if (pending && [...pending.values()].some((entry) => entry.noteEdit === editor)) return;
+  const window = editor.removed.window;
+  // Another IME may defer the table repaint after this filtered-out editor ends.
+  // Its obsolete cell must not open a fresh edit after recovery has been released.
+  if (editor.cell.isConnected && getHistoryItemIndex(editor.removed.item.id) === -1) {
+    editor.cell.dataset.noteFilteredOut = "true";
+  }
+  window.editors.delete(editor);
+  editor.removed = null;
+  if (state._historyNoteEditWindow === window && !window.editors.size) state._historyNoteEditWindow = null;
+}
+
+function releaseDetachedHistoryNoteEdits() {
+  const window = state._historyNoteEditWindow;
+  if (!window) return;
+  for (const editor of window.editors) releaseHistoryNoteEdit(editor);
+}
+
+function inheritPendingHistoryNoteEdit(transactionId, editor) {
+  const entry = state._pendingAnnotations?.get(transactionId);
+  const previous = entry?.sessionId === editor.sessionId ? entry.noteEdit : null;
+  // Another IME can keep the cell visible after closing. Transfer at reopen,
+  // before the old editor's last save can finish and release the recovery.
+  if (previous && previous !== editor && previous.removed
+    && previous.removed.window === currentHistoryNoteEditWindow()) {
+    const window = previous.removed.window;
+    editor.removed = previous.removed;
+    previous.removed = null;
+    window.editors.delete(previous);
+    window.editors.add(editor);
+    entry.noteEdit = editor;
+  }
+}
+
+async function updateAnnotations(transactionId, payload, sessionId = currentSessionId(), noteEdit = null) {
   if (!state._pendingAnnotations) state._pendingAnnotations = new Map();
   if (!state._annotationInFlight) state._annotationInFlight = new Set();
   const pending = state._pendingAnnotations;
   const existing = pending.get(transactionId);
+  const previousEditor = existing?.sessionId === sessionId ? existing.noteEdit : null;
+  if (noteEdit) inheritPendingHistoryNoteEdit(transactionId, noteEdit);
   const mergedPayload = {
     ...(existing?.sessionId === sessionId ? existing.payload : {}),
     ...payload,
@@ -23778,6 +23888,7 @@ async function updateAnnotations(transactionId, payload, sessionId = currentSess
   pending.set(transactionId, {
     sessionId,
     payload: mergedPayload,
+    noteEdit: noteEdit || previousEditor,
   });
   if (!state._annotationInFlight.has(transactionId)) {
     flushPendingAnnotations(transactionId);
@@ -23857,7 +23968,29 @@ async function flushPendingAnnotations(transactionId, options = {}) {
     }
     state.historyPaging.annotationMutationGeneration = (state.historyPaging.annotationMutationGeneration || 0) + 1;
     if (pending.get(transactionId) === entry) {
-      const index = getHistoryItemIndex(transactionId);
+      let window = currentHistoryNoteEditWindow();
+      let index = getHistoryItemIndex(transactionId);
+      const removed = entry.noteEdit?.removed;
+      if (index === -1 && removed && removed.window === window && window.order.has(transactionId)) {
+        const item = Object.assign(removed.item, { color_tag: null, note_preview: null, annotation_revision: 0 }, summary);
+        prepareHistoryItem(item);
+        if (summaryMatchesActiveHistoryFilters(item)) {
+          const rank = window.order.get(transactionId);
+          index = state.items.findIndex((row) => window.order.get(row.id) > rank);
+          if (index === -1) index = state.items.length;
+          state.items.splice(index, 0, item);
+          const paging = state.historyPaging;
+          paging.localRemovalGeneration = (paging.localRemovalGeneration || 0) + 1;
+          if (isKnownCount(paging.filteredTotal)) paging.filteredTotal += 1;
+          paging.offset = canUseSequenceCursorForHistoryPaging()
+            ? state.items.length
+            : (Number(paging.offset) || 0) + 1;
+          rebuildHistoryItemIndex();
+          refreshHistoryPagingCursorFromItems();
+          window.editors.delete(entry.noteEdit);
+          entry.noteEdit.removed = null;
+        }
+      }
       if (index !== -1) {
         // A cleared field is omitted from the response rather than sent as null
         // (color_tag, note_preview and annotation_revision are
@@ -23870,6 +24003,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
         );
         prepareHistoryItem(state.items[index]);
         if (!summaryMatchesActiveHistoryFilters(state.items[index])) {
+          window = retainFilteredHistoryNote(entry.noteEdit, state.items[index], window);
           state.items.splice(index, 1);
           adjustHistoryPagingAfterLocalRemoval(1, { decrementTotal: false });
           if (state.selectedId === transactionId) {
@@ -23888,6 +24022,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
         }
         state._itemsVersion += 1;
         invalidateVisibleEntriesCache();
+        syncHistoryNoteEditWindow(window);
         renderHistory({ preserveNoteEditor: true });
       }
       if (state.selectedRecord && state.selectedRecord.id === transactionId) {
@@ -23922,6 +24057,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
     } else if (pending.has(transactionId)) {
       flushPendingAnnotations(transactionId);
     }
+    releaseHistoryNoteEdit(entry.noteEdit);
   }
   return saved;
 }

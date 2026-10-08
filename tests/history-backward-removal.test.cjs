@@ -30,7 +30,9 @@ function fixture(sortKey = 'host', sortDirection = 'asc', rowCount = 9, pageSize
     'mergeHistoryItems', 'trimHistoryCache', 'reconcileHistorySelectionAfterTrim',
     'rebuildHistoryItemIndex', 'getHistoryItem', 'renderHistory',
     'countHiddenConnectItems', 'humanizeSortKey', 'isSessionEmpty', 'emptySessionMessage', 'historyEmptyMessage',
-    'flushPendingAnnotations', 'getHistoryItemIndex', 'summaryMatchesActiveHistoryFilters', 'applyPendingAnnotationsToItems',
+    'flushPendingAnnotations',
+    'currentHistoryNoteEditWindow', 'syncHistoryNoteEditWindow', 'retainFilteredHistoryNote',
+    'releaseHistoryNoteEdit', 'releaseDetachedHistoryNoteEdits', 'inheritPendingHistoryNoteEdit', 'getHistoryItemIndex', 'summaryMatchesActiveHistoryFilters', 'applyPendingAnnotationsToItems',
   ], {
     state, els, HTTP_HISTORY_MAX_LOADED_ITEMS: pageSize,
     createHistoryQueryState: () => ({}), historyQuerySignature: () => 'fixture-query',
