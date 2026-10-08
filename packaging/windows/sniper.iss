@@ -293,7 +293,11 @@ begin
       if (Length(Extension) < 2) or (Extension[1] <> '.') then
         Exit;
       for Index := 2 to Length(Extension) do
-        if not (Extension[Index] in ['a'..'z', 'A'..'Z', '0'..'9']) then
+        { Pascal Script does not accept set-range literals. Keep the same
+          ASCII-only extension policy with ordinary character comparisons. }
+        if not (((Extension[Index] >= 'a') and (Extension[Index] <= 'z')) or
+          ((Extension[Index] >= 'A') and (Extension[Index] <= 'Z')) or
+          ((Extension[Index] >= '0') and (Extension[Index] <= '9'))) then
           Exit;
     end;
     if Separator = 0 then begin

@@ -150,7 +150,7 @@ test('target-folder same-name siblings and custom PATHEXT commands are checked s
   before(install, 'if not CliExtensionsAreSafe', 'if DirectoryHasOtherCli');
   const safe = routine('CliExtensionsAreSafe');
   assert.match(safe, /\(Length\(Extension\) < 2\) or \(Extension\[1\] <> '\.'\)/);
-  assert.match(safe, /Extension\[Index\] in \['a'\.\.'z', 'A'\.\.'Z', '0'\.\.'9'\]/);
+  assert.match(safe, /for Index := 2 to Length\(Extension\) do/);
 });
 
 test('append keeps the original raw text intact, including trailing empty entries', () => {
@@ -217,4 +217,16 @@ test('successful changes broadcast only after releasing the PATH mutex', () => {
   assert.match(routine('NotifyPathChange'), /BroadcastPathChange\(\$FFFF, \$001A, 0, 'Environment', \$0002, 1000, Ignored\)/);
   assert.match(routine('AddBundledCliToPath'), /finally\s+UnlockCliPath\(Handle\);\s+if Changed then\s+NotifyPathChange/);
   assert.match(routine('RemoveOwnedCliPath'), /finally\s+UnlockCliPath\(Handle\);\s+if Removed then\s+NotifyPathChange/);
+});
+
+// Inno's Pascal Script rejects the Delphi-style set ranges that originally
+// passed these source checks but failed the native setup compilation in CI.
+test('extension validation avoids unsupported Pascal Script set-range syntax', () => {
+  const body = routine('CliExtensionsAreSafe');
+  assert.doesNotMatch(body, /\bin\s*\[[^\]]*\.\./);
+  for (const [lower, upper] of [['a', 'z'], ['A', 'Z'], ['0', '9']]) {
+    assert.ok(body.includes(`((Extension[Index] >= '${lower}') and (Extension[Index] <= '${upper}'))`));
+  }
+  assert.match(body, /if not \(\(\(Extension\[Index\]/);
+  assert.match(body, /Extension\[Index\] <= '9'\)\)\) then\s+Exit;/);
 });
