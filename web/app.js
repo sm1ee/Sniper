@@ -3079,7 +3079,13 @@ async function adoptExternalReplayTabs() {
     const existing = local.get(tab.id);
     if (!existing) {
       const hydrated = hydrateReplayTab(tab);
-      if (hydrated) added.push(hydrated);
+      if (hydrated) {
+        added.push(hydrated);
+        // The tab arrives already committed by its writer. Without a baseline
+        // entry a follow-up `replay update` would find nothing to compare against
+        // and be refused.
+        workspaceSaveCommittedSnapshot?.replay?.tabs?.push(cloneWorkspaceSnapshotForBaseline(tab));
+      }
       continue;
     }
     if (adoptExternalReplayResult(existing, tab)) updated += 1;
@@ -3116,12 +3122,14 @@ async function adoptExternalReplayTabs() {
 function adoptExternalReplayResult(existing, incoming) {
   if (existing.type === "websocket" || incoming.type === "websocket") return false;
 
+  const labelAdopted = adoptExternalReplayLabel(existing, incoming);
+  const requestAdopted = adoptExternalReplayRequest(existing, incoming) || labelAdopted;
   const entries = Array.isArray(incoming.history_entries) ? incoming.history_entries : [];
   const sameLength = entries.length === (existing.historyEntries?.length || 0);
   const sameResponse = (incoming.response_record?.id ?? null) === (existing.responseRecord?.id ?? null);
   // Length alone is not enough: sending from a point back in the history
   // truncates and re-pushes, which can leave the count unchanged.
-  if (sameLength && sameResponse) return false;
+  if (sameLength && sameResponse) return requestAdopted;
 
   const fallbackRequest = incoming.base_request
     ? cloneEditableRequest(incoming.base_request)
@@ -3137,6 +3145,63 @@ function adoptExternalReplayResult(existing, incoming) {
   );
   existing.responseRecord = incoming.response_record || null;
   existing.notice = incoming.notice || "";
+  return true;
+}
+
+// `sniper-cli replay update --label` names a tab this window already holds. Same
+// rule as the request below: take it unless the operator renamed the tab here
+// and has not saved yet.
+function adoptExternalReplayLabel(existing, incoming) {
+  const baseline = workspaceReplayTabsById(workspaceSaveCommittedSnapshot).get(existing.id);
+  if (!baseline) return false;
+  const committed = normalizeReplayTabCustomLabel(baseline.custom_label);
+  const next = normalizeReplayTabCustomLabel(incoming.custom_label);
+  if (normalizeReplayTabCustomLabel(existing.customLabel) !== committed || next === committed) return false;
+  existing.customLabel = next;
+  baseline.custom_label = next;
+  return true;
+}
+
+function replayTabRequestShape(tab) {
+  return {
+    request_text: tab?.request_text || "",
+    http_version_mode: normalizeReplayHttpVersionMode(tab?.http_version_mode),
+    target_scheme: tab?.target_scheme || "https",
+    target_host: tab?.target_host || "",
+    target_port: normalizePortValue(tab?.target_port),
+  };
+}
+
+// `sniper-cli replay update` rewrites the request of a tab this window already
+// holds. Ignoring it left the editor on the stale draft, and the next save wrote
+// that draft back over the CLI's request: a sent request ended up shown as the
+// example.com placeholder next to the real response. The request is taken only
+// while the local tab still matches what was last committed, so an operator's
+// unsaved edit still wins.
+function adoptExternalReplayRequest(existing, incoming) {
+  const baseline = workspaceReplayTabsById(workspaceSaveCommittedSnapshot).get(existing.id);
+  if (!baseline || existing.requestBytes) return false;
+  const baselineShape = replayTabRequestShape(baseline);
+  const localShape = replayTabRequestShape({
+    request_text: existing.requestText,
+    http_version_mode: existing.httpVersionMode,
+    target_scheme: existing.targetScheme,
+    target_host: existing.targetHost,
+    target_port: existing.targetPort,
+  });
+  if (workspaceSnapshotValueChanged(localShape, baselineShape)) return false;
+  const incomingShape = replayTabRequestShape(incoming);
+  if (!workspaceSnapshotValueChanged(incomingShape, baselineShape)) return false;
+
+  existing.requestText = incomingShape.request_text;
+  existing.httpVersionMode = incomingShape.http_version_mode;
+  existing.targetScheme = incomingShape.target_scheme;
+  existing.targetHost = incomingShape.target_host;
+  existing.targetPort = incomingShape.target_port;
+  if (incoming.base_request) existing.baseRequest = cloneEditableRequest(incoming.base_request);
+  // Move the baseline too, or the next external update would read this adopted
+  // request as a local edit and be refused.
+  Object.assign(baseline, incomingShape, { base_request: incoming.base_request || baseline.base_request });
   return true;
 }
 

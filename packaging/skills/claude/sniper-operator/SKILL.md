@@ -100,6 +100,7 @@ sniper-cli scope set-scope --pattern '*.example.com' --yes
 sniper-cli replay list
 sniper-cli replay open --transaction-id <uuid> --dry-run
 sniper-cli replay open --transaction-id <uuid> --yes
+sniper-cli replay update --tab-id <tab-id> --label "IDOR: other user's profile" --yes
 sniper-cli replay send --tab-id <tab-id> --dry-run
 sniper-cli replay send --tab-id <tab-id> --yes
 sniper-cli fuzzer set-template --transaction-id <uuid> --dry-run

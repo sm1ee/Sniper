@@ -540,6 +540,15 @@ invalid replay target: Replay target override is not supported when the request 
 
 An override therefore needs a capture whose `Host:` header is a name.
 
+`--label` on `replay open` and `replay update` names the tab, the same as
+renaming it in the tab strip. An agent firing several requests can mark what
+each tab tests, and an empty `--label ""` clears the name:
+
+```bash
+./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
+  replay update --tab-id <tab-id> --label "closed orders" --yes
+```
+
 ## Where sessions live on disk
 
 A session is a workspace: its own captured traffic, scope, replay tabs and
