@@ -404,7 +404,11 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/browser/list", get(list_browsers))
         .route("/api/browser/preference", post(set_browser_preference))
         .route("/api/browser/launch", post(launch_browser))
-        .route("/api/cli-path", post(install_cli_on_path))
+        .route(
+            "/api/cli-path",
+            get(get_cli_path_status).post(install_cli_on_path),
+        )
+        .route("/api/cli-path/defer", post(defer_cli_path_setup))
         .route(
             "/api/match-replace",
             get(list_match_replace_rules).post(update_match_replace_rules),
@@ -4349,13 +4353,44 @@ async fn reveal_certificate_folder(State(state): State<Arc<AppState>>) -> Respon
     }
 }
 
-// Editing a shell profile is blocking file I/O; keep it off the API runtime.
-async fn install_cli_on_path() -> Response {
-    match tokio::task::spawn_blocking(crate::cli_path::install_cli_path).await {
+// Profile and registry I/O must stay off the API runtime. These routes use the
+// same access-control middleware as Settings; GET never performs registration.
+async fn get_cli_path_status(State(state): State<Arc<AppState>>) -> Response {
+    let data_dir = state.config.data_dir.clone();
+    match tokio::task::spawn_blocking(move || crate::cli_path::cli_path_status(&data_dir)).await {
+        Ok(status) => Json(status).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not check CLI PATH: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn defer_cli_path_setup(State(state): State<Arc<AppState>>) -> Response {
+    let data_dir = state.config.data_dir.clone();
+    match tokio::task::spawn_blocking(move || crate::cli_path::defer_cli_path(&data_dir)).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(error)) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not save CLI choice: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn install_cli_on_path(State(state): State<Arc<AppState>>) -> Response {
+    let data_dir = state.config.data_dir.clone();
+    match tokio::task::spawn_blocking(move || {
+        // Persist the explicit choice first, so a failed/aborted attempt cannot
+        // cause a surprise prompt every launch. Settings always permits retry.
+        crate::cli_path::defer_cli_path(&data_dir)?;
+        crate::cli_path::install_cli_path()
+    })
+    .await
+    {
         Ok(Ok(install)) => Json(install).into_response(),
-        // The common failures here are the operator's to fix — running from a
-        // checkout, a translocated bundle, an unreadable rc file — so the text
-        // goes back to the UI instead of only into the log.
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -7371,6 +7406,25 @@ mod tests {
         },
         ws_replay::WsReplayFrame,
     };
+
+    #[tokio::test]
+    async fn cli_path_status_is_read_only_and_deferral_is_idempotent() {
+        let (state, data_dir) = test_state("sniper-cli-path-choice");
+        let choice = data_dir.join("cli-path-choice.json");
+        let status: serde_json::Value =
+            response_json(super::get_cli_path_status(State(state.clone())).await).await;
+        assert!(status["should_prompt"].is_boolean());
+        assert!(!choice.exists(), "reading status must not record a choice");
+        for _ in 0..2 {
+            let response = super::defer_cli_path_setup(State(state.clone())).await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+        assert!(choice.exists());
+        let status: serde_json::Value =
+            response_json(super::get_cli_path_status(State(state)).await).await;
+        assert_eq!(status["should_prompt"], false);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
 
     #[test]
     fn spawn_open_command_reports_launch_failure() {

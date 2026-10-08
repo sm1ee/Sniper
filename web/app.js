@@ -964,6 +964,7 @@ let proxySettingsSavePromise = null;
 let toolsBootPromise = null;
 let displaySettingsPreviewActive = false;
 let displaySettingsReturnFocus = null;
+const cliPathState = createCliPathState();
 let filterSettingsReturnFocus = null;
 const filterSettingsEditedControls = new Set();
 let activeConfirmDialog = null;
@@ -1082,6 +1083,7 @@ async function init() {
       renderProxySettings();
     }
   }, 800);
+  initCliPathOnboarding();
 }
 
 function resetLayoutTextareas() {
@@ -1554,7 +1556,7 @@ function bindEvents() {
   els.openUpdateButton.addEventListener("click", performSelfUpdate);
   if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
-  document.getElementById("installCliPathButton")?.addEventListener("click", installCliPath);
+  bindCliPathControls();
   els.displaySettingsModal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
     tab.addEventListener("click", () => selectSettingsTab(tab.dataset.settingsTab));
   });
@@ -17658,28 +17660,260 @@ function openDisplaySettingsModal() {
   els.closeDisplaySettingsButton.focus();
 }
 
-async function installCliPath() {
-  const button = document.getElementById("installCliPathButton");
-  const status = document.getElementById("installCliPathStatus");
-  if (!button || !status) return;
-  button.disabled = true;
-  status.classList.remove("hidden", "error");
-  status.textContent = "Working...";
-  try {
-    const response = await fetch("/api/cli-path", { method: "POST" });
-    const text = await response.text();
-    if (!response.ok) throw new Error(text || `Request failed (${response.status})`);
-    const result = JSON.parse(text);
-    const written = [...result.updated, ...result.unchanged];
-    status.textContent = result.updated.length
-      ? `Updated ${written.join(", ")}. Open a new terminal and run sniper-cli.`
-      : `${written.join(", ")} already has it. Open a new terminal and run sniper-cli.`;
-  } catch (error) {
-    status.classList.add("error");
-    status.textContent = error?.message || "Could not update the shell profile.";
-  } finally {
-    button.disabled = false;
+function createCliPathState() {
+  return {
+    initialized: false,
+    wired: false,
+    disposed: false,
+    status: null,
+    loading: false,
+    readId: 0,
+    readController: null,
+    readPromise: null,
+    action: null,
+    actionId: 0,
+    actionController: null,
+    decided: false,
+    banner: "hidden",
+    message: "",
+    error: false,
+  };
+}
+
+function bindCliPathControls() {
+  if (cliPathState.wired) return;
+  cliPathState.wired = true;
+  document.getElementById("installCliPathButton")?.addEventListener("click", installCliPath);
+  document.getElementById("refreshCliPathButton")?.addEventListener("click", () => loadCliPathStatus());
+  document.getElementById("cliPathAddButton")?.addEventListener("click", installCliPath);
+  document.getElementById("cliPathLaterButton")?.addEventListener("click", deferCliPath);
+  document.getElementById("cliPathDismissButton")?.addEventListener("click", hideCliPathBanner);
+  document.getElementById("cliPathSettingsButton")?.addEventListener("click", () => {
+    hideCliPathBanner();
+    openDisplaySettingsModal();
+  });
+  // pagehide runs only when leaving, unlike a cancellable beforeunload. A
+  // restored back/forward-cache page rechecks the actual registration below.
+  window.addEventListener("pagehide", disposeCliPathUi);
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted || !cliPathState.disposed) return;
+    cliPathState.disposed = false;
+    loadCliPathStatus();
+  });
+}
+
+function initCliPathOnboarding() {
+  if (cliPathState.initialized) return;
+  cliPathState.initialized = true;
+  loadCliPathStatus({ allowPrompt: true });
+}
+
+function cliPathCanInstall() {
+  const status = cliPathState.status;
+  return Boolean(status?.supported && status.can_install && !status.registered);
+}
+
+function cliPathDescription() {
+  if (cliPathState.status?.platform === "macos") {
+    return "Optionally add this app's bundled sniper-cli to your shell PATH. This updates your zsh profile (ZDOTDIR/.zshrc or ~/.zshrc) and existing ~/.bash_profile and ~/.bashrc. Open a new terminal afterwards.";
   }
+  if (cliPathState.status?.platform === "windows") {
+    return "Optionally add this app's bundled sniper-cli to your user PATH. This changes only your account's PATH. Open a new terminal afterwards; you may need to restart your terminal app.";
+  }
+  return "Make this app's bundled sniper-cli available in a terminal. PATH setup is optional; availability depends on the platform and app package.";
+}
+
+function renderCliPathUi() {
+  if (cliPathState.disposed) return;
+  const busy = cliPathState.loading || Boolean(cliPathState.action);
+  const banner = document.getElementById("cliPathBanner");
+  const hadBannerFocus = banner?.contains(document.activeElement);
+  const showPrompt = cliPathState.banner === "prompt" || cliPathState.banner === "working";
+  const showResult = cliPathState.banner === "result";
+  const description = cliPathDescription();
+  for (const id of ["cliPathDescription", "cliPathBannerDescription"]) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = description;
+  }
+  const directory = document.getElementById("cliPathDirectory");
+  if (directory) {
+    directory.textContent = cliPathState.status?.directory ? `Bundled command directory: ${cliPathState.status.directory}` : "";
+    directory.classList.toggle("hidden", !directory.textContent);
+  }
+  const button = document.getElementById("installCliPathButton");
+  if (button) {
+    button.disabled = busy || !cliPathCanInstall();
+    button.textContent = cliPathState.action === "install" ? "Adding to PATH..." : "Add sniper-cli to PATH";
+  }
+  const refresh = document.getElementById("refreshCliPathButton");
+  if (refresh) refresh.disabled = busy;
+  const message = cliPathState.message || cliPathState.status?.message || "Checking command-line availability...";
+  for (const id of ["installCliPathStatus", "cliPathBannerStatus"]) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    element.textContent = id === "cliPathBannerStatus" && cliPathState.banner === "prompt" ? "" : message;
+    element.classList.toggle("error", cliPathState.error);
+  }
+  banner?.classList.toggle("hidden", cliPathState.banner === "hidden");
+  banner?.setAttribute("aria-busy", cliPathState.action ? "true" : "false");
+  for (const id of ["cliPathAddButton", "cliPathLaterButton"]) {
+    const element = document.getElementById(id);
+    if (!element) continue;
+    element.classList.toggle("hidden", !showPrompt);
+    element.disabled = busy;
+  }
+  document.getElementById("cliPathDismissButton")?.classList.toggle("hidden", !showResult);
+  document.getElementById("cliPathSettingsButton")?.classList.toggle("hidden", !showResult || !cliPathState.error);
+  if (hadBannerFocus) {
+    if (cliPathState.banner === "hidden") els.openDisplaySettingsButton?.focus();
+    else if (showResult) document.getElementById("cliPathDismissButton")?.focus();
+  }
+}
+
+function validCliPathStatus(status) {
+  return status && ["macos", "windows", "unsupported"].includes(status.platform)
+    && ["supported", "registered", "can_install", "should_prompt"].every((key) => typeof status[key] === "boolean")
+    && (status.directory === null || typeof status.directory === "string")
+    && typeof status.message === "string";
+}
+
+function loadCliPathStatus({ allowPrompt = false } = {}) {
+  if (cliPathState.disposed || cliPathState.action) return Promise.resolve();
+  if (cliPathState.readPromise) return cliPathState.readPromise;
+  const requestId = ++cliPathState.readId;
+  const controller = new AbortController();
+  cliPathState.readController = controller;
+  cliPathState.loading = true;
+  cliPathState.message = "Checking command-line availability...";
+  cliPathState.error = false;
+  renderCliPathUi();
+  const current = () => !cliPathState.disposed && requestId === cliPathState.readId;
+  cliPathState.readPromise = Promise.resolve().then(async () => {
+    try {
+      const response = await fetch("/api/cli-path", { signal: controller.signal });
+      await requireOkResponse(response, "Could not check command-line availability.");
+      const status = await response.json();
+      if (!current()) return;
+      if (!validCliPathStatus(status)) throw new Error("Invalid command-line availability response.");
+      cliPathState.status = status;
+      cliPathState.message = "";
+      const eligible = cliPathCanInstall() && status.should_prompt && !cliPathState.decided;
+      // Do not introduce onboarding behind a dialog the operator is already
+      // using. Settings remains available, and no choice is saved by this read.
+      if (allowPrompt && eligible && !document.querySelector(".modal-backdrop:not(.hidden), dialog[open]")) cliPathState.banner = "prompt";
+      else if (!eligible && cliPathState.banner === "prompt") cliPathState.banner = "hidden";
+    } catch (error) {
+      if (!current()) return;
+      cliPathState.status = null;
+      cliPathState.error = true;
+      cliPathState.message = `${error?.message || "Could not check command-line availability."} Use Refresh status in Settings → Runtime to try again.`;
+      if (cliPathState.banner === "prompt") cliPathState.banner = "hidden";
+    } finally {
+      if (current()) {
+        cliPathState.loading = false;
+        cliPathState.readController = null;
+        cliPathState.readPromise = null;
+        renderCliPathUi();
+      }
+    }
+  });
+  return cliPathState.readPromise;
+}
+
+async function installCliPath() {
+  if (cliPathState.disposed || cliPathState.action || cliPathState.loading || !cliPathCanInstall()) return;
+  const requestId = ++cliPathState.actionId;
+  const controller = new AbortController();
+  cliPathState.actionController = controller;
+  cliPathState.action = "install";
+  // A decision suppresses another prompt even if the response is lost. The
+  // server persists the same decision before attempting any PATH changes.
+  cliPathState.decided = true;
+  cliPathState.message = "Adding bundled sniper-cli to PATH...";
+  cliPathState.error = false;
+  if (cliPathState.banner !== "hidden") cliPathState.banner = "working";
+  renderCliPathUi();
+  const current = () => !cliPathState.disposed && requestId === cliPathState.actionId;
+  try {
+    const response = await fetch("/api/cli-path", { method: "POST", signal: controller.signal });
+    await requireOkResponse(response, "Could not add sniper-cli to PATH.");
+    const result = await response.json();
+    if (!current()) return;
+    if (![result?.updated, result?.unchanged, result?.warnings].every((items) => Array.isArray(items) && items.every((item) => typeof item === "string"))) {
+      throw new Error("Invalid PATH setup response.");
+    }
+    cliPathState.status.should_prompt = false;
+    cliPathState.status.registered = result.warnings.length === 0;
+    cliPathState.error = result.warnings.length > 0;
+    const message = typeof result.message === "string" && result.message.trim()
+      ? result.message : "PATH setup finished. Open a new terminal and run sniper-cli.";
+    cliPathState.message = result.warnings.length
+      ? `${message} ${result.warnings.join(" ")} You can retry from Settings → Runtime.` : message;
+  } catch (error) {
+    if (!current()) return;
+    cliPathState.error = true;
+    cliPathState.message = `${error?.message || "Could not add sniper-cli to PATH."} You can retry from Settings → Runtime.`;
+  } finally {
+    if (current()) {
+      cliPathState.action = null;
+      cliPathState.actionController = null;
+      if (cliPathState.banner !== "hidden") cliPathState.banner = "result";
+      renderCliPathUi();
+    }
+  }
+}
+
+async function deferCliPath() {
+  if (cliPathState.disposed || cliPathState.action || cliPathState.loading || cliPathState.banner !== "prompt") return;
+  const requestId = ++cliPathState.actionId;
+  const controller = new AbortController();
+  cliPathState.actionController = controller;
+  cliPathState.action = "defer";
+  cliPathState.decided = true;
+  cliPathState.banner = "working";
+  cliPathState.message = "Saving your choice...";
+  cliPathState.error = false;
+  renderCliPathUi();
+  const current = () => !cliPathState.disposed && requestId === cliPathState.actionId;
+  try {
+    const response = await fetch("/api/cli-path/defer", { method: "POST", signal: controller.signal });
+    await requireOkResponse(response, "Could not save your choice.");
+    if (!current()) return;
+    cliPathState.status.should_prompt = false;
+    cliPathState.banner = "hidden";
+    cliPathState.message = "You can add sniper-cli later from Settings → Runtime.";
+  } catch (error) {
+    if (!current()) return;
+    cliPathState.banner = "result";
+    cliPathState.error = true;
+    cliPathState.message = `${error?.message || "Could not save your choice."} The prompt may appear again next time. PATH setup remains optional in Settings → Runtime.`;
+  } finally {
+    if (current()) {
+      cliPathState.action = null;
+      cliPathState.actionController = null;
+      renderCliPathUi();
+    }
+  }
+}
+
+function hideCliPathBanner() {
+  if (cliPathState.action) return;
+  cliPathState.banner = "hidden";
+  renderCliPathUi();
+}
+
+function disposeCliPathUi() {
+  cliPathState.disposed = true;
+  cliPathState.readId += 1;
+  cliPathState.actionId += 1;
+  cliPathState.readController?.abort();
+  cliPathState.actionController?.abort();
+  cliPathState.readController = null;
+  cliPathState.actionController = null;
+  cliPathState.readPromise = null;
+  cliPathState.loading = false;
+  cliPathState.action = null;
+  cliPathState.banner = "hidden";
 }
 
 function closeDisplaySettingsModal() {

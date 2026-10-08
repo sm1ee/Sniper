@@ -193,16 +193,33 @@ and `capture.proxy.configure` (the latter reads settings from stdin).
 
 ## CLI
 
-`sniper-cli` ships inside the app bundle. Installed with Homebrew, it is already on
-`PATH`. Otherwise put it there once, since Sniper does not edit your shell profile
-on its own. **Settings ▸ Command line ▸ Add sniper-cli to PATH** does it, or:
+`sniper-cli` is already bundled with the macOS app and Windows packages. The
+first desktop launch offers **Add to PATH** or **Later** when registration is
+available and needed. Later dismisses the prompt without changing PATH; use
+**Settings ▸ Runtime ▸ Command line** whenever you want to register or retry.
+Homebrew and already-registered copies skip the prompt. No external CLI or
+agent skill is installed by this option.
+
+On macOS, move Sniper.app to Applications first. Registration adds one guarded
+entry to your zsh profile (`$ZDOTDIR/.zshrc`, or `~/.zshrc`) and existing
+`~/.bash_profile` / `~/.bashrc` files. On Windows, registration appends the
+installed or extracted app folder to the current user's PATH. Windows Setup
+also has an unchecked CLI PATH option. Existing PATH entries and unrelated
+commands are preserved; a conflicting `sniper-cli` is reported instead of
+replaced. Open a new terminal afterwards (on Windows, restart your terminal app
+if it retains the previous environment).
+
+Keep a portable Windows folder in a stable location after registration. If you
+move it, use Windows Environment Variables to replace its old **user PATH** entry
+with the new folder. Automatic setup conservatively leaves an earlier ownership
+record alone, so removing the old entry and retrying Settings is not a relocation
+workflow. See [Windows PATH ownership and uninstall](packaging/windows/README.md#cli-and-headless-mode)
+for the conservative cleanup rules.
+
+For an explicit macOS launch-time opt-in:
 
 ```bash
-# Let the app add it to ~/.zshrc (and ~/.bashrc when present) on next launch
 SNIPER_INSTALL_CLI_PATH=1 open -a Sniper
-
-# Or add it yourself
-export PATH="/Applications/Sniper.app/Contents/MacOS:$PATH"
 ```
 
 ```bash

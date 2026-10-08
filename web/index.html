@@ -43,6 +43,19 @@
           <button class="utility-button icon-button" id="openDisplaySettingsButton" type="button" aria-label="Settings" title="Settings">&#9881;</button>
           <span class="app-logo">SNIPER</span>
         </div>
+        <section class="cli-path-banner hidden" id="cliPathBanner" aria-labelledby="cliPathBannerTitle">
+          <div class="cli-path-banner-copy">
+            <strong id="cliPathBannerTitle">Use sniper-cli from your terminal?</strong>
+            <p id="cliPathBannerDescription"></p>
+            <p class="settings-inline-status" id="cliPathBannerStatus" role="status" aria-live="polite" aria-atomic="true"></p>
+          </div>
+          <div class="cli-path-banner-actions">
+            <button class="primary-action" id="cliPathAddButton" type="button">Add to PATH</button>
+            <button class="secondary-action" id="cliPathLaterButton" type="button">Later</button>
+            <button class="secondary-action hidden" id="cliPathSettingsButton" type="button">Open Settings</button>
+            <button class="secondary-action hidden" id="cliPathDismissButton" type="button">Dismiss</button>
+          </div>
+        </section>
       </header>
 
       <main class="workspace">
@@ -1495,16 +1508,15 @@
             </section>
 <section class="filter-group">
               <h3>Command line</h3>
-              <p class="modal-copy">
-                Put this app's <code>sniper-cli</code> on your shell <code>PATH</code>.
-                Only <code>~/.zshrc</code> and an existing <code>~/.bashrc</code> are
-                touched, and running it again replaces the line instead of adding
-                another. Open a new terminal afterwards.
+              <p class="modal-copy" id="cliPathDescription">
+                Make this app's bundled sniper-cli available in a terminal. PATH setup is optional.
               </p>
+              <p class="modal-copy cli-path-directory hidden" id="cliPathDirectory"></p>
               <div class="filter-group-actions">
-                <button class="secondary-action" id="installCliPathButton" type="button">Add sniper-cli to PATH</button>
+                <button class="secondary-action" id="installCliPathButton" type="button" disabled>Add sniper-cli to PATH</button>
+                <button class="secondary-action" id="refreshCliPathButton" type="button">Refresh status</button>
               </div>
-              <p class="modal-copy settings-inline-status" id="installCliPathStatus"></p>
+              <p class="modal-copy settings-inline-status" id="installCliPathStatus" role="status" aria-live="polite" aria-atomic="true">Checking command-line availability...</p>
             </section>
 <section class="filter-group filter-group-wide">
               <div class="filter-group-header">

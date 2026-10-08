@@ -12,7 +12,13 @@ rebuild it after the artwork changes.
 
 Run `Sniper-<version>-windows-x64-setup.exe` to install for the current user
 without administrator privileges. Setup adds a Start menu shortcut, an optional
-desktop shortcut, and an uninstaller. WebView2 and the Visual C++ runtime listed
+desktop shortcut, an optional **Add the bundled sniper-cli to my user PATH**
+checkbox, and an uninstaller. The CLI checkbox starts unchecked, including on
+upgrades. Leaving it unchecked does not remove an existing CLI PATH registration.
+This is the installed copy's initial CLI setup choice: the app does not ask again
+on first launch. You can change CLI setup later in Settings. Portable copies
+still offer the optional first-launch CLI setup prompt.
+WebView2 and the Visual C++ runtime listed
 above are prerequisites and are not bundled. Uninstalling preserves sessions
 and certificates in the user data directory.
 
@@ -52,7 +58,33 @@ $env:SNIPER_PROXY_ADDR = '127.0.0.1:18890'
 
 Open `http://127.0.0.1:18899`. Press Ctrl+C in the server console to save and exit.
 Use the same `SNIPER_DATA_DIR` in a second terminal for CLI discovery, or pass `--api http://127.0.0.1:18899`.
-You can add the extracted folder to your user PATH manually to use `sniper-cli` from other directories.
+To use `sniper-cli` from other directories, select the optional CLI PATH checkbox
+in Setup, or use the desktop app's CLI setup option. This uses only the CLI
+already bundled with Sniper. Setup appends its installation folder to the current
+user's PATH after installation succeeds; it does not change the machine PATH or
+request administrator access. Open a new terminal afterward. You may need to
+restart your terminal application if it keeps using its previous environment.
+
+The original PATH text and registry type are preserved. Existing equivalent
+entries are not duplicated or claimed for removal, and another `sniper-cli`
+command found on PATH is left alone. If another command is found, Setup skips
+the PATH change and explains how to use the bundled executable directly.
+Canceling Setup before installation completes leaves PATH unchanged.
+
+For the portable ZIP, keep the extracted folder in a stable location before
+using the app's CLI setup option. You can also add that folder to your user PATH
+manually; manually added entries remain yours to remove. If you move the folder,
+edit its existing user PATH entry to point to the new folder in Windows
+Environment Variables. Automatic setup does not replace an ownership record
+from an earlier location. Removing the old entry alone does not clear that record.
+
+Setup and the app share an ownership record for PATH changes. Uninstall restores
+the previous PATH only when the saved record belongs to that installation and
+the current PATH still exactly matches what Sniper wrote, including its registry
+type. If PATH has since been edited, even to add an unrelated program, uninstall
+leaves it untouched. In that case, remove the old Sniper folder from your user
+PATH manually if it is no longer needed. An upgrade in the same folder keeps
+the original ownership record rather than adding or claiming another entry.
 
 ## Updates
 
@@ -97,3 +129,16 @@ The output is `dist/Sniper-<version>-windows-x64-setup.exe` plus its SHA-256
 checksum. ARM64 uses the same `-Target` option as the ZIP script. The Windows
 CI workflow builds both ZIP and setup artifacts. Installers are unsigned until
 a Windows code-signing certificate is configured.
+
+Setup also installs a `.sniper-installed` marker alongside the executables so
+the app can distinguish this completed setup choice from a portable first launch.
+Inno manages its rollback and removal with the installed files; the portable ZIP
+does not contain this marker.
+
+The source-level installer contract checks run with
+`node --test tests/windows-installer-path.test.cjs`; they do not execute an
+installer or modify a registry. Before releasing installer changes, compile with
+Inno Setup and validate installation/uninstallation on a disposable Windows
+account: unchecked and canceled setup, both PATH string types, missing/empty
+PATH, existing case/quote/trailing-slash variants, other same-name commands,
+repeated installs and upgrades, write failures, and PATH edits before uninstall.

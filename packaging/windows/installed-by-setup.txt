@@ -1,0 +1,3 @@
+Installed by Sniper Setup.
+The Setup CLI PATH checkbox is this installation's initial choice.
+Do not show the portable first-launch CLI prompt; CLI setup remains available in Settings.
