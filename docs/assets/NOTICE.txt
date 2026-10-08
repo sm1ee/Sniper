@@ -1,0 +1,17 @@
+Sniper website assets
+
+sniper-logo-wide.png and favicon.svg are copied from this repository's web/
+assets. The website uses the same Bungee typeface as Sniper's app wordmark.
+
+Bungee-Regular.ttf
+Copyright 2023 The Bungee Project Authors (https://github.com/djrrb/Bungee)
+Licensed under the SIL Open Font License, Version 1.1.
+The full license is included in Bungee-OFL.txt.
+Upstream license: https://github.com/google/fonts/blob/main/ofl/bungee/OFL.txt
+
+sniper-v0.2.12.jpg
+An unmodified screenshot of the real Sniper v0.2.12 web interface, captured
+on 2026-10-08 in a fresh, empty, isolated session. No third-party traffic or
+user data was captured. The UI and runtime source matched released commit
+1b30a9126b36d3b46c6240cd600cfc38c3eb7956 byte-for-byte. The screenshot shows
+the headless interface, which shares the desktop app's embedded web UI.
