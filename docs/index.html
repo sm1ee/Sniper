@@ -1,153 +1,114 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sniper — Open-Source Web Proxy for macOS and Windows</title>
-<meta name="description" content="Sniper is a lightweight, fast, open-source web security proxy for macOS and Windows. Intercept HTTP/HTTPS traffic, replay requests, fuzz parameters, and scan for vulnerabilities. A modern alternative to Burp Suite built in Rust." />
-<meta name="keywords" content="web proxy, MITM proxy, HTTP proxy, HTTPS proxy, security testing, penetration testing, bug bounty, Burp Suite alternative, macOS proxy, Windows proxy, Rust proxy, open source proxy, vulnerability scanner, web security, OWASP, intercept proxy, API testing" />
-<meta property="og:title" content="Sniper — Open-Source Web Proxy for macOS and Windows" />
-<meta property="og:description" content="Lightweight, fast web security proxy built in Rust. Capture, replay, fuzz, and scan." />
-<meta property="og:type" content="website" />
-<meta property="og:url" content="https://sm1ee.github.io/Sniper/" />
-<meta property="og:image" content="https://raw.githubusercontent.com/sm1ee/Sniper/main/web/screenshot.png" />
-<link rel="canonical" href="https://sm1ee.github.io/Sniper/" />
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;line-height:1.6}
-a{color:#d4a017;text-decoration:none}
-a:hover{text-decoration:underline}
-.container{max-width:900px;margin:0 auto;padding:0 24px}
-header{text-align:center;padding:60px 0 40px}
-header img{width:280px;margin-bottom:16px}
-header h1{font-size:1.1rem;font-weight:400;color:#8b949e;margin-bottom:24px}
-.badges{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:32px}
-.badges img{height:20px;width:auto;flex:none}
-.cta{display:inline-block;padding:12px 32px;background:#d4a017;color:#0d1117;font-weight:600;border-radius:8px;font-size:1rem;transition:opacity .2s}
-.cta:hover{opacity:.85;text-decoration:none}
-.cta-secondary{background:transparent;border:1px solid #30363d;color:#c9d1d9;margin-left:12px}
-.cta-secondary:hover{border-color:#d4a017}
-.screenshot{text-align:center;padding:40px 0}
-.screenshot img{width:100%;max-width:860px;border-radius:12px;border:1px solid #21262d;box-shadow:0 8px 32px rgba(0,0,0,.4)}
-section{padding:48px 0;border-top:1px solid #21262d}
-h2{font-size:1.5rem;margin-bottom:16px;color:#f0f6fc}
-h3{font-size:1.1rem;margin-bottom:8px;color:#f0f6fc}
-.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:24px;margin-top:24px}
-.feature{background:#161b22;border:1px solid #21262d;border-radius:10px;padding:20px}
-.feature h3{margin-bottom:6px}
-.feature p{color:#8b949e;font-size:.9rem}
-table{width:100%;border-collapse:collapse;margin-top:16px;font-size:.9rem}
-th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #21262d}
-th{color:#d4a017;font-weight:600}
-td:first-child{font-weight:500;color:#f0f6fc}
-.highlight{color:#d4a017}
-code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:.85rem}
-pre{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:16px;overflow-x:auto;font-size:.85rem;margin-top:12px}
-footer{text-align:center;padding:40px 0;color:#484f58;font-size:.85rem;border-top:1px solid #21262d}
-@media(max-width:600px){header{padding:40px 0 24px}.features{grid-template-columns:1fr}}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e8dfca">
+  <title>Sniper — A closer look at your web traffic</title>
+  <meta name="description" content="An open-source desktop web proxy for macOS and Windows. Inspect HTTP, HTTPS and WebSocket traffic, replay requests, and keep your work in local sessions.">
+  <meta property="og:title" content="Sniper — A closer look at your web traffic">
+  <meta property="og:description" content="An open-source desktop web proxy. Capture, inspect and replay, with a native app and a JSON-first CLI.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://smlee.io/Sniper/">
+  <meta property="og:image" content="https://smlee.io/Sniper/assets/sniper-logo-wide.png">
+  <meta property="og:image:alt" content="Sniper's bear mascot and wordmark">
+  <link rel="canonical" href="https://smlee.io/Sniper/">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
-
-<header>
-  <img src="https://raw.githubusercontent.com/sm1ee/Sniper/main/web/sniper-logo-wide.png" alt="Sniper" />
-  <h1>Lightweight, fast, open-source web security proxy for macOS and Windows</h1>
-  <div class="badges">
-    <img src="https://img.shields.io/github/v/release/sm1ee/Sniper?style=flat-square&labelColor=1c1c1c&color=d4a017" alt="Release" />
-    <img src="https://img.shields.io/github/downloads/sm1ee/Sniper/total?style=flat-square&label=downloads&labelColor=1c1c1c&color=d4a017" alt="Downloads" />
-    <img src="https://img.shields.io/badge/lang-Rust-orange?style=flat-square&logo=rust" alt="Rust" />
-    <img src="https://img.shields.io/badge/platform-macOS-blue?style=flat-square&logo=apple" alt="macOS" />
-    <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square" alt="Windows" />
-    <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT" />
-  </div>
-  <a class="cta" href="https://github.com/sm1ee/Sniper/releases/latest">Download</a>
-  <a class="cta cta-secondary" href="https://github.com/sm1ee/Sniper">View on GitHub</a>
-</header>
-
-<div class="screenshot container">
-  <img src="https://raw.githubusercontent.com/sm1ee/Sniper/main/web/screenshot.png" alt="Sniper proxy UI — HTTP capture, replay, fuzzer, findings" />
-</div>
-
-<div class="screenshot container">
-  <img src="https://raw.githubusercontent.com/sm1ee/Sniper/main/web/architecture.svg" alt="How Sniper fits together: browser traffic, an operator and an AI agent each reach the same Sniper core — through the MITM proxy, the desktop app and sniper-cli — and the core writes captured sessions to disk" />
-</div>
-
-<div class="container">
-
-<section>
-  <h2>What is Sniper?</h2>
-  <p>Sniper is an <strong>open-source MITM proxy</strong> that intercepts and modifies HTTP/HTTPS traffic between your browser and the internet. Built in Rust as a native desktop app for macOS and Windows, it provides the core workflow for web application security testing, penetration testing, and bug bounty hunting — without the overhead of Java-based tools.</p>
-</section>
-
-<section>
-  <h2>Features</h2>
-  <div class="features">
-    <div class="feature">
-      <h3>HTTP/HTTPS Capture</h3>
-      <p>Full MITM proxy with persistent root CA. Inspect every request and response in real time. WebSocket support included.</p>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="wordmark" href="./" aria-label="Sniper home">Sniper<span class="brand-dot" aria-hidden="true">.</span></a>
+    <nav aria-label="Main navigation">
+      <a href="#workflow">The workflow</a><a href="#download">Download</a><a href="#docs">Docs</a>
+      <a class="nav-source" href="https://github.com/sm1ee/Sniper">GitHub <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="small-rule" aria-hidden="true"></span> Open-source web proxy</p>
+        <h1 id="hero-title">Know what’s<br>on the wire.</h1>
+        <p class="hero-description">A closer look at your web traffic. Sniper brings HTTP, HTTPS and WebSockets into a desktop workspace for inspecting, debugging and testing your applications.</p>
+        <div class="hero-actions"><a class="button" href="#download">Get Sniper <span aria-hidden="true">↓</span></a><a class="text-link" href="guides/http-debugging">Read the guide <span aria-hidden="true">↗</span></a></div>
+        <p class="platform-note">macOS · Windows &nbsp; / &nbsp; Built in Rust · MIT licensed</p>
+      </div>
+      <aside class="hero-brand" aria-label="About Sniper">
+        <img src="assets/sniper-logo-wide.png" alt="Sniper's bear mascot and wordmark" width="600" height="333" fetchpriority="high">
+        <div class="brand-note"><span>Small tool.<br>Close attention.</span><span class="brand-index" aria-hidden="true">HTTP<br>HTTPS<br>WS</span></div>
+      </aside>
+    </section>
+    <div class="principles wrap" aria-label="At a glance">
+      <p><span>01</span> A native desktop app</p><p><span>02</span> Sessions saved locally</p><p><span>03</span> A scriptable CLI</p>
     </div>
-    <div class="feature">
-      <h3>Intercept & Modify</h3>
-      <p>Hold requests before they reach the server. Edit headers, body, and parameters on the fly. Auto match & replace rules.</p>
-    </div>
-    <div class="feature">
-      <h3>Passive Scanner</h3>
-      <p>Automatically detect sensitive data leaks, CORS misconfigurations, missing security headers, JWT weaknesses, and more.</p>
-    </div>
-    <div class="feature">
-      <h3>Replay</h3>
-      <p>Resend any captured request with modifications. Override target host and port. Follow redirects.</p>
-    </div>
-    <div class="feature">
-      <h3>Fuzzer</h3>
-      <p>Mark insertion points and run payload lists. Test for injection vulnerabilities with a simple marker-based interface.</p>
-    </div>
-    <div class="feature">
-      <h3>CLI & AI Automation</h3>
-      <p>JSON-first CLI for scripting. Built-in Claude and Codex skill templates let AI agents drive the full workflow.</p>
-    </div>
-  </div>
-</section>
-
-<section>
-  <h2>Why Sniper?</h2>
-  <ul style="margin-top:12px;padding-left:20px;color:#8b949e">
-    <li><strong>Native.</strong> One Rust binary with no runtime to install. It opens immediately and stays small while it runs.</li>
-    <li><strong>Scriptable.</strong> <code>sniper-cli</code> speaks JSON for the operations the UI exposes, so reviewing a capture or resending a request can be driven from a shell script.</li>
-    <li><strong>Agent-ready.</strong> Claude Code and Codex skill templates ship in the repository, so a coding agent drives the same workflow through the same CLI.</li>
-  </ul>
-</section>
-
-<section>
-  <h2>Documentation</h2>
-  <table>
-    <tr><td><a href="guides/http-debugging">Debugging HTTP with Sniper</a></td><td>What can I do with this as a plain intercepting proxy?</td></tr>
-    <tr><td><a href="guides/agent-harness">Sniper in an agent harness</a></td><td>Which part of my harness is this, and what goes in and out?</td></tr>
-    <tr><td><a href="integrations/claude-code">Using Sniper from Claude Code</a></td><td>Install it, confirm it works, and what to ask for</td></tr>
-    <tr><td><a href="integrations/codex">Using Sniper from Codex</a></td><td>The same, for Codex</td></tr>
-    <tr><td><a href="architecture">Architecture</a></td><td>Why it is built this way</td></tr>
-  </table>
-</section>
-
-<section>
-  <h2>Quick Start</h2>
-  <ol style="margin-top:12px;padding-left:20px;color:#8b949e">
-    <li>Download the <a href="https://github.com/sm1ee/Sniper/releases/latest">latest release</a> — the universal <code>.dmg</code> on macOS, the <code>-setup.exe</code> installer or portable <code>.zip</code> on Windows</li>
-    <li>Set your browser proxy to <code>127.0.0.1:8080</code></li>
-    <li>Visit <code>https://sniper</code> to trust the root CA</li>
-    <li>Start capturing traffic</li>
-  </ol>
-  <p style="margin-top:16px">Or build from source:</p>
-  <pre><code>git clone https://github.com/sm1ee/Sniper.git
-cd Sniper
-cargo run --bin sniper-desktop</code></pre>
-</section>
-
-</div>
-
-<footer>
-  <p>MIT License &middot; <a href="https://github.com/sm1ee/Sniper">GitHub</a></p>
-</footer>
-
+    <figure class="product-preview wrap">
+      <a class="preview-image" href="assets/sniper-v0.2.12.jpg" aria-label="View the full Sniper v0.2.12 interface screenshot">
+        <img src="assets/sniper-v0.2.12.jpg" alt="Sniper v0.2.12 in an empty session: Capture and HTTP selected, Open browser in the toolbar, and request and response inspectors below." width="1180" height="757" loading="lazy">
+      </a>
+      <figcaption><span>THE WORKSPACE</span><span>Sniper v0.2.12 · empty session · <a href="assets/sniper-v0.2.12.jpg">View full image ↗</a></span></figcaption>
+    </figure>
+    <section class="workflow wrap section-space" id="workflow" aria-labelledby="workflow-title">
+      <div class="section-intro">
+        <p class="eyebrow">Less setup, more context</p><h2 id="workflow-title">Open a browser.<br>Start looking.</h2>
+        <p>Sniper’s browser launcher takes care of the proxy connection and certificate trust for its separate test profile.</p>
+        <a class="text-link" href="guides/http-debugging#or-open-a-browser-that-is-already-wired">About wired browsers <span aria-hidden="true">↗</span></a>
+      </div>
+      <ol class="steps">
+        <li><span class="step-number" aria-hidden="true">01</span><div><h3>Install and open Sniper</h3><p>Choose the macOS app or Windows package. Your desktop workspace and the bundled CLI work with the same local instance.</p></div></li>
+        <li><span class="step-number" aria-hidden="true">02</span><div><h3>Click “Open browser”</h3><p>Use an installed, supported browser with its own testing profile. The menu lets you choose another browser and save a default. Sniper doesn’t install a browser for you.</p></div></li>
+        <li><span class="step-number" aria-hidden="true">03</span><div><h3>Follow a request</h3><p>Browse an application you own or have permission to test. Inspect the request and response, narrow your scope, and keep the useful traffic in a session.</p></div></li>
+      </ol>
+    </section>
+    <section class="tools-section" aria-labelledby="tools-title">
+      <div class="wrap section-space">
+        <div class="tools-heading"><p class="eyebrow">The working set</p><h2 id="tools-title">Inspect. Replay.<br>Keep the context.</h2><p>The everyday tools for understanding an application, together in one workspace.</p></div>
+        <dl class="tool-list">
+          <div><dt>Capture &amp; inspect</dt><dd>Read HTTP and HTTPS history alongside WebSocket traffic. Scope filters and a site map help you focus.</dd></div>
+          <div><dt>Intercept &amp; replay</dt><dd>Pause a request, make an edit, and send it on. Return to captured requests to compare how your application responds.</dd></div>
+          <div><dt>Keep the context</dt><dd>Separate work into sessions, each with its own records, scope and state, saved on your machine.</dd></div>
+          <div><dt>Review findings</dt><dd>Passive checks flag potential issues in captured traffic, including sensitive data and security-header configuration.</dd></div>
+          <div><dt>Use the small tools</dt><dd>Decode, encode, hash and inspect JWTs without leaving the app. Payload-based testing is available in Fuzzer.</dd></div>
+          <div><dt>Work from a terminal</dt><dd>The bundled <code>sniper-cli</code> provides JSON-first access. Separate Claude Code and Codex skill templates are available in the repository.</dd></div>
+        </dl>
+        <div class="source-note"><span>Open source, all the way down.</span><a href="https://github.com/sm1ee/Sniper">Read the code <span aria-hidden="true">↗</span></a></div>
+      </div>
+    </section>
+    <section class="download-section wrap section-space" id="download" aria-labelledby="download-title">
+      <div class="section-heading"><div><p class="eyebrow">Make yourself at home</p><h2 id="download-title">Get Sniper.</h2></div><p>Pick your platform. Release files and their SHA-256 checksums are published on GitHub.</p></div>
+      <div class="downloads">
+        <article class="download-option" aria-labelledby="mac-title">
+          <div class="download-title"><h3 id="mac-title">macOS</h3><span>Apple silicon + Intel</span></div>
+          <p>Install with Homebrew. The cask also puts the bundled <code>sniper-cli</code> on your PATH.</p>
+          <pre tabindex="0" aria-label="Homebrew install command"><code>brew install --cask sm1ee/tap/sniper</code></pre>
+          <p class="install-alternative">Or choose the universal <strong>.dmg</strong> from the latest release and drag Sniper into Applications.</p>
+          <a class="button button-outline" href="https://github.com/sm1ee/Sniper/releases/latest">macOS release files <span aria-hidden="true">↗</span></a>
+          <p class="install-note">The app is ad-hoc signed, not notarized. macOS may require you to allow it in System Settings → Privacy &amp; Security → Open Anyway.</p>
+        </article>
+        <article class="download-option" aria-labelledby="windows-title">
+          <div class="download-title"><h3 id="windows-title">Windows</h3><span>Windows 10 / 11 · x64</span></div>
+          <p>Choose the <strong>-setup.exe</strong> installer for a per-user installation, or extract the entire portable <strong>.zip</strong> and open <code>sniper-desktop.exe</code>.</p>
+          <p class="windows-runtime">The desktop app requires <a href="https://developer.microsoft.com/en-us/microsoft-edge/webview2/">WebView2 Evergreen Runtime</a> and the <a href="https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist">Microsoft Visual C++ v14 Redistributable</a>. These are not bundled.</p>
+          <a class="button button-outline" href="https://github.com/sm1ee/Sniper/releases/latest">Windows release files <span aria-hidden="true">↗</span></a>
+          <p class="install-note">Windows releases are unsigned. Check the matching .sha256 file before running. <a href="https://github.com/sm1ee/Sniper/blob/v0.2.12/packaging/windows/README.md">Windows setup notes <span aria-hidden="true">↗</span></a></p>
+        </article>
+      </div>
+      <div class="release-note"><span>Already installed? Check the release notes before updating.</span><a href="https://github.com/sm1ee/Sniper/releases">All releases <span aria-hidden="true">↗</span></a></div>
+    </section>
+    <section class="docs-section wrap section-space" id="docs" aria-labelledby="docs-title">
+      <div class="section-intro"><p class="eyebrow">A little further in</p><h2 id="docs-title">Read the docs.</h2><p>Start with the proxy workflow, then explore the CLI, integrations and how Sniper fits together.</p></div>
+      <ul class="docs-list">
+        <li><a href="guides/http-debugging"><span><strong>Debugging HTTP</strong><small>Capture, scope, inspect and replay</small></span><span aria-hidden="true">↗</span></a></li>
+        <li><a href="integrations/claude-code"><span><strong>Claude Code integration</strong><small>Set up the repository’s agent skill</small></span><span aria-hidden="true">↗</span></a></li>
+        <li><a href="integrations/codex"><span><strong>Codex integration</strong><small>Use the CLI from a coding agent</small></span><span aria-hidden="true">↗</span></a></li>
+        <li><a href="guides/agent-harness"><span><strong>Inside an agent harness</strong><small>Inputs, outputs and data boundaries</small></span><span aria-hidden="true">↗</span></a></li>
+        <li><a href="architecture"><span><strong>Architecture</strong><small>The pieces and the decisions behind them</small></span><span aria-hidden="true">↗</span></a></li>
+      </ul>
+    </section>
+  </main>
+  <footer class="site-footer wrap">
+    <a class="wordmark" href="./" aria-label="Sniper home">Sniper<span class="brand-dot" aria-hidden="true">.</span></a><p>A closer look at your web traffic.</p>
+    <div><a href="https://github.com/sm1ee/Sniper/blob/main/LICENSE">MIT license</a><a href="https://github.com/sm1ee/Sniper/issues">Report an issue <span aria-hidden="true">↗</span></a></div>
+  </footer>
 </body>
 </html>
