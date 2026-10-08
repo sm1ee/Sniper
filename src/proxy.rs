@@ -774,7 +774,14 @@ async fn build_replay_client(
                     .context("failed to build replay HTTP client");
             }
             if proxy.enabled {
-                bail!("Replay destination overrides cannot be combined with an upstream proxy; edit the request destination instead");
+                // The chain resolves names itself, so it cannot honour an override.
+                // A destination on the bypass list is dialled directly, where the
+                // override works as it does without a chain. The list is checked
+                // against the dialled host here: the client only sees the request's.
+                if !proxy.bypasses(dial_host) {
+                    bail!("Replay destination overrides cannot be combined with an upstream proxy; edit the request destination instead");
+                }
+                builder = builder.no_proxy();
             }
             if request_authority.host.parse::<IpAddr>().is_ok() {
                 bail!(

@@ -14,6 +14,13 @@ pub struct UpstreamProxy {
     pub url: String,
     pub username: String,
     pub password: String,
+    /// Hosts reached directly instead of through the chain, in scope-pattern form.
+    /// Stored beside the proxy as `upstream_bypass_hosts`, not in its JSON, so a
+    /// client that replaces `upstream_proxy` cannot wipe the list and an older
+    /// Sniper, which rejects unknown proxy fields, can still load the session.
+    /// `RuntimeSettings::upstream_proxy` attaches it.
+    #[serde(skip)]
+    pub bypass_hosts: Vec<String>,
 }
 
 impl std::fmt::Debug for UpstreamProxy {
@@ -59,6 +66,12 @@ impl UpstreamProxy {
         Ok(())
     }
 
+    /// Whether `host` skips the chain. The scope matcher decides, so a pattern means
+    /// the same here as in scope and TLS passthrough.
+    pub fn bypasses(&self, host: &str) -> bool {
+        crate::scope::host_matches_any(host, &self.bypass_hosts)
+    }
+
     fn parsed_url(&self) -> Result<url::Url> {
         url::Url::parse(&self.url).map_err(|_| anyhow::anyhow!("Invalid upstream proxy address"))
     }
@@ -74,11 +87,22 @@ impl UpstreamProxy {
         if url.scheme() == "socks5" {
             url.set_scheme("socks5h").expect("valid SOCKS scheme");
         }
-        let mut proxy = reqwest::Proxy::all(url)
-            .map_err(|_| anyhow::anyhow!("Invalid upstream proxy address"))?;
+        // Credentials ride in the URL, which is where `Proxy::basic_auth` put them
+        // for both HTTP and SOCKS; a custom proxy has no other place for SOCKS ones.
         if !self.username.is_empty() {
-            proxy = proxy.basic_auth(&self.username, &self.password);
+            url.set_username(&self.username)
+                .and_then(|()| url.set_password(Some(&self.password)))
+                .map_err(|()| anyhow::anyhow!("Invalid upstream proxy address"))?;
         }
+        // A client is built before its destination is known, so the list is checked
+        // per request against the host reqwest is about to dial.
+        let bypass_hosts = self.bypass_hosts.clone();
+        let proxy = reqwest::Proxy::custom(move |destination| {
+            let direct = destination
+                .host_str()
+                .is_some_and(|host| crate::scope::host_matches_any(host, &bypass_hosts));
+            (!direct).then(|| url.clone())
+        });
         Ok(builder.proxy(proxy))
     }
 
@@ -92,7 +116,7 @@ impl UpstreamProxy {
     }
 
     async fn connect_inner(&self, host: &str, port: u16) -> Result<TcpStream> {
-        if !self.enabled {
+        if !self.enabled || self.bypasses(host) {
             return TcpStream::connect((host, port))
                 .await
                 .context("Upstream connection failed");

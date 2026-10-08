@@ -805,6 +805,7 @@ const els = {
   proxySettingUpstreamInsecure: document.getElementById("proxySettingUpstreamInsecure"),
   proxySettingScopePatterns: document.getElementById("proxySettingScopePatterns"),
   proxySettingPassthroughHosts: document.getElementById("proxySettingPassthroughHosts"),
+  proxyChainBypassHosts: document.getElementById("proxyChainBypassHosts"),
   proxySettingOastClearToken: document.getElementById("proxySettingOastClearToken"),
   proxySettingOastTokenHint: document.getElementById("proxySettingOastTokenHint"),
   proxySettingBindHost: document.getElementById("proxySettingBindHost"),
@@ -1003,6 +1004,7 @@ const LAYOUT_TEXTAREA_IDS = [
   "interceptRequestEditor",
   "proxySettingScopePatterns",
   "proxySettingPassthroughHosts",
+  "proxyChainBypassHosts",
   "fuzzerPayloadsEditor",
   "targetScopeEditor",
   "wsMessageEditor",
@@ -12066,6 +12068,9 @@ function renderProxySettings() {
   if (document.activeElement !== els.proxySettingPassthroughHosts) {
     els.proxySettingPassthroughHosts.value = (state.runtime.passthrough_hosts || []).join("\n");
   }
+  if (document.activeElement !== els.proxyChainBypassHosts) {
+    els.proxyChainBypassHosts.value = (state.runtime.upstream_bypass_hosts || []).join("\n");
+  }
   if (startup && document.activeElement !== els.proxySettingBindHost) {
     els.proxySettingBindHost.value = startup.proxy_bind_host;
   }
@@ -14558,6 +14563,10 @@ async function saveProxySettings() {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+  const bypassHosts = els.proxyChainBypassHosts.value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
 
   const bindHost = els.proxySettingBindHost.value.trim();
   const proxyPortText = els.proxySettingPort.value.trim();
@@ -14610,6 +14619,7 @@ async function saveProxySettings() {
     },
     scope_patterns: scopePatterns,
     passthrough_hosts: passthroughHosts,
+    upstream_bypass_hosts: bypassHosts,
     oast_enabled: document.getElementById("proxySettingOastEnabled")?.checked ?? false,
     oast_provider: oastProvider,
     oast_server_url: oastServerUrl,

@@ -298,7 +298,8 @@ impl BrowserCommand {
 struct ProxyChainArgs {
     #[arg(long)]
     session_id: Option<Uuid>,
-    /// Replace settings using {enabled, url, username, password} from stdin.
+    /// Replace settings using {enabled, url, username, password, bypass_hosts}
+    /// from stdin. Leaving out bypass_hosts keeps the saved list.
     #[arg(long)]
     stdin: bool,
 }
@@ -2456,7 +2457,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.proxy.get",
             "capture proxy",
-            "Read proxy chain settings with a masked password.",
+            "Read proxy chain settings, with a masked password and the hosts that bypass the chain.",
             Read,
             false,
             &[],
@@ -2465,7 +2466,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.proxy.configure",
             "capture proxy --stdin",
-            "Replace proxy chain settings from stdin JSON.",
+            "Replace proxy chain settings, and optionally its bypass hosts, from stdin JSON.",
             Write,
             true,
             &[],
@@ -5001,19 +5002,51 @@ async fn handle_browser(api: ApiClient, command: BrowserCommand) -> Result<()> {
 async fn handle_proxy_chain(api: ApiClient, args: ProxyChainArgs) -> Result<()> {
     let runtime: Value = if args.stdin {
         let raw = read_text_input(None, true)?;
-        let proxy: sniper::upstream_proxy::UpstreamProxy =
-            serde_json::from_str(&raw).map_err(|_| {
-                anyhow!("Expected proxy settings JSON with enabled, url, username and password")
-            })?;
+        let (proxy, bypass_hosts) = parse_proxy_chain_input(&raw)?;
         proxy.validate()?;
         let (session_id, expected_active_session_id) =
             runtime_write_session_ids(&api, args.session_id).await?;
-        api.post_json("/api/runtime", &json!({"session_id":session_id, "expected_active_session_id":expected_active_session_id, "upstream_proxy":proxy})).await?
+        let mut body = json!({"session_id":session_id, "expected_active_session_id":expected_active_session_id, "upstream_proxy":proxy});
+        if let Some(bypass_hosts) = bypass_hosts {
+            body["upstream_bypass_hosts"] = json!(bypass_hosts);
+        }
+        api.post_json("/api/runtime", &body).await?
     } else {
         api.get_json(&session_query_path("/api/runtime", args.session_id))
             .await?
     };
-    print_json_with_session(&runtime["upstream_proxy"], args.session_id)
+    print_json_with_session(&proxy_chain_output(&runtime), args.session_id)
+}
+
+/// The API keeps the bypass list beside the proxy (`upstream_bypass_hosts`) so that
+/// replacing the proxy cannot wipe it. The CLI reads and writes the two as one
+/// object, which is how people think of a chain and its exceptions.
+fn parse_proxy_chain_input(
+    raw: &str,
+) -> Result<(sniper::upstream_proxy::UpstreamProxy, Option<Vec<String>>)> {
+    let invalid = || {
+        anyhow!("Expected proxy settings JSON with enabled, url, username, password and optional bypass_hosts")
+    };
+    let mut value: Value = serde_json::from_str(raw).map_err(|_| invalid())?;
+    let bypass_hosts = value
+        .as_object_mut()
+        .and_then(|object| object.remove("bypass_hosts"))
+        .map(|hosts| serde_json::from_value(hosts).map_err(|_| invalid()))
+        .transpose()?;
+    let proxy = serde_json::from_value(value).map_err(|_| invalid())?;
+    Ok((proxy, bypass_hosts))
+}
+
+fn proxy_chain_output(runtime: &Value) -> Value {
+    let mut chain = runtime["upstream_proxy"].clone();
+    if let Some(object) = chain.as_object_mut() {
+        let bypass_hosts = runtime
+            .get("upstream_bypass_hosts")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        object.insert("bypass_hosts".to_string(), bypass_hosts);
+    }
+    chain
 }
 
 async fn handle_session(api: ApiClient, command: SessionCommand) -> Result<()> {
@@ -9239,9 +9272,10 @@ mod tests {
         parse_editable_raw_request, parse_editable_raw_request_bytes_with_version,
         parse_editable_raw_request_with_version, parse_editable_raw_response,
         parse_editable_raw_response_bytes, parse_editable_raw_response_for_request_method,
-        prepare_cli_workspace_save, push_replay_history_entry, read_limited_to_end,
-        read_payloads_input, read_raw_request_input, read_raw_response_input, read_text_input,
-        replay_send_http_version, replay_send_target_for_tab, replay_tab_target_as_request,
+        parse_proxy_chain_input, prepare_cli_workspace_save, proxy_chain_output,
+        push_replay_history_entry, read_limited_to_end, read_payloads_input,
+        read_raw_request_input, read_raw_response_input, read_text_input, replay_send_http_version,
+        replay_send_target_for_tab, replay_tab_target_as_request,
         replay_update_should_preserve_current_port, sequence_write_session_id,
         session_id_for_write_payload, session_query_path, session_query_path_with_expected_active,
         sniper_settings_probe_matches, split_host_port, split_payload_lines, strip_host_port,
@@ -13176,5 +13210,31 @@ mod tests {
             &json!({"session_id":second})
         )
         .is_ok());
+    }
+
+    #[test]
+    fn proxy_chain_json_carries_bypass_hosts_beside_the_proxy() {
+        let (proxy, bypass_hosts) = parse_proxy_chain_input(
+            r#"{"enabled":true,"url":"http://127.0.0.1:8081","username":"","password":"","bypass_hosts":["localhost"]}"#,
+        )
+        .unwrap();
+        assert!(proxy.enabled);
+        assert_eq!(bypass_hosts, Some(vec!["localhost".to_string()]));
+        let (_, bypass_hosts) = parse_proxy_chain_input(r#"{"enabled":false}"#).unwrap();
+        assert_eq!(
+            bypass_hosts, None,
+            "leaving the list out keeps the saved one"
+        );
+        assert!(parse_proxy_chain_input(r#"{"enabled":true,"bypass_hosts":"localhost"}"#).is_err());
+        assert!(parse_proxy_chain_input(r#"{"enabled":true,"surprise":1}"#).is_err());
+
+        let output = proxy_chain_output(&json!({
+            "upstream_proxy": {"enabled": true, "url": "http://127.0.0.1:8081", "username": "", "password": ""},
+            "upstream_bypass_hosts": ["localhost"],
+        }));
+        assert_eq!(output["url"], "http://127.0.0.1:8081");
+        assert_eq!(output["bypass_hosts"], json!(["localhost"]));
+        let older_server = proxy_chain_output(&json!({"upstream_proxy": {"enabled": false}}));
+        assert_eq!(older_server["bypass_hosts"], json!([]));
     }
 }

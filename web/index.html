@@ -803,6 +803,11 @@
                     <input id="proxyChainPassword" type="password" autocomplete="new-password" />
                     <small>A masked value keeps the saved password. Empty the field to remove it. Credentials are stored with this session on disk.</small>
                   </label>
+                  <label class="settings-field">
+                    <span>Connect directly to</span>
+                    <textarea id="proxyChainBypassHosts" rows="3" placeholder="localhost&#10;*.internal.example.com"></textarea>
+                    <small>Hosts listed here skip the proxy chain and are reached directly, for captured HTTP and HTTPS, WebSocket and Replay. Same patterns as scope.</small>
+                  </label>
                   <div class="settings-divider"></div>
                   <label class="settings-field">
                     <span>Scope patterns</span>

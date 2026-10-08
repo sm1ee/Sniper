@@ -177,8 +177,14 @@ continues to accept HTTP proxy requests and CONNECT, not SOCKS client requests.
 The chain applies to captured HTTP/HTTPS traffic, TLS passthrough, WebSockets,
 Replay, and HTTP requests sent by Fuzzer/Sequence. Chain failures never fall
 back to direct connections. Existing WebSocket connections keep their current
-route until reconnected. Replay's separate connection-target override cannot
-be combined with a chain; edit the request destination instead.
+route until reconnected.
+
+**Connect directly to** lists hosts that skip the chain, such as a local test
+service the upstream proxy cannot reach. It takes the same patterns as scope
+(`*.example.com` covers the domain and its subdomains) and applies to every path
+above. Hosts not on the list keep using the chain, and an empty list changes
+nothing. Replay's separate connection-target override works only when its target
+is on this list; otherwise edit the request destination instead.
 
 Settings belong to each session and persist across restart. Passwords are
 masked in API responses and stored in the session files on disk. Leaving the
@@ -188,7 +194,8 @@ password. Environment proxy variables do not override this explicit setting.
 Automation can read settings with `sniper-cli capture proxy`. To replace them,
 pipe a JSON object with `enabled`, `url`, `username`, and `password` into
 `sniper-cli capture proxy --stdin --yes`; `--dry-run` previews the operation
-without consuming credentials. The manifest operations are `capture.proxy.get`
+without consuming credentials. Add `bypass_hosts` (an array of patterns) to
+replace the direct-connection list; leaving it out keeps the saved list. The manifest operations are `capture.proxy.get`
 and `capture.proxy.configure` (the latter reads settings from stdin).
 
 ## CLI
