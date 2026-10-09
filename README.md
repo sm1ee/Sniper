@@ -282,6 +282,100 @@ can also be sensitive. These reads do not add redaction: review the output befor
 sharing it with an agent or saving it to a transcript. No scanner execution,
 configuration, or clear operation is exposed by these commands.
 
+### Passive scanner configuration
+
+The `scanner` commands manage the existing passive checks for captured response
+body previews and request/response headers. They do not send traffic, fetch full
+bodies, run probes, rescan saved transactions, or clear findings. Disabling a rule
+only affects later passive processing; configuration edits do not clear existing
+findings. Opening an unloaded legacy session uses normal journal recovery, which
+can reconstruct missing saved findings; these commands add no separate rescan.
+
+```bash
+sniper-cli scanner config get
+sniper-cli scanner custom list --session-id <session-uuid>
+sniper-cli scanner custom get --id example-header
+sniper-cli scanner config set-enabled --enabled false --dry-run
+sniper-cli scanner config set-enabled --enabled false --yes
+sniper-cli scanner builtin set-enabled --id header --enabled false --yes
+sniper-cli scanner custom create --file rule.json --dry-run
+sniper-cli scanner custom create --file rule.json --yes
+printf '%s' '{"enabled":false,"description":""}' | sniper-cli scanner custom update --id example-header --stdin --yes
+sniper-cli scanner custom delete --id example-header --yes
+```
+
+A create input is one complete rule, with an explicit stable ID:
+
+```json
+{
+  "id": "example-header",
+  "name": "Example header marker",
+  "enabled": true,
+  "target": "response_header",
+  "header_name": "X-Example",
+  "pattern": "example-marker",
+  "severity": "info",
+  "category": "example",
+  "description": "Synthetic passive marker."
+}
+```
+
+Targets are `response_body`, `response_header`, and `request_header`; severity is
+`info`, `low`, `medium`, `high`, or `critical`. Patterns must be valid Rust regexes.
+`header_name` defaults to `""`; for header targets this searches all captured
+headers. Body rules inspect the stored preview, which may be truncated. A rule
+field is limited to 64 KiB of UTF-8; a config to 250 custom rules and 4 MiB.
+
+An update input is a nonempty partial rule object without `id`. Omitted fields are
+preserved, `false` disables, and `""` clears optional text. Unknown fields, nulls,
+invalid patterns/targets/severities, blank IDs/names/patterns, and empty patches
+are rejected. Update, get, and delete match the exact ID, never a name or partial
+ID. Create rejects duplicate IDs. Custom rule order and unrelated settings are
+preserved. List/get expose stored patterns and text, which may contain sensitive
+values; review them before sharing output.
+
+Canonical operations are `scanner.config.get`, `scanner.config.set_enabled`,
+`scanner.builtin.set_enabled`, and `scanner.custom.list`, `.get`, `.create`,
+`.update`, `.delete`. For `call`, create takes a nested `rule`; update takes `id`
+and a nested `patch`. Alternatively, either operation takes `file` or
+`stdin: true`, with exactly one source. The outer `--input` also accepts `@file`
+and `-` for stdin; do not use `--input -` and `stdin: true` together.
+
+```bash
+sniper-cli call scanner.config.set_enabled --input '{"enabled":false}' --dry-run
+sniper-cli call scanner.custom.create --input '{"file":"rule.json"}' --yes
+sniper-cli call scanner.custom.update --input '{"id":"example-header","patch":{"enabled":false,"description":""}}' --yes
+sniper-cli schema input scanner.custom.update
+sniper-cli examples scanner.custom.create
+```
+
+All commands are session-scoped. Use `--session-id` (or `session_id` in `call`) to
+select an inactive session without switching it. Otherwise the CLI resolves the
+active session once and pins that ID; writes also guard against an active-session
+switch. Every mutation requires `--yes`. `--dry-run` validates supplied JSON
+before API discovery and remains strictly offline, so it cannot check whether an
+ID exists or whether a saved config has changed.
+
+Writes fetch the selected config and its `config_token`, change only the requested
+part, then compare-and-swap once. A stale config or changed active session returns
+409; a missing API precondition returns 428. Neither conflicts nor failed/lost
+responses are retried automatically. Inspect the current config before a deliberate
+retry. There is no arbitrary full-config overwrite command. Unchanged requests
+return `changed: false` without posting; successful writes return `session_id`,
+`config_token`, `changed`, and `id` when applicable, after the API confirms saving.
+
+Direct API clients must update their write contract: `POST /api/scanner-config`
+now requires complete `enabled`, `rules`, and `custom_rules` fields plus
+`expected_config_token` from the selected session's latest GET. Unguarded legacy
+replacements are rejected. A successful POST returns `200` with snapshot JSON
+instead of the previous `204` empty response. Persisted legacy configurations
+remain readable; the storage format is unchanged.
+
+Direct list/get return the rule array/object. Config get returns the config,
+`session_id`, `config_token`, and builtin ID/name metadata. `call` keeps the normal
+success envelope with the result under `data` and the pinned ID in
+`meta.session_id`. Errors keep the existing JSON error envelope.
+
 All side-effecting commands with `side_effect: "write"` in `sniper-cli manifest` require `--dry-run` or `--yes`.
 
 ```bash

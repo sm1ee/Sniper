@@ -193,6 +193,36 @@ pins the active session once, or reads an explicit `--session-id` without switch
 it. `call` returns the pinned ID in `meta.session_id` for reuse on related reads.
 These commands only read stored data. See the [CLI contract](../../README.md#cli).
 
+## Manage passive scanner configuration
+
+Use `scanner config get`, `scanner custom list`, and `scanner custom get --id <id>`
+to inspect saved settings. Changes use `scanner config set-enabled --enabled
+<true|false>`, `scanner builtin set-enabled --id <id> --enabled <true|false>`, and
+`scanner custom create`, `update`, or `delete`. Mutations require `--yes`;
+`--dry-run` parses and validates input offline before any API discovery.
+
+Create accepts complete rule JSON with a stable `id` via `--file` or `--stdin`.
+Update accepts `--id` and a nonempty partial rule JSON with no `id` field. Omission
+preserves a field; `false` and empty optional text are applied literally. Unknown
+fields and nulls are rejected. Exact IDs are required; other rules and their order
+are retained. Read [the passive scanner CLI contract](../../README.md#passive-scanner-configuration)
+for the rule shape and limits.
+
+The canonical `call` names are `scanner.config.get`, `scanner.config.set_enabled`,
+`scanner.builtin.set_enabled`, `scanner.custom.list`, `scanner.custom.get`,
+`scanner.custom.create`, `scanner.custom.update`, and `scanner.custom.delete`.
+Create takes `rule` (or `file`/`stdin`); update takes `id` and `patch` (or
+`file`/`stdin`). All support `session_id`, including inactive sessions. Omitted
+sessions are resolved once; writes carry both the pinned session guard and the
+fetched configuration token. Conflicts are not retried; inspect the current config
+before any deliberate retry. An unchanged mutation reports `changed: false`
+without a write.
+
+These commands configure passive regex checks of captured body previews and
+headers only. They do not send traffic, run probes, rescan saved traffic, clear
+findings, or replace arbitrary whole configurations. Rule patterns and descriptions
+can themselves contain sensitive text, so review output before sharing it.
+
 ## What the agent sees
 
 `findings list` omits detail and evidence. `findings get` includes stored detail and

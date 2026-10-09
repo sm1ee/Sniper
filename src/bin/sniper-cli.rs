@@ -29,7 +29,11 @@ use sniper::{
         RuntimeSettingsSnapshot, MAX_OAST_POLLING_INTERVAL_SECS, MIN_OAST_POLLING_INTERVAL_SECS,
     },
     runtime_state::{load_runtime_state, remove_runtime_state_if_matches, RuntimeStateSnapshot},
-    scanner::{FindingSummary, ScannerFinding},
+    scanner::{
+        scanner_config_token, validate_custom_rule, validate_scanner_config, CustomRule,
+        FindingSummary, ScannerConfigSnapshot, ScannerFinding, Severity, BUILTIN_RULES,
+        MAX_SCANNER_FIELD_BYTES,
+    },
     sequence::{SequenceDefinition, SequenceRunRecord, SequenceRunSummary},
     session::SessionSummary,
     skills,
@@ -157,6 +161,11 @@ enum Command {
         #[command(subcommand)]
         command: FindingsCommand,
     },
+    /// Manage session-scoped passive regex rules for captured response previews and headers.
+    Scanner {
+        #[command(subcommand)]
+        command: ScannerCommand,
+    },
     /// Read stored session event messages.
     #[command(name = "event-log")]
     EventLog {
@@ -267,6 +276,142 @@ enum FindingsCommand {
     Get(FindingGetArgs),
     /// Count all findings currently retained in the session.
     Count(SessionReadArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ScannerCommand {
+    Config {
+        #[command(subcommand)]
+        command: ScannerConfigCommand,
+    },
+    Builtin {
+        #[command(subcommand)]
+        command: ScannerBuiltinCommand,
+    },
+    Custom {
+        #[command(subcommand)]
+        command: ScannerCustomCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScannerConfigCommand {
+    Get(SessionReadArgs),
+    SetEnabled(ScannerEnabledArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ScannerBuiltinCommand {
+    SetEnabled(ScannerBuiltinEnabledArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ScannerCustomCommand {
+    List(SessionReadArgs),
+    Get(ScannerRuleIdArgs),
+    Create(ScannerCreateArgs),
+    Update(ScannerUpdateArgs),
+    Delete(ScannerRuleIdArgs),
+}
+
+#[derive(Args, Debug)]
+struct ScannerEnabledArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+}
+
+#[derive(Args, Debug)]
+struct ScannerBuiltinEnabledArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    #[arg(long)]
+    id: String,
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+}
+
+#[derive(Args, Debug)]
+struct ScannerRuleIdArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Exact, stable custom rule ID; names and partial IDs are not accepted.
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Args, Debug)]
+#[command(group(ArgGroup::new("rule_source").required(true).args(["file", "stdin"])))]
+struct ScannerCreateArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Complete CustomRule JSON, including its stable id.
+    #[arg(long)]
+    file: Option<PathBuf>,
+    #[arg(long)]
+    stdin: bool,
+    #[arg(skip)]
+    rule: Option<CustomRule>,
+}
+
+#[derive(Args, Debug)]
+#[command(group(ArgGroup::new("patch_source").required(true).args(["file", "stdin"])))]
+struct ScannerUpdateArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    #[arg(long)]
+    id: String,
+    /// Partial CustomRule JSON. Omitted fields are preserved; id cannot be changed.
+    #[arg(long)]
+    file: Option<PathBuf>,
+    #[arg(long)]
+    stdin: bool,
+    #[arg(skip)]
+    patch: Option<ScannerRulePatch>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScannerRulePatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    header_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    severity: Option<Severity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+impl ScannerRulePatch {
+    fn apply(&self, rule: &mut CustomRule) {
+        macro_rules! apply_fields {
+            ($($field:ident),+) => { $(
+                if let Some(value) = &self.$field {
+                    rule.$field = value.clone();
+                }
+            )+ };
+        }
+        apply_fields!(
+            name,
+            enabled,
+            target,
+            header_name,
+            pattern,
+            severity,
+            category,
+            description
+        );
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -1797,6 +1942,7 @@ impl Command {
             Command::Session { command } => command.operation_name(),
             Command::Capture { command } => command.operation_name(),
             Command::Findings { command } => command.operation_name(),
+            Command::Scanner { command } => command.operation_name(),
             Command::EventLog { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
             Command::Replay { command } => command.operation_name(),
@@ -1831,6 +1977,66 @@ impl FindingsCommand {
             Self::Get(_) => "findings.get",
             Self::Count(_) => "findings.count",
         }
+    }
+}
+
+impl ScannerCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Config {
+                command: ScannerConfigCommand::Get(_),
+            } => "scanner.config.get",
+            Self::Config {
+                command: ScannerConfigCommand::SetEnabled(_),
+            } => "scanner.config.set_enabled",
+            Self::Builtin {
+                command: ScannerBuiltinCommand::SetEnabled(_),
+            } => "scanner.builtin.set_enabled",
+            Self::Custom { command } => match command {
+                ScannerCustomCommand::List(_) => "scanner.custom.list",
+                ScannerCustomCommand::Get(_) => "scanner.custom.get",
+                ScannerCustomCommand::Create(_) => "scanner.custom.create",
+                ScannerCustomCommand::Update(_) => "scanner.custom.update",
+                ScannerCustomCommand::Delete(_) => "scanner.custom.delete",
+            },
+        }
+    }
+
+    fn session_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Config {
+                command: ScannerConfigCommand::Get(args),
+            }
+            | Self::Custom {
+                command: ScannerCustomCommand::List(args),
+            } => args.session_id,
+            Self::Config {
+                command: ScannerConfigCommand::SetEnabled(args),
+            } => args.session_id,
+            Self::Builtin {
+                command: ScannerBuiltinCommand::SetEnabled(args),
+            } => args.session_id,
+            Self::Custom {
+                command: ScannerCustomCommand::Get(args) | ScannerCustomCommand::Delete(args),
+            } => args.session_id,
+            Self::Custom {
+                command: ScannerCustomCommand::Create(args),
+            } => args.session_id,
+            Self::Custom {
+                command: ScannerCustomCommand::Update(args),
+            } => args.session_id,
+        }
+    }
+
+    fn is_write(&self) -> bool {
+        !matches!(
+            self,
+            Self::Config {
+                command: ScannerConfigCommand::Get(_)
+            } | Self::Custom {
+                command: ScannerCustomCommand::List(_) | ScannerCustomCommand::Get(_)
+            }
+        )
     }
 }
 
@@ -2628,8 +2834,23 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"provider":"interactsh","url":"https://oast.example","token_stdin":true})],
         ),
     ];
+    operations.extend(scanner_manifest_operations());
     operations.extend(saved_manifest_operations());
     operations
+}
+
+fn scanner_manifest_operations() -> Vec<CliOperationSpec> {
+    use CliSideEffect::{Read, Write};
+    vec![
+        op("scanner.config.get", "scanner config get", "Read one session's passive scanner configuration and builtin metadata.", Read, false, &[], vec![json!({})]),
+        op("scanner.config.set_enabled", "scanner config set-enabled --enabled <true|false>", "Set the session's passive scanner switch with optimistic concurrency. Does not rescan saved traffic.", Write, true, &["enabled"], vec![json!({"enabled":false})]),
+        op("scanner.builtin.set_enabled", "scanner builtin set-enabled --id <rule-id> --enabled <true|false>", "Set one known builtin rule toggle, preserving all other configuration.", Write, true, &["id","enabled"], vec![json!({"id":"header","enabled":false})]),
+        op("scanner.custom.list", "scanner custom list", "List stored custom passive regex rules in saved order.", Read, false, &[], vec![json!({})]),
+        op("scanner.custom.get", "scanner custom get --id <rule-id>", "Read one custom passive rule by exact stable ID.", Read, false, &["id"], vec![json!({"id":"example-header"})]),
+        op("scanner.custom.create", "scanner custom create --file <rule.json>", "Append one complete custom passive rule with an explicit stable ID. Accepts rule, file or stdin as exactly one source.", Write, true, &[], vec![json!({"rule":{"id":"example-header","name":"Example header marker","enabled":true,"target":"response_header","header_name":"X-Example","pattern":"example-marker","severity":"info","category":"example","description":"Synthetic passive marker."}})]),
+        op("scanner.custom.update", "scanner custom update --id <rule-id> --file <patch.json>", "Patch one custom passive rule by exact ID. Omitted fields remain unchanged; accepts patch, file or stdin as exactly one source.", Write, true, &["id"], vec![json!({"id":"example-header","patch":{"enabled":false,"description":""}})]),
+        op("scanner.custom.delete", "scanner custom delete --id <rule-id>", "Delete one custom passive rule by exact ID without clearing existing findings.", Write, true, &["id"], vec![json!({"id":"example-header"})]),
+    ]
 }
 
 fn saved_operation_name(operation: &str) -> Option<&'static str> {
@@ -2681,13 +2902,15 @@ fn op(
         side_effect,
         requires_confirmation: requires_confirmation || side_effect == CliSideEffect::Write,
         input_schema: input_schema(operation, required_fields),
-        output_schema: session_read_output_schema(operation).unwrap_or_else(|| {
-            json!({
-                "type": "object",
-                "additionalProperties": true,
-                "description": "Returned in the envelope data field."
-            })
-        }),
+        output_schema: scanner_output_schema(operation)
+            .or_else(|| session_read_output_schema(operation))
+            .unwrap_or_else(|| {
+                json!({
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Returned in the envelope data field."
+                })
+            }),
         examples,
     }
 }
@@ -2750,6 +2973,9 @@ fn session_read_output_schema(operation: &str) -> Option<Value> {
 }
 
 fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
+    if let Some(schema) = scanner_input_schema(operation, required_fields) {
+        return schema;
+    }
     let mut properties = serde_json::Map::new();
     let fields = call_allowed_fields(operation).unwrap_or(required_fields);
     for field in fields {
@@ -2847,6 +3073,12 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "findings.list" | "event_log.list" => &["session_id", "limit"],
         "findings.get" => &["id", "session_id"],
         "findings.count" => &["session_id"],
+        "scanner.config.get" | "scanner.custom.list" => &["session_id"],
+        "scanner.config.set_enabled" => &["session_id", "enabled"],
+        "scanner.builtin.set_enabled" => &["session_id", "id", "enabled"],
+        "scanner.custom.get" | "scanner.custom.delete" => &["session_id", "id"],
+        "scanner.custom.create" => &["session_id", "rule", "file", "stdin"],
+        "scanner.custom.update" => &["session_id", "id", "patch", "file", "stdin"],
         "capture.http.clear" => &["session_id"],
         "capture.http.select" | "capture.http.delete" => &[
             "session_id",
@@ -3062,6 +3294,7 @@ fn command_input_preview(command: &Command) -> Value {
                 BrowserCommand::Prefer(args) => json!({ "browser": args.browser }),
             },
         },
+        Command::Scanner { command } => scanner_input_preview(command),
         Command::Findings { command } => match command {
             FindingsCommand::List(args) => json!({"session_id":args.session_id,"limit":args.limit}),
             FindingsCommand::Get(args) => json!({"session_id":args.session_id,"id":args.id}),
@@ -3378,6 +3611,7 @@ fn command_api_preview(command: &Command) -> Result<Value> {
                 Some(json!({})),
             ),
         },
+        Command::Scanner { command } => scanner_api_preview(command),
         Command::Findings { command } => findings_api_preview(command),
         Command::EventLog {
             command: EventLogCommand::List(args),
@@ -3805,6 +4039,11 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     if command.requires_confirmation() {
         notes.push("Use --yes to apply this side-effecting operation after reviewing the dry-run.");
     }
+    if matches!(command, Command::Scanner { .. }) {
+        notes.push("Dry-run is offline and validates supplied rule JSON before API discovery. It does not resolve sessions, fetch configuration, apply writes or inspect traffic.");
+        notes.push("An omitted session_id is resolved once and pinned; writes also guard expected_active_session_id. Writes fetch a config_token and compare-and-swap once, preserving unrelated fields and custom rule order. Conflicts are not retried.");
+        notes.push("Passive configuration only: regexes inspect captured response body previews or headers. Configuration changes do not send probes or rescan stored traffic.");
+    }
     if matches!(command, Command::Findings { .. } | Command::EventLog { .. }) {
         notes.push("Dry-run is offline. An omitted session_id is resolved once and pinned before the read; call output includes it in meta.session_id.");
     }
@@ -4113,6 +4352,9 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 },
             }
         }
+        operation if operation.starts_with("scanner.") => Command::Scanner {
+            command: scanner_command_from_input(operation, input)?,
+        },
         "findings.list" => Command::Findings {
             command: FindingsCommand::List(SessionReadListArgs {
                 session_id: call_optional(operation, input, "session_id")?,
@@ -4922,6 +5164,18 @@ fn field_names(fields: &[(&str, bool)]) -> String {
 
 fn command_uses_stdin(command: &Command) -> bool {
     match command {
+        Command::Scanner {
+            command:
+                ScannerCommand::Custom {
+                    command: ScannerCustomCommand::Create(args),
+                },
+        } => args.stdin,
+        Command::Scanner {
+            command:
+                ScannerCommand::Custom {
+                    command: ScannerCustomCommand::Update(args),
+                },
+        } => args.stdin,
         Command::Scope {
             command: TargetCommand::SetScope(args),
         } => args.stdin,
@@ -5023,7 +5277,7 @@ async fn run(cli: Cli) -> Result<()> {
     let api_override = cli.api;
     let dry_run = cli.dry_run;
     let yes = cli.yes;
-    let command = match cli.command {
+    let mut command = match cli.command {
         Command::Call(args) if args.operation.starts_with("saved.v1.") => {
             return run_saved_call(api_override, args, dry_run, yes).await;
         }
@@ -5031,6 +5285,7 @@ async fn run(cli: Cli) -> Result<()> {
         command => command,
     };
 
+    prepare_scanner_command(&mut command)?;
     validate_command_preflight(&command)?;
     if dry_run {
         let plan = dry_run_command(&command)?;
@@ -5109,6 +5364,7 @@ async fn run(cli: Cli) -> Result<()> {
                     CaptureCommand::Oast { command } => handle_oast(api, command).await,
                     CaptureCommand::Browser { command } => handle_browser(api, command).await,
                 },
+                Command::Scanner { command } => handle_scanner(api, command).await,
                 Command::Findings { command } => handle_findings(api, command).await,
                 Command::EventLog { command } => handle_event_log(api, command).await,
                 Command::Scope { command } => handle_target(api, command).await,
@@ -6565,6 +6821,539 @@ async fn pinned_read_session_id(api: &ApiClient, explicit: Option<Uuid>) -> Resu
     resolve_session_id_arg(api, explicit).await?.ok_or_else(|| {
         anyhow!("no active session; pass --session-id to choose a session explicitly")
     })
+}
+
+fn scanner_rule_schema(patch: bool) -> Value {
+    let mut properties = json!({
+        "id":{"type":"string","minLength":1,"pattern":"\\S","description":"Stable exact ID; at most 65536 UTF-8 bytes."},
+        "name":{"type":"string","minLength":1,"pattern":"\\S"},
+        "enabled":{"type":"boolean"},
+        "target":{"type":"string","enum":["response_body","response_header","request_header"]},
+        "header_name":{"type":"string","description":"Header name for header targets; an empty string keeps the existing all-headers behavior."},
+        "pattern":{"type":"string","minLength":1,"pattern":"\\S","description":"Valid Rust regex, applied only to captured body previews or headers."},
+        "severity":{"type":"string","enum":["info","low","medium","high","critical"]},
+        "category":{"type":"string"},
+        "description":{"type":"string"}
+    });
+    for property in properties.as_object_mut().unwrap().values_mut() {
+        if property["type"] == "string" {
+            property["maxLength"] = json!(MAX_SCANNER_FIELD_BYTES);
+        }
+    }
+    let mut schema = json!({"type":"object","additionalProperties":false,"properties":properties});
+    if patch {
+        schema["properties"].as_object_mut().unwrap().remove("id");
+        schema["minProperties"] = json!(1);
+    } else {
+        schema["required"] = json!([
+            "id",
+            "name",
+            "enabled",
+            "target",
+            "pattern",
+            "severity",
+            "category",
+            "description"
+        ]);
+    }
+    schema
+}
+
+fn scanner_input_schema(operation: &str, required: &[&str]) -> Option<Value> {
+    if !operation.starts_with("scanner.") {
+        return None;
+    }
+    let mut properties = serde_json::Map::new();
+    for field in call_allowed_fields(operation)? {
+        let schema = match *field {
+            "session_id" => {
+                json!({"type":["string","null"],"format":"uuid","description":"Explicit session, including inactive sessions; omission pins the active session once."})
+            }
+            "id" if operation == "scanner.builtin.set_enabled" => {
+                json!({"type":"string","enum":BUILTIN_RULES.iter().map(|(id, _)| *id).collect::<Vec<_>>()})
+            }
+            "id" => {
+                json!({"type":"string","minLength":1,"pattern":"\\S","maxLength":MAX_SCANNER_FIELD_BYTES})
+            }
+            "enabled" => json!({"type":"boolean"}),
+            "rule" => scanner_rule_schema(false),
+            "patch" => scanner_rule_schema(true),
+            "file" => {
+                json!({"type":"string","minLength":1,"description":"Path to a UTF-8 JSON rule or patch file."})
+            }
+            "stdin" => {
+                json!({"type":"boolean","description":"Read rule or patch JSON from stdin; cannot be combined with call --input -."})
+            }
+            _ => return None,
+        };
+        properties.insert((*field).into(), schema);
+    }
+    let mut schema = json!({"type":"object","additionalProperties":false,"required":required,"properties":properties});
+    if matches!(operation, "scanner.custom.create" | "scanner.custom.update") {
+        let source = if operation.ends_with(".create") {
+            "rule"
+        } else {
+            "patch"
+        };
+        schema["oneOf"] = json!([
+            {"required":[source],"not":{"anyOf":[{"required":["file"]},{"properties":{"stdin":{"const":true}},"required":["stdin"]}]}},
+            {"required":["file"],"not":{"anyOf":[{"required":[source]},{"properties":{"stdin":{"const":true}},"required":["stdin"]}]}},
+            {"required":["stdin"],"properties":{"stdin":{"const":true}},"not":{"anyOf":[{"required":[source]},{"required":["file"]}]}}
+        ]);
+    }
+    Some(schema)
+}
+
+fn scanner_output_schema(operation: &str) -> Option<Value> {
+    Some(match operation {
+        "scanner.config.get" => json!({
+            "type":"object","required":["session_id","config_token","enabled","rules","custom_rules","builtins"],
+            "properties":{
+                "session_id":{"type":"string","format":"uuid"},
+                "config_token":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                "enabled":{"type":"boolean"},
+                "rules":{"type":"object","additionalProperties":{"type":"boolean"}},
+                "custom_rules":{"type":"array","items":scanner_rule_schema(false)},
+                "builtins":{"type":"array","items":{"type":"object","required":["id","name"],"properties":{"id":{"type":"string"},"name":{"type":"string"}}}}
+            }
+        }),
+        "scanner.custom.list" => json!({"type":"array","items":scanner_rule_schema(false)}),
+        "scanner.custom.get" => scanner_rule_schema(false),
+        "scanner.config.set_enabled"
+        | "scanner.builtin.set_enabled"
+        | "scanner.custom.create"
+        | "scanner.custom.update"
+        | "scanner.custom.delete" => {
+            let mut schema = json!({
+                "type":"object","additionalProperties":false,"required":["session_id","config_token","changed"],
+                "properties":{
+                    "session_id":{"type":"string","format":"uuid"},
+                    "config_token":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                    "changed":{"type":"boolean"},"id":{"type":"string"}
+                }
+            });
+            if operation != "scanner.config.set_enabled" {
+                schema["required"].as_array_mut().unwrap().push(json!("id"));
+            }
+            schema
+        }
+        _ => return None,
+    })
+}
+
+fn scanner_input_preview(command: &ScannerCommand) -> Value {
+    let mut input = json!({"session_id":command.session_id()});
+    match command {
+        ScannerCommand::Config {
+            command: ScannerConfigCommand::SetEnabled(args),
+        } => {
+            input["enabled"] = json!(args.enabled);
+        }
+        ScannerCommand::Builtin {
+            command: ScannerBuiltinCommand::SetEnabled(args),
+        } => {
+            input["id"] = json!(args.id);
+            input["enabled"] = json!(args.enabled);
+        }
+        ScannerCommand::Custom { command } => match command {
+            ScannerCustomCommand::Get(args) | ScannerCustomCommand::Delete(args) => {
+                input["id"] = json!(args.id)
+            }
+            ScannerCustomCommand::Create(args) => input["rule"] = json!(args.rule),
+            ScannerCustomCommand::Update(args) => {
+                input["id"] = json!(args.id);
+                input["patch"] = json!(args.patch);
+            }
+            ScannerCustomCommand::List(_) => (),
+        },
+        _ => (),
+    }
+    input
+}
+
+fn scanner_api_preview(command: &ScannerCommand) -> Value {
+    let read = api_preview(
+        "GET",
+        session_query_path("/api/scanner-config", command.session_id()),
+        None,
+    );
+    if !command.is_write() {
+        return read;
+    }
+    json!({
+        "read":read,
+        "write":{
+            "method":"POST","path":session_query_path("/api/scanner-config", command.session_id()),
+            "body_source":"Fetched enabled/rules/custom_rules with only the requested change; expected_config_token from the pinned GET.",
+            "expected_active_session_id":if command.session_id().is_none() { json!("<resolved active session ID>") } else { Value::Null },
+            "skip_if_unchanged":true,"automatic_retry":false
+        }
+    })
+}
+
+fn scanner_command_from_input(operation: &str, input: &Value) -> Result<ScannerCommand> {
+    // Unlike omission, null is never an instruction to clear a field or source.
+    for (field, value) in input.as_object().expect("call input was validated") {
+        if field != "session_id" && value.is_null() {
+            bail!("field `{field}` for `{operation}` cannot be null");
+        }
+    }
+    let session_id = call_optional(operation, input, "session_id")?;
+    Ok(match operation {
+        "scanner.config.get" => ScannerCommand::Config {
+            command: ScannerConfigCommand::Get(SessionReadArgs { session_id }),
+        },
+        "scanner.config.set_enabled" => ScannerCommand::Config {
+            command: ScannerConfigCommand::SetEnabled(ScannerEnabledArgs {
+                session_id,
+                enabled: call_required(operation, input, "enabled")?,
+            }),
+        },
+        "scanner.builtin.set_enabled" => ScannerCommand::Builtin {
+            command: ScannerBuiltinCommand::SetEnabled(ScannerBuiltinEnabledArgs {
+                session_id,
+                id: call_required(operation, input, "id")?,
+                enabled: call_required(operation, input, "enabled")?,
+            }),
+        },
+        "scanner.custom.list" => ScannerCommand::Custom {
+            command: ScannerCustomCommand::List(SessionReadArgs { session_id }),
+        },
+        "scanner.custom.get" | "scanner.custom.delete" => {
+            let args = ScannerRuleIdArgs {
+                session_id,
+                id: call_required(operation, input, "id")?,
+            };
+            ScannerCommand::Custom {
+                command: if operation.ends_with(".get") {
+                    ScannerCustomCommand::Get(args)
+                } else {
+                    ScannerCustomCommand::Delete(args)
+                },
+            }
+        }
+        "scanner.custom.create" | "scanner.custom.update" => {
+            let create = operation.ends_with(".create");
+            let source = if create { "rule" } else { "patch" };
+            let file: Option<PathBuf> = call_optional_path(operation, input, "file")?;
+            if file
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty())
+            {
+                bail!("field `file` for `{operation}` must be nonempty");
+            }
+            let stdin = call_bool(operation, input, "stdin")?;
+            validate_call_exactly_one(
+                operation,
+                "rule_source",
+                &[
+                    (source, input.get(source).is_some()),
+                    ("file", file.is_some()),
+                    ("stdin", stdin),
+                ],
+            )?;
+            ScannerCommand::Custom {
+                command: if create {
+                    ScannerCustomCommand::Create(ScannerCreateArgs {
+                        session_id,
+                        file,
+                        stdin,
+                        rule: input.get("rule").map(parse_scanner_rule).transpose()?,
+                    })
+                } else {
+                    ScannerCustomCommand::Update(ScannerUpdateArgs {
+                        session_id,
+                        id: call_required(operation, input, "id")?,
+                        file,
+                        stdin,
+                        patch: input.get("patch").map(parse_scanner_patch).transpose()?,
+                    })
+                },
+            }
+        }
+        _ => bail!("unknown operation `{operation}`"),
+    })
+}
+
+fn validate_scanner_rule_id(id: &str) -> Result<()> {
+    if id.trim().is_empty() || id.len() > MAX_SCANNER_FIELD_BYTES {
+        bail!("custom scanner rule id must be nonblank and at most {MAX_SCANNER_FIELD_BYTES} UTF-8 bytes");
+    }
+    Ok(())
+}
+
+fn parse_scanner_rule(input: &Value) -> Result<CustomRule> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| anyhow!("custom scanner rule must be a JSON object"))?;
+    for (field, value) in object {
+        if !matches!(
+            field.as_str(),
+            "id" | "name"
+                | "enabled"
+                | "target"
+                | "header_name"
+                | "pattern"
+                | "severity"
+                | "category"
+                | "description"
+        ) {
+            bail!("invalid custom scanner rule field `{field}`");
+        }
+        if value.is_null() {
+            bail!("custom scanner rule field `{field}` cannot be null");
+        }
+    }
+    let rule: CustomRule = serde_json::from_value(input.clone())
+        .context("failed to parse custom scanner rule JSON")?;
+    validate_custom_rule(&rule).map_err(|message| anyhow!("invalid scanner rule: {message}"))?;
+    Ok(rule)
+}
+
+fn parse_scanner_patch(input: &Value) -> Result<ScannerRulePatch> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| anyhow!("custom scanner rule patch must be a JSON object"))?;
+    if object.is_empty() {
+        bail!("provide at least one custom scanner rule patch field");
+    }
+    for (field, value) in object {
+        if value.is_null() {
+            bail!("custom scanner rule patch field `{field}` cannot be null");
+        }
+    }
+    let patch: ScannerRulePatch = serde_json::from_value(input.clone())
+        .context("failed to parse custom scanner rule patch JSON")?;
+    // Validate the supplied fields offline without requiring unrelated fields
+    // that are intentionally omitted. The merged saved rule is validated again.
+    let mut example = CustomRule {
+        id: "validation-only".into(),
+        name: "Validation".into(),
+        enabled: true,
+        target: "response_body".into(),
+        header_name: String::new(),
+        pattern: "example".into(),
+        severity: Severity::Info,
+        category: String::new(),
+        description: String::new(),
+    };
+    patch.apply(&mut example);
+    validate_custom_rule(&example)
+        .map_err(|message| anyhow!("invalid scanner rule patch: {message}"))?;
+    Ok(patch)
+}
+
+fn prepare_scanner_command(command: &mut Command) -> Result<()> {
+    let Command::Scanner { command } = command else {
+        return Ok(());
+    };
+    match command {
+        ScannerCommand::Builtin {
+            command: ScannerBuiltinCommand::SetEnabled(args),
+        } => {
+            if !BUILTIN_RULES.iter().any(|(id, _)| *id == args.id) {
+                bail!("invalid builtin scanner rule id; use scanner config get for known IDs");
+            }
+        }
+        ScannerCommand::Custom { command } => match command {
+            ScannerCustomCommand::Get(args) | ScannerCustomCommand::Delete(args) => {
+                validate_scanner_rule_id(&args.id)?
+            }
+            ScannerCustomCommand::Create(args) => {
+                if args.rule.is_none() {
+                    let raw = read_text_input(args.file.clone(), args.stdin)?;
+                    let input: Value = serde_json::from_str(&raw)
+                        .context("failed to parse custom scanner rule JSON")?;
+                    args.rule = Some(parse_scanner_rule(&input)?);
+                }
+            }
+            ScannerCustomCommand::Update(args) => {
+                validate_scanner_rule_id(&args.id)?;
+                if args.patch.is_none() {
+                    let raw = read_text_input(args.file.clone(), args.stdin)?;
+                    let input: Value = serde_json::from_str(&raw)
+                        .context("failed to parse custom scanner rule patch JSON")?;
+                    args.patch = Some(parse_scanner_patch(&input)?);
+                }
+            }
+            ScannerCustomCommand::List(_) => (),
+        },
+        _ => (),
+    }
+    Ok(())
+}
+
+fn parse_scanner_snapshot(value: Value, session_id: Uuid) -> Result<ScannerConfigSnapshot> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("scanner config response must be an object"))?;
+    for field in [
+        "session_id",
+        "config_token",
+        "enabled",
+        "rules",
+        "custom_rules",
+    ] {
+        if !object.contains_key(field) {
+            bail!("scanner config response is missing required field `{field}`; refusing to use the snapshot");
+        }
+    }
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "session_id" | "config_token" | "enabled" | "rules" | "custom_rules"
+        ) {
+            bail!("scanner config response contains an unknown field; refusing to discard unsupported settings");
+        }
+    }
+    if let Some(rules) = value["custom_rules"].as_array() {
+        for rule in rules {
+            parse_scanner_rule(rule)?;
+        }
+    }
+    let snapshot: ScannerConfigSnapshot =
+        serde_json::from_value(value).context("failed to parse scanner config snapshot")?;
+    checked_scanner_snapshot(&snapshot, session_id)?;
+    Ok(snapshot)
+}
+
+fn checked_scanner_snapshot(snapshot: &ScannerConfigSnapshot, session_id: Uuid) -> Result<()> {
+    if snapshot.session_id != session_id {
+        bail!("scanner config returned an unexpected session_id; refusing to use the snapshot");
+    }
+    if snapshot.config_token.len() != 64
+        || !snapshot
+            .config_token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        bail!("scanner config must include a valid config_token; refusing to use the snapshot");
+    }
+    if snapshot.config_token != scanner_config_token(session_id, &snapshot.config) {
+        bail!("scanner config returned an unexpected config_token; refusing to use the snapshot");
+    }
+    validate_scanner_config(&snapshot.config)
+        .map_err(|message| anyhow!("invalid stored scanner config: {message}"))?;
+    Ok(())
+}
+
+async fn handle_scanner(api: ApiClient, command: ScannerCommand) -> Result<()> {
+    let explicit_session_id = command.session_id();
+    let session_id = pinned_read_session_id(&api, explicit_session_id).await?;
+    let read_path = session_query_path("/api/scanner-config", Some(session_id));
+    let snapshot = parse_scanner_snapshot(api.get_json(&read_path).await?, session_id)?;
+    match &command {
+        ScannerCommand::Config {
+            command: ScannerConfigCommand::Get(_),
+        } => {
+            let mut output = serde_json::to_value(&snapshot)?;
+            output["builtins"] = json!(BUILTIN_RULES
+                .iter()
+                .map(|(id, name)| json!({"id":id,"name":name}))
+                .collect::<Vec<_>>());
+            return print_session_read_json(&output, session_id);
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::List(_),
+        } => {
+            return print_session_read_json(&snapshot.config.custom_rules, session_id);
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::Get(args),
+        } => {
+            let rule = snapshot
+                .config
+                .custom_rules
+                .iter()
+                .find(|rule| rule.id == args.id)
+                .ok_or_else(|| anyhow!("custom scanner rule id not found in selected session"))?;
+            return print_session_read_json(rule, session_id);
+        }
+        _ => (),
+    }
+    let mut config = snapshot.config.clone();
+    let id = match &command {
+        ScannerCommand::Config {
+            command: ScannerConfigCommand::SetEnabled(args),
+        } => {
+            config.enabled = args.enabled;
+            None
+        }
+        ScannerCommand::Builtin {
+            command: ScannerBuiltinCommand::SetEnabled(args),
+        } => {
+            // A missing builtin toggle already means true; retain that omission
+            // when this request would not change behavior.
+            if config.rules.get(&args.id).copied().unwrap_or(true) != args.enabled {
+                config.rules.insert(args.id.clone(), args.enabled);
+            }
+            Some(args.id.clone())
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::Create(args),
+        } => {
+            let rule = args.rule.as_ref().expect("scanner input prepared");
+            if config
+                .custom_rules
+                .iter()
+                .any(|saved| saved.id.trim() == rule.id.trim())
+            {
+                bail!("invalid custom scanner rule: id already exists; use an exact-ID update");
+            }
+            config.custom_rules.push(rule.clone());
+            Some(rule.id.clone())
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::Update(args),
+        } => {
+            let rule = config
+                .custom_rules
+                .iter_mut()
+                .find(|rule| rule.id == args.id)
+                .ok_or_else(|| anyhow!("custom scanner rule id not found in selected session"))?;
+            args.patch
+                .as_ref()
+                .expect("scanner input prepared")
+                .apply(rule);
+            Some(args.id.clone())
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::Delete(args),
+        } => {
+            let position = config
+                .custom_rules
+                .iter()
+                .position(|rule| rule.id == args.id)
+                .ok_or_else(|| anyhow!("custom scanner rule id not found in selected session"))?;
+            config.custom_rules.remove(position);
+            Some(args.id.clone())
+        }
+        _ => unreachable!("read commands returned above"),
+    };
+    validate_scanner_config(&config)
+        .map_err(|message| anyhow!("invalid scanner config: {message}"))?;
+    let changed = serde_json::to_value(&config)? != serde_json::to_value(&snapshot.config)?;
+    let config_token = if changed {
+        let path = session_query_path_with_expected_active(
+            "/api/scanner-config",
+            Some(session_id),
+            explicit_session_id.is_none().then_some(session_id),
+        );
+        let mut body = serde_json::to_value(&config)?;
+        body["expected_config_token"] = json!(snapshot.config_token);
+        let saved = parse_scanner_snapshot(api.post_json(&path, &body).await?, session_id)?;
+        if serde_json::to_value(&saved.config)? != serde_json::to_value(&config)? {
+            bail!("scanner config save returned unexpected settings; inspect current configuration before retrying");
+        }
+        saved.config_token
+    } else {
+        snapshot.config_token
+    };
+    let mut output = json!({"session_id":session_id,"config_token":config_token,"changed":changed});
+    if let Some(id) = id {
+        output["id"] = json!(id);
+    }
+    print_session_read_json(&output, session_id)
 }
 
 async fn handle_findings(api: ApiClient, command: FindingsCommand) -> Result<()> {
@@ -8921,6 +9710,7 @@ fn cli_parse_error_operation(args: &[String]) -> String {
     }
 
     match tokens.as_slice() {
+        ["scanner", group, action, ..] => format!("scanner.{group}.{}", action.replace('-', "_")),
         ["findings", action, ..] => format!("findings.{action}"),
         ["event-log", action, ..] => format!("event_log.{action}"),
         ["session", action, ..] => format!("session.{action}"),

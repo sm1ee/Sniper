@@ -4692,11 +4692,7 @@ function resetSessionScopedUiState() {
   state.targetScopeDirty = false;
   state.targetScopeEditorSessionId = null;
   state.targetExpandedHosts = new Set();
-  scannerConfigCache = null;
-  scannerSettingsSessionId = null;
-  if (els.scannerSettingsBackdrop) {
-    closeScannerSettings();
-  }
+  resetScannerConfigUiState();
   resetFindingsUiState();
   state.replayTabs = [];
   state.activeReplayTabId = null;
@@ -8428,7 +8424,14 @@ let findingsBadgeRefreshTimer = 0;
 let findingsListRefreshTimer = 0;
 let lastFindingsBadgePollAt = 0;
 let scannerConfigCache = null;
+let scannerConfigStateGeneration = 0;
+let scannerConfigLoadGeneration = 0;
+let scannerConfigSavePending = null;
 let scannerSettingsSessionId = null;
+let scannerSettingsBaseline = null;
+let scannerSettingsGeneration = 0;
+let scannerSettingsSavePending = null;
+let scannerQuickTogglePending = null;
 let findingsSortKey = "found_at";
 let findingsSortDir = "desc";
 const FINDINGS_LIST_LIMIT = 5000;
@@ -9447,69 +9450,144 @@ function handleFindingActionError(error) {
 
 // ── Scanner Settings Modal ──
 
+function resetScannerConfigUiState() {
+  scannerConfigStateGeneration += 1;
+  scannerConfigLoadGeneration += 1;
+  scannerConfigCache = null;
+  scannerConfigSavePending = null;
+  scannerQuickTogglePending = null;
+  closeScannerSettings();
+  if (els.scannerQuickToggle) els.scannerQuickToggle.disabled = false;
+}
+
+function scannerConfigContextIsCurrent(sessionId, generation) {
+  return sessionId === currentSessionId() && generation === scannerConfigStateGeneration;
+}
+
+function scannerConfigSnapshot(config, sessionId) {
+  if (
+    !config || typeof config !== "object" || Array.isArray(config)
+    || config.session_id !== sessionId
+    || typeof config.config_token !== "string" || !config.config_token.trim()
+    || typeof config.enabled !== "boolean"
+    || !config.rules || typeof config.rules !== "object" || Array.isArray(config.rules)
+    || Object.values(config.rules).some((enabled) => typeof enabled !== "boolean")
+    || !Array.isArray(config.custom_rules)
+    || config.custom_rules.some((rule) => (
+      !rule || typeof rule !== "object" || Array.isArray(rule)
+      || typeof rule.enabled !== "boolean"
+      || ["id", "name", "target", "header_name", "pattern", "severity", "category", "description"]
+        .some((field) => typeof rule[field] !== "string")
+      || !rule.id.trim()
+    ))
+  ) {
+    throw new Error("Scanner settings could not be verified. Reopen settings before saving.");
+  }
+  return {
+    session_id: config.session_id,
+    config_token: config.config_token,
+    enabled: config.enabled,
+    rules: { ...config.rules },
+    custom_rules: config.custom_rules.map((rule) => ({ ...rule })),
+  };
+}
+
 async function loadScannerConfig(sessionId = currentSessionId()) {
+  if (!sessionId || sessionId !== currentSessionId()) return null;
+  const stateGeneration = scannerConfigStateGeneration;
+  const loadGeneration = ++scannerConfigLoadGeneration;
   try {
     const res = await fetch(sessionQueryPath("/api/scanner-config", sessionId));
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
     await requireOkResponse(res, "Failed to load scanner settings.");
-    const config = await res.json();
-    if (sessionId !== currentSessionId()) {
-      return null;
-    }
-    scannerConfigCache = config;
-    return scannerConfigCache;
-  } catch (e) {
-    console.error("Failed to load scanner config:", e);
-    showToast(e?.message || "Failed to load scanner settings.", "error");
-    return null;
+    const payload = await res.json();
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    const config = scannerConfigSnapshot(payload, sessionId);
+    if (loadGeneration === scannerConfigLoadGeneration) scannerConfigCache = config;
+    return config;
+  } catch (error) {
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    throw error;
   }
 }
 
-async function saveScannerConfig(config, sessionId = currentSessionId(), options = {}) {
-  if (sessionId !== currentSessionId()) {
-    return false;
+async function saveScannerConfig(config, sessionId, expectedConfigToken) {
+  if (!sessionId || sessionId !== currentSessionId()) return null;
+  if (typeof expectedConfigToken !== "string" || !expectedConfigToken.trim()) {
+    throw new Error("Scanner settings version is missing. Reopen settings before saving.");
   }
-  if (options.preserveEnabled) {
-    const latestResponse = await fetch(sessionQueryPath("/api/scanner-config", sessionId));
-    await requireOkResponse(latestResponse, "Failed to load scanner settings.");
-    const latestConfig = await latestResponse.json();
-    if (sessionId !== currentSessionId()) {
-      return false;
+  if (scannerConfigSavePending) {
+    throw new Error("Scanner settings are already being saved. Wait for that save and try again.");
+  }
+  const stateGeneration = scannerConfigStateGeneration;
+  const pending = {};
+  scannerConfigSavePending = pending;
+  scannerConfigLoadGeneration += 1;
+  try {
+    const res = await fetch(sessionWritePath("/api/scanner-config", sessionId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: config.enabled,
+        rules: config.rules,
+        custom_rules: config.custom_rules,
+        expected_config_token: expectedConfigToken,
+      }),
+    });
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    if (res.status === 409) {
+      throw new Error("Scanner settings changed elsewhere. Reopen settings and reapply your changes before saving.");
     }
-    config.enabled = latestConfig.enabled !== false;
+    if (res.status === 428) {
+      throw new Error("Scanner settings version is missing. Reopen settings before saving.");
+    }
+    await requireOkResponse(res, "Failed to save scanner settings.");
+    const payload = await res.json();
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    const saved = scannerConfigSnapshot(payload, sessionId);
+    // A read started before this acknowledgement may still carry the old token.
+    scannerConfigLoadGeneration += 1;
+    scannerConfigCache = saved;
+    return saved;
+  } catch (error) {
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    throw error;
+  } finally {
+    if (scannerConfigSavePending === pending) scannerConfigSavePending = null;
   }
-  const res = await fetch(sessionWritePath("/api/scanner-config", sessionId), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config),
-  });
-  await requireOkResponse(res, "Failed to save scanner settings.");
-  if (sessionId !== currentSessionId()) {
-    return false;
-  }
-  scannerConfigCache = config;
-  return true;
 }
 
 async function openScannerSettings() {
   const sessionId = currentSessionId();
-  const config = await loadScannerConfig(sessionId);
-  if (!config || sessionId !== currentSessionId()) return;
-  scannerSettingsSessionId = sessionId;
+  if (scannerSettingsBaseline && scannerSettingsSessionId === sessionId) return;
+  const stateGeneration = scannerConfigStateGeneration;
+  const generation = ++scannerSettingsGeneration;
+  const isCurrent = () => generation === scannerSettingsGeneration
+    && scannerConfigContextIsCurrent(sessionId, stateGeneration);
+  try {
+    const config = await loadScannerConfig(sessionId);
+    if (!config || !isCurrent()) return;
+    scannerSettingsSessionId = sessionId;
+    // The editor's read version must not follow later cache refreshes or toggles.
+    scannerSettingsBaseline = scannerConfigSnapshot(config, sessionId);
 
-  // Render built-in rules
-  els.scannerBuiltinRules.innerHTML = Object.entries(BUILTIN_RULE_LABELS)
-    .map(([id, label]) => {
-      const checked = config.rules[id] !== false ? "checked" : "";
-      return `<div class="scanner-rule-item">
-        <label><input type="checkbox" data-rule-id="${id}" ${checked} /> ${escapeHtml(label)}</label>
-      </div>`;
-    })
-    .join("");
+    // Render built-in rules
+    els.scannerBuiltinRules.innerHTML = Object.entries(BUILTIN_RULE_LABELS)
+      .map(([id, label]) => {
+        const checked = config.rules[id] !== false ? "checked" : "";
+        return `<div class="scanner-rule-item">
+          <label><input type="checkbox" data-rule-id="${id}" ${checked} /> ${escapeHtml(label)}</label>
+        </div>`;
+      })
+      .join("");
 
-  // Render custom rules
-  renderCustomRulesEditor(config.custom_rules || []);
-
-  els.scannerSettingsBackdrop.classList.remove("hidden");
+    renderCustomRulesEditor(config.custom_rules);
+    els.scannerSettingsBackdrop.classList.remove("hidden");
+  } catch (error) {
+    if (!isCurrent()) return;
+    console.error(error);
+    showToast(error?.message || "Failed to load scanner settings.", "error");
+  }
 }
 
 function renderCustomRulesEditor(customRules) {
@@ -9572,52 +9650,124 @@ function collectCustomRulesFromEditor() {
 }
 
 function customRuleId(value) {
-  const id = String(value || "").trim();
-  if (id) return id;
+  const id = String(value || "");
+  if (id.trim()) return id;
   return `custom_${generateUuid()}`;
 }
 
 function collectScannerConfig() {
-  const rules = {};
+  const rules = { ...scannerSettingsBaseline.rules };
   els.scannerBuiltinRules.querySelectorAll("input[data-rule-id]").forEach((input) => {
     rules[input.dataset.ruleId] = input.checked;
   });
   return {
-    enabled: els.scannerQuickToggle ? els.scannerQuickToggle.checked : true,
+    enabled: scannerSettingsBaseline.enabled,
     rules,
     custom_rules: collectCustomRulesFromEditor(),
   };
 }
 
 function closeScannerSettings() {
+  scannerSettingsGeneration += 1;
   scannerSettingsSessionId = null;
+  scannerSettingsBaseline = null;
+  scannerSettingsSavePending = null;
   if (els.scannerSettingsBackdrop) {
     els.scannerSettingsBackdrop.classList.add("hidden");
   }
 }
 
 async function saveScannerSettingsFromModal() {
+  if (scannerSettingsSavePending) return;
   const sessionId = scannerSettingsSessionId;
-  if (!sessionId || sessionId !== currentSessionId()) {
+  const baseline = scannerSettingsBaseline;
+  if (!baseline || !sessionId || sessionId !== currentSessionId()) {
+    showToast("Scanner settings changed sessions or were not loaded. Reopen settings before saving.", "error");
+    return;
+  }
+  const stateGeneration = scannerConfigStateGeneration;
+  const generation = scannerSettingsGeneration;
+  const pending = {};
+  scannerSettingsSavePending = pending;
+  const isCurrent = () => generation === scannerSettingsGeneration
+    && scannerConfigContextIsCurrent(sessionId, stateGeneration);
+  try {
+    const config = collectScannerConfig();
+    const saved = await saveScannerConfig(config, sessionId, baseline.config_token);
+    if (!saved || !isCurrent()) return;
+    syncQuickToggle(saved.enabled);
+    if (JSON.stringify(collectScannerConfig()) !== JSON.stringify(config)) {
+      // Editing can continue while the request is pending; retain those changes.
+      scannerSettingsBaseline = scannerConfigSnapshot(saved, sessionId);
+      showToast("Scanner settings saved. Your newer edits are still here; save again to apply them.");
+      return;
+    }
     closeScannerSettings();
-    showToast("Scanner settings changed sessions. Reopen settings and save again.", "error");
-    return;
+    showToast("Scanner settings saved");
+  } catch (error) {
+    if (!isCurrent()) return;
+    console.error(error);
+    showToast(`${error?.message || "Failed to save scanner settings."} Your draft is still here.`, "error");
+  } finally {
+    if (scannerSettingsSavePending === pending) scannerSettingsSavePending = null;
   }
-  const config = collectScannerConfig();
-  if (!(await saveScannerConfig(config, sessionId, { preserveEnabled: true }))) {
-    return;
-  }
-  syncQuickToggle(config.enabled);
-  closeScannerSettings();
-  showToast("Scanner settings saved");
 }
 
 async function refreshScannerQuickToggle() {
   if (!els.scannerQuickToggle) return;
   const sessionId = currentSessionId();
-  const config = await loadScannerConfig(sessionId);
-  if (config && sessionId === currentSessionId()) {
-    syncQuickToggle(config.enabled);
+  const stateGeneration = scannerConfigStateGeneration;
+  const loading = loadScannerConfig(sessionId);
+  const loadGeneration = scannerConfigLoadGeneration;
+  try {
+    const config = await loading;
+    if (config && scannerConfigContextIsCurrent(sessionId, stateGeneration)
+      && scannerConfigCache === config && !scannerQuickTogglePending && !scannerConfigSavePending) {
+      syncQuickToggle(config.enabled);
+    }
+  } catch (error) {
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)
+      || loadGeneration !== scannerConfigLoadGeneration || scannerQuickTogglePending) return;
+    console.error(error);
+    showToast(error?.message || "Failed to load scanner settings.", "error");
+  }
+}
+
+async function saveScannerQuickToggle() {
+  if (scannerQuickTogglePending) {
+    syncQuickToggle(scannerQuickTogglePending.enabled);
+    return;
+  }
+  const enabled = els.scannerQuickToggle.checked;
+  const sessionId = currentSessionId();
+  if (!sessionId) {
+    syncQuickToggle(!enabled);
+    showToast("Select a session before changing scanner settings.", "error");
+    return;
+  }
+  const stateGeneration = scannerConfigStateGeneration;
+  const pending = { enabled };
+  scannerQuickTogglePending = pending;
+  const isCurrent = () => scannerQuickTogglePending === pending
+    && scannerConfigContextIsCurrent(sessionId, stateGeneration);
+  let previousEnabled = scannerConfigCache?.session_id === sessionId ? scannerConfigCache.enabled : !enabled;
+  els.scannerQuickToggle.disabled = true;
+  try {
+    const config = await loadScannerConfig(sessionId);
+    if (!config || !isCurrent()) return;
+    previousEnabled = config.enabled;
+    const saved = await saveScannerConfig({ ...config, enabled }, sessionId, config.config_token);
+    if (saved && isCurrent()) syncQuickToggle(saved.enabled);
+  } catch (error) {
+    if (!isCurrent()) return;
+    console.error(error);
+    showToast(error?.message || "Failed to save scanner settings.", "error");
+    syncQuickToggle(previousEnabled);
+  } finally {
+    if (scannerQuickTogglePending === pending) {
+      scannerQuickTogglePending = null;
+      els.scannerQuickToggle.disabled = false;
+    }
   }
 }
 
@@ -10007,32 +10157,7 @@ function bindFindingsEvents() {
 
   // Quick toggle (on/off in toolbar)
   if (els.scannerQuickToggle) {
-    els.scannerQuickToggle.addEventListener("change", async () => {
-      const enabled = els.scannerQuickToggle.checked;
-      const sessionId = currentSessionId();
-      els.scannerQuickToggle.disabled = true;
-      try {
-        const config = await loadScannerConfig(sessionId);
-        if (sessionId !== currentSessionId()) {
-          return;
-        }
-        if (!config) {
-          syncQuickToggle(!enabled);
-          return;
-        }
-        config.enabled = enabled;
-        if (!(await saveScannerConfig(config, sessionId))) {
-          return;
-        }
-        syncQuickToggle(enabled);
-      } catch (error) {
-        console.error(error);
-        showToast(error?.message || "Failed to save scanner settings.", "error");
-        syncQuickToggle(!enabled);
-      } finally {
-        els.scannerQuickToggle.disabled = false;
-      }
-    });
+    els.scannerQuickToggle.addEventListener("change", () => saveScannerQuickToggle());
     // Sync initial state from server
     refreshScannerQuickToggle();
   }
@@ -10048,17 +10173,13 @@ function bindFindingsEvents() {
     els.scannerSettingsCancel.addEventListener("click", () => closeScannerSettings());
   }
   if (els.scannerSettingsSave) {
-    onClickWithProgress(els.scannerSettingsSave, () =>
-      saveScannerSettingsFromModal().catch((error) => {
-        console.error(error);
-        showToast(error?.message || "Failed to save scanner settings.", "error");
-      }));
+    onClickWithProgress(els.scannerSettingsSave, () => saveScannerSettingsFromModal());
   }
   if (els.scannerAddCustomRule) {
     els.scannerAddCustomRule.addEventListener("click", () => {
       const rules = collectCustomRulesFromEditor();
       rules.push({
-        id: `custom_${Date.now()}`,
+        id: customRuleId(),
         enabled: true,
         name: "",
         target: "response_body",
