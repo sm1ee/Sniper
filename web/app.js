@@ -7654,13 +7654,23 @@ function flushTransactionDeltas() {
     return;
   }
 
+  // Only the newest summary per record counts: a streamed response is listed when
+  // it starts and changes when its body finishes, often within one flush.
+  const latest = new Map();
+  for (const { summary } of pending) {
+    if (summary?.id) latest.set(summary.id, summary);
+  }
   const fresh = [];
-  const seenIds = new Set();
   let totalAdded = 0;
   let hiddenConnectAdded = 0;
-  for (const { summary } of pending) {
-    if (!summary?.id || seenIds.has(summary.id) || getHistoryItem(summary.id)) continue;
-    seenIds.add(summary.id);
+  let updated = 0;
+  for (const summary of latest.values()) {
+    const existing = getHistoryItem(summary.id);
+    if (existing) {
+      applyLiveSummaryUpdate(existing, summary);
+      updated += 1;
+      continue;
+    }
     totalAdded += 1;
     if (String(summary.method || "").toUpperCase() === "CONNECT") {
       if (summaryMatchesActiveHistoryFilters(summary, { includeConnect: true })) hiddenConnectAdded += 1;
@@ -7687,10 +7697,42 @@ function flushTransactionDeltas() {
     }
     state.historyPaging.offset = state.items.length;
   }
-  if (totalAdded || added) {
+  if (updated) {
+    state._itemsVersion += 1;
+    invalidateVisibleEntriesCache();
+    resortLoadedHistoryItemsForCurrentSort();
+    // The inspector may be showing the record as it was when it was listed.
+    const selectedId = state.selectedId;
+    if (selectedId && latest.has(selectedId) && !canReuseSelectedHistoryRecord(selectedId)) {
+      loadTransactionDetail(selectedId).catch((error) => console.error(error));
+    }
+  }
+  if (totalAdded || added || updated) {
     state.historyDirty = false;
     renderHistory();
   }
+}
+
+// A summary for a row already listed means its record changed after it was
+// listed, most often a streamed response finishing. Dropping it left the row on
+// "0 B" and the streaming note for good. Only the record's own fields are taken:
+// annotations have their own save and acknowledgement path, which an event
+// racing an edit must not undo. A cleared field is omitted from a summary rather
+// than sent as null, so the system-note preview is reset, not merged.
+function applyLiveSummaryUpdate(item, summary) {
+  const {
+    color_tag: _colorTag,
+    has_user_note: _hasUserNote,
+    annotation_revision: _annotationRevision,
+    note_preview: notePreview,
+    header_search_text: headerSearchText,
+    ...record
+  } = summary;
+  Object.assign(item, record);
+  if (!item.has_user_note) item.note_preview = notePreview ?? null;
+  // Absent when the subscriber did not ask for header text, not only when empty.
+  if (headerSearchText) item.header_search_text = headerSearchText;
+  prepareHistoryItem(item);
 }
 
 function summaryMatchesActiveHistoryFilters(item, options = {}) {
