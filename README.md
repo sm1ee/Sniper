@@ -159,7 +159,7 @@ Session → Scope → Capture → Replay → Fuzz
 
 - **Session** — isolated workspaces with their own records and state
 - **Scope** — define target domains/paths, auto-filter traffic
-- **Capture** — inspect HTTP, intercept & modify, WebSocket frames, auto-replace
+- **Capture** — inspect HTTP, render HTML responses in a sandbox, intercept & modify, WebSocket frames, auto-replace
 - **Findings** — passive scanner detects sensitive data leaks, CORS misconfig, missing security headers, JWT weaknesses
 - **Replay** — resend with modifications, override host/port
 - **Fuzzer** — insert markers, run payload lists

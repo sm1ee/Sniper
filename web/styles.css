@@ -2770,6 +2770,39 @@ body.pane-resizing-y {
   border-bottom: none;
 }
 
+/* Render replaces the response editor's shell rather than sitting inside it: the
+   shell's grid keeps the editor full width only while it is the only child. */
+.render-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.render-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  /* A page that sets no background expects white, which the UI behind it is not. */
+  background: #fff;
+}
+
+.render-note {
+  margin: 0;
+  padding: 14px;
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+
+.render-banner {
+  margin: 0;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--warning);
+  font-size: 12px;
+}
+
 .empty-copy,
 #notesCard p {
   margin: 0;

@@ -446,6 +446,8 @@ const state = {
     request: "pretty",
     response: "pretty",
   },
+  // What the Render view last drew, so a repaint does not reload the frame.
+  responseRenderKey: null,
   showOriginal: {
     request: false,
     response: false,
@@ -686,6 +688,7 @@ const els = {
   responseLines: document.getElementById("responseLines"),
   requestViewCM: document.getElementById("requestViewCM"),
   responseViewCM: document.getElementById("responseViewCM"),
+  responseRenderView: document.getElementById("responseRenderView"),
   requestSearchInput: document.getElementById("requestSearchInput"),
   responseSearchInput: document.getElementById("responseSearchInput"),
   requestSearchMeta: document.getElementById("requestSearchMeta"),
@@ -11214,6 +11217,105 @@ function renderMessagePanes() {
   els.responseSearchMeta.innerHTML = responsePane
     ? buildSearchMeta(responsePane.lineCount, state.messageViews.response, responsePane.matchCount)
     : buildSearchMeta(0, state.messageViews.response, 0);
+  renderResponseRenderView(responseRecord, resMode === "render", detailLoading);
+}
+
+// Render: the selected response's HTML in a sandboxed frame. It takes the place
+// of the editor's shell instead of sitting inside it, whose grid keeps the editor
+// full width only while the editor is the shell's only child.
+function renderResponseRenderView(record, active, loading) {
+  const view = els.responseRenderView;
+  if (!view) return;
+  els.responseViewCM?.closest(".editor-shell")?.classList.toggle("hidden", active);
+  view.classList.toggle("hidden", !active);
+  // Search runs over the editor's text, which Render hides.
+  els.responseSearchInput.disabled = active;
+  if (!active) {
+    if (state.responseRenderKey !== null) {
+      view.replaceChildren();
+      state.responseRenderKey = null;
+    }
+    return;
+  }
+  const response = record?.response || null;
+  const key = record
+    ? `${record.id}:${state.showOriginal.response}:${response?.body_size}:${response?.body_preview?.length}`
+    : `none:${loading}`;
+  if (state.responseRenderKey === key) return;
+  state.responseRenderKey = key;
+
+  const model = record
+    ? responseRenderModel(response)
+    : { note: loading ? "Loading response details." : "No response selected." };
+  if (model.note) {
+    const note = document.createElement("p");
+    note.className = "render-note";
+    note.textContent = model.note;
+    view.replaceChildren(note);
+    return;
+  }
+  const frame = document.createElement("iframe");
+  frame.className = "render-frame";
+  frame.title = "Rendered response";
+  // No allow-* flags: no scripts, no forms, no popups, no same-origin access.
+  frame.setAttribute("sandbox", "");
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  frame.srcdoc = sandboxedResponseDocument(model.html);
+  const children = [frame];
+  if (model.truncated) {
+    const banner = document.createElement("p");
+    banner.className = "render-banner";
+    banner.textContent = "The body was cut at the preview limit, so the page may be incomplete.";
+    children.unshift(banner);
+  }
+  view.replaceChildren(...children);
+}
+
+// What Render shows for a response: HTML to draw, or why there is none. Pure so
+// it can be tested without a DOM.
+function responseRenderModel(response) {
+  if (!response) {
+    return { note: "This request has no response to render." };
+  }
+  const mime = String(response.content_type || "").split(";")[0].trim().toLowerCase();
+  if (mime !== "text/html" && mime !== "application/xhtml+xml") {
+    return { note: `Render draws HTML responses. This one is ${mime || "untyped"}.` };
+  }
+  if (response.body_encoding === "base64") {
+    return { note: "This HTML body is binary, so it cannot be rendered." };
+  }
+  if (!response.body_preview) {
+    return { note: "This response has no body to render." };
+  }
+  return { html: response.body_preview, truncated: Boolean(response.preview_truncated) };
+}
+
+// Captured HTML must never run with Sniper's privileges or reach the network.
+// It is parsed inert (DOMParser runs no script and fetches nothing), stripped of
+// what could still navigate or fetch outside CSP's reach, and given a CSP that
+// blocks every fetch, including relative URLs, which would resolve against
+// Sniper's own API. The frame's sandbox then blocks scripts, forms and popups.
+const RESPONSE_RENDER_CSP = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'";
+
+function sandboxedResponseDocument(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  // <link> covers prefetch and preconnect, which CSP does not govern everywhere;
+  // <meta http-equiv> covers refresh; <base> would retarget what remains.
+  for (const element of doc.querySelectorAll("script, link, base, meta[http-equiv], iframe, frame, object, embed")) {
+    element.remove();
+  }
+  // The sandbox still lets a clicked link navigate the frame itself.
+  for (const link of doc.querySelectorAll("a, area")) {
+    link.removeAttribute("href");
+    link.removeAttribute("xlink:href");
+  }
+  const policy = doc.createElement("meta");
+  policy.httpEquiv = "Content-Security-Policy";
+  policy.content = RESPONSE_RENDER_CSP;
+  doc.head.prepend(policy);
+  // Keep the page's doctype, and with it standards or quirks mode.
+  const doctype = doc.doctype ? new XMLSerializer().serializeToString(doc.doctype) : "";
+  return doctype + doc.documentElement.outerHTML;
 }
 
 function updateMessagePaneSearch(target) {
