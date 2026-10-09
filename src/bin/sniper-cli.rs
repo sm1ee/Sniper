@@ -8127,13 +8127,18 @@ fn normalize_target_inputs(
             );
         }
     }
+    // A new scheme drops the request's port only when that port was the old
+    // scheme's default: example.com:443 over http means 80, but localhost:18891
+    // means 18891 whatever the scheme. A raw request names no scheme at all, so
+    // its guessed https made `--scheme http` throw an explicit Host port away.
+    // `replay_update_should_preserve_current_port` applies the same rule.
+    let inherited_port = fallback_explicit_port.filter(|port| {
+        !scheme_changed_from_fallback
+            || *port != default_port_for_scheme(&fallback_scheme).to_string()
+    });
     let port = requested_port
         .or(parsed_host_port)
-        .or_else(|| {
-            (!host_url_without_port && !scheme_changed_from_fallback)
-                .then_some(fallback_explicit_port)
-                .flatten()
-        })
+        .or_else(|| (!host_url_without_port).then_some(inherited_port).flatten())
         .unwrap_or_else(|| default_port_for_scheme(&scheme).to_string());
 
     Ok(NormalizedTarget { scheme, host, port })
@@ -11702,6 +11707,23 @@ mod tests {
         assert_eq!(target.scheme, "http");
         assert_eq!(target.host, "example.com");
         assert_eq!(target.port, "80");
+
+        // A port that is not the old scheme's default is kept: it names the
+        // service, not the protocol. This is a raw request's `Host:` line.
+        let fallback_with_service_port = EditableRequest {
+            host: "localhost:18891".to_string(),
+            ..fallback.clone()
+        };
+        let target = normalize_target_inputs(
+            Some("http".to_string()),
+            None,
+            None,
+            Some(&fallback_with_service_port),
+        )
+        .unwrap();
+        assert_eq!(target.scheme, "http");
+        assert_eq!(target.host, "localhost");
+        assert_eq!(target.port, "18891");
 
         let target = normalize_target_inputs(
             None,
