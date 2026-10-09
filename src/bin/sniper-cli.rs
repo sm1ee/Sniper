@@ -13,6 +13,7 @@ use reqwest::{Method, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sniper::{
+    event_log::EventLogEntry,
     fuzzer::FuzzerAttackRecord,
     history_selection::HistorySelection,
     intercept::{
@@ -28,6 +29,7 @@ use sniper::{
         RuntimeSettingsSnapshot, MAX_OAST_POLLING_INTERVAL_SECS, MIN_OAST_POLLING_INTERVAL_SECS,
     },
     runtime_state::{load_runtime_state, remove_runtime_state_if_matches, RuntimeStateSnapshot},
+    scanner::{FindingSummary, ScannerFinding},
     sequence::{SequenceDefinition, SequenceRunRecord, SequenceRunSummary},
     session::SessionSummary,
     skills,
@@ -39,6 +41,7 @@ use sniper::{
 use url::Url;
 use uuid::Uuid;
 
+const DEFAULT_READ_LIST_LIMIT: usize = 100;
 const CLI_REPEATER_HISTORY_LIMIT: usize = 30;
 const DEFAULT_WEBSOCKET_DETAIL_FRAME_LIMIT: usize = 1_000;
 const MAX_WEBSOCKET_DETAIL_FRAME_LIMIT: usize = 1_000;
@@ -149,6 +152,17 @@ enum Command {
         #[command(subcommand)]
         command: CaptureCommand,
     },
+    /// Read stored passive findings; list summaries before opening sensitive evidence.
+    Findings {
+        #[command(subcommand)]
+        command: FindingsCommand,
+    },
+    /// Read stored session event messages.
+    #[command(name = "event-log")]
+    EventLog {
+        #[command(subcommand)]
+        command: EventLogCommand,
+    },
     #[command(name = "scope", visible_alias = "target")]
     Scope {
         #[command(subcommand)]
@@ -243,6 +257,53 @@ enum CaptureCommand {
         #[command(subcommand)]
         command: BrowserCommand,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum FindingsCommand {
+    /// List newest stored summaries, without detail, evidence, or captured bodies.
+    List(SessionReadListArgs),
+    /// Read one stored finding, including potentially sensitive detail and evidence.
+    Get(FindingGetArgs),
+    /// Count all findings currently retained in the session.
+    Count(SessionReadArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum EventLogCommand {
+    /// List newest stored event messages; messages can contain sensitive metadata.
+    List(SessionReadListArgs),
+}
+
+#[derive(Args, Debug)]
+struct SessionReadArgs {
+    /// Read this session without switching it; otherwise pin the active session.
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct SessionReadListArgs {
+    /// Read this session without switching it; otherwise pin the active session.
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Maximum newest entries to return. No offset or cursor pagination is available.
+    #[arg(long, default_value_t = DEFAULT_READ_LIST_LIMIT, value_parser = parse_nonzero_usize)]
+    limit: usize,
+}
+
+#[derive(Args, Debug)]
+struct FindingGetArgs {
+    #[arg(long)]
+    id: Uuid,
+    /// Read this session without switching it; otherwise pin the active session.
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FindingsCount {
+    count: usize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1735,6 +1796,8 @@ impl Command {
             Command::Call(args) => saved_operation_name(&args.operation).unwrap_or("call"),
             Command::Session { command } => command.operation_name(),
             Command::Capture { command } => command.operation_name(),
+            Command::Findings { command } => command.operation_name(),
+            Command::EventLog { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
             Command::Replay { command } => command.operation_name(),
             Command::Fuzzer { command } => command.operation_name(),
@@ -1757,6 +1820,24 @@ impl Command {
         match self {
             Command::Call(args) => args.operation.clone(),
             _ => self.operation_name().to_string(),
+        }
+    }
+}
+
+impl FindingsCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::List(_) => "findings.list",
+            Self::Get(_) => "findings.get",
+            Self::Count(_) => "findings.count",
+        }
+    }
+}
+
+impl EventLogCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::List(_) => "event_log.list",
         }
     }
 }
@@ -2024,6 +2105,26 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &["id"],
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "findings.list", "findings list",
+            "List newest stored finding summaries without detail, evidence or captured bodies. Defaults to 100; limit-only, not cursor pagination. Omitted session_id pins the active session.",
+            Read, false, &[], vec![json!({"limit":20})],
+        ),
+        op(
+            "findings.get", "findings get --id <uuid>",
+            "Read one stored finding, including potentially sensitive detail and evidence. Does not fetch its linked captured transaction or send traffic. Omitted session_id pins the active session.",
+            Read, false, &["id"], vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "findings.count", "findings count",
+            "Count findings currently retained in one session. Omitted session_id pins the active session.",
+            Read, false, &[], vec![json!({})],
+        ),
+        op(
+            "event_log.list", "event-log list",
+            "List newest stored session event messages, which can contain sensitive metadata. Defaults to 100; limit-only, not cursor pagination. Omitted session_id pins the active session.",
+            Read, false, &[], vec![json!({"limit":20})],
         ),
         op(
             "capture.browser.list",
@@ -2580,13 +2681,72 @@ fn op(
         side_effect,
         requires_confirmation: requires_confirmation || side_effect == CliSideEffect::Write,
         input_schema: input_schema(operation, required_fields),
-        output_schema: json!({
-            "type": "object",
-            "additionalProperties": true,
-            "description": "Returned in the envelope data field."
+        output_schema: session_read_output_schema(operation).unwrap_or_else(|| {
+            json!({
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Returned in the envelope data field."
+            })
         }),
         examples,
     }
+}
+
+fn session_read_output_schema(operation: &str) -> Option<Value> {
+    if !matches!(
+        operation,
+        "findings.list" | "findings.get" | "findings.count" | "event_log.list"
+    ) {
+        return None;
+    }
+    let mut finding = json!({
+        "type":"object",
+        "required":["id","record_id","found_at","severity","category","title","host","path"],
+        "properties":{
+            "id":{"type":"string","format":"uuid"},
+            "record_id":{"type":"string","format":"uuid"},
+            "found_at":{"type":"string","format":"date-time"},
+            "rule_id":{"type":"string"},
+            "severity":{"type":"string","enum":["info","low","medium","high","critical"]},
+            "category":{"type":"string"}, "title":{"type":"string"},
+            "host":{"type":"string"}, "path":{"type":"string"},
+            "location":{
+                "type":"object","required":["side"],
+                "properties":{
+                    "side":{"type":"string"}, "section":{"type":"string"},
+                    "line":{"type":"integer","minimum":0}
+                }
+            }
+        }
+    });
+    Some(match operation {
+        "findings.list" => json!({"type":"array","items":finding}),
+        "findings.get" => {
+            finding["required"]
+                .as_array_mut()?
+                .extend([json!("detail"), json!("evidence")]);
+            finding["properties"]["detail"] = json!({"type":"string"});
+            finding["properties"]["evidence"] = json!({"type":"string"});
+            finding
+        }
+        "findings.count" => json!({
+            "type":"object","required":["count"],
+            "properties":{"count":{"type":"integer","minimum":0}}
+        }),
+        "event_log.list" => json!({
+            "type":"array","items":{
+                "type":"object","required":["id","captured_at","level","source","title","message"],
+                "properties":{
+                    "id":{"type":"string","format":"uuid"},
+                    "captured_at":{"type":"string","format":"date-time"},
+                    "level":{"type":"string","enum":["info","warn","error"]},
+                    "source":{"type":"string"}, "title":{"type":"string"},
+                    "message":{"type":"string"}
+                }
+            }
+        }),
+        _ => return None,
+    })
 }
 
 fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
@@ -2599,6 +2759,21 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
                 "description": format!("CLI argument `{field}`"),
             }),
         );
+    }
+    if session_read_output_schema(operation).is_some() {
+        properties.insert("session_id".into(), json!({
+            "type":["string","null"],"format":"uuid",
+            "description":"Read this session without switching it; omitted or null pins the active session."
+        }));
+        if properties.contains_key("id") {
+            properties.insert("id".into(), json!({"type":"string","format":"uuid"}));
+        }
+        if properties.contains_key("limit") {
+            properties.insert("limit".into(), json!({
+                "type":["integer","null"],"minimum":1,"default":DEFAULT_READ_LIST_LIMIT,
+                "description":"Maximum newest retained entries. Null uses the default. No offset or cursor pagination."
+            }));
+        }
     }
     if matches!(
         operation,
@@ -2669,6 +2844,9 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "skills.install" => &["codex", "claude", "all", "codex_dir", "claude_dir"],
         "session.create" => &["name"],
         "session.rename" => &["id", "name"],
+        "findings.list" | "event_log.list" => &["session_id", "limit"],
+        "findings.get" => &["id", "session_id"],
+        "findings.count" => &["session_id"],
         "capture.http.clear" => &["session_id"],
         "capture.http.select" | "capture.http.delete" => &[
             "session_id",
@@ -2884,6 +3062,16 @@ fn command_input_preview(command: &Command) -> Value {
                 BrowserCommand::Prefer(args) => json!({ "browser": args.browser }),
             },
         },
+        Command::Findings { command } => match command {
+            FindingsCommand::List(args) => json!({"session_id":args.session_id,"limit":args.limit}),
+            FindingsCommand::Get(args) => json!({"session_id":args.session_id,"id":args.id}),
+            FindingsCommand::Count(args) => json!({"session_id":args.session_id}),
+        },
+        Command::EventLog {
+            command: EventLogCommand::List(args),
+        } => {
+            json!({"session_id":args.session_id,"limit":args.limit})
+        }
         Command::Scope { command } => match command {
             TargetCommand::GetScope(args) => json!({ "session_id": args.session_id }),
             TargetCommand::SetScope(args) => json!({
@@ -3190,6 +3378,14 @@ fn command_api_preview(command: &Command) -> Result<Value> {
                 Some(json!({})),
             ),
         },
+        Command::Findings { command } => findings_api_preview(command),
+        Command::EventLog {
+            command: EventLogCommand::List(args),
+        } => api_preview(
+            "GET",
+            session_read_list_path("/api/event-log", args.session_id, args.limit),
+            None,
+        ),
         Command::Capture { command } => capture_api_preview(command)?,
         Command::Scope { command } => match command {
             TargetCommand::GetScope(args) => api_preview(
@@ -3579,6 +3775,23 @@ fn oast_api_preview(command: &OastCommand) -> Value {
     }
 }
 
+fn session_read_list_path(base: &str, session_id: Option<Uuid>, limit: usize) -> String {
+    session_query_path(&format!("{base}?limit={limit}"), session_id)
+}
+
+fn findings_api_preview(command: &FindingsCommand) -> Value {
+    let path = match command {
+        FindingsCommand::List(args) => {
+            session_read_list_path("/api/findings", args.session_id, args.limit)
+        }
+        FindingsCommand::Get(args) => {
+            session_query_path(&format!("/api/findings/{}", args.id), args.session_id)
+        }
+        FindingsCommand::Count(args) => session_query_path("/api/findings/count", args.session_id),
+    };
+    api_preview("GET", path, None)
+}
+
 fn api_preview(method: &str, path: impl Into<String>, body: Option<Value>) -> Value {
     json!({
         "method": method,
@@ -3591,6 +3804,9 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     let mut notes = Vec::new();
     if command.requires_confirmation() {
         notes.push("Use --yes to apply this side-effecting operation after reviewing the dry-run.");
+    }
+    if matches!(command, Command::Findings { .. } | Command::EventLog { .. }) {
+        notes.push("Dry-run is offline. An omitted session_id is resolved once and pinned before the read; call output includes it in meta.session_id.");
     }
     if matches!(
         command.operation_name(),
@@ -3897,6 +4113,31 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 },
             }
         }
+        "findings.list" => Command::Findings {
+            command: FindingsCommand::List(SessionReadListArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+                limit: call_optional_nonzero_usize(operation, input, "limit")?
+                    .unwrap_or(DEFAULT_READ_LIST_LIMIT),
+            }),
+        },
+        "findings.get" => Command::Findings {
+            command: FindingsCommand::Get(FindingGetArgs {
+                id: call_required(operation, input, "id")?,
+                session_id: call_optional(operation, input, "session_id")?,
+            }),
+        },
+        "findings.count" => Command::Findings {
+            command: FindingsCommand::Count(SessionReadArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+            }),
+        },
+        "event_log.list" => Command::EventLog {
+            command: EventLogCommand::List(SessionReadListArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+                limit: call_optional_nonzero_usize(operation, input, "limit")?
+                    .unwrap_or(DEFAULT_READ_LIST_LIMIT),
+            }),
+        },
         "scope.get" => Command::Scope {
             command: TargetCommand::GetScope(TargetSessionArgs {
                 session_id: call_optional(operation, input, "session_id")?,
@@ -4868,6 +5109,8 @@ async fn run(cli: Cli) -> Result<()> {
                     CaptureCommand::Oast { command } => handle_oast(api, command).await,
                     CaptureCommand::Browser { command } => handle_browser(api, command).await,
                 },
+                Command::Findings { command } => handle_findings(api, command).await,
+                Command::EventLog { command } => handle_event_log(api, command).await,
                 Command::Scope { command } => handle_target(api, command).await,
                 Command::Replay { command } => handle_replay(api, command).await,
                 Command::Fuzzer { command } => handle_fuzzer(api, command).await,
@@ -6316,6 +6559,60 @@ async fn handle_sequence(api: ApiClient, command: SequenceCommand) -> Result<()>
             print_json(&runs)
         }
     }
+}
+
+async fn pinned_read_session_id(api: &ApiClient, explicit: Option<Uuid>) -> Result<Uuid> {
+    resolve_session_id_arg(api, explicit).await?.ok_or_else(|| {
+        anyhow!("no active session; pass --session-id to choose a session explicitly")
+    })
+}
+
+async fn handle_findings(api: ApiClient, command: FindingsCommand) -> Result<()> {
+    match command {
+        FindingsCommand::List(args) => {
+            let session_id = pinned_read_session_id(&api, args.session_id).await?;
+            let path = session_read_list_path("/api/findings", Some(session_id), args.limit);
+            let findings: Vec<FindingSummary> = api.get_json(&path).await?;
+            print_session_read_json(&findings, session_id)
+        }
+        FindingsCommand::Get(args) => {
+            let session_id = pinned_read_session_id(&api, args.session_id).await?;
+            let path = session_query_path(&format!("/api/findings/{}", args.id), Some(session_id));
+            let finding: ScannerFinding = api.get_json(&path).await?;
+            print_session_read_json(&finding, session_id)
+        }
+        FindingsCommand::Count(args) => {
+            let session_id = pinned_read_session_id(&api, args.session_id).await?;
+            let path = session_query_path("/api/findings/count", Some(session_id));
+            let count: FindingsCount = api.get_json(&path).await?;
+            print_session_read_json(&count, session_id)
+        }
+    }
+}
+
+async fn handle_event_log(api: ApiClient, command: EventLogCommand) -> Result<()> {
+    let EventLogCommand::List(args) = command;
+    let session_id = pinned_read_session_id(&api, args.session_id).await?;
+    let path = session_read_list_path("/api/event-log", Some(session_id), args.limit);
+    let entries: Vec<EventLogEntry> = api.get_json(&path).await?;
+    print_session_read_json(&entries, session_id)
+}
+
+fn print_session_read_json<T: Serialize>(value: &T, session_id: Uuid) -> Result<()> {
+    let context = output_context();
+    if !context.success_envelope {
+        return print_json(value);
+    }
+    // Keep API arrays intact while letting a caller reuse the same pinned session
+    // for a later detail/count request, even if the active session changes.
+    write_json_envelope(
+        &json!({
+            "ok":true, "operation":context.operation,
+            "schema_version":output_schema_version(&context.operation),
+            "data":value, "meta":{"session_id":session_id}, "warnings":[],
+        }),
+        context.format,
+    )
 }
 
 async fn handle_oast(api: ApiClient, command: OastCommand) -> Result<()> {
@@ -8624,6 +8921,8 @@ fn cli_parse_error_operation(args: &[String]) -> String {
     }
 
     match tokens.as_slice() {
+        ["findings", action, ..] => format!("findings.{action}"),
+        ["event-log", action, ..] => format!("event_log.{action}"),
         ["session", action, ..] => format!("session.{action}"),
         ["scope" | "target", "get-scope", ..] => "scope.get".to_string(),
         ["scope" | "target", "set-scope", ..] => "scope.set".to_string(),
@@ -9261,12 +9560,12 @@ mod tests {
         build_editable_raw_request_with_version, build_oast_configure_update, clap_error_payload,
         cli_data_dir, cli_error_payload, cli_output_format_from_raw_args,
         cli_parse_error_operation, cli_partial_apply_error, command_from_call_args,
-        command_from_operation_input, default_cli_data_dir, default_editable_request,
-        discover_api_base_url, discover_api_base_url_from_data_dir, dry_run_command,
-        ensure_http_replay_tab, explicit_or_active_session_id, failed_record_output,
-        fuzzer_active_target_for_request, fuzzer_target_request_authority_for_request,
-        history_list_path, history_search_path, install_skills,
-        json_value_with_session_and_workspace_save_error, manifest_operations,
+        command_from_operation_input, command_input_preview, default_cli_data_dir,
+        default_editable_request, discover_api_base_url, discover_api_base_url_from_data_dir,
+        dry_run_command, ensure_http_replay_tab, explicit_or_active_session_id,
+        failed_record_output, fuzzer_active_target_for_request,
+        fuzzer_target_request_authority_for_request, history_list_path, history_search_path,
+        install_skills, json_value_with_session_and_workspace_save_error, manifest_operations,
         next_replay_tab_sequence, normalize_api_base_url, normalize_replay_port,
         normalize_target_inputs, oast_fields_for_output, operation_spec,
         parse_editable_raw_request, parse_editable_raw_request_bytes_with_version,
@@ -11254,6 +11553,105 @@ mod tests {
             Cli::try_parse_from(["sniper-cli", "capture", "oast", "configure", "--enable",])
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn findings_and_event_log_read_commands_match_the_manifest() {
+        let session = "11111111-1111-1111-1111-111111111111";
+        let id = "22222222-2222-2222-2222-222222222222";
+        for (operation, args, input, endpoint) in [
+            (
+                "findings.list",
+                vec!["findings", "list", "--session-id", session, "--limit", "3"],
+                json!({"session_id":session,"limit":3}),
+                format!("/api/findings?limit=3&session_id={session}"),
+            ),
+            (
+                "findings.get",
+                vec!["findings", "get", "--session-id", session, "--id", id],
+                json!({"session_id":session,"id":id}),
+                format!("/api/findings/{id}?session_id={session}"),
+            ),
+            (
+                "findings.count",
+                vec!["findings", "count", "--session-id", session],
+                json!({"session_id":session}),
+                format!("/api/findings/count?session_id={session}"),
+            ),
+            (
+                "event_log.list",
+                vec!["event-log", "list", "--session-id", session, "--limit", "3"],
+                json!({"session_id":session,"limit":3}),
+                format!("/api/event-log?limit=3&session_id={session}"),
+            ),
+        ] {
+            let mut argv = vec!["sniper-cli"];
+            argv.extend(args);
+            let direct = Cli::try_parse_from(argv).unwrap().command;
+            let call = command_from_operation_input(operation, &input).unwrap();
+            assert_eq!(direct.operation_name(), operation);
+            assert_eq!(call.operation_name(), operation);
+            assert!(!direct.requires_confirmation());
+            assert_eq!(command_input_preview(&direct), command_input_preview(&call));
+            let plan = dry_run_command(&direct).unwrap();
+            assert_eq!(plan["side_effect"], "read");
+            assert_eq!(plan["api"]["method"], "GET");
+            assert_eq!(plan["api"]["path"], endpoint);
+            assert!(plan["api"]["body"].is_null());
+            let spec = operation_spec(operation).unwrap();
+            assert_eq!(spec.input_schema["additionalProperties"], false);
+            assert_eq!(
+                spec.input_schema["properties"]["session_id"]["format"],
+                "uuid"
+            );
+        }
+    }
+
+    #[test]
+    fn findings_and_event_log_reject_invalid_or_unsupported_input() {
+        for operation in [
+            "findings.list",
+            "findings.get",
+            "findings.count",
+            "event_log.list",
+        ] {
+            for input in [
+                json!({"session_id":"invalid"}),
+                json!({"url":"http://example.com"}),
+                Value::Null,
+            ] {
+                let error = command_from_operation_input(operation, &input).unwrap_err();
+                assert_eq!(
+                    cli_error_payload(operation, &error).code,
+                    "INVALID_INPUT",
+                    "{operation}: {error}"
+                );
+            }
+        }
+        for operation in ["findings.list", "event_log.list"] {
+            for input in [
+                json!({"limit":0}),
+                json!({"limit":-1}),
+                json!({"limit":1.5}),
+                json!({"limit":"3"}),
+                json!({"offset":1}),
+                json!({"page":true}),
+            ] {
+                let error = command_from_operation_input(operation, &input).unwrap_err();
+                assert_eq!(cli_error_payload(operation, &error).code, "INVALID_INPUT");
+            }
+        }
+        for input in [json!({}), json!({"id":"invalid"}), json!({"id":1})] {
+            assert!(command_from_operation_input("findings.get", &input).is_err());
+        }
+        for group in ["findings", "event-log"] {
+            assert!(Cli::try_parse_from(["sniper-cli", group, "list", "--limit", "0"]).is_err());
+            assert!(Cli::try_parse_from(["sniper-cli", group, "clear"]).is_err());
+        }
+        for operation in ["findings.clear", "event_log.clear"] {
+            assert!(operation_spec(operation).is_none());
+            assert!(command_from_operation_input(operation, &json!({})).is_err());
+        }
     }
 
     #[test]

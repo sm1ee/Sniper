@@ -252,6 +252,36 @@ sniper-cli --output compact call replay.send --input '{"tab_id":"<tab-id>"}' --d
 sniper-cli --output compact call replay.send --input '{"tab_id":"<tab-id>"}' --yes
 ```
 
+Stored findings and session event logs are available through read-only commands:
+
+```bash
+sniper-cli findings list --limit 20
+sniper-cli findings get --id <finding-uuid>
+sniper-cli findings count
+sniper-cli event-log list --limit 20
+sniper-cli --output compact call findings.list --input '{"limit":20}'
+sniper-cli --output compact call event_log.list --input '{"limit":20}'
+```
+
+These commands resolve the active session once, then pin that ID for the read.
+Pass `--session-id <uuid>` (or `session_id` in `call`) to read another session
+without switching it. `call` includes the resolved ID in `meta.session_id`; reuse
+it for related detail/count reads. Direct commands return the API's bare arrays,
+finding object, or `{count}` object. No `--yes` is needed, and `--dry-run` stays
+offline.
+
+Both lists default to the newest 100 retained entries. `--limit` must be positive;
+there is no offset/cursor pagination or filtered count. `findings count` returns
+all findings currently retained in the session. List and count are separate reads,
+so new or removed findings can change the result between them.
+
+`findings list` omits detail and evidence. `findings get` includes stored detail
+and evidence, which can contain sensitive captured values; it does not fetch the
+linked HTTP transaction or its raw bodies. Summary metadata and event messages
+can also be sensitive. These reads do not add redaction: review the output before
+sharing it with an agent or saving it to a transcript. No scanner execution,
+configuration, or clear operation is exposed by these commands.
+
 All side-effecting commands with `side_effect: "write"` in `sniper-cli manifest` require `--dry-run` or `--yes`.
 
 ```bash

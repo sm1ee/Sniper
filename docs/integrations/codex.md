@@ -210,14 +210,26 @@ request's host is a bare IP address, with `400 Bad Request: Replay target
 override is not supported when the request host is an IP address`, so it cannot
 be exercised against a local upstream addressed as `127.0.0.1`.
 
-For anything not listed here, `sniper-cli manifest` is the catalog: 57
-operations, 32 of them writes. `sniper-cli schema input <operation>` gives the
+Stored passive findings and session logs can also be read without `--yes`:
+`findings list`, `findings get --id <uuid>`, `findings count`, and `event-log list`.
+The canonical operations are `findings.list`, `findings.get`, `findings.count`, and
+`event_log.list`. Lists default to 100 newest retained entries and accept a positive
+`--limit`, with no cursor/offset paging. Every read pins the resolved active session,
+or uses the explicit `--session-id` without switching it. For `call`, reuse the
+returned `meta.session_id` for related reads. See the [CLI contract](../../README.md#cli).
+
+For anything not listed here, `sniper-cli manifest` is the current catalog. `sniper-cli schema input <operation>` gives the
 JSON Schema and `sniper-cli examples <operation>` a worked input. Codex can call
 any of them uniformly with `sniper-cli call <operation> --input '<json>'`, whose
 successful output is wrapped in an envelope with the result under `data`. The
 older subcommands return raw JSON instead.
 
 ## What Codex sees
+
+`findings list` returns summaries without detail/evidence; `findings get` returns
+stored detail and evidence, which can contain sensitive values. It does not fetch
+linked raw HTTP bodies. Finding metadata and event-log messages may also be sensitive
+and are not newly redacted by these commands. Prefer summaries before opening details.
 
 A capture is the real traffic. `capture http get` returns request and response
 headers as they went over the wire, including `Cookie`, `Authorization` and any

@@ -183,7 +183,22 @@ sniper-cli --output compact replay send --tab-id <tab-id> --yes
 change the other. `replay send` returns a full transaction record and tags it
 `"notes": ["Sent from Replay."]`.
 
+## Read stored findings and event logs
+
+Use `findings list`, `findings get --id <uuid>`, `findings count`, and `event-log list`
+without `--yes`. The equivalent `call` names are `findings.list`, `findings.get`,
+`findings.count`, and `event_log.list`. Both lists default to 100 newest retained
+entries; `--limit` is positive and there is no offset/cursor pagination. Each read
+pins the active session once, or reads an explicit `--session-id` without switching
+it. `call` returns the pinned ID in `meta.session_id` for reuse on related reads.
+These commands only read stored data. See the [CLI contract](../../README.md#cli).
+
 ## What the agent sees
+
+`findings list` omits detail and evidence. `findings get` includes stored detail and
+evidence, which can contain sensitive captured values, without fetching the linked
+HTTP record or its raw bodies. Summary metadata and event-log messages may also be
+sensitive; these commands do not add redaction. Prefer summaries before details.
 
 `capture http list` returns no headers and no bodies. `capture http get`,
 `replay open` and `replay send` return both, verbatim — request headers, response
