@@ -13,6 +13,10 @@ const MAX_RUNTIME_TEXT_FIELD_BYTES: usize = 8 * 1024;
 pub struct RuntimeSettingsSnapshot {
     #[serde(default)]
     pub upstream_proxy: crate::upstream_proxy::UpstreamProxy,
+    /// Hosts that skip `upstream_proxy` and are dialled directly. Beside the proxy
+    /// rather than inside it; see `UpstreamProxy::bypass_hosts`.
+    #[serde(default)]
+    pub upstream_bypass_hosts: Vec<String>,
     #[serde(default)]
     pub intercept_enabled: bool,
     #[serde(default = "default_true")]
@@ -78,6 +82,7 @@ impl Default for RuntimeSettingsSnapshot {
     fn default() -> Self {
         Self {
             upstream_proxy: Default::default(),
+            upstream_bypass_hosts: Vec::new(),
             intercept_enabled: false,
             websocket_capture_enabled: true,
             http_capture_enabled: true,
@@ -118,6 +123,9 @@ impl RuntimeSettingsSnapshot {
         self.passthrough_hosts =
             normalize_bounded_scope_patterns("passthrough host", self.passthrough_hosts)
                 .unwrap_or_default();
+        self.upstream_bypass_hosts =
+            normalize_bounded_scope_patterns("upstream bypass host", self.upstream_bypass_hosts)
+                .unwrap_or_default();
         if validate_runtime_text_field("OAST server URL", &self.oast_server_url).is_err()
             || crate::oast::validate_oast_server_url(&self.oast_server_url).is_err()
         {
@@ -141,6 +149,8 @@ impl RuntimeSettingsSnapshot {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RuntimeSettingsUpdate {
     pub upstream_proxy: Option<crate::upstream_proxy::UpstreamProxy>,
+    #[serde(default)]
+    pub upstream_bypass_hosts: Option<Vec<String>>,
     pub session_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub expected_active_session_id: Option<uuid::Uuid>,
@@ -238,6 +248,11 @@ impl RuntimeSettings {
                 normalize_bounded_scope_patterns("passthrough host", passthrough_hosts)?;
         }
 
+        if let Some(bypass_hosts) = update.upstream_bypass_hosts {
+            candidate.upstream_bypass_hosts =
+                normalize_bounded_scope_patterns("upstream bypass host", bypass_hosts)?;
+        }
+
         if let Some(upstream_insecure) = update.upstream_insecure {
             candidate.upstream_insecure = upstream_insecure;
         }
@@ -304,8 +319,13 @@ impl RuntimeSettings {
         self.inner.read().await.upstream_insecure
     }
 
+    /// The chain with its bypass list attached, ready for `apply` and `connect`.
     pub async fn upstream_proxy(&self) -> crate::upstream_proxy::UpstreamProxy {
-        self.inner.read().await.upstream_proxy.clone()
+        let current = self.inner.read().await;
+        crate::upstream_proxy::UpstreamProxy {
+            bypass_hosts: current.upstream_bypass_hosts.clone(),
+            ..current.upstream_proxy.clone()
+        }
     }
 
     pub async fn intercept_scope_only(&self) -> bool {
@@ -742,5 +762,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(snapshot.oast_token, "real-secret");
+    }
+
+    #[tokio::test]
+    async fn upstream_bypass_hosts_ride_on_the_proxy_and_survive_its_replacement() {
+        let settings = RuntimeSettings::new();
+        settings
+            .update(RuntimeSettingsUpdate {
+                upstream_bypass_hosts: Some(vec![
+                    "https://Direct.TEST:8443/path".to_string(),
+                    "*.lan.test".to_string(),
+                ]),
+                ..RuntimeSettingsUpdate::default()
+            })
+            .await
+            .unwrap();
+        // The UI and the CLI replace the whole proxy object; the list must stay.
+        settings
+            .update(RuntimeSettingsUpdate {
+                upstream_proxy: Some(crate::upstream_proxy::UpstreamProxy {
+                    enabled: true,
+                    url: "http://127.0.0.1:8081".to_string(),
+                    ..Default::default()
+                }),
+                ..RuntimeSettingsUpdate::default()
+            })
+            .await
+            .unwrap();
+
+        let proxy = settings.upstream_proxy().await;
+        assert_eq!(proxy.bypass_hosts, vec!["direct.test", "*.lan.test"]);
+        assert!(proxy.bypasses("direct.test:443"));
+        assert!(proxy.bypasses("api.lan.test"));
+        assert!(!proxy.bypasses("example.com"));
+
+        // Kept out of the proxy's own JSON, which an older Sniper reads with
+        // deny_unknown_fields.
+        let json = serde_json::to_value(settings.snapshot().await).unwrap();
+        assert_eq!(
+            json["upstream_bypass_hosts"],
+            serde_json::json!(["direct.test", "*.lan.test"])
+        );
+        assert!(json["upstream_proxy"].get("bypass_hosts").is_none());
     }
 }

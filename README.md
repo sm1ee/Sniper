@@ -159,9 +159,9 @@ Session → Scope → Capture → Replay → Fuzz
 
 - **Session** — isolated workspaces with their own records and state
 - **Scope** — define target domains/paths, auto-filter traffic
-- **Capture** — inspect HTTP, intercept & modify, WebSocket frames, auto-replace
+- **Capture** — inspect HTTP, render HTML and image responses in a sandbox, intercept & modify, WebSocket frames, auto-replace
 - **Findings** — passive scanner detects sensitive data leaks, CORS misconfig, missing security headers, JWT weaknesses
-- **Replay** — resend with modifications, override host/port
+- **Replay** — resend with modifications, override host/port, render the response
 - **Fuzzer** — insert markers, run payload lists
 - **Tools** — decode/encode/hash/JWT in one place
 
@@ -177,8 +177,14 @@ continues to accept HTTP proxy requests and CONNECT, not SOCKS client requests.
 The chain applies to captured HTTP/HTTPS traffic, TLS passthrough, WebSockets,
 Replay, and HTTP requests sent by Fuzzer/Sequence. Chain failures never fall
 back to direct connections. Existing WebSocket connections keep their current
-route until reconnected. Replay's separate connection-target override cannot
-be combined with a chain; edit the request destination instead.
+route until reconnected.
+
+**Connect directly to** lists hosts that skip the chain, such as a local test
+service the upstream proxy cannot reach. It takes the same patterns as scope
+(`*.example.com` covers the domain and its subdomains) and applies to every path
+above. Hosts not on the list keep using the chain, and an empty list changes
+nothing. Replay's separate connection-target override works only when its target
+is on this list; otherwise edit the request destination instead.
 
 Settings belong to each session and persist across restart. Passwords are
 masked in API responses and stored in the session files on disk. Leaving the
@@ -188,8 +194,24 @@ password. Environment proxy variables do not override this explicit setting.
 Automation can read settings with `sniper-cli capture proxy`. To replace them,
 pipe a JSON object with `enabled`, `url`, `username`, and `password` into
 `sniper-cli capture proxy --stdin --yes`; `--dry-run` previews the operation
-without consuming credentials. The manifest operations are `capture.proxy.get`
+without consuming credentials. Add `bypass_hosts` (an array of patterns) to
+replace the direct-connection list; leaving it out keeps the saved list. The manifest operations are `capture.proxy.get`
 and `capture.proxy.configure` (the latter reads settings from stdin).
+
+## Render
+
+Every response in HTTP history, Replay and the fuzzer's results has a
+**Render** tab beside Pretty, Raw and Hex. It draws HTML and images in a
+sandboxed frame inside the pane: scripts, forms, links and network access are
+off, so a captured page cannot run or call anything, Sniper's own API included.
+
+By default it draws only what the response holds, so a page whose look comes
+from external stylesheets shows unstyled. **Settings ▸ Display ▸ Render ▸ Load
+images, styles and fonts** also fetches what the page names (images,
+stylesheets and their imports, fonts) through Sniper and the session's proxy
+chain, and writes them into the page; scripts still never run. Those requests
+go to the target and to any other host the page names, and are not recorded in
+HTTP history.
 
 ## CLI
 
@@ -244,6 +266,164 @@ sniper-cli --output compact call capture.http.list --input '{"limit":20,"page":t
 sniper-cli --output compact call replay.send --input '{"tab_id":"<tab-id>"}' --dry-run
 sniper-cli --output compact call replay.send --input '{"tab_id":"<tab-id>"}' --yes
 ```
+
+Stored findings and session event logs are available through read-only commands:
+
+```bash
+sniper-cli findings list --limit 20
+sniper-cli findings get --id <finding-uuid>
+sniper-cli findings count
+sniper-cli event-log list --limit 20
+sniper-cli --output compact call findings.list --input '{"limit":20}'
+sniper-cli --output compact call event_log.list --input '{"limit":20}'
+```
+
+These commands resolve the active session once, then pin that ID for the read.
+Pass `--session-id <uuid>` (or `session_id` in `call`) to read another session
+without switching it. `call` includes the resolved ID in `meta.session_id`; reuse
+it for related detail/count reads. Direct commands return the API's bare arrays,
+finding object, or `{count}` object. No `--yes` is needed, and `--dry-run` stays
+offline.
+
+Both lists default to the newest 100 retained entries. `--limit` must be positive;
+there is no offset/cursor pagination or filtered count. `findings count` returns
+all findings currently retained in the session. List and count are separate reads,
+so new or removed findings can change the result between them.
+
+`findings list` omits detail and evidence. `findings get` includes stored detail
+and evidence, which can contain sensitive captured values; it does not fetch the
+linked HTTP transaction or its raw bodies. Summary metadata and event messages
+can also be sensitive. These reads do not add redaction: review the output before
+sharing it with an agent or saving it to a transcript. No scanner execution,
+configuration, or clear operation is exposed by these commands.
+
+### Saved HTTP Replay tab housekeeping
+
+```bash
+sniper-cli replay close --tab-id 'exact-tab-id' --dry-run
+sniper-cli replay close --tab-id 'exact-tab-id' --yes
+sniper-cli replay duplicate --tab-id 'exact-tab-id' --session-id <session-uuid> --yes
+sniper-cli call replay.duplicate --input '{"tab_id":"exact-tab-id"}' --dry-run
+sniper-cli schema output replay.close
+```
+
+`replay.close` and `replay.duplicate` accept only an exact `tab_id` and optional
+`session_id`. IDs are never trimmed or matched by label; blank IDs and IDs over
+128 UTF-8 bytes are rejected. Only saved HTTP tabs (including legacy empty tab
+types) are supported. Both require `--yes`; `--dry-run` is entirely offline and
+cannot check whether the tab exists.
+
+Close removes only that tab and its saved replay history. Closing the active tab
+selects its previous neighbor in the stable pinned-first visual order, or the next
+neighbor when there is no previous one. Duplicate clones the saved tab and history
+with a fresh UUID, unpinned, and a new sequence above the current counter and all
+tab sequences; it preserves current focus. Neither operation reparses requests,
+hydrates response bodies, sends traffic, or changes unrelated saved data.
+
+The CLI pins one session (explicit IDs also work for inactive sessions), reads its
+workspace revision, then sends one ID-only compare-and-swap request. An inferred
+session is guarded against an active-session switch. Conflicts and lost, invalid,
+or redirected responses are never retried. Inspect saved tabs before a deliberate
+retry; these operations do not use `saved.v1` receipts.
+
+Success is bounded metadata: `session_id`, `revision`, `active_tab_id`, and either
+`closed_tab_id` or `source_tab_id` plus `new_tab_id`. Direct commands return that
+object; `call` puts it under `data` and adds `meta.session_id`. See the
+[saved-tab API contract](docs/integrations/saved-replay-tabs.md) for wire details.
+
+### Passive scanner configuration
+
+The `scanner` commands manage the existing passive checks for captured response
+body previews and request/response headers. They do not send traffic, fetch full
+bodies, run probes, rescan saved transactions, or clear findings. Disabling a rule
+only affects later passive processing; configuration edits do not clear existing
+findings. Opening an unloaded legacy session uses normal journal recovery, which
+can reconstruct missing saved findings; these commands add no separate rescan.
+
+```bash
+sniper-cli scanner config get
+sniper-cli scanner custom list --session-id <session-uuid>
+sniper-cli scanner custom get --id example-header
+sniper-cli scanner config set-enabled --enabled false --dry-run
+sniper-cli scanner config set-enabled --enabled false --yes
+sniper-cli scanner builtin set-enabled --id header --enabled false --yes
+sniper-cli scanner custom create --file rule.json --dry-run
+sniper-cli scanner custom create --file rule.json --yes
+printf '%s' '{"enabled":false,"description":""}' | sniper-cli scanner custom update --id example-header --stdin --yes
+sniper-cli scanner custom delete --id example-header --yes
+```
+
+A create input is one complete rule, with an explicit stable ID:
+
+```json
+{
+  "id": "example-header",
+  "name": "Example header marker",
+  "enabled": true,
+  "target": "response_header",
+  "header_name": "X-Example",
+  "pattern": "example-marker",
+  "severity": "info",
+  "category": "example",
+  "description": "Synthetic passive marker."
+}
+```
+
+Targets are `response_body`, `response_header`, and `request_header`; severity is
+`info`, `low`, `medium`, `high`, or `critical`. Patterns must be valid Rust regexes.
+`header_name` defaults to `""`; for header targets this searches all captured
+headers. Body rules inspect the stored preview, which may be truncated. A rule
+field is limited to 64 KiB of UTF-8; a config to 250 custom rules and 4 MiB.
+
+An update input is a nonempty partial rule object without `id`. Omitted fields are
+preserved, `false` disables, and `""` clears optional text. Unknown fields, nulls,
+invalid patterns/targets/severities, blank IDs/names/patterns, and empty patches
+are rejected. Update, get, and delete match the exact ID, never a name or partial
+ID. Create rejects duplicate IDs. Custom rule order and unrelated settings are
+preserved. List/get expose stored patterns and text, which may contain sensitive
+values; review them before sharing output.
+
+Canonical operations are `scanner.config.get`, `scanner.config.set_enabled`,
+`scanner.builtin.set_enabled`, and `scanner.custom.list`, `.get`, `.create`,
+`.update`, `.delete`. For `call`, create takes a nested `rule`; update takes `id`
+and a nested `patch`. Alternatively, either operation takes `file` or
+`stdin: true`, with exactly one source. The outer `--input` also accepts `@file`
+and `-` for stdin; do not use `--input -` and `stdin: true` together.
+
+```bash
+sniper-cli call scanner.config.set_enabled --input '{"enabled":false}' --dry-run
+sniper-cli call scanner.custom.create --input '{"file":"rule.json"}' --yes
+sniper-cli call scanner.custom.update --input '{"id":"example-header","patch":{"enabled":false,"description":""}}' --yes
+sniper-cli schema input scanner.custom.update
+sniper-cli examples scanner.custom.create
+```
+
+All commands are session-scoped. Use `--session-id` (or `session_id` in `call`) to
+select an inactive session without switching it. Otherwise the CLI resolves the
+active session once and pins that ID; writes also guard against an active-session
+switch. Every mutation requires `--yes`. `--dry-run` validates supplied JSON
+before API discovery and remains strictly offline, so it cannot check whether an
+ID exists or whether a saved config has changed.
+
+Writes fetch the selected config and its `config_token`, change only the requested
+part, then compare-and-swap once. A stale config or changed active session returns
+409; a missing API precondition returns 428. Neither conflicts nor failed/lost
+responses are retried automatically. Inspect the current config before a deliberate
+retry. There is no arbitrary full-config overwrite command. Unchanged requests
+return `changed: false` without posting; successful writes return `session_id`,
+`config_token`, `changed`, and `id` when applicable, after the API confirms saving.
+
+Direct API clients must update their write contract: `POST /api/scanner-config`
+now requires complete `enabled`, `rules`, and `custom_rules` fields plus
+`expected_config_token` from the selected session's latest GET. Unguarded legacy
+replacements are rejected. A successful POST returns `200` with snapshot JSON
+instead of the previous `204` empty response. Persisted legacy configurations
+remain readable; the storage format is unchanged.
+
+Direct list/get return the rule array/object. Config get returns the config,
+`session_id`, `config_token`, and builtin ID/name metadata. `call` keeps the normal
+success envelope with the result under `data` and the pinned ID in
+`meta.session_id`. Errors keep the existing JSON error envelope.
 
 All side-effecting commands with `side_effect: "write"` in `sniper-cli manifest` require `--dry-run` or `--yes`.
 

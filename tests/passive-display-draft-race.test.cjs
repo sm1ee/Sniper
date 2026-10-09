@@ -28,6 +28,7 @@ function fixture() {
     displaySettingsModal: modal(), filterModal: modal(),
     openDisplaySettingsButton: opener, closeDisplaySettingsButton: close,
     displayThemeSelect: {}, displaySizeInput: {}, displayUiFontSelect: {}, displayMonoFontSelect: {},
+    displayRenderResourcesInput: {},
   };
   const globals = {
     state, els, document, displaySettingsPreviewActive: false, displaySettingsReturnFocus: null,
@@ -144,7 +145,7 @@ test("Apply commits a preserved appearance draft exactly once", () => {
   f.context.applyUiSettingsSnapshot(f.remote);
   f.context.saveDisplaySettingsFromForm();
   assert.equal(f.writes.length, 1);
-  assert.deepEqual(f.writes[0], { sizePx: 18, theme: "ivory", uiFont: "system", monoFont: "sfmono" });
+  assert.deepEqual(f.writes[0], { sizePx: 18, theme: "ivory", uiFont: "system", monoFont: "sfmono", renderResources: false });
   assert.equal(f.document.body.dataset.theme, "ivory");
   assert.equal(f.rootStyles.get("--ui-root-size"), "18px");
   assert.equal(f.context.displaySettingsPreviewActive, false);

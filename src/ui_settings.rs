@@ -90,6 +90,10 @@ pub struct DisplaySettingsSnapshot {
     pub theme: String,
     pub ui_font: String,
     pub mono_font: String,
+    /// Whether Render fetches the images, stylesheets and fonts a page names.
+    /// Off by default: each one is a request to the target, or to any host the
+    /// page chooses, that the operator did not send.
+    pub render_resources: bool,
 }
 
 impl Default for DisplaySettingsSnapshot {
@@ -99,6 +103,7 @@ impl Default for DisplaySettingsSnapshot {
             theme: "charcoal".to_string(),
             ui_font: "plex".to_string(),
             mono_font: "jetbrains".to_string(),
+            render_resources: false,
         }
     }
 }
@@ -110,6 +115,7 @@ impl DisplaySettingsSnapshot {
             theme: sanitize_option(self.theme, "charcoal", DISPLAY_THEME_OPTIONS),
             ui_font: sanitize_option(self.ui_font, "plex", DISPLAY_UI_FONT_OPTIONS),
             mono_font: sanitize_option(self.mono_font, "jetbrains", DISPLAY_MONO_FONT_OPTIONS),
+            render_resources: self.render_resources,
         }
     }
 }

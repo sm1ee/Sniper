@@ -6,6 +6,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{DateTime, Utc};
 use regex::Regex;
+use rsa::sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
@@ -68,6 +69,106 @@ impl Default for ScannerConfig {
             custom_rules: Vec::new(),
         }
     }
+}
+
+/// A read snapshot and compare-and-swap precondition for one session's settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScannerConfigSnapshot {
+    pub session_id: Uuid,
+    pub config_token: String,
+    #[serde(flatten)]
+    pub config: ScannerConfig,
+}
+
+impl ScannerConfigSnapshot {
+    pub fn new(session_id: Uuid, config: ScannerConfig) -> Self {
+        Self {
+            session_id,
+            config_token: scanner_config_token(session_id, &config),
+            config,
+        }
+    }
+}
+
+pub fn scanner_config_token(session_id: Uuid, config: &ScannerConfig) -> String {
+    // Value sorts object keys; custom-rule order remains significant. Binding the
+    // content to the session prevents a copied token from authorizing another one.
+    let value = serde_json::to_value(config).expect("scanner config is serializable");
+    let bytes = serde_json::to_vec(&(session_id, value)).expect("scanner snapshot is serializable");
+    let mut hash = Sha256::new();
+    hash.update(b"sniper-scanner-config-v1\0");
+    hash.update(bytes);
+    format!("{:x}", hash.finalize())
+}
+
+pub fn validate_scanner_config(config: &ScannerConfig) -> Result<(), String> {
+    let bytes =
+        serde_json::to_vec(config).map_err(|_| "failed to measure scanner config".to_string())?;
+    if bytes.len() > MAX_SCANNER_CONFIG_BYTES {
+        return Err(format!(
+            "scanner config cannot exceed {MAX_SCANNER_CONFIG_BYTES} stored bytes"
+        ));
+    }
+    if config.custom_rules.len() > MAX_SCANNER_CUSTOM_RULES {
+        return Err(format!(
+            "scanner config cannot contain more than {MAX_SCANNER_CUSTOM_RULES} custom rules"
+        ));
+    }
+    let mut ids = HashSet::new();
+    for rule in &config.custom_rules {
+        validate_custom_rule(rule)?;
+        if !ids.insert(rule.id.trim()) {
+            return Err(format!(
+                "custom scanner rule {} id is duplicated",
+                rule.id.trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_custom_rule(rule: &CustomRule) -> Result<(), String> {
+    for (label, value) in [
+        ("id", &rule.id),
+        ("name", &rule.name),
+        ("target", &rule.target),
+        ("header name", &rule.header_name),
+        ("pattern", &rule.pattern),
+        ("category", &rule.category),
+        ("description", &rule.description),
+    ] {
+        if value.len() > MAX_SCANNER_FIELD_BYTES {
+            return Err(format!(
+                "custom scanner rule {label} cannot exceed {MAX_SCANNER_FIELD_BYTES} bytes"
+            ));
+        }
+    }
+    if rule.id.trim().is_empty() {
+        return Err("custom scanner rule id is required".to_string());
+    }
+    if rule.name.trim().is_empty() {
+        return Err(format!("custom scanner rule {} name is required", rule.id));
+    }
+    if rule.pattern.trim().is_empty() {
+        return Err(format!(
+            "custom scanner rule {} pattern is required",
+            rule.id
+        ));
+    }
+    if !matches!(
+        rule.target.as_str(),
+        "response_body" | "response_header" | "request_header"
+    ) {
+        return Err(format!(
+            "custom scanner rule {} has invalid target",
+            rule.id
+        ));
+    }
+    // Regex's diagnostic includes the source pattern. Keep it out of API errors,
+    // since patterns can contain private captured values.
+    Regex::new(&rule.pattern)
+        .map_err(|_| format!("custom scanner rule {} has invalid regex", rule.id))?;
+    Ok(())
 }
 
 pub fn sanitize_scanner_config(mut config: ScannerConfig) -> ScannerConfig {
@@ -3954,6 +4055,117 @@ mod tests {
     #[test]
     fn truncate_evidence_does_not_split_utf8_codepoints() {
         assert_eq!(truncate_evidence("😀😀", 5), "😀...");
+    }
+
+    #[test]
+    fn scanner_config_token_is_canonical_session_bound_and_order_sensitive() {
+        let session_id = Uuid::new_v4();
+        let mut first = ScannerConfig::default();
+        first.rules.clear();
+        first.rules.insert("header".into(), false);
+        first.rules.insert("cookie".into(), true);
+        first.custom_rules = vec![custom_rule("one".into()), custom_rule("two".into())];
+        let mut reordered_map = first.clone();
+        reordered_map.rules.clear();
+        reordered_map.rules.insert("cookie".into(), true);
+        reordered_map.rules.insert("header".into(), false);
+        let token = scanner_config_token(session_id, &first);
+        assert_eq!(token, scanner_config_token(session_id, &reordered_map));
+        assert_ne!(token, scanner_config_token(Uuid::new_v4(), &first));
+        reordered_map.custom_rules.reverse();
+        assert_ne!(token, scanner_config_token(session_id, &reordered_map));
+        reordered_map = first.clone();
+        reordered_map.enabled = false;
+        assert_ne!(token, scanner_config_token(session_id, &reordered_map));
+        reordered_map = first.clone();
+        reordered_map.custom_rules[0].description = "changed".into();
+        assert_ne!(token, scanner_config_token(session_id, &reordered_map));
+    }
+
+    #[test]
+    fn scanner_config_validation_preserves_optional_empty_values_and_false() {
+        let mut rule = custom_rule("stable-id".into());
+        rule.enabled = false;
+        rule.header_name.clear();
+        rule.category.clear();
+        rule.description.clear();
+        for target in ["response_body", "response_header", "request_header"] {
+            rule.target = target.into();
+            validate_custom_rule(&rule).unwrap();
+        }
+        let config = ScannerConfig {
+            enabled: false,
+            custom_rules: vec![rule],
+            ..ScannerConfig::default()
+        };
+        validate_scanner_config(&config).unwrap();
+    }
+
+    #[test]
+    fn scanner_config_validation_rejects_invalid_rules_without_echoing_pattern() {
+        let good = custom_rule("stable-id".into());
+        for field in ["id", "name", "pattern"] {
+            let mut rule = good.clone();
+            match field {
+                "id" => rule.id = "  ".into(),
+                "name" => rule.name = "  ".into(),
+                _ => rule.pattern = "  ".into(),
+            }
+            assert!(validate_custom_rule(&rule).is_err());
+        }
+        let mut rule = good.clone();
+        rule.target = "url".into();
+        assert!(validate_custom_rule(&rule).is_err());
+        rule = good.clone();
+        rule.pattern = "private-synthetic-value[".into();
+        let error = validate_custom_rule(&rule).unwrap_err();
+        assert!(error.contains("invalid regex"));
+        assert!(!error.contains("private-synthetic-value"));
+        for field in [
+            "id",
+            "name",
+            "target",
+            "header_name",
+            "pattern",
+            "category",
+            "description",
+        ] {
+            let mut value = serde_json::to_value(&good).unwrap();
+            value[field] = serde_json::json!("x".repeat(MAX_SCANNER_FIELD_BYTES + 1));
+            let rule: CustomRule = serde_json::from_value(value).unwrap();
+            assert!(validate_custom_rule(&rule)
+                .unwrap_err()
+                .contains("cannot exceed"));
+        }
+        let config = ScannerConfig {
+            custom_rules: vec![good.clone(), custom_rule(" stable-id ".into())],
+            ..ScannerConfig::default()
+        };
+        assert!(validate_scanner_config(&config)
+            .unwrap_err()
+            .contains("duplicated"));
+    }
+
+    #[test]
+    fn scanner_config_validation_checks_total_size_and_count() {
+        let rule = custom_rule("one".into());
+        let mut config = ScannerConfig {
+            custom_rules: vec![rule; MAX_SCANNER_CUSTOM_RULES + 1],
+            ..ScannerConfig::default()
+        };
+        assert!(validate_scanner_config(&config)
+            .unwrap_err()
+            .contains("custom rules"));
+        config.custom_rules = (0..MAX_SCANNER_CUSTOM_RULES)
+            .map(|index| {
+                let mut rule = custom_rule(format!("rule-{index}"));
+                rule.description = "x".repeat(MAX_SCANNER_FIELD_BYTES);
+                rule
+            })
+            .collect();
+        assert!(validate_scanner_config(&config)
+            .unwrap_err()
+            .contains("stored bytes"));
     }
 
     #[test]

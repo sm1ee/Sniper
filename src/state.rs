@@ -2948,6 +2948,7 @@ mod tests {
 
     #[tokio::test]
     async fn self_update_prepare_failure_restore_restarts_proxy_listener() {
+        let _global_proxy_work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-update-restore-proxy-{}",
             uuid::Uuid::new_v4()

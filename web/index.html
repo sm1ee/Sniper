@@ -257,11 +257,13 @@
                   <button class="view-tab active" data-target="response" data-view="pretty">Pretty</button>
                   <button class="view-tab" data-target="response" data-view="raw">Raw</button>
                   <button class="view-tab" data-target="response" data-view="hex">Hex</button>
+                  <button class="view-tab" data-target="response" data-view="render" title="The page as a browser draws it, sandboxed: no scripts, forms, navigation or network">Render</button>
                 </div>
               </header>
               <div class="editor-shell">
                 <div id="responseViewCM" class="cm-container"></div>
               </div>
+              <div id="responseRenderView" class="render-view hidden"></div>
               <footer class="pane-footer">
                 <label class="pane-search" aria-label="Search response">
                   <input id="responseSearchInput" type="search" placeholder="Search response" />
@@ -803,6 +805,11 @@
                     <input id="proxyChainPassword" type="password" autocomplete="new-password" />
                     <small>A masked value keeps the saved password. Empty the field to remove it. Credentials are stored with this session on disk.</small>
                   </label>
+                  <label class="settings-field">
+                    <span>Connect directly to</span>
+                    <textarea id="proxyChainBypassHosts" rows="3" placeholder="localhost&#10;*.internal.example.com"></textarea>
+                    <small>Hosts listed here skip the proxy chain and are reached directly, for captured HTTP and HTTPS, WebSocket and Replay. Same patterns as scope.</small>
+                  </label>
                   <div class="settings-divider"></div>
                   <label class="settings-field">
                     <span>Scope patterns</span>
@@ -978,11 +985,13 @@
                   <button class="replay-view-tab active" data-replay-target="response" data-replay-view="pretty">Pretty</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="raw">Raw</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="hex">Hex</button>
+                  <button class="replay-view-tab" data-replay-target="response" data-replay-view="render" title="The page as a browser draws it, sandboxed: no scripts, forms, navigation or network">Render</button>
                 </div>
               </header>
               <div class="editor-panel">
                 <div id="replayResponseCM" class="cm-container"></div>
               </div>
+              <div id="replayResponseRenderView" class="render-view hidden"></div>
               <footer class="pane-footer">
                 <label class="pane-search">
                   <input id="replayResponseSearchInput" type="search" placeholder="Search response" />
@@ -1226,11 +1235,13 @@
                         <button class="view-tab active fuzzer-detail-view-tab" data-fuzzer-detail-target="response" data-fuzzer-detail-view="pretty">Pretty</button>
                         <button class="view-tab fuzzer-detail-view-tab" data-fuzzer-detail-target="response" data-fuzzer-detail-view="raw">Raw</button>
                         <button class="view-tab fuzzer-detail-view-tab" data-fuzzer-detail-target="response" data-fuzzer-detail-view="hex">Hex</button>
+                        <button class="view-tab fuzzer-detail-view-tab" data-fuzzer-detail-target="response" data-fuzzer-detail-view="render" title="The page as a browser draws it, sandboxed: no scripts, forms, navigation or network">Render</button>
                       </div>
                     </header>
                     <div class="editor-shell" style="flex:1;min-height:0">
                       <div id="fuzzerDetailResCM" class="cm-container"></div>
                     </div>
+                    <div id="fuzzerDetailResRenderView" class="render-view hidden" style="flex:1;min-height:0"></div>
                   </section>
                 </div>
               </div>
@@ -1602,6 +1613,14 @@
                   <option value="notomonokr">Noto Sans Mono CJK KR</option>
                 </select>
               </label>
+            </section>
+            <section class="filter-group">
+              <h3>Render</h3>
+              <label class="settings-toggle">
+                <input id="displayRenderResourcesInput" type="checkbox" />
+                <span>Load images, styles and fonts</span>
+              </label>
+              <p class="modal-copy">Off, Render draws only what the response itself holds. On, it also fetches the images, stylesheets and fonts the page names, through Sniper and the session's proxy chain. Those requests go to the target and to any other host the page names, and are not recorded in HTTP history. Scripts never run either way.</p>
             </section>
           </div>
           <div class="settings-panel-plain" data-settings-panel="shortcuts" role="tabpanel">

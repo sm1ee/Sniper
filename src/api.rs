@@ -45,6 +45,7 @@ use crate::{
     proxy,
     runtime::RuntimeSettingsUpdate,
     runtime_state::{self, RuntimeStateSnapshot},
+    scanner::{scanner_config_token, validate_scanner_config, ScannerConfigSnapshot},
     sequence::{self, SequenceDefinition},
     session::{SessionContext, SessionSummary},
     state::AppState,
@@ -54,8 +55,8 @@ use crate::{
     websocket::WebSocketListFilters,
     workspace::{
         can_replace_snapshot, validate_workspace_serialized_size, FuzzerWorkspaceState,
-        ReplayTabState, WorkspaceReplaceError, WorkspaceStateSnapshot,
-        MAX_WORKSPACE_SERIALIZED_BYTES,
+        ReplayTabState, SavedHttpTabOperation, WorkspaceReplaceError, WorkspaceStateSnapshot,
+        WorkspaceTransformError, MAX_WORKSPACE_SERIALIZED_BYTES,
     },
 };
 
@@ -93,9 +94,10 @@ const MAX_SEQUENCE_STEPS: usize = 250;
 const MAX_SEQUENCE_EXTRACTIONS_PER_STEP: usize = 50;
 const MAX_SEQUENCE_TEXT_FIELD_BYTES: usize = 64 * 1024;
 const MAX_SEQUENCE_DEFINITION_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(test)]
 const MAX_SCANNER_CUSTOM_RULES: usize = crate::scanner::MAX_SCANNER_CUSTOM_RULES;
+#[cfg(test)]
 const MAX_SCANNER_FIELD_BYTES: usize = crate::scanner::MAX_SCANNER_FIELD_BYTES;
-const MAX_SCANNER_CONFIG_BYTES: usize = crate::scanner::MAX_SCANNER_CONFIG_BYTES;
 const MAX_MATCH_REPLACE_RULES: usize = crate::match_replace::MAX_MATCH_REPLACE_RULES;
 const MAX_MATCH_REPLACE_FIELD_BYTES: usize = crate::match_replace::MAX_MATCH_REPLACE_FIELD_BYTES;
 const MAX_MATCH_REPLACE_RULES_BYTES: usize = crate::match_replace::MAX_MATCH_REPLACE_RULES_BYTES;
@@ -386,6 +388,8 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/workspace-state/keepalive",
             post(update_workspace_state_keepalive),
         )
+        .route("/api/replay/tabs/close", post(close_saved_http_tab))
+        .route("/api/replay/tabs/duplicate", post(duplicate_saved_http_tab))
         .route(
             "/api/startup-settings",
             get(get_startup_settings).post(update_startup_settings),
@@ -394,6 +398,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/ui-settings",
             get(get_ui_settings).post(update_ui_settings),
         )
+        .route("/api/render-resource", get(get_render_resource))
         .route(
             "/api/event-log",
             get(list_event_log).delete(clear_event_log),
@@ -837,6 +842,14 @@ struct TransactionGetQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct RenderResourceQuery {
+    url: String,
+    session_id: Option<Uuid>,
+}
+
+const RENDER_RESOURCE_URL_MAX_BYTES: usize = 8 * 1024;
+
+#[derive(Debug, Deserialize)]
 struct WorkspaceStateQuery {
     session_id: Option<Uuid>,
 }
@@ -1185,10 +1198,6 @@ fn validate_editable_request_host(host: &str) -> std::result::Result<(), String>
         validate_port_text(port_part, "request host port")?;
     }
     Ok(())
-}
-
-fn validate_editable_request_path(path: &str) -> std::result::Result<(), String> {
-    validate_editable_request_path_with(path, false)
 }
 
 /// `lenient` keeps every structural check but the URI parse. A persisted replay
@@ -2478,82 +2487,6 @@ pub(crate) fn validate_sequence_definition(
     Ok(())
 }
 
-fn validate_scanner_config(
-    config: &crate::scanner::ScannerConfig,
-) -> std::result::Result<(), String> {
-    validate_serialized_size(config, "scanner config", MAX_SCANNER_CONFIG_BYTES)?;
-    if config.custom_rules.len() > MAX_SCANNER_CUSTOM_RULES {
-        return Err(format!(
-            "scanner config cannot contain more than {MAX_SCANNER_CUSTOM_RULES} custom rules"
-        ));
-    }
-    let mut custom_rule_ids = HashSet::new();
-    for rule in &config.custom_rules {
-        validate_text_field("custom scanner rule id", &rule.id, MAX_SCANNER_FIELD_BYTES)?;
-        validate_text_field(
-            "custom scanner rule name",
-            &rule.name,
-            MAX_SCANNER_FIELD_BYTES,
-        )?;
-        validate_text_field(
-            "custom scanner rule target",
-            &rule.target,
-            MAX_SCANNER_FIELD_BYTES,
-        )?;
-        validate_text_field(
-            "custom scanner rule header name",
-            &rule.header_name,
-            MAX_SCANNER_FIELD_BYTES,
-        )?;
-        validate_text_field(
-            "custom scanner rule pattern",
-            &rule.pattern,
-            MAX_SCANNER_FIELD_BYTES,
-        )?;
-        validate_text_field(
-            "custom scanner rule category",
-            &rule.category,
-            MAX_SCANNER_FIELD_BYTES,
-        )?;
-        validate_text_field(
-            "custom scanner rule description",
-            &rule.description,
-            MAX_SCANNER_FIELD_BYTES,
-        )?;
-        if rule.id.trim().is_empty() {
-            return Err("custom scanner rule id is required".to_string());
-        }
-        if !custom_rule_ids.insert(rule.id.trim().to_string()) {
-            return Err(format!(
-                "custom scanner rule {} id is duplicated",
-                rule.id.trim()
-            ));
-        }
-        if rule.name.trim().is_empty() {
-            return Err(format!("custom scanner rule {} name is required", rule.id));
-        }
-        if rule.pattern.trim().is_empty() {
-            return Err(format!(
-                "custom scanner rule {} pattern is required",
-                rule.id
-            ));
-        }
-        match rule.target.as_str() {
-            "response_body" | "response_header" | "request_header" => {}
-            other => {
-                return Err(format!(
-                    "custom scanner rule {} has invalid target {}",
-                    rule.id, other
-                ));
-            }
-        }
-        RegexBuilder::new(&rule.pattern).build().map_err(|error| {
-            format!("custom scanner rule {} has invalid regex: {error}", rule.id)
-        })?;
-    }
-    Ok(())
-}
-
 fn validate_match_replace_rules(rules: &[MatchReplaceRule]) -> std::result::Result<(), String> {
     validate_serialized_size(&rules, "match-replace rules", MAX_MATCH_REPLACE_RULES_BYTES)?;
     if rules.len() > MAX_MATCH_REPLACE_RULES {
@@ -3066,6 +2999,146 @@ async fn get_workspace_state(
     let mut snapshot = session.workspace.snapshot().await;
     snapshot.session_id = Some(session.id());
     Json(snapshot).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedHttpTabPayload {
+    session_id: Uuid,
+    tab_id: String,
+    expected_workspace_revision: u64,
+    expected_active_session_id: Option<Uuid>,
+}
+
+async fn close_saved_http_tab(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SavedHttpTabPayload>,
+) -> Response {
+    mutate_saved_http_tab(state, payload, SavedHttpTabOperation::Close).await
+}
+
+async fn duplicate_saved_http_tab(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SavedHttpTabPayload>,
+) -> Response {
+    mutate_saved_http_tab(state, payload, SavedHttpTabOperation::Duplicate).await
+}
+
+async fn mutate_saved_http_tab(
+    state: Arc<AppState>,
+    payload: SavedHttpTabPayload,
+    operation: SavedHttpTabOperation,
+) -> Response {
+    // Keep the operation/persistence locks alive through disk commit and memory
+    // publication even when the requester disconnects during spawn_blocking.
+    tokio::spawn(mutate_saved_http_tab_inner(state, payload, operation))
+        .await
+        .unwrap_or_else(|_| saved_http_tab_uncertain_response())
+}
+
+fn saved_http_tab_uncertain_response() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Saved Replay tab update outcome is uncertain; reload this session before retrying.",
+    )
+        .into_response()
+}
+
+async fn mutate_saved_http_tab_inner(
+    state: Arc<AppState>,
+    payload: SavedHttpTabPayload,
+    operation: SavedHttpTabOperation,
+) -> Response {
+    if payload.tab_id.trim().is_empty() || payload.tab_id.len() > MAX_WORKSPACE_REPLAY_TAB_ID_BYTES
+    {
+        return (StatusCode::BAD_REQUEST, "saved Replay tab id is invalid").into_response();
+    }
+    if let Some(response) = expected_active_session_conflict_response(
+        &state,
+        payload.expected_active_session_id,
+        Some(payload.session_id),
+    ) {
+        return response;
+    }
+    let session = match resolve_read_session_for_optional_id(&state, Some(payload.session_id)).await
+    {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let _operation_guard = match guard_session_write_operation(
+        &state,
+        &session,
+        payload.expected_active_session_id.is_some(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
+    if let Some(response) = expected_active_session_conflict_response(
+        &state,
+        payload.expected_active_session_id,
+        Some(payload.session_id),
+    ) {
+        return response;
+    }
+    if !state.is_current_session_context(&session).await {
+        return (
+            StatusCode::CONFLICT,
+            "Saved Replay workspace changed; reload before saving.",
+        )
+            .into_response();
+    }
+    // This narrow operation writes only workspace.json. A cached read-only
+    // inactive context is sufficient; promotion could repair unrelated files.
+    match session
+        .mutate_saved_http_tab_and_persist(
+            &payload.tab_id,
+            payload.expected_workspace_revision,
+            operation,
+        )
+        .await
+    {
+        Ok(snapshot) => {
+            let mut result = serde_json::json!({
+                "session_id": session.id(),
+                "revision": snapshot.revision,
+                "active_tab_id": snapshot.replay.active_tab_id,
+            });
+            match operation {
+                SavedHttpTabOperation::Close => result["closed_tab_id"] = payload.tab_id.into(),
+                SavedHttpTabOperation::Duplicate => {
+                    result["source_tab_id"] = payload.tab_id.into();
+                    result["new_tab_id"] = snapshot.replay.tabs.last().unwrap().id.clone().into();
+                }
+            }
+            Json(result).into_response()
+        }
+        Err(WorkspaceTransformError::Conflict { revision }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Saved Replay workspace changed; reload before saving.",
+                "session_id": session.id(),
+                "revision": revision,
+            })),
+        )
+            .into_response(),
+        Err(WorkspaceTransformError::Invalid(error)) => {
+            (StatusCode::BAD_REQUEST, error).into_response()
+        }
+        Err(WorkspaceTransformError::Persist(error)) => {
+            tracing::warn!(%error, "failed to persist saved Replay tab update");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Saved Replay tab update could not be saved.",
+            )
+                .into_response()
+        }
+        Err(WorkspaceTransformError::CommittedButUncertain(error)) => {
+            tracing::warn!(%error, "saved Replay tab update committed with uncertain durability");
+            saved_http_tab_uncertain_response()
+        }
+    }
 }
 
 async fn update_workspace_state(
@@ -3976,6 +4049,80 @@ async fn get_ui_settings(State(state): State<Arc<AppState>>) -> Json<AppUiSettin
     Json(state.ui_settings.snapshot().await)
 }
 
+/// An image, stylesheet or font for the Render view, fetched for the UI when
+/// Settings > Display has resource loading on. The UI inlines the bytes as data:
+/// URLs, so the rendered frame itself never reaches the network or this API.
+async fn get_render_resource(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RenderResourceQuery>,
+) -> Response {
+    // Checked here as well as in the UI, so a page cannot reach it while it is off.
+    if !state
+        .ui_settings
+        .snapshot()
+        .await
+        .display_settings
+        .render_resources
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "Render resource loading is off in Settings > Display",
+        )
+            .into_response();
+    }
+    let url = match url::Url::parse(&query.url) {
+        Ok(url)
+            if matches!(url.scheme(), "http" | "https")
+                && query.url.len() <= RENDER_RESOURCE_URL_MAX_BYTES =>
+        {
+            url
+        }
+        _ => return (StatusCode::BAD_REQUEST, "Not an http(s) URL").into_response(),
+    };
+    let own_listeners = [
+        state.get_active_proxy_addr().await,
+        state.get_active_ui_addr().await,
+    ];
+    let targets_sniper = url.as_str().parse::<http::Uri>().is_ok_and(|uri| {
+        own_listeners
+            .iter()
+            .any(|addr| crate::proxy::request_targets_own_listener(&uri, *addr))
+    });
+    if targets_sniper {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Render does not fetch from Sniper itself",
+        )
+            .into_response();
+    }
+    let session = match resolve_read_session_for_optional_id(&state, query.session_id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    match crate::proxy::fetch_render_resource(&session, url.as_str(), own_listeners).await {
+        Ok(resource) => {
+            let mut response = resource.body.into_response();
+            let headers = response.headers_mut();
+            if let Ok(content_type) = HeaderValue::from_str(&resource.content_type) {
+                headers.insert(header::CONTENT_TYPE, content_type);
+            }
+            headers.insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            // Opened on its own, an SVG from here would otherwise run in this
+            // origin. The UI only ever reads it as bytes.
+            headers.insert(
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("sandbox; default-src 'none'"),
+            );
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response
+        }
+        Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
+    }
+}
+
 async fn update_ui_settings(
     State(state): State<Arc<AppState>>,
     Json(snapshot): Json<AppUiSettingsSnapshot>,
@@ -4153,17 +4300,79 @@ struct FindingsCountResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(from = "ScannerConfigWirePayload")]
 struct ScannerConfigPayload {
-    #[serde(default)]
     session_id: Option<Uuid>,
-    #[serde(flatten)]
+    expected_config_token: Option<String>,
     config: crate::scanner::ScannerConfig,
 }
 
+// Persisted legacy configs keep their defaults, but a replacement request must
+// explicitly contain every field so an omission cannot reset saved settings.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScannerConfigWirePayload {
+    #[serde(default)]
+    session_id: Option<Uuid>,
+    #[serde(default)]
+    expected_config_token: Option<String>,
+    enabled: bool,
+    rules: std::collections::HashMap<String, bool>,
+    custom_rules: Vec<ScannerCustomRuleWire>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
+struct ScannerCustomRuleWire(crate::scanner::CustomRule);
+
+impl TryFrom<serde_json::Value> for ScannerCustomRuleWire {
+    type Error = String;
+
+    fn try_from(value: serde_json::Value) -> std::result::Result<Self, String> {
+        let fields = value
+            .as_object()
+            .ok_or("custom scanner rule must be an object")?;
+        for field in fields.keys() {
+            if !matches!(
+                field.as_str(),
+                "id" | "name"
+                    | "enabled"
+                    | "target"
+                    | "header_name"
+                    | "pattern"
+                    | "severity"
+                    | "category"
+                    | "description"
+            ) {
+                return Err("custom scanner rule contains an unknown field".to_string());
+            }
+        }
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(|_| "custom scanner rule has invalid or missing fields".to_string())
+    }
+}
+
+impl From<ScannerConfigWirePayload> for ScannerConfigPayload {
+    fn from(value: ScannerConfigWirePayload) -> Self {
+        Self {
+            session_id: value.session_id,
+            expected_config_token: value.expected_config_token,
+            config: crate::scanner::ScannerConfig {
+                enabled: value.enabled,
+                rules: value.rules,
+                custom_rules: value.custom_rules.into_iter().map(|rule| rule.0).collect(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
 impl From<crate::scanner::ScannerConfig> for ScannerConfigPayload {
     fn from(config: crate::scanner::ScannerConfig) -> Self {
         Self {
             session_id: None,
+            expected_config_token: None,
             config,
         }
     }
@@ -4270,13 +4479,35 @@ async fn get_scanner_config(
         Ok(session) => session,
         Err(response) => return response,
     };
-    Json(session.scanner.get_config().await).into_response()
+    Json(ScannerConfigSnapshot::new(
+        session.id(),
+        session.scanner.get_config().await,
+    ))
+    .into_response()
 }
 
 async fn update_scanner_config(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SessionWriteQuery>,
     Json(payload): Json<ScannerConfigPayload>,
+) -> Response {
+    // The owned transaction must finish even if the HTTP requester disconnects:
+    // spawn_blocking persistence can otherwise outlive the locks and rollback.
+    tokio::spawn(update_scanner_config_inner(state, query, payload))
+        .await
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Scanner settings update outcome is unknown; reload this session before retrying.",
+            )
+                .into_response()
+        })
+}
+
+async fn update_scanner_config_inner(
+    state: Arc<AppState>,
+    query: SessionWriteQuery,
+    payload: ScannerConfigPayload,
 ) -> Response {
     let (target_session_id, session_id_is_explicit) =
         match reconcile_write_session_id(query.session_id, payload.session_id) {
@@ -4290,7 +4521,7 @@ async fn update_scanner_config(
     ) {
         return response;
     }
-    let session = match resolve_session_for_optional_id(&state, target_session_id).await {
+    let session = match resolve_read_session_for_optional_id(&state, target_session_id).await {
         Ok(session) => session,
         Err(response) => return response,
     };
@@ -4307,15 +4538,80 @@ async fn update_scanner_config(
         Ok(guard) => guard,
         Err(response) => return response,
     };
-    let _mutation_guard = session.mutation_guard().await;
-    let previous = session.scanner.get_config().await;
-    session.scanner.update_config(payload.config).await;
-    if let Err(response) = persist_session_mutation_locked_or_response(&state, &session).await {
-        session.scanner.update_config(previous).await;
-        persist_rolled_back_session_snapshot(&state, &session, "scanner config update").await;
+    if let Some(response) = expected_active_session_conflict_response(
+        &state,
+        query.expected_active_session_id,
+        Some(session.id()),
+    ) {
         return response;
     }
-    StatusCode::NO_CONTENT.into_response()
+    // Read-only hydration is essential here: loading a writable inactive
+    // session can repair journals and findings even when this request is stale.
+    // Reject a detached read context instead of upgrading an obsolete baseline.
+    if !state.is_current_session_context(&session).await {
+        return (
+            StatusCode::CONFLICT,
+            "Scanner settings context changed; reload before saving.",
+        )
+            .into_response();
+    }
+    let read_guard = session.mutation_guard().await;
+    let previous = session.scanner.get_config().await;
+    let Some(expected_token) = payload.expected_config_token.as_deref() else {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            "Scanner settings require expected_config_token from a fresh GET /api/scanner-config.",
+        )
+            .into_response();
+    };
+    if expected_token != scanner_config_token(session.id(), &previous) {
+        return (StatusCode::CONFLICT,
+            "Scanner settings changed. Reload settings and review your changes before saving again.")
+            .into_response();
+    }
+    drop(read_guard);
+    // Promotion is allowed only after the read snapshot passed its precondition.
+    // The operation lock prevents a session switch or another settings writer.
+    let session = if state.sessions.active_session_id() == session.id() {
+        session
+    } else {
+        match state
+            .session_context_for_id_operation_locked(session.id())
+            .await
+        {
+            Ok(session) => session,
+            Err(error) => return session_load_failure_response(session.id(), error),
+        }
+    };
+    let _mutation_guard = session.mutation_guard().await;
+    let previous = session.scanner.get_config().await;
+    if expected_token != scanner_config_token(session.id(), &previous) {
+        return (
+            StatusCode::CONFLICT,
+            "Scanner settings changed; reload before saving.",
+        )
+            .into_response();
+    }
+    session.scanner.update_config(payload.config).await;
+    if persist_session_mutation_locked_or_response(&state, &session)
+        .await
+        .is_err()
+    {
+        session.scanner.update_config(previous).await;
+        let restored =
+            persist_rolled_back_session_snapshot(&state, &session, "scanner config update").await;
+        let message = if restored {
+            "Scanner settings could not be saved. Previous settings were restored; reload before retrying."
+        } else {
+            "Scanner settings could not be saved. Previous settings were restored in memory, but durable rollback could not be verified; reload this session before retrying."
+        };
+        return (StatusCode::INTERNAL_SERVER_ERROR, message).into_response();
+    }
+    Json(ScannerConfigSnapshot::new(
+        session.id(),
+        session.scanner.get_config().await,
+    ))
+    .into_response()
 }
 
 async fn download_root_pem(State(state): State<Arc<AppState>>) -> Response {
@@ -7144,7 +7440,7 @@ async fn persist_rolled_back_session_snapshot(
     state: &Arc<AppState>,
     session: &Arc<SessionContext>,
     action: &'static str,
-) {
+) -> bool {
     if let Err(error) = state.persist_session_context_mutation_locked(session).await {
         tracing::warn!(
             %error,
@@ -7152,7 +7448,9 @@ async fn persist_rolled_back_session_snapshot(
             session_id = %session.id(),
             "failed to fully persist rolled back session state"
         );
+        return false;
     }
+    true
 }
 
 async fn persist_nonrollbackable_event_log_mutation(
@@ -7671,6 +7969,38 @@ mod tests {
             Some(expected_owner_session_id.as_str())
         );
         assert!(payload.get("session_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn render_resource_route_refuses_while_off_and_for_sniper_itself() {
+        let (state, data_dir) = test_state("sniper-route-render-resource");
+        let get = |path: String| {
+            let state = state.clone();
+            async move { api_route_response(state, reqwest::Method::GET, &path, None).await }
+        };
+        let (status, _) =
+            get("/api/render-resource?url=https%3A%2F%2Fexample.com%2Fa.png".into()).await;
+        assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "off by default");
+
+        let mut snapshot = state.ui_settings.snapshot().await;
+        snapshot.display_settings.render_resources = true;
+        state.ui_settings.replace_snapshot(snapshot).await.unwrap();
+
+        let (status, _) = get("/api/render-resource?url=file%3A%2F%2F%2Fetc%2Fpasswd".into()).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        for addr in [
+            state.get_active_ui_addr().await,
+            state.get_active_proxy_addr().await,
+        ] {
+            let (status, body) = get(format!(
+                "/api/render-resource?url=http%3A%2F%2Flocalhost%3A{}%2Fapi%2Fsettings",
+                addr.port()
+            ))
+            .await;
+            assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{addr}: {body}");
+        }
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
@@ -9579,6 +9909,395 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    async fn scanner_test_payload(
+        session: &Arc<crate::session::SessionContext>,
+        config: ScannerConfig,
+    ) -> super::ScannerConfigPayload {
+        super::ScannerConfigPayload {
+            session_id: Some(session.id()),
+            expected_config_token: Some(crate::scanner::scanner_config_token(
+                session.id(),
+                &session.scanner.get_config().await,
+            )),
+            config,
+        }
+    }
+
+    fn scanner_test_state() -> (Arc<AppState>, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("sniper-scanner-cas-{}", Uuid::new_v4()));
+        let state = Arc::new(
+            AppState::new(AppConfig {
+                proxy_addr: "127.0.0.1:0".parse().unwrap(),
+                ui_addr: "127.0.0.1:0".parse().unwrap(),
+                max_entries: 32,
+                max_transaction_entries: 32,
+                body_preview_bytes: 4096,
+                data_dir: path.clone(),
+            })
+            .unwrap(),
+        );
+        (state, path)
+    }
+
+    #[tokio::test]
+    async fn saved_http_tab_disconnected_request_finishes_owned_transaction() {
+        let (state, path) = scanner_test_state();
+        let session = state.session().await;
+        let mut workspace = session.workspace.snapshot().await;
+        workspace.session_id = Some(session.id());
+        workspace.replay.tabs = vec![crate::workspace::ReplayTabState {
+            id: "saved-only".into(),
+            sequence: 8,
+            ..Default::default()
+        }];
+        workspace.replay.active_tab_id = Some("saved-only".into());
+        workspace.replay.tab_sequence = 8;
+        let workspace = state
+            .replace_workspace_state_and_persist(&session, workspace)
+            .await
+            .unwrap();
+        let guard = session.mutation_guard().await;
+        let id = session.id();
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            super::close_saved_http_tab(
+                State(request_state),
+                Json(super::SavedHttpTabPayload {
+                    session_id: id,
+                    tab_id: "saved-only".into(),
+                    expected_workspace_revision: workspace.revision,
+                    expected_active_session_id: Some(id),
+                }),
+            )
+            .await
+        });
+        let operation_lock = state.session_operation_lock(id).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while operation_lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        let _ = request.await;
+        drop(guard);
+        let _finished = tokio::time::timeout(Duration::from_secs(5), operation_lock.lock())
+            .await
+            .unwrap();
+        let saved = session.workspace.snapshot().await;
+        assert!(saved.replay.tabs.is_empty());
+        assert_eq!(saved.replay.tab_sequence, 8);
+        assert_eq!(saved.revision, workspace.revision + 1);
+        let reloaded = state.sessions.load_context_read_only(id).unwrap();
+        assert_eq!(
+            serde_json::to_value(saved).unwrap(),
+            serde_json::to_value(reloaded.workspace.snapshot().await).unwrap()
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn scanner_replacement_requires_complete_strict_payload() {
+        let good = serde_json::json!({
+            "enabled":false, "rules":{}, "custom_rules":[], "expected_config_token":"token"
+        });
+        assert!(serde_json::from_value::<super::ScannerConfigPayload>(good.clone()).is_ok());
+        for field in ["enabled", "rules", "custom_rules"] {
+            let mut incomplete = good.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<super::ScannerConfigPayload>(incomplete).is_err());
+        }
+        let mut extra = good;
+        extra["config_token"] = serde_json::json!("read-token-is-not-a-precondition");
+        assert!(serde_json::from_value::<super::ScannerConfigPayload>(extra).is_err());
+        let mut nested = serde_json::json!({
+            "enabled":true, "rules":{}, "custom_rules":[{
+                "id":"synthetic", "name":"Synthetic", "enabled":true,
+                "target":"response_body", "pattern":"synthetic", "severity":"info",
+                "category":"custom", "description":"", "unknown":true
+            }], "expected_config_token":"token"
+        });
+        assert!(serde_json::from_value::<super::ScannerConfigPayload>(nested.clone()).is_err());
+        nested["custom_rules"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("unknown");
+        assert!(serde_json::from_value::<super::ScannerConfigPayload>(nested).is_ok());
+    }
+
+    #[tokio::test]
+    async fn scanner_config_missing_stale_and_cross_session_tokens_do_not_mutate() {
+        let (state, path) = scanner_test_state();
+        let session = state.session().await;
+        let original = session.scanner.get_config().await;
+        let mut changed = original.clone();
+        changed.enabled = false;
+        for (token, status) in [
+            (None, StatusCode::PRECONDITION_REQUIRED),
+            (Some("stale".to_string()), StatusCode::CONFLICT),
+            (
+                Some(crate::scanner::scanner_config_token(
+                    Uuid::new_v4(),
+                    &original,
+                )),
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let response = super::update_scanner_config(
+                State(state.clone()),
+                Query(super::SessionWriteQuery {
+                    session_id: Some(session.id()),
+                    expected_active_session_id: None,
+                }),
+                Json(super::ScannerConfigPayload {
+                    session_id: None,
+                    expected_config_token: token,
+                    config: changed.clone(),
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                serde_json::to_value(session.scanner.get_config().await).unwrap(),
+                serde_json::to_value(&original).unwrap()
+            );
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scanner_config_rejected_uncached_inactive_writes_leave_storage_unchanged() {
+        fn files(
+            path: &std::path::Path,
+        ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            fn visit(
+                root: &std::path::Path,
+                path: &std::path::Path,
+                result: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+            ) {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    let entry = entry.unwrap();
+                    if entry.file_type().unwrap().is_dir() {
+                        visit(root, &entry.path(), result);
+                    } else {
+                        result.insert(
+                            entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                            std::fs::read(entry.path()).unwrap(),
+                        );
+                    }
+                }
+            }
+            let mut result = std::collections::BTreeMap::new();
+            visit(path, path, &mut result);
+            result
+        }
+        for expected in [None, Some("stale".to_string())] {
+            let (state, path) = scanner_test_state();
+            let inactive = state
+                .sessions
+                .create_session(Some("Synthetic inactive".into()))
+                .unwrap();
+            let storage = state.sessions.session_storage_path(inactive.id).unwrap();
+            // Writable hydration would quarantine these files and initialize a
+            // journal. Read-only lookup must leave even damaged input untouched.
+            std::fs::write(storage.join("snapshot.json"), b"{not-json").unwrap();
+            std::fs::write(storage.join("transactions.journal"), b"{not-json}\n").unwrap();
+            let before = files(&path);
+            let response = super::update_scanner_config(
+                State(state.clone()),
+                Query(super::SessionWriteQuery {
+                    session_id: Some(inactive.id),
+                    expected_active_session_id: None,
+                }),
+                Json(super::ScannerConfigPayload {
+                    session_id: None,
+                    expected_config_token: expected.clone(),
+                    config: ScannerConfig::default(),
+                }),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                if expected.is_some() {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::PRECONDITION_REQUIRED
+                }
+            );
+            assert_eq!(files(&path), before);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn scanner_config_concurrent_writers_only_one_snapshot_wins_and_persists() {
+        let (state, path) = scanner_test_state();
+        let session = state.session().await;
+        let mut first = session.scanner.get_config().await;
+        first.enabled = false;
+        let mut second = session.scanner.get_config().await;
+        second.rules.insert("header".into(), false);
+        let first = scanner_test_payload(&session, first).await;
+        let second = scanner_test_payload(&session, second).await;
+        let query = super::SessionWriteQuery {
+            session_id: Some(session.id()),
+            expected_active_session_id: None,
+        };
+        let (a, b) = tokio::join!(
+            super::update_scanner_config(State(state.clone()), Query(query.clone()), Json(first)),
+            super::update_scanner_config(State(state.clone()), Query(query), Json(second)),
+        );
+        let mut statuses = vec![a.status().as_u16(), b.status().as_u16()];
+        statuses.sort();
+        assert_eq!(statuses, vec![200, 409]);
+        let current = session.scanner.get_config().await;
+        assert_ne!(current.enabled, current.rules["header"]);
+        let reloaded = state.sessions.load_context(session.id()).unwrap();
+        assert_eq!(
+            serde_json::to_value(current).unwrap(),
+            serde_json::to_value(reloaded.scanner.get_config().await).unwrap()
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scanner_config_acknowledges_bound_snapshot_without_changing_findings() {
+        let (state, path) = scanner_test_state();
+        let session = state.session().await;
+        let finding = ScannerFinding {
+            id: Uuid::new_v4(),
+            record_id: Uuid::new_v4(),
+            found_at: Utc::now(),
+            rule_id: "custom".into(),
+            severity: Severity::Info,
+            category: "fixture".into(),
+            title: "Synthetic saved finding".into(),
+            detail: String::new(),
+            evidence: String::new(),
+            host: "example.com".into(),
+            path: "/".into(),
+            location: None,
+        };
+        session.scanner.push(finding.clone()).await;
+        let baseline: crate::scanner::ScannerConfigSnapshot = response_json(
+            super::get_scanner_config(
+                State(state.clone()),
+                Query(super::SessionScopedQuery {
+                    session_id: Some(session.id()),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(baseline.session_id, session.id());
+        assert_eq!(
+            baseline.config_token,
+            crate::scanner::scanner_config_token(session.id(), &baseline.config)
+        );
+        let mut changed = baseline.config;
+        changed.enabled = false;
+        changed.rules.insert("legacy-preserved".into(), false);
+        let response = super::update_scanner_config(
+            State(state.clone()),
+            Query(super::SessionWriteQuery {
+                session_id: Some(session.id()),
+                expected_active_session_id: None,
+            }),
+            Json(super::ScannerConfigPayload {
+                session_id: None,
+                expected_config_token: Some(baseline.config_token.clone()),
+                config: changed,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved: crate::scanner::ScannerConfigSnapshot = response_json(response).await;
+        assert_ne!(saved.config_token, baseline.config_token);
+        assert_eq!(saved.session_id, session.id());
+        assert!(!saved.config.rules["legacy-preserved"]);
+        assert_eq!(session.scanner.list(None).await.len(), 1);
+        assert_eq!(
+            session.scanner.get(finding.id).await.unwrap().title,
+            finding.title
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scanner_config_rechecks_active_session_after_operation_lock_wait() {
+        let (state, path) = scanner_test_state();
+        let session = state.session().await;
+        let next = state
+            .sessions
+            .create_session(Some("Synthetic next".into()))
+            .unwrap();
+        let lock = state.session_operation_lock(session.id()).await;
+        let guard = lock.lock().await;
+        let mut config = session.scanner.get_config().await;
+        config.enabled = false;
+        let payload = scanner_test_payload(&session, config).await;
+        let mut update = Box::pin(super::update_scanner_config(
+            State(state.clone()),
+            Query(super::SessionWriteQuery {
+                session_id: Some(session.id()),
+                expected_active_session_id: Some(session.id()),
+            }),
+            Json(payload),
+        ));
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut update)
+            .await
+            .is_err());
+        state.sessions.activate_session(next.id).unwrap();
+        drop(guard);
+        assert_eq!(update.await.status(), StatusCode::CONFLICT);
+        assert!(session.scanner.get_config().await.enabled);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scanner_config_disconnected_request_finishes_owned_transaction() {
+        let (state, path) = scanner_test_state();
+        let session = state.session().await;
+        let guard = session.mutation_guard().await;
+        let mut config = session.scanner.get_config().await;
+        config.enabled = false;
+        let payload = scanner_test_payload(&session, config).await;
+        let original_id = session.id();
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            super::update_scanner_config(
+                State(request_state),
+                Query(super::SessionWriteQuery {
+                    session_id: Some(original_id),
+                    expected_active_session_id: None,
+                }),
+                Json(payload),
+            )
+            .await
+        });
+        let operation_lock = state.session_operation_lock(session.id()).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while operation_lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        let _ = request.await;
+        drop(guard);
+        // Taking the same operation lock waits for durable success or rollback,
+        // even though the outer HTTP future no longer exists.
+        let _finished = tokio::time::timeout(Duration::from_secs(5), operation_lock.lock())
+            .await
+            .unwrap();
+        assert!(!session.scanner.get_config().await.enabled);
+        let reloaded = state.sessions.load_context(session.id()).unwrap();
+        assert!(!reloaded.scanner.get_config().await.enabled);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
@@ -13864,10 +14583,10 @@ mod tests {
                 session_id: Some(inactive_id),
                 expected_active_session_id: None,
             }),
-            Json(super::ScannerConfigPayload::from(scanner_config.clone())),
+            Json(scanner_test_payload(&inactive, scanner_config.clone()).await),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
 
         let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
             inactive_id,
@@ -14131,11 +14850,11 @@ mod tests {
             }),
             Json(super::ScannerConfigPayload {
                 session_id: Some(inactive_id),
-                config: scanner_config.clone(),
+                ..scanner_test_payload(&inactive, scanner_config.clone()).await
             }),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
         assert!(active.scanner.get_config().await.enabled);
         let inactive_scanner_config: ScannerConfig = response_json(
             super::get_scanner_config(
@@ -14157,7 +14876,7 @@ mod tests {
             }),
             Json(super::ScannerConfigPayload {
                 session_id: Some(inactive_id),
-                config: scanner_config,
+                ..scanner_test_payload(&inactive, scanner_config).await
             }),
         )
         .await;
@@ -17691,6 +18410,7 @@ mod tests {
         let state = Arc::new(AppState::new(config).unwrap());
         let session = state.session().await;
         let mut next_config = session.scanner.get_config().await;
+        let original_token = crate::scanner::scanner_config_token(session.id(), &next_config);
         assert!(next_config.enabled);
         next_config.enabled = false;
 
@@ -17704,12 +18424,20 @@ mod tests {
                 session_id: None,
                 expected_active_session_id: None,
             }),
-            Json(super::ScannerConfigPayload::from(next_config)),
+            Json(scanner_test_payload(&session, next_config).await),
         )
         .await;
 
         assert_eq!(response.status(), super::StatusCode::INTERNAL_SERVER_ERROR);
         assert!(session.scanner.get_config().await.enabled);
+        assert_eq!(
+            original_token,
+            crate::scanner::scanner_config_token(session.id(), &session.scanner.get_config().await)
+        );
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("durable rollback could not be verified"));
 
         let _ = std::fs::remove_file(storage_dir);
         let _ = std::fs::remove_dir_all(data_dir);
@@ -17732,6 +18460,7 @@ mod tests {
         let state = Arc::new(AppState::new(config).unwrap());
         let session = state.session().await;
         let mut next_config = session.scanner.get_config().await;
+        let original_token = crate::scanner::scanner_config_token(session.id(), &next_config);
         assert!(next_config.enabled);
         next_config.enabled = false;
 
@@ -17749,12 +18478,20 @@ mod tests {
                 session_id: None,
                 expected_active_session_id: None,
             }),
-            Json(super::ScannerConfigPayload::from(next_config)),
+            Json(scanner_test_payload(&session, next_config).await),
         )
         .await;
 
         assert_eq!(response.status(), super::StatusCode::INTERNAL_SERVER_ERROR);
         assert!(session.scanner.get_config().await.enabled);
+        assert_eq!(
+            original_token,
+            crate::scanner::scanner_config_token(session.id(), &session.scanner.get_config().await)
+        );
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("durable rollback could not be verified"));
 
         let reloaded = state.sessions.load_context(session.id()).unwrap();
         assert!(reloaded.scanner.get_config().await.enabled);

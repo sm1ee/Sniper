@@ -13,6 +13,7 @@ use reqwest::{Method, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sniper::{
+    event_log::EventLogEntry,
     fuzzer::FuzzerAttackRecord,
     history_selection::HistorySelection,
     intercept::{
@@ -28,6 +29,11 @@ use sniper::{
         RuntimeSettingsSnapshot, MAX_OAST_POLLING_INTERVAL_SECS, MIN_OAST_POLLING_INTERVAL_SECS,
     },
     runtime_state::{load_runtime_state, remove_runtime_state_if_matches, RuntimeStateSnapshot},
+    scanner::{
+        scanner_config_token, validate_custom_rule, validate_scanner_config, CustomRule,
+        FindingSummary, ScannerConfigSnapshot, ScannerFinding, Severity, BUILTIN_RULES,
+        MAX_SCANNER_FIELD_BYTES,
+    },
     sequence::{SequenceDefinition, SequenceRunRecord, SequenceRunSummary},
     session::SessionSummary,
     skills,
@@ -39,6 +45,7 @@ use sniper::{
 use url::Url;
 use uuid::Uuid;
 
+const DEFAULT_READ_LIST_LIMIT: usize = 100;
 const CLI_REPEATER_HISTORY_LIMIT: usize = 30;
 const DEFAULT_WEBSOCKET_DETAIL_FRAME_LIMIT: usize = 1_000;
 const MAX_WEBSOCKET_DETAIL_FRAME_LIMIT: usize = 1_000;
@@ -149,6 +156,22 @@ enum Command {
         #[command(subcommand)]
         command: CaptureCommand,
     },
+    /// Read stored passive findings; list summaries before opening sensitive evidence.
+    Findings {
+        #[command(subcommand)]
+        command: FindingsCommand,
+    },
+    /// Manage session-scoped passive regex rules for captured response previews and headers.
+    Scanner {
+        #[command(subcommand)]
+        command: ScannerCommand,
+    },
+    /// Read stored session event messages.
+    #[command(name = "event-log")]
+    EventLog {
+        #[command(subcommand)]
+        command: EventLogCommand,
+    },
     #[command(name = "scope", visible_alias = "target")]
     Scope {
         #[command(subcommand)]
@@ -246,6 +269,189 @@ enum CaptureCommand {
 }
 
 #[derive(Subcommand, Debug)]
+enum FindingsCommand {
+    /// List newest stored summaries, without detail, evidence, or captured bodies.
+    List(SessionReadListArgs),
+    /// Read one stored finding, including potentially sensitive detail and evidence.
+    Get(FindingGetArgs),
+    /// Count all findings currently retained in the session.
+    Count(SessionReadArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ScannerCommand {
+    Config {
+        #[command(subcommand)]
+        command: ScannerConfigCommand,
+    },
+    Builtin {
+        #[command(subcommand)]
+        command: ScannerBuiltinCommand,
+    },
+    Custom {
+        #[command(subcommand)]
+        command: ScannerCustomCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScannerConfigCommand {
+    Get(SessionReadArgs),
+    SetEnabled(ScannerEnabledArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ScannerBuiltinCommand {
+    SetEnabled(ScannerBuiltinEnabledArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ScannerCustomCommand {
+    List(SessionReadArgs),
+    Get(ScannerRuleIdArgs),
+    Create(ScannerCreateArgs),
+    Update(ScannerUpdateArgs),
+    Delete(ScannerRuleIdArgs),
+}
+
+#[derive(Args, Debug)]
+struct ScannerEnabledArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+}
+
+#[derive(Args, Debug)]
+struct ScannerBuiltinEnabledArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    #[arg(long)]
+    id: String,
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+}
+
+#[derive(Args, Debug)]
+struct ScannerRuleIdArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Exact, stable custom rule ID; names and partial IDs are not accepted.
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Args, Debug)]
+#[command(group(ArgGroup::new("rule_source").required(true).args(["file", "stdin"])))]
+struct ScannerCreateArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Complete CustomRule JSON, including its stable id.
+    #[arg(long)]
+    file: Option<PathBuf>,
+    #[arg(long)]
+    stdin: bool,
+    #[arg(skip)]
+    rule: Option<CustomRule>,
+}
+
+#[derive(Args, Debug)]
+#[command(group(ArgGroup::new("patch_source").required(true).args(["file", "stdin"])))]
+struct ScannerUpdateArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    #[arg(long)]
+    id: String,
+    /// Partial CustomRule JSON. Omitted fields are preserved; id cannot be changed.
+    #[arg(long)]
+    file: Option<PathBuf>,
+    #[arg(long)]
+    stdin: bool,
+    #[arg(skip)]
+    patch: Option<ScannerRulePatch>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScannerRulePatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    header_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    severity: Option<Severity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+impl ScannerRulePatch {
+    fn apply(&self, rule: &mut CustomRule) {
+        macro_rules! apply_fields {
+            ($($field:ident),+) => { $(
+                if let Some(value) = &self.$field {
+                    rule.$field = value.clone();
+                }
+            )+ };
+        }
+        apply_fields!(
+            name,
+            enabled,
+            target,
+            header_name,
+            pattern,
+            severity,
+            category,
+            description
+        );
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum EventLogCommand {
+    /// List newest stored event messages; messages can contain sensitive metadata.
+    List(SessionReadListArgs),
+}
+
+#[derive(Args, Debug)]
+struct SessionReadArgs {
+    /// Read this session without switching it; otherwise pin the active session.
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct SessionReadListArgs {
+    /// Read this session without switching it; otherwise pin the active session.
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Maximum newest entries to return. No offset or cursor pagination is available.
+    #[arg(long, default_value_t = DEFAULT_READ_LIST_LIMIT, value_parser = parse_nonzero_usize)]
+    limit: usize,
+}
+
+#[derive(Args, Debug)]
+struct FindingGetArgs {
+    #[arg(long)]
+    id: Uuid,
+    /// Read this session without switching it; otherwise pin the active session.
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FindingsCount {
+    count: usize,
+}
+
+#[derive(Subcommand, Debug)]
 enum BrowserCommand {
     /// List every browser Sniper knows on this platform, installed or not, with its
     /// driver, what that driver offers, and what is missing.
@@ -298,7 +504,8 @@ impl BrowserCommand {
 struct ProxyChainArgs {
     #[arg(long)]
     session_id: Option<Uuid>,
-    /// Replace settings using {enabled, url, username, password} from stdin.
+    /// Replace settings using {enabled, url, username, password, bypass_hosts}
+    /// from stdin. Leaving out bypass_hosts keeps the saved list.
     #[arg(long)]
     stdin: bool,
 }
@@ -587,6 +794,10 @@ enum ReplayCommand {
     List(ReplayListArgs),
     Open(ReplayOpenArgs),
     Update(ReplayUpdateArgs),
+    /// Close one saved HTTP tab and its saved replay history without sending traffic.
+    Close(ReplaySavedTabArgs),
+    /// Clone one saved HTTP tab without sending traffic or changing the active tab.
+    Duplicate(ReplaySavedTabArgs),
     Send(ReplaySendArgs),
 }
 
@@ -659,6 +870,15 @@ struct ReplayUpdateArgs {
     /// Tab name shown in the Replay tab strip; an empty value clears it
     #[arg(long)]
     label: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct ReplaySavedTabArgs {
+    /// Exact saved tab ID; never interpreted as a label or normalized.
+    #[arg(long)]
+    tab_id: String,
+    #[arg(long)]
+    session_id: Option<Uuid>,
 }
 
 #[derive(Args, Debug)]
@@ -1734,6 +1954,9 @@ impl Command {
             Command::Call(args) => saved_operation_name(&args.operation).unwrap_or("call"),
             Command::Session { command } => command.operation_name(),
             Command::Capture { command } => command.operation_name(),
+            Command::Findings { command } => command.operation_name(),
+            Command::Scanner { command } => command.operation_name(),
+            Command::EventLog { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
             Command::Replay { command } => command.operation_name(),
             Command::Fuzzer { command } => command.operation_name(),
@@ -1756,6 +1979,84 @@ impl Command {
         match self {
             Command::Call(args) => args.operation.clone(),
             _ => self.operation_name().to_string(),
+        }
+    }
+}
+
+impl FindingsCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::List(_) => "findings.list",
+            Self::Get(_) => "findings.get",
+            Self::Count(_) => "findings.count",
+        }
+    }
+}
+
+impl ScannerCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Config {
+                command: ScannerConfigCommand::Get(_),
+            } => "scanner.config.get",
+            Self::Config {
+                command: ScannerConfigCommand::SetEnabled(_),
+            } => "scanner.config.set_enabled",
+            Self::Builtin {
+                command: ScannerBuiltinCommand::SetEnabled(_),
+            } => "scanner.builtin.set_enabled",
+            Self::Custom { command } => match command {
+                ScannerCustomCommand::List(_) => "scanner.custom.list",
+                ScannerCustomCommand::Get(_) => "scanner.custom.get",
+                ScannerCustomCommand::Create(_) => "scanner.custom.create",
+                ScannerCustomCommand::Update(_) => "scanner.custom.update",
+                ScannerCustomCommand::Delete(_) => "scanner.custom.delete",
+            },
+        }
+    }
+
+    fn session_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Config {
+                command: ScannerConfigCommand::Get(args),
+            }
+            | Self::Custom {
+                command: ScannerCustomCommand::List(args),
+            } => args.session_id,
+            Self::Config {
+                command: ScannerConfigCommand::SetEnabled(args),
+            } => args.session_id,
+            Self::Builtin {
+                command: ScannerBuiltinCommand::SetEnabled(args),
+            } => args.session_id,
+            Self::Custom {
+                command: ScannerCustomCommand::Get(args) | ScannerCustomCommand::Delete(args),
+            } => args.session_id,
+            Self::Custom {
+                command: ScannerCustomCommand::Create(args),
+            } => args.session_id,
+            Self::Custom {
+                command: ScannerCustomCommand::Update(args),
+            } => args.session_id,
+        }
+    }
+
+    fn is_write(&self) -> bool {
+        !matches!(
+            self,
+            Self::Config {
+                command: ScannerConfigCommand::Get(_)
+            } | Self::Custom {
+                command: ScannerCustomCommand::List(_) | ScannerCustomCommand::Get(_)
+            }
+        )
+    }
+}
+
+impl EventLogCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::List(_) => "event_log.list",
         }
     }
 }
@@ -1826,6 +2127,8 @@ impl ReplayCommand {
             ReplayCommand::List(_) => "replay.list",
             ReplayCommand::Open(_) => "replay.open",
             ReplayCommand::Update(_) => "replay.update",
+            ReplayCommand::Close(_) => "replay.close",
+            ReplayCommand::Duplicate(_) => "replay.duplicate",
             ReplayCommand::Send(_) => "replay.send",
         }
     }
@@ -2025,6 +2328,26 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
         ),
         op(
+            "findings.list", "findings list",
+            "List newest stored finding summaries without detail, evidence or captured bodies. Defaults to 100; limit-only, not cursor pagination. Omitted session_id pins the active session.",
+            Read, false, &[], vec![json!({"limit":20})],
+        ),
+        op(
+            "findings.get", "findings get --id <uuid>",
+            "Read one stored finding, including potentially sensitive detail and evidence. Does not fetch its linked captured transaction or send traffic. Omitted session_id pins the active session.",
+            Read, false, &["id"], vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "findings.count", "findings count",
+            "Count findings currently retained in one session. Omitted session_id pins the active session.",
+            Read, false, &[], vec![json!({})],
+        ),
+        op(
+            "event_log.list", "event-log list",
+            "List newest stored session event messages, which can contain sensitive metadata. Defaults to 100; limit-only, not cursor pagination. Omitted session_id pins the active session.",
+            Read, false, &[], vec![json!({"limit":20})],
+        ),
+        op(
             "capture.browser.list",
             "capture browser list",
             "List the browsers Sniper knows on this platform: whether each is installed, how an agent drives it, what that driver offers, and what is missing. `default` marks the one that opens when none is named; `preferred` marks the one the user saved; `install_url` is where to download one that is missing.",
@@ -2164,6 +2487,24 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &["tab_id"],
             vec![json!({"tab_id":"tab-1","host":"example.com"})],
+        ),
+        op(
+            "replay.close",
+            "replay close --tab-id <exact-id> [--session-id <uuid>]",
+            "Close one saved HTTP Replay tab and its saved history using one revision-checked write. No traffic is sent; conflicts and lost responses are never retried.",
+            Write,
+            true,
+            &["tab_id"],
+            vec![json!({"tab_id":"tab-1"})],
+        ),
+        op(
+            "replay.duplicate",
+            "replay duplicate --tab-id <exact-id> [--session-id <uuid>]",
+            "Duplicate one saved HTTP Replay tab unchanged with a new UUID, unpinned and without changing focus. No traffic is sent; conflicts and lost responses are never retried.",
+            Write,
+            true,
+            &["tab_id"],
+            vec![json!({"tab_id":"tab-1"})],
         ),
         op(
             "replay.send",
@@ -2456,7 +2797,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.proxy.get",
             "capture proxy",
-            "Read proxy chain settings with a masked password.",
+            "Read proxy chain settings, with a masked password and the hosts that bypass the chain.",
             Read,
             false,
             &[],
@@ -2465,7 +2806,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.proxy.configure",
             "capture proxy --stdin",
-            "Replace proxy chain settings from stdin JSON.",
+            "Replace proxy chain settings, and optionally its bypass hosts, from stdin JSON.",
             Write,
             true,
             &[],
@@ -2526,8 +2867,23 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"provider":"interactsh","url":"https://oast.example","token_stdin":true})],
         ),
     ];
+    operations.extend(scanner_manifest_operations());
     operations.extend(saved_manifest_operations());
     operations
+}
+
+fn scanner_manifest_operations() -> Vec<CliOperationSpec> {
+    use CliSideEffect::{Read, Write};
+    vec![
+        op("scanner.config.get", "scanner config get", "Read one session's passive scanner configuration and builtin metadata.", Read, false, &[], vec![json!({})]),
+        op("scanner.config.set_enabled", "scanner config set-enabled --enabled <true|false>", "Set the session's passive scanner switch with optimistic concurrency. Does not rescan saved traffic.", Write, true, &["enabled"], vec![json!({"enabled":false})]),
+        op("scanner.builtin.set_enabled", "scanner builtin set-enabled --id <rule-id> --enabled <true|false>", "Set one known builtin rule toggle, preserving all other configuration.", Write, true, &["id","enabled"], vec![json!({"id":"header","enabled":false})]),
+        op("scanner.custom.list", "scanner custom list", "List stored custom passive regex rules in saved order.", Read, false, &[], vec![json!({})]),
+        op("scanner.custom.get", "scanner custom get --id <rule-id>", "Read one custom passive rule by exact stable ID.", Read, false, &["id"], vec![json!({"id":"example-header"})]),
+        op("scanner.custom.create", "scanner custom create --file <rule.json>", "Append one complete custom passive rule with an explicit stable ID. Accepts rule, file or stdin as exactly one source.", Write, true, &[], vec![json!({"rule":{"id":"example-header","name":"Example header marker","enabled":true,"target":"response_header","header_name":"X-Example","pattern":"example-marker","severity":"info","category":"example","description":"Synthetic passive marker."}})]),
+        op("scanner.custom.update", "scanner custom update --id <rule-id> --file <patch.json>", "Patch one custom passive rule by exact ID. Omitted fields remain unchanged; accepts patch, file or stdin as exactly one source.", Write, true, &["id"], vec![json!({"id":"example-header","patch":{"enabled":false,"description":""}})]),
+        op("scanner.custom.delete", "scanner custom delete --id <rule-id>", "Delete one custom passive rule by exact ID without clearing existing findings.", Write, true, &["id"], vec![json!({"id":"example-header"})]),
+    ]
 }
 
 fn saved_operation_name(operation: &str) -> Option<&'static str> {
@@ -2579,16 +2935,118 @@ fn op(
         side_effect,
         requires_confirmation: requires_confirmation || side_effect == CliSideEffect::Write,
         input_schema: input_schema(operation, required_fields),
-        output_schema: json!({
-            "type": "object",
-            "additionalProperties": true,
-            "description": "Returned in the envelope data field."
-        }),
+        output_schema: replay_saved_tab_output_schema(operation)
+            .or_else(|| scanner_output_schema(operation))
+            .or_else(|| session_read_output_schema(operation))
+            .unwrap_or_else(|| {
+                json!({
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Returned in the envelope data field."
+                })
+            }),
         examples,
     }
 }
 
+fn replay_saved_tab_output_schema(operation: &str) -> Option<Value> {
+    if !matches!(operation, "replay.close" | "replay.duplicate") {
+        return None;
+    }
+    let mut schema = json!({
+        "type":"object", "additionalProperties":false,
+        "required":["session_id","revision","active_tab_id"],
+        "properties":{
+            "session_id":{"type":"string","format":"uuid"},
+            "revision":{"type":"integer","minimum":1},
+            "active_tab_id":{"type":["string","null"]}
+        }
+    });
+    let fields: &[&str] = if operation == "replay.close" {
+        &["closed_tab_id"]
+    } else {
+        &["source_tab_id", "new_tab_id"]
+    };
+    for field in fields {
+        schema["required"].as_array_mut()?.push(json!(field));
+        schema["properties"][field] = json!({"type":"string","minLength":1});
+    }
+    if operation == "replay.duplicate" {
+        schema["properties"]["new_tab_id"]["format"] = json!("uuid");
+    }
+    Some(schema)
+}
+
+fn session_read_output_schema(operation: &str) -> Option<Value> {
+    if !matches!(
+        operation,
+        "findings.list" | "findings.get" | "findings.count" | "event_log.list"
+    ) {
+        return None;
+    }
+    let mut finding = json!({
+        "type":"object",
+        "required":["id","record_id","found_at","severity","category","title","host","path"],
+        "properties":{
+            "id":{"type":"string","format":"uuid"},
+            "record_id":{"type":"string","format":"uuid"},
+            "found_at":{"type":"string","format":"date-time"},
+            "rule_id":{"type":"string"},
+            "severity":{"type":"string","enum":["info","low","medium","high","critical"]},
+            "category":{"type":"string"}, "title":{"type":"string"},
+            "host":{"type":"string"}, "path":{"type":"string"},
+            "location":{
+                "type":"object","required":["side"],
+                "properties":{
+                    "side":{"type":"string"}, "section":{"type":"string"},
+                    "line":{"type":"integer","minimum":0}
+                }
+            }
+        }
+    });
+    Some(match operation {
+        "findings.list" => json!({"type":"array","items":finding}),
+        "findings.get" => {
+            finding["required"]
+                .as_array_mut()?
+                .extend([json!("detail"), json!("evidence")]);
+            finding["properties"]["detail"] = json!({"type":"string"});
+            finding["properties"]["evidence"] = json!({"type":"string"});
+            finding
+        }
+        "findings.count" => json!({
+            "type":"object","required":["count"],
+            "properties":{"count":{"type":"integer","minimum":0}}
+        }),
+        "event_log.list" => json!({
+            "type":"array","items":{
+                "type":"object","required":["id","captured_at","level","source","title","message"],
+                "properties":{
+                    "id":{"type":"string","format":"uuid"},
+                    "captured_at":{"type":"string","format":"date-time"},
+                    "level":{"type":"string","enum":["info","warn","error"]},
+                    "source":{"type":"string"}, "title":{"type":"string"},
+                    "message":{"type":"string"}
+                }
+            }
+        }),
+        _ => return None,
+    })
+}
+
 fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
+    if matches!(operation, "replay.close" | "replay.duplicate") {
+        return json!({
+            "type":"object", "additionalProperties":false, "required":["tab_id"],
+            "properties":{
+                "tab_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S","description":"Exact saved HTTP tab ID; nonblank, at most 128 UTF-8 bytes, never trimmed or treated as a label."},
+                "session_id":{"type":"string","format":"uuid","description":"Selected saved session, including inactive sessions. Omission pins the active session once."}
+            }
+        });
+    }
+    if let Some(schema) = scanner_input_schema(operation, required_fields) {
+        return schema;
+    }
     let mut properties = serde_json::Map::new();
     let fields = call_allowed_fields(operation).unwrap_or(required_fields);
     for field in fields {
@@ -2598,6 +3056,21 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
                 "description": format!("CLI argument `{field}`"),
             }),
         );
+    }
+    if session_read_output_schema(operation).is_some() {
+        properties.insert("session_id".into(), json!({
+            "type":["string","null"],"format":"uuid",
+            "description":"Read this session without switching it; omitted or null pins the active session."
+        }));
+        if properties.contains_key("id") {
+            properties.insert("id".into(), json!({"type":"string","format":"uuid"}));
+        }
+        if properties.contains_key("limit") {
+            properties.insert("limit".into(), json!({
+                "type":["integer","null"],"minimum":1,"default":DEFAULT_READ_LIST_LIMIT,
+                "description":"Maximum newest retained entries. Null uses the default. No offset or cursor pagination."
+            }));
+        }
     }
     if matches!(
         operation,
@@ -2668,6 +3141,15 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "skills.install" => &["codex", "claude", "all", "codex_dir", "claude_dir"],
         "session.create" => &["name"],
         "session.rename" => &["id", "name"],
+        "findings.list" | "event_log.list" => &["session_id", "limit"],
+        "findings.get" => &["id", "session_id"],
+        "findings.count" => &["session_id"],
+        "scanner.config.get" | "scanner.custom.list" => &["session_id"],
+        "scanner.config.set_enabled" => &["session_id", "enabled"],
+        "scanner.builtin.set_enabled" => &["session_id", "id", "enabled"],
+        "scanner.custom.get" | "scanner.custom.delete" => &["session_id", "id"],
+        "scanner.custom.create" => &["session_id", "rule", "file", "stdin"],
+        "scanner.custom.update" => &["session_id", "id", "patch", "file", "stdin"],
         "capture.http.clear" => &["session_id"],
         "capture.http.select" | "capture.http.delete" => &[
             "session_id",
@@ -2739,6 +3221,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "stdin",
         ],
         "replay.list" => &["session_id"],
+        "replay.close" | "replay.duplicate" => &["tab_id", "session_id"],
         "replay.open" => &[
             "session_id",
             "transaction_id",
@@ -2883,6 +3366,17 @@ fn command_input_preview(command: &Command) -> Value {
                 BrowserCommand::Prefer(args) => json!({ "browser": args.browser }),
             },
         },
+        Command::Scanner { command } => scanner_input_preview(command),
+        Command::Findings { command } => match command {
+            FindingsCommand::List(args) => json!({"session_id":args.session_id,"limit":args.limit}),
+            FindingsCommand::Get(args) => json!({"session_id":args.session_id,"id":args.id}),
+            FindingsCommand::Count(args) => json!({"session_id":args.session_id}),
+        },
+        Command::EventLog {
+            command: EventLogCommand::List(args),
+        } => {
+            json!({"session_id":args.session_id,"limit":args.limit})
+        }
         Command::Scope { command } => match command {
             TargetCommand::GetScope(args) => json!({ "session_id": args.session_id }),
             TargetCommand::SetScope(args) => json!({
@@ -2999,6 +3493,13 @@ fn replay_input_preview(command: &ReplayCommand) -> Value {
             "port": args.port,
             "label": args.label,
         }),
+        ReplayCommand::Close(args) | ReplayCommand::Duplicate(args) => {
+            let mut input = json!({"tab_id":args.tab_id});
+            if let Some(session_id) = args.session_id {
+                input["session_id"] = json!(session_id);
+            }
+            input
+        }
         ReplayCommand::Send(args) => {
             json!({ "tab_id": args.tab_id, "session_id": args.session_id })
         }
@@ -3189,6 +3690,15 @@ fn command_api_preview(command: &Command) -> Result<Value> {
                 Some(json!({})),
             ),
         },
+        Command::Scanner { command } => scanner_api_preview(command),
+        Command::Findings { command } => findings_api_preview(command),
+        Command::EventLog {
+            command: EventLogCommand::List(args),
+        } => api_preview(
+            "GET",
+            session_read_list_path("/api/event-log", args.session_id, args.limit),
+            None,
+        ),
         Command::Capture { command } => capture_api_preview(command)?,
         Command::Scope { command } => match command {
             TargetCommand::GetScope(args) => api_preview(
@@ -3312,6 +3822,21 @@ fn replay_api_preview(command: &ReplayCommand) -> Value {
             "/api/workspace-state",
             Some(json!({ "note": "updates Replay workspace state" })),
         ),
+        ReplayCommand::Close(args) | ReplayCommand::Duplicate(args) => {
+            let mut body = json!({
+                "tab_id":args.tab_id,
+                "session_id":args.session_id.map(|id| json!(id)).unwrap_or_else(|| json!("<resolved active session ID>")),
+                "expected_workspace_revision":"<fetched saved workspace revision>"
+            });
+            if args.session_id.is_none() {
+                body["expected_active_session_id"] = json!("<resolved active session ID>");
+            }
+            api_preview(
+                "POST",
+                replay_saved_tab_path(matches!(command, ReplayCommand::Duplicate(_))),
+                Some(body),
+            )
+        }
         ReplayCommand::Send(_) => api_preview(
             "POST",
             "/api/replay/send",
@@ -3578,6 +4103,23 @@ fn oast_api_preview(command: &OastCommand) -> Value {
     }
 }
 
+fn session_read_list_path(base: &str, session_id: Option<Uuid>, limit: usize) -> String {
+    session_query_path(&format!("{base}?limit={limit}"), session_id)
+}
+
+fn findings_api_preview(command: &FindingsCommand) -> Value {
+    let path = match command {
+        FindingsCommand::List(args) => {
+            session_read_list_path("/api/findings", args.session_id, args.limit)
+        }
+        FindingsCommand::Get(args) => {
+            session_query_path(&format!("/api/findings/{}", args.id), args.session_id)
+        }
+        FindingsCommand::Count(args) => session_query_path("/api/findings/count", args.session_id),
+    };
+    api_preview("GET", path, None)
+}
+
 fn api_preview(method: &str, path: impl Into<String>, body: Option<Value>) -> Value {
     json!({
         "method": method,
@@ -3590,6 +4132,22 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     let mut notes = Vec::new();
     if command.requires_confirmation() {
         notes.push("Use --yes to apply this side-effecting operation after reviewing the dry-run.");
+    }
+    if matches!(
+        command.operation_name(),
+        "replay.close" | "replay.duplicate"
+    ) {
+        notes.push("Dry-run is fully offline: it does not discover Sniper, resolve a session, read saved tabs or check whether the exact tab ID exists.");
+        notes.push("Execution pins one session, reads its saved workspace revision, and posts only IDs plus revision to the dedicated endpoint once. An inferred session also guards against an active-session switch. Conflicts, redirects and ambiguous responses are not retried.");
+        notes.push("Saved HTTP tabs only, including legacy empty types. No request parsing, body hydration, Replay send, WebSocket connection or full workspace replacement occurs. Success returns only acknowledgement metadata.");
+    }
+    if matches!(command, Command::Scanner { .. }) {
+        notes.push("Dry-run is offline and validates supplied rule JSON before API discovery. It does not resolve sessions, fetch configuration, apply writes or inspect traffic.");
+        notes.push("An omitted session_id is resolved once and pinned; writes also guard expected_active_session_id. Writes fetch a config_token and compare-and-swap once, preserving unrelated fields and custom rule order. Conflicts are not retried.");
+        notes.push("Passive configuration only: regexes inspect captured response body previews or headers. Configuration changes do not send probes or rescan stored traffic.");
+    }
+    if matches!(command, Command::Findings { .. } | Command::EventLog { .. }) {
+        notes.push("Dry-run is offline. An omitted session_id is resolved once and pinned before the read; call output includes it in meta.session_id.");
     }
     if matches!(
         command.operation_name(),
@@ -3896,6 +4454,34 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 },
             }
         }
+        operation if operation.starts_with("scanner.") => Command::Scanner {
+            command: scanner_command_from_input(operation, input)?,
+        },
+        "findings.list" => Command::Findings {
+            command: FindingsCommand::List(SessionReadListArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+                limit: call_optional_nonzero_usize(operation, input, "limit")?
+                    .unwrap_or(DEFAULT_READ_LIST_LIMIT),
+            }),
+        },
+        "findings.get" => Command::Findings {
+            command: FindingsCommand::Get(FindingGetArgs {
+                id: call_required(operation, input, "id")?,
+                session_id: call_optional(operation, input, "session_id")?,
+            }),
+        },
+        "findings.count" => Command::Findings {
+            command: FindingsCommand::Count(SessionReadArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+            }),
+        },
+        "event_log.list" => Command::EventLog {
+            command: EventLogCommand::List(SessionReadListArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+                limit: call_optional_nonzero_usize(operation, input, "limit")?
+                    .unwrap_or(DEFAULT_READ_LIST_LIMIT),
+            }),
+        },
         "scope.get" => Command::Scope {
             command: TargetCommand::GetScope(TargetSessionArgs {
                 session_id: call_optional(operation, input, "session_id")?,
@@ -3992,6 +4578,23 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     port,
                     label,
                 }),
+            }
+        }
+        "replay.close" | "replay.duplicate" => {
+            let args = ReplaySavedTabArgs {
+                tab_id: call_required(operation, input, "tab_id")?,
+                session_id: if input.get("session_id").is_some() {
+                    Some(call_required(operation, input, "session_id")?)
+                } else {
+                    None
+                },
+            };
+            Command::Replay {
+                command: if operation == "replay.close" {
+                    ReplayCommand::Close(args)
+                } else {
+                    ReplayCommand::Duplicate(args)
+                },
             }
         }
         "replay.send" => Command::Replay {
@@ -4680,6 +5283,18 @@ fn field_names(fields: &[(&str, bool)]) -> String {
 
 fn command_uses_stdin(command: &Command) -> bool {
     match command {
+        Command::Scanner {
+            command:
+                ScannerCommand::Custom {
+                    command: ScannerCustomCommand::Create(args),
+                },
+        } => args.stdin,
+        Command::Scanner {
+            command:
+                ScannerCommand::Custom {
+                    command: ScannerCustomCommand::Update(args),
+                },
+        } => args.stdin,
         Command::Scope {
             command: TargetCommand::SetScope(args),
         } => args.stdin,
@@ -4781,7 +5396,7 @@ async fn run(cli: Cli) -> Result<()> {
     let api_override = cli.api;
     let dry_run = cli.dry_run;
     let yes = cli.yes;
-    let command = match cli.command {
+    let mut command = match cli.command {
         Command::Call(args) if args.operation.starts_with("saved.v1.") => {
             return run_saved_call(api_override, args, dry_run, yes).await;
         }
@@ -4789,6 +5404,7 @@ async fn run(cli: Cli) -> Result<()> {
         command => command,
     };
 
+    prepare_scanner_command(&mut command)?;
     validate_command_preflight(&command)?;
     if dry_run {
         let plan = dry_run_command(&command)?;
@@ -4867,6 +5483,9 @@ async fn run(cli: Cli) -> Result<()> {
                     CaptureCommand::Oast { command } => handle_oast(api, command).await,
                     CaptureCommand::Browser { command } => handle_browser(api, command).await,
                 },
+                Command::Scanner { command } => handle_scanner(api, command).await,
+                Command::Findings { command } => handle_findings(api, command).await,
+                Command::EventLog { command } => handle_event_log(api, command).await,
                 Command::Scope { command } => handle_target(api, command).await,
                 Command::Replay { command } => handle_replay(api, command).await,
                 Command::Fuzzer { command } => handle_fuzzer(api, command).await,
@@ -4886,6 +5505,14 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Replay {
+        command: ReplayCommand::Close(args) | ReplayCommand::Duplicate(args),
+    } = command
+    {
+        if args.tab_id.trim().is_empty() || args.tab_id.len() > 128 {
+            bail!("tab_id must be nonblank and at most 128 UTF-8 bytes; exact ID is never trimmed");
+        }
+    }
     if let Command::Session {
         command: SessionCommand::Rename(args),
     } = command
@@ -5001,19 +5628,51 @@ async fn handle_browser(api: ApiClient, command: BrowserCommand) -> Result<()> {
 async fn handle_proxy_chain(api: ApiClient, args: ProxyChainArgs) -> Result<()> {
     let runtime: Value = if args.stdin {
         let raw = read_text_input(None, true)?;
-        let proxy: sniper::upstream_proxy::UpstreamProxy =
-            serde_json::from_str(&raw).map_err(|_| {
-                anyhow!("Expected proxy settings JSON with enabled, url, username and password")
-            })?;
+        let (proxy, bypass_hosts) = parse_proxy_chain_input(&raw)?;
         proxy.validate()?;
         let (session_id, expected_active_session_id) =
             runtime_write_session_ids(&api, args.session_id).await?;
-        api.post_json("/api/runtime", &json!({"session_id":session_id, "expected_active_session_id":expected_active_session_id, "upstream_proxy":proxy})).await?
+        let mut body = json!({"session_id":session_id, "expected_active_session_id":expected_active_session_id, "upstream_proxy":proxy});
+        if let Some(bypass_hosts) = bypass_hosts {
+            body["upstream_bypass_hosts"] = json!(bypass_hosts);
+        }
+        api.post_json("/api/runtime", &body).await?
     } else {
         api.get_json(&session_query_path("/api/runtime", args.session_id))
             .await?
     };
-    print_json_with_session(&runtime["upstream_proxy"], args.session_id)
+    print_json_with_session(&proxy_chain_output(&runtime), args.session_id)
+}
+
+/// The API keeps the bypass list beside the proxy (`upstream_bypass_hosts`) so that
+/// replacing the proxy cannot wipe it. The CLI reads and writes the two as one
+/// object, which is how people think of a chain and its exceptions.
+fn parse_proxy_chain_input(
+    raw: &str,
+) -> Result<(sniper::upstream_proxy::UpstreamProxy, Option<Vec<String>>)> {
+    let invalid = || {
+        anyhow!("Expected proxy settings JSON with enabled, url, username, password and optional bypass_hosts")
+    };
+    let mut value: Value = serde_json::from_str(raw).map_err(|_| invalid())?;
+    let bypass_hosts = value
+        .as_object_mut()
+        .and_then(|object| object.remove("bypass_hosts"))
+        .map(|hosts| serde_json::from_value(hosts).map_err(|_| invalid()))
+        .transpose()?;
+    let proxy = serde_json::from_value(value).map_err(|_| invalid())?;
+    Ok((proxy, bypass_hosts))
+}
+
+fn proxy_chain_output(runtime: &Value) -> Value {
+    let mut chain = runtime["upstream_proxy"].clone();
+    if let Some(object) = chain.as_object_mut() {
+        let bypass_hosts = runtime
+            .get("upstream_bypass_hosts")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        object.insert("bypass_hosts".to_string(), bypass_hosts);
+    }
+    chain
 }
 
 async fn handle_session(api: ApiClient, command: SessionCommand) -> Result<()> {
@@ -5448,6 +6107,8 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
             let tab = find_replay_tab(&snapshot.replay, &args.tab_id)?;
             print_json_with_session(tab, workspace.session_id)
         }
+        ReplayCommand::Close(args) => handle_saved_replay_tab(&api, args, false).await,
+        ReplayCommand::Duplicate(args) => handle_saved_replay_tab(&api, args, true).await,
         ReplayCommand::Send(args) => {
             let mut workspace = load_workspace_state(&api, args.session_id).await?;
             let tab = find_replay_tab_mut(&mut workspace.replay, &args.tab_id)?.clone();
@@ -5537,6 +6198,365 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
             }
         }
     }
+}
+
+// Only metadata is decoded here. Saved request text, responses and history never
+// become editable requests or a replacement workspace in these operations.
+#[derive(Deserialize)]
+struct SavedReplayTabMetadata {
+    id: String,
+    #[serde(rename = "type", default)]
+    tab_type: String,
+    #[serde(default)]
+    pinned: bool,
+}
+
+struct SavedReplayTabSnapshot {
+    revision: u64,
+    tabs: Vec<SavedReplayTabMetadata>,
+    active_tab_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct ReplayTabCliError {
+    code: &'static str,
+    message: &'static str,
+    outcome: &'static str,
+    session_id: Option<Uuid>,
+}
+
+impl fmt::Display for ReplayTabCliError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for ReplayTabCliError {}
+
+fn replay_tab_error(
+    code: &'static str,
+    message: &'static str,
+    outcome: &'static str,
+    session_id: Option<Uuid>,
+) -> anyhow::Error {
+    anyhow!(ReplayTabCliError {
+        code,
+        message,
+        outcome,
+        session_id
+    })
+}
+
+fn replay_saved_tab_path(duplicate: bool) -> &'static str {
+    if duplicate {
+        "/api/replay/tabs/duplicate"
+    } else {
+        "/api/replay/tabs/close"
+    }
+}
+
+async fn saved_replay_response_json(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> std::result::Result<Value, ()> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|_| ())
+}
+
+async fn saved_replay_get(
+    api: &ApiClient,
+    client: &reqwest::Client,
+    path: &str,
+    session_id: Option<Uuid>,
+) -> Result<Value> {
+    let response = client.get(api.url(path)).send().await.map_err(|_| {
+        replay_tab_error(
+            "TRANSPORT_ERROR",
+            "Saved tab read failed; no mutation was sent",
+            "not_applied",
+            session_id,
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err(replay_tab_error(
+            "HTTP_STATUS_ERROR",
+            "Saved tab read was rejected; no mutation was sent",
+            "not_applied",
+            session_id,
+        ));
+    }
+    saved_replay_response_json(response, MAX_CLI_INPUT_BYTES)
+        .await
+        .map_err(|_| {
+            replay_tab_error(
+                "INVALID_RESPONSE",
+                "Saved tab read was malformed or too large; no mutation was sent",
+                "not_applied",
+                session_id,
+            )
+        })
+}
+
+fn checked_saved_replay_snapshot(
+    mut value: Value,
+    session_id: Uuid,
+) -> Result<SavedReplayTabSnapshot> {
+    let invalid = || {
+        replay_tab_error(
+            "INVALID_RESPONSE",
+            "Saved workspace metadata is invalid; no mutation was sent",
+            "not_applied",
+            Some(session_id),
+        )
+    };
+    if value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+        != Some(session_id)
+    {
+        return Err(invalid());
+    }
+    let revision = value
+        .get("revision")
+        .and_then(Value::as_u64)
+        .filter(|revision| *revision < u64::MAX)
+        .ok_or_else(invalid)?;
+    let replay = value
+        .get_mut("replay")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(invalid)?;
+    let active = replay.get("active_tab_id").ok_or_else(invalid)?;
+    let active_tab_id = if active.is_null() {
+        None
+    } else {
+        Some(active.as_str().ok_or_else(invalid)?.to_owned())
+    };
+    let tabs: Vec<SavedReplayTabMetadata> =
+        serde_json::from_value(replay.remove("tabs").ok_or_else(invalid)?)
+            .map_err(|_| invalid())?;
+    let mut ids = std::collections::HashSet::new();
+    if tabs.len() > sniper::workspace::MAX_WORKSPACE_REPLAY_TABS
+        || tabs.iter().any(|tab| {
+            tab.id.trim().is_empty() || tab.id.len() > 128 || !ids.insert(tab.id.as_str())
+        })
+        || active_tab_id
+            .as_ref()
+            .is_some_and(|id| id.len() > 128 || (!id.is_empty() && !ids.contains(id.as_str())))
+    {
+        return Err(invalid());
+    }
+    Ok(SavedReplayTabSnapshot {
+        revision,
+        tabs,
+        active_tab_id,
+    })
+}
+
+fn saved_replay_expected_active(
+    snapshot: &SavedReplayTabSnapshot,
+    tab_id: &str,
+    duplicate: bool,
+) -> Option<String> {
+    if !duplicate && snapshot.tabs.len() == 1 {
+        return None;
+    }
+    if duplicate || snapshot.active_tab_id.as_deref() != Some(tab_id) {
+        return snapshot.active_tab_id.clone();
+    }
+    let mut visual: Vec<_> = snapshot.tabs.iter().collect();
+    visual.sort_by_key(|tab| !tab.pinned);
+    let index = visual.iter().position(|tab| tab.id == tab_id)?;
+    index
+        .checked_sub(1)
+        .and_then(|previous| visual.get(previous))
+        .or_else(|| visual.get(index + 1))
+        .map(|tab| tab.id.clone())
+}
+
+fn checked_saved_replay_ack(
+    value: Value,
+    snapshot: &SavedReplayTabSnapshot,
+    session_id: Uuid,
+    tab_id: &str,
+    duplicate: bool,
+) -> Result<Value> {
+    let invalid = || {
+        replay_tab_error("INVALID_RESPONSE", "Saved tab acknowledgement did not match this operation; inspect saved tabs before any further action", "unknown", Some(session_id))
+    };
+    let expected_fields: &[&str] = if duplicate {
+        &[
+            "session_id",
+            "revision",
+            "source_tab_id",
+            "new_tab_id",
+            "active_tab_id",
+        ]
+    } else {
+        &["session_id", "revision", "closed_tab_id", "active_tab_id"]
+    };
+    let object = value.as_object().ok_or_else(invalid)?;
+    if object.len() != expected_fields.len()
+        || expected_fields.iter().any(|key| !object.contains_key(*key))
+    {
+        return Err(invalid());
+    }
+    let target_key = if duplicate {
+        "source_tab_id"
+    } else {
+        "closed_tab_id"
+    };
+    if value["session_id"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        != Some(session_id)
+        || value["revision"].as_u64() != snapshot.revision.checked_add(1)
+        || value[target_key].as_str() != Some(tab_id)
+        || value["active_tab_id"]
+            != json!(saved_replay_expected_active(snapshot, tab_id, duplicate))
+    {
+        return Err(invalid());
+    }
+    if duplicate {
+        let new_id = value["new_tab_id"].as_str().ok_or_else(invalid)?;
+        let uuid = Uuid::parse_str(new_id).map_err(|_| invalid())?;
+        if snapshot
+            .tabs
+            .iter()
+            .any(|tab| tab.id == new_id || Uuid::parse_str(&tab.id).ok() == Some(uuid))
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(value)
+}
+
+async fn handle_saved_replay_tab(
+    api: &ApiClient,
+    args: ReplaySavedTabArgs,
+    duplicate: bool,
+) -> Result<()> {
+    // Do not inherit redirect or protocol retry behavior from legacy clients:
+    // an acknowledgement loss must never create a second duplicate or close.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(CLI_API_TIMEOUT)
+        .build()
+        .map_err(|_| {
+            replay_tab_error(
+                "TRANSPORT_ERROR",
+                "Could not prepare saved tab client; no mutation was sent",
+                "not_applied",
+                args.session_id,
+            )
+        })?;
+    let session_id = if let Some(session_id) = args.session_id {
+        session_id
+    } else {
+        let value = saved_replay_get(api, &client, "/api/sessions", None).await?;
+        let sessions: Vec<SessionSummary> = serde_json::from_value(value).map_err(|_| {
+            replay_tab_error(
+                "INVALID_RESPONSE",
+                "Session metadata is invalid; no mutation was sent",
+                "not_applied",
+                None,
+            )
+        })?;
+        active_session_id_from_summaries(&sessions)
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                replay_tab_error(
+                    "INVALID_RESPONSE",
+                    "Expected exactly one active saved session; pass --session-id explicitly",
+                    "not_applied",
+                    None,
+                )
+            })?
+    };
+    let value = saved_replay_get(
+        api,
+        &client,
+        &session_query_path("/api/workspace-state", Some(session_id)),
+        Some(session_id),
+    )
+    .await?;
+    let snapshot = checked_saved_replay_snapshot(value, session_id)?;
+    let tab = snapshot
+        .tabs
+        .iter()
+        .find(|tab| tab.id == args.tab_id)
+        .ok_or_else(|| {
+            replay_tab_error(
+                "TAB_NOT_FOUND",
+                "Exact saved tab ID was not found in the selected session; no mutation was sent",
+                "not_applied",
+                Some(session_id),
+            )
+        })?;
+    if !matches!(tab.tab_type.as_str(), "" | "http") {
+        return Err(replay_tab_error(
+            "INVALID_INPUT",
+            "Saved tab close and duplicate require an HTTP tab; no mutation was sent",
+            "not_applied",
+            Some(session_id),
+        ));
+    }
+    let mut body = json!({"session_id":session_id,"tab_id":args.tab_id,"expected_workspace_revision":snapshot.revision});
+    if args.session_id.is_none() {
+        body["expected_active_session_id"] = json!(session_id);
+    }
+    let response = client
+        .post(api.url(replay_saved_tab_path(duplicate)))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| {
+            replay_tab_error(
+                "TRANSPORT_ERROR",
+                "Saved tab response was lost; inspect saved tabs before any further action",
+                "unknown",
+                Some(session_id),
+            )
+        })?;
+    let status = response.status();
+    if status.is_redirection() {
+        return Err(replay_tab_error(
+            "REDIRECT_REFUSED",
+            "Saved tab mutation redirect refused; inspect saved tabs before any further action",
+            "unknown",
+            Some(session_id),
+        ));
+    }
+    if !status.is_success() {
+        // Never print an error body: older servers may attach whole workspaces.
+        let (code, outcome) = match status {
+            StatusCode::CONFLICT => ("WORKSPACE_CONFLICT", "not_applied"),
+            StatusCode::PRECONDITION_REQUIRED => ("PRECONDITION_REQUIRED", "not_applied"),
+            StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY => {
+                ("HTTP_STATUS_ERROR", "not_applied")
+            }
+            _ => ("HTTP_STATUS_ERROR", "unknown"),
+        };
+        return Err(replay_tab_error(
+            code,
+            "Saved tab mutation was rejected; inspect saved tabs before any further action",
+            outcome,
+            Some(session_id),
+        ));
+    }
+    let value = saved_replay_response_json(response, 4096).await.map_err(|_| replay_tab_error("INVALID_RESPONSE", "Saved tab acknowledgement was missing, malformed or too large; inspect saved tabs before any further action", "unknown", Some(session_id)))?;
+    let acknowledgement =
+        checked_saved_replay_ack(value, &snapshot, session_id, &args.tab_id, duplicate)?;
+    print_session_read_json(&acknowledgement, session_id)
 }
 
 async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
@@ -6285,6 +7305,593 @@ async fn handle_sequence(api: ApiClient, command: SequenceCommand) -> Result<()>
     }
 }
 
+async fn pinned_read_session_id(api: &ApiClient, explicit: Option<Uuid>) -> Result<Uuid> {
+    resolve_session_id_arg(api, explicit).await?.ok_or_else(|| {
+        anyhow!("no active session; pass --session-id to choose a session explicitly")
+    })
+}
+
+fn scanner_rule_schema(patch: bool) -> Value {
+    let mut properties = json!({
+        "id":{"type":"string","minLength":1,"pattern":"\\S","description":"Stable exact ID; at most 65536 UTF-8 bytes."},
+        "name":{"type":"string","minLength":1,"pattern":"\\S"},
+        "enabled":{"type":"boolean"},
+        "target":{"type":"string","enum":["response_body","response_header","request_header"]},
+        "header_name":{"type":"string","description":"Header name for header targets; an empty string keeps the existing all-headers behavior."},
+        "pattern":{"type":"string","minLength":1,"pattern":"\\S","description":"Valid Rust regex, applied only to captured body previews or headers."},
+        "severity":{"type":"string","enum":["info","low","medium","high","critical"]},
+        "category":{"type":"string"},
+        "description":{"type":"string"}
+    });
+    for property in properties.as_object_mut().unwrap().values_mut() {
+        if property["type"] == "string" {
+            property["maxLength"] = json!(MAX_SCANNER_FIELD_BYTES);
+        }
+    }
+    let mut schema = json!({"type":"object","additionalProperties":false,"properties":properties});
+    if patch {
+        schema["properties"].as_object_mut().unwrap().remove("id");
+        schema["minProperties"] = json!(1);
+    } else {
+        schema["required"] = json!([
+            "id",
+            "name",
+            "enabled",
+            "target",
+            "pattern",
+            "severity",
+            "category",
+            "description"
+        ]);
+    }
+    schema
+}
+
+fn scanner_input_schema(operation: &str, required: &[&str]) -> Option<Value> {
+    if !operation.starts_with("scanner.") {
+        return None;
+    }
+    let mut properties = serde_json::Map::new();
+    for field in call_allowed_fields(operation)? {
+        let schema = match *field {
+            "session_id" => {
+                json!({"type":["string","null"],"format":"uuid","description":"Explicit session, including inactive sessions; omission pins the active session once."})
+            }
+            "id" if operation == "scanner.builtin.set_enabled" => {
+                json!({"type":"string","enum":BUILTIN_RULES.iter().map(|(id, _)| *id).collect::<Vec<_>>()})
+            }
+            "id" => {
+                json!({"type":"string","minLength":1,"pattern":"\\S","maxLength":MAX_SCANNER_FIELD_BYTES})
+            }
+            "enabled" => json!({"type":"boolean"}),
+            "rule" => scanner_rule_schema(false),
+            "patch" => scanner_rule_schema(true),
+            "file" => {
+                json!({"type":"string","minLength":1,"description":"Path to a UTF-8 JSON rule or patch file."})
+            }
+            "stdin" => {
+                json!({"type":"boolean","description":"Read rule or patch JSON from stdin; cannot be combined with call --input -."})
+            }
+            _ => return None,
+        };
+        properties.insert((*field).into(), schema);
+    }
+    let mut schema = json!({"type":"object","additionalProperties":false,"required":required,"properties":properties});
+    if matches!(operation, "scanner.custom.create" | "scanner.custom.update") {
+        let source = if operation.ends_with(".create") {
+            "rule"
+        } else {
+            "patch"
+        };
+        schema["oneOf"] = json!([
+            {"required":[source],"not":{"anyOf":[{"required":["file"]},{"properties":{"stdin":{"const":true}},"required":["stdin"]}]}},
+            {"required":["file"],"not":{"anyOf":[{"required":[source]},{"properties":{"stdin":{"const":true}},"required":["stdin"]}]}},
+            {"required":["stdin"],"properties":{"stdin":{"const":true}},"not":{"anyOf":[{"required":[source]},{"required":["file"]}]}}
+        ]);
+    }
+    Some(schema)
+}
+
+fn scanner_output_schema(operation: &str) -> Option<Value> {
+    Some(match operation {
+        "scanner.config.get" => json!({
+            "type":"object","required":["session_id","config_token","enabled","rules","custom_rules","builtins"],
+            "properties":{
+                "session_id":{"type":"string","format":"uuid"},
+                "config_token":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                "enabled":{"type":"boolean"},
+                "rules":{"type":"object","additionalProperties":{"type":"boolean"}},
+                "custom_rules":{"type":"array","items":scanner_rule_schema(false)},
+                "builtins":{"type":"array","items":{"type":"object","required":["id","name"],"properties":{"id":{"type":"string"},"name":{"type":"string"}}}}
+            }
+        }),
+        "scanner.custom.list" => json!({"type":"array","items":scanner_rule_schema(false)}),
+        "scanner.custom.get" => scanner_rule_schema(false),
+        "scanner.config.set_enabled"
+        | "scanner.builtin.set_enabled"
+        | "scanner.custom.create"
+        | "scanner.custom.update"
+        | "scanner.custom.delete" => {
+            let mut schema = json!({
+                "type":"object","additionalProperties":false,"required":["session_id","config_token","changed"],
+                "properties":{
+                    "session_id":{"type":"string","format":"uuid"},
+                    "config_token":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                    "changed":{"type":"boolean"},"id":{"type":"string"}
+                }
+            });
+            if operation != "scanner.config.set_enabled" {
+                schema["required"].as_array_mut().unwrap().push(json!("id"));
+            }
+            schema
+        }
+        _ => return None,
+    })
+}
+
+fn scanner_input_preview(command: &ScannerCommand) -> Value {
+    let mut input = json!({"session_id":command.session_id()});
+    match command {
+        ScannerCommand::Config {
+            command: ScannerConfigCommand::SetEnabled(args),
+        } => {
+            input["enabled"] = json!(args.enabled);
+        }
+        ScannerCommand::Builtin {
+            command: ScannerBuiltinCommand::SetEnabled(args),
+        } => {
+            input["id"] = json!(args.id);
+            input["enabled"] = json!(args.enabled);
+        }
+        ScannerCommand::Custom { command } => match command {
+            ScannerCustomCommand::Get(args) | ScannerCustomCommand::Delete(args) => {
+                input["id"] = json!(args.id)
+            }
+            ScannerCustomCommand::Create(args) => input["rule"] = json!(args.rule),
+            ScannerCustomCommand::Update(args) => {
+                input["id"] = json!(args.id);
+                input["patch"] = json!(args.patch);
+            }
+            ScannerCustomCommand::List(_) => (),
+        },
+        _ => (),
+    }
+    input
+}
+
+fn scanner_api_preview(command: &ScannerCommand) -> Value {
+    let read = api_preview(
+        "GET",
+        session_query_path("/api/scanner-config", command.session_id()),
+        None,
+    );
+    if !command.is_write() {
+        return read;
+    }
+    json!({
+        "read":read,
+        "write":{
+            "method":"POST","path":session_query_path("/api/scanner-config", command.session_id()),
+            "body_source":"Fetched enabled/rules/custom_rules with only the requested change; expected_config_token from the pinned GET.",
+            "expected_active_session_id":if command.session_id().is_none() { json!("<resolved active session ID>") } else { Value::Null },
+            "skip_if_unchanged":true,"automatic_retry":false
+        }
+    })
+}
+
+fn scanner_command_from_input(operation: &str, input: &Value) -> Result<ScannerCommand> {
+    // Unlike omission, null is never an instruction to clear a field or source.
+    for (field, value) in input.as_object().expect("call input was validated") {
+        if field != "session_id" && value.is_null() {
+            bail!("field `{field}` for `{operation}` cannot be null");
+        }
+    }
+    let session_id = call_optional(operation, input, "session_id")?;
+    Ok(match operation {
+        "scanner.config.get" => ScannerCommand::Config {
+            command: ScannerConfigCommand::Get(SessionReadArgs { session_id }),
+        },
+        "scanner.config.set_enabled" => ScannerCommand::Config {
+            command: ScannerConfigCommand::SetEnabled(ScannerEnabledArgs {
+                session_id,
+                enabled: call_required(operation, input, "enabled")?,
+            }),
+        },
+        "scanner.builtin.set_enabled" => ScannerCommand::Builtin {
+            command: ScannerBuiltinCommand::SetEnabled(ScannerBuiltinEnabledArgs {
+                session_id,
+                id: call_required(operation, input, "id")?,
+                enabled: call_required(operation, input, "enabled")?,
+            }),
+        },
+        "scanner.custom.list" => ScannerCommand::Custom {
+            command: ScannerCustomCommand::List(SessionReadArgs { session_id }),
+        },
+        "scanner.custom.get" | "scanner.custom.delete" => {
+            let args = ScannerRuleIdArgs {
+                session_id,
+                id: call_required(operation, input, "id")?,
+            };
+            ScannerCommand::Custom {
+                command: if operation.ends_with(".get") {
+                    ScannerCustomCommand::Get(args)
+                } else {
+                    ScannerCustomCommand::Delete(args)
+                },
+            }
+        }
+        "scanner.custom.create" | "scanner.custom.update" => {
+            let create = operation.ends_with(".create");
+            let source = if create { "rule" } else { "patch" };
+            let file: Option<PathBuf> = call_optional_path(operation, input, "file")?;
+            if file
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty())
+            {
+                bail!("field `file` for `{operation}` must be nonempty");
+            }
+            let stdin = call_bool(operation, input, "stdin")?;
+            validate_call_exactly_one(
+                operation,
+                "rule_source",
+                &[
+                    (source, input.get(source).is_some()),
+                    ("file", file.is_some()),
+                    ("stdin", stdin),
+                ],
+            )?;
+            ScannerCommand::Custom {
+                command: if create {
+                    ScannerCustomCommand::Create(ScannerCreateArgs {
+                        session_id,
+                        file,
+                        stdin,
+                        rule: input.get("rule").map(parse_scanner_rule).transpose()?,
+                    })
+                } else {
+                    ScannerCustomCommand::Update(ScannerUpdateArgs {
+                        session_id,
+                        id: call_required(operation, input, "id")?,
+                        file,
+                        stdin,
+                        patch: input.get("patch").map(parse_scanner_patch).transpose()?,
+                    })
+                },
+            }
+        }
+        _ => bail!("unknown operation `{operation}`"),
+    })
+}
+
+fn validate_scanner_rule_id(id: &str) -> Result<()> {
+    if id.trim().is_empty() || id.len() > MAX_SCANNER_FIELD_BYTES {
+        bail!("custom scanner rule id must be nonblank and at most {MAX_SCANNER_FIELD_BYTES} UTF-8 bytes");
+    }
+    Ok(())
+}
+
+fn parse_scanner_rule(input: &Value) -> Result<CustomRule> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| anyhow!("custom scanner rule must be a JSON object"))?;
+    for (field, value) in object {
+        if !matches!(
+            field.as_str(),
+            "id" | "name"
+                | "enabled"
+                | "target"
+                | "header_name"
+                | "pattern"
+                | "severity"
+                | "category"
+                | "description"
+        ) {
+            bail!("invalid custom scanner rule field `{field}`");
+        }
+        if value.is_null() {
+            bail!("custom scanner rule field `{field}` cannot be null");
+        }
+    }
+    let rule: CustomRule = serde_json::from_value(input.clone())
+        .context("failed to parse custom scanner rule JSON")?;
+    validate_custom_rule(&rule).map_err(|message| anyhow!("invalid scanner rule: {message}"))?;
+    Ok(rule)
+}
+
+fn parse_scanner_patch(input: &Value) -> Result<ScannerRulePatch> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| anyhow!("custom scanner rule patch must be a JSON object"))?;
+    if object.is_empty() {
+        bail!("provide at least one custom scanner rule patch field");
+    }
+    for (field, value) in object {
+        if value.is_null() {
+            bail!("custom scanner rule patch field `{field}` cannot be null");
+        }
+    }
+    let patch: ScannerRulePatch = serde_json::from_value(input.clone())
+        .context("failed to parse custom scanner rule patch JSON")?;
+    // Validate the supplied fields offline without requiring unrelated fields
+    // that are intentionally omitted. The merged saved rule is validated again.
+    let mut example = CustomRule {
+        id: "validation-only".into(),
+        name: "Validation".into(),
+        enabled: true,
+        target: "response_body".into(),
+        header_name: String::new(),
+        pattern: "example".into(),
+        severity: Severity::Info,
+        category: String::new(),
+        description: String::new(),
+    };
+    patch.apply(&mut example);
+    validate_custom_rule(&example)
+        .map_err(|message| anyhow!("invalid scanner rule patch: {message}"))?;
+    Ok(patch)
+}
+
+fn prepare_scanner_command(command: &mut Command) -> Result<()> {
+    let Command::Scanner { command } = command else {
+        return Ok(());
+    };
+    match command {
+        ScannerCommand::Builtin {
+            command: ScannerBuiltinCommand::SetEnabled(args),
+        } => {
+            if !BUILTIN_RULES.iter().any(|(id, _)| *id == args.id) {
+                bail!("invalid builtin scanner rule id; use scanner config get for known IDs");
+            }
+        }
+        ScannerCommand::Custom { command } => match command {
+            ScannerCustomCommand::Get(args) | ScannerCustomCommand::Delete(args) => {
+                validate_scanner_rule_id(&args.id)?
+            }
+            ScannerCustomCommand::Create(args) => {
+                if args.rule.is_none() {
+                    let raw = read_text_input(args.file.clone(), args.stdin)?;
+                    let input: Value = serde_json::from_str(&raw)
+                        .context("failed to parse custom scanner rule JSON")?;
+                    args.rule = Some(parse_scanner_rule(&input)?);
+                }
+            }
+            ScannerCustomCommand::Update(args) => {
+                validate_scanner_rule_id(&args.id)?;
+                if args.patch.is_none() {
+                    let raw = read_text_input(args.file.clone(), args.stdin)?;
+                    let input: Value = serde_json::from_str(&raw)
+                        .context("failed to parse custom scanner rule patch JSON")?;
+                    args.patch = Some(parse_scanner_patch(&input)?);
+                }
+            }
+            ScannerCustomCommand::List(_) => (),
+        },
+        _ => (),
+    }
+    Ok(())
+}
+
+fn parse_scanner_snapshot(value: Value, session_id: Uuid) -> Result<ScannerConfigSnapshot> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("scanner config response must be an object"))?;
+    for field in [
+        "session_id",
+        "config_token",
+        "enabled",
+        "rules",
+        "custom_rules",
+    ] {
+        if !object.contains_key(field) {
+            bail!("scanner config response is missing required field `{field}`; refusing to use the snapshot");
+        }
+    }
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "session_id" | "config_token" | "enabled" | "rules" | "custom_rules"
+        ) {
+            bail!("scanner config response contains an unknown field; refusing to discard unsupported settings");
+        }
+    }
+    if let Some(rules) = value["custom_rules"].as_array() {
+        for rule in rules {
+            parse_scanner_rule(rule)?;
+        }
+    }
+    let snapshot: ScannerConfigSnapshot =
+        serde_json::from_value(value).context("failed to parse scanner config snapshot")?;
+    checked_scanner_snapshot(&snapshot, session_id)?;
+    Ok(snapshot)
+}
+
+fn checked_scanner_snapshot(snapshot: &ScannerConfigSnapshot, session_id: Uuid) -> Result<()> {
+    if snapshot.session_id != session_id {
+        bail!("scanner config returned an unexpected session_id; refusing to use the snapshot");
+    }
+    if snapshot.config_token.len() != 64
+        || !snapshot
+            .config_token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        bail!("scanner config must include a valid config_token; refusing to use the snapshot");
+    }
+    if snapshot.config_token != scanner_config_token(session_id, &snapshot.config) {
+        bail!("scanner config returned an unexpected config_token; refusing to use the snapshot");
+    }
+    validate_scanner_config(&snapshot.config)
+        .map_err(|message| anyhow!("invalid stored scanner config: {message}"))?;
+    Ok(())
+}
+
+async fn handle_scanner(api: ApiClient, command: ScannerCommand) -> Result<()> {
+    let explicit_session_id = command.session_id();
+    let session_id = pinned_read_session_id(&api, explicit_session_id).await?;
+    let read_path = session_query_path("/api/scanner-config", Some(session_id));
+    let snapshot = parse_scanner_snapshot(api.get_json(&read_path).await?, session_id)?;
+    match &command {
+        ScannerCommand::Config {
+            command: ScannerConfigCommand::Get(_),
+        } => {
+            let mut output = serde_json::to_value(&snapshot)?;
+            output["builtins"] = json!(BUILTIN_RULES
+                .iter()
+                .map(|(id, name)| json!({"id":id,"name":name}))
+                .collect::<Vec<_>>());
+            return print_session_read_json(&output, session_id);
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::List(_),
+        } => {
+            return print_session_read_json(&snapshot.config.custom_rules, session_id);
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::Get(args),
+        } => {
+            let rule = snapshot
+                .config
+                .custom_rules
+                .iter()
+                .find(|rule| rule.id == args.id)
+                .ok_or_else(|| anyhow!("custom scanner rule id not found in selected session"))?;
+            return print_session_read_json(rule, session_id);
+        }
+        _ => (),
+    }
+    let mut config = snapshot.config.clone();
+    let id = match &command {
+        ScannerCommand::Config {
+            command: ScannerConfigCommand::SetEnabled(args),
+        } => {
+            config.enabled = args.enabled;
+            None
+        }
+        ScannerCommand::Builtin {
+            command: ScannerBuiltinCommand::SetEnabled(args),
+        } => {
+            // A missing builtin toggle already means true; retain that omission
+            // when this request would not change behavior.
+            if config.rules.get(&args.id).copied().unwrap_or(true) != args.enabled {
+                config.rules.insert(args.id.clone(), args.enabled);
+            }
+            Some(args.id.clone())
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::Create(args),
+        } => {
+            let rule = args.rule.as_ref().expect("scanner input prepared");
+            if config
+                .custom_rules
+                .iter()
+                .any(|saved| saved.id.trim() == rule.id.trim())
+            {
+                bail!("invalid custom scanner rule: id already exists; use an exact-ID update");
+            }
+            config.custom_rules.push(rule.clone());
+            Some(rule.id.clone())
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::Update(args),
+        } => {
+            let rule = config
+                .custom_rules
+                .iter_mut()
+                .find(|rule| rule.id == args.id)
+                .ok_or_else(|| anyhow!("custom scanner rule id not found in selected session"))?;
+            args.patch
+                .as_ref()
+                .expect("scanner input prepared")
+                .apply(rule);
+            Some(args.id.clone())
+        }
+        ScannerCommand::Custom {
+            command: ScannerCustomCommand::Delete(args),
+        } => {
+            let position = config
+                .custom_rules
+                .iter()
+                .position(|rule| rule.id == args.id)
+                .ok_or_else(|| anyhow!("custom scanner rule id not found in selected session"))?;
+            config.custom_rules.remove(position);
+            Some(args.id.clone())
+        }
+        _ => unreachable!("read commands returned above"),
+    };
+    validate_scanner_config(&config)
+        .map_err(|message| anyhow!("invalid scanner config: {message}"))?;
+    let changed = serde_json::to_value(&config)? != serde_json::to_value(&snapshot.config)?;
+    let config_token = if changed {
+        let path = session_query_path_with_expected_active(
+            "/api/scanner-config",
+            Some(session_id),
+            explicit_session_id.is_none().then_some(session_id),
+        );
+        let mut body = serde_json::to_value(&config)?;
+        body["expected_config_token"] = json!(snapshot.config_token);
+        let saved = parse_scanner_snapshot(api.post_json(&path, &body).await?, session_id)?;
+        if serde_json::to_value(&saved.config)? != serde_json::to_value(&config)? {
+            bail!("scanner config save returned unexpected settings; inspect current configuration before retrying");
+        }
+        saved.config_token
+    } else {
+        snapshot.config_token
+    };
+    let mut output = json!({"session_id":session_id,"config_token":config_token,"changed":changed});
+    if let Some(id) = id {
+        output["id"] = json!(id);
+    }
+    print_session_read_json(&output, session_id)
+}
+
+async fn handle_findings(api: ApiClient, command: FindingsCommand) -> Result<()> {
+    match command {
+        FindingsCommand::List(args) => {
+            let session_id = pinned_read_session_id(&api, args.session_id).await?;
+            let path = session_read_list_path("/api/findings", Some(session_id), args.limit);
+            let findings: Vec<FindingSummary> = api.get_json(&path).await?;
+            print_session_read_json(&findings, session_id)
+        }
+        FindingsCommand::Get(args) => {
+            let session_id = pinned_read_session_id(&api, args.session_id).await?;
+            let path = session_query_path(&format!("/api/findings/{}", args.id), Some(session_id));
+            let finding: ScannerFinding = api.get_json(&path).await?;
+            print_session_read_json(&finding, session_id)
+        }
+        FindingsCommand::Count(args) => {
+            let session_id = pinned_read_session_id(&api, args.session_id).await?;
+            let path = session_query_path("/api/findings/count", Some(session_id));
+            let count: FindingsCount = api.get_json(&path).await?;
+            print_session_read_json(&count, session_id)
+        }
+    }
+}
+
+async fn handle_event_log(api: ApiClient, command: EventLogCommand) -> Result<()> {
+    let EventLogCommand::List(args) = command;
+    let session_id = pinned_read_session_id(&api, args.session_id).await?;
+    let path = session_read_list_path("/api/event-log", Some(session_id), args.limit);
+    let entries: Vec<EventLogEntry> = api.get_json(&path).await?;
+    print_session_read_json(&entries, session_id)
+}
+
+fn print_session_read_json<T: Serialize>(value: &T, session_id: Uuid) -> Result<()> {
+    let context = output_context();
+    if !context.success_envelope {
+        return print_json(value);
+    }
+    // Keep API arrays intact while letting a caller reuse the same pinned session
+    // for a later detail/count request, even if the active session changes.
+    write_json_envelope(
+        &json!({
+            "ok":true, "operation":context.operation,
+            "schema_version":output_schema_version(&context.operation),
+            "data":value, "meta":{"session_id":session_id}, "warnings":[],
+        }),
+        context.format,
+    )
+}
+
 async fn handle_oast(api: ApiClient, command: OastCommand) -> Result<()> {
     match command {
         OastCommand::Status(args) => {
@@ -7008,13 +8615,18 @@ fn normalize_target_inputs(
             );
         }
     }
+    // A new scheme drops the request's port only when that port was the old
+    // scheme's default: example.com:443 over http means 80, but localhost:18891
+    // means 18891 whatever the scheme. A raw request names no scheme at all, so
+    // its guessed https made `--scheme http` throw an explicit Host port away.
+    // `replay_update_should_preserve_current_port` applies the same rule.
+    let inherited_port = fallback_explicit_port.filter(|port| {
+        !scheme_changed_from_fallback
+            || *port != default_port_for_scheme(&fallback_scheme).to_string()
+    });
     let port = requested_port
         .or(parsed_host_port)
-        .or_else(|| {
-            (!host_url_without_port && !scheme_changed_from_fallback)
-                .then_some(fallback_explicit_port)
-                .flatten()
-        })
+        .or_else(|| (!host_url_without_port).then_some(inherited_port).flatten())
         .unwrap_or_else(|| default_port_for_scheme(&scheme).to_string());
 
     Ok(NormalizedTarget { scheme, host, port })
@@ -8591,6 +10203,9 @@ fn cli_parse_error_operation(args: &[String]) -> String {
     }
 
     match tokens.as_slice() {
+        ["scanner", group, action, ..] => format!("scanner.{group}.{}", action.replace('-', "_")),
+        ["findings", action, ..] => format!("findings.{action}"),
+        ["event-log", action, ..] => format!("event_log.{action}"),
         ["session", action, ..] => format!("session.{action}"),
         ["scope" | "target", "get-scope", ..] => "scope.get".to_string(),
         ["scope" | "target", "set-scope", ..] => "scope.set".to_string(),
@@ -8720,6 +10335,16 @@ fn clap_error_payload(error: &clap::Error) -> CliErrorPayload {
 }
 
 fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload {
+    if let Some(tab) = error.downcast_ref::<ReplayTabCliError>() {
+        return CliErrorPayload {
+            code: tab.code,
+            message: tab.message.to_owned(),
+            hint: Some("Inspect the selected session's saved tabs before deliberately issuing another operation; never automatically retry."),
+            retryable: false,
+            details: json!({"session_id":tab.session_id,"outcome":tab.outcome}),
+            exit_code: if tab.code == "INVALID_INPUT" { 2 } else { 5 },
+        };
+    }
     if let Some(saved) = error.downcast_ref::<SavedCliError>() {
         return CliErrorPayload {
             code: saved.code,
@@ -9228,20 +10853,21 @@ mod tests {
         build_editable_raw_request_with_version, build_oast_configure_update, clap_error_payload,
         cli_data_dir, cli_error_payload, cli_output_format_from_raw_args,
         cli_parse_error_operation, cli_partial_apply_error, command_from_call_args,
-        command_from_operation_input, default_cli_data_dir, default_editable_request,
-        discover_api_base_url, discover_api_base_url_from_data_dir, dry_run_command,
-        ensure_http_replay_tab, explicit_or_active_session_id, failed_record_output,
-        fuzzer_active_target_for_request, fuzzer_target_request_authority_for_request,
-        history_list_path, history_search_path, install_skills,
-        json_value_with_session_and_workspace_save_error, manifest_operations,
+        command_from_operation_input, command_input_preview, default_cli_data_dir,
+        default_editable_request, discover_api_base_url, discover_api_base_url_from_data_dir,
+        dry_run_command, ensure_http_replay_tab, explicit_or_active_session_id,
+        failed_record_output, fuzzer_active_target_for_request,
+        fuzzer_target_request_authority_for_request, history_list_path, history_search_path,
+        install_skills, json_value_with_session_and_workspace_save_error, manifest_operations,
         next_replay_tab_sequence, normalize_api_base_url, normalize_replay_port,
         normalize_target_inputs, oast_fields_for_output, operation_spec,
         parse_editable_raw_request, parse_editable_raw_request_bytes_with_version,
         parse_editable_raw_request_with_version, parse_editable_raw_response,
         parse_editable_raw_response_bytes, parse_editable_raw_response_for_request_method,
-        prepare_cli_workspace_save, push_replay_history_entry, read_limited_to_end,
-        read_payloads_input, read_raw_request_input, read_raw_response_input, read_text_input,
-        replay_send_http_version, replay_send_target_for_tab, replay_tab_target_as_request,
+        parse_proxy_chain_input, prepare_cli_workspace_save, proxy_chain_output,
+        push_replay_history_entry, read_limited_to_end, read_payloads_input,
+        read_raw_request_input, read_raw_response_input, read_text_input, replay_send_http_version,
+        replay_send_target_for_tab, replay_tab_target_as_request,
         replay_update_should_preserve_current_port, sequence_write_session_id,
         session_id_for_write_payload, session_query_path, session_query_path_with_expected_active,
         sniper_settings_probe_matches, split_host_port, split_payload_lines, strip_host_port,
@@ -10580,6 +12206,23 @@ mod tests {
         assert_eq!(target.host, "example.com");
         assert_eq!(target.port, "80");
 
+        // A port that is not the old scheme's default is kept: it names the
+        // service, not the protocol. This is a raw request's `Host:` line.
+        let fallback_with_service_port = EditableRequest {
+            host: "localhost:18891".to_string(),
+            ..fallback.clone()
+        };
+        let target = normalize_target_inputs(
+            Some("http".to_string()),
+            None,
+            None,
+            Some(&fallback_with_service_port),
+        )
+        .unwrap();
+        assert_eq!(target.scheme, "http");
+        assert_eq!(target.host, "localhost");
+        assert_eq!(target.port, "18891");
+
         let target = normalize_target_inputs(
             None,
             Some("http://other.example".to_string()),
@@ -11220,6 +12863,105 @@ mod tests {
             Cli::try_parse_from(["sniper-cli", "capture", "oast", "configure", "--enable",])
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn findings_and_event_log_read_commands_match_the_manifest() {
+        let session = "11111111-1111-1111-1111-111111111111";
+        let id = "22222222-2222-2222-2222-222222222222";
+        for (operation, args, input, endpoint) in [
+            (
+                "findings.list",
+                vec!["findings", "list", "--session-id", session, "--limit", "3"],
+                json!({"session_id":session,"limit":3}),
+                format!("/api/findings?limit=3&session_id={session}"),
+            ),
+            (
+                "findings.get",
+                vec!["findings", "get", "--session-id", session, "--id", id],
+                json!({"session_id":session,"id":id}),
+                format!("/api/findings/{id}?session_id={session}"),
+            ),
+            (
+                "findings.count",
+                vec!["findings", "count", "--session-id", session],
+                json!({"session_id":session}),
+                format!("/api/findings/count?session_id={session}"),
+            ),
+            (
+                "event_log.list",
+                vec!["event-log", "list", "--session-id", session, "--limit", "3"],
+                json!({"session_id":session,"limit":3}),
+                format!("/api/event-log?limit=3&session_id={session}"),
+            ),
+        ] {
+            let mut argv = vec!["sniper-cli"];
+            argv.extend(args);
+            let direct = Cli::try_parse_from(argv).unwrap().command;
+            let call = command_from_operation_input(operation, &input).unwrap();
+            assert_eq!(direct.operation_name(), operation);
+            assert_eq!(call.operation_name(), operation);
+            assert!(!direct.requires_confirmation());
+            assert_eq!(command_input_preview(&direct), command_input_preview(&call));
+            let plan = dry_run_command(&direct).unwrap();
+            assert_eq!(plan["side_effect"], "read");
+            assert_eq!(plan["api"]["method"], "GET");
+            assert_eq!(plan["api"]["path"], endpoint);
+            assert!(plan["api"]["body"].is_null());
+            let spec = operation_spec(operation).unwrap();
+            assert_eq!(spec.input_schema["additionalProperties"], false);
+            assert_eq!(
+                spec.input_schema["properties"]["session_id"]["format"],
+                "uuid"
+            );
+        }
+    }
+
+    #[test]
+    fn findings_and_event_log_reject_invalid_or_unsupported_input() {
+        for operation in [
+            "findings.list",
+            "findings.get",
+            "findings.count",
+            "event_log.list",
+        ] {
+            for input in [
+                json!({"session_id":"invalid"}),
+                json!({"url":"http://example.com"}),
+                Value::Null,
+            ] {
+                let error = command_from_operation_input(operation, &input).unwrap_err();
+                assert_eq!(
+                    cli_error_payload(operation, &error).code,
+                    "INVALID_INPUT",
+                    "{operation}: {error}"
+                );
+            }
+        }
+        for operation in ["findings.list", "event_log.list"] {
+            for input in [
+                json!({"limit":0}),
+                json!({"limit":-1}),
+                json!({"limit":1.5}),
+                json!({"limit":"3"}),
+                json!({"offset":1}),
+                json!({"page":true}),
+            ] {
+                let error = command_from_operation_input(operation, &input).unwrap_err();
+                assert_eq!(cli_error_payload(operation, &error).code, "INVALID_INPUT");
+            }
+        }
+        for input in [json!({}), json!({"id":"invalid"}), json!({"id":1})] {
+            assert!(command_from_operation_input("findings.get", &input).is_err());
+        }
+        for group in ["findings", "event-log"] {
+            assert!(Cli::try_parse_from(["sniper-cli", group, "list", "--limit", "0"]).is_err());
+            assert!(Cli::try_parse_from(["sniper-cli", group, "clear"]).is_err());
+        }
+        for operation in ["findings.clear", "event_log.clear"] {
+            assert!(operation_spec(operation).is_none());
+            assert!(command_from_operation_input(operation, &json!({})).is_err());
+        }
     }
 
     #[test]
@@ -13176,5 +14918,31 @@ mod tests {
             &json!({"session_id":second})
         )
         .is_ok());
+    }
+
+    #[test]
+    fn proxy_chain_json_carries_bypass_hosts_beside_the_proxy() {
+        let (proxy, bypass_hosts) = parse_proxy_chain_input(
+            r#"{"enabled":true,"url":"http://127.0.0.1:8081","username":"","password":"","bypass_hosts":["localhost"]}"#,
+        )
+        .unwrap();
+        assert!(proxy.enabled);
+        assert_eq!(bypass_hosts, Some(vec!["localhost".to_string()]));
+        let (_, bypass_hosts) = parse_proxy_chain_input(r#"{"enabled":false}"#).unwrap();
+        assert_eq!(
+            bypass_hosts, None,
+            "leaving the list out keeps the saved one"
+        );
+        assert!(parse_proxy_chain_input(r#"{"enabled":true,"bypass_hosts":"localhost"}"#).is_err());
+        assert!(parse_proxy_chain_input(r#"{"enabled":true,"surprise":1}"#).is_err());
+
+        let output = proxy_chain_output(&json!({
+            "upstream_proxy": {"enabled": true, "url": "http://127.0.0.1:8081", "username": "", "password": ""},
+            "upstream_bypass_hosts": ["localhost"],
+        }));
+        assert_eq!(output["url"], "http://127.0.0.1:8081");
+        assert_eq!(output["bypass_hosts"], json!(["localhost"]));
+        let older_server = proxy_chain_output(&json!({"upstream_proxy": {"enabled": false}}));
+        assert_eq!(older_server["bypass_hosts"], json!([]));
     }
 }

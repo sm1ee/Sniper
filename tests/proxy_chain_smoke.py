@@ -56,10 +56,21 @@ def relay(left, right):
             (right if source is left else left).sendall(data)
 
 
+# A 1x1 PNG for Render's resource loading.
+PIXEL = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==")
+
+
 class Origin(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         assert self.headers.get("Proxy-Authorization") is None
         self.server.hits += 1
+        if self.path == "/pixel.png":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(PIXEL)))
+            self.end_headers()
+            self.wfile.write(PIXEL)
+            return
         if self.headers.get("Upgrade", "").lower() == "websocket":
             key = self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
             accept = base64.b64encode(hashlib.sha1(key.encode()).digest()).decode()
@@ -215,11 +226,11 @@ def main():
             finally:
                 connection.close()
 
-        def websocket(port, secure=False):
+        def websocket(port, secure=False, name="example.com"):
             proxy_host, proxy_port = runtime["proxy_addr"].rsplit(":", 1)
             stream = socket.create_connection((proxy_host, int(proxy_port)), timeout=15)
             try:
-                host = f"example.com:{port}"
+                host = f"{name}:{port}"
                 if secure:
                     stream.sendall(f"CONNECT {host} HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
                     assert b" 200 " in headers(stream)
@@ -275,12 +286,72 @@ def main():
                     assert "example.com" in chain.destinations
                 print(f"PASS: {kind} authentication, remote DNS, HTTP, HTTPS MITM, passthrough, WS/WSS and replay", flush=True)
 
+                # A host on the bypass list is dialled directly on every path; any
+                # other host keeps using the chain.
+                api("/api/runtime", {"upstream_bypass_hosts": ["127.0.0.1"]})
+                attempts, hits = chain.attempts, origin.hits
+                capture(origin.server_port, host="127.0.0.1")
+                capture(tls_origin.server_port, secure=True, host="127.0.0.1")
+                websocket(origin.server_port, name="127.0.0.1")
+                api("/api/runtime", {"passthrough_hosts": ["127.0.0.1"]})
+                capture(tls_origin.server_port, secure=True, host="127.0.0.1")
+                api("/api/runtime", {"passthrough_hosts": []})
+                direct = {"scheme": "http", "host": f"127.0.0.1:{origin.server_port}", "method": "GET", "path": "/replay", "headers": [], "body": ""}
+                assert api("/api/replay/send", {"session_id": session_id, "request": direct})["response"]["body_preview"] == "chain-ok"
+                # A destination override is allowed with a chain only when its target is bypassed.
+                named = dict(direct, host=f"example.com:{origin.server_port}")
+                result = api("/api/replay/send", {"session_id": session_id, "request": named, "target": {"scheme": "http", "host": "127.0.0.1", "port": str(origin.server_port)}})
+                assert result["response"]["body_preview"] == "chain-ok"
+                ws_id = str(uuid.uuid4())
+                api("/api/replay/ws-connect", {"session_id": session_id, "id": ws_id, "scheme": "ws", "host": "127.0.0.1", "port": origin.server_port, "path": "/ws"})
+                eventually(lambda: api(f"/api/replay/ws-snapshot/{ws_id}?session_id={session_id}")["status"] == "connected")
+                api("/api/replay/ws-send", {"session_id": session_id, "id": ws_id, "body": "ping"})
+                eventually(lambda: any(frame["direction"] == "server_to_client" and frame["body"] == "ping" for frame in api(f"/api/replay/ws-snapshot/{ws_id}?session_id={session_id}")["frames"]))
+                api("/api/replay/ws-disconnect", {"session_id": session_id, "id": ws_id})
+                assert chain.attempts == attempts, "A bypassed host went through the chain"
+                assert origin.hits >= hits + 5, "A bypassed request did not reach the origin"
+                capture(origin.server_port)
+                assert chain.attempts > attempts, "A host not on the bypass list skipped the chain"
+                # The list sits beside the proxy, so replacing the proxy keeps it.
+                api("/api/runtime", {"upstream_proxy": settings})
+                assert api("/api/runtime")["upstream_bypass_hosts"] == ["127.0.0.1"]
+                api("/api/runtime", {"upstream_bypass_hosts": []})
+                try:
+                    api("/api/replay/send", {"session_id": session_id, "request": named, "target": {"scheme": "http", "host": "127.0.0.1", "port": str(origin.server_port)}})
+                    raise AssertionError("Replay override was combined with a chain for a host that is not bypassed")
+                except urllib.error.HTTPError as error:
+                    assert error.code == 400
+                print(f"PASS: {kind} bypass list on HTTP, HTTPS MITM, passthrough, WS, replay, replay override and WS replay", flush=True)
+
+                # Render's opt-in resource loading leaves through the chain too.
+                ui = api("/api/ui-settings")
+                ui["display_settings"]["render_resources"] = True
+                api("/api/ui-settings", ui)
+                attempts = chain.attempts
+                resource = "http://" + runtime["ui_addr"] + "/api/render-resource?url=" + urllib.parse.quote(f"http://example.com:{origin.server_port}/pixel.png", safe="")
+                with opener.open(resource, timeout=15) as response:
+                    assert response.headers["Content-Type"] == "image/png"
+                    assert response.read() == PIXEL
+                assert chain.attempts > attempts, "A Render resource skipped the chain"
+                ui = api("/api/ui-settings")
+                ui["display_settings"]["render_resources"] = False
+                api("/api/ui-settings", ui)
+                try:
+                    opener.open(resource, timeout=15)
+                    raise AssertionError("A Render resource was fetched with the option off")
+                except urllib.error.HTTPError as error:
+                    assert error.code == 403
+                print(f"PASS: {kind} Render resources through the chain, refused when off", flush=True)
+
                 # Redacted round-trip must preserve the real password across restart.
                 api("/api/runtime", {"upstream_proxy": dict(settings, password="********")})
+                api("/api/runtime", {"upstream_bypass_hosts": ["https://Direct.Example.com:8443/path"]})
                 child.kill()
                 child.wait(timeout=10)
                 child, runtime = start()
                 assert api("/api/runtime")["upstream_proxy"]["password"] == "********"
+                assert api("/api/runtime")["upstream_bypass_hosts"] == ["direct.example.com"]
+                api("/api/runtime", {"upstream_bypass_hosts": []})
                 capture(origin.server_port)
                 before = origin.hits
                 api("/api/runtime", {"upstream_proxy": dict(settings, password="wrong")})

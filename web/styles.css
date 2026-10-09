@@ -2770,6 +2770,50 @@ body.pane-resizing-y {
   border-bottom: none;
 }
 
+/* Render replaces a response pane's editor rather than sitting inside it: the
+   history shell's grid keeps the editor full width only while it is the only child. */
+.render-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.render-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  /* A page that sets no background expects white, which the UI behind it is not. */
+  background: #fff;
+}
+
+.render-image {
+  /* Natural size, shrunk only to fit: a flex item would otherwise stretch an
+     icon across the whole pane. */
+  align-self: flex-start;
+  max-width: calc(100% - 28px);
+  max-height: calc(100% - 28px);
+  margin: 14px;
+  /* Transparent images need a ground; a checkerboard would be noisier. */
+  background: #fff;
+}
+
+.render-note {
+  margin: 0;
+  padding: 14px;
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+
+.render-banner {
+  margin: 0;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--warning);
+  font-size: 12px;
+}
+
 .empty-copy,
 #notesCard p {
   margin: 0;

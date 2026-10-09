@@ -36,6 +36,7 @@ function createDefaultDisplaySettings() {
     theme: "charcoal",
     uiFont: "plex",
     monoFont: "jetbrains",
+    renderResources: false,
   };
 }
 
@@ -686,6 +687,8 @@ const els = {
   responseLines: document.getElementById("responseLines"),
   requestViewCM: document.getElementById("requestViewCM"),
   responseViewCM: document.getElementById("responseViewCM"),
+  responseRenderView: document.getElementById("responseRenderView"),
+  replayResponseRenderView: document.getElementById("replayResponseRenderView"),
   requestSearchInput: document.getElementById("requestSearchInput"),
   responseSearchInput: document.getElementById("responseSearchInput"),
   requestSearchMeta: document.getElementById("requestSearchMeta"),
@@ -719,6 +722,7 @@ const els = {
   displaySizeInput: document.getElementById("displaySizeInput"),
   displayUiFontSelect: document.getElementById("displayUiFontSelect"),
   displayMonoFontSelect: document.getElementById("displayMonoFontSelect"),
+  displayRenderResourcesInput: document.getElementById("displayRenderResourcesInput"),
   settingsSpecialHostHttp: document.getElementById("settingsSpecialHostHttp"),
   certificateName: document.getElementById("certificateName"),
   certificateExpiry: document.getElementById("certificateExpiry"),
@@ -805,6 +809,7 @@ const els = {
   proxySettingUpstreamInsecure: document.getElementById("proxySettingUpstreamInsecure"),
   proxySettingScopePatterns: document.getElementById("proxySettingScopePatterns"),
   proxySettingPassthroughHosts: document.getElementById("proxySettingPassthroughHosts"),
+  proxyChainBypassHosts: document.getElementById("proxyChainBypassHosts"),
   proxySettingOastClearToken: document.getElementById("proxySettingOastClearToken"),
   proxySettingOastTokenHint: document.getElementById("proxySettingOastTokenHint"),
   proxySettingBindHost: document.getElementById("proxySettingBindHost"),
@@ -867,6 +872,7 @@ const els = {
   fuzzerDetailPanel: document.getElementById("fuzzerDetailPanel"),
   fuzzerDetailReqCM: document.getElementById("fuzzerDetailReqCM"),
   fuzzerDetailResCM: document.getElementById("fuzzerDetailResCM"),
+  fuzzerDetailResRenderView: document.getElementById("fuzzerDetailResRenderView"),
   fuzzerDetailResponseMeta: document.getElementById("fuzzerDetailResponseMeta"),
   startFuzzerButton: document.getElementById("startFuzzerButton"),
   resetFuzzerButton: document.getElementById("resetFuzzerButton"),
@@ -939,6 +945,9 @@ let workspaceSaveCommittedSnapshot = null;
 const workspaceClientId = createWorkspaceClientId();
 let workspaceSaveLoopPromise = null;
 let workspaceSaveConflictPending = false;
+let workspaceStateGeneration = 0;
+let workspaceExternalLoadGeneration = 0;
+let workspaceExternalAppliedGeneration = 0;
 // Highest replay-tab count a workspace may hold; must match
 // MAX_WORKSPACE_REPLAY_TABS in src/workspace.rs.
 const MAX_REPLAY_TABS = 512;
@@ -1003,6 +1012,7 @@ const LAYOUT_TEXTAREA_IDS = [
   "interceptRequestEditor",
   "proxySettingScopePatterns",
   "proxySettingPassthroughHosts",
+  "proxyChainBypassHosts",
   "fuzzerPayloadsEditor",
   "targetScopeEditor",
   "wsMessageEditor",
@@ -1619,6 +1629,7 @@ function bindEvents() {
     els.displaySizeInput.value = String(defaults.sizePx);
     els.displayUiFontSelect.value = defaults.uiFont;
     els.displayMonoFontSelect.value = defaults.monoFont;
+    els.displayRenderResourcesInput.checked = defaults.renderResources;
     previewDisplaySettingsFromForm();
   });
   [els.displayThemeSelect, els.displayUiFontSelect, els.displayMonoFontSelect].forEach((element) => {
@@ -1986,6 +1997,8 @@ function bindEvents() {
       // Re-render with current record
       if (state._fuzzerDetailRecord) {
         renderFuzzerDetailPanes(state._fuzzerDetailRecord);
+      } else if (target === "response") {
+        syncFuzzerResponsePreview(null);
       }
     });
   });
@@ -3003,6 +3016,7 @@ function applyWorkspaceState(snapshot) {
     console.warn("Ignoring workspace state for a non-active session", snapshot?.session_id);
     return;
   }
+  workspaceStateGeneration += 1;
   for (const tab of state.replayTabs || []) {
     if (tab?.type === "websocket") {
       cleanupWsReplayTab(tab, { guardWorkspaceRevision: false }).catch((error) => console.error(error));
@@ -3054,61 +3068,130 @@ function applyWorkspaceState(snapshot) {
   workspaceSaveCommittedSnapshot = cloneWorkspaceSnapshotForBaseline(snapshotWorkspaceState());
 }
 
-// Pick up replay tabs committed by another client — typically
-// `sniper-cli replay open`. Only tabs we do not already have are added: an open
-// tab may be mid-edit, and replacing it from a background fetch would discard
-// the user's work. A tab the CLI *modified* is therefore left alone.
+// Reconcile saved HTTP tab deletions before following another writer's revision.
+// A full save at that revision would otherwise put a CLI-closed tab back.
 async function adoptExternalReplayTabs() {
-  const response = await fetch("/api/workspace-state");
+  if (!workspaceLoaded || workspaceSaveConflictPending) return;
+  const sessionId = currentSessionId();
+  if (!sessionId) return;
+  const stateGeneration = workspaceStateGeneration;
+  const loadGeneration = ++workspaceExternalLoadGeneration;
+  const response = await fetch(sessionQueryPath("/api/workspace-state", sessionId));
   if (!response.ok) return;
   const snapshot = await response.json();
-  if (!workspaceSnapshotMatchesActiveSession(snapshot)) return;
-
-  // Follow the writer's revision, otherwise our next save looks stale and the
-  // server rejects it as a conflict.
-  if (Number.isFinite(snapshot?.revision)) {
-    state.workspaceRevision = snapshot.revision;
-  }
+  if (
+    !workspaceLoaded || workspaceSaveConflictPending
+    || sessionId !== currentSessionId() || stateGeneration !== workspaceStateGeneration
+    || snapshot?.session_id !== sessionId
+    || loadGeneration < workspaceExternalAppliedGeneration
+    || !Array.isArray(snapshot?.replay?.tabs)
+    || !Number.isSafeInteger(snapshot?.revision) || snapshot.revision <= state.workspaceRevision
+  ) return;
+  workspaceExternalAppliedGeneration = loadGeneration;
 
   const incoming = Array.isArray(snapshot?.replay?.tabs) ? snapshot.replay.tabs : [];
+  const incomingById = workspaceReplayTabsById(snapshot);
+  const baselineById = workspaceReplayTabsById(workspaceSaveCommittedSnapshot);
   const local = new Map((state.replayTabs || []).map((tab) => [tab?.id, tab]));
+  const removed = new Set();
+  for (const [id, baseline] of baselineById) {
+    if (baseline.type === "websocket" || incomingById.has(id)) continue;
+    const existing = local.get(id);
+    if (existing && (existing.type === "websocket"
+      || replayTabHasUncommittedEditorState(existing)
+      || workspaceSnapshotValueChanged(snapshotHttpReplayTab(existing), baseline))) {
+      // Do not render, sync the DOM, stop activity, or partly advance a baseline
+      // when the closed tab still contains a local draft.
+      workspaceSaveConflictPending = true;
+      workspaceSaveConflictLatest = snapshot;
+      workspaceSaveDirty = true;
+      window.clearTimeout(workspaceSaveTimer);
+      workspaceSaveTimer = null;
+      showToast(
+        "A replay tab was closed elsewhere. Local edits are unsaved; copy them before reloading the workspace to reconcile.",
+        "error", 6000,
+      );
+      return;
+    }
+    removed.add(id);
+  }
+
+  const previousSequence = Math.max(state.replayTabSequence || 0,
+    ...state.replayTabs.map((tab) => tab.sequence || 0));
+  const visualIds = getReplayTabVisualOrder().map((tab) => tab.id);
+  const previousActiveId = state.activeReplayTabId;
   const added = [];
-  let updated = 0;
+  let activeUpdated = false;
+  let updated = false;
   for (const tab of incoming) {
     if (!tab?.id) continue;
     const existing = local.get(tab.id);
     if (!existing) {
+      // A baseline tab absent locally was closed here, not opened remotely.
+      if (baselineById.has(tab.id)) continue;
       const hydrated = hydrateReplayTab(tab);
       if (hydrated) {
         added.push(hydrated);
-        // The tab arrives already committed by its writer. Without a baseline
-        // entry a follow-up `replay update` would find nothing to compare against
-        // and be refused.
-        workspaceSaveCommittedSnapshot?.replay?.tabs?.push(cloneWorkspaceSnapshotForBaseline(tab));
+        workspaceSaveCommittedSnapshot?.replay?.tabs?.push(cloneWorkspaceSnapshotForBaseline(
+          hydrated.type === "websocket" ? tab : snapshotHttpReplayTab(hydrated),
+        ));
       }
       continue;
     }
-    if (adoptExternalReplayResult(existing, tab)) updated += 1;
-  }
-  if (!added.length && !updated) return;
-
-  if (added.length) {
-    state.replayTabs = [...(state.replayTabs || []), ...added];
-    state.replayTabSequence = Math.max(
-      state.replayTabSequence || 0,
-      ...added.map((tab) => tab.sequence || 0),
-    );
-    if (!state.activeReplayTabId) {
-      state.activeReplayTabId = added[0].id;
+    if (replayTabHasUncommittedEditorState(existing)) continue;
+    if (adoptExternalReplayResult(existing, tab)) {
+      updated = true;
+      if (existing.id === previousActiveId) activeUpdated = true;
     }
   }
-  renderReplay();
-  // Only a new tab is announced. An update lands in the pane the operator is
-  // already looking at, and an agent firing a run of sends would otherwise bury
-  // the screen in toasts.
+  state.replayTabs = [...state.replayTabs.filter((tab) => !removed.has(tab.id)), ...added];
+  if (removed.has(previousActiveId)) {
+    const index = visualIds.indexOf(previousActiveId);
+    state.activeReplayTabId = visualIds.slice(0, index).reverse().find((id) => !removed.has(id))
+      || visualIds.slice(index + 1).find((id) => !removed.has(id)) || added[0]?.id || null;
+  } else if (!state.activeReplayTabId && added.length) {
+    state.activeReplayTabId = added[0].id;
+  }
+  state.replayTabSequence = Math.max(
+    previousSequence, snapshot.replay?.tab_sequence || 0,
+    ...added.map((tab) => tab.sequence || 0),
+  );
+  if (workspaceSaveCommittedSnapshot?.replay) {
+    workspaceSaveCommittedSnapshot.replay.tabs = workspaceSaveCommittedSnapshot.replay.tabs
+      .filter((tab) => !removed.has(tab.id));
+  }
+  state.workspaceRevision = snapshot.revision;
+  // An unload must not reuse a pre-adoption in-flight full snapshot.
+  workspaceSaveLastSnapshot = null;
+
+  if (!added.length && !updated && !removed.size) return;
+  if (state.activeReplayTabId !== previousActiveId || activeUpdated) {
+    renderReplay({ preserveTabStrip: !!state.replayRenamingTabId });
+  } else if (!state.replayRenamingTabId) {
+    // Keep unsynced editor text, binary bytes, cursor and modal state intact.
+    // A surviving rename refreshes the strip when it is committed/cancelled.
+    renderReplayTabs();
+  }
   if (added.length) {
     showToast(`${added.length} replay tab${added.length === 1 ? "" : "s"} added from another client.`, "info");
   }
+}
+
+function replayTabHasUncommittedEditorState(tab) {
+  if (tab.type === "websocket") return false;
+  if (tab.requestBytes || state.replayRenamingTabId === tab.id || isReplayTabSending(tab.id)) return true;
+  if (tab.id !== state.activeReplayTabId) return false;
+  if (state.replayMessageViews.request === "hex") return true;
+  const editor = getCMView("replayReq");
+  const text = editor ? editor.getContent()
+    : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value ?? null);
+  if (typeof text === "string" && !replayRequestTextsEquivalent(text, tab.requestText)) return true;
+  const target = getRepeaterTargetConfig(tab);
+  if ((els.replayHostInput && els.replayHostInput.value !== target.host)
+    || (els.replayPortInput && els.replayPortInput.value !== target.port)
+    || (els.replaySchemeSelect && els.replaySchemeSelect.value !== target.scheme)) return true;
+  const versionSelect = document.getElementById("replayHttpVersionSelect");
+  return !!versionSelect && versionSelect.value !== normalizeReplayHttpVersionMode(tab.httpVersionMode);
 }
 
 // A send from another client — `sniper-cli replay send`, or a second window —
@@ -3145,6 +3228,13 @@ function adoptExternalReplayResult(existing, incoming) {
   );
   existing.responseRecord = incoming.response_record || null;
   existing.notice = incoming.notice || "";
+  const baseline = workspaceReplayTabsById(workspaceSaveCommittedSnapshot).get(existing.id);
+  if (baseline) {
+    const adopted = snapshotHttpReplayTab(existing);
+    for (const key of ["history_entries", "history_index", "response_record", "notice"]) {
+      baseline[key] = cloneWorkspaceSnapshotForBaseline(adopted[key]) ?? adopted[key];
+    }
+  }
   return true;
 }
 
@@ -3446,6 +3536,39 @@ function createWsReplaySnapshotBudgetAllocator(replayTabs, options = {}) {
   return (tab) => budgetsByTab.get(tab) || { frames: 0, bytes: 0 };
 }
 
+function snapshotHttpReplayTab(tab) {
+  const historyEntries = Array.isArray(tab.historyEntries)
+    ? tab.historyEntries.filter((entry) => entry && typeof entry === "object")
+    : [];
+  return {
+    id: tab.id,
+    sequence: tab.sequence,
+    custom_label: tab.customLabel || "",
+    pinned: !!tab.pinned,
+    base_request: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : null,
+    source_transaction_id: tab.sourceTransactionId || null,
+    notice: tab.notice || "",
+    request_text: tab.requestText || "",
+    http_version_mode: normalizeReplayHttpVersionMode(tab.httpVersionMode),
+    response_record: tab.responseRecord || null,
+    target_scheme: tab.targetScheme || "https",
+    target_host: tab.targetHost || "",
+    target_port: normalizePortValue(tab.targetPort),
+    target_manually_edited: !!tab.targetManuallyEdited,
+    history_entries: historyEntries.map((entry) => ({
+      request: cloneEditableRequest(entry.request),
+      request_text: entry.requestText || "",
+      http_version_mode: normalizeReplayHttpVersionMode(entry.httpVersionMode),
+      response_record: entry.responseRecord || null,
+      notice: entry.notice || "",
+      target_scheme: entry.targetScheme || "https",
+      target_host: entry.targetHost || "",
+      target_port: normalizePortValue(entry.targetPort),
+    })),
+    history_index: normalizeRepeaterHistoryIndex(tab.historyIndex, historyEntries.length),
+  };
+}
+
 function snapshotWorkspaceState(options = {}) {
   const sessionId = options.sessionId || state.activeSession?.id || null;
   const replayTabs = Array.isArray(state.replayTabs) ? state.replayTabs : [];
@@ -3491,36 +3614,7 @@ function snapshotWorkspaceState(options = {}) {
         ws_frame_window_start: snapshotWsReplayFrameWindowStart(tab, wsFrames),
       };
     }
-    const historyEntries = Array.isArray(tab.historyEntries)
-      ? tab.historyEntries.filter((entry) => entry && typeof entry === "object")
-      : [];
-    return {
-      id: tab.id,
-      sequence: tab.sequence,
-      custom_label: tab.customLabel || "",
-      pinned: !!tab.pinned,
-      base_request: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : null,
-      source_transaction_id: tab.sourceTransactionId || null,
-      notice: tab.notice || "",
-      request_text: tab.requestText || "",
-      http_version_mode: normalizeReplayHttpVersionMode(tab.httpVersionMode),
-      response_record: tab.responseRecord || null,
-      target_scheme: tab.targetScheme || "https",
-      target_host: tab.targetHost || "",
-      target_port: normalizePortValue(tab.targetPort),
-      target_manually_edited: !!tab.targetManuallyEdited,
-      history_entries: historyEntries.map((entry) => ({
-        request: cloneEditableRequest(entry.request),
-        request_text: entry.requestText || "",
-        http_version_mode: normalizeReplayHttpVersionMode(entry.httpVersionMode),
-        response_record: entry.responseRecord || null,
-        notice: entry.notice || "",
-        target_scheme: entry.targetScheme || "https",
-        target_host: entry.targetHost || "",
-        target_port: normalizePortValue(entry.targetPort),
-      })),
-      history_index: normalizeRepeaterHistoryIndex(tab.historyIndex, historyEntries.length),
-    };
+    return snapshotHttpReplayTab(tab);
   };
   const activeReplayTab = replayTabs.find((tab) => tab.id === state.activeReplayTabId) || null;
   const snapshotOrder = activeReplayTab
@@ -3628,15 +3722,24 @@ async function flushQueuedWorkspaceStateSave(options = {}) {
     return workspaceSaveLoopPromise;
   }
 
+  const stateGeneration = workspaceStateGeneration;
   workspaceSaveLoopPromise = runQueuedWorkspaceStateSaves(options)
     .finally(() => {
       workspaceSaveLoopPromise = null;
+      // A new session's timer may have joined this old save while it was still
+      // awaiting its response. Give that session its own save loop afterwards.
+      if (stateGeneration !== workspaceStateGeneration && workspaceLoaded
+        && workspaceSaveDirty && !workspaceSaveConflictPending) {
+        scheduleWorkspaceStateSave();
+      }
     });
   return workspaceSaveLoopPromise;
 }
 
 async function runQueuedWorkspaceStateSaves(options = {}) {
-  while (state.activeSession && workspaceSaveDirty) {
+  const stateGeneration = workspaceStateGeneration;
+  while (state.activeSession && workspaceSaveDirty && !workspaceSaveConflictPending
+    && stateGeneration === workspaceStateGeneration) {
     workspaceSaveDirty = false;
     const version = workspaceSaveVersion;
     const snapshot = snapshotWorkspaceState(options);
@@ -3645,6 +3748,7 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
     try {
       await saveWorkspaceState(snapshot, options);
     } catch (error) {
+      if (stateGeneration !== workspaceStateGeneration || workspaceSaveConflictPending) return;
       if (isTooManyReplayTabsError(error)) {
         // The server rejects every save while over the limit. Re-sending the
         // same over-limit snapshot on a 1s timer just spams toasts and never
@@ -3688,6 +3792,7 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
     } finally {
       workspaceSaveInFlight = false;
     }
+    if (stateGeneration !== workspaceStateGeneration || workspaceSaveConflictPending) return;
     if (workspaceSaveVersion !== version) {
       workspaceSaveDirty = true;
     }
@@ -3779,6 +3884,8 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
   if (!state.activeSession || !workspaceLoaded) {
     return;
   }
+  if (workspaceSaveConflictPending) throw new WorkspaceStateConflictError(workspaceSaveConflictLatest);
+  const stateGeneration = workspaceStateGeneration;
   if (!snapshot) {
     snapshot = snapshotWorkspaceState(options);
   }
@@ -3792,9 +3899,11 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
     body: JSON.stringify(snapshot),
   });
 
+  if (stateGeneration !== workspaceStateGeneration) return;
   if (!response.ok) {
     if (response.status === 409) {
       const latest = await response.json().catch(() => null);
+      if (stateGeneration !== workspaceStateGeneration) return;
       throw new WorkspaceStateConflictError(latest);
     }
     throw new Error(await response.text());
@@ -3802,7 +3911,9 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
   const saved = await response.json();
   const currentSessionId = state.activeSession?.id || null;
   if (
-    (snapshot?.session_id && snapshot.session_id !== currentSessionId)
+    stateGeneration !== workspaceStateGeneration || workspaceSaveConflictPending
+    || (Number.isFinite(saved?.revision) && saved.revision <= state.workspaceRevision)
+    || (snapshot?.session_id && snapshot.session_id !== currentSessionId)
     || (saved?.session_id && saved.session_id !== currentSessionId)
   ) {
     return;
@@ -3959,6 +4070,10 @@ function flushWorkspaceStateOnUnload(event) {
   disconnectWsReplayTabsOnUnload();
   if (state.sequenceDirty && state.editingSequence) {
     requestWorkspaceUnloadPrompt(event);
+  }
+  if (workspaceSaveConflictPending) {
+    requestWorkspaceUnloadPrompt(event);
+    return;
   }
   if (!state.activeSession || !workspaceLoaded || (!workspaceSaveDirty && !workspaceSaveTimer && !workspaceSaveInFlight && !hadTranscriptSaveTimer)) {
     return;
@@ -4218,6 +4333,7 @@ function syncReplayDraftsBeforeWorkspaceClose() {
 }
 
 function workspaceUnloadPayload(primarySnapshot) {
+  if (workspaceSaveConflictPending) return null;
   const primaryPayload = JSON.stringify(primarySnapshot);
   if (utf8ByteLength(primaryPayload) <= WORKSPACE_UNLOAD_KEEPALIVE_MAX_BYTES) {
     return { payload: primaryPayload, endpoint: "/api/workspace-state" };
@@ -4601,6 +4717,7 @@ async function cleanupWsReplayTabsBeforeStateReset(options = {}) {
 }
 
 function resetSessionScopedUiState() {
+  workspaceStateGeneration += 1;
   workspaceLoaded = false;
   clearReplaySendInFlight();
   closeContextMenu();
@@ -4688,11 +4805,7 @@ function resetSessionScopedUiState() {
   state.targetScopeDirty = false;
   state.targetScopeEditorSessionId = null;
   state.targetExpandedHosts = new Set();
-  scannerConfigCache = null;
-  scannerSettingsSessionId = null;
-  if (els.scannerSettingsBackdrop) {
-    closeScannerSettings();
-  }
+  resetScannerConfigUiState();
   resetFindingsUiState();
   state.replayTabs = [];
   state.activeReplayTabId = null;
@@ -7201,6 +7314,7 @@ function connectEvents() {
   });
 
   eventSource.addEventListener("workspace_state", (event) => {
+    if (eventSessionId !== currentSessionId()) return;
     let payload = null;
     try {
       payload = JSON.parse(event.data);
@@ -7208,7 +7322,8 @@ function connectEvents() {
       return;
     }
     // Skip the echo of our own save; only another client's write is news.
-    if (!payload || payload.client_id === workspaceClientId) return;
+    if (!payload || payload.client_id === workspaceClientId
+      || (payload.session_id && payload.session_id !== eventSessionId)) return;
     adoptExternalReplayTabs().catch((error) => console.error(error));
   });
 
@@ -7654,13 +7769,23 @@ function flushTransactionDeltas() {
     return;
   }
 
+  // Only the newest summary per record counts: a streamed response is listed when
+  // it starts and changes when its body finishes, often within one flush.
+  const latest = new Map();
+  for (const { summary } of pending) {
+    if (summary?.id) latest.set(summary.id, summary);
+  }
   const fresh = [];
-  const seenIds = new Set();
   let totalAdded = 0;
   let hiddenConnectAdded = 0;
-  for (const { summary } of pending) {
-    if (!summary?.id || seenIds.has(summary.id) || getHistoryItem(summary.id)) continue;
-    seenIds.add(summary.id);
+  let updated = 0;
+  for (const summary of latest.values()) {
+    const existing = getHistoryItem(summary.id);
+    if (existing) {
+      applyLiveSummaryUpdate(existing, summary);
+      updated += 1;
+      continue;
+    }
     totalAdded += 1;
     if (String(summary.method || "").toUpperCase() === "CONNECT") {
       if (summaryMatchesActiveHistoryFilters(summary, { includeConnect: true })) hiddenConnectAdded += 1;
@@ -7687,10 +7812,42 @@ function flushTransactionDeltas() {
     }
     state.historyPaging.offset = state.items.length;
   }
-  if (totalAdded || added) {
+  if (updated) {
+    state._itemsVersion += 1;
+    invalidateVisibleEntriesCache();
+    resortLoadedHistoryItemsForCurrentSort();
+    // The inspector may be showing the record as it was when it was listed.
+    const selectedId = state.selectedId;
+    if (selectedId && latest.has(selectedId) && !canReuseSelectedHistoryRecord(selectedId)) {
+      loadTransactionDetail(selectedId).catch((error) => console.error(error));
+    }
+  }
+  if (totalAdded || added || updated) {
     state.historyDirty = false;
     renderHistory();
   }
+}
+
+// A summary for a row already listed means its record changed after it was
+// listed, most often a streamed response finishing. Dropping it left the row on
+// "0 B" and the streaming note for good. Only the record's own fields are taken:
+// annotations have their own save and acknowledgement path, which an event
+// racing an edit must not undo. A cleared field is omitted from a summary rather
+// than sent as null, so the system-note preview is reset, not merged.
+function applyLiveSummaryUpdate(item, summary) {
+  const {
+    color_tag: _colorTag,
+    has_user_note: _hasUserNote,
+    annotation_revision: _annotationRevision,
+    note_preview: notePreview,
+    header_search_text: headerSearchText,
+    ...record
+  } = summary;
+  Object.assign(item, record);
+  if (!item.has_user_note) item.note_preview = notePreview ?? null;
+  // Absent when the subscriber did not ask for header text, not only when empty.
+  if (headerSearchText) item.header_search_text = headerSearchText;
+  prepareHistoryItem(item);
 }
 
 function summaryMatchesActiveHistoryFilters(item, options = {}) {
@@ -8424,7 +8581,14 @@ let findingsBadgeRefreshTimer = 0;
 let findingsListRefreshTimer = 0;
 let lastFindingsBadgePollAt = 0;
 let scannerConfigCache = null;
+let scannerConfigStateGeneration = 0;
+let scannerConfigLoadGeneration = 0;
+let scannerConfigSavePending = null;
 let scannerSettingsSessionId = null;
+let scannerSettingsBaseline = null;
+let scannerSettingsGeneration = 0;
+let scannerSettingsSavePending = null;
+let scannerQuickTogglePending = null;
 let findingsSortKey = "found_at";
 let findingsSortDir = "desc";
 const FINDINGS_LIST_LIMIT = 5000;
@@ -9443,69 +9607,144 @@ function handleFindingActionError(error) {
 
 // ── Scanner Settings Modal ──
 
+function resetScannerConfigUiState() {
+  scannerConfigStateGeneration += 1;
+  scannerConfigLoadGeneration += 1;
+  scannerConfigCache = null;
+  scannerConfigSavePending = null;
+  scannerQuickTogglePending = null;
+  closeScannerSettings();
+  if (els.scannerQuickToggle) els.scannerQuickToggle.disabled = false;
+}
+
+function scannerConfigContextIsCurrent(sessionId, generation) {
+  return sessionId === currentSessionId() && generation === scannerConfigStateGeneration;
+}
+
+function scannerConfigSnapshot(config, sessionId) {
+  if (
+    !config || typeof config !== "object" || Array.isArray(config)
+    || config.session_id !== sessionId
+    || typeof config.config_token !== "string" || !config.config_token.trim()
+    || typeof config.enabled !== "boolean"
+    || !config.rules || typeof config.rules !== "object" || Array.isArray(config.rules)
+    || Object.values(config.rules).some((enabled) => typeof enabled !== "boolean")
+    || !Array.isArray(config.custom_rules)
+    || config.custom_rules.some((rule) => (
+      !rule || typeof rule !== "object" || Array.isArray(rule)
+      || typeof rule.enabled !== "boolean"
+      || ["id", "name", "target", "header_name", "pattern", "severity", "category", "description"]
+        .some((field) => typeof rule[field] !== "string")
+      || !rule.id.trim()
+    ))
+  ) {
+    throw new Error("Scanner settings could not be verified. Reopen settings before saving.");
+  }
+  return {
+    session_id: config.session_id,
+    config_token: config.config_token,
+    enabled: config.enabled,
+    rules: { ...config.rules },
+    custom_rules: config.custom_rules.map((rule) => ({ ...rule })),
+  };
+}
+
 async function loadScannerConfig(sessionId = currentSessionId()) {
+  if (!sessionId || sessionId !== currentSessionId()) return null;
+  const stateGeneration = scannerConfigStateGeneration;
+  const loadGeneration = ++scannerConfigLoadGeneration;
   try {
     const res = await fetch(sessionQueryPath("/api/scanner-config", sessionId));
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
     await requireOkResponse(res, "Failed to load scanner settings.");
-    const config = await res.json();
-    if (sessionId !== currentSessionId()) {
-      return null;
-    }
-    scannerConfigCache = config;
-    return scannerConfigCache;
-  } catch (e) {
-    console.error("Failed to load scanner config:", e);
-    showToast(e?.message || "Failed to load scanner settings.", "error");
-    return null;
+    const payload = await res.json();
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    const config = scannerConfigSnapshot(payload, sessionId);
+    if (loadGeneration === scannerConfigLoadGeneration) scannerConfigCache = config;
+    return config;
+  } catch (error) {
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    throw error;
   }
 }
 
-async function saveScannerConfig(config, sessionId = currentSessionId(), options = {}) {
-  if (sessionId !== currentSessionId()) {
-    return false;
+async function saveScannerConfig(config, sessionId, expectedConfigToken) {
+  if (!sessionId || sessionId !== currentSessionId()) return null;
+  if (typeof expectedConfigToken !== "string" || !expectedConfigToken.trim()) {
+    throw new Error("Scanner settings version is missing. Reopen settings before saving.");
   }
-  if (options.preserveEnabled) {
-    const latestResponse = await fetch(sessionQueryPath("/api/scanner-config", sessionId));
-    await requireOkResponse(latestResponse, "Failed to load scanner settings.");
-    const latestConfig = await latestResponse.json();
-    if (sessionId !== currentSessionId()) {
-      return false;
+  if (scannerConfigSavePending) {
+    throw new Error("Scanner settings are already being saved. Wait for that save and try again.");
+  }
+  const stateGeneration = scannerConfigStateGeneration;
+  const pending = {};
+  scannerConfigSavePending = pending;
+  scannerConfigLoadGeneration += 1;
+  try {
+    const res = await fetch(sessionWritePath("/api/scanner-config", sessionId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: config.enabled,
+        rules: config.rules,
+        custom_rules: config.custom_rules,
+        expected_config_token: expectedConfigToken,
+      }),
+    });
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    if (res.status === 409) {
+      throw new Error("Scanner settings changed elsewhere. Reopen settings and reapply your changes before saving.");
     }
-    config.enabled = latestConfig.enabled !== false;
+    if (res.status === 428) {
+      throw new Error("Scanner settings version is missing. Reopen settings before saving.");
+    }
+    await requireOkResponse(res, "Failed to save scanner settings.");
+    const payload = await res.json();
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    const saved = scannerConfigSnapshot(payload, sessionId);
+    // A read started before this acknowledgement may still carry the old token.
+    scannerConfigLoadGeneration += 1;
+    scannerConfigCache = saved;
+    return saved;
+  } catch (error) {
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)) return null;
+    throw error;
+  } finally {
+    if (scannerConfigSavePending === pending) scannerConfigSavePending = null;
   }
-  const res = await fetch(sessionWritePath("/api/scanner-config", sessionId), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config),
-  });
-  await requireOkResponse(res, "Failed to save scanner settings.");
-  if (sessionId !== currentSessionId()) {
-    return false;
-  }
-  scannerConfigCache = config;
-  return true;
 }
 
 async function openScannerSettings() {
   const sessionId = currentSessionId();
-  const config = await loadScannerConfig(sessionId);
-  if (!config || sessionId !== currentSessionId()) return;
-  scannerSettingsSessionId = sessionId;
+  if (scannerSettingsBaseline && scannerSettingsSessionId === sessionId) return;
+  const stateGeneration = scannerConfigStateGeneration;
+  const generation = ++scannerSettingsGeneration;
+  const isCurrent = () => generation === scannerSettingsGeneration
+    && scannerConfigContextIsCurrent(sessionId, stateGeneration);
+  try {
+    const config = await loadScannerConfig(sessionId);
+    if (!config || !isCurrent()) return;
+    scannerSettingsSessionId = sessionId;
+    // The editor's read version must not follow later cache refreshes or toggles.
+    scannerSettingsBaseline = scannerConfigSnapshot(config, sessionId);
 
-  // Render built-in rules
-  els.scannerBuiltinRules.innerHTML = Object.entries(BUILTIN_RULE_LABELS)
-    .map(([id, label]) => {
-      const checked = config.rules[id] !== false ? "checked" : "";
-      return `<div class="scanner-rule-item">
-        <label><input type="checkbox" data-rule-id="${id}" ${checked} /> ${escapeHtml(label)}</label>
-      </div>`;
-    })
-    .join("");
+    // Render built-in rules
+    els.scannerBuiltinRules.innerHTML = Object.entries(BUILTIN_RULE_LABELS)
+      .map(([id, label]) => {
+        const checked = config.rules[id] !== false ? "checked" : "";
+        return `<div class="scanner-rule-item">
+          <label><input type="checkbox" data-rule-id="${id}" ${checked} /> ${escapeHtml(label)}</label>
+        </div>`;
+      })
+      .join("");
 
-  // Render custom rules
-  renderCustomRulesEditor(config.custom_rules || []);
-
-  els.scannerSettingsBackdrop.classList.remove("hidden");
+    renderCustomRulesEditor(config.custom_rules);
+    els.scannerSettingsBackdrop.classList.remove("hidden");
+  } catch (error) {
+    if (!isCurrent()) return;
+    console.error(error);
+    showToast(error?.message || "Failed to load scanner settings.", "error");
+  }
 }
 
 function renderCustomRulesEditor(customRules) {
@@ -9568,52 +9807,124 @@ function collectCustomRulesFromEditor() {
 }
 
 function customRuleId(value) {
-  const id = String(value || "").trim();
-  if (id) return id;
+  const id = String(value || "");
+  if (id.trim()) return id;
   return `custom_${generateUuid()}`;
 }
 
 function collectScannerConfig() {
-  const rules = {};
+  const rules = { ...scannerSettingsBaseline.rules };
   els.scannerBuiltinRules.querySelectorAll("input[data-rule-id]").forEach((input) => {
     rules[input.dataset.ruleId] = input.checked;
   });
   return {
-    enabled: els.scannerQuickToggle ? els.scannerQuickToggle.checked : true,
+    enabled: scannerSettingsBaseline.enabled,
     rules,
     custom_rules: collectCustomRulesFromEditor(),
   };
 }
 
 function closeScannerSettings() {
+  scannerSettingsGeneration += 1;
   scannerSettingsSessionId = null;
+  scannerSettingsBaseline = null;
+  scannerSettingsSavePending = null;
   if (els.scannerSettingsBackdrop) {
     els.scannerSettingsBackdrop.classList.add("hidden");
   }
 }
 
 async function saveScannerSettingsFromModal() {
+  if (scannerSettingsSavePending) return;
   const sessionId = scannerSettingsSessionId;
-  if (!sessionId || sessionId !== currentSessionId()) {
+  const baseline = scannerSettingsBaseline;
+  if (!baseline || !sessionId || sessionId !== currentSessionId()) {
+    showToast("Scanner settings changed sessions or were not loaded. Reopen settings before saving.", "error");
+    return;
+  }
+  const stateGeneration = scannerConfigStateGeneration;
+  const generation = scannerSettingsGeneration;
+  const pending = {};
+  scannerSettingsSavePending = pending;
+  const isCurrent = () => generation === scannerSettingsGeneration
+    && scannerConfigContextIsCurrent(sessionId, stateGeneration);
+  try {
+    const config = collectScannerConfig();
+    const saved = await saveScannerConfig(config, sessionId, baseline.config_token);
+    if (!saved || !isCurrent()) return;
+    syncQuickToggle(saved.enabled);
+    if (JSON.stringify(collectScannerConfig()) !== JSON.stringify(config)) {
+      // Editing can continue while the request is pending; retain those changes.
+      scannerSettingsBaseline = scannerConfigSnapshot(saved, sessionId);
+      showToast("Scanner settings saved. Your newer edits are still here; save again to apply them.");
+      return;
+    }
     closeScannerSettings();
-    showToast("Scanner settings changed sessions. Reopen settings and save again.", "error");
-    return;
+    showToast("Scanner settings saved");
+  } catch (error) {
+    if (!isCurrent()) return;
+    console.error(error);
+    showToast(`${error?.message || "Failed to save scanner settings."} Your draft is still here.`, "error");
+  } finally {
+    if (scannerSettingsSavePending === pending) scannerSettingsSavePending = null;
   }
-  const config = collectScannerConfig();
-  if (!(await saveScannerConfig(config, sessionId, { preserveEnabled: true }))) {
-    return;
-  }
-  syncQuickToggle(config.enabled);
-  closeScannerSettings();
-  showToast("Scanner settings saved");
 }
 
 async function refreshScannerQuickToggle() {
   if (!els.scannerQuickToggle) return;
   const sessionId = currentSessionId();
-  const config = await loadScannerConfig(sessionId);
-  if (config && sessionId === currentSessionId()) {
-    syncQuickToggle(config.enabled);
+  const stateGeneration = scannerConfigStateGeneration;
+  const loading = loadScannerConfig(sessionId);
+  const loadGeneration = scannerConfigLoadGeneration;
+  try {
+    const config = await loading;
+    if (config && scannerConfigContextIsCurrent(sessionId, stateGeneration)
+      && scannerConfigCache === config && !scannerQuickTogglePending && !scannerConfigSavePending) {
+      syncQuickToggle(config.enabled);
+    }
+  } catch (error) {
+    if (!scannerConfigContextIsCurrent(sessionId, stateGeneration)
+      || loadGeneration !== scannerConfigLoadGeneration || scannerQuickTogglePending) return;
+    console.error(error);
+    showToast(error?.message || "Failed to load scanner settings.", "error");
+  }
+}
+
+async function saveScannerQuickToggle() {
+  if (scannerQuickTogglePending) {
+    syncQuickToggle(scannerQuickTogglePending.enabled);
+    return;
+  }
+  const enabled = els.scannerQuickToggle.checked;
+  const sessionId = currentSessionId();
+  if (!sessionId) {
+    syncQuickToggle(!enabled);
+    showToast("Select a session before changing scanner settings.", "error");
+    return;
+  }
+  const stateGeneration = scannerConfigStateGeneration;
+  const pending = { enabled };
+  scannerQuickTogglePending = pending;
+  const isCurrent = () => scannerQuickTogglePending === pending
+    && scannerConfigContextIsCurrent(sessionId, stateGeneration);
+  let previousEnabled = scannerConfigCache?.session_id === sessionId ? scannerConfigCache.enabled : !enabled;
+  els.scannerQuickToggle.disabled = true;
+  try {
+    const config = await loadScannerConfig(sessionId);
+    if (!config || !isCurrent()) return;
+    previousEnabled = config.enabled;
+    const saved = await saveScannerConfig({ ...config, enabled }, sessionId, config.config_token);
+    if (saved && isCurrent()) syncQuickToggle(saved.enabled);
+  } catch (error) {
+    if (!isCurrent()) return;
+    console.error(error);
+    showToast(error?.message || "Failed to save scanner settings.", "error");
+    syncQuickToggle(previousEnabled);
+  } finally {
+    if (scannerQuickTogglePending === pending) {
+      scannerQuickTogglePending = null;
+      els.scannerQuickToggle.disabled = false;
+    }
   }
 }
 
@@ -10003,32 +10314,7 @@ function bindFindingsEvents() {
 
   // Quick toggle (on/off in toolbar)
   if (els.scannerQuickToggle) {
-    els.scannerQuickToggle.addEventListener("change", async () => {
-      const enabled = els.scannerQuickToggle.checked;
-      const sessionId = currentSessionId();
-      els.scannerQuickToggle.disabled = true;
-      try {
-        const config = await loadScannerConfig(sessionId);
-        if (sessionId !== currentSessionId()) {
-          return;
-        }
-        if (!config) {
-          syncQuickToggle(!enabled);
-          return;
-        }
-        config.enabled = enabled;
-        if (!(await saveScannerConfig(config, sessionId))) {
-          return;
-        }
-        syncQuickToggle(enabled);
-      } catch (error) {
-        console.error(error);
-        showToast(error?.message || "Failed to save scanner settings.", "error");
-        syncQuickToggle(!enabled);
-      } finally {
-        els.scannerQuickToggle.disabled = false;
-      }
-    });
+    els.scannerQuickToggle.addEventListener("change", () => saveScannerQuickToggle());
     // Sync initial state from server
     refreshScannerQuickToggle();
   }
@@ -10044,17 +10330,13 @@ function bindFindingsEvents() {
     els.scannerSettingsCancel.addEventListener("click", () => closeScannerSettings());
   }
   if (els.scannerSettingsSave) {
-    onClickWithProgress(els.scannerSettingsSave, () =>
-      saveScannerSettingsFromModal().catch((error) => {
-        console.error(error);
-        showToast(error?.message || "Failed to save scanner settings.", "error");
-      }));
+    onClickWithProgress(els.scannerSettingsSave, () => saveScannerSettingsFromModal());
   }
   if (els.scannerAddCustomRule) {
     els.scannerAddCustomRule.addEventListener("click", () => {
       const rules = collectCustomRulesFromEditor();
       rules.push({
-        id: `custom_${Date.now()}`,
+        id: customRuleId(),
         enabled: true,
         name: "",
         target: "response_body",
@@ -11212,6 +11494,365 @@ function renderMessagePanes() {
   els.responseSearchMeta.innerHTML = responsePane
     ? buildSearchMeta(responsePane.lineCount, state.messageViews.response, responsePane.matchCount)
     : buildSearchMeta(0, state.messageViews.response, 0);
+  renderResponsePreview(
+    {
+      view: els.responseRenderView,
+      editor: els.responseViewCM?.closest(".editor-shell"),
+      search: els.responseSearchInput,
+    },
+    resMode === "render",
+    responseRecord
+      ? {
+          response: responseRecord.response || null,
+          key: `${responseRecord.id}:${state.showOriginal.response}`,
+          url: recordPageUrl(responseRecord),
+        }
+      : { note: detailLoading ? "Loading response details." : "No response selected." },
+  );
+}
+
+// Render: the response drawn inside its own pane, the way Burp's Render tab and
+// Caido's preview work, for HTTP history and Replay alike. The view takes the
+// place of the pane's editor instead of sitting inside it: the history editor's
+// grid keeps it full width only while it is its shell's only child.
+function renderResponsePreview({ view, editor, search }, active, subject) {
+  if (!view) return;
+  editor?.classList.toggle("hidden", active);
+  view.classList.toggle("hidden", !active);
+  // Search runs over the editor's text, which Render hides.
+  if (search) search.disabled = active;
+  if (!active) {
+    if (view.dataset.renderKey) {
+      view.replaceChildren();
+      delete view.dataset.renderKey;
+    }
+    return;
+  }
+  const response = subject.response;
+  // A note stands in for a response that is not there yet (loading, sending).
+  const placeholder = "note" in subject;
+  // Repaints are frequent; reloading the frame on each would reset its scroll.
+  const loadResources = Boolean(state.displaySettings?.renderResources && subject.url);
+  const key = placeholder
+    ? `note:${subject.note}`
+    : `${subject.key}:${response?.body_size}:${response?.body_preview?.length}:${loadResources}`;
+  if (view.dataset.renderKey === key) return;
+  view.dataset.renderKey = key;
+
+  const model = placeholder ? { note: subject.note } : responseRenderModel(response);
+  const children = [];
+  const banner = (text) => {
+    const element = document.createElement("p");
+    element.className = "render-banner";
+    element.textContent = text;
+    children.push(element);
+    return element;
+  };
+  if (model.truncated) {
+    banner("The body was cut at the preview limit, so this may be incomplete.");
+  }
+  if (model.note !== undefined) {
+    if (model.note) {
+      const note = document.createElement("p");
+      note.className = "render-note";
+      note.textContent = model.note;
+      children.push(note);
+    }
+  } else if (model.image) {
+    // An <img> never runs script, SVG included, so an image needs no frame.
+    const image = document.createElement("img");
+    image.className = "render-image";
+    image.alt = "Response image";
+    image.src = model.image;
+    children.push(image);
+  } else {
+    const frame = document.createElement("iframe");
+    frame.className = "render-frame";
+    frame.title = "Rendered response";
+    // No allow-* flags: no scripts, no forms, no popups, no same-origin access.
+    frame.setAttribute("sandbox", "");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    // Drawn at once from what the response holds; resources, when on, follow.
+    frame.srcdoc = sandboxedResponseDocument(model.html);
+    if (loadResources) {
+      const status = banner("Loading images, styles and fonts…");
+      const fetcher = createRenderResourceFetcher(currentSessionId());
+      sandboxedResponseDocumentWithResources(model.html, subject.url, fetcher)
+        .then((doc) => {
+          if (view.dataset.renderKey !== key || !frame.isConnected) return;
+          frame.srcdoc = doc;
+          const failed = fetcher.failures();
+          if (failed) {
+            status.textContent = `${failed} image, style or font could not be loaded.`;
+          } else {
+            status.remove();
+          }
+        })
+        .catch((error) => console.error(error));
+    } else if (RENDER_RESOURCE_REFERENCE.test(model.html)) {
+      banner("Images, styles and fonts are not loaded. Settings ▸ Display ▸ Render can load them.");
+    }
+    children.push(frame);
+  }
+  view.replaceChildren(...children);
+}
+
+// What Render shows for a response: HTML to draw, an image to show, or why there
+// is neither. HTML and images are what Burp's Render tab covers too. Pure so it
+// can be tested without a DOM.
+function responseRenderModel(response) {
+  if (!response) {
+    return { note: "This request has no response to render." };
+  }
+  const mime = String(response.content_type || "").split(";")[0].trim().toLowerCase();
+  const html = mime === "text/html" || mime === "application/xhtml+xml";
+  const image = /^image\/[\w.+-]+$/.test(mime);
+  if (!html && !image) {
+    return { note: `Render draws HTML and images. This response is ${mime || "untyped"}.` };
+  }
+  if (!response.body_preview) {
+    return { note: "This response has no body to render." };
+  }
+  const truncated = Boolean(response.preview_truncated);
+  const base64 = response.body_encoding === "base64";
+  if (image) {
+    // A text image such as SVG arrives as text; anything else as base64.
+    const data = base64
+      ? `data:${mime};base64,${response.body_preview}`
+      : `data:${mime};charset=utf-8,${encodeURIComponent(response.body_preview)}`;
+    return { image: data, truncated };
+  }
+  if (base64) {
+    return { note: "This HTML body is binary, so it cannot be rendered." };
+  }
+  return { html: response.body_preview, truncated };
+}
+
+// Captured HTML must never run with Sniper's privileges or reach the network.
+// It is parsed inert (DOMParser runs no script and fetches nothing), stripped of
+// what could still navigate or fetch outside CSP's reach, and given a CSP that
+// blocks every fetch, including relative URLs, which would resolve against
+// Sniper's own API. The frame's sandbox then blocks scripts, forms and popups.
+// data: stylesheets are allowed for the resource pass, which inlines fetched
+// stylesheets that way; without it every <link> is gone before CSP applies.
+const RESPONSE_RENDER_CSP = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline' data:";
+
+function sandboxedResponseDocument(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  sanitizeRenderDocument(doc);
+  return serializeRenderDocument(doc);
+}
+
+function sanitizeRenderDocument(doc, { keepStylesheets = false } = {}) {
+  // <link> covers prefetch and preconnect, which CSP does not govern everywhere;
+  // <meta http-equiv> covers refresh; <base> would retarget what remains.
+  const links = keepStylesheets ? "link:not([rel~='stylesheet' i])" : "link";
+  for (const element of doc.querySelectorAll(`script, ${links}, base, meta[http-equiv], iframe, frame, object, embed`)) {
+    element.remove();
+  }
+  // The sandbox still lets a clicked link navigate the frame itself.
+  for (const link of doc.querySelectorAll("a, area")) {
+    link.removeAttribute("href");
+    link.removeAttribute("xlink:href");
+  }
+}
+
+function serializeRenderDocument(doc) {
+  const policy = doc.createElement("meta");
+  policy.httpEquiv = "Content-Security-Policy";
+  policy.content = RESPONSE_RENDER_CSP;
+  doc.head.prepend(policy);
+  // Keep the page's doctype, and with it standards or quirks mode.
+  const doctype = doc.doctype ? new XMLSerializer().serializeToString(doc.doctype) : "";
+  return doctype + doc.documentElement.outerHTML;
+}
+
+// Render's opt-in resource pass (Settings > Display > Render). What a page draws
+// with is fetched through Sniper's API, which goes out through the session's
+// proxy chain, and written into the document as data: URLs. The frame keeps its
+// no-network policy: everything it holds is already in the document.
+const RENDER_RESOURCE_MAX_COUNT = 150;
+const RENDER_RESOURCE_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
+const RENDER_RESOURCE_CONCURRENCY = 6;
+const RENDER_CSS_URL_PATTERN = /url\(\s*(['"]?)([^'")]*)\1\s*\)|@import\s+(['"])([^'"]*)\3/gi;
+// Enough to say a page draws with something it does not carry itself.
+const RENDER_RESOURCE_REFERENCE = /<img\b|<link\b[^>]*stylesheet|url\(|<video\b[^>]*poster/i;
+
+function recordPageUrl(record) {
+  if (!record?.host) return null;
+  try {
+    return new URL(`${record.scheme || "https"}://${record.host}${record.path || "/"}`).href;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function renderResourceUrl(raw, base) {
+  const value = String(raw ?? "").trim();
+  if (!value || value.startsWith("#") || /^(data|blob|javascript|about):/i.test(value)) return null;
+  try {
+    const url = new URL(value, base);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function renderDocumentBase(doc, pageUrl) {
+  const href = doc.querySelector("base[href]")?.getAttribute("href");
+  if (!href) return pageUrl;
+  try {
+    return new URL(href, pageUrl).href;
+  } catch (_error) {
+    return pageUrl;
+  }
+}
+
+// One fetcher per drawn page: each URL is fetched once, a few at a time, within a
+// count and size budget so a heavy page cannot pull unbounded data into memory.
+function createRenderResourceFetcher(sessionId) {
+  const cache = new Map();
+  const waiting = [];
+  let active = 0;
+  let totalBytes = 0;
+  let failed = 0;
+  const acquire = () => new Promise((resolve) => {
+    if (active < RENDER_RESOURCE_CONCURRENCY) {
+      active += 1;
+      resolve();
+    } else {
+      waiting.push(resolve);
+    }
+  });
+  const release = () => {
+    const next = waiting.shift();
+    if (next) next();
+    else active -= 1;
+  };
+  const load = async (url) => {
+    await acquire();
+    try {
+      const params = new URLSearchParams({ url });
+      if (sessionId) params.set("session_id", sessionId);
+      const response = await fetch(`/api/render-resource?${params}`);
+      if (!response.ok) throw new Error(String(response.status));
+      const blob = await response.blob();
+      if (totalBytes + blob.size > RENDER_RESOURCE_MAX_TOTAL_BYTES) throw new Error("budget");
+      totalBytes += blob.size;
+      return blob;
+    } catch (_error) {
+      failed += 1;
+      return null;
+    } finally {
+      release();
+    }
+  };
+  return {
+    fetchBlob(url) {
+      if (!cache.has(url)) {
+        if (cache.size >= RENDER_RESOURCE_MAX_COUNT) {
+          failed += 1;
+          return Promise.resolve(null);
+        }
+        cache.set(url, load(url));
+      }
+      return cache.get(url);
+    },
+    failures: () => failed,
+  };
+}
+
+function blobDataUrl(blob) {
+  if (!blob) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(blob);
+  });
+}
+
+// url() and @import in a stylesheet resolve against the stylesheet's own URL, so
+// a fetched stylesheet is inlined with its references, imports included. An
+// import cycle or a deep chain is cut rather than followed.
+async function inlineCssResources(css, base, fetcher, ancestors = new Set()) {
+  const text = String(css ?? "");
+  const found = new Map();
+  for (const match of text.matchAll(RENDER_CSS_URL_PATTERN)) {
+    const url = renderResourceUrl(match[2] ?? match[4], base);
+    if (url) found.set(url, null);
+  }
+  if (!found.size) return text;
+  await Promise.all([...found.keys()].map(async (url) => {
+    const blob = await fetcher.fetchBlob(url);
+    if (!blob) return;
+    if (blob.type === "text/css") {
+      if (ancestors.has(url) || ancestors.size >= 3) return;
+      const nested = await inlineCssResources(await blob.text(), url, fetcher, new Set([...ancestors, url]));
+      found.set(url, `data:text/css;charset=utf-8,${encodeURIComponent(nested)}`);
+    } else {
+      found.set(url, await blobDataUrl(blob));
+    }
+  }));
+  return text.replace(RENDER_CSS_URL_PATTERN, (whole, _quote, rawUrl, _importQuote, rawImport) => {
+    const data = found.get(renderResourceUrl(rawUrl ?? rawImport, base));
+    if (!data) return whole;
+    return rawImport !== undefined ? `@import url("${data}")` : `url("${data}")`;
+  });
+}
+
+async function sandboxedResponseDocumentWithResources(html, pageUrl, fetcher) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  // Read before sanitising, which removes <base>.
+  const base = renderDocumentBase(doc, pageUrl);
+  sanitizeRenderDocument(doc, { keepStylesheets: true });
+  const tasks = [];
+  const inline = (element, attribute, url) => {
+    tasks.push(fetcher.fetchBlob(url).then(blobDataUrl).then((data) => {
+      if (data) element.setAttribute(attribute, data);
+    }));
+  };
+  // A preview needs one picture per image; srcset and <picture> sources would
+  // only pick among candidates the frame cannot fetch.
+  for (const source of doc.querySelectorAll("picture source")) source.remove();
+  for (const image of doc.querySelectorAll("img, input[type='image' i]")) {
+    const candidates = image.getAttribute("srcset");
+    image.removeAttribute("srcset");
+    const fallback = String(candidates || "").split(",")[0]?.trim().split(/\s+/)[0];
+    const url = renderResourceUrl(image.getAttribute("src") || fallback, base);
+    if (url) inline(image, "src", url);
+  }
+  for (const video of doc.querySelectorAll("video[poster]")) {
+    const url = renderResourceUrl(video.getAttribute("poster"), base);
+    if (url) inline(video, "poster", url);
+  }
+  for (const link of doc.querySelectorAll("link[rel~='stylesheet' i]")) {
+    const url = renderResourceUrl(link.getAttribute("href"), base);
+    if (!url) {
+      link.remove();
+      continue;
+    }
+    tasks.push(fetcher.fetchBlob(url).then(async (blob) => {
+      if (blob?.type !== "text/css") {
+        link.remove();
+        return;
+      }
+      const css = await inlineCssResources(await blob.text(), url, fetcher, new Set([url]));
+      link.setAttribute("href", `data:text/css;charset=utf-8,${encodeURIComponent(css)}`);
+    }));
+  }
+  for (const style of doc.querySelectorAll("style")) {
+    tasks.push(inlineCssResources(style.textContent, base, fetcher).then((css) => {
+      style.textContent = css;
+    }));
+  }
+  for (const element of doc.querySelectorAll("[style]")) {
+    tasks.push(inlineCssResources(element.getAttribute("style"), base, fetcher).then((css) => {
+      element.setAttribute("style", css);
+    }));
+  }
+  await Promise.all(tasks);
+  return serializeRenderDocument(doc);
 }
 
 function updateMessagePaneSearch(target) {
@@ -12066,6 +12707,9 @@ function renderProxySettings() {
   if (document.activeElement !== els.proxySettingPassthroughHosts) {
     els.proxySettingPassthroughHosts.value = (state.runtime.passthrough_hosts || []).join("\n");
   }
+  if (document.activeElement !== els.proxyChainBypassHosts) {
+    els.proxyChainBypassHosts.value = (state.runtime.upstream_bypass_hosts || []).join("\n");
+  }
   if (startup && document.activeElement !== els.proxySettingBindHost) {
     els.proxySettingBindHost.value = startup.proxy_bind_host;
   }
@@ -12156,9 +12800,9 @@ function renderOastSettingsControls(options = {}) {
   }
 }
 
-function renderReplay() {
+function renderReplay(options = {}) {
   const tab = ensureRepeaterTab();
-  renderReplayTabs();
+  if (!options.preserveTabStrip) renderReplayTabs();
 
   const isWsTab = tab && tab.type === "websocket";
 
@@ -12497,11 +13141,29 @@ function renderReplayResponseView(text) {
     // Apply search
     const query = (state.replayMessageSearch?.response || "").trim();
     _replayResponseCMView.applySearch(query);
-    return;
+  } else if (els.replayResponseView) {
+    // Fallback to legacy
+    const mode = state.replayMessageViews.response;
+    els.replayResponseView.innerHTML = renderCodeHtml(text, mode, "response");
   }
-  // Fallback to legacy
-  const mode = state.replayMessageViews.response;
-  if (els.replayResponseView) els.replayResponseView.innerHTML = renderCodeHtml(text, mode, "response");
+  // Every path that redraws the response comes through here, so Render follows.
+  syncReplayResponsePreview(text);
+}
+
+function syncReplayResponsePreview(placeholder) {
+  const tab = getActiveReplayTab();
+  const record = tab && tab.type !== "websocket" ? tab.responseRecord : null;
+  renderResponsePreview(
+    {
+      view: els.replayResponseRenderView,
+      editor: els.replayResponseCM?.closest(".editor-panel"),
+      search: els.replayResponseSearchInput,
+    },
+    state.replayMessageViews.response === "render",
+    record
+      ? { response: record.response || null, key: `${tab.id}:${record.id}`, url: recordPageUrl(record) }
+      : { note: placeholder ?? "" },
+  );
 }
 
 function renderReplayEmptyResponse(tab) {
@@ -13130,7 +13792,7 @@ function selectFuzzerResultIndex(rowIndex, options = {}) {
     const detailResizer = document.getElementById("fuzzerDetailResizer");
     if (detailResizer) detailResizer.classList.remove("hidden");
     if (els.fuzzerDetailReqCM) updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, result?.note || "No transaction was captured for this payload.", { mode: "http" });
-    if (els.fuzzerDetailResCM) updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+    clearFuzzerResponsePane();
     if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
   }
 }
@@ -13220,6 +13882,30 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
 
 let _fuzzerDetailViewModes = { request: "pretty", response: "pretty" };
 
+// The fuzzer result's response pane, emptied while a result loads or when it has
+// no transaction; Render empties with it.
+function clearFuzzerResponsePane() {
+  if (els.fuzzerDetailResCM) updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+  syncFuzzerResponsePreview(null);
+}
+
+function syncFuzzerResponsePreview(record) {
+  renderResponsePreview(
+    { view: els.fuzzerDetailResRenderView, editor: els.fuzzerDetailResCM?.closest(".editor-shell") },
+    _fuzzerDetailViewModes.response === "render",
+    record
+      ? { response: record.response || null, key: `${record.id}`, url: recordPageUrl(record) }
+      : { note: "" },
+  );
+}
+
+// After the resource option changes, so open Render views follow it.
+function redrawResponsePreviews() {
+  renderMessagePanes();
+  if (getActiveReplayTab()?.responseRecord) syncReplayResponsePreview();
+  if (state._fuzzerDetailRecord) syncFuzzerResponsePreview(state._fuzzerDetailRecord);
+}
+
 /** Show request/response detail for a fuzzer result. */
 async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transactionId}`) {
   if (!transactionId || !els.fuzzerDetailPanel) return;
@@ -13230,7 +13916,7 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
   state._fuzzerDetailRecord = null;
   if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
   updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, "Loading transaction...", { mode: "http" });
-  updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+  clearFuzzerResponsePane();
 
   try {
     const sessionId = currentSessionId();
@@ -13239,7 +13925,7 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
     if (!resp.ok) {
       if (state._selectedFuzzerResultKey !== selectionKey) return;
       updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, `Failed to load transaction: ${resp.status}`, { mode: "http" });
-      updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+      clearFuzzerResponsePane();
       if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
       return;
     }
@@ -13253,7 +13939,7 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
   } catch (err) {
     if (state._selectedFuzzerResultKey !== selectionKey) return;
     updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, `Error: ${err.message}`, { mode: "http" });
-    updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+    clearFuzzerResponsePane();
     if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
   }
 }
@@ -13312,6 +13998,7 @@ function renderFuzzerDetailPanes(record) {
       els.fuzzerDetailResponseMeta.textContent = "";
     }
   }
+  syncFuzzerResponsePreview(record);
 }
 
 function hideFuzzerDetailPanel() {
@@ -14558,6 +15245,10 @@ async function saveProxySettings() {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+  const bypassHosts = els.proxyChainBypassHosts.value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
 
   const bindHost = els.proxySettingBindHost.value.trim();
   const proxyPortText = els.proxySettingPort.value.trim();
@@ -14610,6 +15301,7 @@ async function saveProxySettings() {
     },
     scope_patterns: scopePatterns,
     passthrough_hosts: passthroughHosts,
+    upstream_bypass_hosts: bypassHosts,
     oast_enabled: document.getElementById("proxySettingOastEnabled")?.checked ?? false,
     oast_provider: oastProvider,
     oast_server_url: oastServerUrl,
@@ -16280,7 +16972,6 @@ function createReplayTab(seed = {}) {
 
 function ensureRepeaterTab() {
   if (!state.replayTabs.length) {
-    state.replayTabSequence = 0;
     const tab = createReplayTab();
     state.replayTabs = [tab];
     state.activeReplayTabId = tab.id;
@@ -16707,9 +17398,10 @@ async function closeRepeaterTab(id) {
     state.replayRenamingTabId = null;
   }
 
+  state.replayTabSequence = Math.max(state.replayTabSequence || 0,
+    ...state.replayTabs.map((tab) => tab.sequence || 0));
   state.replayTabs.splice(currentIndex, 1);
   if (!state.replayTabs.length) {
-    state.replayTabSequence = 0;
     const replacement = createReplayTab();
     state.replayTabs = [replacement];
     state.activeReplayTabId = replacement.id;
@@ -18100,6 +18792,7 @@ function sanitizeDisplaySettings(candidate) {
     theme: DISPLAY_THEME_OPTIONS.has(candidate?.theme) ? candidate.theme : defaults.theme,
     uiFont: DISPLAY_UI_FONT_OPTIONS.has(candidate?.uiFont) ? candidate.uiFont : defaults.uiFont,
     monoFont: DISPLAY_MONO_FONT_OPTIONS.has(candidate?.monoFont) ? candidate.monoFont : defaults.monoFont,
+    renderResources: candidate?.renderResources === true,
   };
 }
 
@@ -18463,6 +19156,7 @@ function hydrateDisplaySettingsForm() {
   els.displaySizeInput.value = String(state.displaySettings.sizePx);
   els.displayUiFontSelect.value = state.displaySettings.uiFont;
   els.displayMonoFontSelect.value = state.displaySettings.monoFont;
+  els.displayRenderResourcesInput.checked = state.displaySettings.renderResources;
 }
 
 function collectDisplaySettingsFormValues() {
@@ -18471,6 +19165,7 @@ function collectDisplaySettingsFormValues() {
     theme: els.displayThemeSelect.value,
     uiFont: els.displayUiFontSelect.value,
     monoFont: els.displayMonoFontSelect.value,
+    renderResources: els.displayRenderResourcesInput.checked,
   });
 }
 
@@ -18487,8 +19182,12 @@ function previewDisplaySettingsFromForm() {
 }
 
 function saveDisplaySettingsFromForm() {
+  const renderResourcesBefore = state.displaySettings.renderResources;
   state.displaySettings = collectDisplaySettingsFormValues();
   applyDisplaySettingsState();
+  if (state.displaySettings.renderResources !== renderResourcesBefore) {
+    redrawResponsePreviews();
+  }
   displaySettingsPreviewActive = false;
   window.clearTimeout(uiSettingsSaveTimer);
   uiSettingsSaveTimer = null;
@@ -18530,6 +19229,7 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
     theme: snapshot?.display_settings?.theme,
     uiFont: snapshot?.display_settings?.ui_font,
     monoFont: snapshot?.display_settings?.mono_font,
+    renderResources: snapshot?.display_settings?.render_resources,
   });
   state.activeTool = sanitizeActiveTool(snapshot?.active_tool);
   state.activeProxyTab = sanitizeActiveProxyTab(snapshot?.active_proxy_tab);
@@ -18609,6 +19309,7 @@ function snapshotUiSettings() {
       theme: state.displaySettings.theme,
       ui_font: state.displaySettings.uiFont,
       mono_font: state.displaySettings.monoFont,
+      render_resources: state.displaySettings.renderResources,
     },
     active_tool: sanitizeActiveTool(state.activeTool),
     active_proxy_tab: sanitizeActiveProxyTab(state.activeProxyTab),

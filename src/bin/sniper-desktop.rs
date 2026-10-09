@@ -1075,8 +1075,17 @@ fn truthy_env_value(env_value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// The response Render view draws captured HTML in a sandboxed `srcdoc` frame,
+/// whose load the webview reports as a navigation to `about:srcdoc`. Left to the
+/// rules below it was blocked, leaving the view blank, and handed to the user's
+/// browser. wry routes a subframe's navigation to the new-window handler on
+/// macOS, so both handlers let it through.
+fn is_render_frame_document(url: &str) -> bool {
+    url == "about:srcdoc"
+}
+
 fn handle_navigation_request(url: &str, ui_origin: &str) -> bool {
-    if url == "about:blank" || is_same_origin(url, ui_origin) {
+    if url == "about:blank" || is_render_frame_document(url) || is_same_origin(url, ui_origin) {
         return true;
     }
 
@@ -1092,6 +1101,9 @@ fn handle_navigation_request(url: &str, ui_origin: &str) -> bool {
 }
 
 fn handle_new_window_request(url: &str, ui_origin: &str) -> bool {
+    if is_render_frame_document(url) {
+        return true;
+    }
     if url == "about:blank" || is_same_origin(url, ui_origin) {
         return false;
     }
@@ -1490,6 +1502,19 @@ mod tests {
         assert!(!handle_navigation_request(
             "data:text/html,pwn",
             "http://127.0.0.1:3000",
+        ));
+    }
+
+    #[test]
+    fn the_render_frame_loads_in_place_instead_of_opening_a_browser() {
+        // Returning before the external-open branch is what keeps it in the app.
+        assert!(handle_navigation_request(
+            "about:srcdoc",
+            "http://127.0.0.1:3000"
+        ));
+        assert!(handle_new_window_request(
+            "about:srcdoc",
+            "http://127.0.0.1:3000"
         ));
     }
 

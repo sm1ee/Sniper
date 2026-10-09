@@ -30,8 +30,9 @@ function fixture() {
   });
   const http = tabs.filter(tab => "target" in tab.dataset);
   const saved = tabs.filter(tab => "fuzzerDetailTarget" in tab.dataset);
-  assert.equal(http.length, 6);
-  assert.equal(saved.length, 6);
+  // Pretty, Raw and Hex on both sides, plus Render on the response.
+  assert.equal(http.length, 7);
+  assert.equal(saved.length, 7);
   const state = {
     activeTool: "fuzzer", selectedId: "synthetic-http", selectedRecord: null,
     messageViews: { request: "raw", response: "hex" }, showOriginal: { request: false, response: false },
@@ -119,6 +120,25 @@ for (const side of ["request", "response"]) {
     });
   }
 }
+
+test("HTTP response render click preserves saved-result modes and active tabs", () => {
+  const f = fixture();
+  f.http.find(tab => tab.dataset.target === "response" && tab.dataset.view === "render").click();
+  assert.equal(f.state.messageViews.response, "render");
+  assert.equal(f.renders.http, 1);
+  assert.equal(f.renders.saved, 0);
+  assert.deepEqual(activeSaved(f), ["request/raw", "response/hex"]);
+});
+
+test("saved-result response render click preserves HTTP view state", () => {
+  const f = fixture();
+  const values = JSON.stringify(f.state.messageViews);
+  f.saved.find(tab => tab.dataset.fuzzerDetailTarget === "response" && tab.dataset.fuzzerDetailView === "render").click();
+  assert.equal(JSON.stringify(f.state.messageViews), values);
+  assert.equal(f.renders.http, 0);
+  assert.equal(f.renders.saved, 1);
+  assert.equal(f.modes.response, "render");
+});
 
 test("HTTP detail rendering leaves visible saved-result mode highlights alone", () => {
   const f = fixture();

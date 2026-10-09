@@ -183,7 +183,52 @@ sniper-cli --output compact replay send --tab-id <tab-id> --yes
 change the other. `replay send` returns a full transaction record and tags it
 `"notes": ["Sent from Replay."]`.
 
+## Read stored findings and event logs
+
+Use `findings list`, `findings get --id <uuid>`, `findings count`, and `event-log list`
+without `--yes`. The equivalent `call` names are `findings.list`, `findings.get`,
+`findings.count`, and `event_log.list`. Both lists default to 100 newest retained
+entries; `--limit` is positive and there is no offset/cursor pagination. Each read
+pins the active session once, or reads an explicit `--session-id` without switching
+it. `call` returns the pinned ID in `meta.session_id` for reuse on related reads.
+These commands only read stored data. See the [CLI contract](../../README.md#cli).
+
+## Manage passive scanner configuration
+
+Use `scanner config get`, `scanner custom list`, and `scanner custom get --id <id>`
+to inspect saved settings. Changes use `scanner config set-enabled --enabled
+<true|false>`, `scanner builtin set-enabled --id <id> --enabled <true|false>`, and
+`scanner custom create`, `update`, or `delete`. Mutations require `--yes`;
+`--dry-run` parses and validates input offline before any API discovery.
+
+Create accepts complete rule JSON with a stable `id` via `--file` or `--stdin`.
+Update accepts `--id` and a nonempty partial rule JSON with no `id` field. Omission
+preserves a field; `false` and empty optional text are applied literally. Unknown
+fields and nulls are rejected. Exact IDs are required; other rules and their order
+are retained. Read [the passive scanner CLI contract](../../README.md#passive-scanner-configuration)
+for the rule shape and limits.
+
+The canonical `call` names are `scanner.config.get`, `scanner.config.set_enabled`,
+`scanner.builtin.set_enabled`, `scanner.custom.list`, `scanner.custom.get`,
+`scanner.custom.create`, `scanner.custom.update`, and `scanner.custom.delete`.
+Create takes `rule` (or `file`/`stdin`); update takes `id` and `patch` (or
+`file`/`stdin`). All support `session_id`, including inactive sessions. Omitted
+sessions are resolved once; writes carry both the pinned session guard and the
+fetched configuration token. Conflicts are not retried; inspect the current config
+before any deliberate retry. An unchanged mutation reports `changed: false`
+without a write.
+
+These commands configure passive regex checks of captured body previews and
+headers only. They do not send traffic, run probes, rescan saved traffic, clear
+findings, or replace arbitrary whole configurations. Rule patterns and descriptions
+can themselves contain sensitive text, so review output before sharing it.
+
 ## What the agent sees
+
+`findings list` omits detail and evidence. `findings get` includes stored detail and
+evidence, which can contain sensitive captured values, without fetching the linked
+HTTP record or its raw bodies. Summary metadata and event-log messages may also be
+sensitive; these commands do not add redaction. Prefer summaries before details.
 
 `capture http list` returns no headers and no bodies. `capture http get`,
 `replay open` and `replay send` return both, verbatim — request headers, response

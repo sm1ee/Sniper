@@ -635,6 +635,80 @@ fn build_client(
         .context("failed to build upstream HTTP client")
 }
 
+const RENDER_RESOURCE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Largest single resource Render inlines. Each one sits in the page as a data:
+/// URL, so its bytes are held more than once while the page is drawn.
+pub(crate) const RENDER_RESOURCE_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+pub(crate) struct RenderResource {
+    pub content_type: String,
+    pub body: Bytes,
+}
+
+/// Fetch something a rendered page draws with, for Render's opt-in resource
+/// loading. It goes out through the session's chain, bypass list and TLS setting
+/// like Replay, so turning the option on never opens a connection the chain was
+/// set up to avoid. Only what draws comes back (images, stylesheets, fonts), and
+/// the request is not recorded in history.
+pub(crate) async fn fetch_render_resource(
+    session: &SessionContext,
+    url: &str,
+    own_listeners: [SocketAddr; 2],
+) -> Result<RenderResource> {
+    let proxy = session.runtime.upstream_proxy().await;
+    // A redirect must not lead back into Sniper's own listeners either.
+    let redirects = Policy::custom(move |attempt| {
+        let loops_back = attempt.url().as_str().parse::<Uri>().is_ok_and(|uri| {
+            own_listeners
+                .iter()
+                .any(|addr| request_targets_own_listener(&uri, *addr))
+        });
+        if loops_back || attempt.previous().len() >= 5 {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    });
+    let client = proxy
+        .apply(Client::builder())?
+        .use_rustls_tls()
+        .danger_accept_invalid_certs(session.runtime.upstream_insecure().await)
+        .redirect(redirects)
+        .connect_timeout(REPLAY_CONNECT_TIMEOUT)
+        .timeout(RENDER_RESOURCE_TIMEOUT)
+        .build()
+        .context("failed to build render resource client")?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| anyhow!(describe_upstream_error(&error)))?;
+    if !response.status().is_success() {
+        bail!("upstream answered {}", response.status());
+    }
+    let content_type = render_resource_content_type(response.headers())
+        .context("not an image, stylesheet or font")?;
+    let body = read_response_body_limited(response, RENDER_RESOURCE_MAX_BYTES).await?;
+    Ok(RenderResource { content_type, body })
+}
+
+/// The media type of something Render may draw with, or None for anything that
+/// could run (HTML, script) or is not drawn at all. Fonts are often served as
+/// plain octet-stream, so that is let through too; the page only ever sees the
+/// bytes as a data: URL inside a frame that runs nothing.
+fn render_resource_content_type(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(http::header::CONTENT_TYPE)?.to_str().ok()?;
+    let mime = value.split(';').next()?.trim().to_ascii_lowercase();
+    let drawable = mime.starts_with("image/")
+        || mime.starts_with("font/")
+        || mime == "text/css"
+        || mime == "application/octet-stream"
+        || mime == "application/vnd.ms-fontobject"
+        || mime.starts_with("application/font-")
+        || mime.starts_with("application/x-font-");
+    drawable.then_some(mime)
+}
+
 /// A second client that hands TLS to the platform instead of rustls.
 ///
 /// rustls implements neither static-RSA key exchange nor the CBC cipher suites,
@@ -774,7 +848,14 @@ async fn build_replay_client(
                     .context("failed to build replay HTTP client");
             }
             if proxy.enabled {
-                bail!("Replay destination overrides cannot be combined with an upstream proxy; edit the request destination instead");
+                // The chain resolves names itself, so it cannot honour an override.
+                // A destination on the bypass list is dialled directly, where the
+                // override works as it does without a chain. The list is checked
+                // against the dialled host here: the client only sees the request's.
+                if !proxy.bypasses(dial_host) {
+                    bail!("Replay destination overrides cannot be combined with an upstream proxy; edit the request destination instead");
+                }
+                builder = builder.no_proxy();
             }
             if request_authority.host.parse::<IpAddr>().is_ok() {
                 bail!(
@@ -5090,6 +5171,14 @@ static LIVE_WEBSOCKET_RELAYS: LazyLock<Mutex<HashMap<Uuid, LiveWebSocketRelay>>>
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static ACTIVE_STREAMED_RESPONSE_PUMPS: LazyLock<Mutex<HashMap<Uuid, StreamedResponsePump>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Held by the tests that leave proxy work running on purpose and by the tests
+/// that abort every connection in the process (drain, rebind). The registries
+/// below are process-wide, so side by side the second kind aborted the first
+/// kind's tasks, and the first kind made the second wait out its whole drain.
+#[cfg(test)]
+pub(crate) static GLOBAL_PROXY_WORK_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 static ACTIVE_PROXY_CONNECTIONS: LazyLock<Mutex<HashMap<Uuid, AbortHandle>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Per session, how much work is in flight broken down by what is holding it.
@@ -6803,6 +6892,7 @@ mod tests {
 
     #[tokio::test]
     async fn journaled_capture_does_not_schedule_full_session_persist() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-journaled-capture-no-full-persist-{}",
             Uuid::new_v4()
@@ -6875,6 +6965,7 @@ mod tests {
 
     #[tokio::test]
     async fn capturing_past_the_old_cap_keeps_every_record_without_compacting() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-journaled-capture-retention-{}",
             Uuid::new_v4()
@@ -6936,6 +7027,7 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_capture_store_clears_clean_pending_persist_context() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-streamed-capture-cleans-pending-{}",
             Uuid::new_v4()
@@ -6998,6 +7090,7 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_capture_provisional_record_is_updated_in_place() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-streamed-capture-updates-in-place-{}",
             Uuid::new_v4()
@@ -7551,6 +7644,7 @@ mod tests {
 
     #[tokio::test]
     async fn rebind_proxy_starts_listener_when_same_address_is_offline() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-rebind-offline-same-address-{}",
             Uuid::new_v4()
@@ -7628,6 +7722,7 @@ mod tests {
 
     #[tokio::test]
     async fn rebind_proxy_keeps_existing_proxy_online_when_relay_close_persist_fails() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-rebind-live-ws-persist-failure-{}",
             Uuid::new_v4()
@@ -7821,6 +7916,7 @@ mod tests {
 
     #[tokio::test]
     async fn closing_idle_tunnels_leaves_exchanges_and_relays_alone() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         // A switch closes idle tunnels without asking, so it must touch nothing
         // else: an exchange in flight or a live relay still has to hold the
         // session, or a switch would silently drop captured traffic.
@@ -7863,6 +7959,7 @@ mod tests {
 
     #[tokio::test]
     async fn aborting_session_tasks_releases_work_that_never_finishes() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         // An HTTPS tunnel or a WebSocket relay runs for as long as the client
         // keeps it open, so waiting never clears it. A forced session switch has
         // to be able to cut them, which is what abort_session_tracked_tasks does.
@@ -8020,6 +8117,40 @@ mod tests {
         headers.insert(HOST, HeaderValue::from_static("[::1]:443"));
 
         validate_connect_host_header(&headers, "[::1]:443").unwrap();
+    }
+
+    #[test]
+    fn render_resources_are_only_what_draws() {
+        let allowed = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_str(value).unwrap(),
+            );
+            render_resource_content_type(&headers)
+        };
+        assert_eq!(allowed("image/png").as_deref(), Some("image/png"));
+        assert_eq!(
+            allowed("Text/CSS; charset=utf-8").as_deref(),
+            Some("text/css")
+        );
+        for drawable in [
+            "font/woff2",
+            "image/svg+xml",
+            "application/octet-stream",
+            "application/font-woff",
+        ] {
+            assert!(allowed(drawable).is_some(), "{drawable}");
+        }
+        for active in [
+            "text/html",
+            "application/javascript",
+            "text/javascript",
+            "application/json",
+        ] {
+            assert!(allowed(active).is_none(), "{active}");
+        }
+        assert!(render_resource_content_type(&HeaderMap::new()).is_none());
     }
 
     #[test]
