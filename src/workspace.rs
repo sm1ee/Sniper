@@ -203,6 +203,92 @@ pub enum WorkspaceReplaceError<E> {
     Persist(E),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SavedHttpTabOperation {
+    Close,
+    Duplicate,
+}
+
+#[derive(Debug)]
+pub(crate) enum WorkspaceTransformError<E> {
+    Conflict { revision: u64 },
+    Invalid(String),
+    Persist(E),
+    CommittedButUncertain(E),
+}
+
+/// Transform saved state only: draft text, embedded bodies and transaction
+/// references must never pass through the request parser or body hydrator here.
+pub(crate) fn transform_saved_http_tab(
+    current: &WorkspaceStateSnapshot,
+    tab_id: &str,
+    operation: SavedHttpTabOperation,
+) -> Result<WorkspaceStateSnapshot, String> {
+    let index = current
+        .replay
+        .tabs
+        .iter()
+        .position(|tab| tab.id == tab_id)
+        .ok_or_else(|| "saved Replay tab was not found".to_string())?;
+    let source = &current.replay.tabs[index];
+    if !matches!(source.tab_type.as_str(), "" | "http") {
+        return Err("saved Replay tab must be an HTTP tab".to_string());
+    }
+    let mut next = current.clone();
+    match operation {
+        SavedHttpTabOperation::Close => {
+            // Legacy counters can lag the saved tabs. Closing the last/highest
+            // tab must not make its sequence available for reuse.
+            next.replay.tab_sequence = current
+                .replay
+                .tabs
+                .iter()
+                .map(|tab| tab.sequence)
+                .fold(current.replay.tab_sequence, usize::max);
+            if current.replay.active_tab_id.as_deref() == Some(tab_id) {
+                let mut visual: Vec<_> = current.replay.tabs.iter().collect();
+                visual.sort_by_key(|tab| !tab.pinned);
+                let position = visual.iter().position(|tab| tab.id == tab_id).unwrap();
+                next.replay.active_tab_id = position
+                    .checked_sub(1)
+                    .and_then(|previous| visual.get(previous))
+                    .or_else(|| visual.get(position + 1))
+                    .map(|tab| tab.id.clone());
+            }
+            next.replay.tabs.remove(index);
+            if next.replay.tabs.is_empty() {
+                next.replay.active_tab_id = None;
+            }
+        }
+        SavedHttpTabOperation::Duplicate => {
+            if current.replay.tabs.len() >= MAX_WORKSPACE_REPLAY_TABS {
+                return Err("workspace has reached the saved Replay tab limit".to_string());
+            }
+            let sequence = current
+                .replay
+                .tabs
+                .iter()
+                .map(|tab| tab.sequence)
+                .fold(current.replay.tab_sequence, usize::max)
+                .checked_add(1)
+                .filter(|sequence| *sequence < usize::MAX)
+                .ok_or_else(|| "replay tab sequence is too large".to_string())?;
+            let mut duplicate = source.clone();
+            loop {
+                duplicate.id = Uuid::new_v4().to_string();
+                if current.replay.tabs.iter().all(|tab| tab.id != duplicate.id) {
+                    break;
+                }
+            }
+            duplicate.sequence = sequence;
+            duplicate.pinned = false;
+            next.replay.tabs.push(duplicate);
+            next.replay.tab_sequence = sequence;
+        }
+    }
+    Ok(next)
+}
+
 impl WorkspaceStateStore {
     pub fn new() -> Self {
         Self::from_snapshot(WorkspaceStateSnapshot::default())
@@ -288,6 +374,47 @@ impl WorkspaceStateStore {
         drop(current);
         self.announce(&next);
         Ok((next, persist_result))
+    }
+
+    pub(crate) async fn transform_snapshot_checked_persisting<F, P, Fut, E>(
+        &self,
+        expected_revision: u64,
+        transform: F,
+        persist: P,
+    ) -> Result<WorkspaceStateSnapshot, WorkspaceTransformError<E>>
+    where
+        F: FnOnce(&WorkspaceStateSnapshot) -> Result<WorkspaceStateSnapshot, String>,
+        P: FnOnce(WorkspaceStateSnapshot) -> Fut,
+        Fut: Future<Output = Result<Option<E>, E>>,
+    {
+        let mut current = self.inner.write().await;
+        if current.revision != expected_revision {
+            return Err(WorkspaceTransformError::Conflict {
+                revision: current.revision,
+            });
+        }
+        let revision = current.revision.checked_add(1).ok_or_else(|| {
+            WorkspaceTransformError::Invalid("workspace revision is exhausted".to_string())
+        })?;
+        let mut next = transform(&current).map_err(WorkspaceTransformError::Invalid)?;
+        next.revision = revision;
+        next.expected_active_session_id = None;
+        // A queued save from the previous writer must not use the legacy
+        // same-client version bypass to resurrect a tab this operation closed.
+        next.client_id = None;
+        next.client_version = 0;
+        let uncertainty = persist(next.clone())
+            .await
+            .map_err(WorkspaceTransformError::Persist)?;
+        *current = next.clone();
+        drop(current);
+        self.announce(&next);
+        if let Some(error) = uncertainty {
+            // The rename happened, so exposing the old in-memory revision
+            // would let a stale writer overwrite the committed disk snapshot.
+            return Err(WorkspaceTransformError::CommittedButUncertain(error));
+        }
+        Ok(next)
     }
 }
 
@@ -644,5 +771,257 @@ mod tests {
         let tab = &decoded.replay.tabs[0];
         assert_eq!(tab.ws_selected_frame_index, Some(42));
         assert_eq!(tab.ws_frame_window_start, Some(10));
+    }
+}
+
+#[cfg(test)]
+mod saved_http_tab_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn fixture() -> WorkspaceStateSnapshot {
+        serde_json::from_value(json!({
+            "revision": 8, "client_id": "desktop", "client_version": 100,
+            "replay": {
+                "tab_sequence": 20, "active_tab_id": "middle",
+                "tabs": [
+                    {"id":"first","type":"http","sequence":1},
+                    {"id":"middle","type":"","sequence":5,"pinned":true,
+                     "custom_label":"saved label","request_text":"unfinished request\r\nraw \u{0000} text",
+                     "http_version_mode":"HTTP/2","target_scheme":"https","target_host":"example.com","target_port":"443",
+                     "target_manually_edited":true,"notice":"saved notice",
+                     "source_transaction_id":"11111111-1111-4111-8111-111111111111",
+                     "history_entries":[{"request_text":"first draft","http_version_mode":"HTTP/1.1","notice":"history notice"}],
+                     "history_index":0},
+                    {"id":"last","type":"http","sequence":3},
+                    {"id":"pinned","type":"http","sequence":4,"pinned":true}
+                ]
+            }, "fuzzer":{"request_text":"other saved draft","payloads_text":"one\ntwo"}
+        })).unwrap()
+    }
+
+    fn value(snapshot: &WorkspaceStateSnapshot) -> Value {
+        serde_json::to_value(snapshot).unwrap()
+    }
+
+    #[test]
+    fn saved_http_close_uses_stable_visual_order_and_retains_monotonic_sequence() {
+        let current = fixture();
+        let next =
+            transform_saved_http_tab(&current, "middle", SavedHttpTabOperation::Close).unwrap();
+        assert_eq!(next.replay.active_tab_id.as_deref(), Some("pinned"));
+        assert_eq!(next.replay.tab_sequence, 20);
+        assert_eq!(
+            next.replay
+                .tabs
+                .iter()
+                .map(|tab| tab.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "last", "pinned"]
+        );
+        assert_eq!(value(&current)["fuzzer"], value(&next)["fuzzer"]);
+        for (selected, expected) in [("first", "pinned"), ("last", "first"), ("pinned", "middle")] {
+            let mut selected_state = current.clone();
+            selected_state.replay.active_tab_id = Some(selected.into());
+            let closed =
+                transform_saved_http_tab(&selected_state, selected, SavedHttpTabOperation::Close)
+                    .unwrap();
+            assert_eq!(closed.replay.active_tab_id.as_deref(), Some(expected));
+        }
+        let nonselected =
+            transform_saved_http_tab(&current, "last", SavedHttpTabOperation::Close).unwrap();
+        assert_eq!(
+            nonselected.replay.active_tab_id,
+            current.replay.active_tab_id
+        );
+        let mut single = current.clone();
+        single.replay.tabs.retain(|tab| tab.id == "middle");
+        let empty =
+            transform_saved_http_tab(&single, "middle", SavedHttpTabOperation::Close).unwrap();
+        assert!(empty.replay.tabs.is_empty());
+        assert!(empty.replay.active_tab_id.is_none());
+        assert_eq!(empty.replay.tab_sequence, 20);
+        single.replay.tab_sequence = 0;
+        let empty =
+            transform_saved_http_tab(&single, "middle", SavedHttpTabOperation::Close).unwrap();
+        assert_eq!(empty.replay.tab_sequence, 5);
+    }
+
+    #[test]
+    fn saved_http_duplicate_keeps_raw_saved_state_and_focus_with_fresh_unpinned_identity() {
+        let current = fixture();
+        let next =
+            transform_saved_http_tab(&current, "middle", SavedHttpTabOperation::Duplicate).unwrap();
+        assert_eq!(next.replay.active_tab_id, current.replay.active_tab_id);
+        assert_eq!(next.replay.tab_sequence, 21);
+        let mut duplicate = next.replay.tabs.last().unwrap().clone();
+        assert!(Uuid::parse_str(&duplicate.id).is_ok());
+        assert!(current.replay.tabs.iter().all(|tab| tab.id != duplicate.id));
+        assert_eq!(duplicate.sequence, 21);
+        assert!(!duplicate.pinned);
+        duplicate.id = current.replay.tabs[1].id.clone();
+        duplicate.sequence = current.replay.tabs[1].sequence;
+        duplicate.pinned = current.replay.tabs[1].pinned;
+        assert_eq!(
+            serde_json::to_value(duplicate).unwrap(),
+            value(&current)["replay"]["tabs"][1]
+        );
+        assert_eq!(
+            &next.replay.tabs[..4]
+                .iter()
+                .map(|t| serde_json::to_value(t).unwrap())
+                .collect::<Vec<_>>(),
+            value(&current)["replay"]["tabs"].as_array().unwrap()
+        );
+        assert_eq!(value(&next)["fuzzer"], value(&current)["fuzzer"]);
+        let mut behind = current.clone();
+        behind.replay.tab_sequence = 0;
+        assert_eq!(
+            transform_saved_http_tab(&behind, "middle", SavedHttpTabOperation::Duplicate)
+                .unwrap()
+                .replay
+                .tab_sequence,
+            6
+        );
+    }
+
+    #[test]
+    fn saved_http_transform_rejects_missing_wrong_kind_cap_and_sequence_overflow() {
+        let current = fixture();
+        for operation in [
+            SavedHttpTabOperation::Close,
+            SavedHttpTabOperation::Duplicate,
+        ] {
+            assert!(transform_saved_http_tab(&current, " middle ", operation).is_err());
+            for kind in ["websocket", "unknown", "HTTP"] {
+                let mut wrong = current.clone();
+                wrong.replay.tabs[1].tab_type = kind.into();
+                assert!(transform_saved_http_tab(&wrong, "middle", operation).is_err());
+            }
+        }
+        let mut full = current.clone();
+        full.replay
+            .tabs
+            .resize(MAX_WORKSPACE_REPLAY_TABS, current.replay.tabs[0].clone());
+        assert!(
+            transform_saved_http_tab(&full, "middle", SavedHttpTabOperation::Duplicate).is_err()
+        );
+        for sequence in [usize::MAX, usize::MAX - 1] {
+            let mut exhausted = current.clone();
+            exhausted.replay.tab_sequence = sequence;
+            assert!(transform_saved_http_tab(
+                &exhausted,
+                "middle",
+                SavedHttpTabOperation::Duplicate
+            )
+            .is_err());
+            exhausted.replay.tab_sequence = 0;
+            exhausted.replay.tabs[0].sequence = sequence;
+            assert!(transform_saved_http_tab(
+                &exhausted,
+                "middle",
+                SavedHttpTabOperation::Duplicate
+            )
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_http_strict_cas_clears_writer_and_blocks_queued_same_client_snapshot() {
+        let current = fixture();
+        let store = WorkspaceStateStore::from_snapshot(current.clone());
+        let mut events = store.subscribe();
+        let committed = store
+            .transform_snapshot_checked_persisting(
+                8,
+                |current| transform_saved_http_tab(current, "middle", SavedHttpTabOperation::Close),
+                |_| async { Ok::<_, String>(None) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(committed.revision, 9);
+        assert_eq!(events.try_recv().unwrap().revision, 9);
+        assert!(committed.client_id.is_none());
+        assert_eq!(committed.client_version, 0);
+        let mut queued = current;
+        queued.client_version = 999;
+        assert!(store.replace_snapshot_checked(queued).await.is_err());
+        let stale = store
+            .transform_snapshot_checked_persisting(
+                8,
+                |_| panic!("stale CAS must not call transform"),
+                |_| async {
+                    panic!("stale CAS must not persist");
+                    #[allow(unreachable_code)]
+                    Ok::<_, String>(None)
+                },
+            )
+            .await;
+        assert!(matches!(
+            stale,
+            Err(WorkspaceTransformError::Conflict { revision: 9 })
+        ));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn saved_http_failed_persistence_is_not_published_but_postrename_uncertainty_is() {
+        let current = fixture();
+        let store = WorkspaceStateStore::from_snapshot(current.clone());
+        let mut events = store.subscribe();
+        let failure = store
+            .transform_snapshot_checked_persisting(
+                8,
+                |current| transform_saved_http_tab(current, "middle", SavedHttpTabOperation::Close),
+                |_| async { Err::<Option<String>, _>("before rename".into()) },
+            )
+            .await;
+        assert!(matches!(failure, Err(WorkspaceTransformError::Persist(_))));
+        assert_eq!(value(&store.snapshot().await), value(&current));
+        assert!(events.try_recv().is_err());
+        let uncertainty = store
+            .transform_snapshot_checked_persisting(
+                8,
+                |current| transform_saved_http_tab(current, "middle", SavedHttpTabOperation::Close),
+                |_| async { Ok::<_, String>(Some("directory sync failed after rename".into())) },
+            )
+            .await;
+        assert!(matches!(
+            uncertainty,
+            Err(WorkspaceTransformError::CommittedButUncertain(_))
+        ));
+        assert_eq!(store.snapshot().await.revision, 9);
+        assert!(store.snapshot().await.client_id.is_none());
+        assert_eq!(events.try_recv().unwrap().revision, 9);
+    }
+
+    #[tokio::test]
+    async fn saved_http_revision_exhaustion_and_invalid_transform_do_not_persist_or_announce() {
+        for (revision, invalid) in [(u64::MAX, false), (8, true)] {
+            let mut current = fixture();
+            current.revision = revision;
+            let store = WorkspaceStateStore::from_snapshot(current.clone());
+            let mut events = store.subscribe();
+            let result = store
+                .transform_snapshot_checked_persisting(
+                    revision,
+                    |current| {
+                        if invalid {
+                            Err("invalid tab".into())
+                        } else {
+                            Ok(current.clone())
+                        }
+                    },
+                    |_| async {
+                        panic!("invalid transform must not persist");
+                        #[allow(unreachable_code)]
+                        Ok::<_, String>(None)
+                    },
+                )
+                .await;
+            assert!(matches!(result, Err(WorkspaceTransformError::Invalid(_))));
+            assert_eq!(value(&store.snapshot().await), value(&current));
+            assert!(events.try_recv().is_err());
+        }
     }
 }

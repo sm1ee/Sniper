@@ -297,6 +297,40 @@ can also be sensitive. These reads do not add redaction: review the output befor
 sharing it with an agent or saving it to a transcript. No scanner execution,
 configuration, or clear operation is exposed by these commands.
 
+### Saved HTTP Replay tab housekeeping
+
+```bash
+sniper-cli replay close --tab-id 'exact-tab-id' --dry-run
+sniper-cli replay close --tab-id 'exact-tab-id' --yes
+sniper-cli replay duplicate --tab-id 'exact-tab-id' --session-id <session-uuid> --yes
+sniper-cli call replay.duplicate --input '{"tab_id":"exact-tab-id"}' --dry-run
+sniper-cli schema output replay.close
+```
+
+`replay.close` and `replay.duplicate` accept only an exact `tab_id` and optional
+`session_id`. IDs are never trimmed or matched by label; blank IDs and IDs over
+128 UTF-8 bytes are rejected. Only saved HTTP tabs (including legacy empty tab
+types) are supported. Both require `--yes`; `--dry-run` is entirely offline and
+cannot check whether the tab exists.
+
+Close removes only that tab and its saved replay history. Closing the active tab
+selects its previous neighbor in the stable pinned-first visual order, or the next
+neighbor when there is no previous one. Duplicate clones the saved tab and history
+with a fresh UUID, unpinned, and a new sequence above the current counter and all
+tab sequences; it preserves current focus. Neither operation reparses requests,
+hydrates response bodies, sends traffic, or changes unrelated saved data.
+
+The CLI pins one session (explicit IDs also work for inactive sessions), reads its
+workspace revision, then sends one ID-only compare-and-swap request. An inferred
+session is guarded against an active-session switch. Conflicts and lost, invalid,
+or redirected responses are never retried. Inspect saved tabs before a deliberate
+retry; these operations do not use `saved.v1` receipts.
+
+Success is bounded metadata: `session_id`, `revision`, `active_tab_id`, and either
+`closed_tab_id` or `source_tab_id` plus `new_tab_id`. Direct commands return that
+object; `call` puts it under `data` and adds `meta.session_id`. See the
+[saved-tab API contract](docs/integrations/saved-replay-tabs.md) for wire details.
+
 ### Passive scanner configuration
 
 The `scanner` commands manage the existing passive checks for captured response

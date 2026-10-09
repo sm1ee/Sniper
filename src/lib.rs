@@ -18,6 +18,8 @@ pub mod runtime;
 pub mod runtime_state;
 pub mod saved_contract;
 pub mod saved_data;
+#[cfg(test)]
+mod saved_http_tab_tests;
 pub mod saved_operations;
 pub mod scanner;
 pub mod scope;

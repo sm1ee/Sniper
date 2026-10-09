@@ -38,7 +38,10 @@ use crate::{
         TransactionJournalEntry, TransactionStore,
     },
     websocket::{sessions_with_live_preserved, trim_frame_overflow, WebSocketStore},
-    workspace::{validate_workspace_serialized_size, WorkspaceReplaceError},
+    workspace::{
+        transform_saved_http_tab, validate_workspace_serialized_size, SavedHttpTabOperation,
+        WorkspaceReplaceError, WorkspaceTransformError,
+    },
     workspace::{WorkspaceStateSnapshot, WorkspaceStateStore},
 };
 
@@ -606,6 +609,45 @@ impl SessionContext {
             .replace_snapshot_checked_persisting(snapshot, |workspace| async move {
                 self.persist_workspace_snapshot_locked(workspace).await
             })
+            .await
+    }
+
+    pub(crate) async fn mutate_saved_http_tab_and_persist(
+        &self,
+        tab_id: &str,
+        expected_revision: u64,
+        operation: SavedHttpTabOperation,
+    ) -> std::result::Result<WorkspaceStateSnapshot, WorkspaceTransformError<anyhow::Error>> {
+        let _mutation_guard = self.mutation_lock.lock().await;
+        let _persist_guard = self.persist_lock.lock().await;
+        let path = workspace_path(&self.storage_dir);
+        self.workspace
+            .transform_snapshot_checked_persisting(
+                expected_revision,
+                |current| {
+                    let mut next = transform_saved_http_tab(current, tab_id, operation)?;
+                    next.session_id = Some(self.id());
+                    next.revision = expected_revision + 1;
+                    next.expected_active_session_id = None;
+                    next.client_id = None;
+                    next.client_version = 0;
+                    validate_workspace_state(&next)?;
+                    Ok(next)
+                },
+                |workspace| async move {
+                    // Workspace-only persistence is also safe for a read-only
+                    // inactive context. Do not hydrate its unrelated journals.
+                    match tokio::task::spawn_blocking(move || {
+                        write_json_with_commit_status(&path, &workspace)
+                    })
+                    .await?
+                    {
+                        Ok(()) => Ok(None),
+                        Err(failure) if failure.committed => Ok(Some(failure.error)),
+                        Err(failure) => Err(failure.error),
+                    }
+                },
+            )
             .await
     }
 
@@ -3627,44 +3669,72 @@ fn persist_session_snapshot(
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        create_private_dir_all(parent)
-            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
-    }
-    let tmp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
-    let mut tmp_guard = TempJsonFile::new(tmp_path.clone());
-    {
-        let mut file = create_private_file(&tmp_path)
-            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-        {
-            let mut writer = BufWriter::new(&mut file);
-            serde_json::to_writer_pretty(&mut writer, value)
-                .context("failed to serialize JSON file")?;
-            writer
-                .flush()
-                .with_context(|| format!("failed to flush {}", tmp_path.display()))?;
+    write_json_with_commit_status(path, value).map_err(|failure| failure.error)
+}
+
+struct JsonWriteFailure {
+    error: anyhow::Error,
+    committed: bool,
+}
+
+fn write_json_with_commit_status(
+    path: &Path,
+    value: &impl Serialize,
+) -> std::result::Result<(), JsonWriteFailure> {
+    write_json_finalizing(path, value, |path| {
+        tighten_private_file(path).with_context(|| {
+            format!(
+                "failed to set private permissions on session JSON {}",
+                path.display()
+            )
+        })?;
+        if let Some(parent) = path.parent() {
+            sync_directory(parent, "session JSON directory")?;
         }
-        file.sync_all()
-            .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
-    }
-    crate::platform::rename(&tmp_path, path).with_context(|| {
-        format!(
-            "failed to rename {} to {}",
-            tmp_path.display(),
-            path.display()
-        )
-    })?;
-    tmp_guard.commit();
-    tighten_private_file(path).with_context(|| {
-        format!(
-            "failed to set private permissions on session JSON {}",
-            path.display()
-        )
-    })?;
-    if let Some(parent) = path.parent() {
-        sync_directory(parent, "session JSON directory")?;
-    }
-    Ok(())
+        Ok(())
+    })
+}
+
+fn write_json_finalizing(
+    path: &Path,
+    value: &impl Serialize,
+    finalize: impl FnOnce(&Path) -> Result<()>,
+) -> std::result::Result<(), JsonWriteFailure> {
+    let mut committed = false;
+    let result = (|| -> Result<()> {
+        if let Some(parent) = path.parent() {
+            create_private_dir_all(parent).with_context(|| {
+                format!("failed to create parent directory {}", parent.display())
+            })?;
+        }
+        let tmp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+        let mut tmp_guard = TempJsonFile::new(tmp_path.clone());
+        {
+            let mut file = create_private_file(&tmp_path)
+                .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+            {
+                let mut writer = BufWriter::new(&mut file);
+                serde_json::to_writer_pretty(&mut writer, value)
+                    .context("failed to serialize JSON file")?;
+                writer
+                    .flush()
+                    .with_context(|| format!("failed to flush {}", tmp_path.display()))?;
+            }
+            file.sync_all()
+                .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
+        }
+        crate::platform::rename(&tmp_path, path).with_context(|| {
+            format!(
+                "failed to rename {} to {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
+        tmp_guard.commit();
+        committed = true;
+        finalize(path)
+    })();
+    result.map_err(|error| JsonWriteFailure { error, committed })
 }
 
 struct TempJsonFile {
@@ -3726,6 +3796,34 @@ mod tests {
         },
         ws_replay::WsReplayFrame,
     };
+
+    #[test]
+    fn saved_http_workspace_write_distinguishes_precommit_and_postrename_failures() {
+        let root =
+            std::env::temp_dir().join(format!("sniper-json-commit-status-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("workspace.json");
+        std::fs::create_dir(&path).unwrap();
+        let error = super::write_json_with_commit_status(&path, &serde_json::json!({"revision":1}))
+            .err()
+            .unwrap();
+        assert!(!error.committed);
+        assert!(path.is_dir());
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, b"{\"revision\":1}").unwrap();
+        let error = super::write_json_finalizing(&path, &serde_json::json!({"revision":2}), |_| {
+            anyhow::bail!("injected directory sync failure")
+        })
+        .err()
+        .unwrap();
+        assert!(error.committed);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            serde_json::json!({"revision":2})
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn write_json_syncs_and_replaces_without_leaving_temp_files() {

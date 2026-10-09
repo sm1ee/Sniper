@@ -945,6 +945,9 @@ let workspaceSaveCommittedSnapshot = null;
 const workspaceClientId = createWorkspaceClientId();
 let workspaceSaveLoopPromise = null;
 let workspaceSaveConflictPending = false;
+let workspaceStateGeneration = 0;
+let workspaceExternalLoadGeneration = 0;
+let workspaceExternalAppliedGeneration = 0;
 // Highest replay-tab count a workspace may hold; must match
 // MAX_WORKSPACE_REPLAY_TABS in src/workspace.rs.
 const MAX_REPLAY_TABS = 512;
@@ -3013,6 +3016,7 @@ function applyWorkspaceState(snapshot) {
     console.warn("Ignoring workspace state for a non-active session", snapshot?.session_id);
     return;
   }
+  workspaceStateGeneration += 1;
   for (const tab of state.replayTabs || []) {
     if (tab?.type === "websocket") {
       cleanupWsReplayTab(tab, { guardWorkspaceRevision: false }).catch((error) => console.error(error));
@@ -3064,61 +3068,130 @@ function applyWorkspaceState(snapshot) {
   workspaceSaveCommittedSnapshot = cloneWorkspaceSnapshotForBaseline(snapshotWorkspaceState());
 }
 
-// Pick up replay tabs committed by another client — typically
-// `sniper-cli replay open`. Only tabs we do not already have are added: an open
-// tab may be mid-edit, and replacing it from a background fetch would discard
-// the user's work. A tab the CLI *modified* is therefore left alone.
+// Reconcile saved HTTP tab deletions before following another writer's revision.
+// A full save at that revision would otherwise put a CLI-closed tab back.
 async function adoptExternalReplayTabs() {
-  const response = await fetch("/api/workspace-state");
+  if (!workspaceLoaded || workspaceSaveConflictPending) return;
+  const sessionId = currentSessionId();
+  if (!sessionId) return;
+  const stateGeneration = workspaceStateGeneration;
+  const loadGeneration = ++workspaceExternalLoadGeneration;
+  const response = await fetch(sessionQueryPath("/api/workspace-state", sessionId));
   if (!response.ok) return;
   const snapshot = await response.json();
-  if (!workspaceSnapshotMatchesActiveSession(snapshot)) return;
-
-  // Follow the writer's revision, otherwise our next save looks stale and the
-  // server rejects it as a conflict.
-  if (Number.isFinite(snapshot?.revision)) {
-    state.workspaceRevision = snapshot.revision;
-  }
+  if (
+    !workspaceLoaded || workspaceSaveConflictPending
+    || sessionId !== currentSessionId() || stateGeneration !== workspaceStateGeneration
+    || snapshot?.session_id !== sessionId
+    || loadGeneration < workspaceExternalAppliedGeneration
+    || !Array.isArray(snapshot?.replay?.tabs)
+    || !Number.isSafeInteger(snapshot?.revision) || snapshot.revision <= state.workspaceRevision
+  ) return;
+  workspaceExternalAppliedGeneration = loadGeneration;
 
   const incoming = Array.isArray(snapshot?.replay?.tabs) ? snapshot.replay.tabs : [];
+  const incomingById = workspaceReplayTabsById(snapshot);
+  const baselineById = workspaceReplayTabsById(workspaceSaveCommittedSnapshot);
   const local = new Map((state.replayTabs || []).map((tab) => [tab?.id, tab]));
+  const removed = new Set();
+  for (const [id, baseline] of baselineById) {
+    if (baseline.type === "websocket" || incomingById.has(id)) continue;
+    const existing = local.get(id);
+    if (existing && (existing.type === "websocket"
+      || replayTabHasUncommittedEditorState(existing)
+      || workspaceSnapshotValueChanged(snapshotHttpReplayTab(existing), baseline))) {
+      // Do not render, sync the DOM, stop activity, or partly advance a baseline
+      // when the closed tab still contains a local draft.
+      workspaceSaveConflictPending = true;
+      workspaceSaveConflictLatest = snapshot;
+      workspaceSaveDirty = true;
+      window.clearTimeout(workspaceSaveTimer);
+      workspaceSaveTimer = null;
+      showToast(
+        "A replay tab was closed elsewhere. Local edits are unsaved; copy them before reloading the workspace to reconcile.",
+        "error", 6000,
+      );
+      return;
+    }
+    removed.add(id);
+  }
+
+  const previousSequence = Math.max(state.replayTabSequence || 0,
+    ...state.replayTabs.map((tab) => tab.sequence || 0));
+  const visualIds = getReplayTabVisualOrder().map((tab) => tab.id);
+  const previousActiveId = state.activeReplayTabId;
   const added = [];
-  let updated = 0;
+  let activeUpdated = false;
+  let updated = false;
   for (const tab of incoming) {
     if (!tab?.id) continue;
     const existing = local.get(tab.id);
     if (!existing) {
+      // A baseline tab absent locally was closed here, not opened remotely.
+      if (baselineById.has(tab.id)) continue;
       const hydrated = hydrateReplayTab(tab);
       if (hydrated) {
         added.push(hydrated);
-        // The tab arrives already committed by its writer. Without a baseline
-        // entry a follow-up `replay update` would find nothing to compare against
-        // and be refused.
-        workspaceSaveCommittedSnapshot?.replay?.tabs?.push(cloneWorkspaceSnapshotForBaseline(tab));
+        workspaceSaveCommittedSnapshot?.replay?.tabs?.push(cloneWorkspaceSnapshotForBaseline(
+          hydrated.type === "websocket" ? tab : snapshotHttpReplayTab(hydrated),
+        ));
       }
       continue;
     }
-    if (adoptExternalReplayResult(existing, tab)) updated += 1;
-  }
-  if (!added.length && !updated) return;
-
-  if (added.length) {
-    state.replayTabs = [...(state.replayTabs || []), ...added];
-    state.replayTabSequence = Math.max(
-      state.replayTabSequence || 0,
-      ...added.map((tab) => tab.sequence || 0),
-    );
-    if (!state.activeReplayTabId) {
-      state.activeReplayTabId = added[0].id;
+    if (replayTabHasUncommittedEditorState(existing)) continue;
+    if (adoptExternalReplayResult(existing, tab)) {
+      updated = true;
+      if (existing.id === previousActiveId) activeUpdated = true;
     }
   }
-  renderReplay();
-  // Only a new tab is announced. An update lands in the pane the operator is
-  // already looking at, and an agent firing a run of sends would otherwise bury
-  // the screen in toasts.
+  state.replayTabs = [...state.replayTabs.filter((tab) => !removed.has(tab.id)), ...added];
+  if (removed.has(previousActiveId)) {
+    const index = visualIds.indexOf(previousActiveId);
+    state.activeReplayTabId = visualIds.slice(0, index).reverse().find((id) => !removed.has(id))
+      || visualIds.slice(index + 1).find((id) => !removed.has(id)) || added[0]?.id || null;
+  } else if (!state.activeReplayTabId && added.length) {
+    state.activeReplayTabId = added[0].id;
+  }
+  state.replayTabSequence = Math.max(
+    previousSequence, snapshot.replay?.tab_sequence || 0,
+    ...added.map((tab) => tab.sequence || 0),
+  );
+  if (workspaceSaveCommittedSnapshot?.replay) {
+    workspaceSaveCommittedSnapshot.replay.tabs = workspaceSaveCommittedSnapshot.replay.tabs
+      .filter((tab) => !removed.has(tab.id));
+  }
+  state.workspaceRevision = snapshot.revision;
+  // An unload must not reuse a pre-adoption in-flight full snapshot.
+  workspaceSaveLastSnapshot = null;
+
+  if (!added.length && !updated && !removed.size) return;
+  if (state.activeReplayTabId !== previousActiveId || activeUpdated) {
+    renderReplay({ preserveTabStrip: !!state.replayRenamingTabId });
+  } else if (!state.replayRenamingTabId) {
+    // Keep unsynced editor text, binary bytes, cursor and modal state intact.
+    // A surviving rename refreshes the strip when it is committed/cancelled.
+    renderReplayTabs();
+  }
   if (added.length) {
     showToast(`${added.length} replay tab${added.length === 1 ? "" : "s"} added from another client.`, "info");
   }
+}
+
+function replayTabHasUncommittedEditorState(tab) {
+  if (tab.type === "websocket") return false;
+  if (tab.requestBytes || state.replayRenamingTabId === tab.id || isReplayTabSending(tab.id)) return true;
+  if (tab.id !== state.activeReplayTabId) return false;
+  if (state.replayMessageViews.request === "hex") return true;
+  const editor = getCMView("replayReq");
+  const text = editor ? editor.getContent()
+    : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value ?? null);
+  if (typeof text === "string" && !replayRequestTextsEquivalent(text, tab.requestText)) return true;
+  const target = getRepeaterTargetConfig(tab);
+  if ((els.replayHostInput && els.replayHostInput.value !== target.host)
+    || (els.replayPortInput && els.replayPortInput.value !== target.port)
+    || (els.replaySchemeSelect && els.replaySchemeSelect.value !== target.scheme)) return true;
+  const versionSelect = document.getElementById("replayHttpVersionSelect");
+  return !!versionSelect && versionSelect.value !== normalizeReplayHttpVersionMode(tab.httpVersionMode);
 }
 
 // A send from another client — `sniper-cli replay send`, or a second window —
@@ -3155,6 +3228,13 @@ function adoptExternalReplayResult(existing, incoming) {
   );
   existing.responseRecord = incoming.response_record || null;
   existing.notice = incoming.notice || "";
+  const baseline = workspaceReplayTabsById(workspaceSaveCommittedSnapshot).get(existing.id);
+  if (baseline) {
+    const adopted = snapshotHttpReplayTab(existing);
+    for (const key of ["history_entries", "history_index", "response_record", "notice"]) {
+      baseline[key] = cloneWorkspaceSnapshotForBaseline(adopted[key]) ?? adopted[key];
+    }
+  }
   return true;
 }
 
@@ -3456,6 +3536,39 @@ function createWsReplaySnapshotBudgetAllocator(replayTabs, options = {}) {
   return (tab) => budgetsByTab.get(tab) || { frames: 0, bytes: 0 };
 }
 
+function snapshotHttpReplayTab(tab) {
+  const historyEntries = Array.isArray(tab.historyEntries)
+    ? tab.historyEntries.filter((entry) => entry && typeof entry === "object")
+    : [];
+  return {
+    id: tab.id,
+    sequence: tab.sequence,
+    custom_label: tab.customLabel || "",
+    pinned: !!tab.pinned,
+    base_request: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : null,
+    source_transaction_id: tab.sourceTransactionId || null,
+    notice: tab.notice || "",
+    request_text: tab.requestText || "",
+    http_version_mode: normalizeReplayHttpVersionMode(tab.httpVersionMode),
+    response_record: tab.responseRecord || null,
+    target_scheme: tab.targetScheme || "https",
+    target_host: tab.targetHost || "",
+    target_port: normalizePortValue(tab.targetPort),
+    target_manually_edited: !!tab.targetManuallyEdited,
+    history_entries: historyEntries.map((entry) => ({
+      request: cloneEditableRequest(entry.request),
+      request_text: entry.requestText || "",
+      http_version_mode: normalizeReplayHttpVersionMode(entry.httpVersionMode),
+      response_record: entry.responseRecord || null,
+      notice: entry.notice || "",
+      target_scheme: entry.targetScheme || "https",
+      target_host: entry.targetHost || "",
+      target_port: normalizePortValue(entry.targetPort),
+    })),
+    history_index: normalizeRepeaterHistoryIndex(tab.historyIndex, historyEntries.length),
+  };
+}
+
 function snapshotWorkspaceState(options = {}) {
   const sessionId = options.sessionId || state.activeSession?.id || null;
   const replayTabs = Array.isArray(state.replayTabs) ? state.replayTabs : [];
@@ -3501,36 +3614,7 @@ function snapshotWorkspaceState(options = {}) {
         ws_frame_window_start: snapshotWsReplayFrameWindowStart(tab, wsFrames),
       };
     }
-    const historyEntries = Array.isArray(tab.historyEntries)
-      ? tab.historyEntries.filter((entry) => entry && typeof entry === "object")
-      : [];
-    return {
-      id: tab.id,
-      sequence: tab.sequence,
-      custom_label: tab.customLabel || "",
-      pinned: !!tab.pinned,
-      base_request: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : null,
-      source_transaction_id: tab.sourceTransactionId || null,
-      notice: tab.notice || "",
-      request_text: tab.requestText || "",
-      http_version_mode: normalizeReplayHttpVersionMode(tab.httpVersionMode),
-      response_record: tab.responseRecord || null,
-      target_scheme: tab.targetScheme || "https",
-      target_host: tab.targetHost || "",
-      target_port: normalizePortValue(tab.targetPort),
-      target_manually_edited: !!tab.targetManuallyEdited,
-      history_entries: historyEntries.map((entry) => ({
-        request: cloneEditableRequest(entry.request),
-        request_text: entry.requestText || "",
-        http_version_mode: normalizeReplayHttpVersionMode(entry.httpVersionMode),
-        response_record: entry.responseRecord || null,
-        notice: entry.notice || "",
-        target_scheme: entry.targetScheme || "https",
-        target_host: entry.targetHost || "",
-        target_port: normalizePortValue(entry.targetPort),
-      })),
-      history_index: normalizeRepeaterHistoryIndex(tab.historyIndex, historyEntries.length),
-    };
+    return snapshotHttpReplayTab(tab);
   };
   const activeReplayTab = replayTabs.find((tab) => tab.id === state.activeReplayTabId) || null;
   const snapshotOrder = activeReplayTab
@@ -3638,15 +3722,24 @@ async function flushQueuedWorkspaceStateSave(options = {}) {
     return workspaceSaveLoopPromise;
   }
 
+  const stateGeneration = workspaceStateGeneration;
   workspaceSaveLoopPromise = runQueuedWorkspaceStateSaves(options)
     .finally(() => {
       workspaceSaveLoopPromise = null;
+      // A new session's timer may have joined this old save while it was still
+      // awaiting its response. Give that session its own save loop afterwards.
+      if (stateGeneration !== workspaceStateGeneration && workspaceLoaded
+        && workspaceSaveDirty && !workspaceSaveConflictPending) {
+        scheduleWorkspaceStateSave();
+      }
     });
   return workspaceSaveLoopPromise;
 }
 
 async function runQueuedWorkspaceStateSaves(options = {}) {
-  while (state.activeSession && workspaceSaveDirty) {
+  const stateGeneration = workspaceStateGeneration;
+  while (state.activeSession && workspaceSaveDirty && !workspaceSaveConflictPending
+    && stateGeneration === workspaceStateGeneration) {
     workspaceSaveDirty = false;
     const version = workspaceSaveVersion;
     const snapshot = snapshotWorkspaceState(options);
@@ -3655,6 +3748,7 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
     try {
       await saveWorkspaceState(snapshot, options);
     } catch (error) {
+      if (stateGeneration !== workspaceStateGeneration || workspaceSaveConflictPending) return;
       if (isTooManyReplayTabsError(error)) {
         // The server rejects every save while over the limit. Re-sending the
         // same over-limit snapshot on a 1s timer just spams toasts and never
@@ -3698,6 +3792,7 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
     } finally {
       workspaceSaveInFlight = false;
     }
+    if (stateGeneration !== workspaceStateGeneration || workspaceSaveConflictPending) return;
     if (workspaceSaveVersion !== version) {
       workspaceSaveDirty = true;
     }
@@ -3789,6 +3884,8 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
   if (!state.activeSession || !workspaceLoaded) {
     return;
   }
+  if (workspaceSaveConflictPending) throw new WorkspaceStateConflictError(workspaceSaveConflictLatest);
+  const stateGeneration = workspaceStateGeneration;
   if (!snapshot) {
     snapshot = snapshotWorkspaceState(options);
   }
@@ -3802,9 +3899,11 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
     body: JSON.stringify(snapshot),
   });
 
+  if (stateGeneration !== workspaceStateGeneration) return;
   if (!response.ok) {
     if (response.status === 409) {
       const latest = await response.json().catch(() => null);
+      if (stateGeneration !== workspaceStateGeneration) return;
       throw new WorkspaceStateConflictError(latest);
     }
     throw new Error(await response.text());
@@ -3812,7 +3911,9 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
   const saved = await response.json();
   const currentSessionId = state.activeSession?.id || null;
   if (
-    (snapshot?.session_id && snapshot.session_id !== currentSessionId)
+    stateGeneration !== workspaceStateGeneration || workspaceSaveConflictPending
+    || (Number.isFinite(saved?.revision) && saved.revision <= state.workspaceRevision)
+    || (snapshot?.session_id && snapshot.session_id !== currentSessionId)
     || (saved?.session_id && saved.session_id !== currentSessionId)
   ) {
     return;
@@ -3969,6 +4070,10 @@ function flushWorkspaceStateOnUnload(event) {
   disconnectWsReplayTabsOnUnload();
   if (state.sequenceDirty && state.editingSequence) {
     requestWorkspaceUnloadPrompt(event);
+  }
+  if (workspaceSaveConflictPending) {
+    requestWorkspaceUnloadPrompt(event);
+    return;
   }
   if (!state.activeSession || !workspaceLoaded || (!workspaceSaveDirty && !workspaceSaveTimer && !workspaceSaveInFlight && !hadTranscriptSaveTimer)) {
     return;
@@ -4228,6 +4333,7 @@ function syncReplayDraftsBeforeWorkspaceClose() {
 }
 
 function workspaceUnloadPayload(primarySnapshot) {
+  if (workspaceSaveConflictPending) return null;
   const primaryPayload = JSON.stringify(primarySnapshot);
   if (utf8ByteLength(primaryPayload) <= WORKSPACE_UNLOAD_KEEPALIVE_MAX_BYTES) {
     return { payload: primaryPayload, endpoint: "/api/workspace-state" };
@@ -4611,6 +4717,7 @@ async function cleanupWsReplayTabsBeforeStateReset(options = {}) {
 }
 
 function resetSessionScopedUiState() {
+  workspaceStateGeneration += 1;
   workspaceLoaded = false;
   clearReplaySendInFlight();
   closeContextMenu();
@@ -7207,6 +7314,7 @@ function connectEvents() {
   });
 
   eventSource.addEventListener("workspace_state", (event) => {
+    if (eventSessionId !== currentSessionId()) return;
     let payload = null;
     try {
       payload = JSON.parse(event.data);
@@ -7214,7 +7322,8 @@ function connectEvents() {
       return;
     }
     // Skip the echo of our own save; only another client's write is news.
-    if (!payload || payload.client_id === workspaceClientId) return;
+    if (!payload || payload.client_id === workspaceClientId
+      || (payload.session_id && payload.session_id !== eventSessionId)) return;
     adoptExternalReplayTabs().catch((error) => console.error(error));
   });
 
@@ -12691,9 +12800,9 @@ function renderOastSettingsControls(options = {}) {
   }
 }
 
-function renderReplay() {
+function renderReplay(options = {}) {
   const tab = ensureRepeaterTab();
-  renderReplayTabs();
+  if (!options.preserveTabStrip) renderReplayTabs();
 
   const isWsTab = tab && tab.type === "websocket";
 
@@ -16863,7 +16972,6 @@ function createReplayTab(seed = {}) {
 
 function ensureRepeaterTab() {
   if (!state.replayTabs.length) {
-    state.replayTabSequence = 0;
     const tab = createReplayTab();
     state.replayTabs = [tab];
     state.activeReplayTabId = tab.id;
@@ -17290,9 +17398,10 @@ async function closeRepeaterTab(id) {
     state.replayRenamingTabId = null;
   }
 
+  state.replayTabSequence = Math.max(state.replayTabSequence || 0,
+    ...state.replayTabs.map((tab) => tab.sequence || 0));
   state.replayTabs.splice(currentIndex, 1);
   if (!state.replayTabs.length) {
-    state.replayTabSequence = 0;
     const replacement = createReplayTab();
     state.replayTabs = [replacement];
     state.activeReplayTabId = replacement.id;

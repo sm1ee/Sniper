@@ -55,8 +55,8 @@ use crate::{
     websocket::WebSocketListFilters,
     workspace::{
         can_replace_snapshot, validate_workspace_serialized_size, FuzzerWorkspaceState,
-        ReplayTabState, WorkspaceReplaceError, WorkspaceStateSnapshot,
-        MAX_WORKSPACE_SERIALIZED_BYTES,
+        ReplayTabState, SavedHttpTabOperation, WorkspaceReplaceError, WorkspaceStateSnapshot,
+        WorkspaceTransformError, MAX_WORKSPACE_SERIALIZED_BYTES,
     },
 };
 
@@ -388,6 +388,8 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/workspace-state/keepalive",
             post(update_workspace_state_keepalive),
         )
+        .route("/api/replay/tabs/close", post(close_saved_http_tab))
+        .route("/api/replay/tabs/duplicate", post(duplicate_saved_http_tab))
         .route(
             "/api/startup-settings",
             get(get_startup_settings).post(update_startup_settings),
@@ -3001,6 +3003,146 @@ async fn get_workspace_state(
     let mut snapshot = session.workspace.snapshot().await;
     snapshot.session_id = Some(session.id());
     Json(snapshot).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedHttpTabPayload {
+    session_id: Uuid,
+    tab_id: String,
+    expected_workspace_revision: u64,
+    expected_active_session_id: Option<Uuid>,
+}
+
+async fn close_saved_http_tab(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SavedHttpTabPayload>,
+) -> Response {
+    mutate_saved_http_tab(state, payload, SavedHttpTabOperation::Close).await
+}
+
+async fn duplicate_saved_http_tab(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SavedHttpTabPayload>,
+) -> Response {
+    mutate_saved_http_tab(state, payload, SavedHttpTabOperation::Duplicate).await
+}
+
+async fn mutate_saved_http_tab(
+    state: Arc<AppState>,
+    payload: SavedHttpTabPayload,
+    operation: SavedHttpTabOperation,
+) -> Response {
+    // Keep the operation/persistence locks alive through disk commit and memory
+    // publication even when the requester disconnects during spawn_blocking.
+    tokio::spawn(mutate_saved_http_tab_inner(state, payload, operation))
+        .await
+        .unwrap_or_else(|_| saved_http_tab_uncertain_response())
+}
+
+fn saved_http_tab_uncertain_response() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Saved Replay tab update outcome is uncertain; reload this session before retrying.",
+    )
+        .into_response()
+}
+
+async fn mutate_saved_http_tab_inner(
+    state: Arc<AppState>,
+    payload: SavedHttpTabPayload,
+    operation: SavedHttpTabOperation,
+) -> Response {
+    if payload.tab_id.trim().is_empty() || payload.tab_id.len() > MAX_WORKSPACE_REPLAY_TAB_ID_BYTES
+    {
+        return (StatusCode::BAD_REQUEST, "saved Replay tab id is invalid").into_response();
+    }
+    if let Some(response) = expected_active_session_conflict_response(
+        &state,
+        payload.expected_active_session_id,
+        Some(payload.session_id),
+    ) {
+        return response;
+    }
+    let session = match resolve_read_session_for_optional_id(&state, Some(payload.session_id)).await
+    {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let _operation_guard = match guard_session_write_operation(
+        &state,
+        &session,
+        payload.expected_active_session_id.is_some(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
+    if let Some(response) = expected_active_session_conflict_response(
+        &state,
+        payload.expected_active_session_id,
+        Some(payload.session_id),
+    ) {
+        return response;
+    }
+    if !state.is_current_session_context(&session).await {
+        return (
+            StatusCode::CONFLICT,
+            "Saved Replay workspace changed; reload before saving.",
+        )
+            .into_response();
+    }
+    // This narrow operation writes only workspace.json. A cached read-only
+    // inactive context is sufficient; promotion could repair unrelated files.
+    match session
+        .mutate_saved_http_tab_and_persist(
+            &payload.tab_id,
+            payload.expected_workspace_revision,
+            operation,
+        )
+        .await
+    {
+        Ok(snapshot) => {
+            let mut result = serde_json::json!({
+                "session_id": session.id(),
+                "revision": snapshot.revision,
+                "active_tab_id": snapshot.replay.active_tab_id,
+            });
+            match operation {
+                SavedHttpTabOperation::Close => result["closed_tab_id"] = payload.tab_id.into(),
+                SavedHttpTabOperation::Duplicate => {
+                    result["source_tab_id"] = payload.tab_id.into();
+                    result["new_tab_id"] = snapshot.replay.tabs.last().unwrap().id.clone().into();
+                }
+            }
+            Json(result).into_response()
+        }
+        Err(WorkspaceTransformError::Conflict { revision }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Saved Replay workspace changed; reload before saving.",
+                "session_id": session.id(),
+                "revision": revision,
+            })),
+        )
+            .into_response(),
+        Err(WorkspaceTransformError::Invalid(error)) => {
+            (StatusCode::BAD_REQUEST, error).into_response()
+        }
+        Err(WorkspaceTransformError::Persist(error)) => {
+            tracing::warn!(%error, "failed to persist saved Replay tab update");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Saved Replay tab update could not be saved.",
+            )
+                .into_response()
+        }
+        Err(WorkspaceTransformError::CommittedButUncertain(error)) => {
+            tracing::warn!(%error, "saved Replay tab update committed with uncertain durability");
+            saved_http_tab_uncertain_response()
+        }
+    }
 }
 
 async fn update_workspace_state(
@@ -9801,6 +9943,64 @@ mod tests {
             .unwrap(),
         );
         (state, path)
+    }
+
+    #[tokio::test]
+    async fn saved_http_tab_disconnected_request_finishes_owned_transaction() {
+        let (state, path) = scanner_test_state();
+        let session = state.session().await;
+        let mut workspace = session.workspace.snapshot().await;
+        workspace.session_id = Some(session.id());
+        workspace.replay.tabs = vec![crate::workspace::ReplayTabState {
+            id: "saved-only".into(),
+            sequence: 8,
+            ..Default::default()
+        }];
+        workspace.replay.active_tab_id = Some("saved-only".into());
+        workspace.replay.tab_sequence = 8;
+        let workspace = state
+            .replace_workspace_state_and_persist(&session, workspace)
+            .await
+            .unwrap();
+        let guard = session.mutation_guard().await;
+        let id = session.id();
+        let request_state = state.clone();
+        let request = tokio::spawn(async move {
+            super::close_saved_http_tab(
+                State(request_state),
+                Json(super::SavedHttpTabPayload {
+                    session_id: id,
+                    tab_id: "saved-only".into(),
+                    expected_workspace_revision: workspace.revision,
+                    expected_active_session_id: Some(id),
+                }),
+            )
+            .await
+        });
+        let operation_lock = state.session_operation_lock(id).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while operation_lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        let _ = request.await;
+        drop(guard);
+        let _finished = tokio::time::timeout(Duration::from_secs(5), operation_lock.lock())
+            .await
+            .unwrap();
+        let saved = session.workspace.snapshot().await;
+        assert!(saved.replay.tabs.is_empty());
+        assert_eq!(saved.replay.tab_sequence, 8);
+        assert_eq!(saved.revision, workspace.revision + 1);
+        let reloaded = state.sessions.load_context_read_only(id).unwrap();
+        assert_eq!(
+            serde_json::to_value(saved).unwrap(),
+            serde_json::to_value(reloaded.workspace.snapshot().await).unwrap()
+        );
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
