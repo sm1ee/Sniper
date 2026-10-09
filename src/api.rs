@@ -1200,10 +1200,6 @@ fn validate_editable_request_host(host: &str) -> std::result::Result<(), String>
     Ok(())
 }
 
-fn validate_editable_request_path(path: &str) -> std::result::Result<(), String> {
-    validate_editable_request_path_with(path, false)
-}
-
 /// `lenient` keeps every structural check but the URI parse. A persisted replay
 /// draft is work in progress — a placeholder like `<VICTIM_ID>` is exactly what an
 /// operator types before filling it in, and it is not a valid URI yet. Requiring

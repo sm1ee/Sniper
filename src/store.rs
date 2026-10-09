@@ -2576,33 +2576,6 @@ fn extract_path_extension(path: &str) -> Option<String> {
     Some(extension.to_ascii_lowercase())
 }
 
-fn normalize_host_for_matching(host: &str) -> String {
-    let mut value = host.trim().to_ascii_lowercase();
-    if let Some((_, rest)) = value.split_once("://") {
-        value = rest.to_string();
-    } else if let Some(rest) = value.strip_prefix("//") {
-        value = rest.to_string();
-    }
-    let host = value.split(['/', '?', '#']).next().unwrap_or("").trim();
-    host_without_port(host).to_string()
-}
-
-fn host_without_port(host: &str) -> &str {
-    let trimmed = host.trim();
-    if let Some(rest) = trimmed.strip_prefix('[') {
-        if let Some(end) = rest.find(']') {
-            return &rest[..end];
-        }
-    }
-    if trimmed.matches(':').count() == 1 {
-        return trimmed
-            .split_once(':')
-            .map(|(value, _)| value)
-            .unwrap_or(trimmed);
-    }
-    trimmed
-}
-
 fn extract_host_port(host: &str) -> Option<&str> {
     let trimmed = host.trim();
     if let Some(rest) = trimmed.strip_prefix('[') {
