@@ -74,6 +74,9 @@ struct MockState {
     faults: Mutex<Faults>,
 }
 
+/// Longest `call --input` value passed as an argument rather than on stdin.
+const CALL_INPUT_ARG_MAX_BYTES: usize = 8 * 1024;
+
 struct MockApi {
     api: String,
     dir: PathBuf,
@@ -147,11 +150,16 @@ impl MockApi {
 
     async fn call(&self, operation: &str, input: Value, flag: Option<&str>) -> (i32, Value) {
         let input = input.to_string();
-        let mut args = vec!["call", operation, "--input", &input];
+        // Windows caps a whole command line at 32,767 characters and refuses to
+        // start the process past it, so the cases that send a 64 KiB field go
+        // through stdin, which `--input -` reads the same way.
+        let stdin = (input.len() > CALL_INPUT_ARG_MAX_BYTES).then_some(input.as_str());
+        let source = if stdin.is_some() { "-" } else { input.as_str() };
+        let mut args = vec!["call", operation, "--input", source];
         if let Some(flag) = flag {
             args.push(flag);
         }
-        self.command(&args, None).await
+        self.command(&args, stdin).await
     }
 
     fn snapshot(&self, id: Uuid) -> ScannerConfigSnapshot {
