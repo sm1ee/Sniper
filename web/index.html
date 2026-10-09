@@ -985,11 +985,13 @@
                   <button class="replay-view-tab active" data-replay-target="response" data-replay-view="pretty">Pretty</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="raw">Raw</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="hex">Hex</button>
+                  <button class="replay-view-tab" data-replay-target="response" data-replay-view="render" title="The page as a browser draws it, sandboxed: no scripts, forms, navigation or network">Render</button>
                 </div>
               </header>
               <div class="editor-panel">
                 <div id="replayResponseCM" class="cm-container"></div>
               </div>
+              <div id="replayResponseRenderView" class="render-view hidden"></div>
               <footer class="pane-footer">
                 <label class="pane-search">
                   <input id="replayResponseSearchInput" type="search" placeholder="Search response" />

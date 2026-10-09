@@ -446,8 +446,6 @@ const state = {
     request: "pretty",
     response: "pretty",
   },
-  // What the Render view last drew, so a repaint does not reload the frame.
-  responseRenderKey: null,
   showOriginal: {
     request: false,
     response: false,
@@ -689,6 +687,7 @@ const els = {
   requestViewCM: document.getElementById("requestViewCM"),
   responseViewCM: document.getElementById("responseViewCM"),
   responseRenderView: document.getElementById("responseRenderView"),
+  replayResponseRenderView: document.getElementById("replayResponseRenderView"),
   requestSearchInput: document.getElementById("requestSearchInput"),
   responseSearchInput: document.getElementById("responseSearchInput"),
   requestSearchMeta: document.getElementById("requestSearchMeta"),
@@ -11217,77 +11216,113 @@ function renderMessagePanes() {
   els.responseSearchMeta.innerHTML = responsePane
     ? buildSearchMeta(responsePane.lineCount, state.messageViews.response, responsePane.matchCount)
     : buildSearchMeta(0, state.messageViews.response, 0);
-  renderResponseRenderView(responseRecord, resMode === "render", detailLoading);
+  renderResponsePreview(
+    {
+      view: els.responseRenderView,
+      editor: els.responseViewCM?.closest(".editor-shell"),
+      search: els.responseSearchInput,
+    },
+    resMode === "render",
+    responseRecord
+      ? {
+          response: responseRecord.response || null,
+          key: `${responseRecord.id}:${state.showOriginal.response}`,
+        }
+      : { note: detailLoading ? "Loading response details." : "No response selected." },
+  );
 }
 
-// Render: the selected response's HTML in a sandboxed frame. It takes the place
-// of the editor's shell instead of sitting inside it, whose grid keeps the editor
-// full width only while the editor is the shell's only child.
-function renderResponseRenderView(record, active, loading) {
-  const view = els.responseRenderView;
+// Render: the response drawn inside its own pane, the way Burp's Render tab and
+// Caido's preview work, for HTTP history and Replay alike. The view takes the
+// place of the pane's editor instead of sitting inside it: the history editor's
+// grid keeps it full width only while it is its shell's only child.
+function renderResponsePreview({ view, editor, search }, active, subject) {
   if (!view) return;
-  els.responseViewCM?.closest(".editor-shell")?.classList.toggle("hidden", active);
+  editor?.classList.toggle("hidden", active);
   view.classList.toggle("hidden", !active);
   // Search runs over the editor's text, which Render hides.
-  els.responseSearchInput.disabled = active;
+  if (search) search.disabled = active;
   if (!active) {
-    if (state.responseRenderKey !== null) {
+    if (view.dataset.renderKey) {
       view.replaceChildren();
-      state.responseRenderKey = null;
+      delete view.dataset.renderKey;
     }
     return;
   }
-  const response = record?.response || null;
-  const key = record
-    ? `${record.id}:${state.showOriginal.response}:${response?.body_size}:${response?.body_preview?.length}`
-    : `none:${loading}`;
-  if (state.responseRenderKey === key) return;
-  state.responseRenderKey = key;
+  const response = subject.response;
+  // A note stands in for a response that is not there yet (loading, sending).
+  const placeholder = "note" in subject;
+  // Repaints are frequent; reloading the frame on each would reset its scroll.
+  const key = placeholder
+    ? `note:${subject.note}`
+    : `${subject.key}:${response?.body_size}:${response?.body_preview?.length}`;
+  if (view.dataset.renderKey === key) return;
+  view.dataset.renderKey = key;
 
-  const model = record
-    ? responseRenderModel(response)
-    : { note: loading ? "Loading response details." : "No response selected." };
-  if (model.note) {
-    const note = document.createElement("p");
-    note.className = "render-note";
-    note.textContent = model.note;
-    view.replaceChildren(note);
-    return;
-  }
-  const frame = document.createElement("iframe");
-  frame.className = "render-frame";
-  frame.title = "Rendered response";
-  // No allow-* flags: no scripts, no forms, no popups, no same-origin access.
-  frame.setAttribute("sandbox", "");
-  frame.setAttribute("referrerpolicy", "no-referrer");
-  frame.srcdoc = sandboxedResponseDocument(model.html);
-  const children = [frame];
+  const model = placeholder ? { note: subject.note } : responseRenderModel(response);
+  const children = [];
   if (model.truncated) {
     const banner = document.createElement("p");
     banner.className = "render-banner";
-    banner.textContent = "The body was cut at the preview limit, so the page may be incomplete.";
-    children.unshift(banner);
+    banner.textContent = "The body was cut at the preview limit, so this may be incomplete.";
+    children.push(banner);
+  }
+  if (model.note !== undefined) {
+    if (model.note) {
+      const note = document.createElement("p");
+      note.className = "render-note";
+      note.textContent = model.note;
+      children.push(note);
+    }
+  } else if (model.image) {
+    // An <img> never runs script, SVG included, so an image needs no frame.
+    const image = document.createElement("img");
+    image.className = "render-image";
+    image.alt = "Response image";
+    image.src = model.image;
+    children.push(image);
+  } else {
+    const frame = document.createElement("iframe");
+    frame.className = "render-frame";
+    frame.title = "Rendered response";
+    // No allow-* flags: no scripts, no forms, no popups, no same-origin access.
+    frame.setAttribute("sandbox", "");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.srcdoc = sandboxedResponseDocument(model.html);
+    children.push(frame);
   }
   view.replaceChildren(...children);
 }
 
-// What Render shows for a response: HTML to draw, or why there is none. Pure so
-// it can be tested without a DOM.
+// What Render shows for a response: HTML to draw, an image to show, or why there
+// is neither. HTML and images are what Burp's Render tab covers too. Pure so it
+// can be tested without a DOM.
 function responseRenderModel(response) {
   if (!response) {
     return { note: "This request has no response to render." };
   }
   const mime = String(response.content_type || "").split(";")[0].trim().toLowerCase();
-  if (mime !== "text/html" && mime !== "application/xhtml+xml") {
-    return { note: `Render draws HTML responses. This one is ${mime || "untyped"}.` };
-  }
-  if (response.body_encoding === "base64") {
-    return { note: "This HTML body is binary, so it cannot be rendered." };
+  const html = mime === "text/html" || mime === "application/xhtml+xml";
+  const image = /^image\/[\w.+-]+$/.test(mime);
+  if (!html && !image) {
+    return { note: `Render draws HTML and images. This response is ${mime || "untyped"}.` };
   }
   if (!response.body_preview) {
     return { note: "This response has no body to render." };
   }
-  return { html: response.body_preview, truncated: Boolean(response.preview_truncated) };
+  const truncated = Boolean(response.preview_truncated);
+  const base64 = response.body_encoding === "base64";
+  if (image) {
+    // A text image such as SVG arrives as text; anything else as base64.
+    const data = base64
+      ? `data:${mime};base64,${response.body_preview}`
+      : `data:${mime};charset=utf-8,${encodeURIComponent(response.body_preview)}`;
+    return { image: data, truncated };
+  }
+  if (base64) {
+    return { note: "This HTML body is binary, so it cannot be rendered." };
+  }
+  return { html: response.body_preview, truncated };
 }
 
 // Captured HTML must never run with Sniper's privileges or reach the network.
@@ -12604,11 +12639,29 @@ function renderReplayResponseView(text) {
     // Apply search
     const query = (state.replayMessageSearch?.response || "").trim();
     _replayResponseCMView.applySearch(query);
-    return;
+  } else if (els.replayResponseView) {
+    // Fallback to legacy
+    const mode = state.replayMessageViews.response;
+    els.replayResponseView.innerHTML = renderCodeHtml(text, mode, "response");
   }
-  // Fallback to legacy
-  const mode = state.replayMessageViews.response;
-  if (els.replayResponseView) els.replayResponseView.innerHTML = renderCodeHtml(text, mode, "response");
+  // Every path that redraws the response comes through here, so Render follows.
+  syncReplayResponsePreview(text);
+}
+
+function syncReplayResponsePreview(placeholder) {
+  const tab = getActiveReplayTab();
+  const record = tab && tab.type !== "websocket" ? tab.responseRecord : null;
+  renderResponsePreview(
+    {
+      view: els.replayResponseRenderView,
+      editor: els.replayResponseCM?.closest(".editor-panel"),
+      search: els.replayResponseSearchInput,
+    },
+    state.replayMessageViews.response === "render",
+    record
+      ? { response: record.response || null, key: `${tab.id}:${record.id}` }
+      : { note: placeholder ?? "" },
+  );
 }
 
 function renderReplayEmptyResponse(tab) {
