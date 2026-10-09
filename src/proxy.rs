@@ -5171,6 +5171,14 @@ static LIVE_WEBSOCKET_RELAYS: LazyLock<Mutex<HashMap<Uuid, LiveWebSocketRelay>>>
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static ACTIVE_STREAMED_RESPONSE_PUMPS: LazyLock<Mutex<HashMap<Uuid, StreamedResponsePump>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Held by the tests that leave proxy work running on purpose and by the tests
+/// that abort every connection in the process (drain, rebind). The registries
+/// below are process-wide, so side by side the second kind aborted the first
+/// kind's tasks, and the first kind made the second wait out its whole drain.
+#[cfg(test)]
+pub(crate) static GLOBAL_PROXY_WORK_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 static ACTIVE_PROXY_CONNECTIONS: LazyLock<Mutex<HashMap<Uuid, AbortHandle>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Per session, how much work is in flight broken down by what is holding it.
@@ -6884,6 +6892,7 @@ mod tests {
 
     #[tokio::test]
     async fn journaled_capture_does_not_schedule_full_session_persist() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-journaled-capture-no-full-persist-{}",
             Uuid::new_v4()
@@ -6956,6 +6965,7 @@ mod tests {
 
     #[tokio::test]
     async fn capturing_past_the_old_cap_keeps_every_record_without_compacting() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-journaled-capture-retention-{}",
             Uuid::new_v4()
@@ -7017,6 +7027,7 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_capture_store_clears_clean_pending_persist_context() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-streamed-capture-cleans-pending-{}",
             Uuid::new_v4()
@@ -7079,6 +7090,7 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_capture_provisional_record_is_updated_in_place() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-proxy-streamed-capture-updates-in-place-{}",
             Uuid::new_v4()
@@ -7632,6 +7644,7 @@ mod tests {
 
     #[tokio::test]
     async fn rebind_proxy_starts_listener_when_same_address_is_offline() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-rebind-offline-same-address-{}",
             Uuid::new_v4()
@@ -7709,6 +7722,7 @@ mod tests {
 
     #[tokio::test]
     async fn rebind_proxy_keeps_existing_proxy_online_when_relay_close_persist_fails() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-rebind-live-ws-persist-failure-{}",
             Uuid::new_v4()
@@ -7902,6 +7916,7 @@ mod tests {
 
     #[tokio::test]
     async fn closing_idle_tunnels_leaves_exchanges_and_relays_alone() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         // A switch closes idle tunnels without asking, so it must touch nothing
         // else: an exchange in flight or a live relay still has to hold the
         // session, or a switch would silently drop captured traffic.
@@ -7944,6 +7959,7 @@ mod tests {
 
     #[tokio::test]
     async fn aborting_session_tasks_releases_work_that_never_finishes() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         // An HTTPS tunnel or a WebSocket relay runs for as long as the client
         // keeps it open, so waiting never clears it. A forced session switch has
         // to be able to cut them, which is what abort_session_tracked_tasks does.
