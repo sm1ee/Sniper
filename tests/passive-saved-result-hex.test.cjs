@@ -13,7 +13,7 @@ function fixture(modes) {
     "messageBodyBytes", "base64ToBytes", "toHexDumpFromBytes",
   ], {
     els, _fuzzerDetailViewModes: modes, TextEncoder, Uint8Array, atob,
-    syncFuzzerDetailTabs() {},
+    syncFuzzerDetailTabs() {}, syncFuzzerResponsePreview() {},
     updateCodePaneCM(key, container, text, options) { panes.set(key, { text, options }); },
   });
   return { c, panes, els };

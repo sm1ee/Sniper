@@ -1235,11 +1235,13 @@
                         <button class="view-tab active fuzzer-detail-view-tab" data-fuzzer-detail-target="response" data-fuzzer-detail-view="pretty">Pretty</button>
                         <button class="view-tab fuzzer-detail-view-tab" data-fuzzer-detail-target="response" data-fuzzer-detail-view="raw">Raw</button>
                         <button class="view-tab fuzzer-detail-view-tab" data-fuzzer-detail-target="response" data-fuzzer-detail-view="hex">Hex</button>
+                        <button class="view-tab fuzzer-detail-view-tab" data-fuzzer-detail-target="response" data-fuzzer-detail-view="render" title="The page as a browser draws it, sandboxed: no scripts, forms, navigation or network">Render</button>
                       </div>
                     </header>
                     <div class="editor-shell" style="flex:1;min-height:0">
                       <div id="fuzzerDetailResCM" class="cm-container"></div>
                     </div>
+                    <div id="fuzzerDetailResRenderView" class="render-view hidden" style="flex:1;min-height:0"></div>
                   </section>
                 </div>
               </div>

@@ -870,6 +870,7 @@ const els = {
   fuzzerDetailPanel: document.getElementById("fuzzerDetailPanel"),
   fuzzerDetailReqCM: document.getElementById("fuzzerDetailReqCM"),
   fuzzerDetailResCM: document.getElementById("fuzzerDetailResCM"),
+  fuzzerDetailResRenderView: document.getElementById("fuzzerDetailResRenderView"),
   fuzzerDetailResponseMeta: document.getElementById("fuzzerDetailResponseMeta"),
   startFuzzerButton: document.getElementById("startFuzzerButton"),
   resetFuzzerButton: document.getElementById("resetFuzzerButton"),
@@ -1990,6 +1991,8 @@ function bindEvents() {
       // Re-render with current record
       if (state._fuzzerDetailRecord) {
         renderFuzzerDetailPanes(state._fuzzerDetailRecord);
+      } else if (target === "response") {
+        syncFuzzerResponsePreview(null);
       }
     });
   });
@@ -13453,7 +13456,7 @@ function selectFuzzerResultIndex(rowIndex, options = {}) {
     const detailResizer = document.getElementById("fuzzerDetailResizer");
     if (detailResizer) detailResizer.classList.remove("hidden");
     if (els.fuzzerDetailReqCM) updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, result?.note || "No transaction was captured for this payload.", { mode: "http" });
-    if (els.fuzzerDetailResCM) updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+    clearFuzzerResponsePane();
     if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
   }
 }
@@ -13543,6 +13546,21 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
 
 let _fuzzerDetailViewModes = { request: "pretty", response: "pretty" };
 
+// The fuzzer result's response pane, emptied while a result loads or when it has
+// no transaction; Render empties with it.
+function clearFuzzerResponsePane() {
+  if (els.fuzzerDetailResCM) updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+  syncFuzzerResponsePreview(null);
+}
+
+function syncFuzzerResponsePreview(record) {
+  renderResponsePreview(
+    { view: els.fuzzerDetailResRenderView, editor: els.fuzzerDetailResCM?.closest(".editor-shell") },
+    _fuzzerDetailViewModes.response === "render",
+    record ? { response: record.response || null, key: `${record.id}` } : { note: "" },
+  );
+}
+
 /** Show request/response detail for a fuzzer result. */
 async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transactionId}`) {
   if (!transactionId || !els.fuzzerDetailPanel) return;
@@ -13553,7 +13571,7 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
   state._fuzzerDetailRecord = null;
   if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
   updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, "Loading transaction...", { mode: "http" });
-  updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+  clearFuzzerResponsePane();
 
   try {
     const sessionId = currentSessionId();
@@ -13562,7 +13580,7 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
     if (!resp.ok) {
       if (state._selectedFuzzerResultKey !== selectionKey) return;
       updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, `Failed to load transaction: ${resp.status}`, { mode: "http" });
-      updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+      clearFuzzerResponsePane();
       if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
       return;
     }
@@ -13576,7 +13594,7 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
   } catch (err) {
     if (state._selectedFuzzerResultKey !== selectionKey) return;
     updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, `Error: ${err.message}`, { mode: "http" });
-    updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, "", { mode: "http" });
+    clearFuzzerResponsePane();
     if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
   }
 }
@@ -13635,6 +13653,7 @@ function renderFuzzerDetailPanes(record) {
       els.fuzzerDetailResponseMeta.textContent = "";
     }
   }
+  syncFuzzerResponsePreview(record);
 }
 
 function hideFuzzerDetailPanel() {
