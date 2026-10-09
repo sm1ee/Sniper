@@ -241,7 +241,9 @@ async fn flush_pending_persists_waits_for_streaming_body_pump_store() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello")
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Held open well past the read below: the flush has to find the body
+        // still streaming, and a slow runner must not turn that into an EOF.
+        tokio::time::sleep(Duration::from_secs(30)).await;
     });
 
     let config = AppConfig {
@@ -269,7 +271,7 @@ async fn flush_pending_persists_waits_for_streaming_body_pump_store() {
 
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 128];
-    tokio::time::timeout(Duration::from_millis(500), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let read = stream.read(&mut chunk).await.unwrap();
             assert!(read > 0, "proxy closed before streaming body");
