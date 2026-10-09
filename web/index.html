@@ -1614,6 +1614,14 @@
                 </select>
               </label>
             </section>
+            <section class="filter-group">
+              <h3>Render</h3>
+              <label class="settings-toggle">
+                <input id="displayRenderResourcesInput" type="checkbox" />
+                <span>Load images, styles and fonts</span>
+              </label>
+              <p class="modal-copy">Off, Render draws only what the response itself holds. On, it also fetches the images, stylesheets and fonts the page names, through Sniper and the session's proxy chain. Those requests go to the target and to any other host the page names, and are not recorded in HTTP history. Scripts never run either way.</p>
+            </section>
           </div>
           <div class="settings-panel-plain" data-settings-panel="shortcuts" role="tabpanel">
             <section class="filter-group filter-group-wide">

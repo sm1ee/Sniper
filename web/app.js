@@ -36,6 +36,7 @@ function createDefaultDisplaySettings() {
     theme: "charcoal",
     uiFont: "plex",
     monoFont: "jetbrains",
+    renderResources: false,
   };
 }
 
@@ -721,6 +722,7 @@ const els = {
   displaySizeInput: document.getElementById("displaySizeInput"),
   displayUiFontSelect: document.getElementById("displayUiFontSelect"),
   displayMonoFontSelect: document.getElementById("displayMonoFontSelect"),
+  displayRenderResourcesInput: document.getElementById("displayRenderResourcesInput"),
   settingsSpecialHostHttp: document.getElementById("settingsSpecialHostHttp"),
   certificateName: document.getElementById("certificateName"),
   certificateExpiry: document.getElementById("certificateExpiry"),
@@ -1624,6 +1626,7 @@ function bindEvents() {
     els.displaySizeInput.value = String(defaults.sizePx);
     els.displayUiFontSelect.value = defaults.uiFont;
     els.displayMonoFontSelect.value = defaults.monoFont;
+    els.displayRenderResourcesInput.checked = defaults.renderResources;
     previewDisplaySettingsFromForm();
   });
   [els.displayThemeSelect, els.displayUiFontSelect, els.displayMonoFontSelect].forEach((element) => {
@@ -11393,6 +11396,7 @@ function renderMessagePanes() {
       ? {
           response: responseRecord.response || null,
           key: `${responseRecord.id}:${state.showOriginal.response}`,
+          url: recordPageUrl(responseRecord),
         }
       : { note: detailLoading ? "Loading response details." : "No response selected." },
   );
@@ -11419,19 +11423,24 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
   // A note stands in for a response that is not there yet (loading, sending).
   const placeholder = "note" in subject;
   // Repaints are frequent; reloading the frame on each would reset its scroll.
+  const loadResources = Boolean(state.displaySettings?.renderResources && subject.url);
   const key = placeholder
     ? `note:${subject.note}`
-    : `${subject.key}:${response?.body_size}:${response?.body_preview?.length}`;
+    : `${subject.key}:${response?.body_size}:${response?.body_preview?.length}:${loadResources}`;
   if (view.dataset.renderKey === key) return;
   view.dataset.renderKey = key;
 
   const model = placeholder ? { note: subject.note } : responseRenderModel(response);
   const children = [];
+  const banner = (text) => {
+    const element = document.createElement("p");
+    element.className = "render-banner";
+    element.textContent = text;
+    children.push(element);
+    return element;
+  };
   if (model.truncated) {
-    const banner = document.createElement("p");
-    banner.className = "render-banner";
-    banner.textContent = "The body was cut at the preview limit, so this may be incomplete.";
-    children.push(banner);
+    banner("The body was cut at the preview limit, so this may be incomplete.");
   }
   if (model.note !== undefined) {
     if (model.note) {
@@ -11454,7 +11463,26 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
     // No allow-* flags: no scripts, no forms, no popups, no same-origin access.
     frame.setAttribute("sandbox", "");
     frame.setAttribute("referrerpolicy", "no-referrer");
+    // Drawn at once from what the response holds; resources, when on, follow.
     frame.srcdoc = sandboxedResponseDocument(model.html);
+    if (loadResources) {
+      const status = banner("Loading images, styles and fonts…");
+      const fetcher = createRenderResourceFetcher(currentSessionId());
+      sandboxedResponseDocumentWithResources(model.html, subject.url, fetcher)
+        .then((doc) => {
+          if (view.dataset.renderKey !== key || !frame.isConnected) return;
+          frame.srcdoc = doc;
+          const failed = fetcher.failures();
+          if (failed) {
+            status.textContent = `${failed} image, style or font could not be loaded.`;
+          } else {
+            status.remove();
+          }
+        })
+        .catch((error) => console.error(error));
+    } else if (RENDER_RESOURCE_REFERENCE.test(model.html)) {
+      banner("Images, styles and fonts are not loaded. Settings ▸ Display ▸ Render can load them.");
+    }
     children.push(frame);
   }
   view.replaceChildren(...children);
@@ -11496,13 +11524,21 @@ function responseRenderModel(response) {
 // what could still navigate or fetch outside CSP's reach, and given a CSP that
 // blocks every fetch, including relative URLs, which would resolve against
 // Sniper's own API. The frame's sandbox then blocks scripts, forms and popups.
-const RESPONSE_RENDER_CSP = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'";
+// data: stylesheets are allowed for the resource pass, which inlines fetched
+// stylesheets that way; without it every <link> is gone before CSP applies.
+const RESPONSE_RENDER_CSP = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline' data:";
 
 function sandboxedResponseDocument(html) {
   const doc = new DOMParser().parseFromString(html, "text/html");
+  sanitizeRenderDocument(doc);
+  return serializeRenderDocument(doc);
+}
+
+function sanitizeRenderDocument(doc, { keepStylesheets = false } = {}) {
   // <link> covers prefetch and preconnect, which CSP does not govern everywhere;
   // <meta http-equiv> covers refresh; <base> would retarget what remains.
-  for (const element of doc.querySelectorAll("script, link, base, meta[http-equiv], iframe, frame, object, embed")) {
+  const links = keepStylesheets ? "link:not([rel~='stylesheet' i])" : "link";
+  for (const element of doc.querySelectorAll(`script, ${links}, base, meta[http-equiv], iframe, frame, object, embed`)) {
     element.remove();
   }
   // The sandbox still lets a clicked link navigate the frame itself.
@@ -11510,6 +11546,9 @@ function sandboxedResponseDocument(html) {
     link.removeAttribute("href");
     link.removeAttribute("xlink:href");
   }
+}
+
+function serializeRenderDocument(doc) {
   const policy = doc.createElement("meta");
   policy.httpEquiv = "Content-Security-Policy";
   policy.content = RESPONSE_RENDER_CSP;
@@ -11517,6 +11556,194 @@ function sandboxedResponseDocument(html) {
   // Keep the page's doctype, and with it standards or quirks mode.
   const doctype = doc.doctype ? new XMLSerializer().serializeToString(doc.doctype) : "";
   return doctype + doc.documentElement.outerHTML;
+}
+
+// Render's opt-in resource pass (Settings > Display > Render). What a page draws
+// with is fetched through Sniper's API, which goes out through the session's
+// proxy chain, and written into the document as data: URLs. The frame keeps its
+// no-network policy: everything it holds is already in the document.
+const RENDER_RESOURCE_MAX_COUNT = 150;
+const RENDER_RESOURCE_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
+const RENDER_RESOURCE_CONCURRENCY = 6;
+const RENDER_CSS_URL_PATTERN = /url\(\s*(['"]?)([^'")]*)\1\s*\)|@import\s+(['"])([^'"]*)\3/gi;
+// Enough to say a page draws with something it does not carry itself.
+const RENDER_RESOURCE_REFERENCE = /<img\b|<link\b[^>]*stylesheet|url\(|<video\b[^>]*poster/i;
+
+function recordPageUrl(record) {
+  if (!record?.host) return null;
+  try {
+    return new URL(`${record.scheme || "https"}://${record.host}${record.path || "/"}`).href;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function renderResourceUrl(raw, base) {
+  const value = String(raw ?? "").trim();
+  if (!value || value.startsWith("#") || /^(data|blob|javascript|about):/i.test(value)) return null;
+  try {
+    const url = new URL(value, base);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function renderDocumentBase(doc, pageUrl) {
+  const href = doc.querySelector("base[href]")?.getAttribute("href");
+  if (!href) return pageUrl;
+  try {
+    return new URL(href, pageUrl).href;
+  } catch (_error) {
+    return pageUrl;
+  }
+}
+
+// One fetcher per drawn page: each URL is fetched once, a few at a time, within a
+// count and size budget so a heavy page cannot pull unbounded data into memory.
+function createRenderResourceFetcher(sessionId) {
+  const cache = new Map();
+  const waiting = [];
+  let active = 0;
+  let totalBytes = 0;
+  let failed = 0;
+  const acquire = () => new Promise((resolve) => {
+    if (active < RENDER_RESOURCE_CONCURRENCY) {
+      active += 1;
+      resolve();
+    } else {
+      waiting.push(resolve);
+    }
+  });
+  const release = () => {
+    const next = waiting.shift();
+    if (next) next();
+    else active -= 1;
+  };
+  const load = async (url) => {
+    await acquire();
+    try {
+      const params = new URLSearchParams({ url });
+      if (sessionId) params.set("session_id", sessionId);
+      const response = await fetch(`/api/render-resource?${params}`);
+      if (!response.ok) throw new Error(String(response.status));
+      const blob = await response.blob();
+      if (totalBytes + blob.size > RENDER_RESOURCE_MAX_TOTAL_BYTES) throw new Error("budget");
+      totalBytes += blob.size;
+      return blob;
+    } catch (_error) {
+      failed += 1;
+      return null;
+    } finally {
+      release();
+    }
+  };
+  return {
+    fetchBlob(url) {
+      if (!cache.has(url)) {
+        if (cache.size >= RENDER_RESOURCE_MAX_COUNT) {
+          failed += 1;
+          return Promise.resolve(null);
+        }
+        cache.set(url, load(url));
+      }
+      return cache.get(url);
+    },
+    failures: () => failed,
+  };
+}
+
+function blobDataUrl(blob) {
+  if (!blob) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(blob);
+  });
+}
+
+// url() and @import in a stylesheet resolve against the stylesheet's own URL, so
+// a fetched stylesheet is inlined with its references, imports included. An
+// import cycle or a deep chain is cut rather than followed.
+async function inlineCssResources(css, base, fetcher, ancestors = new Set()) {
+  const text = String(css ?? "");
+  const found = new Map();
+  for (const match of text.matchAll(RENDER_CSS_URL_PATTERN)) {
+    const url = renderResourceUrl(match[2] ?? match[4], base);
+    if (url) found.set(url, null);
+  }
+  if (!found.size) return text;
+  await Promise.all([...found.keys()].map(async (url) => {
+    const blob = await fetcher.fetchBlob(url);
+    if (!blob) return;
+    if (blob.type === "text/css") {
+      if (ancestors.has(url) || ancestors.size >= 3) return;
+      const nested = await inlineCssResources(await blob.text(), url, fetcher, new Set([...ancestors, url]));
+      found.set(url, `data:text/css;charset=utf-8,${encodeURIComponent(nested)}`);
+    } else {
+      found.set(url, await blobDataUrl(blob));
+    }
+  }));
+  return text.replace(RENDER_CSS_URL_PATTERN, (whole, _quote, rawUrl, _importQuote, rawImport) => {
+    const data = found.get(renderResourceUrl(rawUrl ?? rawImport, base));
+    if (!data) return whole;
+    return rawImport !== undefined ? `@import url("${data}")` : `url("${data}")`;
+  });
+}
+
+async function sandboxedResponseDocumentWithResources(html, pageUrl, fetcher) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  // Read before sanitising, which removes <base>.
+  const base = renderDocumentBase(doc, pageUrl);
+  sanitizeRenderDocument(doc, { keepStylesheets: true });
+  const tasks = [];
+  const inline = (element, attribute, url) => {
+    tasks.push(fetcher.fetchBlob(url).then(blobDataUrl).then((data) => {
+      if (data) element.setAttribute(attribute, data);
+    }));
+  };
+  // A preview needs one picture per image; srcset and <picture> sources would
+  // only pick among candidates the frame cannot fetch.
+  for (const source of doc.querySelectorAll("picture source")) source.remove();
+  for (const image of doc.querySelectorAll("img, input[type='image' i]")) {
+    const candidates = image.getAttribute("srcset");
+    image.removeAttribute("srcset");
+    const fallback = String(candidates || "").split(",")[0]?.trim().split(/\s+/)[0];
+    const url = renderResourceUrl(image.getAttribute("src") || fallback, base);
+    if (url) inline(image, "src", url);
+  }
+  for (const video of doc.querySelectorAll("video[poster]")) {
+    const url = renderResourceUrl(video.getAttribute("poster"), base);
+    if (url) inline(video, "poster", url);
+  }
+  for (const link of doc.querySelectorAll("link[rel~='stylesheet' i]")) {
+    const url = renderResourceUrl(link.getAttribute("href"), base);
+    if (!url) {
+      link.remove();
+      continue;
+    }
+    tasks.push(fetcher.fetchBlob(url).then(async (blob) => {
+      if (blob?.type !== "text/css") {
+        link.remove();
+        return;
+      }
+      const css = await inlineCssResources(await blob.text(), url, fetcher, new Set([url]));
+      link.setAttribute("href", `data:text/css;charset=utf-8,${encodeURIComponent(css)}`);
+    }));
+  }
+  for (const style of doc.querySelectorAll("style")) {
+    tasks.push(inlineCssResources(style.textContent, base, fetcher).then((css) => {
+      style.textContent = css;
+    }));
+  }
+  for (const element of doc.querySelectorAll("[style]")) {
+    tasks.push(inlineCssResources(element.getAttribute("style"), base, fetcher).then((css) => {
+      element.setAttribute("style", css);
+    }));
+  }
+  await Promise.all(tasks);
+  return serializeRenderDocument(doc);
 }
 
 function updateMessagePaneSearch(target) {
@@ -12825,7 +13052,7 @@ function syncReplayResponsePreview(placeholder) {
     },
     state.replayMessageViews.response === "render",
     record
-      ? { response: record.response || null, key: `${tab.id}:${record.id}` }
+      ? { response: record.response || null, key: `${tab.id}:${record.id}`, url: recordPageUrl(record) }
       : { note: placeholder ?? "" },
   );
 }
@@ -13557,8 +13784,17 @@ function syncFuzzerResponsePreview(record) {
   renderResponsePreview(
     { view: els.fuzzerDetailResRenderView, editor: els.fuzzerDetailResCM?.closest(".editor-shell") },
     _fuzzerDetailViewModes.response === "render",
-    record ? { response: record.response || null, key: `${record.id}` } : { note: "" },
+    record
+      ? { response: record.response || null, key: `${record.id}`, url: recordPageUrl(record) }
+      : { note: "" },
   );
+}
+
+// After the resource option changes, so open Render views follow it.
+function redrawResponsePreviews() {
+  renderMessagePanes();
+  if (getActiveReplayTab()?.responseRecord) syncReplayResponsePreview();
+  if (state._fuzzerDetailRecord) syncFuzzerResponsePreview(state._fuzzerDetailRecord);
 }
 
 /** Show request/response detail for a fuzzer result. */
@@ -18447,6 +18683,7 @@ function sanitizeDisplaySettings(candidate) {
     theme: DISPLAY_THEME_OPTIONS.has(candidate?.theme) ? candidate.theme : defaults.theme,
     uiFont: DISPLAY_UI_FONT_OPTIONS.has(candidate?.uiFont) ? candidate.uiFont : defaults.uiFont,
     monoFont: DISPLAY_MONO_FONT_OPTIONS.has(candidate?.monoFont) ? candidate.monoFont : defaults.monoFont,
+    renderResources: candidate?.renderResources === true,
   };
 }
 
@@ -18810,6 +19047,7 @@ function hydrateDisplaySettingsForm() {
   els.displaySizeInput.value = String(state.displaySettings.sizePx);
   els.displayUiFontSelect.value = state.displaySettings.uiFont;
   els.displayMonoFontSelect.value = state.displaySettings.monoFont;
+  els.displayRenderResourcesInput.checked = state.displaySettings.renderResources;
 }
 
 function collectDisplaySettingsFormValues() {
@@ -18818,6 +19056,7 @@ function collectDisplaySettingsFormValues() {
     theme: els.displayThemeSelect.value,
     uiFont: els.displayUiFontSelect.value,
     monoFont: els.displayMonoFontSelect.value,
+    renderResources: els.displayRenderResourcesInput.checked,
   });
 }
 
@@ -18834,8 +19073,12 @@ function previewDisplaySettingsFromForm() {
 }
 
 function saveDisplaySettingsFromForm() {
+  const renderResourcesBefore = state.displaySettings.renderResources;
   state.displaySettings = collectDisplaySettingsFormValues();
   applyDisplaySettingsState();
+  if (state.displaySettings.renderResources !== renderResourcesBefore) {
+    redrawResponsePreviews();
+  }
   displaySettingsPreviewActive = false;
   window.clearTimeout(uiSettingsSaveTimer);
   uiSettingsSaveTimer = null;
@@ -18877,6 +19120,7 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
     theme: snapshot?.display_settings?.theme,
     uiFont: snapshot?.display_settings?.ui_font,
     monoFont: snapshot?.display_settings?.mono_font,
+    renderResources: snapshot?.display_settings?.render_resources,
   });
   state.activeTool = sanitizeActiveTool(snapshot?.active_tool);
   state.activeProxyTab = sanitizeActiveProxyTab(snapshot?.active_proxy_tab);
@@ -18956,6 +19200,7 @@ function snapshotUiSettings() {
       theme: state.displaySettings.theme,
       ui_font: state.displaySettings.uiFont,
       mono_font: state.displaySettings.monoFont,
+      render_resources: state.displaySettings.renderResources,
     },
     active_tool: sanitizeActiveTool(state.activeTool),
     active_proxy_tab: sanitizeActiveProxyTab(state.activeProxyTab),

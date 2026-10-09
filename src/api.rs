@@ -396,6 +396,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/ui-settings",
             get(get_ui_settings).post(update_ui_settings),
         )
+        .route("/api/render-resource", get(get_render_resource))
         .route(
             "/api/event-log",
             get(list_event_log).delete(clear_event_log),
@@ -837,6 +838,14 @@ struct TransactionSearchQuery {
 struct TransactionGetQuery {
     session_id: Option<Uuid>,
 }
+
+#[derive(Debug, Deserialize)]
+struct RenderResourceQuery {
+    url: String,
+    session_id: Option<Uuid>,
+}
+
+const RENDER_RESOURCE_URL_MAX_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct WorkspaceStateQuery {
@@ -3900,6 +3909,80 @@ async fn get_startup_settings(State(state): State<Arc<AppState>>) -> Json<Startu
 
 async fn get_ui_settings(State(state): State<Arc<AppState>>) -> Json<AppUiSettingsSnapshot> {
     Json(state.ui_settings.snapshot().await)
+}
+
+/// An image, stylesheet or font for the Render view, fetched for the UI when
+/// Settings > Display has resource loading on. The UI inlines the bytes as data:
+/// URLs, so the rendered frame itself never reaches the network or this API.
+async fn get_render_resource(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RenderResourceQuery>,
+) -> Response {
+    // Checked here as well as in the UI, so a page cannot reach it while it is off.
+    if !state
+        .ui_settings
+        .snapshot()
+        .await
+        .display_settings
+        .render_resources
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "Render resource loading is off in Settings > Display",
+        )
+            .into_response();
+    }
+    let url = match url::Url::parse(&query.url) {
+        Ok(url)
+            if matches!(url.scheme(), "http" | "https")
+                && query.url.len() <= RENDER_RESOURCE_URL_MAX_BYTES =>
+        {
+            url
+        }
+        _ => return (StatusCode::BAD_REQUEST, "Not an http(s) URL").into_response(),
+    };
+    let own_listeners = [
+        state.get_active_proxy_addr().await,
+        state.get_active_ui_addr().await,
+    ];
+    let targets_sniper = url.as_str().parse::<http::Uri>().is_ok_and(|uri| {
+        own_listeners
+            .iter()
+            .any(|addr| crate::proxy::request_targets_own_listener(&uri, *addr))
+    });
+    if targets_sniper {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Render does not fetch from Sniper itself",
+        )
+            .into_response();
+    }
+    let session = match resolve_read_session_for_optional_id(&state, query.session_id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    match crate::proxy::fetch_render_resource(&session, url.as_str(), own_listeners).await {
+        Ok(resource) => {
+            let mut response = resource.body.into_response();
+            let headers = response.headers_mut();
+            if let Ok(content_type) = HeaderValue::from_str(&resource.content_type) {
+                headers.insert(header::CONTENT_TYPE, content_type);
+            }
+            headers.insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            // Opened on its own, an SVG from here would otherwise run in this
+            // origin. The UI only ever reads it as bytes.
+            headers.insert(
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("sandbox; default-src 'none'"),
+            );
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response
+        }
+        Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
+    }
 }
 
 async fn update_ui_settings(
@@ -7748,6 +7831,38 @@ mod tests {
             Some(expected_owner_session_id.as_str())
         );
         assert!(payload.get("session_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn render_resource_route_refuses_while_off_and_for_sniper_itself() {
+        let (state, data_dir) = test_state("sniper-route-render-resource");
+        let get = |path: String| {
+            let state = state.clone();
+            async move { api_route_response(state, reqwest::Method::GET, &path, None).await }
+        };
+        let (status, _) =
+            get("/api/render-resource?url=https%3A%2F%2Fexample.com%2Fa.png".into()).await;
+        assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "off by default");
+
+        let mut snapshot = state.ui_settings.snapshot().await;
+        snapshot.display_settings.render_resources = true;
+        state.ui_settings.replace_snapshot(snapshot).await.unwrap();
+
+        let (status, _) = get("/api/render-resource?url=file%3A%2F%2F%2Fetc%2Fpasswd".into()).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        for addr in [
+            state.get_active_ui_addr().await,
+            state.get_active_proxy_addr().await,
+        ] {
+            let (status, body) = get(format!(
+                "/api/render-resource?url=http%3A%2F%2Flocalhost%3A{}%2Fapi%2Fsettings",
+                addr.port()
+            ))
+            .await;
+            assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{addr}: {body}");
+        }
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]

@@ -198,6 +198,21 @@ without consuming credentials. Add `bypass_hosts` (an array of patterns) to
 replace the direct-connection list; leaving it out keeps the saved list. The manifest operations are `capture.proxy.get`
 and `capture.proxy.configure` (the latter reads settings from stdin).
 
+## Render
+
+Every response in HTTP history, Replay and the fuzzer's results has a
+**Render** tab beside Pretty, Raw and Hex. It draws HTML and images in a
+sandboxed frame inside the pane: scripts, forms, links and network access are
+off, so a captured page cannot run or call anything, Sniper's own API included.
+
+By default it draws only what the response holds, so a page whose look comes
+from external stylesheets shows unstyled. **Settings ▸ Display ▸ Render ▸ Load
+images, styles and fonts** also fetches what the page names (images,
+stylesheets and their imports, fonts) through Sniper and the session's proxy
+chain, and writes them into the page; scripts still never run. Those requests
+go to the target and to any other host the page names, and are not recorded in
+HTTP history.
+
 ## CLI
 
 `sniper-cli` is already bundled with the macOS app and Windows packages. The

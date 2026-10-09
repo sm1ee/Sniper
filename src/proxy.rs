@@ -635,6 +635,80 @@ fn build_client(
         .context("failed to build upstream HTTP client")
 }
 
+const RENDER_RESOURCE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Largest single resource Render inlines. Each one sits in the page as a data:
+/// URL, so its bytes are held more than once while the page is drawn.
+pub(crate) const RENDER_RESOURCE_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+pub(crate) struct RenderResource {
+    pub content_type: String,
+    pub body: Bytes,
+}
+
+/// Fetch something a rendered page draws with, for Render's opt-in resource
+/// loading. It goes out through the session's chain, bypass list and TLS setting
+/// like Replay, so turning the option on never opens a connection the chain was
+/// set up to avoid. Only what draws comes back (images, stylesheets, fonts), and
+/// the request is not recorded in history.
+pub(crate) async fn fetch_render_resource(
+    session: &SessionContext,
+    url: &str,
+    own_listeners: [SocketAddr; 2],
+) -> Result<RenderResource> {
+    let proxy = session.runtime.upstream_proxy().await;
+    // A redirect must not lead back into Sniper's own listeners either.
+    let redirects = Policy::custom(move |attempt| {
+        let loops_back = attempt.url().as_str().parse::<Uri>().is_ok_and(|uri| {
+            own_listeners
+                .iter()
+                .any(|addr| request_targets_own_listener(&uri, *addr))
+        });
+        if loops_back || attempt.previous().len() >= 5 {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    });
+    let client = proxy
+        .apply(Client::builder())?
+        .use_rustls_tls()
+        .danger_accept_invalid_certs(session.runtime.upstream_insecure().await)
+        .redirect(redirects)
+        .connect_timeout(REPLAY_CONNECT_TIMEOUT)
+        .timeout(RENDER_RESOURCE_TIMEOUT)
+        .build()
+        .context("failed to build render resource client")?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| anyhow!(describe_upstream_error(&error)))?;
+    if !response.status().is_success() {
+        bail!("upstream answered {}", response.status());
+    }
+    let content_type = render_resource_content_type(response.headers())
+        .context("not an image, stylesheet or font")?;
+    let body = read_response_body_limited(response, RENDER_RESOURCE_MAX_BYTES).await?;
+    Ok(RenderResource { content_type, body })
+}
+
+/// The media type of something Render may draw with, or None for anything that
+/// could run (HTML, script) or is not drawn at all. Fonts are often served as
+/// plain octet-stream, so that is let through too; the page only ever sees the
+/// bytes as a data: URL inside a frame that runs nothing.
+fn render_resource_content_type(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(http::header::CONTENT_TYPE)?.to_str().ok()?;
+    let mime = value.split(';').next()?.trim().to_ascii_lowercase();
+    let drawable = mime.starts_with("image/")
+        || mime.starts_with("font/")
+        || mime == "text/css"
+        || mime == "application/octet-stream"
+        || mime == "application/vnd.ms-fontobject"
+        || mime.starts_with("application/font-")
+        || mime.starts_with("application/x-font-");
+    drawable.then_some(mime)
+}
+
 /// A second client that hands TLS to the platform instead of rustls.
 ///
 /// rustls implements neither static-RSA key exchange nor the CBC cipher suites,
@@ -8027,6 +8101,40 @@ mod tests {
         headers.insert(HOST, HeaderValue::from_static("[::1]:443"));
 
         validate_connect_host_header(&headers, "[::1]:443").unwrap();
+    }
+
+    #[test]
+    fn render_resources_are_only_what_draws() {
+        let allowed = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_str(value).unwrap(),
+            );
+            render_resource_content_type(&headers)
+        };
+        assert_eq!(allowed("image/png").as_deref(), Some("image/png"));
+        assert_eq!(
+            allowed("Text/CSS; charset=utf-8").as_deref(),
+            Some("text/css")
+        );
+        for drawable in [
+            "font/woff2",
+            "image/svg+xml",
+            "application/octet-stream",
+            "application/font-woff",
+        ] {
+            assert!(allowed(drawable).is_some(), "{drawable}");
+        }
+        for active in [
+            "text/html",
+            "application/javascript",
+            "text/javascript",
+            "application/json",
+        ] {
+            assert!(allowed(active).is_none(), "{active}");
+        }
+        assert!(render_resource_content_type(&HeaderMap::new()).is_none());
     }
 
     #[test]

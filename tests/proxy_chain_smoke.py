@@ -56,10 +56,21 @@ def relay(left, right):
             (right if source is left else left).sendall(data)
 
 
+# A 1x1 PNG for Render's resource loading.
+PIXEL = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==")
+
+
 class Origin(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         assert self.headers.get("Proxy-Authorization") is None
         self.server.hits += 1
+        if self.path == "/pixel.png":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(PIXEL)))
+            self.end_headers()
+            self.wfile.write(PIXEL)
+            return
         if self.headers.get("Upgrade", "").lower() == "websocket":
             key = self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
             accept = base64.b64encode(hashlib.sha1(key.encode()).digest()).decode()
@@ -311,6 +322,26 @@ def main():
                 except urllib.error.HTTPError as error:
                     assert error.code == 400
                 print(f"PASS: {kind} bypass list on HTTP, HTTPS MITM, passthrough, WS, replay, replay override and WS replay", flush=True)
+
+                # Render's opt-in resource loading leaves through the chain too.
+                ui = api("/api/ui-settings")
+                ui["display_settings"]["render_resources"] = True
+                api("/api/ui-settings", ui)
+                attempts = chain.attempts
+                resource = "http://" + runtime["ui_addr"] + "/api/render-resource?url=" + urllib.parse.quote(f"http://example.com:{origin.server_port}/pixel.png", safe="")
+                with opener.open(resource, timeout=15) as response:
+                    assert response.headers["Content-Type"] == "image/png"
+                    assert response.read() == PIXEL
+                assert chain.attempts > attempts, "A Render resource skipped the chain"
+                ui = api("/api/ui-settings")
+                ui["display_settings"]["render_resources"] = False
+                api("/api/ui-settings", ui)
+                try:
+                    opener.open(resource, timeout=15)
+                    raise AssertionError("A Render resource was fetched with the option off")
+                except urllib.error.HTTPError as error:
+                    assert error.code == 403
+                print(f"PASS: {kind} Render resources through the chain, refused when off", flush=True)
 
                 # Redacted round-trip must preserve the real password across restart.
                 api("/api/runtime", {"upstream_proxy": dict(settings, password="********")})
