@@ -13,7 +13,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
-use tokio::sync::{oneshot, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
+use tokio::sync::{oneshot, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, OwnedMutexGuard};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -289,7 +289,7 @@ pub struct SessionContext {
     pub workspace: Arc<WorkspaceStateStore>,
     websocket_journal_tx: Option<mpsc::Sender<WebSocketJournalCommand>>,
     metadata: RwLock<SessionMetadata>,
-    mutation_lock: AsyncMutex<()>,
+    mutation_lock: Arc<AsyncMutex<()>>,
     persist_lock: AsyncMutex<()>,
     /// Set while a state-only persist is already queued, so a burst of small
     /// changes costs one write instead of one write each.
@@ -438,7 +438,7 @@ impl SessionContext {
             workspace: Arc::new(WorkspaceStateStore::from_snapshot(snapshot.workspace)),
             websocket_journal_tx,
             metadata: RwLock::new(metadata),
-            mutation_lock: AsyncMutex::new(()),
+            mutation_lock: Arc::new(AsyncMutex::new(())),
             persist_lock: AsyncMutex::new(()),
             state_persist_scheduled: AtomicBool::new(false),
         }
@@ -508,6 +508,10 @@ impl SessionContext {
 
     pub async fn mutation_guard(&self) -> AsyncMutexGuard<'_, ()> {
         self.mutation_lock.lock().await
+    }
+
+    pub(crate) async fn owned_mutation_guard(&self) -> OwnedMutexGuard<()> {
+        self.mutation_lock.clone().lock_owned().await
     }
 
     pub async fn persist_mutation_locked(&self) -> Result<SessionMetadata> {
@@ -899,6 +903,23 @@ pub(crate) struct SessionRenameCommit {
     pub finalization_error: Option<anyhow::Error>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionDeleteWrite {
+    Commit,
+    Prune,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum SessionDeleteFault {
+    BeforeReplacement,
+    AfterReplacement,
+}
+
+pub(crate) struct SessionDeleteCommit {
+    pub finalization_error: Option<anyhow::Error>,
+}
+
 pub struct SessionRegistry {
     root_dir: PathBuf,
     registry_path: PathBuf,
@@ -908,6 +929,8 @@ pub struct SessionRegistry {
     inner: RwLock<SessionRegistrySnapshot>,
     #[cfg(test)]
     rename_fault: std::sync::Mutex<Option<SessionRenameFault>>,
+    #[cfg(test)]
+    delete_fault: std::sync::Mutex<Option<(SessionDeleteWrite, SessionDeleteFault)>>,
 }
 
 impl SessionRegistry {
@@ -1045,6 +1068,8 @@ impl SessionRegistry {
             inner: RwLock::new(registry.clone()),
             #[cfg(test)]
             rename_fault: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            delete_fault: std::sync::Mutex::new(None),
         };
         let active_metadata = this.touch_active_session(registry.active_session_id)?;
         let active_context = this.load_context(active_metadata.id)?;
@@ -1220,6 +1245,17 @@ impl SessionRegistry {
     }
 
     pub fn delete_session(&self, id: Uuid) -> Result<()> {
+        let commit = self.delete_session_with_commit_status(id)?;
+        match commit.finalization_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn delete_session_with_commit_status(
+        &self,
+        id: Uuid,
+    ) -> Result<SessionDeleteCommit> {
         let mut registry = self.inner.write().expect("session registry lock poisoned");
         if registry.active_session_id == id {
             return Err(anyhow!("cannot delete the active session"));
@@ -1248,22 +1284,37 @@ impl SessionRegistry {
         if !next.deleted_session_ids.contains(&id) {
             next.deleted_session_ids.push(id);
         }
-        if let Err(error) = write_json(&self.registry_path, &next) {
-            if let Some(quarantine_dir) = quarantined_storage.as_ref() {
-                if let Err(rollback_error) = crate::platform::rename(quarantine_dir, &storage_dir) {
-                    warn!(
-                        ?rollback_error,
-                        session_id = %id,
-                        source = %quarantine_dir.display(),
-                        target = %storage_dir.display(),
-                        "failed to restore quarantined session storage after registry delete failure"
-                    );
+        let finalization_error = match self
+            .write_deleted_registry(&next, SessionDeleteWrite::Commit)
+        {
+            Ok(()) => None,
+            Err(failure) if failure.committed => Some(failure.error),
+            Err(failure) => {
+                if let Some(quarantine_dir) = quarantined_storage.as_ref() {
+                    if let Err(rollback_error) =
+                        crate::platform::rename(quarantine_dir, &storage_dir)
+                    {
+                        warn!(
+                            ?rollback_error,
+                            session_id = %id,
+                            source = %quarantine_dir.display(),
+                            target = %storage_dir.display(),
+                            "failed to restore quarantined session storage after registry delete failure"
+                        );
+                    }
                 }
+                return Err(failure.error);
             }
-            return Err(error);
-        }
+        };
         *registry = next;
         drop(registry);
+
+        if finalization_error.is_some() {
+            // Replacement is visible, but durability was not acknowledged. Keep
+            // the quarantine and tombstone for recovery rather than restoring
+            // a session that the next restart would silently delete again.
+            return Ok(SessionDeleteCommit { finalization_error });
+        }
 
         let storage_removed = quarantined_storage
             .as_deref()
@@ -1274,20 +1325,69 @@ impl SessionRegistry {
             cleaned
                 .deleted_session_ids
                 .retain(|deleted_id| *deleted_id != id);
-            match write_json(&self.registry_path, &cleaned) {
+            match self.write_deleted_registry(&cleaned, SessionDeleteWrite::Prune) {
                 Ok(()) => {
                     *registry = cleaned;
                 }
-                Err(error) => {
+                Err(failure) => {
+                    if failure.committed {
+                        *registry = cleaned;
+                    }
                     warn!(
-                        %error,
+                        error = %failure.error,
                         session_id = %id,
                         "failed to prune deleted session tombstone after storage removal"
                     );
                 }
             }
         }
-        Ok(())
+        Ok(SessionDeleteCommit {
+            finalization_error: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_delete_write(
+        &self,
+        purpose: SessionDeleteWrite,
+        fault: SessionDeleteFault,
+    ) {
+        *self.delete_fault.lock().unwrap() = Some((purpose, fault));
+    }
+
+    fn write_deleted_registry(
+        &self,
+        next: &SessionRegistrySnapshot,
+        _purpose: SessionDeleteWrite,
+    ) -> std::result::Result<(), JsonWriteFailure> {
+        #[cfg(test)]
+        {
+            let fault = {
+                let mut fault = self.delete_fault.lock().unwrap();
+                if fault
+                    .as_ref()
+                    .is_some_and(|(purpose, _)| *purpose == _purpose)
+                {
+                    fault.take().map(|(_, fault)| fault)
+                } else {
+                    None
+                }
+            };
+            if let Some(fault) = fault {
+                return match fault {
+                    SessionDeleteFault::BeforeReplacement => Err(JsonWriteFailure {
+                        error: anyhow!("synthetic delete failure before replacement"),
+                        committed: false,
+                    }),
+                    SessionDeleteFault::AfterReplacement => {
+                        write_json_finalizing(&self.registry_path, next, |_| {
+                            bail!("synthetic delete finalization failure")
+                        })
+                    }
+                };
+            }
+        }
+        write_json_with_commit_status(&self.registry_path, next)
     }
 
     pub fn session_storage_path(&self, id: Uuid) -> Result<PathBuf> {
@@ -5766,6 +5866,152 @@ mod tests {
         assert!(!super::session_dir(&root_dir, missing.id).exists());
 
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn delete_commit_failure_preserves_registry_storage_boundary_across_restart() {
+        for after_replacement in [false, true] {
+            let data_dir =
+                std::env::temp_dir().join(format!("sniper-delete-commit-{}", Uuid::new_v4()));
+            let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            let created = registry
+                .create_session(Some("Synthetic target".to_owned()))
+                .unwrap();
+            let storage = registry.session_storage_path(created.id).unwrap();
+            let marker_bytes = b"synthetic session data";
+            std::fs::write(storage.join("synthetic-marker"), marker_bytes).unwrap();
+            let survivor_marker = active.storage_dir().join("synthetic-survivor");
+            std::fs::write(&survivor_marker, b"keep").unwrap();
+            let disk_before = std::fs::read(&registry.registry_path).unwrap();
+            registry.fail_next_delete_write(
+                super::SessionDeleteWrite::Commit,
+                if after_replacement {
+                    super::SessionDeleteFault::AfterReplacement
+                } else {
+                    super::SessionDeleteFault::BeforeReplacement
+                },
+            );
+            let error = registry.delete_session(created.id).unwrap_err();
+            assert!(error.to_string().contains(if after_replacement {
+                "finalization"
+            } else {
+                "before replacement"
+            }));
+            let quarantines = std::fs::read_dir(&registry.root_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(&format!(".deleted-{}-", created.id))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(registry.contains_session(created.id), !after_replacement);
+            if after_replacement {
+                assert!(!storage.exists());
+                assert_eq!(quarantines.len(), 1);
+                assert_eq!(
+                    std::fs::read(quarantines[0].join("synthetic-marker")).unwrap(),
+                    marker_bytes
+                );
+                assert!(registry.session_storage_path(created.id).is_err());
+                assert!(registry.load_context(created.id).is_err());
+                let disk: super::SessionRegistrySnapshot =
+                    serde_json::from_slice(&std::fs::read(&registry.registry_path).unwrap())
+                        .unwrap();
+                assert!(!disk.sessions.iter().any(|session| session.id == created.id));
+                assert!(disk.deleted_session_ids.contains(&created.id));
+                // A successful unrelated write must not resurrect the target or
+                // erase the tombstone while its quarantined data still exists.
+                registry
+                    .update_metadata(active.metadata.read().unwrap().clone())
+                    .unwrap();
+                let disk: super::SessionRegistrySnapshot =
+                    serde_json::from_slice(&std::fs::read(&registry.registry_path).unwrap())
+                        .unwrap();
+                assert!(!disk.sessions.iter().any(|session| session.id == created.id));
+                assert!(disk.deleted_session_ids.contains(&created.id));
+            } else {
+                assert_eq!(std::fs::read(&registry.registry_path).unwrap(), disk_before);
+                assert_eq!(
+                    std::fs::read(storage.join("synthetic-marker")).unwrap(),
+                    marker_bytes
+                );
+                assert!(quarantines.is_empty());
+            }
+            drop(active);
+            drop(registry);
+            let (reopened, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            assert_eq!(reopened.contains_session(created.id), !after_replacement);
+            assert_eq!(storage.exists(), !after_replacement);
+            assert!(quarantines.iter().all(|path| !path.exists()));
+            assert_eq!(std::fs::read(survivor_marker).unwrap(), b"keep");
+            drop(active);
+            drop(reopened);
+            std::fs::remove_dir_all(data_dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn delete_commit_prune_failure_keeps_success_and_visible_snapshot_coherent() {
+        for after_replacement in [false, true] {
+            let data_dir =
+                std::env::temp_dir().join(format!("sniper-delete-prune-fault-{}", Uuid::new_v4()));
+            let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            let created = registry
+                .create_session(Some("Synthetic target".to_owned()))
+                .unwrap();
+            let storage = registry.session_storage_path(created.id).unwrap();
+            registry.fail_next_delete_write(
+                super::SessionDeleteWrite::Prune,
+                if after_replacement {
+                    super::SessionDeleteFault::AfterReplacement
+                } else {
+                    super::SessionDeleteFault::BeforeReplacement
+                },
+            );
+            registry.delete_session(created.id).unwrap();
+            assert!(!registry.contains_session(created.id));
+            assert!(!storage.exists());
+            assert_eq!(
+                registry
+                    .inner
+                    .read()
+                    .unwrap()
+                    .deleted_session_ids
+                    .contains(&created.id),
+                !after_replacement
+            );
+            let disk: super::SessionRegistrySnapshot =
+                serde_json::from_slice(&std::fs::read(&registry.registry_path).unwrap()).unwrap();
+            assert_eq!(
+                disk.deleted_session_ids.contains(&created.id),
+                !after_replacement
+            );
+            registry
+                .update_metadata(active.metadata.read().unwrap().clone())
+                .unwrap();
+            let disk: super::SessionRegistrySnapshot =
+                serde_json::from_slice(&std::fs::read(&registry.registry_path).unwrap()).unwrap();
+            assert_eq!(
+                disk.deleted_session_ids.contains(&created.id),
+                !after_replacement
+            );
+            drop(active);
+            drop(registry);
+            let (reopened, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+            assert!(!reopened.contains_session(created.id));
+            assert!(reopened
+                .inner
+                .read()
+                .unwrap()
+                .deleted_session_ids
+                .is_empty());
+            drop(active);
+            drop(reopened);
+            std::fs::remove_dir_all(data_dir).unwrap();
+        }
     }
 
     #[test]
