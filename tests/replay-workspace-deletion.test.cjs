@@ -280,8 +280,7 @@ test("new-session autosave resumes when its timer joined an old in-flight loop",
   f.timers.delete(timer); callback();
   f.succeed(0, { session_id: "session-a", revision: 11 }); await oldLoop;
   assert.equal(f.state.workspaceRevision, 3);
-  assert.equal(f.context.workspaceSaveDirty, true);
-  assert.ok(f.timers.has(f.context.workspaceSaveTimer), "a new timer must remain after the old loop settles");
+  assert.equal(f.context.workspaceSaveInFlight, true, "the joined timer resumes its own session's save");
   const newLoop = f.context.flushQueuedWorkspaceStateSave();
   assert.equal(f.requests.length, 2);
   assert.equal(JSON.parse(f.requests[1].options.body).session_id, "session-b");

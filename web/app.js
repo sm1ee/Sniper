@@ -3740,22 +3740,32 @@ async function flushQueuedWorkspaceStateSave(options = {}) {
   if (workspaceSaveConflictPending && !clearBypassableWorkspaceConflict(options)) {
     return;
   }
+  const stateGeneration = workspaceStateGeneration;
+  const sessionId = currentSessionId();
   if (workspaceSaveLoopPromise) {
-    return workspaceSaveLoopPromise;
+    await workspaceSaveLoopPromise;
+    if (stateGeneration !== workspaceStateGeneration || sessionId !== currentSessionId()) return;
+    // A new session can join an older session's still-pending save. Its action
+    // must wait for its own save too; another waiter may already have started it.
+    if (!workspaceSaveConflictPending && (workspaceSaveDirty || workspaceSaveLoopPromise)) {
+      return flushQueuedWorkspaceStateSave(options);
+    }
+    return;
   }
 
-  const stateGeneration = workspaceStateGeneration;
-  workspaceSaveLoopPromise = runQueuedWorkspaceStateSaves(options)
+  const saveLoopPromise = runQueuedWorkspaceStateSaves(options)
     .finally(() => {
+      if (workspaceSaveLoopPromise !== saveLoopPromise) return;
       workspaceSaveLoopPromise = null;
       // A new session's timer may have joined this old save while it was still
       // awaiting its response. Give that session its own save loop afterwards.
-      if (stateGeneration !== workspaceStateGeneration && workspaceLoaded
+      if ((stateGeneration !== workspaceStateGeneration || sessionId !== currentSessionId()) && workspaceLoaded
         && workspaceSaveDirty && !workspaceSaveConflictPending) {
         scheduleWorkspaceStateSave();
       }
     });
-  return workspaceSaveLoopPromise;
+  workspaceSaveLoopPromise = saveLoopPromise;
+  return saveLoopPromise;
 }
 
 async function runQueuedWorkspaceStateSaves(options = {}) {
@@ -3968,6 +3978,8 @@ function handleWorkspaceActionError(error) {
 }
 
 async function flushWorkspaceState(options = {}) {
+  const stateGeneration = workspaceStateGeneration;
+  const sessionId = currentSessionId();
   const hasQueuedChanges = !!(workspaceSaveDirty || workspaceSaveTimer || wsTranscriptSaveTimer);
   const hasInFlightSave = !!(workspaceSaveInFlight || workspaceSaveLoopPromise);
   const hasPendingConflict = !!workspaceSaveConflictPending;
@@ -3987,9 +3999,12 @@ async function flushWorkspaceState(options = {}) {
     workspaceSaveVersion += 1;
   }
   await flushQueuedWorkspaceStateSave(options);
+  // Old-session options must never clear or retry a newer workspace's conflict.
+  if (stateGeneration !== workspaceStateGeneration || sessionId !== currentSessionId()) return;
   if (workspaceSaveConflictPending) {
     if (clearBypassableWorkspaceConflict(options)) {
       await flushQueuedWorkspaceStateSave(options);
+      if (stateGeneration !== workspaceStateGeneration || sessionId !== currentSessionId()) return;
     }
   }
   if (workspaceSaveConflictPending) {
