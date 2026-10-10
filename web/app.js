@@ -2524,9 +2524,10 @@ function bindEvents() {
       const idx = visualOrder.findIndex((t) => t.id === state.activeReplayTabId);
       const len = visualOrder.length;
       const next = event.shiftKey ? (idx - 1 + len) % len : (idx + 1) % len;
+      if (!preserveActiveHttpReplayDraftBeforeNavigation(getActiveReplayTab(), "switching tabs")) return;
       state.activeReplayTabId = visualOrder[next].id;
       scheduleWorkspaceStateSave();
-      renderReplay();
+      renderReplay({ forceToolbarSync: true });
       return;
     }
 
@@ -12879,7 +12880,7 @@ function renderReplay(options = {}) {
     return;
   }
 
-  syncReplayToolbar(tab);
+  syncReplayToolbar(tab, { force: options.forceToolbarSync });
   const reqMode = state.replayMessageViews.request;
   if (els.replayRequestCM) {
     // CM path for all modes
@@ -13365,16 +13366,17 @@ function updateReplaySearchPane(target, text, options = {}) {
   meta.innerHTML = buildSearchMeta(countLines(text), mode, searchResult.count);
 }
 
-function syncReplayToolbar(tab) {
+function syncReplayToolbar(tab, { force = false } = {}) {
   const request = deriveRepeaterRequest(tab);
   const target = getRepeaterTargetConfig(tab, request);
-  if (document.activeElement !== els.replayHostInput && els.replayHostInput.value !== target.host) {
+  // A successful tab switch must replace the old tab's controls even when focus stays here.
+  if ((force || document.activeElement !== els.replayHostInput) && els.replayHostInput.value !== target.host) {
     els.replayHostInput.value = target.host;
   }
-  if (document.activeElement !== els.replayPortInput && els.replayPortInput.value !== target.port) {
+  if ((force || document.activeElement !== els.replayPortInput) && els.replayPortInput.value !== target.port) {
     els.replayPortInput.value = target.port;
   }
-  if (document.activeElement !== els.replaySchemeSelect && els.replaySchemeSelect.value !== target.scheme) {
+  if ((force || document.activeElement !== els.replaySchemeSelect) && els.replaySchemeSelect.value !== target.scheme) {
     els.replaySchemeSelect.value = target.scheme;
   }
   setReplayTargetInputValidity(validateManualRepeaterTargetInput(
@@ -13382,7 +13384,7 @@ function syncReplayToolbar(tab) {
     els.replayPortInput.value,
   ));
   const versionSelect = document.getElementById("replayHttpVersionSelect");
-  if (versionSelect && document.activeElement !== versionSelect) {
+  if (versionSelect && (force || document.activeElement !== versionSelect)) {
     versionSelect.value = normalizeReplayHttpVersion(tab.httpVersionMode || "");
   }
   const sending = isReplayTabSending(tab.id);
@@ -17268,6 +17270,8 @@ function renderReplayTabs(options = {}) {
           .catch(handleWorkspaceActionError);
         return;
       }
+      if (tabButton && state.activeReplayTabId !== actionTabId
+        && !preserveActiveHttpReplayDraftBeforeNavigation(getActiveReplayTab(), "switching tabs")) return;
       commitReplayTabRename(editingId, editingInput?.value || "");
       if (pinButton) {
         toggleReplayTabPin(actionTabId);
@@ -17275,7 +17279,7 @@ function renderReplayTabs(options = {}) {
         state.activeReplayTabId = actionTabId;
         state.replayRenamingTabId = null;
         scheduleWorkspaceStateSave();
-        renderReplay();
+        renderReplay({ forceToolbarSync: true });
       }
     }, { capture: true });
     if (nameInput) {
@@ -17305,10 +17309,11 @@ function renderReplayTabs(options = {}) {
         beginReplayTabRename(id);
         return;
       }
+      if (!preserveActiveHttpReplayDraftBeforeNavigation(getActiveReplayTab(), "switching tabs")) return;
       state.activeReplayTabId = id;
       state.replayRenamingTabId = null;
       scheduleWorkspaceStateSave();
-      renderReplay();
+      renderReplay({ forceToolbarSync: true });
     });
     tabElement.querySelector(".replay-tab-pin-btn")?.addEventListener("click", (event) => {
       event.stopPropagation();
