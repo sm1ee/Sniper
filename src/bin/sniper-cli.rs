@@ -9917,7 +9917,15 @@ async fn probe_sniper_api_base_url_once_classified(
             "Sniper API probe returned {status}"
         )));
     }
-    let payload: serde_json::Value = response.json().await.map_err(|error| {
+    // An incomplete body says nothing about server identity. Keep transport
+    // failures separate from invalid, fully received JSON so a live owner's
+    // runtime-state survives a timeout or a dropped connection after headers.
+    let body = response.bytes().await.map_err(|error| {
+        SniperApiProbeFailure::unreachable(anyhow!(
+            "failed to probe Sniper API at {url}: failed to read response body: {error}"
+        ))
+    })?;
+    let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
         SniperApiProbeFailure::rejected(anyhow!("Sniper API probe response was not JSON: {error}"))
     })?;
     validate_sniper_settings_probe(&payload, expected).map_err(SniperApiProbeFailure::rejected)
@@ -15567,6 +15575,132 @@ mod tests {
             .contains("Removed the stale runtime-state"));
         assert!(!runtime_state_path(&root).exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    // The fixture only serves synthetic settings responses over loopback. A stalled
+    // connection stays open until the probe's own timeout closes it.
+    async fn assert_discovery_response_cleanup(
+        response: &'static [u8],
+        stall: bool,
+        live_owner: bool,
+        preserve: bool,
+        expected_message: &str,
+    ) {
+        let root = std::env::temp_dir().join(format!("sniper-cli-probe-body-{}", Uuid::new_v4()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut snapshot = RuntimeStateSnapshot::with_proxy_status(
+            "127.0.0.1:18080".parse().unwrap(),
+            listener.local_addr().unwrap(),
+            true,
+        );
+        if !live_owner {
+            snapshot.pid = None;
+        }
+        persist_runtime_state(&root, &snapshot).unwrap();
+        let original = fs::read(runtime_state_path(&root)).unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..=SNIPER_API_PROBE_RETRY_DELAYS.len() {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                }
+                assert!(request.starts_with(b"GET /api/settings HTTP/1.1\r\n"));
+                stream.write_all(response).await.unwrap();
+                if stall {
+                    let mut rest = Vec::new();
+                    // EOF or a reset both mean that the timed-out client closed.
+                    let _ = stream.read_to_end(&mut rest).await;
+                }
+            }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            discover_api_base_url_from_data_dir(&client, root.clone()),
+        )
+        .await
+        .expect("discovery should finish after its bounded retries")
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(expected_message), "{message}");
+        assert_eq!(runtime_state_path(&root).exists(), preserve, "{message}");
+        if preserve {
+            assert_eq!(fs::read(runtime_state_path(&root)).unwrap(), original);
+        } else {
+            assert!(
+                message.contains("Removed the stale runtime-state"),
+                "{message}"
+            );
+        }
+        server.await.unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_preserves_live_owner_on_timeout_before_headers() {
+        assert_discovery_response_cleanup(b"", true, true, true, "Leaving runtime-state intact")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_preserves_live_owner_on_timeout_after_headers() {
+        assert_discovery_response_cleanup(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+            true,
+            true,
+            true,
+            "Leaving runtime-state intact",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_preserves_live_owner_on_truncated_response_body() {
+        assert_discovery_response_cleanup(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+            false,
+            true,
+            true,
+            "Leaving runtime-state intact",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_removes_stale_owner_on_truncated_response_body() {
+        assert_discovery_response_cleanup(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+            false,
+            false,
+            false,
+            "is not responding",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_complete_invalid_json_with_live_owner() {
+        assert_discovery_response_cleanup(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{",
+            false,
+            true,
+            false,
+            "response was not JSON",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_complete_invalid_schema_with_live_owner() {
+        assert_discovery_response_cleanup(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            false,
+            true,
+            false,
+            "did not match the expected /api/settings schema",
+        )
+        .await;
     }
 
     #[tokio::test]
