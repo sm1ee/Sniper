@@ -947,6 +947,7 @@ let workspaceSaveLoopPromise = null;
 let workspaceSaveConflictPending = false;
 let workspaceStateGeneration = 0;
 const workspacePendingReplayCloses = new Map();
+const workspaceReplayMetadataEdits = new WeakMap();
 let workspaceExternalLoadGeneration = 0;
 let workspaceExternalAppliedGeneration = 0;
 // Highest replay-tab count a workspace may hold; must match
@@ -17355,16 +17356,8 @@ function commitReplayTabRename(id, value) {
   }
   const previousLabel = tab.customLabel || "";
   tab.customLabel = normalizeReplayTabCustomLabel(value);
-  const attemptedLabel = tab.customLabel;
   state.replayRenamingTabId = null;
-  scheduleWorkspaceStateSave();
-  flushWorkspaceState().catch((error) => {
-    if (tab.customLabel === attemptedLabel) {
-      tab.customLabel = previousLabel;
-    }
-    handleWorkspaceActionError(error);
-    renderReplayTabs();
-  });
+  persistReplayTabMetadataEdit(tab, "customLabel", previousLabel);
   renderReplayTabs();
 }
 
@@ -17372,21 +17365,46 @@ function normalizeReplayTabCustomLabel(value) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, 80);
 }
 
+function persistReplayTabMetadataEdit(tab, field, previousValue) {
+  const generation = workspaceStateGeneration;
+  const sessionId = currentSessionId();
+  const revision = state.workspaceRevision;
+  const attemptedValue = tab[field];
+  const committedValue = () => {
+    const baseline = workspaceReplayTabsById(workspaceSaveCommittedSnapshot).get(tab.id);
+    return baseline ? (field === "pinned" ? !!baseline.pinned
+      : normalizeReplayTabCustomLabel(baseline.custom_label)) : null;
+  };
+  const baselineValue = committedValue();
+  const owners = workspaceReplayMetadataEdits.get(tab) || {};
+  const owner = {};
+  owners[field] = owner;
+  workspaceReplayMetadataEdits.set(tab, owners);
+  scheduleWorkspaceStateSave();
+  flushWorkspaceState().catch((error) => {
+    if (generation !== workspaceStateGeneration || sessionId !== currentSessionId()
+      || !state.replayTabs.includes(tab)) return;
+    // A later snapshot may have confirmed this value while the old POST was
+    // still awaiting its response. Rolling it back would let the retry overwrite
+    // that committed metadata. Tokens also distinguish repeated/ABA local edits.
+    if (owners[field] === owner && tab[field] === attemptedValue
+      && state.workspaceRevision === revision && committedValue() === baselineValue) {
+      tab[field] = previousValue;
+      if (!state.replayRenamingTabId) renderReplayTabs();
+    }
+    handleWorkspaceActionError(error);
+  }).finally(() => {
+    if (owners[field] === owner) delete owners[field];
+  });
+}
+
 function toggleReplayTabPin(id) {
   const tab = state.replayTabs.find((t) => t.id === id);
   if (!tab) return;
   const previousPinned = !!tab.pinned;
   tab.pinned = !tab.pinned;
-  const attemptedPinned = tab.pinned;
   // Flush immediately so pin state survives quick app quit
-  scheduleWorkspaceStateSave();
-  flushWorkspaceState().catch((error) => {
-    if (tab.pinned === attemptedPinned) {
-      tab.pinned = previousPinned;
-    }
-    handleWorkspaceActionError(error);
-    renderReplayTabs();
-  });
+  persistReplayTabMetadataEdit(tab, "pinned", previousPinned);
   renderReplayTabs();
 }
 

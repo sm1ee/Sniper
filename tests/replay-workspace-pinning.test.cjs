@@ -155,9 +155,12 @@ test("external HTTP pin adoption does not touch WebSocket pin or live objects", 
 test("GUI pin toggle remains available for both HTTP and WebSocket tabs", () => {
   const tabs = [{ id: "http", type: "http", pinned: false }, { id: "ws", type: "websocket", pinned: false }];
   let saves = 0, renders = 0;
-  const context = loadFunctions(["toggleReplayTabPin"], {
+  const context = loadFunctions(["toggleReplayTabPin", "persistReplayTabMetadataEdit"], {
     state: { replayTabs: tabs }, scheduleWorkspaceStateSave: () => saves++,
     flushWorkspaceState: () => Promise.resolve(), renderReplayTabs: () => renders++,
+    workspaceStateGeneration: 0, currentSessionId: () => "session-a",
+    workspaceReplayMetadataEdits: new WeakMap(), workspaceSaveCommittedSnapshot: null,
+    workspaceReplayTabsById: () => new Map(),
   });
   for (const tab of tabs) {
     context.toggleReplayTabPin(tab.id); assert.equal(tab.pinned, true);
