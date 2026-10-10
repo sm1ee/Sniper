@@ -378,7 +378,8 @@ pub fn validate_output(name: &str, value: &Value) -> Result<(), String> {
             }
         }
         "saved.v1.operation.get" if value["found"] == json!(true) => {
-            if value["operation_id"] != value["receipt"]["operation_id"]
+            if validated_uuid(&value["operation_id"])
+                != validated_uuid(&value["receipt"]["operation_id"])
                 || value["outcome"] != value["receipt"]["outcome"]
             {
                 return Err("output lookup does not match its receipt".into());
@@ -1240,6 +1241,45 @@ mod tests {
         validate_schema(&schema, &absent, "output").unwrap();
         absent["outcome"] = json!("not_applied");
         assert!(validate_schema(&schema, &absent, "output").is_err());
+    }
+
+    #[test]
+    fn operation_lookup_matches_receipt_uuid_identity() {
+        let lower = "abcdef00-1234-5678-9abc-def012345678";
+        let upper = lower.to_uppercase();
+        let lookup = |outer: &str, inner: &str| {
+            json!({"contract_version":CONTRACT_VERSION,"operation_id":outer,"found":true,
+                "outcome":"unknown","receipt":{"contract_version":CONTRACT_VERSION,
+                    "operation_id":inner,"session_id":id(),"operation":"saved.v1.http.clear",
+                    "outcome":"unknown","code":"pending","message":"Pending.",
+                    "created_at":"2026-10-10T00:00:00Z"}})
+        };
+        for (outer, inner) in [(upper.as_str(), lower), (lower, upper.as_str())] {
+            validate_output("saved.v1.operation.get", &lookup(outer, inner)).unwrap();
+        }
+        let different = "abcdef00-1234-5678-9abc-def012345679";
+        for (outer, inner) in [(lower, different), (different, upper.as_str())] {
+            assert_eq!(
+                validate_output("saved.v1.operation.get", &lookup(outer, inner)),
+                Err("output lookup does not match its receipt".into())
+            );
+        }
+        for malformed in [
+            "not-a-uuid",
+            "abcdef00123456789abcdef012345678",
+            "urn:uuid:abcdef00-1234-5678-9abc-def012345678",
+            "{abcdef00-1234-5678-9abc-def012345678}",
+        ] {
+            for (outer, inner) in [(malformed, lower), (lower, malformed)] {
+                assert!(validate_output("saved.v1.operation.get", &lookup(outer, inner)).is_err());
+            }
+        }
+        let mut wrong_outcome = lookup(lower, &upper);
+        wrong_outcome["outcome"] = json!("not_applied");
+        assert_eq!(
+            validate_output("saved.v1.operation.get", &wrong_outcome),
+            Err("output lookup does not match its receipt".into())
+        );
     }
 
     #[test]

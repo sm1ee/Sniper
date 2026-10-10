@@ -323,3 +323,44 @@ async fn initial_and_terminal_pages_use_the_effective_requested_limit() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operation_lookup_matches_receipt_uuid_identity() {
+    let lower = id(4).to_string();
+    let upper = lower.to_uppercase();
+    let lookup = |outer: &str, inner: &str| {
+        json!({"contract_version":"saved.v1","operation_id":outer,"found":true,
+            "outcome":"unknown","receipt":{"contract_version":"saved.v1",
+                "operation_id":inner,"session_id":id(1),"operation":"saved.v1.http.clear",
+                "outcome":"unknown","code":"pending","message":"Pending.",
+                "created_at":"2026-10-10T00:00:00Z"}})
+    };
+    for (outer, inner) in [
+        (upper.as_str(), lower.as_str()),
+        (lower.as_str(), upper.as_str()),
+    ] {
+        check(
+            "saved.v1.operation.get",
+            json!({"operation_id":lower}),
+            lookup(outer, inner),
+            true,
+        )
+        .await;
+    }
+    check(
+        "saved.v1.operation.get",
+        json!({"operation_id":lower}),
+        lookup(&lower, &id(5).to_string()),
+        false,
+    )
+    .await;
+    let mut wrong_outcome = lookup(&lower, &upper);
+    wrong_outcome["outcome"] = json!("not_applied");
+    check(
+        "saved.v1.operation.get",
+        json!({"operation_id":lower}),
+        wrong_outcome,
+        false,
+    )
+    .await;
+}
