@@ -855,10 +855,13 @@ async fn discovery_exposes_only_stage_one_reads_without_contacting_api() {
         assert_eq!(spec["requires_confirmation"], false);
         assert_eq!(spec["input_schema"]["type"], "object");
         assert_eq!(spec["input_schema"]["additionalProperties"], false);
-        assert_eq!(
-            spec["input_schema"]["properties"]["session_id"]["format"],
-            "uuid"
-        );
+        let session_id_schema = &spec["input_schema"]["properties"]["session_id"];
+        assert!(session_id_schema.get("format").is_none());
+        assert_eq!(session_id_schema["type"], json!(["string", "null"]));
+        assert!(session_id_schema["description"]
+            .as_str()
+            .unwrap()
+            .contains("urn:uuid:"));
         let (code, schema) = mock.command(&["schema", "input", operation]).await;
         assert_eq!(code, 0, "{schema}");
         assert_eq!(schema["schema"], spec["input_schema"]);
