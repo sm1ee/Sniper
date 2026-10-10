@@ -530,6 +530,183 @@ fn legacy_session_uuid_inputs_keep_all_accepted_spellings() {
 }
 
 #[test]
+fn metadata_uuid_inputs_match_legacy_parser_and_keep_defaults() {
+    let f = Fixture::new();
+    let canonical = "aabbccdd-0011-2233-4455-66778899aabb";
+    let spellings = [
+        canonical.to_owned(),
+        canonical.to_uppercase(),
+        canonical.replace('-', ""),
+        format!("{{{canonical}}}"),
+        format!("urn:uuid:{canonical}"),
+    ];
+    for (operation, field, baseline, direct, nullable, required) in [
+        (
+            "replay.close",
+            "session_id",
+            json!({"tab_id":"tab"}),
+            vec!["replay", "close", "--tab-id", "tab"],
+            false,
+            false,
+        ),
+        (
+            "replay.duplicate",
+            "session_id",
+            json!({"tab_id":"tab"}),
+            vec!["replay", "duplicate", "--tab-id", "tab"],
+            false,
+            false,
+        ),
+        (
+            "replay.set_pinned",
+            "session_id",
+            json!({"tab_id":"tab","pinned":true}),
+            vec![
+                "replay",
+                "set-pinned",
+                "--tab-id",
+                "tab",
+                "--pinned",
+                "true",
+            ],
+            false,
+            false,
+        ),
+        (
+            "findings.list",
+            "session_id",
+            json!({}),
+            vec!["findings", "list"],
+            true,
+            false,
+        ),
+        (
+            "findings.get",
+            "session_id",
+            json!({"id":canonical}),
+            vec!["findings", "get", "--id", canonical],
+            true,
+            false,
+        ),
+        (
+            "findings.get",
+            "id",
+            json!({}),
+            vec!["findings", "get"],
+            false,
+            true,
+        ),
+        (
+            "findings.count",
+            "session_id",
+            json!({}),
+            vec!["findings", "count"],
+            true,
+            false,
+        ),
+        (
+            "event_log.list",
+            "session_id",
+            json!({}),
+            vec!["event-log", "list"],
+            true,
+            false,
+        ),
+        (
+            "session.rename",
+            "id",
+            json!({"name":"Archive"}),
+            vec!["session", "rename", "--name", "Archive"],
+            false,
+            true,
+        ),
+    ] {
+        let schema = f.input_schema(operation);
+        let property = &schema["properties"][field];
+        assert!(property.get("format").is_none(), "{operation}.{field}");
+        assert_eq!(
+            property["type"],
+            if nullable {
+                json!(["string", "null"])
+            } else {
+                json!("string")
+            }
+        );
+        assert_eq!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field)),
+            required
+        );
+        let description = property["description"].as_str().unwrap();
+        for term in [
+            "hyphenated",
+            "32 hexadecimal digits",
+            "braced",
+            "lowercase urn:uuid:",
+            "either case",
+        ] {
+            assert!(
+                description.contains(term),
+                "{operation}.{field}: {description}"
+            );
+        }
+        if operation.starts_with("replay.") {
+            assert!(description.contains("including inactive sessions"));
+            assert!(description.contains("Omission pins the active session once"));
+        } else if field == "session_id" {
+            assert!(description.contains("without switching it"));
+            assert!(description.contains("omitted or null pins the active session"));
+        }
+        let option = if field == "id" {
+            "--id"
+        } else {
+            "--session-id"
+        };
+        for spelling in &spellings {
+            let mut input = baseline.clone();
+            input[field] = json!(spelling);
+            let called = f.call(operation, input, 0);
+            let mut args = vec!["--dry-run"];
+            args.extend(direct.iter().copied());
+            args.extend([option, spelling.as_str()]);
+            let output = f.cli(&args, 0);
+            assert_eq!(called["data"]["input"], output["input"]);
+            assert_eq!(called["data"]["api"], output["api"]);
+            assert_eq!(output["input"][field], canonical);
+        }
+        for invalid in [
+            json!(1),
+            json!(true),
+            json!([]),
+            json!({}),
+            json!("not-a-uuid"),
+            json!(format!(" {canonical}")),
+            json!(format!("URN:UUID:{canonical}")),
+        ] {
+            let mut input = baseline.clone();
+            input[field] = invalid;
+            assert_invalid(&f.call(operation, input, 2), operation);
+        }
+        let omitted = f.call(operation, baseline.clone(), if required { 2 } else { 0 });
+        let mut input = baseline;
+        input[field] = Value::Null;
+        let null = f.call(operation, input, if nullable { 0 } else { 2 });
+        if required {
+            assert_invalid(&omitted, operation);
+        } else {
+            assert_eq!(omitted["data"]["input"][field], Value::Null);
+        }
+        if nullable {
+            assert_eq!(omitted["data"]["input"], null["data"]["input"]);
+        } else {
+            assert_invalid(&null, operation);
+        }
+    }
+}
+
+#[test]
 fn discovery_rejects_unknown_targets_before_dry_run() {
     let f = Fixture::new();
     for target in ["missing.operation", "", " session.list"] {

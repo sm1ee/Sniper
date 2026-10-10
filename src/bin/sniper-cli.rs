@@ -3335,6 +3335,14 @@ fn skill_root_selection_schema(allow_all: bool) -> Value {
     json!(constraints)
 }
 
+// Legacy Uuid arguments accept spellings that strict JSON Schema uuid formats reject.
+fn legacy_uuid_input_schema(nullable: bool, context: &str) -> Value {
+    json!({
+        "type": if nullable { json!(["string", "null"]) } else { json!("string") },
+        "description": format!("UUID: hyphenated, 32 hexadecimal digits, braced hyphenated, or lowercase urn:uuid: prefix followed by a hyphenated UUID. Hexadecimal digits may use either case. {context}")
+    })
+}
+
 fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
     if matches!(
         operation,
@@ -3386,7 +3394,7 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
             "type":"object", "additionalProperties":false, "required":["tab_id"],
             "properties":{
                 "tab_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S","description":"Exact saved HTTP tab ID; nonblank, at most 128 UTF-8 bytes, never trimmed or treated as a label."},
-                "session_id":{"type":"string","format":"uuid","description":"Selected saved session, including inactive sessions. Omission pins the active session once."}
+                "session_id":legacy_uuid_input_schema(false, "Selected saved session, including inactive sessions. Omission pins the active session once.")
             }
         });
         if operation == "replay.set_pinned" {
@@ -3435,30 +3443,37 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
             "description":"The server trims the name and limits it to 256 UTF-8 bytes after trimming. Omitted, null, empty or whitespace-only names use the server's timestamp-based default."
         }));
     }
-    // These legacy arguments also accept simple, braced and URN UUID spellings,
-    // which strict JSON Schema uuid format validators would reject.
     if matches!(
         operation,
         "session.switch" | "session.delete" | "session.reveal"
     ) {
-        properties.insert("id".into(), json!({
-            "type":"string",
-            "description":"Session UUID: hyphenated, 32 hexadecimal digits, braced hyphenated, or lowercase urn:uuid: prefix followed by a hyphenated UUID. Hexadecimal digits may use either case."
-        }));
+        properties.insert(
+            "id".into(),
+            legacy_uuid_input_schema(false, "Session UUID."),
+        );
     }
     if operation == "replay.list" {
-        properties.insert("session_id".into(), json!({
-            "type":["string","null"],
-            "description":"Session UUID: hyphenated, 32 hexadecimal digits, braced hyphenated, or lowercase urn:uuid: prefix followed by a hyphenated UUID. Hexadecimal digits may use either case. Omitted or null selects the active session."
-        }));
+        properties.insert(
+            "session_id".into(),
+            legacy_uuid_input_schema(
+                true,
+                "Session UUID. Omitted or null selects the active session.",
+            ),
+        );
     }
     if session_read_output_schema(operation).is_some() {
-        properties.insert("session_id".into(), json!({
-            "type":["string","null"],"format":"uuid",
-            "description":"Read this session without switching it; omitted or null pins the active session."
-        }));
+        properties.insert(
+            "session_id".into(),
+            legacy_uuid_input_schema(
+                true,
+                "Read this session without switching it; omitted or null pins the active session.",
+            ),
+        );
         if properties.contains_key("id") {
-            properties.insert("id".into(), json!({"type":"string","format":"uuid"}));
+            properties.insert(
+                "id".into(),
+                legacy_uuid_input_schema(false, "Finding UUID."),
+            );
         }
         if properties.contains_key("limit") {
             properties.insert("limit".into(), json!({
@@ -3500,6 +3515,12 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
                 properties.insert(field.into(), json!({"type":"string","minLength":1,"pattern":"\\S","description":"Nonblank metadata filter. All supplied filters must match; invalid filters are rejected."}));
             }
         }
+    }
+    if operation == "session.rename" {
+        properties.insert(
+            "id".into(),
+            legacy_uuid_input_schema(false, "Session UUID."),
+        );
     }
     let mut schema = json!({
         "type": "object",
@@ -13808,10 +13829,9 @@ mod tests {
             assert!(plan["api"]["body"].is_null());
             let spec = operation_spec(operation).unwrap();
             assert_eq!(spec.input_schema["additionalProperties"], false);
-            assert_eq!(
-                spec.input_schema["properties"]["session_id"]["format"],
-                "uuid"
-            );
+            let session_id_schema = &spec.input_schema["properties"]["session_id"];
+            assert!(session_id_schema.get("format").is_none());
+            assert_eq!(session_id_schema["type"], json!(["string", "null"]));
         }
     }
 
@@ -16021,14 +16041,16 @@ mod tests {
             assert_eq!(plan["operation"], operation);
             let spec = super::operation_spec(operation).unwrap();
             assert_eq!(spec.input_schema["additionalProperties"], false);
-            assert_eq!(
-                spec.input_schema["properties"][if operation == "session.rename" {
-                    "id"
-                } else {
-                    "session_id"
-                }]["format"],
-                "uuid"
-            );
+            if operation == "session.rename" {
+                let id_schema = &spec.input_schema["properties"]["id"];
+                assert!(id_schema.get("format").is_none());
+                assert_eq!(id_schema["type"], "string");
+            } else {
+                assert_eq!(
+                    spec.input_schema["properties"]["session_id"]["format"],
+                    "uuid"
+                );
+            }
         }
     }
 
