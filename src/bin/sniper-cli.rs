@@ -10186,17 +10186,29 @@ fn output_format_from_raw_value(value: &str) -> Option<OutputFormat> {
 
 fn cli_parse_error_operation(args: &[String]) -> String {
     let mut tokens = Vec::new();
-    let mut skip_next = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
+    let mut args = args.iter().peekable();
+    let mut positional_only = false;
+    while let Some(arg) = args.next() {
+        if positional_only {
+            tokens.push(arg.as_str());
             continue;
         }
-        if arg == "--output" || arg == "--api" {
-            skip_next = true;
+        if arg == "--" {
+            positional_only = true;
             continue;
         }
-        if arg.starts_with("--output=") || arg.starts_with("--api=") || arg.starts_with('-') {
+        // Call input can precede the operation. Never promote its JSON or file
+        // path into error metadata, even when clap rejects a later argument.
+        if matches!(arg.as_str(), "--output" | "--api" | "--input") {
+            if args
+                .peek()
+                .is_some_and(|value| !value.starts_with('-') || value.as_str() == "-")
+            {
+                args.next();
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
             continue;
         }
         tokens.push(arg.as_str());
@@ -13096,6 +13108,54 @@ mod tests {
             cli_parse_error_operation(&browser_args),
             "capture.browser.open"
         );
+    }
+
+    #[test]
+    fn parse_error_operation_does_not_confuse_call_input_with_operation() {
+        for (args, expected) in [
+            (
+                vec![
+                    "call",
+                    "--input",
+                    r#"{"private":"saved metadata"}"#,
+                    "findings.list",
+                    "--unknown",
+                ],
+                "findings.list",
+            ),
+            (
+                vec![
+                    "call",
+                    "--input",
+                    "@local.json",
+                    "saved.v1.http.list",
+                    "--unknown",
+                ],
+                "saved.v1.http.list",
+            ),
+            (
+                vec!["call", "--input=-", "findings.list", "--unknown"],
+                "findings.list",
+            ),
+            (vec!["call", "findings.list", "--input"], "findings.list"),
+            (vec!["call", "--input"], "call"),
+            (
+                vec!["call", "--input", "-", "findings.list", "--unknown"],
+                "findings.list",
+            ),
+            (
+                vec!["call", "--input", "--output", "compact", "findings.list"],
+                "findings.list",
+            ),
+            (
+                vec!["--api", "--output", "compact", "call", "findings.list"],
+                "findings.list",
+            ),
+            (vec!["call", "--", "--api", "--unknown"], "--api"),
+        ] {
+            let raw_args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(cli_parse_error_operation(&raw_args), expected);
+        }
     }
 
     #[test]
