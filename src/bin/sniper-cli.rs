@@ -4642,6 +4642,12 @@ fn command_from_call_args(args: CallArgs) -> Result<Command> {
 }
 
 fn parse_call_input(source: Option<String>) -> Result<Value> {
+    // Local paths may contain words used by the legacy error classifier. Keep
+    // input failures typed so those words cannot change the code or retry hint.
+    load_call_input(source).map_err(|error| anyhow!(CallInputError(error.to_string())))
+}
+
+fn load_call_input(source: Option<String>) -> Result<Value> {
     let Some(source) = source else {
         return Ok(json!({}));
     };
@@ -10872,6 +10878,17 @@ async fn run_saved_call(
 }
 
 #[derive(Debug)]
+struct CallInputError(String);
+
+impl fmt::Display for CallInputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CallInputError {}
+
+#[derive(Debug)]
 struct CliPartialApplyError {
     message: String,
     details: Value,
@@ -11106,6 +11123,18 @@ fn clap_error_payload(error: &clap::Error) -> CliErrorPayload {
 }
 
 fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload {
+    if let Some(input) = error.downcast_ref::<CallInputError>() {
+        return CliErrorPayload {
+            code: "INVALID_INPUT",
+            message: input.to_string(),
+            hint: Some(
+                "Check `sniper-cli schema input <operation>` or run the command with --help.",
+            ),
+            retryable: false,
+            details: json!({ "operation": operation }),
+            exit_code: 2,
+        };
+    }
     if let Some(managed) = error.downcast_ref::<sniper::skill_managed::ManagedSkillError>() {
         let (message, hint) = match (operation, managed.code) {
             ("skills.stage_update", "already_current") => (
