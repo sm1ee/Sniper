@@ -199,3 +199,168 @@ fn ambiguous_direct_tokens_use_only_known_group_fallbacks() {
         assert_eq!(parse_error(&args)["operation"], expected, "{args:?}");
     }
 }
+
+#[cfg(unix)]
+mod non_unicode {
+    use serde_json::Value;
+    use std::{ffi::OsString, fs, os::unix::ffi::OsStringExt, process::Command};
+    use uuid::Uuid;
+
+    fn check(args: &[&[u8]], operation: &str, compact: bool) {
+        let root = std::env::temp_dir().join(format!("sniper-nonunicode-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_sniper-cli"))
+            .env_clear()
+            .env("HOME", root.join("home"))
+            .env("USERPROFILE", root.join("home"))
+            .env("CODEX_HOME", root.join("codex-home"))
+            .env("SNIPER_DATA_DIR", root.join("data"))
+            .current_dir(&root)
+            .arg("--dry-run")
+            .args(args.iter().map(|arg| OsString::from_vec(arg.to_vec())))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelope["ok"], false);
+        assert_eq!(envelope["operation"], operation);
+        assert_eq!(envelope["error"]["code"], "INVALID_INPUT");
+        assert_eq!(envelope["error"]["details"]["kind"], "InvalidUtf8");
+        assert_eq!(envelope["error"]["retryable"], false);
+        assert_eq!(
+            envelope["schema_version"],
+            if operation.starts_with("saved.v1.") {
+                "saved.v1"
+            } else {
+                "2026-06-22"
+            }
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+        assert!(!stdout.contains('\u{fffd}'));
+        assert_eq!(stdout.lines().count() == 1, compact, "{stdout}");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_unicode_operands_keep_canonical_operation_metadata() {
+        let cases: &[(&[&[u8]], &str)] = &[
+            (
+                &[
+                    b"call",
+                    b"manifest",
+                    b"--input",
+                    b"@SYNTHETIC_PRIVATE_\xff.json",
+                ],
+                "manifest",
+            ),
+            (
+                &[
+                    b"call",
+                    b"--input",
+                    b"@SYNTHETIC_PRIVATE_\xff.json",
+                    b"saved.v1.http.list",
+                ],
+                "saved.v1.http.list",
+            ),
+            (
+                &[
+                    b"call",
+                    b"--input=@SYNTHETIC_PRIVATE_\xff.json",
+                    b"manifest",
+                ],
+                "manifest",
+            ),
+            (
+                &[
+                    b"skills",
+                    b"--codex-dir",
+                    b"SYNTHETIC_PRIVATE_\xff",
+                    b"status",
+                    b"--unknown",
+                ],
+                "skills.status",
+            ),
+            (
+                &[
+                    b"skills",
+                    b"--codex-dir=SYNTHETIC_PRIVATE_\xff",
+                    b"status",
+                    b"--unknown",
+                ],
+                "skills.status",
+            ),
+        ];
+        for (args, operation) in cases {
+            let mut compact_args = vec![b"--output".as_slice(), b"compact".as_slice()];
+            compact_args.extend_from_slice(args);
+            check(&compact_args, operation, true);
+        }
+    }
+
+    #[test]
+    fn invalid_unicode_command_tokens_use_private_safe_fallbacks() {
+        let cases: &[(&[&[u8]], &str)] = &[
+            (&[b"call", b"SYNTHETIC_PRIVATE_\xff"], "call"),
+            (&[b"call", b"--", b"SYNTHETIC_PRIVATE_\xff"], "call"),
+            (&[b"SYNTHETIC_PRIVATE_\xff"], "parse"),
+            (&[b"skills", b"SYNTHETIC_PRIVATE_\xff"], "skills"),
+            (&[b"--SYNTHETIC_PRIVATE_\xff"], "parse"),
+            (
+                &[
+                    b"--api",
+                    b"--SYNTHETIC_PRIVATE_\xff",
+                    b"call",
+                    b"SYNTHETIC_PRIVATE_OPERATION",
+                ],
+                "parse",
+            ),
+            (
+                &[
+                    b"call",
+                    b"--SYNTHETIC_PRIVATE_\xff",
+                    b"SYNTHETIC_PRIVATE_OPERATION",
+                ],
+                "call",
+            ),
+        ];
+        for (args, operation) in cases {
+            check(args, operation, false);
+        }
+    }
+
+    #[test]
+    fn invalid_unicode_arguments_preserve_output_format_selection() {
+        for args in [
+            vec![
+                b"--output".as_slice(),
+                b"SYNTHETIC_PRIVATE_\xff",
+                b"manifest",
+            ],
+            vec![b"--output=SYNTHETIC_PRIVATE_\xff".as_slice(), b"manifest"],
+        ] {
+            check(&args, "manifest", false);
+        }
+        for args in [
+            vec![
+                b"call".as_slice(),
+                b"--input",
+                b"SYNTHETIC_PRIVATE_\xff",
+                b"manifest",
+                b"--output",
+                b"compact",
+            ],
+            vec![
+                b"--output=compact".as_slice(),
+                b"call",
+                b"manifest",
+                b"--input",
+                b"SYNTHETIC_PRIVATE_\xff",
+            ],
+        ] {
+            check(&args, "manifest", true);
+        }
+    }
+}

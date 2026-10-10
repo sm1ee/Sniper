@@ -1,5 +1,7 @@
 use std::{
-    env, fmt, fs,
+    env,
+    ffi::OsStr,
+    fmt, fs,
     io::{self, Read, Write},
     net::IpAddr,
     path::{Path, PathBuf},
@@ -5873,13 +5875,23 @@ async fn main() {
             error.exit();
         }
         Err(error) => {
-            let raw_args: Vec<String> = env::args().skip(1).collect();
+            let raw_args: Vec<_> = env::args_os().skip(1).collect();
             let operation = cli_parse_error_operation(&raw_args);
             let _ = CLI_OUTPUT_CONTEXT.set(CliOutputContext {
                 format: cli_output_format_from_raw_args(&raw_args),
                 operation: operation.clone(),
                 success_envelope: true,
             });
+            // Some clap diagnostics render rejected OS strings lossily. Keep
+            // those argument bytes out of JSON and the stderr fallback alike.
+            let error = if raw_args.iter().any(|arg| arg.to_str().is_none()) {
+                clap::Error::raw(
+                    clap::error::ErrorKind::InvalidUtf8,
+                    "Command-line arguments must contain valid Unicode.",
+                )
+            } else {
+                error
+            };
             let payload = clap_error_payload(&error);
             if let Err(write_error) = print_error_json(&operation, payload.exit_code, &payload) {
                 eprintln!("sniper-cli: failed to write JSON error output: {write_error}");
@@ -10913,24 +10925,26 @@ struct CliErrorPayload {
     exit_code: i32,
 }
 
-fn cli_output_format_from_raw_args(args: &[String]) -> OutputFormat {
+fn cli_output_format_from_raw_args(args: &[impl AsRef<OsStr>]) -> OutputFormat {
     for (index, arg) in args.iter().enumerate() {
-        if let Some(value) = arg.strip_prefix("--output=") {
+        let arg = arg.as_ref();
+        if let Some(value) = arg.as_encoded_bytes().strip_prefix(b"--output=") {
             return output_format_from_raw_value(value).unwrap_or(OutputFormat::Pretty);
         }
         if arg == "--output" {
             if let Some(value) = args.get(index + 1) {
-                return output_format_from_raw_value(value).unwrap_or(OutputFormat::Pretty);
+                return output_format_from_raw_value(value.as_ref().as_encoded_bytes())
+                    .unwrap_or(OutputFormat::Pretty);
             }
         }
     }
     OutputFormat::Pretty
 }
 
-fn output_format_from_raw_value(value: &str) -> Option<OutputFormat> {
+fn output_format_from_raw_value(value: &[u8]) -> Option<OutputFormat> {
     match value {
-        "compact" => Some(OutputFormat::Compact),
-        "pretty" => Some(OutputFormat::Pretty),
+        b"compact" => Some(OutputFormat::Compact),
+        b"pretty" => Some(OutputFormat::Pretty),
         _ => None,
     }
 }
@@ -10954,16 +10968,30 @@ fn cli_parse_error_option_takes_value(command: &clap::Command, name: &str) -> Op
         })
 }
 
-fn cli_parse_error_operation(args: &[String]) -> String {
+fn cli_parse_error_long_option(arg: &OsStr) -> Option<(&str, bool)> {
+    let option = arg.as_encoded_bytes().strip_prefix(b"--")?;
+    let (name, inline_value) = option
+        .iter()
+        .position(|&byte| byte == b'=')
+        .map_or((option, false), |index| (&option[..index], true));
+    // Only the name must be Unicode: an inline operand may contain arbitrary
+    // OS bytes, and still must not change option arity or become an operation.
+    Some((std::str::from_utf8(name).ok()?, inline_value))
+}
+
+fn cli_parse_error_operation(args: &[impl AsRef<OsStr>]) -> String {
     let cli = Cli::command();
     let mut command = &cli;
     let mut path = Vec::new();
-    let mut args = args.iter().peekable();
+    let mut args = args.iter().map(|arg| arg.as_ref()).peekable();
     let mut positional_only = false;
     while let Some(arg) = args.next() {
         let is_call = path.as_slice() == ["call"];
         if positional_only {
-            return arg.clone();
+            if let Some(arg) = arg.to_str() {
+                return arg.to_owned();
+            }
+            break;
         }
         if arg == "--" {
             if is_call {
@@ -10972,15 +11000,15 @@ fn cli_parse_error_operation(args: &[String]) -> String {
             }
             break;
         }
-        if arg.starts_with('-') {
+        if arg.as_encoded_bytes().starts_with(b"-") {
             let takes_value = if is_call {
                 // Call operations are free-form, including unknown names. Keep
                 // their existing input skipping and delimiter semantics.
-                matches!(arg.as_str(), "--output" | "--api" | "--input")
-            } else if let Some(option) = arg.strip_prefix("--") {
-                let (name, inline_value) = option
-                    .split_once('=')
-                    .map_or((option, false), |(name, _)| (name, true));
+                if arg.to_str().is_none() && cli_parse_error_long_option(arg).is_none() {
+                    break;
+                }
+                matches!(arg.as_encoded_bytes(), b"--output" | b"--api" | b"--input")
+            } else if let Some((name, inline_value)) = cli_parse_error_long_option(arg) {
                 let Some(takes_value) = cli_parse_error_option_takes_value(&cli, name) else {
                     // An unknown option may own the following token. Do not
                     // mistake that operand for a declared command or action.
@@ -10991,16 +11019,20 @@ fn cli_parse_error_operation(args: &[String]) -> String {
                 break;
             };
             if takes_value
-                && args
-                    .peek()
-                    .is_some_and(|value| !value.starts_with('-') || value.as_str() == "-")
+                && args.peek().is_some_and(|value| {
+                    let bytes = value.as_encoded_bytes();
+                    !bytes.starts_with(b"-") || bytes == b"-"
+                })
             {
                 args.next();
             }
             continue;
         }
+        let Some(arg) = arg.to_str() else {
+            break;
+        };
         if is_call {
-            return arg.clone();
+            return arg.to_owned();
         }
         let Some(child) = command.find_subcommand(arg) else {
             break;
@@ -11800,11 +11832,11 @@ mod tests {
         browser_open_body, build_annotations_payload, build_editable_raw_request,
         build_editable_raw_request_with_version, build_oast_configure_update, clap_error_payload,
         cli_data_dir, cli_error_payload, cli_output_format_from_raw_args,
-        cli_parse_error_operation, cli_partial_apply_error, command_from_call_args,
-        command_from_operation_input, command_input_preview, default_cli_data_dir,
-        default_editable_request, discover_api_base_url, discover_api_base_url_from_data_dir,
-        dry_run_command, ensure_http_replay_tab, explicit_or_active_session_id,
-        failed_record_output, fuzzer_active_target_for_request,
+        cli_parse_error_long_option, cli_parse_error_operation, cli_partial_apply_error,
+        command_from_call_args, command_from_operation_input, command_input_preview,
+        default_cli_data_dir, default_editable_request, discover_api_base_url,
+        discover_api_base_url_from_data_dir, dry_run_command, ensure_http_replay_tab,
+        explicit_or_active_session_id, failed_record_output, fuzzer_active_target_for_request,
         fuzzer_target_request_authority_for_request, history_list_path, history_search_path,
         install_skills, json_value_with_session_and_workspace_save_error, manifest_operations,
         next_replay_tab_sequence, normalize_api_base_url, normalize_replay_port,
@@ -14043,6 +14075,95 @@ mod tests {
             cli_parse_error_operation(&browser_args),
             "capture.browser.open"
         );
+    }
+
+    #[test]
+    fn parse_error_helpers_accept_os_strings_without_changing_unicode_behavior() {
+        use std::ffi::{OsStr, OsString};
+
+        let args: Vec<OsString> = [
+            "--output=compact",
+            "call",
+            "--input",
+            "@synthetic-\u{96ea}.json",
+            "manifest",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(cli_parse_error_operation(&args), "manifest");
+        assert_eq!(
+            cli_output_format_from_raw_args(&args),
+            OutputFormat::Compact
+        );
+        assert_eq!(
+            cli_parse_error_long_option(OsStr::new("--input=synthetic-\u{96ea}")),
+            Some(("input", true))
+        );
+        assert_eq!(
+            cli_parse_error_operation(&[OsStr::new("call"), OsStr::new("unknown.\u{96ea}")]),
+            "unknown.\u{96ea}"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn parse_error_os_strings_preserve_non_unicode_operand_boundaries() {
+        use std::ffi::OsString;
+        #[cfg(unix)]
+        let invalid = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![0xff])
+        };
+        #[cfg(windows)]
+        let invalid = {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0xd800])
+        };
+        let mut inline = OsString::from("--input=");
+        inline.push(&invalid);
+        assert_eq!(cli_parse_error_long_option(&inline), Some(("input", true)));
+        for (args, expected) in [
+            (
+                vec![
+                    "call".into(),
+                    "--input".into(),
+                    invalid.clone(),
+                    "manifest".into(),
+                ],
+                "manifest",
+            ),
+            (vec!["call".into(), inline, "manifest".into()], "manifest"),
+            (
+                vec![
+                    "skills".into(),
+                    "--codex-dir".into(),
+                    invalid.clone(),
+                    "status".into(),
+                ],
+                "skills.status",
+            ),
+            (vec!["call".into(), invalid.clone()], "call"),
+            (vec![invalid.clone()], "parse"),
+        ] {
+            assert_eq!(cli_parse_error_operation(&args), expected);
+        }
+        assert_eq!(
+            cli_output_format_from_raw_args(&[OsString::from("--output"), invalid.clone()]),
+            OutputFormat::Pretty
+        );
+        // The fallback must not change clap's acceptance of OS-native path
+        // operands; only the rejected-argument diagnostic path is altered.
+        assert!(Cli::try_parse_from([
+            OsString::from("sniper-cli"),
+            "--dry-run".into(),
+            "skills".into(),
+            "status".into(),
+            "--codex".into(),
+            "--codex-dir".into(),
+            invalid,
+        ])
+        .is_ok());
     }
 
     #[test]
