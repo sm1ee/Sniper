@@ -15,7 +15,7 @@ const functions = [
   "buildEditableRawRequest", "mergeHeaders", "headerNameEquals", "replayRequestTextsEquivalent",
   "getRepeaterTargetConfig", "getActiveReplayTab", "getReplayTabVisualOrder", "isReplayTabSending", "sessionQueryPath",
   "createReplayTab", "ensureRepeaterTab", "currentSessionId", "workspaceSnapshotMatchesActiveSession",
-  "closeRepeaterTab", "preserveActiveHttpReplayDraftBeforeClose", "validateManualRepeaterTargetInput", "isLikelyIpv6Literal",
+  "closeRepeaterTab", "preserveActiveHttpReplayDraftBeforeNavigation", "validateManualRepeaterTargetInput", "isLikelyIpv6Literal",
   "persistReplayTabMetadataEdit",
   "snapshotReplayTabsState", "cloneReplayTabState", "cloneRepeaterHistoryEntry", "restoreReplayTabsState",
   "scheduleWorkspaceStateSave", "flushQueuedWorkspaceStateSave", "runQueuedWorkspaceStateSaves", "saveWorkspaceState",

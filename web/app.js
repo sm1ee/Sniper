@@ -16891,6 +16891,7 @@ async function followRedirect() {
 }
 
 function openBlankReplayTab() {
+  if (!preserveActiveHttpReplayDraftBeforeNavigation(getActiveReplayTab(), "opening a new tab")) return;
   const tab = createReplayTab();
   state.replayTabs.push(tab);
   state.activeReplayTabId = tab.id;
@@ -16941,8 +16942,9 @@ function duplicateActiveReplayTab() {
     return;
   }
 
+  if (!preserveActiveHttpReplayDraftBeforeNavigation(tab, "duplicating this tab")) return;
   const fallback = tab.baseRequest || createDefaultEditableRequest();
-  const requestText = tab.requestText || buildEditableRawRequest(fallback);
+  const requestText = tab.requestText ?? buildEditableRawRequest(fallback);
   let request = cloneEditableRequest(fallback);
   try {
     request = parseEditableRawRequest(requestText, fallback);
@@ -17431,8 +17433,8 @@ function scrollActiveReplayTabIntoView() {
   }
 }
 
-function preserveActiveHttpReplayDraftBeforeClose(tab) {
-  if (tab.type === "websocket" || tab.id !== state.activeReplayTabId) return true;
+function preserveActiveHttpReplayDraftBeforeNavigation(tab, action) {
+  if (!tab || tab.type === "websocket" || tab.id !== state.activeReplayTabId) return true;
 
   // Read every control before touching the model: normal editor synchronization
   // also refreshes the toolbar and can erase a different, still-invalid draft.
@@ -17457,7 +17459,7 @@ function preserveActiveHttpReplayDraftBeforeClose(tab) {
     ? els.replayRequestHighlight?.querySelector?.(".hex-byte-input") : null;
 
   if (targetChanged && !validateManualRepeaterTargetInput(host, port).valid) {
-    showToast("Finish or correct the target fields before closing this tab; your draft is still here.", "error", 6000);
+    showToast(`Finish or correct the target fields before ${action}; your draft is still here.`, "error", 6000);
     return false;
   }
   if (hexInput) {
@@ -17466,14 +17468,14 @@ function preserveActiveHttpReplayDraftBeforeClose(tab) {
     if (!Number.isSafeInteger(index) || index < 0 || !tab.requestBytes
       || index >= tab.requestBytes.length || !/^[0-9a-f]{1,2}$/i.test(value)
       || parseInt(value, 16) !== tab.requestBytes[index]) {
-      // Its delayed blur commit belongs to the current DOM. Closing first would
+      // Its delayed blur commit belongs to the current DOM. Navigating first would
       // destroy that input before the byte reaches the retained tab object.
-      showToast("Finish the byte edit before closing this tab; your draft is still here.", "error", 6000);
+      showToast(`Finish the byte edit before ${action}; your draft is still here.`, "error", 6000);
       return false;
     }
   }
   if (versionChanged && (tab.requestBytes || version !== normalizeReplayHttpVersionMode(version))) {
-    showToast("Apply the HTTP version change before closing this tab; your draft is still here.", "error", 6000);
+    showToast(`Apply the HTTP version change before ${action}; your draft is still here.`, "error", 6000);
     return false;
   }
 
@@ -17491,7 +17493,7 @@ function preserveActiveHttpReplayDraftBeforeClose(tab) {
   const targetModelChanged = targetChanged && (nextTarget.host !== target.host
     || nextTarget.port !== target.port || nextTarget.scheme !== target.scheme);
 
-  // The close retains this object for rollback. Preserve supported edits there
+  // Preserve supported edits before the shared editor displays another tab,
   // without re-rendering or parsing partially typed text into a different draft.
   if (textChanged) {
     tab.requestText = requestText;
@@ -17519,7 +17521,7 @@ async function closeRepeaterTab(id, pendingRename = null) {
     return;
   }
   const closingTab = state.replayTabs[index];
-  if (!preserveActiveHttpReplayDraftBeforeClose(closingTab)) return;
+  if (!preserveActiveHttpReplayDraftBeforeNavigation(closingTab, "closing this tab")) return;
   // The strip can finish a rename with the same click; a refused close must
   // leave that input and its pending save untouched as well.
   if (pendingRename) commitReplayTabRename(pendingRename.id, pendingRename.value);
