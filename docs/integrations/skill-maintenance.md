@@ -92,13 +92,13 @@ sniper-cli skills stage-update --codex --staging-dir /tmp/sniper-skill-candidate
 sniper-cli skills stage-update --codex --staging-dir /tmp/sniper-skill-candidate --yes
 ```
 
-The stage command writes only the bundled candidate and a completion receipt in
+The stage command writes only the bundled candidate and a staging receipt in
 the new directory. It never replaces active `SKILL.md`, including when another
 editor changes that file during staging. A successful result explicitly says
-`activated:false`. Existing staging paths are not overwritten. A failure may
-leave an incomplete new staging directory; keep it for inspection and use a new
-path for a deliberate retry. Do not treat candidate-file existence alone as a
-successful stage.
+`activated:false`. Existing staging paths are not overwritten. Failed or
+interrupted operations can leave partial or complete visible files; keep them
+for inspection and use a new path for a deliberate retry. Neither candidate-file
+existence nor a parseable receipt alone proves successful completion or durability.
 
 `--dry-run` validates command input only. It does not read installed files,
 reserve a destination, verify enrollment, or guarantee that execution will
@@ -147,10 +147,15 @@ merely to obtain an enrolled status.
 Input errors exit 2. A safely refused or failed enrollment/staging operation
 returns a structured `MANAGED_SKILL_ERROR`, exits 5, and includes a stable reason
 under `error.details.reason`. It is not automatically retryable. Inspect the
-preview and any partial output before making a new deliberate attempt. The
-receipt and version fields describe the recorded baseline; differing version
-strings alone do not prove an upgrade or downgrade. Candidate eligibility is
-based on byte hashes.
+command result and any output, and rerun `skills status` and `skills update-preview`
+for the selected agent before making a new deliberate attempt. Enrollment can
+leave a valid visible receipt that preview recognizes as a baseline even when
+the command reports a write or sync error. Preserve existing receipts and staged
+files; do not overwrite them or reuse a staging path to force a retry.
+
+The receipt and version fields describe the recorded baseline; differing version
+strings alone do not prove an upgrade or downgrade. Candidate eligibility is based
+on byte hashes.
 
 Common refusals provide operation-specific guidance:
 

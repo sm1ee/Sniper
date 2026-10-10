@@ -264,8 +264,10 @@ pub fn preview_skill_update(
 }
 
 /// Enroll only an exact copy of the current bundle. Never replace a receipt.
-/// A partial receipt from a failed write stays invalid; it cannot confer ownership
-/// or update permission, and a later call will not silently overwrite it.
+/// A write or sync error can leave a partial or complete visible receipt. Invalid
+/// receipts are rejected, but preview may recognize a valid receipt even after
+/// enrollment reports an error. Receipt presence does not prove that all
+/// completion checks succeeded; later calls never overwrite it.
 pub fn enroll_skill(
     agent: &str,
     root: &Path,
@@ -328,8 +330,9 @@ fn encode_receipt(value: &impl Serialize) -> Result<Vec<u8>> {
 
 /// Stage a changed bundle only when active bytes still match the enrollment.
 /// The parent must exist, the output directory must be new and outside the active
-/// skill folder, and the receipt is written last as the completion marker. A
-/// failure leaves the partial directory intact and never removes competing files.
+/// skill folder, and the receipt is written last. Errors can leave partial or
+/// complete visible output, so receipt presence does not prove completion or
+/// durability. Existing output is preserved, including competing files.
 pub fn stage_skill_update(
     agent: &str,
     root: &Path,
