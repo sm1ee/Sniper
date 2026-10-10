@@ -308,6 +308,36 @@ mod tests {
     }
 
     #[test]
+    fn packaged_skill_maintenance_guidance_stays_in_sync() {
+        fn maintenance(template: &str) -> String {
+            template
+                .lines()
+                .skip_while(|line| *line != "## Skill maintenance")
+                .skip(1)
+                .take_while(|line| !line.starts_with("## "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        let section = maintenance(super::CODEX_SKILL_TEMPLATE);
+        assert_eq!(section, maintenance(super::CLAUDE_SKILL_TEMPLATE));
+        for term in [
+            "skills status",
+            "skills update-preview",
+            "skills.enroll",
+            "skills.stage_update",
+            "activated:false",
+            "does not enable automatic updates",
+            "overwrite",
+            "loaded context",
+        ] {
+            assert!(
+                section.contains(term),
+                "missing maintenance guidance: {term}"
+            );
+        }
+    }
+
+    #[test]
     fn install_skill_folder_rejects_path_like_names() {
         let root = std::env::temp_dir().join(format!("sniper-skill-test-{}", uuid::Uuid::new_v4()));
 

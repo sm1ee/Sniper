@@ -480,6 +480,14 @@ Completed inspections exit zero, including missing/error rows: automation must
 check each row's `status` and `error_code`. Invalid arguments or failure to
 resolve a selected path exit nonzero. Existing install behavior is unchanged.
 
+### Preview and stage skill updates
+
+`skills update-preview` compares active installed bytes with this binary's bundle
+without writing. Experimental enrollment and staging can preserve a
+known baseline; they do not enable startup updates or activate a candidate.
+See [safe skill maintenance](docs/integrations/skill-maintenance.md) for the
+workflow, receipt states, and manual activation limitations.
+
 AI agents can drive the full workflow through CLI — capture, scope, replay, fuzz — no UI scraping needed.
 
 - [Using Sniper from Claude Code](docs/integrations/claude-code.md)

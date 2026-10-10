@@ -1178,6 +1178,34 @@ enum SkillsCommand {
     Install(SkillsInstallArgs),
     /// Inspect installed skill hashes on this CLI host without changing files.
     Status(SkillsInstallArgs),
+    /// Experimental: record local enrollment for one installed, exact bundled skill.
+    Enroll(SingleSkillArgs),
+    /// Compare local files and enrollment with this CLI's bundle; never writes.
+    UpdatePreview(SkillsInstallArgs),
+    /// Experimental: stage a bundled candidate in a new directory without activating it.
+    StageUpdate(SkillsStageArgs),
+}
+
+#[derive(Args, Debug, Default)]
+#[command(group(ArgGroup::new("skill_agent").args(["codex", "claude"]).required(true)))]
+struct SingleSkillArgs {
+    #[arg(long)]
+    codex: bool,
+    #[arg(long)]
+    claude: bool,
+    #[arg(long)]
+    codex_dir: Option<PathBuf>,
+    #[arg(long)]
+    claude_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct SkillsStageArgs {
+    #[command(flatten)]
+    target: SingleSkillArgs,
+    /// New local directory for candidate and staging receipt; it must not exist.
+    #[arg(long)]
+    staging_dir: PathBuf,
 }
 
 #[derive(Args, Debug, Default)]
@@ -2249,6 +2277,9 @@ impl SkillsCommand {
         match self {
             SkillsCommand::Install(_) => "skills.install",
             SkillsCommand::Status(_) => "skills.status",
+            SkillsCommand::Enroll(_) => "skills.enroll",
+            SkillsCommand::UpdatePreview(_) => "skills.update_preview",
+            SkillsCommand::StageUpdate(_) => "skills.stage_update",
         }
     }
 }
@@ -2300,6 +2331,33 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &[],
             vec![json!({"all":true})],
+        ),
+        op(
+            "skills.enroll",
+            "skills enroll <--codex|--claude>",
+            "Experimental: record explicit local enrollment of one exact bundled skill. Does not permit automatic updates or change SKILL.md.",
+            Write,
+            true,
+            &[],
+            vec![json!({"codex":true,"codex_dir":"/tmp/example-skills"})],
+        ),
+        op(
+            "skills.update_preview",
+            "skills update-preview",
+            "Compare local skills and enrollment against this CLI's bundle without changing files. Unmanaged files remain unmanaged.",
+            Read,
+            false,
+            &[],
+            vec![json!({"all":true}), json!({"codex":true,"codex_dir":"/tmp/example-skills"})],
+        ),
+        op(
+            "skills.stage_update",
+            "skills stage-update <--codex|--claude> --staging-dir <new-directory>",
+            "Experimental: stage one enrolled, unchanged skill's bundled update and receipt in a new local directory. Does not activate it or replace the active SKILL.md.",
+            Write,
+            true,
+            &["staging_dir"],
+            vec![json!({"codex":true,"codex_dir":"/tmp/example-skills","staging_dir":"/tmp/example-skill-candidate"})],
         ),
         op(
             "session.list",
@@ -2973,6 +3031,7 @@ fn op(
             .or_else(|| session_list_output_schema(operation))
             .or_else(|| session_read_output_schema(operation))
             .or_else(|| skills_status_output_schema(operation))
+            .or_else(|| skills_managed_output_schema(operation))
             .unwrap_or_else(|| {
                 json!({
                     "type": "object",
@@ -3114,8 +3173,98 @@ fn skills_status_output_schema(operation: &str) -> Option<Value> {
     }))
 }
 
+fn skills_managed_output_schema(operation: &str) -> Option<Value> {
+    let string = json!({"type":"string"});
+    let hash = json!({"type":"string","pattern":"^[0-9a-f]{64}$"});
+    let mut entry = json!({
+        "type":"object", "additionalProperties":false,
+        "required":["agent","path","receipt_path"],
+        "properties":{
+            "agent":{"type":"string","enum":["codex","claude"]},
+            "path":{"type":"string","description":"Absolute active local SKILL.md path; source text is never returned."},
+            "receipt_path":{"type":"string"}
+        }
+    });
+    let (required, properties) = match operation {
+        "skills.update_preview" => (
+            json!([
+                "installed_sha256",
+                "bundled_sha256",
+                "bundled_version",
+                "enrolled_sha256",
+                "enrolled_version",
+                "state",
+                "stage_eligible"
+            ]),
+            json!({
+                "installed_sha256":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},
+                "bundled_sha256":hash,
+                "bundled_version":string,
+                "enrolled_sha256":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},
+                "enrolled_version":{"type":["string","null"],"description":"Recorded enrollment version, not inferred provenance."},
+                "state":{"type":"string","enum":["unmanaged","current","update_available","modified","missing","error"],"description":"Unmanaged files are never adopted by preview. Update availability requires enrolled bytes still matching the active file."},
+                "stage_eligible":{"type":"boolean"},
+                "error_code":{"type":"string","description":"Stable local inspection error code; no file contents."}
+            }),
+        ),
+        "skills.enroll" => (
+            json!([
+                "enrolled_sha256",
+                "enrolled_version",
+                "allows_automatic_updates"
+            ]),
+            json!({
+                "enrolled_sha256":hash,
+                "enrolled_version":string,
+                "allows_automatic_updates":{"type":"boolean","const":false}
+            }),
+        ),
+        "skills.stage_update" => (
+            json!([
+                "staging_dir",
+                "candidate_path",
+                "installed_sha256",
+                "bundled_sha256",
+                "bundled_version",
+                "activated"
+            ]),
+            json!({
+                "staging_dir":string,
+                "candidate_path":{"type":"string","description":"Staged candidate only; active SKILL.md remains unchanged."},
+                "installed_sha256":hash,
+                "bundled_sha256":hash,
+                "bundled_version":string,
+                "activated":{"type":"boolean","const":false}
+            }),
+        ),
+        _ => return None,
+    };
+    entry["required"]
+        .as_array_mut()?
+        .extend(required.as_array()?.iter().cloned());
+    entry["properties"].as_object_mut()?.extend(
+        properties
+            .as_object()?
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    if operation == "skills.update_preview" {
+        Some(json!({
+            "type":"object","additionalProperties":false,
+            "required":["scope","bundled_version","entries"],
+            "properties":{
+                "scope":{"type":"string","const":"cli_host"},
+                "bundled_version":string,
+                "entries":{"type":"array","minItems":1,"maxItems":2,"items":entry}
+            }
+        }))
+    } else {
+        Some(entry)
+    }
+}
+
 fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
-    if operation == "skills.status" {
+    if matches!(operation, "skills.status" | "skills.update_preview") {
         return json!({
             "type":"object", "additionalProperties":false, "required":[],
             "properties":{
@@ -3131,6 +3280,26 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
                 {"required":["all"],"properties":{"all":{"const":true}}}
             ]
         });
+    }
+    if matches!(operation, "skills.enroll" | "skills.stage_update") {
+        let mut schema = json!({
+            "type":"object", "additionalProperties":false, "required":[],
+            "properties":{
+                "codex":{"type":["boolean","null"],"default":false},
+                "claude":{"type":["boolean","null"],"default":false},
+                "codex_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Codex skills root on the CLI host; omission or null uses the install default."},
+                "claude_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Claude skills root on the CLI host; omission or null uses the install default."}
+            },
+            "oneOf":[
+                {"required":["codex"],"properties":{"codex":{"const":true},"claude":{"enum":[false,null]}}},
+                {"required":["claude"],"properties":{"claude":{"const":true},"codex":{"enum":[false,null]}}}
+            ]
+        });
+        if operation == "skills.stage_update" {
+            schema["required"] = json!(["staging_dir"]);
+            schema["properties"]["staging_dir"] = json!({"type":"string","minLength":1,"pattern":"^[^\\u0000]*$","description":"Explicit new local staging directory, which must not exist. The active SKILL.md is never replaced."});
+        }
+        return schema;
     }
     if matches!(
         operation,
@@ -3252,9 +3421,11 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "manifest" | "session.list" => &[],
         "schema" => &["kind", "operation"],
         "examples" => &["operation"],
-        "skills.install" | "skills.status" => {
+        "skills.install" | "skills.status" | "skills.update_preview" => {
             &["codex", "claude", "all", "codex_dir", "claude_dir"]
         }
+        "skills.enroll" => &["codex", "claude", "codex_dir", "claude_dir"],
+        "skills.stage_update" => &["codex", "claude", "codex_dir", "claude_dir", "staging_dir"],
         "session.create" => &["name"],
         "session.rename" => &["id", "name"],
         "findings.list" | "event_log.list" => &["session_id", "limit"],
@@ -3508,19 +3679,31 @@ fn command_input_preview(command: &Command) -> Value {
         Command::Fuzzer { command } => fuzzer_input_preview(command),
         Command::Sequence { command } => sequence_input_preview(command),
         Command::Skills { command } => match command {
-            SkillsCommand::Install(args) | SkillsCommand::Status(args) => json!({
+            SkillsCommand::Install(args)
+            | SkillsCommand::Status(args)
+            | SkillsCommand::UpdatePreview(args) => json!({
                 "codex": args.codex,
                 "claude": args.claude,
                 "all": args.all,
                 "codex_dir": args.codex_dir,
                 "claude_dir": args.claude_dir,
             }),
+            SkillsCommand::Enroll(args) => single_skill_input_preview(args),
+            SkillsCommand::StageUpdate(args) => {
+                let mut input = single_skill_input_preview(&args.target);
+                input["staging_dir"] = json!(args.staging_dir);
+                input
+            }
         },
         Command::History { command } => history_input_preview(command),
         Command::Intercept { command } => intercept_input_preview(command),
         Command::Websocket { command } => websocket_input_preview(command),
         Command::AutoReplace { command } => auto_replace_input_preview(command),
     }
+}
+
+fn single_skill_input_preview(args: &SingleSkillArgs) -> Value {
+    json!({"codex":args.codex,"claude":args.claude,"codex_dir":args.codex_dir,"claude_dir":args.claude_dir})
 }
 
 fn history_input_preview(command: &HistoryCommand) -> Value {
@@ -4280,6 +4463,18 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
         notes.push("Execution pins one session, reads its saved workspace revision, and posts only IDs, revision and any requested pin state to the dedicated endpoint once. An inferred session also guards against an active-session switch. Conflicts, redirects and ambiguous responses are not retried.");
         notes.push("Saved HTTP tabs only, including legacy empty types. No request parsing, body hydration, Replay send, WebSocket connection or full workspace replacement occurs. Success returns only acknowledgement metadata.");
     }
+    if matches!(
+        command,
+        Command::Skills {
+            command: SkillsCommand::Enroll(_)
+                | SkillsCommand::UpdatePreview(_)
+                | SkillsCommand::StageUpdate(_)
+        }
+    ) {
+        notes.push("CLI-host local only; no Sniper API discovery or contact. Dry-run validates arguments and describes the plan without reading skill files or checking eligibility.");
+        notes.push("Enrollment records explicit local opt-in only and does not enable startup or automatic updates. Preview never implies ownership of unmanaged files.");
+        notes.push("Staging requires an unchanged enrolled skill with different bundled bytes and a new output directory. It writes a candidate and receipt only; the active SKILL.md remains unchanged and nothing is activated.");
+    }
     if matches!(command, Command::Scanner { .. }) {
         notes.push("Dry-run is offline and validates supplied rule JSON before API discovery. It does not resolve sessions, fetch configuration, apply writes or inspect traffic.");
         notes.push("An omitted session_id is resolved once and pinned; writes also guard expected_active_session_id. Writes fetch a config_token and compare-and-swap once, preserving unrelated fields and custom rule order. Conflicts are not retried.");
@@ -4362,15 +4557,44 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         "examples" => Command::Examples {
             operation: call_optional(operation, input, "operation")?,
         },
-        "skills.status" => Command::Skills {
-            command: SkillsCommand::Status(SkillsInstallArgs {
+        "skills.status" | "skills.update_preview" => {
+            let args = SkillsInstallArgs {
                 codex: call_bool(operation, input, "codex")?,
                 claude: call_bool(operation, input, "claude")?,
                 all: call_bool(operation, input, "all")?,
                 codex_dir: call_optional_path(operation, input, "codex_dir")?,
                 claude_dir: call_optional_path(operation, input, "claude_dir")?,
-            }),
-        },
+            };
+            Command::Skills {
+                command: if operation == "skills.status" {
+                    SkillsCommand::Status(args)
+                } else {
+                    SkillsCommand::UpdatePreview(args)
+                },
+            }
+        }
+        "skills.enroll" | "skills.stage_update" => {
+            let target = SingleSkillArgs {
+                codex: call_bool(operation, input, "codex")?,
+                claude: call_bool(operation, input, "claude")?,
+                codex_dir: call_optional_path(operation, input, "codex_dir")?,
+                claude_dir: call_optional_path(operation, input, "claude_dir")?,
+            };
+            Command::Skills {
+                command: if operation == "skills.enroll" {
+                    SkillsCommand::Enroll(target)
+                } else {
+                    SkillsCommand::StageUpdate(SkillsStageArgs {
+                        target,
+                        staging_dir: PathBuf::from(call_required::<String>(
+                            operation,
+                            input,
+                            "staging_dir",
+                        )?),
+                    })
+                },
+            }
+        }
         "skills.install" => Command::Skills {
             command: SkillsCommand::Install(SkillsInstallArgs {
                 codex: call_bool(operation, input, "codex")?,
@@ -5618,6 +5842,32 @@ async fn run(cli: Cli) -> Result<()> {
             let result = install_skills(args)?;
             print_json(&result)
         }
+        Command::Skills {
+            command: SkillsCommand::UpdatePreview(args),
+        } => print_json(&skills_update_preview(args)?),
+        Command::Skills {
+            command: SkillsCommand::Enroll(args),
+        } => {
+            let (agent, root, bundled) = single_skill_target(args)?;
+            print_json(&sniper::skill_managed::enroll_skill(
+                agent,
+                &root,
+                bundled,
+                env!("CARGO_PKG_VERSION"),
+            )?)
+        }
+        Command::Skills {
+            command: SkillsCommand::StageUpdate(args),
+        } => {
+            let (agent, root, bundled) = single_skill_target(args.target)?;
+            print_json(&sniper::skill_managed::stage_skill_update(
+                agent,
+                &root,
+                bundled,
+                env!("CARGO_PKG_VERSION"),
+                &args.staging_dir,
+            )?)
+        }
         command => {
             let api = ApiClient::discover(api_override).await?;
             match command {
@@ -5662,7 +5912,7 @@ async fn run(cli: Cli) -> Result<()> {
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
     if let Command::Skills {
-        command: SkillsCommand::Status(args),
+        command: SkillsCommand::Status(args) | SkillsCommand::UpdatePreview(args),
     } = command
     {
         if !(args.codex || args.claude || args.all) {
@@ -5673,6 +5923,26 @@ fn validate_command_preflight(command: &Command) -> Result<()> {
                 bail!("skill directory must be nonempty and contain no NUL characters");
             }
         }
+    }
+
+    if let Command::Skills {
+        command:
+            SkillsCommand::Enroll(args)
+            | SkillsCommand::StageUpdate(SkillsStageArgs { target: args, .. }),
+    } = command
+    {
+        if args.codex == args.claude {
+            bail!("must select exactly one destination with --codex or --claude");
+        }
+        for path in [&args.codex_dir, &args.claude_dir].into_iter().flatten() {
+            validate_skill_cli_path(path)?;
+        }
+    }
+    if let Command::Skills {
+        command: SkillsCommand::StageUpdate(args),
+    } = command
+    {
+        validate_skill_cli_path(&args.staging_dir)?;
     }
 
     if let Command::Replay {
@@ -10432,7 +10702,7 @@ fn cli_parse_error_operation(args: &[String]) -> String {
         ["replay" | "repeater", action, ..] => format!("replay.{action}"),
         ["fuzzer", action, ..] => format!("fuzzer.{}", action.replace('-', "_")),
         ["sequence", action, ..] => format!("sequence.{}", action.replace('-', "_")),
-        ["skills", action, ..] => format!("skills.{action}"),
+        ["skills", action, ..] => format!("skills.{}", action.replace('-', "_")),
         ["capture", "http", action, ..] | ["http" | "history", action, ..] => {
             format!("capture.http.{}", action.replace('-', "_"))
         }
@@ -10555,6 +10825,16 @@ fn clap_error_payload(error: &clap::Error) -> CliErrorPayload {
 }
 
 fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload {
+    if let Some(managed) = error.downcast_ref::<sniper::skill_managed::ManagedSkillError>() {
+        return CliErrorPayload {
+            code: "MANAGED_SKILL_ERROR",
+            message: "Local skill operation could not be completed safely.".to_owned(),
+            hint: Some("Inspect skills update-preview and the local staging directory before deliberately trying again. No activation is performed."),
+            retryable: false,
+            details: json!({"reason":managed.code}),
+            exit_code: 5,
+        };
+    }
     if let Some(tab) = error.downcast_ref::<ReplayTabCliError>() {
         return CliErrorPayload {
             code: tab.code,
@@ -10867,6 +11147,70 @@ fn default_port_for_scheme(scheme: &str) -> u16 {
     } else {
         443
     }
+}
+
+fn validate_skill_cli_path(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() || path.to_string_lossy().contains('\0') {
+        bail!("skill directory must be nonempty and contain no NUL characters");
+    }
+    Ok(())
+}
+
+fn single_skill_target(args: SingleSkillArgs) -> Result<(&'static str, PathBuf, &'static str)> {
+    let (agent, root, default_root, bundled) = if args.codex {
+        (
+            "codex",
+            args.codex_dir,
+            skills::default_codex_skills_dir as fn() -> Option<PathBuf>,
+            skills::CODEX_SKILL_TEMPLATE,
+        )
+    } else {
+        (
+            "claude",
+            args.claude_dir,
+            skills::default_claude_skills_dir as fn() -> Option<PathBuf>,
+            skills::CLAUDE_SKILL_TEMPLATE,
+        )
+    };
+    let root = root.or_else(default_root).with_context(|| {
+        format!("could not determine {agent} skills directory; set HOME or pass --{agent}-dir")
+    })?;
+    Ok((agent, root, bundled))
+}
+
+fn skills_update_preview(args: SkillsInstallArgs) -> Result<Value> {
+    let mut entries = Vec::new();
+    for (selected, agent, root, default_root, bundled) in [
+        (
+            args.all || args.codex,
+            "codex",
+            args.codex_dir,
+            skills::default_codex_skills_dir as fn() -> Option<PathBuf>,
+            skills::CODEX_SKILL_TEMPLATE,
+        ),
+        (
+            args.all || args.claude,
+            "claude",
+            args.claude_dir,
+            skills::default_claude_skills_dir as fn() -> Option<PathBuf>,
+            skills::CLAUDE_SKILL_TEMPLATE,
+        ),
+    ] {
+        if selected {
+            let root = root.or_else(default_root).with_context(|| {
+                format!(
+                    "could not determine {agent} skills directory; set HOME or pass --{agent}-dir"
+                )
+            })?;
+            entries.push(sniper::skill_managed::preview_skill_update(
+                agent,
+                &root,
+                bundled,
+                env!("CARGO_PKG_VERSION"),
+            )?);
+        }
+    }
+    Ok(json!({"scope":"cli_host","bundled_version":env!("CARGO_PKG_VERSION"),"entries":entries}))
 }
 
 fn skills_status(args: SkillsInstallArgs) -> Result<Value> {

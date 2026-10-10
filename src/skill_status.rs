@@ -64,7 +64,7 @@ pub fn read_skill_status(agent: &str, root: &Path, bundled: &str) -> io::Result<
     Ok(row)
 }
 
-fn sha256(bytes: &[u8]) -> String {
+pub(crate) fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -104,7 +104,19 @@ fn validate_metadata(meta: &Metadata) -> Result<(), InspectionError> {
     Ok(())
 }
 
-fn inspect(path: &Path) -> Result<Vec<u8>, InspectionError> {
+pub(crate) fn inspect(path: &Path) -> Result<Vec<u8>, InspectionError> {
+    inspect_with_limit(path, MAX_SKILL_BYTES)
+}
+
+pub(crate) fn inspect_with_limit(path: &Path, max_bytes: u64) -> Result<Vec<u8>, InspectionError> {
+    let max_bytes = max_bytes.min(MAX_SKILL_BYTES);
+    let validate = |meta: &Metadata| {
+        validate_metadata(meta)?;
+        if meta.len() > max_bytes {
+            return Err(unsupported("file_too_large"));
+        }
+        Ok(())
+    };
     let before = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -112,26 +124,26 @@ fn inspect(path: &Path) -> Result<Vec<u8>, InspectionError> {
         }
         Err(error) => return Err(io_error(error)),
     };
-    validate_metadata(&before)?;
+    validate(&before)?;
     let file = open_no_follow(path)?;
     let opened = file.metadata().map_err(io_error)?;
-    validate_metadata(&opened)?;
+    validate(&opened)?;
     if !same_metadata(&before, &opened) {
         return Err(unreadable("changed_during_read"));
     }
     let mut bytes = Vec::new();
     // Read one extra byte to detect growth without an unbounded allocation.
     (&file)
-        .take(MAX_SKILL_BYTES + 1)
+        .take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(io_error)?;
-    if bytes.len() as u64 > MAX_SKILL_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(unsupported("file_too_large"));
     }
     let after = file.metadata().map_err(io_error)?;
     let at_path = fs::symlink_metadata(path).map_err(|_| unreadable("changed_during_read"))?;
-    validate_metadata(&after)?;
-    validate_metadata(&at_path)?;
+    validate(&after)?;
+    validate(&at_path)?;
     if !same_metadata(&opened, &after)
         || !same_metadata(&after, &at_path)
         || bytes.len() as u64 != after.len()

@@ -161,6 +161,21 @@ sniper-cli skills install --claude --dry-run
 sniper-cli skills install --claude --yes
 ```
 
+## Skill maintenance
+
+Use `sniper-cli skills status --all` to compare active installed files with the
+bundle, or `sniper-cli skills update-preview --all` to inspect enrollment and
+update eligibility. These are local, read-only operations; inspect each row's
+state/error rather than treating exit zero as proof every file is current.
+The experimental `skills.enroll` and `skills.stage_update` operations must be
+discovered through `manifest`, `schema`,
+and `examples` before using them. Enrollment records an explicit local baseline;
+it does not enable automatic updates. Staging requires confirmation and a new
+output directory, writes only a candidate and receipt, and returns
+`activated:false`. Never claim staging updated the active skill or the agent's
+loaded context. Preserve modified or unmanaged installations; do not invoke
+`skills install --yes` as an automatic fallback because it can overwrite them.
+
 ## Guardrails
 
 - If `sniper-cli` is missing from `PATH`, say so briefly instead of falling back to GUI scraping.

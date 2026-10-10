@@ -25,6 +25,7 @@ pub mod scanner;
 pub mod scope;
 pub mod sequence;
 pub mod session;
+pub mod skill_managed;
 pub mod skill_status;
 pub mod skills;
 pub mod special_host;
