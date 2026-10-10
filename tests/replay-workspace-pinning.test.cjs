@@ -79,7 +79,9 @@ for (const committed of [false, true]) for (const local of [false, true]) for (c
     const f = setup(committed);
     f.a.pinned = local; f.a.customLabel = "local label";
     f.context.workspaceSaveDirty = true;
-    await f.adopt(remotePin(f, remote));
+    const incoming = remotePin(f, remote);
+    incoming.replay.tabs.find(tab => tab.id === f.a.id).custom_label = "first";
+    await f.adopt(incoming);
     assert.equal(f.a.pinned, local === committed ? remote : local);
     assert.equal(baseline(f).pinned, remote);
     assert.equal(f.a.customLabel, "local label");

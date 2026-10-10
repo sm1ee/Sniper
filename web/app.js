@@ -3259,10 +3259,14 @@ function adoptExternalReplayLabel(existing, incoming) {
   const baseline = workspaceReplayTabsById(workspaceSaveCommittedSnapshot).get(existing.id);
   if (!baseline) return false;
   const committed = normalizeReplayTabCustomLabel(baseline.custom_label);
+  const local = normalizeReplayTabCustomLabel(existing.customLabel);
   const next = normalizeReplayTabCustomLabel(incoming.custom_label);
-  if (normalizeReplayTabCustomLabel(existing.customLabel) !== committed || next === committed) return false;
-  existing.customLabel = next;
+  if (local !== committed && local !== next) return false;
+  // Matching renames converge without a render, but must move the baseline so
+  // a later remote rename is not mistaken for an unsaved local change.
   baseline.custom_label = next;
+  if (local === next) return false;
+  existing.customLabel = next;
   return true;
 }
 
