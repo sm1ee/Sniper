@@ -574,3 +574,22 @@ fn discovery_rejects_unknown_targets_before_dry_run() {
     f.call("examples", json!({}), 0);
     f.call("examples", json!({"operation":null}), 0);
 }
+
+#[test]
+fn invalid_saved_reads_point_to_input_schemas_not_mutation_receipts() {
+    let f = Fixture::new();
+    for (operation, input) in [
+        ("saved.v1.http.list", json!({"limit":201})),
+        ("saved.v1.session.list", json!({"limit":0})),
+        ("saved.v1.http.select", json!({"ids":[]})),
+        ("saved.v1.operation.get", json!({"operation_id":"invalid"})),
+    ] {
+        let output = f.call(operation, input, 2);
+        assert_invalid(&output, operation);
+        let hint = output["error"]["hint"].as_str().unwrap();
+        assert!(hint.contains("schema input"), "{output}");
+        assert!(!hint.contains("receipt"), "{output}");
+        assert_eq!(output["error"]["retryable"], false);
+        assert_eq!(output["error"]["details"]["outcome"], "not_applied");
+    }
+}

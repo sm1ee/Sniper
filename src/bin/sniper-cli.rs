@@ -11132,13 +11132,29 @@ fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload 
         };
     }
     if let Some(saved) = error.downcast_ref::<SavedCliError>() {
+        let hint = if saved.code == "INVALID_INPUT"
+            && saved.outcome == "not_applied"
+            && sniper::saved_contract::OPERATIONS.contains(&operation)
+            && !sniper::saved_data::is_write(operation)
+        {
+            "Inspect sniper-cli schema input <operation> for this operation's accepted input, then correct the input."
+        } else {
+            "Use saved.v1.operation.get with the original operation_id to inspect a receipt; never automatically retry a mutation."
+        };
         return CliErrorPayload {
             code: saved.code,
             message: saved.message.clone(),
-            hint: Some("Use saved.v1.operation.get with the original operation_id to inspect a receipt; never automatically retry a mutation."),
+            hint: Some(hint),
             retryable: false,
             details: json!({"outcome":saved.outcome,"operation_id":saved.operation_id,"session_id":saved.session_id}),
-            exit_code: if matches!(saved.code, "INVALID_INPUT" | "UNKNOWN_OPERATION" | "CONFIRMATION_REQUIRED") { 2 } else { 5 },
+            exit_code: if matches!(
+                saved.code,
+                "INVALID_INPUT" | "UNKNOWN_OPERATION" | "CONFIRMATION_REQUIRED"
+            ) {
+                2
+            } else {
+                5
+            },
         };
     }
     if let Some(partial) = error.downcast_ref::<CliPartialApplyError>() {
@@ -16291,5 +16307,55 @@ mod tests {
         assert_eq!(output["bypass_hosts"], json!(["localhost"]));
         let older_server = proxy_chain_output(&json!({"upstream_proxy": {"enabled": false}}));
         assert_eq!(older_server["bypass_hosts"], json!([]));
+    }
+
+    #[test]
+    fn saved_mutation_errors_keep_receipt_guidance() {
+        for operation in [
+            "saved.v1.http.delete",
+            "saved.v1.http.clear",
+            "saved.v1.session.rename",
+        ] {
+            for (code, outcome) in [
+                ("INVALID_INPUT", "not_applied"),
+                ("INVALID_RESPONSE", "unknown"),
+                ("API_UNAVAILABLE", "unknown"),
+            ] {
+                let error = super::saved_cli_error(
+                    code,
+                    "synthetic failure",
+                    outcome,
+                    &json!({"operation_id":"aabbccdd-0011-2233-4455-66778899aabb"}),
+                );
+                let payload = cli_error_payload(operation, &error);
+                assert_eq!(payload.code, code);
+                assert_eq!(payload.details["outcome"], outcome);
+                assert_eq!(
+                    payload.details["operation_id"],
+                    "aabbccdd-0011-2233-4455-66778899aabb"
+                );
+                assert!(!payload.retryable);
+                assert!(payload.hint.unwrap().contains("original operation_id"));
+                assert!(payload.hint.unwrap().contains("never automatically retry"));
+                assert_eq!(
+                    payload.exit_code,
+                    if code == "INVALID_INPUT" { 2 } else { 5 }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn saved_read_hint_keeps_receipt_guidance_for_unknown_outcomes_and_operations() {
+        for (operation, outcome) in [
+            ("saved.v1.http.list", "unknown"),
+            ("saved.v1.future", "not_applied"),
+        ] {
+            let error =
+                super::saved_cli_error("INVALID_INPUT", "synthetic failure", outcome, &json!({}));
+            let payload = cli_error_payload(operation, &error);
+            assert!(payload.hint.unwrap().contains("original operation_id"));
+            assert_eq!(payload.details["outcome"], outcome);
+        }
     }
 }
