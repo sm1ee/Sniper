@@ -65,14 +65,13 @@ $ echo $?
 0
 ```
 
-Two things to know about that file. It is a **copy of the template embedded in
-the binary that wrote it**, not a link to the repository, so a Sniper upgrade
-does not refresh an existing install — re-run it after upgrading. On the machine
-this page was written on, a skill installed by an older build was 2708 bytes
-against the 4769-byte current
-[`packaging/skills/codex/sniper-operator/SKILL.md`](../../packaging/skills/codex/sniper-operator/SKILL.md),
-81 diff lines apart. And `--yes` **overwrites** an existing `SKILL.md`; if you
-have hand-edited yours, copy it aside first.
+The installed file is a **copy of the template embedded in the binary**, not a
+link to the repository. Upgrading Sniper does not refresh it. Inspect it first
+with `sniper-cli skills status --codex` or `sniper-cli skills update-preview --codex`.
+`skills install --codex --yes` **overwrites** an existing `SKILL.md`; preserve any
+edits before deliberately choosing replacement. See
+[safe skill maintenance](skill-maintenance.md) for read-only checks and the
+experimental non-activating staging workflow.
 
 Installing both agents into one directory is rejected, because both would write
 the same `SKILL.md`:
@@ -85,7 +84,10 @@ $ sniper-cli --output compact skills install --all --codex-dir /tmp/x --claude-d
 `sniper-desktop` can install on launch, but only when
 `SNIPER_INSTALL_AGENT_SKILLS` is set to `1`, `true` or `yes` — any other value,
 including `on`, is ignored — and that path writes only when no `SKILL.md` is
-already there. A normal launch installs nothing.
+already there. Publication never replaces a file created concurrently, and
+startup logs report only newly created installations. The no-replace publication
+requires filesystem hard-link support; unsupported publication fails closed
+rather than falling back to replacement. A normal launch installs nothing.
 
 ## Point the CLI at the right instance
 

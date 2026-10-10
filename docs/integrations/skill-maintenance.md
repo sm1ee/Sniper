@@ -46,6 +46,27 @@ or stage updates for it automatically. Review and preserve those files manually;
 do not use the legacy `skills install --yes` command as an automatic fallback,
 since that command can overwrite an existing installation.
 
+## Review an unmanaged edited installation
+
+You can compare the new bundle without replacing the active skill. Choose a
+separate, unused skills root, verify that destination, and preview a copy there:
+
+```bash
+sniper-cli skills install --codex --codex-dir ./new-skill-review --dry-run
+```
+
+After reviewing that destination, run the same command with `--yes` to create
+the separate copy. Use `--claude` and `--claude-dir` for that host's template.
+The legacy installer can overwrite files at its selected destination; this is
+why the review root must be separate and unused. Dry run does not reserve or
+inspect that path. Use the returned installation path rather than guessing it.
+
+Back up the active file, compare it with the separate bundle, and manually merge
+the updated guidance while preserving your edits. Review before activation and
+avoid concurrent writers, as described below. A customized merged skill can
+legitimately remain `modified_or_outdated` and `unmanaged`; do not erase edits
+just to make its hash match the bundle.
+
 ## Experimental candidate staging
 
 After a later binary supplies a new bundle, preview identifies an enrolled file
