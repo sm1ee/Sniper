@@ -9,6 +9,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "support/schema_vocabulary.rs"]
+mod schema_vocabulary;
+
 struct Fixture {
     root: PathBuf,
     listener: TcpListener,
@@ -90,10 +93,35 @@ impl Drop for Fixture {
 
 // Validate the JSON Schema vocabulary used by these three strict contracts.
 fn matches_schema(value: &Value, schema: &Value) -> bool {
+    schema_vocabulary::assert_supported(
+        schema,
+        &[
+            "type",
+            "const",
+            "enum",
+            "required",
+            "properties",
+            "additionalProperties",
+            "items",
+            "minLength",
+            "pattern",
+            "minItems",
+            "maxItems",
+            "allOf",
+            "anyOf",
+            "oneOf",
+        ],
+        &["object", "array", "string", "boolean", "null"],
+        &[],
+    );
+    matches_schema_value(value, schema)
+}
+
+fn matches_schema_value(value: &Value, schema: &Value) -> bool {
     if schema["allOf"].as_array().is_some_and(|constraints| {
         !constraints
             .iter()
-            .all(|constraint| matches_schema(value, constraint))
+            .all(|constraint| matches_schema_value(value, constraint))
     }) {
         return false;
     }
@@ -135,7 +163,7 @@ fn matches_schema(value: &Value, schema: &Value) -> bool {
         }
         for (key, value) in fields {
             if let Some(field) = schema["properties"].get(key) {
-                if !matches_schema(value, field) {
+                if !matches_schema_value(value, field) {
                     return false;
                 }
             } else if schema["additionalProperties"] == false {
@@ -167,20 +195,23 @@ fn matches_schema(value: &Value, schema: &Value) -> bool {
             return false;
         }
         if let Some(items) = schema.get("items") {
-            if rows.iter().any(|row| !matches_schema(row, items)) {
+            if rows.iter().any(|row| !matches_schema_value(row, items)) {
                 return false;
             }
         }
     }
     if let Some(choices) = schema["anyOf"].as_array() {
-        if !choices.iter().any(|choice| matches_schema(value, choice)) {
+        if !choices
+            .iter()
+            .any(|choice| matches_schema_value(value, choice))
+        {
             return false;
         }
     }
     if let Some(choices) = schema["oneOf"].as_array() {
         if choices
             .iter()
-            .filter(|choice| matches_schema(value, choice))
+            .filter(|choice| matches_schema_value(value, choice))
             .count()
             != 1
         {
@@ -195,6 +226,30 @@ fn assert_schema(value: &Value, schema: &Value) {
         matches_schema(value, schema),
         "value {value} fails schema {schema}"
     );
+}
+
+#[test]
+fn schema_matcher_guards_its_subset_and_checks_constants() {
+    for schema in [
+        json!({"properties":{"optional":{"type":"string","format":"date-time"}}}),
+        json!({"properties":{"optional":{"type":"integer"}}}),
+        json!({"type":["object","integer"]}),
+        json!({"type":["object",false]}),
+        json!({"anyOf":[{}, {"type":"integer"}]}),
+        json!({"properties":{"optional":{"minLength":-1}}}),
+        json!({"anyOf":[{}, {"minItems":1.5}]}),
+        json!({"anyOf":[{}, {"maxItems":"2"}]}),
+        json!({"properties":{"optional":{"pattern":false}}}),
+        json!({"anyOf":[{}, {"pattern":"(?=a)"}]}),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| matches_schema(&json!({}), &schema)).is_err(),
+            "unsupported schema was accepted: {schema}"
+        );
+    }
+    let schema = json!({"type":"boolean","const":false});
+    assert!(matches_schema(&json!(false), &schema));
+    assert!(!matches_schema(&json!(true), &schema));
 }
 
 #[test]

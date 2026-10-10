@@ -7,6 +7,9 @@ use sniper::session::SessionSummary;
 use std::process::Command;
 use uuid::Uuid;
 
+#[path = "support/schema_vocabulary.rs"]
+mod schema_vocabulary;
+
 fn cli(args: &[&str], expected_code: i32) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_sniper-cli"))
         .args(["--output", "compact", "--api", "http://127.0.0.1:1"])
@@ -39,10 +42,35 @@ fn output_schema(operation: &str) -> Value {
 
 // Only the JSON Schema vocabulary used by these read-only output contracts.
 fn matches_schema(value: &Value, schema: &Value) -> bool {
+    schema_vocabulary::assert_supported(
+        schema,
+        &[
+            "type",
+            "enum",
+            "required",
+            "properties",
+            "additionalProperties",
+            "items",
+            "minimum",
+            "maximum",
+            "pattern",
+            "format",
+            "allOf",
+            "anyOf",
+            "oneOf",
+            "x-sniper-json-number-representation",
+        ],
+        &["object", "array", "string", "integer", "boolean", "null"],
+        &["uuid", "date-time"],
+    );
+    matches_schema_value(value, schema)
+}
+
+fn matches_schema_value(value: &Value, schema: &Value) -> bool {
     if schema["allOf"].as_array().is_some_and(|constraints| {
         !constraints
             .iter()
-            .all(|constraint| matches_schema(value, constraint))
+            .all(|constraint| matches_schema_value(value, constraint))
     }) {
         return false;
     }
@@ -80,7 +108,7 @@ fn matches_schema(value: &Value, schema: &Value) -> bool {
         }
         for (key, item) in fields {
             if let Some(property) = schema["properties"].get(key) {
-                if !matches_schema(item, property) {
+                if !matches_schema_value(item, property) {
                     return false;
                 }
             } else if schema["additionalProperties"] == false {
@@ -90,7 +118,10 @@ fn matches_schema(value: &Value, schema: &Value) -> bool {
     }
     if let Some(items) = value.as_array() {
         if let Some(item_schema) = schema.get("items") {
-            if items.iter().any(|item| !matches_schema(item, item_schema)) {
+            if items
+                .iter()
+                .any(|item| !matches_schema_value(item, item_schema))
+            {
                 return false;
             }
         }
@@ -123,16 +154,17 @@ fn matches_schema(value: &Value, schema: &Value) -> bool {
             _ => {}
         }
     }
-    if schema["anyOf"]
-        .as_array()
-        .is_some_and(|choices| !choices.iter().any(|choice| matches_schema(value, choice)))
-    {
+    if schema["anyOf"].as_array().is_some_and(|choices| {
+        !choices
+            .iter()
+            .any(|choice| matches_schema_value(value, choice))
+    }) {
         return false;
     }
     if schema["oneOf"].as_array().is_some_and(|choices| {
         choices
             .iter()
-            .filter(|choice| matches_schema(value, choice))
+            .filter(|choice| matches_schema_value(value, choice))
             .count()
             != 1
     }) {
@@ -146,6 +178,37 @@ fn assert_schema(value: &Value, schema: &Value) {
         matches_schema(value, schema),
         "{value} does not match {schema}"
     );
+}
+
+#[test]
+fn schema_matcher_guards_its_subset_and_checks_formats() {
+    for schema in [
+        json!({"properties":{"optional":{"const":"expected"}}}),
+        json!({"properties":{"optional":{"type":"number"}}}),
+        json!({"type":["object","number"]}),
+        json!({"type":["object",false]}),
+        json!({"anyOf":[{}, {"type":"number"}]}),
+        json!({"properties":{"optional":{"minimum":-1}}}),
+        json!({"anyOf":[{}, {"maximum":1.5}]}),
+        json!({"properties":{"optional":{"pattern":false}}}),
+        json!({"anyOf":[{}, {"pattern":"(?=a)"}]}),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| matches_schema(&json!({}), &schema)).is_err(),
+            "unsupported schema was accepted: {schema}"
+        );
+    }
+    let integer = json!({"type":"integer","minimum":0,"maximum":u64::MAX});
+    assert!(matches_schema(&json!(u64::MAX), &integer));
+    assert!(!matches_schema(&json!(-1), &integer));
+    for (format, valid) in [
+        ("uuid", "00000000-0000-0000-0000-000000000001"),
+        ("date-time", "2026-10-10T12:00:00Z"),
+    ] {
+        let schema = json!({"type":"string","format":format});
+        assert!(matches_schema(&json!(valid), &schema));
+        assert!(!matches_schema(&json!("invalid"), &schema));
+    }
 }
 
 fn summary(annotated: bool) -> TransactionSummary {
