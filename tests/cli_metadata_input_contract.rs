@@ -259,6 +259,63 @@ fn session_create_keeps_nullable_and_blank_name_semantics() {
 }
 
 #[test]
+fn session_create_validates_trimmed_utf8_bytes_without_normalizing_previews() {
+    let f = Fixture::new();
+    let direct_default = f.cli(&["--dry-run", "session", "create"], 0);
+    assert_eq!(direct_default["input"], json!({"name": null}));
+    for name in [
+        "x".repeat(256),
+        "é".repeat(128),
+        "😀".repeat(64),
+        "\u{2003}".repeat(300),
+        "a\nb".to_owned(),
+    ] {
+        for raw in [name.clone(), format!(" \t\u{2003}{name}\n ")] {
+            let called = f.call("session.create", json!({"name":raw}), 0);
+            let direct = f.cli(&["--dry-run", "session", "create", "--name", &raw], 0);
+            assert_eq!(called["data"]["input"], json!({"name":raw}));
+            assert_eq!(called["data"]["input"], direct["input"]);
+            assert_eq!(called["data"]["api"], direct["api"]);
+            assert_eq!(direct["api"]["body"], json!({"name":raw}));
+        }
+    }
+    // NUL cannot be passed as an OS argument, but remains valid in JSON input.
+    let raw = " \u{2003}a\0b\n ";
+    let called = f.call("session.create", json!({"name":raw}), 0);
+    assert_eq!(called["data"]["input"], json!({"name":raw}));
+    assert_eq!(called["data"]["api"]["body"], json!({"name":raw}));
+    for name in ["x".repeat(257), "é".repeat(129), "😀".repeat(65)] {
+        for raw in [name.clone(), format!(" \t\u{2003}{name}\n ")] {
+            for output in [
+                f.call("session.create", json!({"name":raw}), 2),
+                f.cli(&["--dry-run", "session", "create", "--name", &raw], 2),
+            ] {
+                assert_invalid(&output, "session.create");
+                assert_eq!(
+                    output["error"]["message"],
+                    "session name cannot exceed 256 bytes"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn oversized_session_creation_fails_before_confirmation_or_api_discovery() {
+    let f = Fixture::new();
+    let name = "é".repeat(129);
+    let input = json!({"name": name}).to_string();
+    for args in [
+        vec!["session", "create", "--name", name.as_str()],
+        vec!["call", "session.create", "--input", input.as_str()],
+        vec!["--yes", "session", "create", "--name", name.as_str()],
+        vec!["--yes", "call", "session.create", "--input", input.as_str()],
+    ] {
+        assert_invalid(&f.cli(&args, 2), "session.create");
+    }
+}
+
+#[test]
 fn legacy_session_uuid_inputs_keep_all_accepted_spellings() {
     let f = Fixture::new();
     let canonical = "aabbccdd-0011-2233-4455-66778899aabb";

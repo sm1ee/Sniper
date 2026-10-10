@@ -1807,15 +1807,21 @@ fn default_session_metadata(name: &str) -> SessionMetadata {
     }
 }
 
+/// Validate creation names without changing the caller's raw value or choosing a timestamp.
+pub fn validate_session_creation_name(name: Option<&str>) -> Result<()> {
+    if name.is_some_and(|value| value.trim().len() > MAX_SESSION_NAME_BYTES) {
+        bail!("session name cannot exceed {MAX_SESSION_NAME_BYTES} bytes");
+    }
+    Ok(())
+}
+
 fn normalize_session_name(name: Option<&str>, now: DateTime<Utc>) -> Result<String> {
+    validate_session_creation_name(name)?;
     let normalized = name
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("Session {}", now.format("%Y-%m-%d %H:%M")));
-    if normalized.len() > MAX_SESSION_NAME_BYTES {
-        bail!("session name cannot exceed {MAX_SESSION_NAME_BYTES} bytes");
-    }
     Ok(normalized)
 }
 
@@ -3772,7 +3778,7 @@ fn sync_directory(path: &Path, label: &str) -> Result<()> {
 mod tests {
     use std::collections::{HashMap, HashSet, VecDeque};
 
-    use chrono::{Duration as ChronoDuration, Utc};
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
     use uuid::Uuid;
 
     use super::SessionRegistry;
@@ -4968,6 +4974,57 @@ mod tests {
             .summaries()
             .iter()
             .any(|session| session.id == created.id));
+    }
+
+    #[test]
+    fn session_creation_name_validates_trimmed_utf8_bytes() {
+        let now = DateTime::parse_from_rfc3339("2026-10-10T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for name in ["x".repeat(256), "é".repeat(128), "😀".repeat(64)] {
+            for raw in [name.clone(), format!(" \t\u{2003}{name}\n ")] {
+                super::validate_session_creation_name(Some(&raw)).unwrap();
+                assert_eq!(
+                    super::normalize_session_name(Some(&raw), now).unwrap(),
+                    name
+                );
+            }
+        }
+        for name in ["x".repeat(257), "é".repeat(129), "😀".repeat(65)] {
+            for raw in [name.clone(), format!(" \t\u{2003}{name}\n ")] {
+                let error = super::validate_session_creation_name(Some(&raw)).unwrap_err();
+                assert_eq!(error.to_string(), "session name cannot exceed 256 bytes");
+                assert!(super::normalize_session_name(Some(&raw), now).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn session_creation_name_preserves_defaults_and_embedded_controls() {
+        let now = DateTime::parse_from_rfc3339("2026-10-10T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let long_blank = " \t\n\u{2003}".repeat(100);
+        for name in [
+            None,
+            Some(""),
+            Some(" \t\n\u{2003}"),
+            Some(long_blank.as_str()),
+        ] {
+            super::validate_session_creation_name(name).unwrap();
+            assert_eq!(
+                super::normalize_session_name(name, now).unwrap(),
+                "Session 2026-10-10 12:34"
+            );
+        }
+        for name in ["a\nb", "a\0b", "Review"] {
+            let raw = format!(" \u{2003}{name}\t ");
+            super::validate_session_creation_name(Some(&raw)).unwrap();
+            assert_eq!(
+                super::normalize_session_name(Some(&raw), now).unwrap(),
+                name
+            );
+        }
     }
 
     #[tokio::test]

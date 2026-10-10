@@ -35,7 +35,7 @@ use sniper::{
         MAX_SCANNER_FIELD_BYTES,
     },
     sequence::{SequenceDefinition, SequenceRunRecord, SequenceRunSummary},
-    session::SessionSummary,
+    session::{validate_session_creation_name, SessionSummary},
     skills,
     workspace::{
         FuzzerWorkspaceState, ReplayHistoryEntryState, ReplayTabState, ReplayWorkspaceState,
@@ -6003,6 +6003,13 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Session {
+        command: SessionCommand::Create(args),
+    } = command
+    {
+        validate_session_creation_name(args.name.as_deref())?;
+    }
+
     if let Command::Skills {
         command:
             SkillsCommand::Install(args)
