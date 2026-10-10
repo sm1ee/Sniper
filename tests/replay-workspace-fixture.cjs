@@ -39,6 +39,7 @@ function fixture() {
   const document = { activeElement: els.replayRequestHighlight, getElementById: id => id === "replayHttpVersionSelect" ? versionSelect : null };
   const context = loadFunctions(functions, {
     state, els, document, URL, TextEncoder, Blob, Uint8Array,
+    workspacePendingReplayCloses: new Map(), MAX_REPLAY_TABS: 512,
     workspaceLoaded: true, workspaceStateGeneration: 0, workspaceExternalLoadGeneration: 0, workspaceExternalAppliedGeneration: 0,
     workspaceSaveConflictPending: false, workspaceSaveConflictLatest: null, workspaceSaveCommittedSnapshot: null,
     workspaceClientId: "ui-client", workspaceSaveVersion: 0, workspaceSaveDirty: false, workspaceSaveTimer: null,

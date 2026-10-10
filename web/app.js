@@ -946,6 +946,7 @@ const workspaceClientId = createWorkspaceClientId();
 let workspaceSaveLoopPromise = null;
 let workspaceSaveConflictPending = false;
 let workspaceStateGeneration = 0;
+const workspacePendingReplayCloses = new Map();
 let workspaceExternalLoadGeneration = 0;
 let workspaceExternalAppliedGeneration = 0;
 // Highest replay-tab count a workspace may hold; must match
@@ -3128,7 +3129,9 @@ async function adoptExternalReplayTabs() {
     const existing = local.get(tab.id);
     if (!existing) {
       // A baseline tab absent locally was closed here, not opened remotely.
-      if (baselineById.has(tab.id)) continue;
+      const pendingClose = workspacePendingReplayCloses.get(tab.id);
+      if (baselineById.has(tab.id) || (pendingClose
+        && pendingClose.generation === stateGeneration && pendingClose.sessionId === sessionId)) continue;
       const hydrated = hydrateReplayTab(tab);
       if (hydrated) {
         added.push(hydrated);
@@ -17398,7 +17401,11 @@ async function closeRepeaterTab(id) {
     return;
   }
 
-  const closeSnapshot = snapshotReplayTabsState();
+  const generation = workspaceStateGeneration;
+  const sessionId = currentSessionId();
+  const closeOwner = { generation, sessionId };
+  const originalIds = state.replayTabs.map((tab) => tab.id);
+  const previousActiveId = state.activeReplayTabId;
   const visualOrderBeforeClose = getReplayTabVisualOrder().map((tab) => tab.id);
   const visualIndex = visualOrderBeforeClose.indexOf(id);
   const closingTab = state.replayTabs[index];
@@ -17406,6 +17413,7 @@ async function closeRepeaterTab(id) {
   if (currentIndex === -1) {
     return;
   }
+  workspacePendingReplayCloses.set(id, closeOwner);
   const controller = _replaySendControllers.get(id);
   if (controller) {
     _replaySendControllers.delete(id);
@@ -17431,22 +17439,58 @@ async function closeRepeaterTab(id) {
     state.activeReplayTabId = remainingVisualIds[replacementIndex] || state.replayTabs[Math.max(0, currentIndex - 1)].id;
   }
   scheduleWorkspaceStateSave();
-  renderReplay();
+  if (state.activeReplayTabId !== previousActiveId) {
+    renderReplay({ preserveTabStrip: !!state.replayRenamingTabId });
+  } else if (!state.replayRenamingTabId) {
+    renderReplayTabs();
+  }
   try {
     await flushWorkspaceState();
   } catch (error) {
+    if (generation !== workspaceStateGeneration || sessionId !== currentSessionId()) return;
     if (isTooManyReplayTabsError(error)) {
-      // Keep the close: it is progress back under the limit. Restoring the tab
-      // here is exactly what left the workspace stuck — every delete reappeared.
-      renderReplay();
+      // Keep the close: it is progress back under the limit.
       return;
     }
-    restoreReplayTabsState(closeSnapshot);
-    handleWorkspaceActionError(error);
-    renderReplay();
+    // A failed POST may already have reached disk. Preserve newer local/remote
+    // work, but stop all retries until the user explicitly reconciles it.
+    workspaceSaveConflictPending = true;
+    workspaceSaveConflictLatest = error.latest || workspaceSaveConflictLatest;
+    workspaceSaveDirty = true;
+    window.clearTimeout(workspaceSaveTimer);
+    workspaceSaveTimer = null;
+    window.clearTimeout(wsTranscriptSaveTimer);
+    wsTranscriptSaveTimer = null;
+    wsTranscriptFirstDirtyAt = 0;
+    workspaceSaveLastSnapshot = null;
+    if (!state.replayTabs.some((tab) => tab.id === id)) {
+      // Restore only this close, beside the nearest surviving original neighbour.
+      // Never replay an old array, revision, selection or tab sequence.
+      const before = originalIds.slice(0, index).reverse()
+        .find((tabId) => state.replayTabs.some((tab) => tab.id === tabId));
+      const after = originalIds.slice(index + 1)
+        .find((tabId) => state.replayTabs.some((tab) => tab.id === tabId));
+      const insertion = before ? state.replayTabs.findIndex((tab) => tab.id === before) + 1
+        : after ? state.replayTabs.findIndex((tab) => tab.id === after) : state.replayTabs.length;
+      state.replayTabs.splice(insertion, 0, closingTab);
+    }
+    if (!state.replayTabs.some((tab) => tab.id === state.activeReplayTabId)) {
+      state.activeReplayTabId = id;
+      renderReplay({ preserveTabStrip: !!state.replayRenamingTabId });
+    } else if (!state.replayRenamingTabId) {
+      renderReplayTabs();
+    }
+    showToast(
+      "Replay tab close could not be confirmed. The tab is restored locally; changes are unsaved. Copy local edits before reloading the workspace to reconcile.",
+      "error", 7000,
+    );
     return;
+  } finally {
+    // An older session's callback must not clear a newer close of the same ID.
+    if (workspacePendingReplayCloses.get(id) === closeOwner) workspacePendingReplayCloses.delete(id);
   }
 
+  if (generation !== workspaceStateGeneration || sessionId !== currentSessionId()) return;
   if (closingTab.type === "websocket") {
     try {
       await cleanupWsReplayTab(closingTab, {
