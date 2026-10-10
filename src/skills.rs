@@ -199,14 +199,42 @@ fn auto_install_all_to(claude_root: PathBuf, codex_root: PathBuf) -> Vec<Install
 mod tests {
     use super::{agent_home_dir, auto_install_all_to, install_skill_folder};
 
-    fn saved_data_guidance(template: &str) -> &str {
-        template
-            .split_once("## Saved data and session management\n")
-            .expect("packaged skill must explain saved-data contracts")
-            .1
-            .split("\n## ")
-            .next()
-            .unwrap()
+    fn saved_data_guidance(template: &str) -> String {
+        let mut lines = template.lines();
+        assert!(
+            lines.any(|line| line == "## Saved data and session management"),
+            "packaged skill must explain saved-data contracts"
+        );
+        // Windows checkouts may use CRLF; compare Markdown content, not EOLs.
+        lines
+            .take_while(|line| !line.starts_with("## "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_owned()
+    }
+
+    #[test]
+    fn packaged_saved_data_section_accepts_lf_and_crlf() {
+        for newline in ["\n", "\r\n"] {
+            let fixture = [
+                "# Skill",
+                "",
+                "## Saved data and session management",
+                "",
+                "Saved guidance.",
+                "### Details",
+                "Keep this subsection.",
+                "",
+                "## Next section",
+                "Exclude this section.",
+            ]
+            .join(newline);
+            assert_eq!(
+                saved_data_guidance(&fixture),
+                "Saved guidance.\n### Details\nKeep this subsection."
+            );
+        }
     }
 
     #[test]
