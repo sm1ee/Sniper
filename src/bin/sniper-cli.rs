@@ -3032,6 +3032,8 @@ fn op(
             .or_else(|| session_read_output_schema(operation))
             .or_else(|| skills_status_output_schema(operation))
             .or_else(|| skills_managed_output_schema(operation))
+            .or_else(|| examples_output_schema(operation))
+            .or_else(|| history_list_output_schema(operation))
             .unwrap_or_else(|| {
                 json!({
                     "type": "object",
@@ -3041,6 +3043,58 @@ fn op(
             }),
         examples,
     }
+}
+
+fn examples_output_schema(operation: &str) -> Option<Value> {
+    if operation != "examples" {
+        return None;
+    }
+    let specific = json!({
+        "type":"object", "additionalProperties":false,
+        "required":["operation","examples"],
+        "properties":{
+            "operation":{"type":"string"},
+            "examples":{"type":"array","items":{}}
+        }
+    });
+    let mut catalog_item = specific.clone();
+    catalog_item["properties"]["command"] = json!({"type":"string"});
+    catalog_item["required"]
+        .as_array_mut()?
+        .push(json!("command"));
+    Some(json!({
+        "description":"Example inputs returned in the envelope data field: a catalog array when operation is omitted or null, or an object for one operation.",
+        "oneOf":[
+            {"type":"array","items":catalog_item},
+            specific
+        ]
+    }))
+}
+
+fn history_list_output_schema(operation: &str) -> Option<Value> {
+    if operation != "capture.http.list" {
+        return None;
+    }
+    let mut item = sniper::saved_contract::transaction_summary_schema();
+    item["properties"]["label"] = json!({"type":"string"});
+    item["required"].as_array_mut()?.push(json!("label"));
+    let items = json!({"type":"array","items":item});
+    let count = json!({"type":["integer","null"],"minimum":0});
+    Some(json!({
+        "description":"Labeled transaction summaries returned in the envelope data field. Only page=true includes pagination metadata; sorting, offset and cursor options alone still return an array. Unavailable page metadata is null.",
+        "oneOf":[
+            items,
+            {
+                "type":"object", "additionalProperties":false,
+                "required":["items","total","filtered_total","hidden_connect_total","offset","limit","has_more"],
+                "properties":{
+                    "items":items,
+                    "total":count,"filtered_total":count,"hidden_connect_total":count,
+                    "offset":count,"limit":count,"has_more":{"type":["boolean","null"]}
+                }
+            }
+        ]
+    }))
 }
 
 fn replay_saved_tab_output_schema(operation: &str) -> Option<Value> {
