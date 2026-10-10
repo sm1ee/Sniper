@@ -303,32 +303,38 @@ configuration, or clear operation is exposed by these commands.
 sniper-cli replay close --tab-id 'exact-tab-id' --dry-run
 sniper-cli replay close --tab-id 'exact-tab-id' --yes
 sniper-cli replay duplicate --tab-id 'exact-tab-id' --session-id <session-uuid> --yes
+sniper-cli replay set-pinned --tab-id 'exact-tab-id' --pinned true --yes
 sniper-cli call replay.duplicate --input '{"tab_id":"exact-tab-id"}' --dry-run
 sniper-cli schema output replay.close
 ```
 
-`replay.close` and `replay.duplicate` accept only an exact `tab_id` and optional
-`session_id`. IDs are never trimmed or matched by label; blank IDs and IDs over
-128 UTF-8 bytes are rejected. Only saved HTTP tabs (including legacy empty tab
-types) are supported. Both require `--yes`; `--dry-run` is entirely offline and
+`replay.close`, `replay.duplicate`, and `replay.set_pinned` accept an exact
+`tab_id` and optional `session_id`. Set-pinned also requires an explicit boolean
+(`--pinned true` or `--pinned false`; JSON `pinned` for `call`). IDs are never
+trimmed or matched by label; blank IDs and IDs over 128 UTF-8 bytes are rejected. Only saved HTTP tabs (including legacy empty tab
+types) are supported. All require `--yes`; `--dry-run` is entirely offline and
 cannot check whether the tab exists.
 
 Close removes only that tab and its saved replay history. Closing the active tab
 selects its previous neighbor in the stable pinned-first visual order, or the next
 neighbor when there is no previous one. Duplicate clones the saved tab and history
 with a fresh UUID, unpinned, and a new sequence above the current counter and all
-tab sequences; it preserves current focus. Neither operation reparses requests,
-hydrates response bodies, sends traffic, or changes unrelated saved data.
+tab sequences; it preserves current focus. Set-pinned assigns the requested pin
+state while preserving focus, physical array order, counters, and tab content. Repeating the same value never toggles
+it; each accepted write still advances the workspace revision. None of these
+operations reparse requests, hydrate response bodies, send traffic, or change
+unrelated saved data.
 
 The CLI pins one session (explicit IDs also work for inactive sessions), reads its
-workspace revision, then sends one ID-only compare-and-swap request. An inferred
-session is guarded against an active-session switch. Conflicts and lost, invalid,
+workspace revision, then sends one metadata-only compare-and-swap request.
+An inferred session is guarded against an active-session switch. Conflicts and lost, invalid,
 or redirected responses are never retried. Inspect saved tabs before a deliberate
 retry; these operations do not use `saved.v1` receipts.
 
 Success is bounded metadata: `session_id`, `revision`, `active_tab_id`, and either
-`closed_tab_id` or `source_tab_id` plus `new_tab_id`. Direct commands return that
-object; `call` puts it under `data` and adds `meta.session_id`. See the
+`closed_tab_id`, `source_tab_id` plus `new_tab_id`, or `tab_id` plus `pinned`.
+Direct commands return that object; `call` puts it under `data` and adds
+`meta.session_id`. See the
 [saved-tab API contract](docs/integrations/saved-replay-tabs.md) for wire details.
 
 ### Passive scanner configuration

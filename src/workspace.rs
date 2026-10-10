@@ -207,6 +207,7 @@ pub enum WorkspaceReplaceError<E> {
 pub(crate) enum SavedHttpTabOperation {
     Close,
     Duplicate,
+    SetPinned(bool),
 }
 
 #[derive(Debug)]
@@ -236,6 +237,10 @@ pub(crate) fn transform_saved_http_tab(
     }
     let mut next = current.clone();
     match operation {
+        SavedHttpTabOperation::SetPinned(pinned) => {
+            // This is desired-state assignment, never a toggle or reorder.
+            next.replay.tabs[index].pinned = pinned;
+        }
         SavedHttpTabOperation::Close => {
             // Legacy counters can lag the saved tabs. Closing the last/highest
             // tab must not make its sequence available for reuse.
@@ -891,6 +896,8 @@ mod saved_http_tab_tests {
         for operation in [
             SavedHttpTabOperation::Close,
             SavedHttpTabOperation::Duplicate,
+            SavedHttpTabOperation::SetPinned(true),
+            SavedHttpTabOperation::SetPinned(false),
         ] {
             assert!(transform_saved_http_tab(&current, " middle ", operation).is_err());
             for kind in ["websocket", "unknown", "HTTP"] {
@@ -966,33 +973,45 @@ mod saved_http_tab_tests {
 
     #[tokio::test]
     async fn saved_http_failed_persistence_is_not_published_but_postrename_uncertainty_is() {
-        let current = fixture();
-        let store = WorkspaceStateStore::from_snapshot(current.clone());
-        let mut events = store.subscribe();
-        let failure = store
-            .transform_snapshot_checked_persisting(
-                8,
-                |current| transform_saved_http_tab(current, "middle", SavedHttpTabOperation::Close),
-                |_| async { Err::<Option<String>, _>("before rename".into()) },
-            )
-            .await;
-        assert!(matches!(failure, Err(WorkspaceTransformError::Persist(_))));
-        assert_eq!(value(&store.snapshot().await), value(&current));
-        assert!(events.try_recv().is_err());
-        let uncertainty = store
-            .transform_snapshot_checked_persisting(
-                8,
-                |current| transform_saved_http_tab(current, "middle", SavedHttpTabOperation::Close),
-                |_| async { Ok::<_, String>(Some("directory sync failed after rename".into())) },
-            )
-            .await;
-        assert!(matches!(
-            uncertainty,
-            Err(WorkspaceTransformError::CommittedButUncertain(_))
-        ));
-        assert_eq!(store.snapshot().await.revision, 9);
-        assert!(store.snapshot().await.client_id.is_none());
-        assert_eq!(events.try_recv().unwrap().revision, 9);
+        for operation in [
+            SavedHttpTabOperation::Close,
+            SavedHttpTabOperation::SetPinned(false),
+        ] {
+            let current = fixture();
+            let store = WorkspaceStateStore::from_snapshot(current.clone());
+            let mut events = store.subscribe();
+            let failure = store
+                .transform_snapshot_checked_persisting(
+                    8,
+                    |current| transform_saved_http_tab(current, "middle", operation),
+                    |_| async { Err::<Option<String>, _>("before rename".into()) },
+                )
+                .await;
+            assert!(matches!(failure, Err(WorkspaceTransformError::Persist(_))));
+            assert_eq!(value(&store.snapshot().await), value(&current));
+            assert!(events.try_recv().is_err());
+            let uncertainty = store
+                .transform_snapshot_checked_persisting(
+                    8,
+                    |current| transform_saved_http_tab(current, "middle", operation),
+                    |_| async {
+                        Ok::<_, String>(Some("directory sync failed after rename".into()))
+                    },
+                )
+                .await;
+            assert!(matches!(
+                uncertainty,
+                Err(WorkspaceTransformError::CommittedButUncertain(_))
+            ));
+            let mut expected = transform_saved_http_tab(&current, "middle", operation).unwrap();
+            expected.revision = 9;
+            expected.client_id = None;
+            expected.client_version = 0;
+            assert_eq!(value(&store.snapshot().await), value(&expected));
+            assert_eq!(store.snapshot().await.revision, 9);
+            assert!(store.snapshot().await.client_id.is_none());
+            assert_eq!(events.try_recv().unwrap().revision, 9);
+        }
     }
 
     #[tokio::test]

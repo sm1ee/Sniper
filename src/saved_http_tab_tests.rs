@@ -130,6 +130,13 @@ fn payload(id: Uuid, tab: &str, revision: u64) -> Value {
     json!({ "session_id": id, "tab_id": tab, "expected_workspace_revision": revision })
 }
 
+fn operation_payload(operation: &str, mut body: Value) -> Value {
+    if operation == "set-pinned" {
+        body["pinned"] = json!(false);
+    }
+    body
+}
+
 fn request() -> EditableRequest {
     EditableRequest {
         scheme: "https".into(),
@@ -504,9 +511,11 @@ async fn saved_http_tab_routes_reject_malformed_unknown_and_inexact_payloads_wit
     }
     let disk = files(&fixture.config.data_dir);
     let mut events = session.workspace.subscribe();
-    for operation in ["close", "duplicate"] {
+    for operation in ["close", "duplicate", "set-pinned"] {
         for body in &invalid {
-            let (status, text) = fixture.post(operation, body.clone()).await;
+            let (status, text) = fixture
+                .post(operation, operation_payload(operation, body.clone()))
+                .await;
             assert!(status.is_client_error(), "{operation}: {status} {text}");
             assert_eq!(
                 serialized(&session.workspace.snapshot().await),
@@ -531,6 +540,10 @@ async fn saved_http_tab_wrong_kind_and_stale_uncached_inactive_requests_do_not_r
         ("duplicate", "unknown", false),
         ("close", " legacy tab ", true),
         ("duplicate", " legacy tab ", true),
+        ("set-pinned", "missing", false),
+        ("set-pinned", "websocket", false),
+        ("set-pinned", "unknown", false),
+        ("set-pinned", " legacy tab ", true),
     ] {
         let mut snapshot = workspace();
         snapshot.replay.tabs.push(ReplayTabState {
@@ -559,7 +572,12 @@ async fn saved_http_tab_wrong_kind_and_stale_uncached_inactive_requests_do_not_r
         } else {
             before.revision
         };
-        let (status, text) = fixture.post(operation, payload(id, target, revision)).await;
+        let (status, text) = fixture
+            .post(
+                operation,
+                operation_payload(operation, payload(id, target, revision)),
+            )
+            .await;
         assert_eq!(
             status,
             if stale {
@@ -644,13 +662,16 @@ async fn saved_http_tab_cas_prevents_same_revision_writers_and_legacy_client_res
         ("duplicate", "duplicate"),
         ("close", "close"),
         ("close", "duplicate"),
+        ("set-pinned", "set-pinned"),
+        ("set-pinned", "close"),
+        ("duplicate", "set-pinned"),
     ] {
         let (session, before) = fixture.seed(workspace()).await;
         let mut events = session.workspace.subscribe();
         let body = payload(session.id(), " legacy tab ", before.revision);
         let (one, two) = tokio::join!(
-            fixture.post(first, body.clone()),
-            fixture.post(second, body)
+            fixture.post(first, operation_payload(first, body.clone())),
+            fixture.post(second, operation_payload(second, body))
         );
         let mut statuses = [one.0.as_u16(), two.0.as_u16()];
         statuses.sort();
@@ -679,90 +700,109 @@ async fn saved_http_tab_cas_prevents_same_revision_writers_and_legacy_client_res
 
 #[tokio::test]
 async fn saved_http_tab_rechecks_cas_after_operation_and_mutation_lock_waits() {
-    let fixture = Fixture::new().await;
-    for mutation_lock in [false, true] {
-        let (session, before) = fixture.seed(workspace()).await;
-        let operation_lock = fixture.state.session_operation_lock(session.id()).await;
-        let operation_guard = if mutation_lock {
-            None
-        } else {
-            Some(operation_lock.lock().await)
-        };
-        let mutation_guard = if mutation_lock {
-            Some(session.mutation_guard().await)
-        } else {
-            None
-        };
-        let client = fixture.client.clone();
-        let base = fixture.base.clone();
-        let body = payload(session.id(), " legacy tab ", before.revision);
-        let mut pending =
-            tokio::spawn(async move { post(&client, &base, "duplicate", body).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut pending)
+    for operation in ["duplicate", "set-pinned"] {
+        let fixture = Fixture::new().await;
+        for mutation_lock in [false, true] {
+            let (session, before) = fixture.seed(workspace()).await;
+            let operation_lock = fixture.state.session_operation_lock(session.id()).await;
+            let operation_guard = if mutation_lock {
+                None
+            } else {
+                Some(operation_lock.lock().await)
+            };
+            let mutation_guard = if mutation_lock {
+                Some(session.mutation_guard().await)
+            } else {
+                None
+            };
+            let client = fixture.client.clone();
+            let base = fixture.base.clone();
+            let body = payload(session.id(), " legacy tab ", before.revision);
+            let mut pending = tokio::spawn(async move {
+                post(
+                    &client,
+                    &base,
+                    operation,
+                    operation_payload(operation, body),
+                )
                 .await
-                .is_err(),
-            "writer ignored held lock"
-        );
-        let mut newer = before.clone();
-        newer.replay.tabs[1].notice = "concurrent editor changed this".into();
-        let newer = session.workspace.replace_snapshot(newer).await;
-        drop(mutation_guard);
-        drop(operation_guard);
-        let (status, text) = tokio::time::timeout(Duration::from_secs(5), pending)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(status, StatusCode::CONFLICT, "{text}");
-        assert_eq!(
-            serialized(&session.workspace.snapshot().await),
-            serialized(&newer)
-        );
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut pending)
+                    .await
+                    .is_err(),
+                "writer ignored held lock"
+            );
+            let mut newer = before.clone();
+            newer.replay.tabs[1].notice = "concurrent editor changed this".into();
+            let newer = session.workspace.replace_snapshot(newer).await;
+            drop(mutation_guard);
+            drop(operation_guard);
+            let (status, text) = tokio::time::timeout(Duration::from_secs(5), pending)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status, StatusCode::CONFLICT, "{text}");
+            assert_eq!(
+                serialized(&session.workspace.snapshot().await),
+                serialized(&newer)
+            );
+        }
     }
 }
 
 #[tokio::test]
 async fn saved_http_tab_active_guard_is_checked_again_after_a_queued_session_switch() {
-    let fixture = Fixture::new().await;
-    let (session, before) = fixture.seed(workspace()).await;
-    let other = fixture
-        .state
-        .sessions
-        .create_session(Some("Other generated session".into()))
-        .unwrap()
-        .id;
-    let operation_lock = fixture.state.session_operation_lock(session.id()).await;
-    let guard = operation_lock.lock().await;
-    let mut switching = Box::pin(fixture.state.activate_session(other));
-    // Polling the real activation future while holding the old session lock
-    // deterministically queues the switch before the request in Tokio's FIFO mutex.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut switching)
+    for operation in ["close", "set-pinned"] {
+        let fixture = Fixture::new().await;
+        let (session, before) = fixture.seed(workspace()).await;
+        let other = fixture
+            .state
+            .sessions
+            .create_session(Some("Other generated session".into()))
+            .unwrap()
+            .id;
+        let operation_lock = fixture.state.session_operation_lock(session.id()).await;
+        let guard = operation_lock.lock().await;
+        let mut switching = Box::pin(fixture.state.activate_session(other));
+        // Polling the real activation future while holding the old session lock
+        // deterministically queues the switch before the request in Tokio's FIFO mutex.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut switching)
+                .await
+                .is_err()
+        );
+        let mut body = payload(session.id(), " legacy tab ", before.revision);
+        body["expected_active_session_id"] = json!(session.id());
+        let client = fixture.client.clone();
+        let base = fixture.base.clone();
+        let mut pending = tokio::spawn(async move {
+            post(
+                &client,
+                &base,
+                operation,
+                operation_payload(operation, body),
+            )
             .await
-            .is_err()
-    );
-    let mut body = payload(session.id(), " legacy tab ", before.revision);
-    body["expected_active_session_id"] = json!(session.id());
-    let client = fixture.client.clone();
-    let base = fixture.base.clone();
-    let mut pending = tokio::spawn(async move { post(&client, &base, "close", body).await });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut pending)
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut pending)
+                .await
+                .is_err()
+        );
+        drop(guard);
+        switching.await.unwrap();
+        let (status, text) = tokio::time::timeout(Duration::from_secs(5), pending)
             .await
-            .is_err()
-    );
-    drop(guard);
-    switching.await.unwrap();
-    let (status, text) = tokio::time::timeout(Duration::from_secs(5), pending)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(status, StatusCode::CONFLICT, "{text}");
-    assert_eq!(fixture.state.session().await.id(), other);
-    assert_eq!(
-        serialized(&session.workspace.snapshot().await),
-        serialized(&before)
-    );
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, StatusCode::CONFLICT, "{text}");
+        assert_eq!(fixture.state.session().await.id(), other);
+        assert_eq!(
+            serialized(&session.workspace.snapshot().await),
+            serialized(&before)
+        );
+    }
 }
 
 #[tokio::test]
@@ -789,11 +829,14 @@ async fn saved_http_tab_precommit_disk_failure_preserves_memory_revision_and_rea
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
     let disk = files(session.storage_dir());
-    for operation in ["close", "duplicate"] {
+    for operation in ["close", "duplicate", "set-pinned"] {
         let (status, text) = fixture
             .post(
                 operation,
-                payload(session.id(), " legacy tab ", before.revision),
+                operation_payload(
+                    operation,
+                    payload(session.id(), " legacy tab ", before.revision),
+                ),
             )
             .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{text}");
@@ -813,8 +856,11 @@ async fn saved_http_tab_precommit_disk_failure_preserves_memory_revision_and_rea
     std::fs::rename(&backup, &path).unwrap();
     let (status, text) = fixture
         .post(
-            "duplicate",
-            payload(session.id(), " legacy tab ", before.revision),
+            "set-pinned",
+            operation_payload(
+                "set-pinned",
+                payload(session.id(), " legacy tab ", before.revision),
+            ),
         )
         .await;
     ack(status, &text);
@@ -958,15 +1004,20 @@ async fn saved_http_tab_immediate_active_guard_and_unknown_session_fail_without_
     let fixture = Fixture::new().await;
     let (session, before) = fixture.seed(workspace()).await;
     let disk = files(&fixture.config.data_dir);
-    for operation in ["close", "duplicate"] {
+    for operation in ["close", "duplicate", "set-pinned"] {
         let mut wrong_active = payload(session.id(), " legacy tab ", before.revision);
         wrong_active["expected_active_session_id"] = json!(Uuid::new_v4());
-        let (status, text) = fixture.post(operation, wrong_active).await;
+        let (status, text) = fixture
+            .post(operation, operation_payload(operation, wrong_active))
+            .await;
         assert_eq!(status, StatusCode::CONFLICT, "{text}");
         let (status, text) = fixture
             .post(
                 operation,
-                payload(Uuid::new_v4(), " legacy tab ", before.revision),
+                operation_payload(
+                    operation,
+                    payload(Uuid::new_v4(), " legacy tab ", before.revision),
+                ),
             )
             .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
@@ -986,6 +1037,9 @@ async fn saved_http_tab_concurrent_uncached_inactive_writers_share_the_same_revi
         ("duplicate", "duplicate"),
         ("close", "close"),
         ("close", "duplicate"),
+        ("set-pinned", "set-pinned"),
+        ("set-pinned", "close"),
+        ("duplicate", "set-pinned"),
     ] {
         let (id, path, before) = fixture.inactive(workspace());
         for name in ["transactions.journal", "websockets.journal"] {
@@ -994,8 +1048,8 @@ async fn saved_http_tab_concurrent_uncached_inactive_writers_share_the_same_revi
         let disk = files(&path);
         let body = payload(id, " legacy tab ", before.revision);
         let (one, two) = tokio::join!(
-            fixture.post(first, body.clone()),
-            fixture.post(second, body)
+            fixture.post(first, operation_payload(first, body.clone())),
+            fixture.post(second, operation_payload(second, body))
         );
         let mut statuses = [one.0.as_u16(), two.0.as_u16()];
         statuses.sort();
@@ -1052,6 +1106,131 @@ async fn saved_http_tab_successful_close_blocks_stale_same_client_keepalive_resu
             serialized(&after)
         );
         assert_eq!(files(session.storage_dir()), disk);
+        assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+    }
+}
+
+#[tokio::test]
+async fn saved_http_tab_set_pinned_is_idempotent_desired_state_only_and_survives_restart() {
+    for inactive in [false, true] {
+        let fixture = Fixture::new().await;
+        let active = fixture.state.session().await.id();
+        let (session, mut before) = if inactive {
+            let (id, path, before) = fixture.inactive(workspace());
+            for name in ["transactions.journal", "websockets.journal"] {
+                std::fs::write(path.join(name), b"damaged synthetic journal\n{incomplete").unwrap();
+            }
+            (
+                fixture.state.read_session_context_for_id(id).await.unwrap(),
+                before,
+            )
+        } else {
+            fixture.seed(workspace()).await
+        };
+        let disk_before = without_workspace(files(session.storage_dir()));
+        let mut events = session.workspace.subscribe();
+        // Repeating the desired state is not a toggle. Each accepted CAS still
+        // commits one revision, including a pin value already stored on disk.
+        for (tab_id, pinned) in [
+            (" legacy tab ", false),
+            (" legacy tab ", false),
+            (" legacy tab ", true),
+            (" legacy tab ", true),
+            ("other-http", true),
+            ("other-http", false),
+        ] {
+            let mut body = payload(session.id(), tab_id, before.revision);
+            body["pinned"] = json!(pinned);
+            let (status, text) = fixture.post("set-pinned", body).await;
+            assert_eq!(
+                ack(status, &text),
+                json!({
+                    "session_id": session.id(),
+                    "revision": before.revision + 1,
+                    "active_tab_id": before.replay.active_tab_id,
+                    "tab_id": tab_id,
+                    "pinned": pinned,
+                })
+            );
+            let mut expected = before.clone();
+            expected
+                .replay
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.id == tab_id)
+                .unwrap()
+                .pinned = pinned;
+            expected.revision += 1;
+            expected.session_id = Some(session.id());
+            expected.client_id = None;
+            expected.client_version = 0;
+            expected.expected_active_session_id = None;
+            let after = session.workspace.snapshot().await;
+            // Full equality preserves physical order, focus, the deliberately
+            // lagging sequence, every saved HTTP/WS field, and unrelated drafts.
+            assert_eq!(serialized(&after), serialized(&expected));
+            assert_eq!(fixture.state.session().await.id(), active);
+            assert_eq!(without_workspace(files(session.storage_dir())), disk_before);
+            let persisted: WorkspaceStateSnapshot = serde_json::from_slice(
+                &std::fs::read(session.storage_dir().join("workspace.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(serialized(&persisted), serialized(&expected));
+            let event = events.try_recv().unwrap();
+            assert_eq!(event.revision, after.revision);
+            assert_eq!(event.session_id, Some(session.id()));
+            assert!(event.client_id.is_none());
+            assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+            before = after;
+        }
+        let restarted = AppState::new(fixture.config.clone()).unwrap();
+        assert_eq!(restarted.session().await.id(), active);
+        let loaded = restarted
+            .read_session_context_for_id(session.id())
+            .await
+            .unwrap();
+        assert_eq!(
+            serialized(&loaded.workspace.snapshot().await),
+            serialized(&before)
+        );
+    }
+}
+
+#[tokio::test]
+async fn saved_http_tab_set_pinned_requires_strict_boolean_and_rejects_unknown_fields() {
+    let fixture = Fixture::new().await;
+    let (session, before) = fixture.seed(workspace()).await;
+    let valid = payload(session.id(), " legacy tab ", before.revision);
+    let mut invalid = vec![valid.clone()]; // Missing pinned must not default to false.
+    for pinned in [
+        Value::Null,
+        json!("true"),
+        json!("false"),
+        json!(0),
+        json!(1),
+        json!([]),
+        json!({}),
+    ] {
+        let mut body = valid.clone();
+        body["pinned"] = pinned;
+        invalid.push(body);
+    }
+    for key in ["toggle", "pin", "client_version", "request_text"] {
+        let mut body = valid.clone();
+        body["pinned"] = json!(true);
+        body[key] = json!(true);
+        invalid.push(body);
+    }
+    let disk = files(&fixture.config.data_dir);
+    let mut events = session.workspace.subscribe();
+    for body in invalid {
+        let (status, text) = fixture.post("set-pinned", body).await;
+        assert!(status.is_client_error(), "{status}: {text}");
+        assert_eq!(
+            serialized(&session.workspace.snapshot().await),
+            serialized(&before)
+        );
+        assert_eq!(files(&fixture.config.data_dir), disk);
         assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
     }
 }

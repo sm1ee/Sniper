@@ -798,6 +798,8 @@ enum ReplayCommand {
     Close(ReplaySavedTabArgs),
     /// Clone one saved HTTP tab without sending traffic or changing the active tab.
     Duplicate(ReplaySavedTabArgs),
+    /// Set saved HTTP tab pin state without sending traffic or changing focus.
+    SetPinned(ReplaySetPinnedArgs),
     Send(ReplaySendArgs),
 }
 
@@ -879,6 +881,15 @@ struct ReplaySavedTabArgs {
     tab_id: String,
     #[arg(long)]
     session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct ReplaySetPinnedArgs {
+    #[command(flatten)]
+    tab: ReplaySavedTabArgs,
+    /// Desired pin state; repeated values never toggle it.
+    #[arg(long, required = true, action = ArgAction::Set)]
+    pinned: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2129,6 +2140,7 @@ impl ReplayCommand {
             ReplayCommand::Update(_) => "replay.update",
             ReplayCommand::Close(_) => "replay.close",
             ReplayCommand::Duplicate(_) => "replay.duplicate",
+            ReplayCommand::SetPinned(_) => "replay.set_pinned",
             ReplayCommand::Send(_) => "replay.send",
         }
     }
@@ -2505,6 +2517,15 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             true,
             &["tab_id"],
             vec![json!({"tab_id":"tab-1"})],
+        ),
+        op(
+            "replay.set_pinned",
+            "replay set-pinned --tab-id <exact-id> --pinned <true|false> [--session-id <uuid>]",
+            "Set one saved HTTP tab's pin state using one revision-checked write. Focus and saved array order are preserved; no traffic is sent.",
+            Write,
+            true,
+            &["tab_id", "pinned"],
+            vec![json!({"tab_id":"tab-1","pinned":true})],
         ),
         op(
             "replay.send",
@@ -2950,7 +2971,10 @@ fn op(
 }
 
 fn replay_saved_tab_output_schema(operation: &str) -> Option<Value> {
-    if !matches!(operation, "replay.close" | "replay.duplicate") {
+    if !matches!(
+        operation,
+        "replay.close" | "replay.duplicate" | "replay.set_pinned"
+    ) {
         return None;
     }
     let mut schema = json!({
@@ -2964,8 +2988,10 @@ fn replay_saved_tab_output_schema(operation: &str) -> Option<Value> {
     });
     let fields: &[&str] = if operation == "replay.close" {
         &["closed_tab_id"]
-    } else {
+    } else if operation == "replay.duplicate" {
         &["source_tab_id", "new_tab_id"]
+    } else {
+        &["tab_id"]
     };
     for field in fields {
         schema["required"].as_array_mut()?.push(json!(field));
@@ -2973,6 +2999,9 @@ fn replay_saved_tab_output_schema(operation: &str) -> Option<Value> {
     }
     if operation == "replay.duplicate" {
         schema["properties"]["new_tab_id"]["format"] = json!("uuid");
+    } else if operation == "replay.set_pinned" {
+        schema["required"].as_array_mut()?.push(json!("pinned"));
+        schema["properties"]["pinned"] = json!({"type":"boolean"});
     }
     Some(schema)
 }
@@ -3035,14 +3064,25 @@ fn session_read_output_schema(operation: &str) -> Option<Value> {
 }
 
 fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
-    if matches!(operation, "replay.close" | "replay.duplicate") {
-        return json!({
+    if matches!(
+        operation,
+        "replay.close" | "replay.duplicate" | "replay.set_pinned"
+    ) {
+        let mut schema = json!({
             "type":"object", "additionalProperties":false, "required":["tab_id"],
             "properties":{
                 "tab_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"\\S","description":"Exact saved HTTP tab ID; nonblank, at most 128 UTF-8 bytes, never trimmed or treated as a label."},
                 "session_id":{"type":"string","format":"uuid","description":"Selected saved session, including inactive sessions. Omission pins the active session once."}
             }
         });
+        if operation == "replay.set_pinned" {
+            schema["required"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("pinned"));
+            schema["properties"]["pinned"] = json!({"type":"boolean"});
+        }
+        return schema;
     }
     if let Some(schema) = scanner_input_schema(operation, required_fields) {
         return schema;
@@ -3222,6 +3262,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         ],
         "replay.list" => &["session_id"],
         "replay.close" | "replay.duplicate" => &["tab_id", "session_id"],
+        "replay.set_pinned" => &["tab_id", "session_id", "pinned"],
         "replay.open" => &[
             "session_id",
             "transaction_id",
@@ -3496,6 +3537,13 @@ fn replay_input_preview(command: &ReplayCommand) -> Value {
         ReplayCommand::Close(args) | ReplayCommand::Duplicate(args) => {
             let mut input = json!({"tab_id":args.tab_id});
             if let Some(session_id) = args.session_id {
+                input["session_id"] = json!(session_id);
+            }
+            input
+        }
+        ReplayCommand::SetPinned(args) => {
+            let mut input = json!({"tab_id":args.tab.tab_id,"pinned":args.pinned});
+            if let Some(session_id) = args.tab.session_id {
                 input["session_id"] = json!(session_id);
             }
             input
@@ -3833,9 +3881,24 @@ fn replay_api_preview(command: &ReplayCommand) -> Value {
             }
             api_preview(
                 "POST",
-                replay_saved_tab_path(matches!(command, ReplayCommand::Duplicate(_))),
+                replay_saved_tab_path(if matches!(command, ReplayCommand::Duplicate(_)) {
+                    SavedReplayTabAction::Duplicate
+                } else {
+                    SavedReplayTabAction::Close
+                }),
                 Some(body),
             )
+        }
+        ReplayCommand::SetPinned(args) => {
+            let mut preview = replay_api_preview(&ReplayCommand::Close(ReplaySavedTabArgs {
+                tab_id: args.tab.tab_id.clone(),
+                session_id: args.tab.session_id,
+            }));
+            preview["path"] = json!(replay_saved_tab_path(SavedReplayTabAction::SetPinned(
+                args.pinned
+            )));
+            preview["body"]["pinned"] = json!(args.pinned);
+            preview
         }
         ReplayCommand::Send(_) => api_preview(
             "POST",
@@ -4135,10 +4198,10 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     }
     if matches!(
         command.operation_name(),
-        "replay.close" | "replay.duplicate"
+        "replay.close" | "replay.duplicate" | "replay.set_pinned"
     ) {
         notes.push("Dry-run is fully offline: it does not discover Sniper, resolve a session, read saved tabs or check whether the exact tab ID exists.");
-        notes.push("Execution pins one session, reads its saved workspace revision, and posts only IDs plus revision to the dedicated endpoint once. An inferred session also guards against an active-session switch. Conflicts, redirects and ambiguous responses are not retried.");
+        notes.push("Execution pins one session, reads its saved workspace revision, and posts only IDs, revision and any requested pin state to the dedicated endpoint once. An inferred session also guards against an active-session switch. Conflicts, redirects and ambiguous responses are not retried.");
         notes.push("Saved HTTP tabs only, including legacy empty types. No request parsing, body hydration, Replay send, WebSocket connection or full workspace replacement occurs. Success returns only acknowledgement metadata.");
     }
     if matches!(command, Command::Scanner { .. }) {
@@ -4580,7 +4643,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 }),
             }
         }
-        "replay.close" | "replay.duplicate" => {
+        "replay.close" | "replay.duplicate" | "replay.set_pinned" => {
             let args = ReplaySavedTabArgs {
                 tab_id: call_required(operation, input, "tab_id")?,
                 session_id: if input.get("session_id").is_some() {
@@ -4592,8 +4655,13 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             Command::Replay {
                 command: if operation == "replay.close" {
                     ReplayCommand::Close(args)
-                } else {
+                } else if operation == "replay.duplicate" {
                     ReplayCommand::Duplicate(args)
+                } else {
+                    ReplayCommand::SetPinned(ReplaySetPinnedArgs {
+                        tab: args,
+                        pinned: call_required(operation, input, "pinned")?,
+                    })
                 },
             }
         }
@@ -5506,7 +5574,10 @@ async fn run(cli: Cli) -> Result<()> {
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
     if let Command::Replay {
-        command: ReplayCommand::Close(args) | ReplayCommand::Duplicate(args),
+        command:
+            ReplayCommand::Close(args)
+            | ReplayCommand::Duplicate(args)
+            | ReplayCommand::SetPinned(ReplaySetPinnedArgs { tab: args, .. }),
     } = command
     {
         if args.tab_id.trim().is_empty() || args.tab_id.len() > 128 {
@@ -6107,8 +6178,16 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
             let tab = find_replay_tab(&snapshot.replay, &args.tab_id)?;
             print_json_with_session(tab, workspace.session_id)
         }
-        ReplayCommand::Close(args) => handle_saved_replay_tab(&api, args, false).await,
-        ReplayCommand::Duplicate(args) => handle_saved_replay_tab(&api, args, true).await,
+        ReplayCommand::Close(args) => {
+            handle_saved_replay_tab(&api, args, SavedReplayTabAction::Close).await
+        }
+        ReplayCommand::Duplicate(args) => {
+            handle_saved_replay_tab(&api, args, SavedReplayTabAction::Duplicate).await
+        }
+        ReplayCommand::SetPinned(args) => {
+            handle_saved_replay_tab(&api, args.tab, SavedReplayTabAction::SetPinned(args.pinned))
+                .await
+        }
         ReplayCommand::Send(args) => {
             let mut workspace = load_workspace_state(&api, args.session_id).await?;
             let tab = find_replay_tab_mut(&mut workspace.replay, &args.tab_id)?.clone();
@@ -6247,11 +6326,18 @@ fn replay_tab_error(
     })
 }
 
-fn replay_saved_tab_path(duplicate: bool) -> &'static str {
-    if duplicate {
-        "/api/replay/tabs/duplicate"
-    } else {
-        "/api/replay/tabs/close"
+#[derive(Clone, Copy)]
+enum SavedReplayTabAction {
+    Close,
+    Duplicate,
+    SetPinned(bool),
+}
+
+fn replay_saved_tab_path(action: SavedReplayTabAction) -> &'static str {
+    match action {
+        SavedReplayTabAction::Close => "/api/replay/tabs/close",
+        SavedReplayTabAction::Duplicate => "/api/replay/tabs/duplicate",
+        SavedReplayTabAction::SetPinned(_) => "/api/replay/tabs/set-pinned",
     }
 }
 
@@ -6385,12 +6471,12 @@ fn checked_saved_replay_ack(
     snapshot: &SavedReplayTabSnapshot,
     session_id: Uuid,
     tab_id: &str,
-    duplicate: bool,
+    action: SavedReplayTabAction,
 ) -> Result<Value> {
     let invalid = || {
         replay_tab_error("INVALID_RESPONSE", "Saved tab acknowledgement did not match this operation; inspect saved tabs before any further action", "unknown", Some(session_id))
     };
-    let expected_fields: &[&str] = if duplicate {
+    let expected_fields: &[&str] = if matches!(action, SavedReplayTabAction::Duplicate) {
         &[
             "session_id",
             "revision",
@@ -6398,8 +6484,16 @@ fn checked_saved_replay_ack(
             "new_tab_id",
             "active_tab_id",
         ]
-    } else {
+    } else if matches!(action, SavedReplayTabAction::Close) {
         &["session_id", "revision", "closed_tab_id", "active_tab_id"]
+    } else {
+        &[
+            "session_id",
+            "revision",
+            "tab_id",
+            "pinned",
+            "active_tab_id",
+        ]
     };
     let object = value.as_object().ok_or_else(invalid)?;
     if object.len() != expected_fields.len()
@@ -6407,10 +6501,10 @@ fn checked_saved_replay_ack(
     {
         return Err(invalid());
     }
-    let target_key = if duplicate {
-        "source_tab_id"
-    } else {
-        "closed_tab_id"
+    let target_key = match action {
+        SavedReplayTabAction::Close => "closed_tab_id",
+        SavedReplayTabAction::Duplicate => "source_tab_id",
+        SavedReplayTabAction::SetPinned(_) => "tab_id",
     };
     if value["session_id"]
         .as_str()
@@ -6419,11 +6513,15 @@ fn checked_saved_replay_ack(
         || value["revision"].as_u64() != snapshot.revision.checked_add(1)
         || value[target_key].as_str() != Some(tab_id)
         || value["active_tab_id"]
-            != json!(saved_replay_expected_active(snapshot, tab_id, duplicate))
+            != json!(saved_replay_expected_active(
+                snapshot,
+                tab_id,
+                !matches!(action, SavedReplayTabAction::Close)
+            ))
     {
         return Err(invalid());
     }
-    if duplicate {
+    if matches!(action, SavedReplayTabAction::Duplicate) {
         let new_id = value["new_tab_id"].as_str().ok_or_else(invalid)?;
         let uuid = Uuid::parse_str(new_id).map_err(|_| invalid())?;
         if snapshot
@@ -6434,13 +6532,18 @@ fn checked_saved_replay_ack(
             return Err(invalid());
         }
     }
+    if let SavedReplayTabAction::SetPinned(pinned) = action {
+        if value["pinned"].as_bool() != Some(pinned) {
+            return Err(invalid());
+        }
+    }
     Ok(value)
 }
 
 async fn handle_saved_replay_tab(
     api: &ApiClient,
     args: ReplaySavedTabArgs,
-    duplicate: bool,
+    action: SavedReplayTabAction,
 ) -> Result<()> {
     // Do not inherit redirect or protocol retry behavior from legacy clients:
     // an acknowledgement loss must never create a second duplicate or close.
@@ -6505,7 +6608,7 @@ async fn handle_saved_replay_tab(
     if !matches!(tab.tab_type.as_str(), "" | "http") {
         return Err(replay_tab_error(
             "INVALID_INPUT",
-            "Saved tab close and duplicate require an HTTP tab; no mutation was sent",
+            "Saved tab operations require an HTTP tab; no mutation was sent",
             "not_applied",
             Some(session_id),
         ));
@@ -6514,8 +6617,11 @@ async fn handle_saved_replay_tab(
     if args.session_id.is_none() {
         body["expected_active_session_id"] = json!(session_id);
     }
+    if let SavedReplayTabAction::SetPinned(pinned) = action {
+        body["pinned"] = json!(pinned);
+    }
     let response = client
-        .post(api.url(replay_saved_tab_path(duplicate)))
+        .post(api.url(replay_saved_tab_path(action)))
         .json(&body)
         .send()
         .await
@@ -6555,7 +6661,7 @@ async fn handle_saved_replay_tab(
     }
     let value = saved_replay_response_json(response, 4096).await.map_err(|_| replay_tab_error("INVALID_RESPONSE", "Saved tab acknowledgement was missing, malformed or too large; inspect saved tabs before any further action", "unknown", Some(session_id)))?;
     let acknowledgement =
-        checked_saved_replay_ack(value, &snapshot, session_id, &args.tab_id, duplicate)?;
+        checked_saved_replay_ack(value, &snapshot, session_id, &args.tab_id, action)?;
     print_session_read_json(&acknowledgement, session_id)
 }
 

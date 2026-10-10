@@ -391,6 +391,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/replay/tabs/close", post(close_saved_http_tab))
         .route("/api/replay/tabs/duplicate", post(duplicate_saved_http_tab))
         .route(
+            "/api/replay/tabs/set-pinned",
+            post(set_saved_http_tab_pinned),
+        )
+        .route(
             "/api/startup-settings",
             get(get_startup_settings).post(update_startup_settings),
         )
@@ -3010,6 +3014,33 @@ struct SavedHttpTabPayload {
     expected_active_session_id: Option<Uuid>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetSavedHttpTabPinnedPayload {
+    session_id: Uuid,
+    tab_id: String,
+    expected_workspace_revision: u64,
+    expected_active_session_id: Option<Uuid>,
+    pinned: bool,
+}
+
+async fn set_saved_http_tab_pinned(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SetSavedHttpTabPinnedPayload>,
+) -> Response {
+    mutate_saved_http_tab(
+        state,
+        SavedHttpTabPayload {
+            session_id: payload.session_id,
+            tab_id: payload.tab_id,
+            expected_workspace_revision: payload.expected_workspace_revision,
+            expected_active_session_id: payload.expected_active_session_id,
+        },
+        SavedHttpTabOperation::SetPinned(payload.pinned),
+    )
+    .await
+}
+
 async fn close_saved_http_tab(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SavedHttpTabPayload>,
@@ -3107,6 +3138,10 @@ async fn mutate_saved_http_tab_inner(
             });
             match operation {
                 SavedHttpTabOperation::Close => result["closed_tab_id"] = payload.tab_id.into(),
+                SavedHttpTabOperation::SetPinned(pinned) => {
+                    result["tab_id"] = payload.tab_id.into();
+                    result["pinned"] = pinned.into();
+                }
                 SavedHttpTabOperation::Duplicate => {
                     result["source_tab_id"] = payload.tab_id.into();
                     result["new_tab_id"] = snapshot.replay.tabs.last().unwrap().id.clone().into();

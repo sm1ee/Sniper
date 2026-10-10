@@ -1,4 +1,4 @@
-# Saved HTTP Replay tab close and duplicate
+# Saved HTTP Replay tab housekeeping
 
 These housekeeping operations affect already saved HTTP Replay tabs only. They
 never send requests, connect WebSockets, hydrate bodies, or replace a workspace
@@ -6,22 +6,25 @@ with client-supplied state. Captured HTTP history and other tools are unchanged.
 
 ## CLI
 
-Canonical operations: `replay.close` and `replay.duplicate`.
+Canonical operations: `replay.close`, `replay.duplicate`, and `replay.set_pinned`.
 
 ```bash
 sniper-cli replay close --tab-id 'exact-tab-id' --session-id <session-uuid> --dry-run
 sniper-cli replay duplicate --tab-id 'exact-tab-id' --yes
+sniper-cli replay set-pinned --tab-id 'exact-tab-id' --pinned true --yes
+sniper-cli call replay.set_pinned --input '{"tab_id":"exact-tab-id","pinned":false}' --dry-run
 sniper-cli call replay.close --input '{"tab_id":"exact-tab-id"}' --yes
 sniper-cli schema input replay.close
 sniper-cli schema output replay.duplicate
 ```
 
-`call` permits exactly `tab_id` (required string) and `session_id` (optional UUID
-string; explicit null is rejected). Tab IDs are nonblank and at most 128 UTF-8
-bytes. Leading/trailing spaces remain part of the exact ID. Labels, partial IDs,
-request fields, caller-provided revisions, and unknown fields are rejected.
+Close and duplicate `call` inputs permit exactly `tab_id` (required string)
+and `session_id` (optional UUID string; explicit null is rejected). Tab IDs are
+nonblank and at most 128 UTF-8 bytes. `replay.set_pinned` additionally requires `pinned` as a JSON boolean;
+strings, numbers, null, and omission are rejected. Leading/trailing spaces
+remain part of the exact ID. Labels, partial IDs, request fields, caller-provided revisions, and unknown fields are rejected.
 
-Both commands require `--yes`. Dry-run validates local input before discovery and
+All commands require `--yes`. Dry-run validates local input before discovery and
 makes zero requests, including session or workspace reads. Without `session_id`,
 the active session is resolved once and pinned. Explicit IDs select saved sessions
 without switching the UI's active session.
@@ -32,6 +35,7 @@ Read `GET /api/workspace-state?session_id=<uuid>`, then use one of:
 
 - `POST /api/replay/tabs/close`
 - `POST /api/replay/tabs/duplicate`
+- `POST /api/replay/tabs/set-pinned` (also requires boolean `pinned`)
 
 ```json
 {
@@ -58,6 +62,19 @@ Only the new tab's ID, pinned flag and sequence change: a fresh UUID, false, and
 one above the maximum of the existing counter and all tab sequences. Existing
 focus remains unchanged.
 
+Set-pinned assigns the requested boolean to the saved HTTP tab. It preserves
+focus, physical array order, sequence counters, request text, targets, responses,
+history, and all other tabs. The visual strip still groups pinned tabs first.
+Repeating the same desired value never toggles it, but every accepted request
+still advances the workspace revision by one and requires the latest revision.
+There is no receipt-based retry guarantee.
+
+Successful set-pinned returns exactly:
+
+```json
+{"session_id":"00000000-0000-0000-0000-000000000000","revision":18,"tab_id":"exact-tab-id","pinned":true,"active_tab_id":"exact-tab-id"}
+```
+
 Successful close returns exactly:
 
 ```json
@@ -71,7 +88,7 @@ Successful duplicate returns exactly:
 ```
 
 The CLI validates the acknowledgement's exact fields, session, next revision,
-target, expected focus, and fresh duplicate UUID before reporting success. It
+target, expected focus, requested pin value, and fresh duplicate UUID before reporting success. It
 returns only this metadata, never request/response/history content. Direct
 commands return the bare object; `call` uses the ordinary success envelope with
 `data` and `meta.session_id`.
@@ -92,3 +109,10 @@ A clean desktop workspace follows an external saved-tab close. If the desktop
 has a dirty or active draft conflict, it preserves the current editor and stops
 workspace autosave/unload writes until the conflict is explicitly reconciled.
 Copy any unsaved draft before reloading; a reload displays the saved workspace.
+
+Remote HTTP pin changes are merged as a separate metadata field, even while a
+request editor or rename is dirty. A clean local pin adopts the saved value;
+a local-only pin edit remains local, and matching edits converge. The committed
+pin baseline is advanced with the merge, preventing a later autosave or unload
+from restoring a stale pin. Existing revision-conflict handling still stops
+stale full-workspace saves. Remote physical array ordering is not adopted.

@@ -21,6 +21,23 @@ use uuid::Uuid;
 const TARGET: &str = " exact saved tab ";
 const CONTENT: &str = "synthetic-request-response-history-content-must-not-be-printed";
 const OPERATIONS: [&str; 2] = ["replay.close", "replay.duplicate"];
+const PIN: &str = "replay.set_pinned";
+const ALL_OPERATIONS: [&str; 3] = ["replay.close", "replay.duplicate", PIN];
+
+fn input_for(operation: &str) -> Value {
+    let mut input = json!({"tab_id":TARGET});
+    if operation == PIN {
+        input["pinned"] = json!(true);
+    }
+    input
+}
+
+fn operation_path(operation: &str) -> String {
+    format!(
+        "/api/replay/tabs/{}",
+        operation.strip_prefix("replay.").unwrap().replace('_', "-")
+    )
+}
 
 #[derive(Clone, Debug)]
 struct RecordedRequest {
@@ -83,6 +100,12 @@ fn session_summary(id: Uuid, active: bool) -> Value {
 }
 
 fn acknowledgement(workspace: &Value, operation: &str) -> Value {
+    if operation == PIN {
+        return json!({"session_id":workspace["session_id"],
+            "revision":workspace["revision"].as_u64().unwrap()+1,
+            "active_tab_id":workspace["replay"]["active_tab_id"],
+            "tab_id":TARGET,"pinned":true});
+    }
     let duplicate = operation == "replay.duplicate";
     let mut active = workspace["replay"]["active_tab_id"].clone();
     if !duplicate && workspace["replay"]["tabs"].as_array().unwrap().len() == 1 {
@@ -155,6 +178,14 @@ impl MockApi {
         .await
         .expect("synthetic CLI timed out")
         .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains(CONTENT),
+            "captured content leaked to stdout"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains(CONTENT),
+            "captured content leaked to stderr"
+        );
         let value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
             panic!(
                 "invalid JSON for {args:?}: {error}: {} / {}",
@@ -205,6 +236,8 @@ impl MockApi {
                 "POST",
                 if operation == "replay.close" {
                     "/api/replay/tabs/close"
+                } else if operation == PIN {
+                    "/api/replay/tabs/set-pinned"
                 } else {
                     "/api/replay/tabs/duplicate"
                 },
@@ -231,6 +264,9 @@ impl MockApi {
                 let mut body = json!({"session_id":session_id,"tab_id":TARGET,"expected_workspace_revision":17});
                 if implicit {
                     body["expected_active_session_id"] = json!(session_id);
+                }
+                if post == Some(PIN) {
+                    body["pinned"] = json!(true);
                 }
                 assert_eq!(request.body, Some(body));
             }
@@ -288,7 +324,12 @@ async fn mock_request(State(state): State<Arc<MockState>>, request: Request<Body
                 Json(workspace).into_response()
             }
         }
-        ("POST", path @ ("/api/replay/tabs/close" | "/api/replay/tabs/duplicate")) => {
+        (
+            "POST",
+            path @ ("/api/replay/tabs/close"
+            | "/api/replay/tabs/duplicate"
+            | "/api/replay/tabs/set-pinned"),
+        ) => {
             let body = body.unwrap();
             if faults.stale_revision
                 || (body.get("expected_active_session_id").is_some()
@@ -313,6 +354,14 @@ async fn mock_request(State(state): State<Arc<MockState>>, request: Request<Body
             }
             let mut workspace = state.workspace.lock().unwrap().clone();
             workspace["session_id"] = body["session_id"].clone();
+            if path.ends_with("set-pinned") {
+                let mut ack = acknowledgement(&workspace, PIN);
+                ack["pinned"] = body["pinned"].clone();
+                let mut saved = state.workspace.lock().unwrap();
+                saved["revision"] = ack["revision"].clone();
+                saved["replay"]["tabs"][2]["pinned"] = body["pinned"].clone();
+                return Json(ack).into_response();
+            }
             Json(acknowledgement(
                 &workspace,
                 if path.ends_with("duplicate") {
@@ -562,7 +611,7 @@ async fn saved_tab_cli_accepts_legacy_http_and_validates_visual_focus() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saved_tab_cli_rejects_bad_gets_and_non_http_targets_before_posting() {
-    for operation in OPERATIONS {
+    for operation in ALL_OPERATIONS {
         let api = MockApi::new().await;
         let mut cases = vec![
             "not json".to_owned(),
@@ -636,7 +685,7 @@ async fn saved_tab_cli_rejects_bad_gets_and_non_http_targets_before_posting() {
         for body in cases {
             api.state.faults.lock().unwrap().get_body = Some(body);
             let (status, value) = api
-                .call(operation, json!({"tab_id":TARGET}), Some("--yes"))
+                .call(operation, input_for(operation), Some("--yes"))
                 .await;
             assert_ne!(status, 0, "{value}");
             assert_eq!(value["error"]["code"], "INVALID_RESPONSE", "{value}");
@@ -649,7 +698,7 @@ async fn saved_tab_cli_rejects_bad_gets_and_non_http_targets_before_posting() {
         for tab_type in ["websocket", "future", "HTTP"] {
             api.state.workspace.lock().unwrap()["replay"]["tabs"][2]["type"] = json!(tab_type);
             let (status, value) = api
-                .call(operation, json!({"tab_id":TARGET}), Some("--yes"))
+                .call(operation, input_for(operation), Some("--yes"))
                 .await;
             assert_ne!(status, 0);
             assert_eq!(value["error"]["code"], "INVALID_INPUT");
@@ -658,7 +707,15 @@ async fn saved_tab_cli_rejects_bad_gets_and_non_http_targets_before_posting() {
         api.state.workspace.lock().unwrap()["replay"]["tabs"][2]["type"] = json!("http");
         for wrong_target in ["fixture label", "exact saved tab", "exact", "missing"] {
             let (status, value) = api
-                .call(operation, json!({"tab_id":wrong_target}), Some("--yes"))
+                .call(
+                    operation,
+                    {
+                        let mut input = input_for(operation);
+                        input["tab_id"] = json!(wrong_target);
+                        input
+                    },
+                    Some("--yes"),
+                )
                 .await;
             assert_ne!(status, 0);
             assert_eq!(value["error"]["code"], "TAB_NOT_FOUND");
@@ -698,7 +755,7 @@ async fn saved_tab_cli_rejects_ambiguous_session_discovery_without_workspace_rea
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saved_tab_cli_rejects_conflicts_without_retrying_or_printing_workspace_content() {
-    for operation in OPERATIONS {
+    for operation in ALL_OPERATIONS {
         for switched in [false, true] {
             let api = MockApi::new().await;
             {
@@ -707,7 +764,7 @@ async fn saved_tab_cli_rejects_conflicts_without_retrying_or_printing_workspace_
                 faults.stale_revision = !switched;
             }
             let (status, value) = api
-                .call(operation, json!({"tab_id":TARGET}), Some("--yes"))
+                .call(operation, input_for(operation), Some("--yes"))
                 .await;
             assert_ne!(status, 0);
             assert_eq!(value["error"]["code"], "WORKSPACE_CONFLICT");
@@ -721,7 +778,11 @@ async fn saved_tab_cli_rejects_conflicts_without_retrying_or_printing_workspace_
         let (status, value) = api
             .call(
                 operation,
-                json!({"tab_id":TARGET,"session_id":api.state.ids[0]}),
+                {
+                    let mut input = input_for(operation);
+                    input["session_id"] = json!(api.state.ids[0]);
+                    input
+                },
                 Some("--yes"),
             )
             .await;
@@ -732,7 +793,7 @@ async fn saved_tab_cli_rejects_conflicts_without_retrying_or_printing_workspace_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saved_tab_cli_rejects_malformed_or_misattributed_acknowledgements_once() {
-    for operation in OPERATIONS {
+    for operation in ALL_OPERATIONS {
         let api = MockApi::new().await;
         let ack = acknowledgement(&fixture(api.state.ids[0]), operation);
         let mut cases = vec![
@@ -756,6 +817,8 @@ async fn saved_tab_cli_rejects_malformed_or_misattributed_acknowledgements_once(
             (
                 if operation == "replay.close" {
                     "closed_tab_id"
+                } else if operation == PIN {
+                    "tab_id"
                 } else {
                     "source_tab_id"
                 },
@@ -789,10 +852,17 @@ async fn saved_tab_cli_rejects_malformed_or_misattributed_acknowledgements_once(
             collision["new_tab_id"] = json!(existing);
             cases.push(collision.to_string());
         }
+        if operation == PIN {
+            for bad in [json!(false), Value::Null, json!("true"), json!(1)] {
+                let mut wire = ack.clone();
+                wire["pinned"] = bad;
+                cases.push(wire.to_string());
+            }
+        }
         for body in cases {
             api.state.faults.lock().unwrap().post = Some((StatusCode::OK, body));
             let (status, value) = api
-                .call(operation, json!({"tab_id":TARGET}), Some("--yes"))
+                .call(operation, input_for(operation), Some("--yes"))
                 .await;
             assert_ne!(status, 0, "{value}");
             assert_eq!(value["error"]["code"], "INVALID_RESPONSE", "{value}");
@@ -812,7 +882,7 @@ async fn saved_tab_cli_rejects_malformed_or_misattributed_acknowledgements_once(
         ] {
             api.state.faults.lock().unwrap().post = Some((status, CONTENT.to_owned()));
             let (exit, value) = api
-                .call(operation, json!({"tab_id":TARGET}), Some("--yes"))
+                .call(operation, input_for(operation), Some("--yes"))
                 .await;
             assert_ne!(exit, 0);
             assert_eq!(value["error"]["retryable"], false);
@@ -828,7 +898,7 @@ async fn saved_tab_cli_rejects_malformed_or_misattributed_acknowledgements_once(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saved_tab_cli_lost_mutation_response_is_unknown_and_never_retried() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    for operation in OPERATIONS {
+    for operation in ALL_OPERATIONS {
         let mut api = MockApi::new().await;
         api.server.abort();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -843,13 +913,7 @@ async fn saved_tab_cli_lost_mutation_response_is_unknown_and_never_retried() {
                     format!("GET /api/workspace-state?session_id={session_id} "),
                     Some(workspace),
                 ),
-                (
-                    format!(
-                        "POST /api/replay/tabs/{} ",
-                        operation.strip_prefix("replay.").unwrap()
-                    ),
-                    None,
-                ),
+                (format!("POST {} ", operation_path(operation)), None),
             ] {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
@@ -887,10 +951,11 @@ async fn saved_tab_cli_lost_mutation_response_is_unknown_and_never_retried() {
                         .unwrap()
                         + 4;
                     let mutation: Value = serde_json::from_slice(&request[start..]).unwrap();
-                    assert_eq!(
-                        mutation,
-                        json!({"session_id":session_id,"tab_id":TARGET,"expected_workspace_revision":17})
-                    );
+                    let mut expected = json!({"session_id":session_id,"tab_id":TARGET,"expected_workspace_revision":17});
+                    if operation == PIN {
+                        expected["pinned"] = json!(true);
+                    }
+                    assert_eq!(mutation, expected);
                 }
                 if let Some(body) = body {
                     let body = body.to_string();
@@ -908,7 +973,11 @@ async fn saved_tab_cli_lost_mutation_response_is_unknown_and_never_retried() {
         let (status, value) = api
             .call(
                 operation,
-                json!({"tab_id":TARGET,"session_id":session_id}),
+                {
+                    let mut input = input_for(operation);
+                    input["session_id"] = json!(session_id);
+                    input
+                },
                 Some("--yes"),
             )
             .await;
@@ -970,5 +1039,242 @@ async fn saved_tab_cli_duplicate_rejects_uuid_aliases_and_preserves_existing_foc
         assert_eq!(status, 0, "{value}");
         assert_eq!(value["data"]["active_tab_id"], active);
         api.assert_requests(api.state.ids[0], true, Some("replay.duplicate"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_tab_pin_gates_and_discovery_are_offline() {
+    let api = MockApi::new().await;
+    for pinned in [false, true] {
+        let input = json!({"tab_id":TARGET,"pinned":pinned});
+        let (status, value) = api.call(PIN, input.clone(), None).await;
+        assert_ne!(status, 0);
+        assert_eq!(value["error"]["code"], "CONFIRMATION_REQUIRED");
+        let (status, value) = api.call(PIN, input.clone(), Some("--dry-run")).await;
+        assert_eq!(status, 0, "{value}");
+        assert_eq!(value["data"]["input"], input);
+        assert_eq!(value["data"]["dry_run"], true);
+        assert_eq!(value["data"]["requires_confirmation"], true);
+        assert_eq!(value["data"]["api"]["method"], "POST");
+        assert_eq!(value["data"]["api"]["path"], operation_path(PIN));
+        let value_arg = if pinned { "true" } else { "false" };
+        let direct = [
+            "replay",
+            "set-pinned",
+            "--tab-id",
+            TARGET,
+            "--pinned",
+            value_arg,
+        ];
+        let (status, value) = api.command(&direct).await;
+        assert_ne!(status, 0);
+        assert_eq!(value["error"]["code"], "CONFIRMATION_REQUIRED");
+        let mut dry = direct.to_vec();
+        dry.push("--dry-run");
+        let (status, value) = api.command(&dry).await;
+        assert_eq!(status, 0, "{value}");
+    }
+    for kind in ["input", "output"] {
+        let (status, value) = api.command(&["schema", kind, PIN]).await;
+        assert_eq!(status, 0, "{value}");
+        let schema = &value["schema"];
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["pinned"]["type"], "boolean");
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("tab_id")));
+        assert!(required.contains(&json!("pinned")));
+        if kind == "input" {
+            assert_eq!(required.len(), 2);
+            assert_eq!(schema["properties"].as_object().unwrap().len(), 3);
+            assert_eq!(schema["properties"]["session_id"]["type"], "string");
+        } else {
+            assert_eq!(required.len(), 5);
+            assert_eq!(schema["properties"].as_object().unwrap().len(), 5);
+        }
+    }
+    let (status, value) = api.command(&["manifest"]).await;
+    assert_eq!(status, 0);
+    let row = value["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["operation"] == PIN)
+        .unwrap();
+    assert_eq!(row["side_effect"], "write");
+    assert_eq!(row["requires_confirmation"], true);
+    let (status, examples) = api.command(&["examples", PIN]).await;
+    assert_eq!(status, 0, "{examples}");
+    assert!(examples["examples"].is_array());
+    assert!(api.take_requests().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_tab_pin_invalid_inputs_are_offline() {
+    let api = MockApi::new().await;
+    let mut cases = vec![json!({}), json!({"tab_id":TARGET}), json!({"pinned":false})];
+    for pinned in [
+        Value::Null,
+        json!("false"),
+        json!("true"),
+        json!(0),
+        json!(1),
+        json!([]),
+        json!({}),
+    ] {
+        cases.push(json!({"tab_id":TARGET,"pinned":pinned}));
+    }
+    for tab_id in [
+        Value::Null,
+        json!(false),
+        json!(7),
+        json!([]),
+        json!(""),
+        json!(" \t\n"),
+        json!("x".repeat(129)),
+        json!("é".repeat(65)),
+    ] {
+        cases.push(json!({"tab_id":tab_id,"pinned":false}));
+    }
+    for session_id in [Value::Null, json!("invalid"), json!(9)] {
+        cases.push(json!({"tab_id":TARGET,"pinned":false,"session_id":session_id}));
+    }
+    for key in [
+        "label",
+        "toggle",
+        "request_text",
+        "expected_workspace_revision",
+        "expected_active_session_id",
+    ] {
+        let mut input = json!({"tab_id":TARGET,"pinned":true});
+        input[key] = json!(CONTENT);
+        cases.push(input);
+    }
+    for input in cases {
+        for flag in ["--yes", "--dry-run"] {
+            let (status, value) = api.call(PIN, input.clone(), Some(flag)).await;
+            assert_ne!(status, 0, "{input} {value}");
+            assert_eq!(value["error"]["code"], "INVALID_INPUT", "{input} {value}");
+            assert!(!value.to_string().contains(CONTENT));
+        }
+    }
+    for tail in [
+        vec!["--yes"],
+        vec!["--pinned", "--yes"],
+        vec!["--pinned", "1", "--yes"],
+        vec!["--pinned", "False", "--yes"],
+        vec!["--pinned", "null", "--yes"],
+        vec!["--pinned", "false", "--unknown", "--yes"],
+        vec!["--pinned", "false", "--session-id", "invalid", "--yes"],
+        vec!["--pinned", "false", "--dry-run", "--yes"],
+    ] {
+        let mut args = vec!["replay", "set-pinned", "--tab-id", TARGET];
+        args.extend(tail);
+        let (status, value) = api.command(&args).await;
+        assert_ne!(status, 0);
+        assert_eq!(value["error"]["code"], "INVALID_INPUT", "{value}");
+    }
+    assert!(api.take_requests().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_tab_pin_sets_exact_boolean_with_cas_and_preserves_focus() {
+    for direct in [false, true] {
+        for implicit in [false, true] {
+            for pinned in [false, true] {
+                let api = MockApi::new().await;
+                let id = api.state.ids[usize::from(!implicit)];
+                api.state.workspace.lock().unwrap()["replay"]["tabs"][2]["pinned"] = json!(!pinned);
+                // Two identical requests must remain explicit setters and advance CAS.
+                for revision in [17, 18] {
+                    let (status, value) = if direct {
+                        let id_arg = id.to_string();
+                        let mut args = vec![
+                            "replay",
+                            "set-pinned",
+                            "--tab-id",
+                            TARGET,
+                            "--pinned",
+                            if pinned { "true" } else { "false" },
+                            "--yes",
+                        ];
+                        if !implicit {
+                            args.extend(["--session-id", &id_arg]);
+                        }
+                        api.command(&args).await
+                    } else {
+                        let mut input = json!({"tab_id":TARGET,"pinned":pinned});
+                        if !implicit {
+                            input["session_id"] = json!(id);
+                        }
+                        api.call(PIN, input, Some("--yes")).await
+                    };
+                    assert_eq!(status, 0, "{value}");
+                    let data = if direct { &value } else { &value["data"] };
+                    assert_eq!(
+                        *data,
+                        json!({"session_id":id,"revision":revision+1,
+                        "active_tab_id":TARGET,"tab_id":TARGET,"pinned":pinned})
+                    );
+                    if !direct {
+                        assert_eq!(value["meta"]["session_id"], json!(id));
+                    }
+                    assert!(!value.to_string().contains(CONTENT));
+                    let requests = api.take_requests();
+                    let mut expected = vec![("GET", "/api/settings")];
+                    if implicit {
+                        expected.push(("GET", "/api/sessions"));
+                    }
+                    expected.extend([
+                        ("GET", "/api/workspace-state"),
+                        ("POST", "/api/replay/tabs/set-pinned"),
+                    ]);
+                    assert_eq!(
+                        requests
+                            .iter()
+                            .map(|r| (r.method.as_str(), r.path.as_str()))
+                            .collect::<Vec<_>>(),
+                        expected
+                    );
+                    let mut body = json!({"session_id":id,"tab_id":TARGET,"pinned":pinned,
+                        "expected_workspace_revision":revision});
+                    if implicit {
+                        body["expected_active_session_id"] = json!(id);
+                    }
+                    assert_eq!(requests.last().unwrap().body, Some(body));
+                    for request in &requests {
+                        assert_eq!(
+                            request.query,
+                            if request.path == "/api/workspace-state" {
+                                BTreeMap::from([("session_id".into(), id.to_string())])
+                            } else {
+                                BTreeMap::new()
+                            }
+                        );
+                        if request.method == "GET" {
+                            assert!(request.body.is_none());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for active in [json!("left"), Value::Null, json!("")] {
+        for legacy_type in [None, Some("")] {
+            let api = MockApi::new().await;
+            {
+                let mut workspace = api.state.workspace.lock().unwrap();
+                workspace["replay"]["active_tab_id"] = active.clone();
+                let tab = workspace["replay"]["tabs"][2].as_object_mut().unwrap();
+                if let Some(kind) = legacy_type {
+                    tab.insert("type".into(), json!(kind));
+                } else {
+                    tab.remove("type");
+                }
+            }
+            let (status, value) = api.call(PIN, input_for(PIN), Some("--yes")).await;
+            assert_eq!(status, 0, "{value}");
+            assert_eq!(value["data"]["active_tab_id"], active);
+            api.assert_requests(api.state.ids[0], true, Some(PIN));
+        }
     }
 }

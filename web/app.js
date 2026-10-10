@@ -3138,6 +3138,20 @@ async function adoptExternalReplayTabs() {
       }
       continue;
     }
+    // Pin state is independent of request/rename drafts. Merge this field even
+    // while its editor is dirty, without rerendering the editor or adopting the
+    // remote array order. A local-only toggle stays local; matching toggles
+    // converge and advance the baseline so the next remote toggle can follow.
+    const baseline = baselineById.get(tab.id);
+    if (baseline && baseline.type !== "websocket"
+      && existing.type !== "websocket" && tab.type !== "websocket") {
+      const nextPinned = !!tab.pinned;
+      if (!!existing.pinned === !!baseline.pinned || !!existing.pinned === nextPinned) {
+        if (!!existing.pinned !== nextPinned) updated = true;
+        existing.pinned = nextPinned;
+        baseline.pinned = nextPinned;
+      }
+    }
     if (replayTabHasUncommittedEditorState(existing)) continue;
     if (adoptExternalReplayResult(existing, tab)) {
       updated = true;
