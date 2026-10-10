@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use reqwest::{Method, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -10724,75 +10724,100 @@ fn output_format_from_raw_value(value: &str) -> Option<OutputFormat> {
     }
 }
 
+fn cli_parse_error_option_takes_value(command: &clap::Command, name: &str) -> Option<bool> {
+    // Recognize misplaced child options too, so their operands cannot become
+    // command names merely because clap rejects the option at this position.
+    command
+        .get_arguments()
+        .find(|arg| {
+            arg.get_long() == Some(name)
+                || arg
+                    .get_all_aliases()
+                    .is_some_and(|aliases| aliases.contains(&name))
+        })
+        .map(|arg| arg.get_action().takes_values())
+        .or_else(|| {
+            command
+                .get_subcommands()
+                .find_map(|child| cli_parse_error_option_takes_value(child, name))
+        })
+}
+
 fn cli_parse_error_operation(args: &[String]) -> String {
-    let mut tokens = Vec::new();
+    let cli = Cli::command();
+    let mut command = &cli;
+    let mut path = Vec::new();
     let mut args = args.iter().peekable();
     let mut positional_only = false;
     while let Some(arg) = args.next() {
+        let is_call = path.as_slice() == ["call"];
         if positional_only {
-            tokens.push(arg.as_str());
-            continue;
+            return arg.clone();
         }
         if arg == "--" {
-            positional_only = true;
-            continue;
+            if is_call {
+                positional_only = true;
+                continue;
+            }
+            break;
         }
-        // Call input can precede the operation. Never promote its JSON or file
-        // path into error metadata, even when clap rejects a later argument.
-        if matches!(arg.as_str(), "--output" | "--api" | "--input") {
-            if args
-                .peek()
-                .is_some_and(|value| !value.starts_with('-') || value.as_str() == "-")
+        if arg.starts_with('-') {
+            let takes_value = if is_call {
+                // Call operations are free-form, including unknown names. Keep
+                // their existing input skipping and delimiter semantics.
+                matches!(arg.as_str(), "--output" | "--api" | "--input")
+            } else if let Some(option) = arg.strip_prefix("--") {
+                let (name, inline_value) = option
+                    .split_once('=')
+                    .map_or((option, false), |(name, _)| (name, true));
+                let Some(takes_value) = cli_parse_error_option_takes_value(&cli, name) else {
+                    // An unknown option may own the following token. Do not
+                    // mistake that operand for a declared command or action.
+                    break;
+                };
+                takes_value && !inline_value
+            } else {
+                break;
+            };
+            if takes_value
+                && args
+                    .peek()
+                    .is_some_and(|value| !value.starts_with('-') || value.as_str() == "-")
             {
                 args.next();
             }
             continue;
         }
-        if arg.starts_with('-') {
-            continue;
+        if is_call {
+            return arg.clone();
         }
-        tokens.push(arg.as_str());
+        let Some(child) = command.find_subcommand(arg) else {
+            break;
+        };
+        path.push(child.get_name());
+        command = child;
     }
 
-    match tokens.as_slice() {
-        ["scanner", group, action, ..] => format!("scanner.{group}.{}", action.replace('-', "_")),
-        ["findings", action, ..] => format!("findings.{action}"),
-        ["event-log", action, ..] => format!("event_log.{action}"),
-        ["session", action, ..] => format!("session.{action}"),
-        ["scope" | "target", "get-scope", ..] => "scope.get".to_string(),
-        ["scope" | "target", "set-scope", ..] => "scope.set".to_string(),
-        ["replay" | "repeater", action, ..] => format!("replay.{action}"),
-        ["fuzzer", action, ..] => format!("fuzzer.{}", action.replace('-', "_")),
-        ["sequence", action, ..] => format!("sequence.{}", action.replace('-', "_")),
-        ["skills", action, ..] => format!("skills.{}", action.replace('-', "_")),
-        ["capture", "http", action, ..] | ["http" | "history", action, ..] => {
-            format!("capture.http.{}", action.replace('-', "_"))
-        }
-        ["capture", "intercept", action, ..] | ["intercept", action, ..] => {
-            format!("capture.intercept.{}", action.replace('-', "_"))
-        }
-        ["capture", "response-intercept", action, ..] => {
-            format!("capture.response_intercept.{}", action.replace('-', "_"))
-        }
-        ["capture", "intercept-rule", action, ..] => {
-            format!("capture.intercept_rule.{}", action.replace('-', "_"))
-        }
-        ["capture", "web-socket", action, ..] | ["websocket", action, ..] => {
-            format!("capture.websocket.{}", action.replace('-', "_"))
-        }
-        ["capture", "auto-replace", action, ..] | ["auto-replace", action, ..] => {
-            format!("capture.auto_replace.{}", action.replace('-', "_"))
-        }
-        ["capture", "oast", action, ..] => format!("capture.oast.{}", action.replace('-', "_")),
-        ["capture", "browser", action, ..] => {
-            format!("capture.browser.{}", action.replace('-', "_"))
-        }
-        ["call", operation, ..] => (*operation).to_string(),
-        ["manifest", ..] => "manifest".to_string(),
-        ["schema", ..] => "schema".to_string(),
-        ["examples", ..] => "examples".to_string(),
-        [first, ..] => (*first).to_string(),
-        [] => "parse".to_string(),
+    // Hidden top-level wrappers expose the same operations as capture. Only
+    // canonical names from clap, never raw option operands, enter this path.
+    if matches!(
+        path.first(),
+        Some(&("http" | "intercept" | "web-socket" | "auto-replace"))
+    ) {
+        path.insert(0, "capture");
+    }
+    let fallback = path.first().copied().unwrap_or("parse");
+    let mut operations = manifest_operations().into_iter().filter(|spec| {
+        spec.command
+            .split_ascii_whitespace()
+            .take_while(|token| !token.starts_with(['-', '<', '[']))
+            .eq(path.iter().copied())
+    });
+    match (operations.next(), operations.next()) {
+        // Flag-dependent commands such as capture proxy deliberately retain
+        // the group fallback rather than guessing among multiple operations.
+        (Some(spec), None) => spec.operation.to_string(),
+        _ => fallback.to_string(),
     }
 }
 
@@ -13754,6 +13779,139 @@ mod tests {
             cli_parse_error_operation(&browser_args),
             "capture.browser.open"
         );
+    }
+
+    #[test]
+    fn parse_error_option_definitions_have_consistent_single_value_arity() {
+        fn check(command: &clap::Command, seen: &mut std::collections::BTreeMap<String, bool>) {
+            for arg in command
+                .get_arguments()
+                .filter(|arg| arg.get_long().is_some())
+            {
+                let takes_value = arg.get_action().takes_values();
+                assert!(!arg.is_allow_hyphen_values_set(), "{}", arg.get_id());
+                assert!(!arg.is_allow_negative_numbers_set(), "{}", arg.get_id());
+                if let Some(range) = arg.get_num_args() {
+                    assert_eq!(
+                        range.min_values(),
+                        usize::from(takes_value),
+                        "{}",
+                        arg.get_id()
+                    );
+                    assert_eq!(
+                        range.max_values(),
+                        usize::from(takes_value),
+                        "{}",
+                        arg.get_id()
+                    );
+                }
+                for name in arg
+                    .get_long()
+                    .into_iter()
+                    .chain(arg.get_all_aliases().unwrap_or_default())
+                {
+                    if let Some(previous) = seen.insert(name.to_owned(), takes_value) {
+                        assert_eq!(previous, takes_value, "conflicting arity for --{name}");
+                    }
+                }
+            }
+            for child in command.get_subcommands() {
+                check(child, seen);
+            }
+        }
+        check(
+            &<Cli as clap::CommandFactory>::command(),
+            &mut std::collections::BTreeMap::new(),
+        );
+    }
+
+    #[test]
+    fn parse_error_operation_matches_unique_direct_manifest_commands() {
+        for spec in manifest_operations() {
+            let raw_args = spec
+                .command
+                .split_ascii_whitespace()
+                .take_while(|token| !token.starts_with(['-', '<', '[']))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if raw_args.first().is_some_and(|command| command == "call") {
+                continue;
+            }
+            let expected = if spec.operation.starts_with("capture.proxy.") {
+                "capture"
+            } else {
+                spec.operation
+            };
+            assert_eq!(
+                cli_parse_error_operation(&raw_args),
+                expected,
+                "{}",
+                spec.command
+            );
+        }
+    }
+
+    #[test]
+    fn parse_error_operation_uses_only_trusted_direct_command_tokens() {
+        for (args, expected) in [
+            (
+                vec!["--dry-run", "skills", "status", "--unknown"],
+                "skills.status",
+            ),
+            (
+                vec!["--yes", "skills", "status", "--unknown"],
+                "skills.status",
+            ),
+            (
+                vec!["repeater", "set-pinned", "--unknown"],
+                "replay.set_pinned",
+            ),
+            (
+                vec!["capture", "history", "list", "--unknown"],
+                "capture.http.list",
+            ),
+            (
+                vec!["capture", "websocket", "list", "--unknown"],
+                "capture.websocket.list",
+            ),
+            (
+                vec!["web-socket", "list", "--unknown"],
+                "capture.websocket.list",
+            ),
+            (
+                vec!["match-replace", "list", "--unknown"],
+                "capture.auto_replace.list",
+            ),
+            (vec!["target", "get-scope", "--unknown"], "scope.get"),
+            (
+                vec!["skills", "--codex-dir", "SYNTHETIC_PRIVATE_PATH", "status"],
+                "skills.status",
+            ),
+            (vec!["skills", "--codex-dir", "status"], "skills"),
+            (vec!["skills", "--codex-dir=status"], "skills"),
+            (
+                vec!["skills", "--codex-dir", "status", "install"],
+                "skills.install",
+            ),
+            (vec!["capture", "--browser", "browser", "list"], "capture"),
+            (vec!["skills", "--unknown", "status"], "skills"),
+            (vec!["skills", "--unknown=status", "install"], "skills"),
+            (vec!["skills", "SYNTHETIC_PRIVATE_ACTION"], "skills"),
+            (vec!["SYNTHETIC_PRIVATE_ACTION"], "parse"),
+            (vec!["skills", "--", "status"], "skills"),
+            (vec!["--", "skills", "status"], "parse"),
+            (vec!["capture", "proxy", "--stdin", "--unknown"], "capture"),
+            (
+                vec!["call", "unknown.operation", "--unknown"],
+                "unknown.operation",
+            ),
+        ] {
+            let raw_args = args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(cli_parse_error_operation(&raw_args), expected, "{args:?}");
+        }
     }
 
     #[test]
