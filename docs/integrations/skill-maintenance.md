@@ -15,7 +15,8 @@ sniper-cli schema output skills.update_preview
 sniper-cli examples skills.stage_update
 ```
 
-`status` reports active installed bytes. `update-preview` adds receipt-based
+`status` compares active installed bytes with this binary's bundled template.
+`update-preview` adds receipt-based
 baseline information and staging eligibility. Neither writes files. Completed
 previews can include missing, unmanaged, modified, or error rows; inspect each
 row rather than interpreting exit zero as “everything is current.” No installed
@@ -125,12 +126,21 @@ Enrollment receipts are never rewritten by these commands. They are ordinary
 local files, not tamper-proof evidence of provenance. After a manual
 activation, the old receipt can make preview report `modified`; that means the
 active hash differs from the enrolled baseline, not that Sniper knows who changed
-it. To establish a new baseline, first archive the old
+it. In particular, `status` can report `current` while `update-preview` reports
+`modified` after manual activation of the current bundle. These observations
+are consistent: one compares the bundle, and the other compares the old baseline.
+This does not mean the active skill failed to update.
+
+### Optional advanced receipt recovery
+
+A receipt is not required to use the active skill. Recovery is only for users
+who deliberately want a new managed baseline. After reviewing and backing up
+the active file and existing receipt, archive the old
 `sniper-operator/.sniper-enrollment.json` yourself, then explicitly run `skills
-enroll` with the current binary after reviewing the active file. The CLI does
-not remove or reset receipts for you. Enrollment still requires exact current
-bundle bytes, so keep customizations separately rather than erasing them merely
-to obtain an enrolled status.
+enroll` with the current binary. The CLI does not remove or reset receipts for
+you. Enrollment still requires exact current bundle bytes. Preserve customized
+active files and leave them unmanaged or modified rather than erasing edits
+merely to obtain an enrolled status.
 
 ## Automation result handling
 
@@ -141,3 +151,20 @@ preview and any partial output before making a new deliberate attempt. The
 receipt and version fields describe the recorded baseline; differing version
 strings alone do not prove an upgrade or downgrade. Candidate eligibility is
 based on byte hashes.
+
+Common refusals provide operation-specific guidance:
+
+- `skills.stage_update` / `already_current`: active bytes already match the
+  bundle. Use `skills status`; no candidate is needed.
+- `skills.enroll` / `already_exists`: the receipt path exists. This does not
+  prove successful enrollment; it can be malformed, a directory, or a link.
+  Preserve it and inspect `skills update-preview`.
+- `skills.stage_update` / `already_exists`: the staging directory or an output
+  path exists. Inspect any partial output, then choose a new directory outside
+  the active skill directory whose parent already exists.
+- `skills.enroll` / `installed_not_current`: enrollment requires exact bundle
+  bytes. Review differences and preserve edits rather than overwriting them.
+- `skills.stage_update` / `installed_modified`: active bytes differ from the
+  recorded baseline, including after manual activation with an old receipt.
+  Check both `skills status` and `skills update-preview` before deciding whether
+  optional receipt recovery is useful.

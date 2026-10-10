@@ -493,6 +493,14 @@ fn unsafe_or_ineligible_writes_return_bounded_errors_without_active_changes() {
     let denied = f.call("skills.enroll", &f.input(), Some("--yes"), 5);
     assert_eq!(denied["error"]["code"], "MANAGED_SKILL_ERROR");
     assert_eq!(denied["error"]["retryable"], false);
+    assert_eq!(
+        denied["error"]["details"]["reason"],
+        "installed_not_current"
+    );
+    assert!(denied["error"]["hint"]
+        .as_str()
+        .unwrap()
+        .contains("preserve customizations"));
     assert!(!denied.to_string().contains(secret.trim()));
     let staging = f.root.join("not-created");
     let input = json!({"codex":true,"codex_dir":f.root_for("codex"),"staging_dir":staging});
@@ -514,7 +522,16 @@ fn unsafe_or_ineligible_writes_return_bounded_errors_without_active_changes() {
     fs::write(&active, secret).unwrap();
     fs::create_dir(&staging).unwrap();
     fs::write(staging.join("sentinel"), b"keep").unwrap();
-    f.call("skills.stage_update", &input, Some("--yes"), 5);
+    let collision = f.call("skills.stage_update", &input, Some("--yes"), 5);
+    assert_eq!(collision["error"]["details"]["reason"], "already_exists");
+    assert_eq!(
+        collision["error"]["message"],
+        "The staging directory or an output path already exists."
+    );
+    assert!(collision["error"]["hint"]
+        .as_str()
+        .unwrap()
+        .contains("partial output"));
     assert_eq!(fs::read_dir(&staging).unwrap().count(), 1);
     assert_eq!(fs::read(staging.join("sentinel")).unwrap(), b"keep");
     assert_eq!(fs::read_to_string(&active).unwrap(), secret);
@@ -539,11 +556,178 @@ fn malformed_receipt_is_reported_without_exposing_or_replacing_contents() {
     assert!(!preview.to_string().contains("Synthetic private malformed"));
     let error = f.call("skills.enroll", &f.input(), Some("--yes"), 5);
     assert_eq!(error["error"]["code"], "MANAGED_SKILL_ERROR");
+    assert_eq!(error["error"]["details"]["reason"], "already_exists");
+    assert_eq!(
+        error["error"]["message"],
+        "The enrollment receipt path already exists."
+    );
+    assert!(error["error"]["hint"]
+        .as_str()
+        .unwrap()
+        .contains("malformed"));
     assert!(!error.to_string().contains("Synthetic private malformed"));
     assert_eq!(fs::read(&receipt).unwrap(), contents);
     assert_eq!(fs::metadata(&receipt).unwrap().modified().unwrap(), before);
     assert_eq!(
         fs::read_to_string(active).unwrap(),
         skills::CODEX_SKILL_TEMPLATE
+    );
+}
+
+#[test]
+fn repeated_enrollment_reports_existing_path_and_preserves_active_and_receipt() {
+    let f = Fixture::new();
+    let active = f.put("codex", skills::CODEX_SKILL_TEMPLATE);
+    let enrolled = f.call("skills.enroll", &f.input(), Some("--yes"), 0);
+    let receipt = Path::new(enrolled["data"]["receipt_path"].as_str().unwrap());
+    let receipt_bytes = fs::read(receipt).unwrap();
+    let active_modified = fs::metadata(&active).unwrap().modified().unwrap();
+    let receipt_modified = fs::metadata(receipt).unwrap().modified().unwrap();
+
+    let result = f.call("skills.enroll", &f.input(), Some("--yes"), 5);
+    assert_eq!(result["error"]["code"], "MANAGED_SKILL_ERROR");
+    assert_eq!(result["error"]["details"]["reason"], "already_exists");
+    assert_eq!(result["error"]["retryable"], false);
+    assert_eq!(
+        result["error"]["message"],
+        "The enrollment receipt path already exists."
+    );
+    assert!(result["error"]["hint"]
+        .as_str()
+        .unwrap()
+        .contains("skills update-preview"));
+    assert_eq!(
+        fs::read_to_string(&active).unwrap(),
+        skills::CODEX_SKILL_TEMPLATE
+    );
+    assert_eq!(fs::read(receipt).unwrap(), receipt_bytes);
+    assert_eq!(
+        fs::metadata(&active).unwrap().modified().unwrap(),
+        active_modified
+    );
+    assert_eq!(
+        fs::metadata(receipt).unwrap().modified().unwrap(),
+        receipt_modified
+    );
+    assert_eq!(fs::read_dir(active.parent().unwrap()).unwrap().count(), 2);
+}
+
+#[test]
+fn staging_current_bundle_points_to_status_without_mutation() {
+    let f = Fixture::new();
+    let root = f.root_for("codex");
+    let active = f.put("codex", skills::CODEX_SKILL_TEMPLATE);
+    let enrollment =
+        skill_managed::enroll_skill("codex", &root, skills::CODEX_SKILL_TEMPLATE, "0.0.0").unwrap();
+    let receipt_bytes = fs::read(&enrollment.receipt_path).unwrap();
+    let active_modified = fs::metadata(&active).unwrap().modified().unwrap();
+    let receipt_modified = fs::metadata(&enrollment.receipt_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+    let staging = f.root.join("not-created-current");
+    let input = json!({"codex":true,"codex_dir":root,"staging_dir":staging});
+    let called = f.call("skills.stage_update", &input, Some("--yes"), 5);
+    let direct = f.cli(
+        &[
+            "skills",
+            "stage-update",
+            "--codex",
+            "--codex-dir",
+            root.to_str().unwrap(),
+            "--staging-dir",
+            staging.to_str().unwrap(),
+            "--yes",
+        ],
+        5,
+    );
+    for result in [called, direct] {
+        assert_eq!(result["error"]["code"], "MANAGED_SKILL_ERROR");
+        assert_eq!(result["error"]["details"]["reason"], "already_current");
+        assert_eq!(result["error"]["retryable"], false);
+        assert_eq!(
+            result["error"]["message"],
+            "The active skill already matches this binary's bundled template."
+        );
+        assert!(result["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("skills status"));
+    }
+    assert!(!staging.exists());
+    assert_eq!(
+        fs::read_to_string(&active).unwrap(),
+        skills::CODEX_SKILL_TEMPLATE
+    );
+    assert_eq!(fs::read(&enrollment.receipt_path).unwrap(), receipt_bytes);
+    assert_eq!(
+        fs::metadata(&active).unwrap().modified().unwrap(),
+        active_modified
+    );
+    assert_eq!(
+        fs::metadata(&enrollment.receipt_path)
+            .unwrap()
+            .modified()
+            .unwrap(),
+        receipt_modified
+    );
+}
+
+#[test]
+fn manual_activation_can_be_current_with_a_modified_recorded_baseline() {
+    let f = Fixture::new();
+    let root = f.root_for("codex");
+    let old = "Synthetic historical template.\n";
+    let active = f.put("codex", old);
+    let enrollment = skill_managed::enroll_skill("codex", &root, old, "0.0.0").unwrap();
+    let receipt_bytes = fs::read(&enrollment.receipt_path).unwrap();
+    fs::write(&active, skills::CODEX_SKILL_TEMPLATE).unwrap();
+    let active_modified = fs::metadata(&active).unwrap().modified().unwrap();
+    let receipt_modified = fs::metadata(&enrollment.receipt_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let status = f.call("skills.status", &f.input(), None, 0);
+    assert_eq!(status["data"]["entries"][0]["status"], "current");
+    let preview = f.preview();
+    assert_eq!(preview["entries"][0]["state"], "modified");
+    assert_eq!(preview["entries"][0]["stage_eligible"], false);
+    let staging = f.root.join("not-created-modified");
+    let input = json!({"codex":true,"codex_dir":root,"staging_dir":staging});
+    let result = f.call("skills.stage_update", &input, Some("--yes"), 5);
+    assert_eq!(result["error"]["code"], "MANAGED_SKILL_ERROR");
+    assert_eq!(result["error"]["details"]["reason"], "installed_modified");
+    assert_eq!(result["error"]["retryable"], false);
+    assert_eq!(
+        result["error"]["message"],
+        "The active skill differs from its recorded enrollment baseline."
+    );
+    let hint = result["error"]["hint"].as_str().unwrap();
+    for fragment in [
+        "skills status",
+        "skills update-preview",
+        "Manual activation",
+        "old receipt",
+        "optional receipt recovery",
+    ] {
+        assert!(hint.contains(fragment), "{fragment}");
+    }
+    assert!(!staging.exists());
+    assert_eq!(
+        fs::read_to_string(&active).unwrap(),
+        skills::CODEX_SKILL_TEMPLATE
+    );
+    assert_eq!(fs::read(&enrollment.receipt_path).unwrap(), receipt_bytes);
+    assert_eq!(
+        fs::metadata(&active).unwrap().modified().unwrap(),
+        active_modified
+    );
+    assert_eq!(
+        fs::metadata(&enrollment.receipt_path)
+            .unwrap()
+            .modified()
+            .unwrap(),
+        receipt_modified
     );
 }

@@ -11078,10 +11078,36 @@ fn clap_error_payload(error: &clap::Error) -> CliErrorPayload {
 
 fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload {
     if let Some(managed) = error.downcast_ref::<sniper::skill_managed::ManagedSkillError>() {
+        let (message, hint) = match (operation, managed.code) {
+            ("skills.stage_update", "already_current") => (
+                "The active skill already matches this binary's bundled template.",
+                "Use skills status to check the active bytes; no update candidate is needed.",
+            ),
+            ("skills.enroll", "already_exists") => (
+                "The enrollment receipt path already exists.",
+                "Use skills update-preview to inspect the recorded baseline. Preserve the existing path; it may contain a valid or malformed receipt, or be a directory or link.",
+            ),
+            ("skills.stage_update", "already_exists") => (
+                "The staging directory or an output path already exists.",
+                "Inspect the staging directory and any partial output, then choose a new staging directory whose parent exists and which is outside the active skill directory.",
+            ),
+            ("skills.enroll", "installed_not_current") => (
+                "Enrollment requires active skill bytes that exactly match this binary's bundled template.",
+                "Use skills status to compare the active bytes. Review differences and preserve customizations; do not overwrite edits just to enroll.",
+            ),
+            ("skills.stage_update", "installed_modified") => (
+                "The active skill differs from its recorded enrollment baseline.",
+                "Use skills status to compare active bytes with the bundle and skills update-preview to inspect the baseline. Manual activation can leave an old receipt; preserve customizations before considering optional receipt recovery.",
+            ),
+            _ => (
+                "Local skill operation could not be completed safely.",
+                "Inspect skills update-preview and the local staging directory before deliberately trying again. No activation is performed.",
+            ),
+        };
         return CliErrorPayload {
             code: "MANAGED_SKILL_ERROR",
-            message: "Local skill operation could not be completed safely.".to_owned(),
-            hint: Some("Inspect skills update-preview and the local staging directory before deliberately trying again. No activation is performed."),
+            message: message.to_owned(),
+            hint: Some(hint),
             retryable: false,
             details: json!({"reason":managed.code}),
             exit_code: 5,
@@ -14124,6 +14150,71 @@ mod tests {
         ] {
             let raw_args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
             assert_eq!(cli_parse_error_operation(&raw_args), expected);
+        }
+    }
+
+    #[test]
+    fn managed_skill_errors_have_operation_specific_guidance_and_stable_contracts() {
+        for (operation, reason, message, hint_fragments) in [
+            (
+                "skills.stage_update",
+                "already_current",
+                "The active skill already matches this binary's bundled template.",
+                vec!["skills status", "no update candidate is needed"],
+            ),
+            (
+                "skills.enroll",
+                "already_exists",
+                "The enrollment receipt path already exists.",
+                vec!["skills update-preview", "malformed", "directory or link"],
+            ),
+            (
+                "skills.stage_update",
+                "already_exists",
+                "The staging directory or an output path already exists.",
+                vec!["partial output", "new staging directory", "parent exists", "outside the active skill directory"],
+            ),
+            (
+                "skills.enroll",
+                "installed_not_current",
+                "Enrollment requires active skill bytes that exactly match this binary's bundled template.",
+                vec!["skills status", "preserve customizations", "do not overwrite edits"],
+            ),
+            (
+                "skills.stage_update",
+                "installed_modified",
+                "The active skill differs from its recorded enrollment baseline.",
+                vec!["skills status", "skills update-preview", "Manual activation", "old receipt", "optional receipt recovery"],
+            ),
+            (
+                "skills.enroll",
+                "unrecognized_reason",
+                "Local skill operation could not be completed safely.",
+                vec!["local staging directory", "No activation is performed"],
+            ),
+            (
+                "skills.enroll",
+                "already_current",
+                "Local skill operation could not be completed safely.",
+                vec!["local staging directory", "No activation is performed"],
+            ),
+            (
+                "unknown.operation",
+                "already_exists",
+                "Local skill operation could not be completed safely.",
+                vec!["local staging directory", "No activation is performed"],
+            ),
+        ] {
+            let error = anyhow::Error::new(sniper::skill_managed::ManagedSkillError { code: reason });
+            let payload = cli_error_payload(operation, &error);
+            assert_eq!(payload.code, "MANAGED_SKILL_ERROR");
+            assert_eq!(payload.exit_code, 5);
+            assert!(!payload.retryable);
+            assert_eq!(payload.details, json!({"reason": reason}));
+            assert_eq!(payload.message, message);
+            for fragment in hint_fragments {
+                assert!(payload.hint.unwrap().contains(fragment), "{operation}/{reason}: {fragment}");
+            }
         }
     }
 
