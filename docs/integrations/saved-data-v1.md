@@ -65,6 +65,16 @@ Selection previews intentionally return the complete selected ID set and a
 count/token, not a page of summaries. A very broad filter can therefore have a
 large preview. No deletion is authorized by a list continuation.
 
+The CLI rejects structurally valid read responses that do not match the request:
+explicit-ID previews must return the same UUID set, page limits must match the
+requested or default limit, and continuation pages must respect the requested
+cursor boundary. HTTP next cursors also retain the supplied store generation.
+Pages have unique IDs in their documented order. UUID spelling case and explicit
+selection input order do not change identity. A mismatch returns
+`INVALID_RESPONSE` without presenting the rows as successful data; the CLI does
+not automatically retry the request. These checks validate the response, not a
+snapshot guarantee for a live traversal.
+
 ## Mutations and receipts
 
 Every v1 mutation requires `session_id` and a caller-chosen UUID `operation_id`.

@@ -10459,6 +10459,68 @@ fn validate_saved_response_binding(operation: &str, input: &Value, data: &Value)
             bail!("saved HTTP response is not bound to the requested session");
         }
     }
+    match operation {
+        "saved.v1.http.select" => {
+            if let Some(requested) = input.get("ids").and_then(Value::as_array) {
+                // Selection resolves every requested ID, but sorts and deduplicates
+                // parsed UUIDs rather than preserving input order or letter case.
+                let uuid_set = |ids: &[Value]| -> Result<std::collections::HashSet<Uuid>> {
+                    ids.iter()
+                        .map(|id| {
+                            Uuid::parse_str(id.as_str().context("missing selection UUID")?)
+                                .context("invalid selection UUID")
+                        })
+                        .collect()
+                };
+                let returned = data["ids"].as_array().context("missing selection IDs")?;
+                if uuid_set(requested)? != uuid_set(returned)? {
+                    bail!("saved selection response is not bound to the requested IDs");
+                }
+            }
+        }
+        "saved.v1.http.list" | "saved.v1.session.list" => {
+            let source = input.get("continuation").unwrap_or(input);
+            let limit = source
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(sniper::saved_contract::DEFAULT_LIMIT as u64);
+            if data["limit"].as_u64() != Some(limit) {
+                bail!("saved page is not bound to the requested limit");
+            }
+            let items = data["items"]
+                .as_array()
+                .context("missing saved page items")?;
+            if operation == "saved.v1.http.list" {
+                if let Some(cursor) = input.get("continuation") {
+                    let before = cursor["before_sequence"]
+                        .as_u64()
+                        .context("missing HTTP continuation boundary")?;
+                    if items
+                        .iter()
+                        .any(|item| item["sequence"].as_u64().is_none_or(|seq| seq >= before))
+                    {
+                        bail!("saved HTTP page crosses the requested sequence boundary");
+                    }
+                    // Terminal pages do not return a generation. Only a next
+                    // cursor can carry forward the pinned generation.
+                    if !data["continuation"].is_null()
+                        && saved_uuid_field(&data["continuation"], "store_generation")
+                            != saved_uuid_field(cursor, "store_generation")
+                    {
+                        bail!("saved HTTP continuation changed the requested store generation");
+                    }
+                }
+            } else if let Some(after) = saved_uuid_field(input, "after_id") {
+                if items
+                    .iter()
+                    .any(|item| saved_uuid_field(item, "id").is_none_or(|id| id <= after))
+                {
+                    bail!("saved session page crosses the requested UUID boundary");
+                }
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -15559,9 +15621,102 @@ mod tests {
         assert!(validate_saved_response_binding(
             "saved.v1.http.list",
             &json!({}),
-            &json!({"session_id":second})
+            &json!({"session_id":second,"limit":50,"items":[]})
         )
         .is_ok());
+    }
+
+    #[test]
+    fn saved_response_binding_matches_explicit_selection_uuid_sets() {
+        let first = Uuid::from_u128(0xabcdef);
+        let second = Uuid::from_u128(0xabcdee);
+        let input = json!({"session_id":first,"ids":[first,second]});
+        let data = json!({"session_id":first,"ids":[second,first.to_string().to_uppercase()]});
+        assert!(validate_saved_response_binding("saved.v1.http.select", &input, &data).is_ok());
+        for ids in [
+            json!([]),
+            json!([first]),
+            json!([first, Uuid::nil()]),
+            json!([first, second, Uuid::nil()]),
+        ] {
+            assert!(validate_saved_response_binding(
+                "saved.v1.http.select",
+                &input,
+                &json!({"session_id":first,"ids":ids})
+            )
+            .is_err());
+        }
+        assert!(validate_saved_response_binding(
+            "saved.v1.http.select",
+            &json!({"session_id":first,"host":"example.com"}),
+            &json!({"session_id":first,"ids":[]})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn saved_response_binding_checks_limits_even_on_empty_terminal_pages() {
+        for operation in ["saved.v1.http.list", "saved.v1.session.list"] {
+            for (input, expected) in [
+                (json!({}), 50),
+                (json!({"limit":1}), 1),
+                (json!({"limit":200}), 200),
+            ] {
+                for limit in [1, 50, 200] {
+                    let data = json!({"session_id":Uuid::nil(),"limit":limit,"items":[],"continuation":null});
+                    assert_eq!(
+                        validate_saved_response_binding(operation, &input, &data).is_ok(),
+                        limit == expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn saved_response_binding_checks_http_cursor_even_on_terminal_pages() {
+        let sid = Uuid::from_u128(0xabcdef);
+        let generation = Uuid::from_u128(0xabcdee);
+        let input = json!({"continuation":{"session_id":sid,"store_generation":generation,"before_sequence":10,"limit":1}});
+        for (sequence, valid) in [(9, true), (10, false), (11, false)] {
+            let data = json!({"session_id":sid,"limit":1,"items":[{"sequence":sequence}],"continuation":null});
+            assert_eq!(
+                validate_saved_response_binding("saved.v1.http.list", &input, &data).is_ok(),
+                valid
+            );
+        }
+        let mut data = json!({"session_id":sid,"limit":1,"items":[],"continuation":null});
+        assert!(validate_saved_response_binding("saved.v1.http.list", &input, &data).is_ok());
+        data["limit"] = json!(2);
+        assert!(validate_saved_response_binding("saved.v1.http.list", &input, &data).is_err());
+        data["limit"] = json!(1);
+        for (returned, valid) in [
+            (generation.to_string().to_uppercase(), true),
+            (Uuid::nil().to_string(), false),
+        ] {
+            data["continuation"] = json!({"store_generation":returned});
+            assert_eq!(
+                validate_saved_response_binding("saved.v1.http.list", &input, &data).is_ok(),
+                valid
+            );
+        }
+    }
+
+    #[test]
+    fn saved_response_binding_checks_session_cursor_as_uuid() {
+        let after = Uuid::from_u128(0xabcdef);
+        let input = json!({"after_id":after.to_string().to_uppercase(),"limit":1});
+        for (id, valid) in [
+            (after.as_u128() - 1, false),
+            (after.as_u128(), false),
+            (after.as_u128() + 1, true),
+        ] {
+            let data = json!({"limit":1,"items":[{"id":Uuid::from_u128(id)}],"continuation":null});
+            assert_eq!(
+                validate_saved_response_binding("saved.v1.session.list", &input, &data).is_ok(),
+                valid
+            );
+        }
     }
 
     #[test]
