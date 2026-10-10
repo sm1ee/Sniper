@@ -920,6 +920,19 @@ pub(crate) struct SessionDeleteCommit {
     pub finalization_error: Option<anyhow::Error>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionMetadataWrite {
+    Create,
+    Update,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum SessionMetadataFault {
+    BeforeReplacement,
+    AfterReplacement,
+}
+
 pub struct SessionRegistry {
     root_dir: PathBuf,
     registry_path: PathBuf,
@@ -931,6 +944,8 @@ pub struct SessionRegistry {
     rename_fault: std::sync::Mutex<Option<SessionRenameFault>>,
     #[cfg(test)]
     delete_fault: std::sync::Mutex<Option<(SessionDeleteWrite, SessionDeleteFault)>>,
+    #[cfg(test)]
+    metadata_fault: std::sync::Mutex<Option<(SessionMetadataWrite, SessionMetadataFault)>>,
 }
 
 impl SessionRegistry {
@@ -1070,6 +1085,8 @@ impl SessionRegistry {
             rename_fault: std::sync::Mutex::new(None),
             #[cfg(test)]
             delete_fault: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            metadata_fault: std::sync::Mutex::new(None),
         };
         let active_metadata = this.touch_active_session(registry.active_session_id)?;
         let active_context = this.load_context(active_metadata.id)?;
@@ -1123,13 +1140,26 @@ impl SessionRegistry {
             next.sessions.push(metadata.clone());
             next.deleted_session_ids
                 .retain(|deleted_id| *deleted_id != metadata.id);
-            write_json(&self.registry_path, &next).map(|()| {
-                *registry = next;
-            })
+            match self.write_registry_metadata(&next, SessionMetadataWrite::Create) {
+                Ok(()) => {
+                    *registry = next;
+                    Ok(())
+                }
+                Err(failure) => {
+                    if failure.committed {
+                        *registry = next;
+                    }
+                    Err(failure)
+                }
+            }
         };
-        if let Err(error) = registry_result {
-            let _ = fs::remove_dir_all(session_dir(&self.root_dir, metadata.id));
-            return Err(error);
+        if let Err(failure) = registry_result {
+            // A visible registry entry must retain its storage even when the
+            // write's durability could not be acknowledged to the caller.
+            if !failure.committed {
+                let _ = fs::remove_dir_all(session_dir(&self.root_dir, metadata.id));
+            }
+            return Err(failure.error);
         }
         Ok(metadata)
     }
@@ -1234,9 +1264,63 @@ impl SessionRegistry {
         metadata.last_opened_at = existing.last_opened_at;
         metadata.updated_at = metadata.updated_at.max(existing.updated_at);
         *existing = metadata;
-        write_json(&self.registry_path, &next)?;
+        let finalization_error =
+            match self.write_registry_metadata(&next, SessionMetadataWrite::Update) {
+                Ok(()) => None,
+                Err(failure) if failure.committed => Some(failure.error),
+                Err(failure) => return Err(failure.error),
+            };
+        // Later registry writes clone this snapshot, so leaving it stale would
+        // overwrite metadata whose replacement is already visible on disk.
         *registry = next;
-        Ok(())
+        match finalization_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_metadata_write(
+        &self,
+        purpose: SessionMetadataWrite,
+        fault: SessionMetadataFault,
+    ) {
+        *self.metadata_fault.lock().unwrap() = Some((purpose, fault));
+    }
+
+    fn write_registry_metadata(
+        &self,
+        next: &SessionRegistrySnapshot,
+        _purpose: SessionMetadataWrite,
+    ) -> std::result::Result<(), JsonWriteFailure> {
+        #[cfg(test)]
+        {
+            let fault = {
+                let mut fault = self.metadata_fault.lock().unwrap();
+                if fault
+                    .as_ref()
+                    .is_some_and(|(purpose, _)| *purpose == _purpose)
+                {
+                    fault.take().map(|(_, fault)| fault)
+                } else {
+                    None
+                }
+            };
+            if let Some(fault) = fault {
+                return match fault {
+                    SessionMetadataFault::BeforeReplacement => Err(JsonWriteFailure {
+                        error: anyhow!("synthetic metadata failure before replacement"),
+                        committed: false,
+                    }),
+                    SessionMetadataFault::AfterReplacement => {
+                        write_json_finalizing(&self.registry_path, next, |_| {
+                            bail!("synthetic metadata finalization failure")
+                        })
+                    }
+                };
+            }
+        }
+        write_json_with_commit_status(&self.registry_path, next)
     }
 
     pub fn contains_session(&self, id: Uuid) -> bool {
@@ -6427,6 +6511,367 @@ mod tests {
         }));
 
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    fn metadata_commit_fault(after_replacement: bool) -> super::SessionMetadataFault {
+        if after_replacement {
+            super::SessionMetadataFault::AfterReplacement
+        } else {
+            super::SessionMetadataFault::BeforeReplacement
+        }
+    }
+
+    fn metadata_commit_disk(registry: &SessionRegistry) -> super::SessionRegistrySnapshot {
+        serde_json::from_slice(&std::fs::read(&registry.registry_path).unwrap()).unwrap()
+    }
+
+    fn metadata_commit_entry(
+        snapshot: &super::SessionRegistrySnapshot,
+        id: Uuid,
+    ) -> serde_json::Value {
+        serde_json::to_value(
+            snapshot
+                .sessions
+                .iter()
+                .find(|entry| entry.id == id)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn metadata_commit_create_preserves_visible_entry_storage_and_names() {
+        for after_replacement in [false, true] {
+            for name in [None, Some(" \tSynthetic name\n ".to_owned())] {
+                let data_dir =
+                    std::env::temp_dir().join(format!("sniper-create-commit-{}", Uuid::new_v4()));
+                let (registry, active) =
+                    SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+                let before = std::fs::read(&registry.registry_path).unwrap();
+                registry.fail_next_metadata_write(
+                    super::SessionMetadataWrite::Create,
+                    metadata_commit_fault(after_replacement),
+                );
+                let error = registry.create_session(name.clone()).unwrap_err();
+                assert!(error.to_string().contains(if after_replacement {
+                    "finalization"
+                } else {
+                    "before replacement"
+                }));
+                assert_eq!(registry.active_session_id(), active.id());
+                let disk = metadata_commit_disk(&registry);
+                let created = disk
+                    .sessions
+                    .iter()
+                    .find(|entry| entry.id != active.id())
+                    .cloned();
+                assert_eq!(created.is_some(), after_replacement);
+                assert_eq!(
+                    registry.inner.read().unwrap().sessions.len(),
+                    1 + usize::from(after_replacement)
+                );
+                if let Some(created) = created.as_ref() {
+                    assert!(registry.contains_session(created.id));
+                    assert_eq!(
+                        created.name,
+                        name.as_deref()
+                            .map(str::trim)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!(
+                                "Session {}",
+                                created.created_at.format("%Y-%m-%d %H:%M")
+                            ))
+                    );
+                    assert_eq!(created.created_at, created.updated_at);
+                    assert_eq!(created.created_at, created.last_opened_at);
+                    assert_eq!(
+                        metadata_commit_entry(&registry.inner.read().unwrap(), created.id),
+                        serde_json::to_value(created).unwrap()
+                    );
+                    let storage = registry.session_storage_path(created.id).unwrap();
+                    assert!(super::snapshot_path(&storage).is_file());
+                    std::fs::write(storage.join("synthetic-retained-marker"), b"kept").unwrap();
+                    registry
+                        .update_metadata(active.metadata.read().unwrap().clone())
+                        .unwrap();
+                    assert_eq!(
+                        metadata_commit_entry(&metadata_commit_disk(&registry), created.id),
+                        serde_json::to_value(created).unwrap()
+                    );
+                } else {
+                    assert_eq!(std::fs::read(&registry.registry_path).unwrap(), before);
+                    let storage_ids = std::fs::read_dir(&registry.root_dir)
+                        .unwrap()
+                        .filter_map(|entry| Uuid::parse_str(entry.ok()?.file_name().to_str()?).ok())
+                        .collect::<Vec<_>>();
+                    assert_eq!(storage_ids, vec![active.id()]);
+                }
+                assert!(!std::fs::read_dir(&registry.root_dir)
+                    .unwrap()
+                    .any(|entry| entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".tmp-")));
+                let active_id = active.id();
+                drop(active);
+                drop(registry);
+                let (reopened, active) =
+                    SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+                assert_eq!(active.id(), active_id);
+                assert_eq!(
+                    reopened.inner.read().unwrap().sessions.len(),
+                    1 + usize::from(after_replacement)
+                );
+                if let Some(created) = created {
+                    assert_eq!(
+                        metadata_commit_entry(&reopened.inner.read().unwrap(), created.id),
+                        serde_json::to_value(&created).unwrap()
+                    );
+                    let storage = reopened.session_storage_path(created.id).unwrap();
+                    assert_eq!(
+                        std::fs::read(storage.join("synthetic-retained-marker")).unwrap(),
+                        b"kept"
+                    );
+                }
+                drop(active);
+                drop(reopened);
+                std::fs::remove_dir_all(data_dir).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_commit_update_preserves_visible_fields_across_writes_and_restart() {
+        for after_replacement in [false, true] {
+            for incoming_is_newer in [false, true] {
+                let data_dir =
+                    std::env::temp_dir().join(format!("sniper-update-commit-{}", Uuid::new_v4()));
+                let (registry, active) =
+                    SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+                let mut incoming = registry.create_session(Some("Before".to_owned())).unwrap();
+                registry
+                    .rename_session(incoming.id, "Registry-owned name")
+                    .unwrap();
+                registry.activate_session(incoming.id).unwrap();
+                registry.activate_session(active.id()).unwrap();
+                let existing = registry
+                    .inner
+                    .read()
+                    .unwrap()
+                    .sessions
+                    .iter()
+                    .find(|entry| entry.id == incoming.id)
+                    .unwrap()
+                    .clone();
+                incoming.name = "Stale name".to_owned();
+                incoming.created_at -= ChronoDuration::days(1);
+                incoming.last_opened_at -= ChronoDuration::days(1);
+                incoming.updated_at = existing.updated_at
+                    + if incoming_is_newer {
+                        ChronoDuration::hours(1)
+                    } else {
+                        -ChronoDuration::hours(1)
+                    };
+                incoming.request_count = 42;
+                incoming.event_count = 7;
+                let mut expected = existing.clone();
+                if after_replacement {
+                    expected.request_count = incoming.request_count;
+                    expected.event_count = incoming.event_count;
+                    expected.updated_at = existing.updated_at.max(incoming.updated_at);
+                }
+                let before = std::fs::read(&registry.registry_path).unwrap();
+                registry.fail_next_metadata_write(
+                    super::SessionMetadataWrite::Update,
+                    metadata_commit_fault(after_replacement),
+                );
+                let error = registry.update_metadata(incoming).unwrap_err();
+                assert!(error.to_string().contains(if after_replacement {
+                    "finalization"
+                } else {
+                    "before replacement"
+                }));
+                let expected_value = serde_json::to_value(&expected).unwrap();
+                assert_eq!(
+                    metadata_commit_entry(&registry.inner.read().unwrap(), existing.id),
+                    expected_value
+                );
+                assert_eq!(
+                    metadata_commit_entry(&metadata_commit_disk(&registry), existing.id),
+                    expected_value
+                );
+                if !after_replacement {
+                    assert_eq!(std::fs::read(&registry.registry_path).unwrap(), before);
+                }
+                registry
+                    .update_metadata(active.metadata.read().unwrap().clone())
+                    .unwrap();
+                assert_eq!(
+                    metadata_commit_entry(&metadata_commit_disk(&registry), existing.id),
+                    expected_value
+                );
+                let active_id = active.id();
+                drop(active);
+                drop(registry);
+                let (reopened, active) =
+                    SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+                assert_eq!(active.id(), active_id);
+                // The target stays inactive: loading it would legitimately
+                // recompute these synthetic counts from its empty snapshot.
+                assert_eq!(
+                    metadata_commit_entry(&reopened.inner.read().unwrap(), existing.id),
+                    expected_value
+                );
+                drop(active);
+                drop(reopened);
+                std::fs::remove_dir_all(data_dir).unwrap();
+            }
+        }
+    }
+
+    fn metadata_commit_test_state() -> (std::path::PathBuf, crate::state::AppState) {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-state-metadata-commit-{}", Uuid::new_v4()));
+        let state = crate::state::AppState::new(crate::config::AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 32,
+            max_transaction_entries: 32,
+            body_preview_bytes: 4096,
+            data_dir: data_dir.clone(),
+        })
+        .unwrap();
+        (data_dir, state)
+    }
+
+    #[tokio::test]
+    async fn metadata_commit_app_create_keeps_active_identity_on_registry_error() {
+        for after_replacement in [false, true] {
+            let (data_dir, state) = metadata_commit_test_state();
+            let original = state.session().await;
+            state.sessions.fail_next_metadata_write(
+                super::SessionMetadataWrite::Create,
+                metadata_commit_fault(after_replacement),
+            );
+            let error = state
+                .create_session(Some("Synthetic inactive".to_owned()))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(if after_replacement {
+                "finalization"
+            } else {
+                "before replacement"
+            }));
+            assert!(std::sync::Arc::ptr_eq(&original, &state.session().await));
+            assert_eq!(state.sessions.active_session_id(), original.id());
+            let sessions = state.list_sessions().await;
+            assert_eq!(sessions.len(), 1 + usize::from(after_replacement));
+            let created = sessions
+                .into_iter()
+                .find(|session| session.id != original.id());
+            if let Some(created) = created.as_ref() {
+                assert!(!created.active);
+                assert_eq!(created.name, "Synthetic inactive");
+                let loaded = state.session_context_for_id(created.id).await.unwrap();
+                assert_eq!(loaded.id(), created.id);
+                assert!(super::snapshot_path(loaded.storage_dir()).is_file());
+            }
+            state.persist_active_session().await.unwrap();
+            let config = state.config.clone();
+            let active_id = original.id();
+            drop(original);
+            drop(state);
+            let reopened = crate::state::AppState::new(config).unwrap();
+            assert_eq!(reopened.active_session_summary().await.id, active_id);
+            assert_eq!(
+                reopened.sessions.summaries().len(),
+                1 + usize::from(after_replacement)
+            );
+            if let Some(created) = created {
+                assert!(reopened.sessions.contains_session(created.id));
+                assert_eq!(
+                    reopened
+                        .session_context_for_id(created.id)
+                        .await
+                        .unwrap()
+                        .summary(false)
+                        .name,
+                    "Synthetic inactive"
+                );
+            }
+            drop(reopened);
+            std::fs::remove_dir_all(data_dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_commit_app_persist_keeps_snapshot_and_reports_registry_error() {
+        for after_replacement in [false, true] {
+            let (data_dir, state) = metadata_commit_test_state();
+            let original = state.session().await;
+            original
+                .event_log
+                .push(
+                    crate::event_log::EventLevel::Info,
+                    "synthetic",
+                    "Saved event",
+                    "Synthetic persisted data",
+                )
+                .await;
+            state.sessions.fail_next_metadata_write(
+                super::SessionMetadataWrite::Update,
+                metadata_commit_fault(after_replacement),
+            );
+            let error = state.persist_active_session().await.unwrap_err();
+            assert!(error.to_string().contains(if after_replacement {
+                "finalization"
+            } else {
+                "before replacement"
+            }));
+            let expected_count = usize::from(after_replacement);
+            assert_eq!(
+                metadata_commit_entry(&state.sessions.inner.read().unwrap(), original.id())
+                    ["event_count"],
+                expected_count
+            );
+            assert_eq!(
+                metadata_commit_entry(&metadata_commit_disk(&state.sessions), original.id())
+                    ["event_count"],
+                expected_count
+            );
+            // Snapshot persistence precedes the registry update, so even its
+            // precommit failure cannot establish that the whole save was undone.
+            let snapshot = super::load_session_snapshot(original.storage_dir(), 32, 32).unwrap();
+            assert_eq!(snapshot.event_log.len(), 1);
+            state
+                .sessions
+                .create_session(Some("Unrelated write".to_owned()))
+                .unwrap();
+            assert_eq!(
+                metadata_commit_entry(&metadata_commit_disk(&state.sessions), original.id())
+                    ["event_count"],
+                expected_count
+            );
+            let config = state.config.clone();
+            let active_id = original.id();
+            drop(original);
+            drop(state);
+            let reopened = crate::state::AppState::new(config).unwrap();
+            let active = reopened.session().await;
+            assert_eq!(active.id(), active_id);
+            let events = active.event_log.snapshot(None).await;
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].message, "Synthetic persisted data");
+            assert_eq!(
+                metadata_commit_entry(&reopened.sessions.inner.read().unwrap(), active_id)
+                    ["event_count"],
+                1
+            );
+            drop(active);
+            drop(reopened);
+            std::fs::remove_dir_all(data_dir).unwrap();
+        }
     }
 
     #[tokio::test]
