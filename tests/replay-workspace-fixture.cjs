@@ -15,7 +15,8 @@ const functions = [
   "buildEditableRawRequest", "mergeHeaders", "headerNameEquals", "replayRequestTextsEquivalent",
   "getRepeaterTargetConfig", "getActiveReplayTab", "getReplayTabVisualOrder", "isReplayTabSending", "sessionQueryPath",
   "createReplayTab", "ensureRepeaterTab", "currentSessionId", "workspaceSnapshotMatchesActiveSession",
-  "closeRepeaterTab", "snapshotReplayTabsState", "cloneReplayTabState", "cloneRepeaterHistoryEntry", "restoreReplayTabsState",
+  "closeRepeaterTab", "preserveActiveHttpReplayDraftBeforeClose", "validateManualRepeaterTargetInput", "isLikelyIpv6Literal",
+  "snapshotReplayTabsState", "cloneReplayTabState", "cloneRepeaterHistoryEntry", "restoreReplayTabsState",
   "scheduleWorkspaceStateSave", "flushQueuedWorkspaceStateSave", "runQueuedWorkspaceStateSaves", "saveWorkspaceState",
   "flushWorkspaceState", "clearBypassableWorkspaceConflict", "isActiveSessionChangedConflict", "isTooManyReplayTabsError",
   "flushWorkspaceStateOnUnload", "requestWorkspaceUnloadPrompt", "workspaceUnloadPayload", "utf8ByteLength",
@@ -66,7 +67,7 @@ function fixture() {
   function syncDom() {
     const tab = context.getActiveReplayTab();
     if (!tab || tab.type === "websocket") return;
-    els.replayRequestHighlight.innerText = tab.requestText;
+    if (els.replayRequestHighlight) els.replayRequestHighlight.innerText = tab.requestText;
     els.replayRequestEditor.value = tab.requestText;
     const target = context.getRepeaterTargetConfig(tab);
     els.replayHostInput.value = target.host; els.replayPortInput.value = target.port; els.replaySchemeSelect.value = target.scheme;

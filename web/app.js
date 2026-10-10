@@ -17245,10 +17245,13 @@ function renderReplayTabs(options = {}) {
       );
       event.preventDefault();
       event.stopPropagation();
-      commitReplayTabRename(editingId, editingInput?.value || "");
       if (closeButton) {
-        closeRepeaterTab(actionTabId).catch(handleWorkspaceActionError);
-      } else if (pinButton) {
+        closeRepeaterTab(actionTabId, { id: editingId, value: editingInput?.value || "" })
+          .catch(handleWorkspaceActionError);
+        return;
+      }
+      commitReplayTabRename(editingId, editingInput?.value || "");
+      if (pinButton) {
         toggleReplayTabPin(actionTabId);
       } else if (tabButton && state.activeReplayTabId !== actionTabId) {
         state.activeReplayTabId = actionTabId;
@@ -17395,11 +17398,98 @@ function scrollActiveReplayTabIntoView() {
   }
 }
 
-async function closeRepeaterTab(id) {
+function preserveActiveHttpReplayDraftBeforeClose(tab) {
+  if (tab.type === "websocket" || tab.id !== state.activeReplayTabId) return true;
+
+  // Read every control before touching the model: normal editor synchronization
+  // also refreshes the toolbar and can erase a different, still-invalid draft.
+  const editor = getCMView("replayReq");
+  const hexMode = state.replayMessageViews.request === "hex";
+  const legacyText = els.replayRequestCM ? null
+    : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value ?? null);
+  const visibleText = hexMode ? null : (editor ? editor.getContent()
+    : legacyText);
+  let textChanged = typeof visibleText === "string"
+    && !replayRequestTextsEquivalent(visibleText, tab.requestText);
+  let requestText = textChanged ? visibleText : (tab.requestText || "");
+  const target = getRepeaterTargetConfig(tab);
+  const host = els.replayHostInput?.value ?? target.host;
+  const port = els.replayPortInput?.value ?? target.port;
+  const scheme = els.replaySchemeSelect?.value ?? target.scheme;
+  const targetChanged = host !== target.host || port !== target.port || scheme !== target.scheme;
+  const versionSelect = document.getElementById("replayHttpVersionSelect");
+  const version = versionSelect?.value ?? normalizeReplayHttpVersionMode(tab.httpVersionMode);
+  const versionChanged = version !== normalizeReplayHttpVersionMode(tab.httpVersionMode);
+  const hexInput = hexMode && !editor && !els.replayRequestCM
+    ? els.replayRequestHighlight?.querySelector?.(".hex-byte-input") : null;
+
+  if (targetChanged && !validateManualRepeaterTargetInput(host, port).valid) {
+    showToast("Finish or correct the target fields before closing this tab; your draft is still here.", "error", 6000);
+    return false;
+  }
+  if (hexInput) {
+    const index = Number(hexInput.closest(".hex-byte")?.dataset.idx);
+    const value = hexInput.value.trim();
+    if (!Number.isSafeInteger(index) || index < 0 || !tab.requestBytes
+      || index >= tab.requestBytes.length || !/^[0-9a-f]{1,2}$/i.test(value)
+      || parseInt(value, 16) !== tab.requestBytes[index]) {
+      // Its delayed blur commit belongs to the current DOM. Closing first would
+      // destroy that input before the byte reaches the retained tab object.
+      showToast("Finish the byte edit before closing this tab; your draft is still here.", "error", 6000);
+      return false;
+    }
+  }
+  if (versionChanged && (tab.requestBytes || version !== normalizeReplayHttpVersionMode(version))) {
+    showToast("Apply the HTTP version change before closing this tab; your draft is still here.", "error", 6000);
+    return false;
+  }
+
+  if (versionChanged) {
+    requestText = requestText.replace(/^[^\r\n]*/, (line) => {
+      let nextLine = version
+        ? line.replace(/\s+HTTP\/[0-9.]+\s*$/i, ` ${version}`)
+        : line.replace(/\s+HTTP\/[0-9.]+\s*$/i, "");
+      if (version && !/HTTP\//i.test(nextLine)) nextLine += ` ${version}`;
+      return nextLine;
+    });
+    textChanged = !replayRequestTextsEquivalent(requestText, tab.requestText);
+  }
+  const nextTarget = targetChanged ? normalizeRepeaterTargetInput(host, port, scheme) : target;
+  const targetModelChanged = targetChanged && (nextTarget.host !== target.host
+    || nextTarget.port !== target.port || nextTarget.scheme !== target.scheme);
+
+  // The close retains this object for rollback. Preserve supported edits there
+  // without re-rendering or parsing partially typed text into a different draft.
+  if (textChanged) {
+    tab.requestText = requestText;
+    tab.httpVersionMode = replayHttpVersionState(null, requestText, tab.httpVersionMode);
+    tab.requestBytes = null;
+    tab.requestOriginalBytes = null;
+  }
+  if (versionChanged) tab.httpVersionMode = version;
+  if (targetModelChanged) {
+    tab.targetScheme = nextTarget.scheme;
+    tab.targetHost = nextTarget.host;
+    tab.targetPort = nextTarget.port;
+    tab.targetManuallyEdited = true;
+  }
+  if (textChanged || versionChanged || targetModelChanged) {
+    tab.responseRecord = null;
+    tab.notice = "";
+  }
+  return true;
+}
+
+async function closeRepeaterTab(id, pendingRename = null) {
   const index = state.replayTabs.findIndex((tab) => tab.id === id);
   if (index === -1) {
     return;
   }
+  const closingTab = state.replayTabs[index];
+  if (!preserveActiveHttpReplayDraftBeforeClose(closingTab)) return;
+  // The strip can finish a rename with the same click; a refused close must
+  // leave that input and its pending save untouched as well.
+  if (pendingRename) commitReplayTabRename(pendingRename.id, pendingRename.value);
 
   const generation = workspaceStateGeneration;
   const sessionId = currentSessionId();
@@ -17408,7 +17498,6 @@ async function closeRepeaterTab(id) {
   const previousActiveId = state.activeReplayTabId;
   const visualOrderBeforeClose = getReplayTabVisualOrder().map((tab) => tab.id);
   const visualIndex = visualOrderBeforeClose.indexOf(id);
-  const closingTab = state.replayTabs[index];
   const currentIndex = state.replayTabs.findIndex((tab) => tab.id === id);
   if (currentIndex === -1) {
     return;
@@ -20589,7 +20678,7 @@ function startHexByteEdit(span, tab, container) {
   input.addEventListener("blur", () => {
     // Delay to allow click on another byte
     setTimeout(() => {
-      if (!container.querySelector(".hex-byte-input")) return;
+      if (container.querySelector(".hex-byte-input") !== input) return;
       commit();
     }, 100);
   });
