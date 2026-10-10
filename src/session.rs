@@ -933,6 +933,24 @@ pub(crate) enum SessionMetadataFault {
     AfterReplacement,
 }
 
+pub(crate) struct SessionActivationCommit {
+    pub metadata: SessionMetadata,
+    pub finalization_error: Option<anyhow::Error>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum SessionActivationFault {
+    BeforeReplacement,
+    AfterReplacement,
+}
+
+#[cfg(test)]
+struct SessionActivationGate {
+    entered: oneshot::Sender<()>,
+    resume: mpsc::Receiver<()>,
+}
+
 pub struct SessionRegistry {
     root_dir: PathBuf,
     registry_path: PathBuf,
@@ -946,6 +964,12 @@ pub struct SessionRegistry {
     delete_fault: std::sync::Mutex<Option<(SessionDeleteWrite, SessionDeleteFault)>>,
     #[cfg(test)]
     metadata_fault: std::sync::Mutex<Option<(SessionMetadataWrite, SessionMetadataFault)>>,
+    #[cfg(test)]
+    activation_fault: std::sync::Mutex<Option<SessionActivationFault>>,
+    #[cfg(test)]
+    activation_gate: std::sync::Mutex<Option<SessionActivationGate>>,
+    #[cfg(test)]
+    activation_panic: AtomicBool,
 }
 
 impl SessionRegistry {
@@ -1087,6 +1111,12 @@ impl SessionRegistry {
             delete_fault: std::sync::Mutex::new(None),
             #[cfg(test)]
             metadata_fault: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            activation_fault: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            activation_gate: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            activation_panic: AtomicBool::new(false),
         };
         let active_metadata = this.touch_active_session(registry.active_session_id)?;
         let active_context = this.load_context(active_metadata.id)?;
@@ -1613,6 +1643,29 @@ impl SessionRegistry {
     }
 
     fn touch_active_session(&self, id: Uuid) -> Result<SessionMetadata> {
+        let commit = self.activate_session_with_commit_status(id)?;
+        match commit.finalization_error {
+            Some(error) => Err(error),
+            None => Ok(commit.metadata),
+        }
+    }
+
+    pub(crate) fn activate_session_with_commit_status(
+        &self,
+        id: Uuid,
+    ) -> Result<SessionActivationCommit> {
+        #[cfg(test)]
+        {
+            let gate = self.activation_gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                let _ = gate.entered.send(());
+                let _ = gate.resume.recv();
+            }
+            // Simulate a genuine worker JoinError without poisoning the registry.
+            if self.activation_panic.swap(false, Ordering::SeqCst) {
+                panic!("synthetic activation writer panic");
+            }
+        }
         let mut registry = self.inner.write().expect("session registry lock poisoned");
         let mut next = registry.clone();
         let Some(index) = next.sessions.iter().position(|session| session.id == id) else {
@@ -1622,9 +1675,61 @@ impl SessionRegistry {
         next.sessions[index].last_opened_at = Utc::now();
         next.active_session_id = id;
         let metadata = next.sessions[index].clone();
-        write_json(&self.registry_path, &next)?;
+        let finalization_error = match self.write_activated_registry(&next) {
+            Ok(()) => None,
+            Err(failure) if failure.committed => Some(failure.error),
+            Err(failure) => return Err(failure.error),
+        };
         *registry = next;
-        Ok(metadata)
+        Ok(SessionActivationCommit {
+            metadata,
+            finalization_error,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_activation(&self, fault: SessionActivationFault) {
+        *self.activation_fault.lock().unwrap() = Some(fault);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_activation(&self) -> (oneshot::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, ready) = oneshot::channel();
+        let (resume, release) = mpsc::channel();
+        *self.activation_gate.lock().unwrap() = Some(SessionActivationGate {
+            entered,
+            resume: release,
+        });
+        (ready, resume)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_next_activation(&self) {
+        self.activation_panic.store(true, Ordering::SeqCst);
+    }
+
+    fn write_activated_registry(
+        &self,
+        next: &SessionRegistrySnapshot,
+    ) -> std::result::Result<(), JsonWriteFailure> {
+        #[cfg(test)]
+        {
+            let fault = self.activation_fault.lock().unwrap().take();
+            if let Some(fault) = fault {
+                return match fault {
+                    SessionActivationFault::BeforeReplacement => Err(JsonWriteFailure {
+                        error: anyhow!("synthetic activation failure before replacement"),
+                        committed: false,
+                    }),
+                    SessionActivationFault::AfterReplacement => {
+                        write_json_finalizing(&self.registry_path, next, |_| {
+                            bail!("synthetic activation finalization failure")
+                        })
+                    }
+                };
+            }
+        }
+        write_json_with_commit_status(&self.registry_path, next)
     }
 }
 
@@ -6511,6 +6616,89 @@ mod tests {
         }));
 
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn activation_commit_registry_matches_visible_switch_and_same_active_timestamp() {
+        for switch in [false, true] {
+            for after_replacement in [false, true] {
+                let data_dir = std::env::temp_dir()
+                    .join(format!("sniper-activation-commit-{}", Uuid::new_v4()));
+                let (registry, active) =
+                    SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+                let original_id = active.id();
+                let target = if switch {
+                    registry
+                        .create_session(Some("Synthetic target".to_owned()))
+                        .unwrap()
+                } else {
+                    active.metadata.read().unwrap().clone()
+                };
+                let before = metadata_commit_disk(&registry);
+                registry.fail_next_activation(if after_replacement {
+                    super::SessionActivationFault::AfterReplacement
+                } else {
+                    super::SessionActivationFault::BeforeReplacement
+                });
+                let error = registry.activate_session(target.id).unwrap_err();
+                assert!(error.to_string().contains(if after_replacement {
+                    "finalization"
+                } else {
+                    "before replacement"
+                }));
+                let expected_id = if after_replacement {
+                    target.id
+                } else {
+                    original_id
+                };
+                let disk = metadata_commit_disk(&registry);
+                assert_eq!(disk.active_session_id, expected_id);
+                assert_eq!(registry.active_session_id(), expected_id);
+                assert_eq!(
+                    serde_json::to_value(&*registry.inner.read().unwrap()).unwrap(),
+                    serde_json::to_value(&disk).unwrap()
+                );
+                let last_opened = disk
+                    .sessions
+                    .iter()
+                    .find(|entry| entry.id == target.id)
+                    .unwrap()
+                    .last_opened_at;
+                if after_replacement {
+                    assert!(last_opened >= target.last_opened_at);
+                } else {
+                    assert_eq!(
+                        serde_json::to_value(&disk).unwrap(),
+                        serde_json::to_value(&before).unwrap()
+                    );
+                }
+                registry
+                    .update_metadata(active.metadata.read().unwrap().clone())
+                    .unwrap();
+                assert_eq!(
+                    metadata_commit_disk(&registry).active_session_id,
+                    expected_id
+                );
+                assert_eq!(
+                    metadata_commit_disk(&registry)
+                        .sessions
+                        .iter()
+                        .find(|entry| entry.id == target.id)
+                        .unwrap()
+                        .last_opened_at,
+                    last_opened
+                );
+                drop(active);
+                drop(registry);
+                let (reopened, active) =
+                    SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+                assert_eq!(active.id(), expected_id);
+                assert_eq!(reopened.active_session_id(), expected_id);
+                drop(active);
+                drop(reopened);
+                std::fs::remove_dir_all(data_dir).unwrap();
+            }
+        }
     }
 
     fn metadata_commit_fault(after_replacement: bool) -> super::SessionMetadataFault {
