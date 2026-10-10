@@ -3318,7 +3318,10 @@ fn skills_managed_output_schema(operation: &str) -> Option<Value> {
 }
 
 fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
-    if matches!(operation, "skills.status" | "skills.update_preview") {
+    if matches!(
+        operation,
+        "skills.install" | "skills.status" | "skills.update_preview"
+    ) {
         return json!({
             "type":"object", "additionalProperties":false, "required":[],
             "properties":{
@@ -3392,6 +3395,41 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
         properties.insert("operation".into(), json!({
             "type":["string","null"],
             "description":"Operation to show examples for; omitted or null lists all operations."
+        }));
+    }
+    if operation == "schema" {
+        properties.insert(
+            "kind".into(),
+            json!({"type":"string","enum":["input","output"]}),
+        );
+        properties.insert(
+            "operation".into(),
+            json!({
+                "type":"string","description":"Operation name from the CLI manifest."
+            }),
+        );
+    }
+    if operation == "session.create" {
+        properties.insert("name".into(), json!({
+            "type":["string","null"],
+            "description":"The server trims the name and limits it to 256 UTF-8 bytes after trimming. Omitted, null, empty or whitespace-only names use the server's timestamp-based default."
+        }));
+    }
+    // These legacy arguments also accept simple, braced and URN UUID spellings,
+    // which strict JSON Schema uuid format validators would reject.
+    if matches!(
+        operation,
+        "session.switch" | "session.delete" | "session.reveal"
+    ) {
+        properties.insert("id".into(), json!({
+            "type":"string",
+            "description":"Session UUID: hyphenated, 32 hexadecimal digits, braced hyphenated, or lowercase urn:uuid: prefix followed by a hyphenated UUID. Hexadecimal digits may use either case."
+        }));
+    }
+    if operation == "replay.list" {
+        properties.insert("session_id".into(), json!({
+            "type":["string","null"],
+            "description":"Session UUID: hyphenated, 32 hexadecimal digits, braced hyphenated, or lowercase urn:uuid: prefix followed by a hyphenated UUID. Hexadecimal digits may use either case. Omitted or null selects the active session."
         }));
     }
     if session_read_output_schema(operation).is_some() {
@@ -5966,16 +6004,17 @@ async fn run(cli: Cli) -> Result<()> {
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
     if let Command::Skills {
-        command: SkillsCommand::Status(args) | SkillsCommand::UpdatePreview(args),
+        command:
+            SkillsCommand::Install(args)
+            | SkillsCommand::Status(args)
+            | SkillsCommand::UpdatePreview(args),
     } = command
     {
         if !(args.codex || args.claude || args.all) {
             bail!("must select at least one destination with --codex, --claude, or --all");
         }
         for path in [&args.codex_dir, &args.claude_dir].into_iter().flatten() {
-            if path.as_os_str().is_empty() || path.to_string_lossy().contains('\0') {
-                bail!("skill directory must be nonempty and contain no NUL characters");
-            }
+            validate_skill_cli_path(path)?;
         }
     }
 
