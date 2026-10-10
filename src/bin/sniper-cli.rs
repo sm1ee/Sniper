@@ -6003,6 +6003,14 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Schema { operation, .. }
+    | Command::Examples {
+        operation: Some(operation),
+    } = command
+    {
+        operation_spec(operation).ok_or_else(|| anyhow!("unknown operation `{operation}`"))?;
+    }
+
     if let Command::Session {
         command: SessionCommand::Create(args),
     } = command

@@ -380,3 +380,49 @@ fn legacy_session_uuid_inputs_keep_all_accepted_spellings() {
         }
     }
 }
+
+#[test]
+fn discovery_rejects_unknown_targets_before_dry_run() {
+    let f = Fixture::new();
+    for target in ["missing.operation", "", " session.list"] {
+        for dry_run in [false, true] {
+            for kind in ["input", "output"] {
+                let mut args = vec!["schema", kind, target];
+                if dry_run {
+                    args.insert(0, "--dry-run");
+                }
+                let direct = f.cli(&args, 2);
+                assert_eq!(direct["error"]["code"], "UNKNOWN_OPERATION");
+                let input = json!({"kind":kind,"operation":target}).to_string();
+                let mut args = vec!["call", "schema", "--input", &input];
+                if dry_run {
+                    args.insert(0, "--dry-run");
+                }
+                let called = f.cli(&args, 2);
+                assert_eq!(called["error"]["code"], "UNKNOWN_OPERATION");
+            }
+            let mut args = vec!["examples", target];
+            if dry_run {
+                args.insert(0, "--dry-run");
+            }
+            assert_eq!(f.cli(&args, 2)["error"]["code"], "UNKNOWN_OPERATION");
+            let input = json!({"operation":target}).to_string();
+            let mut args = vec!["call", "examples", "--input", &input];
+            if dry_run {
+                args.insert(0, "--dry-run");
+            }
+            assert_eq!(f.cli(&args, 2)["error"]["code"], "UNKNOWN_OPERATION");
+        }
+    }
+    for target in ["session.list", "saved.v1.session.list", "skills.status"] {
+        for kind in ["input", "output"] {
+            f.cli(&["--dry-run", "schema", kind, target], 0);
+            f.call("schema", json!({"kind":kind,"operation":target}), 0);
+        }
+        f.cli(&["--dry-run", "examples", target], 0);
+        f.call("examples", json!({"operation":target}), 0);
+    }
+    f.cli(&["--dry-run", "examples"], 0);
+    f.call("examples", json!({}), 0);
+    f.call("examples", json!({"operation":null}), 0);
+}
