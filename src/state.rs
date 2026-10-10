@@ -503,11 +503,14 @@ impl AppState {
             let sessions = state.sessions.clone();
             let renamed_contexts = contexts.clone();
             tokio::task::spawn_blocking(move || -> Result<()> {
-                let metadata = sessions.rename_session(id, &name)?;
+                let commit = sessions.rename_session_with_commit_status(id, &name)?;
                 for context in renamed_contexts {
-                    context.apply_renamed_metadata(&metadata);
+                    context.apply_renamed_metadata(&commit.metadata);
                 }
-                Ok(())
+                match commit.finalization_error {
+                    Some(error) => Err(error),
+                    None => Ok(()),
+                }
             })
             .await
             .context("session rename writer panicked")??;
@@ -3040,6 +3043,123 @@ mod tests {
         })
         .unwrap();
         (data_dir, state)
+    }
+
+    #[tokio::test]
+    async fn rename_finalization_failure_updates_active_context_before_error() {
+        let (data_dir, state) = rename_session_test_state();
+        let context = state.session().await;
+        let before = context.summary(true);
+        state
+            .sessions
+            .fail_next_rename(crate::session::SessionRenameFault::AfterReplacement);
+        assert!(state
+            .rename_session(before.id, "After".to_owned())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("finalization"));
+        assert_eq!(context.summary(true).name, "After");
+        assert_eq!(state.active_session_summary().await.name, "After");
+        state.persist_active_session().await.unwrap();
+        let config = state.config.clone();
+        drop(context);
+        drop(state);
+        let restarted = AppState::new(config).unwrap();
+        let summary = restarted.active_session_summary().await;
+        assert_eq!(summary.id, before.id);
+        assert_eq!(summary.name, "After");
+        assert_eq!(summary.storage_path, before.storage_path);
+        drop(restarted);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rename_failure_keeps_all_inactive_caches_coherent() {
+        for after_replacement in [false, true] {
+            let (data_dir, state) = rename_session_test_state();
+            let original = state.session().await;
+            let before = original.summary(true);
+            let second = state
+                .create_session(Some("Second".to_owned()))
+                .await
+                .unwrap();
+            // Keep distinct writable and read-only contexts cached together.
+            state.session_contexts.lock().await.remove(&before.id);
+            let read_only = state.read_session_context_for_id(before.id).await.unwrap();
+            state
+                .session_contexts
+                .lock()
+                .await
+                .insert(before.id, original.clone());
+            assert!(!std::sync::Arc::ptr_eq(&original, &read_only));
+            let fault = if after_replacement {
+                crate::session::SessionRenameFault::AfterReplacement
+            } else {
+                crate::session::SessionRenameFault::BeforeReplacement
+            };
+            let registry_path = data_dir.join("sessions/registry.json");
+            let disk_before = std::fs::read(&registry_path).unwrap();
+            state.sessions.fail_next_rename(fault);
+            assert!(state
+                .rename_session(before.id, "After".to_owned())
+                .await
+                .is_err());
+            let expected = if after_replacement {
+                "After"
+            } else {
+                &before.name
+            };
+            assert_eq!(original.summary(false).name, expected);
+            assert_eq!(read_only.summary(false).name, expected);
+            assert_eq!(
+                state
+                    .list_sessions()
+                    .await
+                    .iter()
+                    .find(|s| s.id == before.id)
+                    .unwrap()
+                    .name,
+                expected
+            );
+            if !after_replacement {
+                assert_eq!(std::fs::read(&registry_path).unwrap(), disk_before);
+            }
+            let disk: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&registry_path).unwrap()).unwrap();
+            assert_eq!(
+                disk["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s["id"] == before.id.to_string())
+                    .unwrap()["name"],
+                expected
+            );
+            state.persist_session_context(&original).await.unwrap();
+            assert_eq!(state.active_session_summary().await.id, second.id);
+            let config = state.config.clone();
+            drop(original);
+            drop(read_only);
+            drop(state);
+            let restarted = AppState::new(config).unwrap();
+            let summary = restarted
+                .list_sessions()
+                .await
+                .into_iter()
+                .find(|s| s.id == before.id)
+                .unwrap();
+            assert_eq!(summary.name, expected);
+            assert_eq!(summary.storage_path, before.storage_path);
+            assert_eq!(summary.created_at, before.created_at);
+            // Faults are one-shot and normal persistence remains available.
+            restarted
+                .rename_session(before.id, "Retry".to_owned())
+                .await
+                .unwrap();
+            drop(restarted);
+            std::fs::remove_dir_all(data_dir).unwrap();
+        }
     }
 
     #[tokio::test]

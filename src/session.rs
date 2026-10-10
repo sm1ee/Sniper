@@ -887,6 +887,18 @@ fn recover_missing_scanner_findings(
     recovered
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum SessionRenameFault {
+    BeforeReplacement,
+    AfterReplacement,
+}
+
+pub(crate) struct SessionRenameCommit {
+    pub metadata: SessionMetadata,
+    pub finalization_error: Option<anyhow::Error>,
+}
+
 pub struct SessionRegistry {
     root_dir: PathBuf,
     registry_path: PathBuf,
@@ -894,6 +906,8 @@ pub struct SessionRegistry {
     max_transaction_entries: usize,
     max_frames_per_session: usize,
     inner: RwLock<SessionRegistrySnapshot>,
+    #[cfg(test)]
+    rename_fault: std::sync::Mutex<Option<SessionRenameFault>>,
 }
 
 impl SessionRegistry {
@@ -1029,6 +1043,8 @@ impl SessionRegistry {
             max_transaction_entries,
             max_frames_per_session,
             inner: RwLock::new(registry.clone()),
+            #[cfg(test)]
+            rename_fault: std::sync::Mutex::new(None),
         };
         let active_metadata = this.touch_active_session(registry.active_session_id)?;
         let active_context = this.load_context(active_metadata.id)?;
@@ -1098,6 +1114,18 @@ impl SessionRegistry {
     }
 
     pub fn rename_session(&self, id: Uuid, name: &str) -> Result<SessionMetadata> {
+        let commit = self.rename_session_with_commit_status(id, name)?;
+        match commit.finalization_error {
+            Some(error) => Err(error),
+            None => Ok(commit.metadata),
+        }
+    }
+
+    pub(crate) fn rename_session_with_commit_status(
+        &self,
+        id: Uuid,
+        name: &str,
+    ) -> Result<SessionRenameCommit> {
         let name = name.trim();
         if name.is_empty() {
             bail!("session name cannot be blank");
@@ -1116,15 +1144,52 @@ impl SessionRegistry {
             .iter_mut()
             .find(|session| session.id == id)
             .ok_or_else(|| anyhow!("session {id} was not found"))?;
-        if metadata.name == name {
-            return Ok(metadata.clone());
+        if metadata.name != name {
+            metadata.name = name.to_owned();
+            metadata.updated_at = metadata.updated_at.max(Utc::now());
         }
-        metadata.name = name.to_owned();
-        metadata.updated_at = metadata.updated_at.max(Utc::now());
+        // Even an unchanged name must persist: an earlier replacement may have
+        // been visible without its finalization being acknowledged.
         let renamed = metadata.clone();
-        write_json(&self.registry_path, &next)?;
+        let finalization_error = match self.write_renamed_registry(&next) {
+            Ok(()) => None,
+            Err(failure) if failure.committed => Some(failure.error),
+            Err(failure) => return Err(failure.error),
+        };
+        // Replacement is already visible even when finalization fails. Publish
+        // the same metadata so a later snapshot cannot restore the old name.
+        // This does not establish crash durability; the caller still gets Err.
         *registry = next;
-        Ok(renamed)
+        Ok(SessionRenameCommit {
+            metadata: renamed,
+            finalization_error,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_rename(&self, fault: SessionRenameFault) {
+        *self.rename_fault.lock().unwrap() = Some(fault);
+    }
+
+    fn write_renamed_registry(
+        &self,
+        next: &SessionRegistrySnapshot,
+    ) -> std::result::Result<(), JsonWriteFailure> {
+        #[cfg(test)]
+        if let Some(fault) = self.rename_fault.lock().unwrap().take() {
+            return match fault {
+                SessionRenameFault::BeforeReplacement => Err(JsonWriteFailure {
+                    error: anyhow!("synthetic rename failure before replacement"),
+                    committed: false,
+                }),
+                SessionRenameFault::AfterReplacement => {
+                    write_json_finalizing(&self.registry_path, next, |_| {
+                        bail!("synthetic rename finalization failure")
+                    })
+                }
+            };
+        }
+        write_json_with_commit_status(&self.registry_path, next)
     }
 
     pub fn update_metadata(&self, mut metadata: SessionMetadata) -> Result<()> {
@@ -5039,6 +5104,77 @@ mod tests {
         assert!(error.to_string().contains("session name"));
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn registry_rename_finalization_failure_keeps_visible_metadata_coherent() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-rename-finalize-{}", Uuid::new_v4()));
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let stale = registry.create_session(Some("Before".to_owned())).unwrap();
+        let storage = registry.session_storage_path(stale.id).unwrap();
+        registry.fail_next_rename(super::SessionRenameFault::AfterReplacement);
+        assert!(registry
+            .rename_session(stale.id, "After")
+            .unwrap_err()
+            .to_string()
+            .contains("finalization"));
+        let disk: super::SessionRegistrySnapshot =
+            serde_json::from_slice(&std::fs::read(&registry.registry_path).unwrap()).unwrap();
+        assert_eq!(
+            disk.sessions
+                .iter()
+                .find(|s| s.id == stale.id)
+                .unwrap()
+                .name,
+            "After"
+        );
+        assert_eq!(
+            registry
+                .summaries()
+                .iter()
+                .find(|s| s.id == stale.id)
+                .unwrap()
+                .name,
+            "After"
+        );
+        registry.update_metadata(stale.clone()).unwrap();
+        drop(active);
+        drop(registry);
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let summary = registry
+            .summaries()
+            .into_iter()
+            .find(|s| s.id == stale.id)
+            .unwrap();
+        assert_eq!(summary.name, "After");
+        assert_eq!(summary.created_at, stale.created_at);
+        assert_eq!(registry.session_storage_path(stale.id).unwrap(), storage);
+        drop(active);
+        drop(registry);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn registry_same_name_rename_retries_persistence_after_finalization_failure() {
+        let data_dir = std::env::temp_dir().join(format!("sniper-rename-retry-{}", Uuid::new_v4()));
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        registry.fail_next_rename(super::SessionRenameFault::AfterReplacement);
+        assert!(registry.rename_session(active.id(), "After").is_err());
+        let updated_at = registry.summaries()[0].updated_at;
+        registry.fail_next_rename(super::SessionRenameFault::BeforeReplacement);
+        assert!(registry
+            .rename_session(active.id(), "After")
+            .unwrap_err()
+            .to_string()
+            .contains("before replacement"));
+        assert_eq!(registry.summaries()[0].name, "After");
+        assert_eq!(registry.summaries()[0].updated_at, updated_at);
+        let metadata = registry.rename_session(active.id(), "After").unwrap();
+        assert_eq!(metadata.updated_at, updated_at);
+        drop(active);
+        drop(registry);
+        std::fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[tokio::test]

@@ -454,6 +454,70 @@ mod tests {
     use super::*;
     use crate::saved_operations::{SavedOperationLedger, SavedOperationReceipt};
 
+    #[tokio::test]
+    async fn rename_finalization_failure_receipt_stays_unknown_and_never_reapplies() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-rename-receipt-{}", Uuid::new_v4()));
+        let config = crate::config::AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 100,
+            max_transaction_entries: 100,
+            body_preview_bytes: 4096,
+            data_dir: data_dir.clone(),
+        };
+        let state = Arc::new(AppState::new(config.clone()).unwrap());
+        let session_id = state.active_session_summary().await.id;
+        let operation_id = Uuid::new_v4();
+        let input =
+            json!({"operation_id": operation_id, "session_id": session_id, "name": "After"});
+        async fn invoke(state: &Arc<AppState>, input: &Value) -> Value {
+            let response = call(
+                State(state.clone()),
+                Ok(Bytes::from(
+                    serde_json::to_vec(&json!({
+                        "operation": "saved.v1.session.rename", "input": input
+                    }))
+                    .unwrap(),
+                )),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice::<Value>(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()["data"]
+                .clone()
+        }
+        state
+            .sessions
+            .fail_next_rename(crate::session::SessionRenameFault::AfterReplacement);
+        let first = invoke(&state, &input).await;
+        assert_eq!(first["receipt"]["outcome"], "unknown");
+        assert_eq!(first["receipt"]["code"], "mutation_failed");
+        assert_eq!(first["replayed"], false);
+        assert_eq!(state.active_session_summary().await.name, "After");
+        // An intervening rename makes any accidental reapplication observable.
+        state
+            .rename_session(session_id, "Later".to_owned())
+            .await
+            .unwrap();
+        let repeated = invoke(&state, &input).await;
+        assert_eq!(repeated["receipt"], first["receipt"]);
+        assert_eq!(repeated["replayed"], true);
+        assert_eq!(state.active_session_summary().await.name, "Later");
+        drop(state);
+        let restarted = Arc::new(AppState::new(config).unwrap());
+        let repeated = invoke(&restarted, &input).await;
+        assert_eq!(repeated["receipt"], first["receipt"]);
+        assert_eq!(repeated["replayed"], true);
+        assert_eq!(restarted.active_session_summary().await.name, "Later");
+        drop(restarted);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
     async fn deletion_error_receipt(
         kind: SavedOperationKind,
         error: std::io::Error,
