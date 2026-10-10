@@ -37,6 +37,42 @@ Use `sniper-cli` for all Sniper operations. Prefer `--output compact` JSON envel
 
 ## Saved data and session management
 
+### Prefer the saved-data v1 contract
+
+For supported saved-data work, prefer `saved.v1.*` operations discovered through `sniper-cli manifest`; inspect `schema input <operation>` and `schema output <operation>` before constructing requests. The supported operations are `saved.v1.http.list`, `saved.v1.http.select`, `saved.v1.http.delete`, `saved.v1.http.clear`, `saved.v1.session.list`, `saved.v1.session.rename`, and `saved.v1.operation.get`. Detail/body reads, annotations, session creation/deletion, and active-session switching retain their existing interfaces; do not assume they have v1 receipts.
+
+Pin the intended session explicitly with `session_id` for the first HTTP list and selection, and for every mutation. Use UUIDs returned by session discovery, not display names. HTTP list defaults to 50 summaries (maximum 200), has no filters, and returns `data.items`, `data.session_id`, `data.has_more`, and `data.continuation`. Use select for metadata filters.
+
+- For HTTP pagination, preserve the returned continuation object verbatim and pass it as the sole `continuation` member of the next input. Do not add top-level `session_id` or `limit`, rebuild the cursor, or change its `store_generation`. Stop when `has_more:false` and `continuation:null`.
+- For session pagination, pass the returned continuation object verbatim as the entire next input: it contains `after_id` and `limit`, without a `continuation` wrapper. Session listing uses ascending UUID order.
+- HTTP pages use descending sequence order and stay pinned despite active-session changes. Newer inserts are excluded from later pages, but deletion can remove rows: this is not a snapshot. Store reload/restart returns `STALE_CONTINUATION`. Discard that cursor and deliberately start a fresh listing with the same explicit session UUID; treat it as a new traversal, not a continuation of the old results.
+
+For saved mutations, generate and retain a fresh UUID `operation_id` before sending a newly approved operation. Dry-run validates locally without contacting Sniper, resolving selections, or reserving the ID. After reviewing the plan and obtaining required approval, use `--yes` with the same request. Filtered deletion needs a reviewed `saved.v1.http.select` result and its `selection_token`; a list continuation never authorizes deletion. Read envelope errors at `error.code` (uppercase), but mutation receipt codes at `data.receipt.code` (snake_case). A changed deletion selection returns `ok:true` with `data.receipt.outcome:"not_applied"` and `data.receipt.code:"selection_mismatch"`; selection reads can instead return `error.code:"SELECTION_MISMATCH"`. In either case, reread/select the intended session and review the changed data before deciding on any new operation. On `error.code:"OPERATION_CONFLICT"`, look up the original receipt and compare the original request; do not change input under the same ID or automatically substitute a new one.
+
+Check `data.receipt.outcome` before reporting mutation success: `applied` is durably acknowledged, `not_applied` means this attempt made no change, and `unknown` means the evidence is insufficient. An `ok:true` envelope or `replayed:true` alone does not establish success. Identical reuse of an operation ID returns its receipt without executing again, including for unknown outcomes.
+
+After a lost response, timeout, redirect refusal, or invalid write response, first call `saved.v1.operation.get` with the original `operation_id`. Lookup returns `found`, `outcome`, and nullable `receipt`; `found:false` with `outcome:"unknown"` is not proof that nothing happened. Inspect saved data and decide deliberately. Never automatically retry a mutation or silently mint a replacement ID, even after `not_applied`; all v1 errors report `retryable:false`. Receipts persist across runtime restarts for the lifetime of the data directory and have no automatic expiry or recovery mutation.
+
+These are synthetic examples, not commands to run against real data. Replace the session UUID with one deliberately selected from discovery and generate an operation UUID for each newly approved mutation. The repeated operation UUID below represents the same rename and its later receipt lookup.
+
+```bash
+sniper-cli --output compact manifest
+sniper-cli --output compact schema input saved.v1.http.list
+sniper-cli --output compact schema output saved.v1.http.list
+sniper-cli --output compact schema input saved.v1.session.rename
+sniper-cli --output compact schema output saved.v1.session.rename
+sniper-cli --output compact call saved.v1.session.list --input '{"limit":20}'
+sniper-cli --output compact call saved.v1.http.list --input '{"session_id":"00000000-0000-0000-0000-000000000000","limit":20}'
+sniper-cli --output compact call saved.v1.http.select --input '{"session_id":"00000000-0000-0000-0000-000000000000","host":"example.com"}'
+sniper-cli call saved.v1.session.rename --input '{"session_id":"00000000-0000-0000-0000-000000000000","operation_id":"22222222-2222-2222-2222-222222222222","name":"Archive"}' --dry-run
+sniper-cli call saved.v1.session.rename --input '{"session_id":"00000000-0000-0000-0000-000000000000","operation_id":"22222222-2222-2222-2222-222222222222","name":"Archive"}' --yes
+sniper-cli --output compact call saved.v1.operation.get --input '{"operation_id":"22222222-2222-2222-2222-222222222222"}'
+```
+
+### Existing saved-data commands
+
+Use the existing commands below when the requested operation is outside v1 or the installed version does not support v1. Their raw success output and retry semantics do not acquire the v1 receipt contract.
+
 These operations manage local saved data. Start with `session list` and use the returned UUIDs. `session create --name "Review"` creates and immediately activates a new session. `session rename --id <session-uuid> --name "Archive"` changes only its display name; the UUID and storage location stay the same. Names must be nonblank after trimming, at most 256 UTF-8 bytes, and contain no control characters.
 
 `session switch --id <session-uuid>` respects busy-session checks. `session delete --id <session-uuid>` refuses to delete the active session; deliberately switch to another session first. Do not bypass live-capture, proxy-work, or pending-persistence safeguards. Deleting a session removes its saved data.
@@ -48,7 +84,7 @@ For saved HTTP records:
 - Supported filters are `query`, `method`, `host`, `status`, `status_range`, `since`, and `mime`; all provided criteria must match. Query searches metadata, not bodies; host and MIME filters are case-insensitive substring matches. `status` and `status_range` cannot be combined. IDs and filters cannot be mixed. Empty, unknown, or invalid filters are rejected. Select/delete require an explicit session UUID
 - Entire history: `capture http clear --session-id <session-uuid>` is a separate operation and accepts no IDs or filters. It deletes all saved HTTP records in that session; WebSockets, findings, and workspace tabs remain. Omitting the session UUID pins the active session at execution, so prefer an explicit UUID
 - Every write uses the common `--dry-run` / `--yes` confirmation contract. Dry-run validates and describes the request without contacting Sniper; it does not resolve matches. `capture http select` is the read-only command that resolves the exact selection
-- Deletions are durable before success is reported. They cannot be undone through the CLI; obtain the user's approval for the selected data. On a failure or lost response, inspect current data before retrying
+- Deletions are durable before success is reported. They cannot be undone through the CLI; obtain the user's approval for the selected data. On a failure or lost response, inspect current data before deciding on another action; never automatically retry a mutation
 
 ```bash
 sniper-cli --output compact session list

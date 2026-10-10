@@ -199,6 +199,86 @@ fn auto_install_all_to(claude_root: PathBuf, codex_root: PathBuf) -> Vec<Install
 mod tests {
     use super::{agent_home_dir, auto_install_all_to, install_skill_folder};
 
+    fn saved_data_guidance(template: &str) -> &str {
+        template
+            .split_once("## Saved data and session management\n")
+            .expect("packaged skill must explain saved-data contracts")
+            .1
+            .split("\n## ")
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn packaged_saved_data_guidance_stays_in_sync_and_covers_the_contract() {
+        let section = saved_data_guidance(super::CODEX_SKILL_TEMPLATE);
+        assert_eq!(section, saved_data_guidance(super::CLAUDE_SKILL_TEMPLATE));
+        for operation in crate::saved_contract::OPERATIONS {
+            assert!(
+                section.contains(operation),
+                "missing saved operation: {operation}"
+            );
+        }
+        let receipt_code =
+            serde_json::to_string(&crate::saved_operations::SavedOperationCode::SelectionMismatch)
+                .unwrap();
+        assert!(section.contains(&format!("data.receipt.code:{receipt_code}")));
+        for term in [
+            "receipt.outcome",
+            "operation_id",
+            "continuation",
+            "STALE_CONTINUATION",
+            "found:false",
+            "unknown",
+            "--dry-run",
+            "--yes",
+        ] {
+            assert!(section.contains(term), "missing contract guidance: {term}");
+        }
+    }
+
+    #[test]
+    fn packaged_saved_data_examples_validate_without_running_operations() {
+        let mut examples = 0;
+        let mut mutation_examples = 0;
+        for line in saved_data_guidance(super::CODEX_SKILL_TEMPLATE).lines() {
+            if !line.starts_with("sniper-cli ") {
+                continue;
+            }
+            let Some((_, call)) = line.split_once("call saved.v1.") else {
+                continue;
+            };
+            let operation = format!("saved.v1.{}", call.split_whitespace().next().unwrap());
+            let Some((_, quoted)) = line.split_once("--input '") else {
+                panic!("saved-data examples need literal JSON input: {line}");
+            };
+            let raw = quoted.split_once('\'').expect("closed shell JSON quote").0;
+            let input: serde_json::Value = serde_json::from_str(raw).expect("valid example JSON");
+            crate::saved_contract::validate_input(&operation, &input)
+                .unwrap_or_else(|error| panic!("invalid {operation} example: {error}"));
+            if crate::saved_contract::is_write(&operation) {
+                assert!(
+                    line.contains("--dry-run") || line.contains("--yes"),
+                    "mutation examples require a confirmation gate"
+                );
+                if line.contains("--yes") {
+                    assert!(
+                        saved_data_guidance(super::CODEX_SKILL_TEMPLATE)
+                            .contains(&line.replace("--yes", "--dry-run")),
+                        "an apply example must have an identical preview example"
+                    );
+                }
+                mutation_examples += 1;
+            }
+            examples += 1;
+        }
+        assert!(
+            examples >= 3,
+            "keep read, mutation preview, and receipt examples"
+        );
+        assert!(mutation_examples > 0);
+    }
+
     #[test]
     fn install_skill_folder_rejects_path_like_names() {
         let root = std::env::temp_dir().join(format!("sniper-skill-test-{}", uuid::Uuid::new_v4()));

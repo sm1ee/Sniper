@@ -2273,12 +2273,12 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         ),
         op(
             "examples",
-            "examples <operation>",
-            "Print example inputs for one Sniper CLI operation.",
+            "examples [operation]",
+            "Print example inputs for one Sniper CLI operation, or all operations when omitted.",
             Read,
             false,
-            &["operation"],
-            vec![json!({"operation":"capture.http.list"})],
+            &[],
+            vec![json!({}), json!({"operation":"capture.http.list"})],
         ),
         op(
             "skills.install",
@@ -2958,6 +2958,7 @@ fn op(
         input_schema: input_schema(operation, required_fields),
         output_schema: replay_saved_tab_output_schema(operation)
             .or_else(|| scanner_output_schema(operation))
+            .or_else(|| session_list_output_schema(operation))
             .or_else(|| session_read_output_schema(operation))
             .unwrap_or_else(|| {
                 json!({
@@ -3004,6 +3005,17 @@ fn replay_saved_tab_output_schema(operation: &str) -> Option<Value> {
         schema["properties"]["pinned"] = json!({"type":"boolean"});
     }
     Some(schema)
+}
+
+fn session_list_output_schema(operation: &str) -> Option<Value> {
+    if operation != "session.list" {
+        return None;
+    }
+    Some(json!({
+        "type":"array",
+        "description":"Session summaries returned in the envelope data field.",
+        "items":sniper::saved_contract::session_summary_schema()
+    }))
 }
 
 fn session_read_output_schema(operation: &str) -> Option<Value> {
@@ -3096,6 +3108,12 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
                 "description": format!("CLI argument `{field}`"),
             }),
         );
+    }
+    if operation == "examples" {
+        properties.insert("operation".into(), json!({
+            "type":["string","null"],
+            "description":"Operation to show examples for; omitted or null lists all operations."
+        }));
     }
     if session_read_output_schema(operation).is_some() {
         properties.insert("session_id".into(), json!({
