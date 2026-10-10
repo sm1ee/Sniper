@@ -1176,6 +1176,8 @@ struct WebSocketGetArgs {
 #[derive(Subcommand, Debug)]
 enum SkillsCommand {
     Install(SkillsInstallArgs),
+    /// Inspect installed skill hashes on this CLI host without changing files.
+    Status(SkillsInstallArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -2246,6 +2248,7 @@ impl SkillsCommand {
     fn operation_name(&self) -> &'static str {
         match self {
             SkillsCommand::Install(_) => "skills.install",
+            SkillsCommand::Status(_) => "skills.status",
         }
     }
 }
@@ -2279,6 +2282,15 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &[],
             vec![json!({}), json!({"operation":"capture.http.list"})],
+        ),
+        op(
+            "skills.status",
+            "skills status",
+            "Inspect local CLI-host skill hashes without installing or updating files.",
+            Read,
+            false,
+            &[],
+            vec![json!({"all":true}), json!({"codex":true,"codex_dir":"/tmp/example-skills"})],
         ),
         op(
             "skills.install",
@@ -2960,6 +2972,7 @@ fn op(
             .or_else(|| scanner_output_schema(operation))
             .or_else(|| session_list_output_schema(operation))
             .or_else(|| session_read_output_schema(operation))
+            .or_else(|| skills_status_output_schema(operation))
             .unwrap_or_else(|| {
                 json!({
                     "type": "object",
@@ -3075,7 +3088,50 @@ fn session_read_output_schema(operation: &str) -> Option<Value> {
     })
 }
 
+fn skills_status_output_schema(operation: &str) -> Option<Value> {
+    if operation != "skills.status" {
+        return None;
+    }
+    Some(json!({
+        "type":"object","additionalProperties":false,
+        "required":["scope","bundled_version","entries"],
+        "properties":{
+            "scope":{"type":"string","const":"cli_host"},
+            "bundled_version":{"type":"string","description":"Version of this CLI's bundled templates; installed version is unknown."},
+            "entries":{"type":"array","minItems":1,"maxItems":2,"items":{
+                "type":"object","additionalProperties":false,
+                "required":["agent","path","bundled_sha256","installed_sha256","status"],
+                "properties":{
+                    "agent":{"type":"string","enum":["codex","claude"]},
+                    "path":{"type":"string","description":"Absolute local SKILL.md path; no source text is returned."},
+                    "bundled_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                    "installed_sha256":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},
+                    "status":{"type":"string","enum":["missing","current","modified_or_outdated","unreadable","unsupported"],"description":"Current means exact byte hash equality. A different hash cannot distinguish user edits from an older template."},
+                    "error_code":{"type":"string","enum":["symlink","reparse_point","non_regular_file","file_too_large","platform_unsupported","permission_denied","io_error","changed_during_read"]}
+                }
+            }}
+        }
+    }))
+}
+
 fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
+    if operation == "skills.status" {
+        return json!({
+            "type":"object", "additionalProperties":false, "required":[],
+            "properties":{
+                "codex":{"type":["boolean","null"],"default":false},
+                "claude":{"type":["boolean","null"],"default":false},
+                "all":{"type":["boolean","null"],"default":false},
+                "codex_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Codex skills root on the CLI host; omission or null uses the install default."},
+                "claude_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Claude skills root on the CLI host; omission or null uses the install default."}
+            },
+            "anyOf":[
+                {"required":["codex"],"properties":{"codex":{"const":true}}},
+                {"required":["claude"],"properties":{"claude":{"const":true}}},
+                {"required":["all"],"properties":{"all":{"const":true}}}
+            ]
+        });
+    }
     if matches!(
         operation,
         "replay.close" | "replay.duplicate" | "replay.set_pinned"
@@ -3196,7 +3252,9 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "manifest" | "session.list" => &[],
         "schema" => &["kind", "operation"],
         "examples" => &["operation"],
-        "skills.install" => &["codex", "claude", "all", "codex_dir", "claude_dir"],
+        "skills.install" | "skills.status" => {
+            &["codex", "claude", "all", "codex_dir", "claude_dir"]
+        }
         "session.create" => &["name"],
         "session.rename" => &["id", "name"],
         "findings.list" | "event_log.list" => &["session_id", "limit"],
@@ -3450,7 +3508,7 @@ fn command_input_preview(command: &Command) -> Value {
         Command::Fuzzer { command } => fuzzer_input_preview(command),
         Command::Sequence { command } => sequence_input_preview(command),
         Command::Skills { command } => match command {
-            SkillsCommand::Install(args) => json!({
+            SkillsCommand::Install(args) | SkillsCommand::Status(args) => json!({
                 "codex": args.codex,
                 "claude": args.claude,
                 "all": args.all,
@@ -4303,6 +4361,15 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         },
         "examples" => Command::Examples {
             operation: call_optional(operation, input, "operation")?,
+        },
+        "skills.status" => Command::Skills {
+            command: SkillsCommand::Status(SkillsInstallArgs {
+                codex: call_bool(operation, input, "codex")?,
+                claude: call_bool(operation, input, "claude")?,
+                all: call_bool(operation, input, "all")?,
+                codex_dir: call_optional_path(operation, input, "codex_dir")?,
+                claude_dir: call_optional_path(operation, input, "claude_dir")?,
+            }),
         },
         "skills.install" => Command::Skills {
             command: SkillsCommand::Install(SkillsInstallArgs {
@@ -5543,6 +5610,9 @@ async fn run(cli: Cli) -> Result<()> {
                 .collect::<Vec<_>>(),
         ),
         Command::Skills {
+            command: SkillsCommand::Status(args),
+        } => print_json(&skills_status(args)?),
+        Command::Skills {
             command: SkillsCommand::Install(args),
         } => {
             let result = install_skills(args)?;
@@ -5591,6 +5661,20 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Skills {
+        command: SkillsCommand::Status(args),
+    } = command
+    {
+        if !(args.codex || args.claude || args.all) {
+            bail!("must select at least one destination with --codex, --claude, or --all");
+        }
+        for path in [&args.codex_dir, &args.claude_dir].into_iter().flatten() {
+            if path.as_os_str().is_empty() || path.to_string_lossy().contains('\0') {
+                bail!("skill directory must be nonempty and contain no NUL characters");
+            }
+        }
+    }
+
     if let Command::Replay {
         command:
             ReplayCommand::Close(args)
@@ -10783,6 +10867,38 @@ fn default_port_for_scheme(scheme: &str) -> u16 {
     } else {
         443
     }
+}
+
+fn skills_status(args: SkillsInstallArgs) -> Result<Value> {
+    let mut entries = Vec::new();
+    for (selected, agent, root, default_root, bundled) in [
+        (
+            args.all || args.codex,
+            "codex",
+            args.codex_dir,
+            skills::default_codex_skills_dir as fn() -> Option<PathBuf>,
+            skills::CODEX_SKILL_TEMPLATE,
+        ),
+        (
+            args.all || args.claude,
+            "claude",
+            args.claude_dir,
+            skills::default_claude_skills_dir as fn() -> Option<PathBuf>,
+            skills::CLAUDE_SKILL_TEMPLATE,
+        ),
+    ] {
+        if selected {
+            let root = root.or_else(default_root).with_context(|| {
+                format!(
+                    "could not determine {agent} skills directory; set HOME or pass --{agent}-dir"
+                )
+            })?;
+            entries.push(sniper::skill_status::read_skill_status(
+                agent, &root, bundled,
+            )?);
+        }
+    }
+    Ok(json!({"scope":"cli_host","bundled_version":env!("CARGO_PKG_VERSION"),"entries":entries}))
 }
 
 fn install_skills(args: SkillsInstallArgs) -> Result<skills::SkillsInstallResult> {

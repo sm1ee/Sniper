@@ -451,6 +451,35 @@ sniper-cli skills install --all --dry-run
 sniper-cli skills install --all --yes
 ```
 
+Check installed skill files without modifying them:
+
+```bash
+sniper-cli skills status --all
+sniper-cli skills status --codex --codex-dir /tmp/example-skills
+sniper-cli call skills.status --input '{"claude":true}'
+sniper-cli schema output skills.status
+```
+
+Select at least one of `--codex`, `--claude`, or `--all`. Optional
+`--codex-dir` and `--claude-dir` specify skills roots, just as for install.
+Status reads only this CLI host's `sniper-operator/SKILL.md` files, even when
+`--api` points elsewhere. It performs no API discovery, installation, directory
+creation, or update; `--yes` is not needed. Discovery, schemas, examples, and
+`--dry-run` are offline and do not inspect installed files.
+
+The result has `scope: "cli_host"`, the CLI's `bundled_version`, and `entries`
+with agent, absolute path, bundled and installed SHA-256 hashes, and status.
+`current` means exact byte equality; `modified_or_outdated` only means the hashes
+differ. The installed version is unknown, so differences cannot distinguish
+user edits from an older template. `missing`, `unreadable`, and `unsupported`
+report files that could not be compared; the installed hash is null and error
+rows include `error_code`. Reads are byte-bounded and reject final-component symlinks/reparse points,
+non-regular files, and oversized files. Ancestor directory links retain normal
+filesystem semantics; this is not a general filesystem I/O timeout. Source text is never returned.
+Completed inspections exit zero, including missing/error rows: automation must
+check each row's `status` and `error_code`. Invalid arguments or failure to
+resolve a selected path exit nonzero. Existing install behavior is unchanged.
+
 AI agents can drive the full workflow through CLI — capture, scope, replay, fuzz — no UI scraping needed.
 
 - [Using Sniper from Claude Code](docs/integrations/claude-code.md)
