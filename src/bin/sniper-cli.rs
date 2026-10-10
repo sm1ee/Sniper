@@ -3317,6 +3317,24 @@ fn skills_managed_output_schema(operation: &str) -> Option<Value> {
     }
 }
 
+// A root override must never silently fall back to another agent's default root.
+fn skill_root_selection_schema(allow_all: bool) -> Value {
+    let constraints: Vec<Value> = [("codex", "codex_dir"), ("claude", "claude_dir")]
+        .into_iter()
+        .map(|(agent, root)| {
+            let mut choices = vec![
+                json!({"properties":{root:{"type":"null"}}}),
+                json!({"required":[agent],"properties":{agent:{"const":true}}}),
+            ];
+            if allow_all {
+                choices.push(json!({"required":["all"],"properties":{"all":{"const":true}}}));
+            }
+            json!({"anyOf":choices})
+        })
+        .collect();
+    json!(constraints)
+}
+
 fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
     if matches!(
         operation,
@@ -3328,9 +3346,10 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
                 "codex":{"type":["boolean","null"],"default":false},
                 "claude":{"type":["boolean","null"],"default":false},
                 "all":{"type":["boolean","null"],"default":false},
-                "codex_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Codex skills root on the CLI host; omission or null uses the install default."},
-                "claude_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Claude skills root on the CLI host; omission or null uses the install default."}
+                "codex_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Codex skills root on the CLI host; requires the matching agent selector (or all where supported); omission or null uses the selected agent’s install default."},
+                "claude_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Claude skills root on the CLI host; requires the matching agent selector (or all where supported); omission or null uses the selected agent’s install default."}
             },
+            "allOf":skill_root_selection_schema(true),
             "anyOf":[
                 {"required":["codex"],"properties":{"codex":{"const":true}}},
                 {"required":["claude"],"properties":{"claude":{"const":true}}},
@@ -3344,9 +3363,10 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
             "properties":{
                 "codex":{"type":["boolean","null"],"default":false},
                 "claude":{"type":["boolean","null"],"default":false},
-                "codex_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Codex skills root on the CLI host; omission or null uses the install default."},
-                "claude_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Claude skills root on the CLI host; omission or null uses the install default."}
+                "codex_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Codex skills root on the CLI host; requires the matching agent selector (or all where supported); omission or null uses the selected agent’s install default."},
+                "claude_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Claude skills root on the CLI host; requires the matching agent selector (or all where supported); omission or null uses the selected agent’s install default."}
             },
+            "allOf":skill_root_selection_schema(false),
             "oneOf":[
                 {"required":["codex"],"properties":{"codex":{"const":true},"claude":{"enum":[false,null]}}},
                 {"required":["claude"],"properties":{"claude":{"const":true},"codex":{"enum":[false,null]}}}
@@ -6002,6 +6022,29 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
+fn validate_skill_root_selection(
+    codex_selected: bool,
+    claude_selected: bool,
+    codex_dir: &Option<PathBuf>,
+    claude_dir: &Option<PathBuf>,
+    allow_all: bool,
+) -> Result<()> {
+    for (agent, selected, root) in [
+        ("codex", codex_selected, codex_dir),
+        ("claude", claude_selected, claude_dir),
+    ] {
+        if root.is_some() && !selected {
+            let all = if allow_all {
+                " or --all (all=true)"
+            } else {
+                ""
+            };
+            bail!("invalid directory override: --{agent}-dir ({agent}_dir) requires --{agent} ({agent}=true){all}; select that agent or omit its directory override");
+        }
+    }
+    Ok(())
+}
+
 fn validate_command_preflight(command: &Command) -> Result<()> {
     if let Command::Schema { operation, .. }
     | Command::Examples {
@@ -6028,6 +6071,13 @@ fn validate_command_preflight(command: &Command) -> Result<()> {
         if !(args.codex || args.claude || args.all) {
             bail!("must select at least one destination with --codex, --claude, or --all");
         }
+        validate_skill_root_selection(
+            args.codex || args.all,
+            args.claude || args.all,
+            &args.codex_dir,
+            &args.claude_dir,
+            true,
+        )?;
         for path in [&args.codex_dir, &args.claude_dir].into_iter().flatten() {
             validate_skill_cli_path(path)?;
         }
@@ -6042,6 +6092,13 @@ fn validate_command_preflight(command: &Command) -> Result<()> {
         if args.codex == args.claude {
             bail!("must select exactly one destination with --codex or --claude");
         }
+        validate_skill_root_selection(
+            args.codex,
+            args.claude,
+            &args.codex_dir,
+            &args.claude_dir,
+            false,
+        )?;
         for path in [&args.codex_dir, &args.claude_dir].into_iter().flatten() {
             validate_skill_cli_path(path)?;
         }

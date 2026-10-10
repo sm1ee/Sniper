@@ -90,6 +90,13 @@ impl Drop for Fixture {
 
 // Validate the JSON Schema vocabulary used by these three strict contracts.
 fn matches_schema(value: &Value, schema: &Value) -> bool {
+    if schema["allOf"].as_array().is_some_and(|constraints| {
+        !constraints
+            .iter()
+            .all(|constraint| matches_schema(value, constraint))
+    }) {
+        return false;
+    }
     if let Some(ty) = schema.get("type") {
         let matches_type = |ty: &Value| match ty.as_str().unwrap() {
             "object" => value.is_object(),

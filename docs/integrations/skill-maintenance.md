@@ -24,7 +24,13 @@ source text is returned. Hashes identify bytes, not authorship or trust.
 ## Experimental enrollment
 
 Select exactly one agent. Directory overrides identify skills roots, matching
-`skills status` and the existing installer.
+`skills status` and the existing installer. A non-null directory override requires
+its matching agent selector: `--codex-dir` requires `--codex`, and
+`--claude-dir` requires `--claude`. `--all` selects both agents for `install`,
+`status`, and `update-preview`; enrollment and staging still require exactly
+one agent. Previously ignored overrides for unselected agents now fail with
+`INVALID_INPUT`, including in dry run. JSON `null` overrides remain equivalent
+to omission. Overrides never redirect another agent's selected root.
 
 ```bash
 sniper-cli skills enroll --codex --dry-run
@@ -55,8 +61,14 @@ separate, unused skills root, verify that destination, and preview a copy there:
 sniper-cli skills install --codex --codex-dir ./new-skill-review --dry-run
 ```
 
-After reviewing that destination, run the same command with `--yes` to create
-the separate copy. Use `--claude` and `--claude-dir` for that host's template.
+After reviewing that destination, replace `--dry-run` with `--yes` to create
+the separate copy:
+
+```bash
+sniper-cli skills install --codex --codex-dir ./new-skill-review --yes
+```
+
+Use `--claude` and `--claude-dir` for that host's template.
 The legacy installer can overwrite files at its selected destination; this is
 why the review root must be separate and unused. Dry run does not reserve or
 inspect that path. Use the returned installation path rather than guessing it.
