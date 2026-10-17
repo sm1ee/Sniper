@@ -22040,19 +22040,13 @@ function validateRawHttpBodyFraming(headers, bodyLength, acceptedBodyLengths = [
 
 function splitRawHttpMessage(text) {
   const raw = String(text ?? "");
-  const crlfBoundary = raw.indexOf("\r\n\r\n");
-  if (crlfBoundary !== -1) {
+  // The editor can use LF headers around a CRLF body (for example imported
+  // multipart data). Only the first blank line separates headers from body.
+  const boundary = /\r?\n\r?\n/.exec(raw);
+  if (boundary) {
     return {
-      head: raw.slice(0, crlfBoundary).replace(/\r\n/g, "\n"),
-      body: raw.slice(crlfBoundary + 4),
-    };
-  }
-
-  const lfBoundary = raw.indexOf("\n\n");
-  if (lfBoundary !== -1) {
-    return {
-      head: raw.slice(0, lfBoundary).replace(/\r\n/g, "\n"),
-      body: raw.slice(lfBoundary + 2),
+      head: raw.slice(0, boundary.index).replace(/\r\n/g, "\n"),
+      body: raw.slice(boundary.index + boundary[0].length),
     };
   }
 
