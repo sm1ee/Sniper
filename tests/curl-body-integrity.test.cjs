@@ -17,7 +17,7 @@ const c = loadFunctions([
   "parseCurlCommand", "splitShellWords", "decodeAnsiCStringEscape",
   "encodeCurlDataUrlencode", "curlDataBinaryBodyIsPlainText", "appendCurlGetQuery",
 ], {
-  URL,
+  URL, TextEncoder, TextDecoder,
   showToast: (...args) => toasts.push(args),
   HTTP_METHOD_TOKEN_RE: /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/,
 });
@@ -160,7 +160,7 @@ for (const option of ["-d", "--data", "--data-raw", "--data-binary", "--data-url
 test("empty body arguments retain explicit methods and multi-part concatenation", () => {
   assert.equal(c.parseCurlCommand("curl https://example.com -X PUT --data-raw ''").method, "PUT");
   assert.equal(c.parseCurlCommand("curl https://example.com --get --data-raw ''").method, "GET");
-  assert.equal(c.parseCurlCommand("curl https://example.com --data-raw '' --data-raw value --data-raw ''").body, "&value&");
+  assert.equal(c.parseCurlCommand("curl https://example.com --data-raw '' --data-raw value --data-raw ''").body, "value&");
 });
 
 test("empty and missing non-body option values remain rejected", () => {

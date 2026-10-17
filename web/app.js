@@ -27691,6 +27691,7 @@ function copyReplayUrl(tab = getActiveReplayTab()) {
 
 function parseCurlCommand(text) {
   const shellWords = splitShellWords(text);
+  if (shellWords.error) return shellWords;
   if (!shellWords.length || shellWords[0].toLowerCase() !== "curl") return null;
   const tokens = shellWords.slice(1);
   let method = "GET";
@@ -27762,7 +27763,7 @@ function parseCurlCommand(text) {
     if (flag === "--data-urlencode") {
       const encoded = encodeCurlDataUrlencode(value);
       if (encoded.error) return encoded.error;
-      bodyParts.push(encoded.value);
+      bodyParts.push({ value: encoded.value, separator: "&" });
       bodyProvided = true;
       if (options.defaultContentType !== false) needsDefaultFormContentType = true;
       if (!getMode && !methodExplicit && (!method || method === "GET")) method = "POST";
@@ -27774,7 +27775,7 @@ function parseCurlCommand(text) {
     if (flag !== "--data-raw" && value.startsWith("@")) {
       return "cURL @file body imports are not supported. Use --data-raw for literal @ bodies.";
     }
-    bodyParts.push(value);
+    bodyParts.push({ value, separator: flag === "--json" ? "" : "&" });
     bodyProvided = true;
     if (options.defaultContentType !== false) needsDefaultFormContentType = true;
     if (!getMode && !methodExplicit && (!method || method === "GET")) method = "POST";
@@ -27790,7 +27791,7 @@ function parseCurlCommand(text) {
     if (raw.startsWith("@")) {
       return "cURL --json @file imports are not supported.";
     }
-    const error = addBodyPart("--data-raw", raw, { defaultContentType: false });
+    const error = addBodyPart("--json", raw, { defaultContentType: false });
     if (error) return error;
     ensureHeader("Content-Type", "application/json");
     ensureHeader("Accept", "application/json");
@@ -27951,7 +27952,9 @@ function parseCurlCommand(text) {
   if (!HTTP_METHOD_TOKEN_RE.test(method)) {
     return { error: "Invalid HTTP method in cURL command." };
   }
-  let body = bodyParts.join("&");
+  // curl chooses the separator from the option being appended, and only
+  // inserts it when previous fragments have produced a nonempty body.
+  let body = bodyParts.reduce((value, part) => value + (value ? part.separator : "") + part.value, "");
   if (getMode && body) {
     url = appendCurlGetQuery(url, body);
     body = "";
@@ -28034,10 +28037,45 @@ function rawPathFromUrlString(url) {
 }
 
 function splitShellWords(input) {
+  if (/[\uD800-\uDFFF]/u.test(input)) {
+    return { error: "cURL commands must contain valid Unicode text." };
+  }
+  if (input.includes("\0")) {
+    return { error: "cURL commands containing NUL bytes cannot be imported." };
+  }
   const tokens = [];
   let token = "";
   let quote = null;
   let active = false;
+  let byteChunks = [];
+  const appendTextBytes = () => {
+    if (!token) return;
+    byteChunks.push(new TextEncoder().encode(token));
+    token = "";
+  };
+  const finishToken = () => {
+    if (byteChunks.length) {
+      appendTextBytes();
+      const bytes = new Uint8Array(byteChunks.reduce((length, chunk) => length + chunk.length, 0));
+      let offset = 0;
+      for (const chunk of byteChunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      try {
+        // Byte escapes can span adjacent quoted segments. Decode the whole
+        // word once, retaining a literal BOM and refusing lossy replacement.
+        token = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+      } catch (_) {
+        return "cURL ANSI-C byte escapes must form valid UTF-8 text. Binary byte imports are not supported.";
+      }
+    }
+    tokens.push(token);
+    token = "";
+    byteChunks = [];
+    active = false;
+    return "";
+  };
 
   for (let i = 0; i < input.length; i++) {
     const ch = input[i];
@@ -28072,7 +28110,13 @@ function splitShellWords(input) {
         quote = null;
       } else if (ch === "\\" && i + 1 < input.length) {
         const decoded = decodeAnsiCStringEscape(input, i + 1);
-        token += decoded.value;
+        if (decoded.error) return decoded;
+        if (decoded.byte !== undefined) {
+          appendTextBytes();
+          byteChunks.push(Uint8Array.of(decoded.byte));
+        } else {
+          token += decoded.value;
+        }
         i = decoded.index;
         active = true;
       } else {
@@ -28083,9 +28127,10 @@ function splitShellWords(input) {
     }
 
     if (/\s/.test(ch)) {
-      if (active || token.length) tokens.push(token);
-      token = "";
-      active = false;
+      if (active || token.length) {
+        const error = finishToken();
+        if (error) return { error };
+      }
       continue;
     }
     if (ch === "$" && input[i + 1] === "'") {
@@ -28115,7 +28160,10 @@ function splitShellWords(input) {
   }
 
   if (quote) return [];
-  if (active || token.length) tokens.push(token);
+  if (active || token.length) {
+    const error = finishToken();
+    if (error) return { error };
+  }
   return tokens;
 }
 
@@ -28139,30 +28187,27 @@ function decodeAnsiCStringEscape(input, index) {
   if (Object.prototype.hasOwnProperty.call(simple, ch)) {
     return { value: simple[ch], index };
   }
+  const byteEscape = (value, end) => value === 0
+    ? { error: "cURL ANSI-C NUL escapes cannot be imported as text." }
+    : { byte: value, index: end };
   if (ch === "x") {
     const hex = input.slice(index + 1).match(/^[0-9a-fA-F]{1,2}/)?.[0] || "";
+    if (hex) return byteEscape(parseInt(hex, 16), index + hex.length);
+  }
+  if (ch === "u" || ch === "U") {
+    const width = ch === "u" ? 4 : 8;
+    const hex = input.slice(index + 1, index + 1 + width).match(/^[0-9a-fA-F]+/)?.[0] || "";
     if (hex) {
-      return { value: String.fromCharCode(parseInt(hex, 16)), index: index + hex.length };
-    }
-  }
-  if (ch === "u") {
-    const hex = input.slice(index + 1, index + 5);
-    if (/^[0-9a-fA-F]{4}$/.test(hex)) {
-      return { value: String.fromCharCode(parseInt(hex, 16)), index: index + 4 };
-    }
-  }
-  if (ch === "U") {
-    const hex = input.slice(index + 1, index + 9);
-    if (/^[0-9a-fA-F]{8}$/.test(hex)) {
       const codePoint = parseInt(hex, 16);
-      if (codePoint <= 0x10ffff) {
-        return { value: String.fromCodePoint(codePoint), index: index + 8 };
+      if (codePoint === 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+        return { error: "cURL ANSI-C Unicode escapes must contain valid non-NUL Unicode characters." };
       }
+      return { value: String.fromCodePoint(codePoint), index: index + hex.length };
     }
   }
   if (/^[0-7]$/.test(ch)) {
     const octal = input.slice(index, index + 3).match(/^[0-7]{1,3}/)?.[0] || ch;
-    return { value: String.fromCharCode(parseInt(octal, 8)), index: index + octal.length - 1 };
+    return byteEscape(parseInt(octal, 8) & 0xff, index + octal.length - 1);
   }
   return { value: `\\${ch}`, index };
 }
