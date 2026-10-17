@@ -27353,8 +27353,10 @@ function shellQuote(value) {
 }
 
 function parseRequestForExport(rawText, scheme, host, port) {
-  const lines = String(rawText || "").replace(/\r\n/g, "\n").split("\n");
-  const [startLine = "GET / HTTP/1.1", ...rest] = lines;
+  // Normalize header lines only: multipart and signed text bodies need their
+  // original CRLF bytes, even when the editor uses LF for the request head.
+  const lines = String(rawText || "").split("\n");
+  const [startLine = "GET / HTTP/1.1", ...rest] = lines.map((line) => line.replace(/\r$/, ""));
   const match = startLine.match(/^([A-Za-z0-9!#$%&'*+.^_`|~-]+)\s+(\S+)(?:\s+(HTTP\/[0-9.]+))?$/);
   if (!match) return null;
   const method = match[1];
@@ -27369,7 +27371,7 @@ function parseRequestForExport(rawText, scheme, host, port) {
     }
   }
   const headerLines = bodyIdx === -1 ? rest : rest.slice(0, bodyIdx);
-  const body = bodyIdx === -1 ? "" : (rest[bodyIdx] === "" ? rest.slice(bodyIdx + 1) : rest.slice(bodyIdx)).join("\n");
+  const body = bodyIdx === -1 ? "" : lines.slice(bodyIdx + (rest[bodyIdx] === "" ? 2 : 1)).join("\n");
   const bodyProvided = bodyIdx !== -1;
   const headers = headerLines.map((h) => parseHeaderLineForExport(h)).filter(Boolean);
   const authority = exportHeaderValue(headers, ":authority");
@@ -27694,8 +27696,7 @@ function copyReplayUrl(tab = getActiveReplayTab()) {
 }
 
 function parseCurlCommand(text) {
-  const normalized = text.replace(/\\\s*\n/g, " ").trim();
-  const shellWords = splitShellWords(normalized);
+  const shellWords = splitShellWords(text);
   if (!shellWords.length || shellWords[0].toLowerCase() !== "curl") return null;
   const tokens = shellWords.slice(1);
   let method = "GET";
@@ -28055,8 +28056,17 @@ function splitShellWords(input) {
       if (ch === '"') {
         quote = null;
       } else if (ch === "\\" && i + 1 < input.length) {
-        token += input[++i];
-        active = true;
+        // In double quotes, backslashes only escape shell-special characters.
+        // Paths such as C:\temp\file keep their literal backslashes.
+        const next = input[i + 1];
+        if (next === "\n") {
+          i += 1;
+        } else if (next === "$" || next === "`" || next === '"' || next === "\\") {
+          token += next;
+          i += 1;
+        } else {
+          token += ch;
+        }
       } else {
         token += ch;
         active = true;
@@ -28096,6 +28106,12 @@ function splitShellWords(input) {
       continue;
     }
     if (ch === "\\" && i + 1 < input.length) {
+      // A continuation removes the newline, without splitting the current word.
+      // Single-quoted and ANSI-C quoted text are handled above and stay literal.
+      if (input[i + 1] === "\n") {
+        i += 1;
+        continue;
+      }
       token += input[++i];
       active = true;
       continue;
@@ -28154,7 +28170,7 @@ function decodeAnsiCStringEscape(input, index) {
     const octal = input.slice(index, index + 3).match(/^[0-7]{1,3}/)?.[0] || ch;
     return { value: String.fromCharCode(parseInt(octal, 8)), index: index + octal.length - 1 };
   }
-  return { value: ch, index };
+  return { value: `\\${ch}`, index };
 }
 
 function openCurlImportModal() {
