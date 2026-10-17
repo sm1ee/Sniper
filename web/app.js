@@ -27737,12 +27737,12 @@ function parseCurlCommand(text) {
     "--unix-socket",
   ]);
   const curlShortOptionsWithValue = new Set(["-E", "-m", "-o", "-x", "-y", "-Y"]);
-  const requireOptionValue = (flag) => {
+  const requireOptionValue = (flag, allowEmpty = false) => {
     if (t + 1 >= tokens.length) {
       return { error: `cURL ${flag} requires a value.` };
     }
     const value = tokens[t + 1];
-    if (value === undefined || value === "") {
+    if (value === undefined || (!allowEmpty && value === "")) {
       return { error: `cURL ${flag} requires a value.` };
     }
     t += 1;
@@ -27847,13 +27847,13 @@ function parseCurlCommand(text) {
       if (error) return { error };
     }
     else if (tok === "-d" || tok === "--data" || tok === "--data-raw" || tok === "--data-binary" || tok === "--data-urlencode") {
-      const value = requireOptionValue(tok);
+      const value = requireOptionValue(tok, true);
       if (value.error) return value;
       const error = addBodyPart(tok, value.value);
       if (error) return { error };
     }
     else if (tok === "--json") {
-      const value = requireOptionValue(tok);
+      const value = requireOptionValue(tok, true);
       if (value.error) return value;
       const error = addJsonBody(value.value);
       if (error) return { error };

@@ -39,15 +39,12 @@ for (const [name, body] of bodyCases) {
       const parsed = c.parseRequestForExport(raw, "https", "example.com", "");
       assert.equal(parsed.body, body);
       assert.equal(parsed.bodyProvided, true);
-      if (body) {
-        const imported = c.parseCurlCommand(c.requestToCurl(parsed));
-        assert.ok(imported && !imported.error);
-        assert.equal(imported.body, body);
-        assert.equal(imported.method, "POST");
-        assert.equal(imported.path, "/upload");
-      } else {
-        assert.ok(c.requestToCurl(parsed).includes("--data-raw ''"));
-      }
+      const imported = c.parseCurlCommand(c.requestToCurl(parsed));
+      assert.ok(imported && !imported.error);
+      assert.equal(imported.body, body);
+      assert.equal(imported.method, "POST");
+      assert.equal(imported.path, "/upload");
+      if (!body) assert.ok(c.requestToCurl(parsed).includes("--data-raw ''"));
       assert.ok(c.requestToPython(parsed).includes(`data = ${JSON.stringify(body)}`));
       assert.ok(c.requestToFetch(parsed).includes(`body: ${JSON.stringify(body)}`));
       assert.ok(c.requestToPowerShell(parsed).includes(`-Body '${body.replace(/'/g, "''")}'`));
@@ -136,6 +133,41 @@ test("quoted empty words and malformed quotes keep their existing contracts", ()
   for (const input of ["'missing", '"missing', "$'missing"]) {
     assert.deepEqual(Array.from(c.splitShellWords(input)), []);
     assert.equal(c.parseCurlCommand(`curl https://example.com --data-raw ${input}`), null);
+  }
+});
+
+for (const option of ["-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "--json"]) {
+  test(`${option} distinguishes an empty body argument from a missing argument`, () => {
+    for (const quoted of ["''", '\"\"', "$''"]) {
+      for (const command of [
+        `curl https://example.com/upload ${option} ${quoted}`,
+        `curl ${option} ${quoted} https://example.com/upload`,
+      ]) {
+        const parsed = c.parseCurlCommand(command);
+        assert.ok(parsed && !parsed.error);
+        assert.equal(parsed.method, "POST");
+        assert.equal(parsed.body, "");
+        assert.ok(parsed.requestText.endsWith("\n\n"));
+        const headers = Array.from(parsed.headers, header => [header.name, header.value]);
+        assert.ok(headers.some(([name, value]) => name === "Content-Type"
+          && value === (option === "--json" ? "application/json" : "application/x-www-form-urlencoded")));
+      }
+    }
+    assert.match(c.parseCurlCommand(`curl https://example.com ${option}`).error, /requires a value/);
+  });
+}
+
+test("empty body arguments retain explicit methods and multi-part concatenation", () => {
+  assert.equal(c.parseCurlCommand("curl https://example.com -X PUT --data-raw ''").method, "PUT");
+  assert.equal(c.parseCurlCommand("curl https://example.com --get --data-raw ''").method, "GET");
+  assert.equal(c.parseCurlCommand("curl https://example.com --data-raw '' --data-raw value --data-raw ''").body, "&value&");
+});
+
+test("empty and missing non-body option values remain rejected", () => {
+  for (const option of ["-X", "--request", "-H", "--header", "--url"]) {
+    for (const value of ["", " ''"]) {
+      assert.match(c.parseCurlCommand(`curl https://example.com ${option}${value}`).error, /requires a value/);
+    }
   }
 });
 
