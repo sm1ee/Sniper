@@ -31,6 +31,7 @@ pub mod service_map;
 pub mod service_map_auth;
 pub mod service_map_body;
 pub mod service_map_clients;
+pub mod service_map_flow;
 pub mod service_map_html;
 mod service_map_html_parser;
 pub mod service_map_libraries;
@@ -42,15 +43,13 @@ pub mod service_map_peer_matches;
 pub mod service_map_servers;
 pub mod service_map_technology;
 pub mod session;
-pub mod skill_activation;
-pub mod skill_auto_update;
-pub mod skill_managed;
 pub mod skill_status;
 pub mod skills;
 pub mod special_host;
 pub mod state;
 pub mod store;
 pub mod target;
+pub mod templates;
 pub mod ui_settings;
 pub mod upstream_peer_settings;
 pub mod upstream_proxy;
@@ -217,7 +216,7 @@ async fn shutdown_headless_runtime(
     state: &AppState,
     oast_task: tokio::task::JoinHandle<()>,
 ) -> Result<()> {
-    state.stop_recon_jobs().await?;
+    state.stop_background_jobs().await?;
     oast_task.abort();
     if let Err(error) = oast_task.await {
         if !error.is_cancelled() {

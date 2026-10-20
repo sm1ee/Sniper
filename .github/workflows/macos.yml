@@ -1,0 +1,32 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-arm64:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-15-arm64-desktop
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      # The other workflows build on Linux and Windows; this is the only place
+      # CI compiles the macOS window code.
+      - name: Compile the desktop app
+        run: cargo check --locked --release --bin sniper-desktop

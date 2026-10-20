@@ -3,10 +3,10 @@ const assert = require("node:assert/strict");
 const recon = require("../web/recon.js");
 
 function values(overrides = {}) {
-  return { target: "https://example.com/start#section", crawler: true, maxRequests: "100", maxDepth: "3", maxEndpoints: "5000", maxPages: "5", ...overrides };
+  return { target: "https://example.com/start#section", crawler: true, maxRequests: "0", maxDepth: "0", maxEndpoints: "0", maxPages: "0", ...overrides };
 }
 
-test("the default request is scoped, bounded and does not submit a browser scan", () => {
+test("the default request is scoped, unbudgeted and does not submit a browser scan", () => {
   const body = recon.buildJobRequest(values(), "session-a");
   assert.equal(body.session_id, "session-a");
   assert.equal(body.target_url, "https://example.com/start");
@@ -15,7 +15,18 @@ test("the default request is scoped, bounded and does not submit a browser scan"
   assert.equal(body.history_acknowledged, false);
   assert.equal(body.scan_acknowledged, false);
   assert.equal(body.scan_visibility, "private");
-  assert.equal(body.max_requests, 100);
+  for (const field of ["max_requests", "max_depth", "max_endpoints", "max_pages"]) assert.equal(body[field], 0);
+});
+
+test("discovery budget inputs default to zero without maximum attributes", () => {
+  const markup = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/index.html"), "utf8");
+  for (const id of ["reconMaxRequests", "reconMaxDepth", "reconMaxEndpoints", "reconMaxPages"]) {
+    const input = markup.match(new RegExp(`<input[^>]*id="${id}"[^>]*>`))?.[0];
+    assert.ok(input, id);
+    assert.match(input, /min="0"/);
+    assert.match(input, /value="0"/);
+    assert.doesNotMatch(input, /\bmax=/);
+  }
 });
 
 test("targets require an explicit HTTP(S) URL and reject embedded credentials", () => {
@@ -52,13 +63,14 @@ test("new urlscan scans require independent acknowledgment and valid visibility"
   }
 });
 
-test("client limits match backend bounds and never silently clamp", () => {
-  for (const [field, min, max] of [["maxRequests", 1, 1000], ["maxDepth", 0, 10], ["maxEndpoints", 1, 5000], ["maxPages", 1, 20]]) {
-    for (const value of [min - 1, max + 1, 1.5, "", "NaN", "Infinity"]) {
+test("optional budgets accept zero and values above former ceilings without silently clamping", () => {
+  for (const field of ["maxRequests", "maxDepth", "maxEndpoints", "maxPages"]) {
+    for (const value of [-1, 1.5, "NaN", "Infinity", Number.MAX_SAFE_INTEGER + 1]) {
       assert.throws(() => recon.buildJobRequest(values({ [field]: value }), "session-a"));
     }
-    assert.doesNotThrow(() => recon.buildJobRequest(values({ [field]: min }), "session-a"));
-    assert.doesNotThrow(() => recon.buildJobRequest(values({ [field]: max }), "session-a"));
+    for (const value of [0, "", undefined, 50_000, Number.MAX_SAFE_INTEGER]) {
+      assert.doesNotThrow(() => recon.buildJobRequest(values({ [field]: value }), "session-a"));
+    }
   }
 });
 
@@ -148,7 +160,7 @@ function controllerFixture() {
   node("Form").reset = () => {
     for (const item of nodes.values()) { item.value = ""; item.checked = false; }
     node("Crawler").checked = true;
-    for (const [key, value] of Object.entries({ MaxRequests: "100", MaxDepth: "3", MaxEndpoints: "5000", MaxPages: "5", ScanVisibility: "private" })) node(key).value = value;
+    for (const [key, value] of Object.entries({ MaxRequests: "0", MaxDepth: "0", MaxEndpoints: "0", MaxPages: "0", ScanVisibility: "private" })) node(key).value = value;
   };
   const endpoint = (path, method = "GET") => ({ url: `https://example.com/${path}`, method, raw_urls: [`/${path}`, "<img src=x onerror=alert(1)>"], evidence: [{ source: "crawler", kind: "candidate", location: "https://example.com/app.js" }] });
   const snapshots = {
@@ -160,7 +172,12 @@ function controllerFixture() {
   const fetcher = async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     const method = options.method || "GET";
-    fixture.calls.push({ path, body, method });
+    fixture.calls.push({ path, body, method, signal: options.signal });
+    if (fixture.respondNext) {
+      const respond = fixture.respondNext;
+      fixture.respondNext = null;
+      return respond();
+    }
     if (fixture.failNext === method) { fixture.failNext = null; return { ok: false, status: 503, text: async () => '{"error":"Temporary failure"}' }; }
     const sid = body?.session_id || new URL(path, "http://localhost").searchParams.get("session_id");
     const snapshot = snapshots[sid];
@@ -182,13 +199,258 @@ function controllerFixture() {
     return response(snapshot);
   };
   fixture.controller = recon.createController({ root, getSessionId: () => fixture.session, getSessionGeneration: () => fixture.generation, fetch: fetcher,
-    setTimeout(callback) { fixture.timers.set(++fixture.nextTimer, callback); return fixture.nextTimer; }, clearTimeout(id) { fixture.timers.delete(id); } });
+    setTimeout(callback, delay) { fixture.timers.set(++fixture.nextTimer, { callback, delay }); return fixture.nextTimer; }, clearTimeout(id) { fixture.timers.delete(id); } });
   fixture.switchTo = session => { fixture.controller.reset(); fixture.session = session; fixture.generation += 1; fixture.controller.syncSession(); };
   fixture.controller.setVisible(true);
   return fixture;
 }
 async function settled() { for (let i = 0; i < 10; i += 1) await new Promise(resolve => setImmediate(resolve)); }
 function descendants(node) { return node.childNodes.flatMap(child => [child, ...descendants(child)]); }
+
+function deferredResponse(fixture, phase) {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  fixture.respondNext = () => phase === "fetch" ? promise : {
+    ok: phase === "json", status: 503, json: () => promise, text: () => promise,
+  };
+  return {
+    succeed(payload) { resolve(phase === "fetch" ? { ok: true, json: async () => payload } : phase === "json" ? payload : '{"error":"Old HTTP error"}'); },
+    fail() { reject(new Error("Old transport error")); },
+  };
+}
+
+function controllerState(f) {
+  return {
+    jobs: f.node("Jobs").textContent, endpoints: f.node("Endpoints").textContent,
+    detail: f.node("Detail").textContent, inventory: f.node("InventoryMeta").textContent,
+    load: f.node("LoadStatus").textContent, action: f.node("ActionStatus").textContent,
+    target: f.node("Target").value, search: f.node("Search").value, kind: f.node("Kind").value,
+    startDisabled: f.node("Start").disabled, refreshDisabled: f.node("Refresh").disabled,
+    timers: [...f.timers.keys()], calls: f.calls.length,
+  };
+}
+
+function runRefreshTimer(f) {
+  assert.equal(f.timers.size, 1);
+  const [id, { callback }] = [...f.timers.entries()][0];
+  f.timers.delete(id);
+  callback();
+}
+
+for (const phase of ["fetch", "json", "error body"]) {
+  for (const outcome of ["success", "failure"]) {
+    for (const completion of ["hidden", "new read pending", "new read complete"]) {
+      test(`hide releases ${phase} read; late ${outcome} while ${completion} cannot repaint or release newer work`, async () => {
+        const f = controllerFixture(); await settled();
+        const old = deferredResponse(f, phase);
+        const pending = f.controller.refresh(); await settled();
+        const oldRequest = f.calls.at(-1);
+        assert.equal(f.node("Refresh").disabled, true);
+        f.controller.setVisible(false);
+        assert.equal(oldRequest.signal.aborted, true);
+        assert.equal(f.node("Refresh").disabled, false);
+        assert.equal(f.timers.size, 0);
+        await f.controller.refresh();
+        assert.equal(f.calls.length, 2, "hidden refresh cannot acquire a read");
+
+        let fresh;
+        const latest = { session_id: "a", jobs: [], endpoints: [f.snapshots.a.endpoints[110]] };
+        if (completion !== "hidden") {
+          fresh = deferredResponse(f, "fetch");
+          f.controller.setVisible(true); await settled();
+          assert.equal(f.calls.length, 3, "reopening starts a fresh read before the old read settles");
+          assert.equal(f.node("Refresh").disabled, true);
+          f.controller.setVisible(true);
+          assert.equal(f.calls.length, 3, "same-visible render does not duplicate the read");
+          if (completion === "new read complete") { fresh.succeed(latest); await settled(); }
+        }
+        const before = controllerState(f);
+        if (outcome === "success") old.succeed({ session_id: "a", jobs: [], endpoints: [] });
+        else old.fail();
+        await pending; await settled();
+        assert.deepEqual(controllerState(f), before, "old success, catch and finally must all be inert");
+
+        if (completion === "hidden") {
+          f.snapshots.a = latest;
+          f.controller.setVisible(true); await settled();
+        } else if (completion === "new read pending") {
+          assert.equal(f.calls.at(-1).signal.aborted, false);
+          fresh.succeed(latest); await settled();
+        }
+        assert.match(f.node("Endpoints").textContent, /api\/110/);
+        assert.equal(f.node("Endpoints").childNodes.length, 1);
+        assert.equal(f.node("LoadStatus").textContent, "");
+        assert.equal(f.node("Refresh").disabled, false);
+        assert.equal(f.timers.size, 1);
+        assert.equal([...f.timers.values()][0].delay, 10000);
+        f.snapshots.a = latest;
+        runRefreshTimer(f); await settled();
+        assert.equal(f.calls.length, 4, "reopened polling continues");
+        assert.equal(f.timers.size, 1);
+        f.controller.dispose();
+      });
+    }
+  }
+}
+
+test("same-visible renders preserve read ownership and the existing poll timer", async () => {
+  const f = controllerFixture(); await settled();
+  const originalTimer = [...f.timers.keys()];
+  f.controller.setVisible(true); f.controller.setVisible(true);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual([...f.timers.keys()], originalTimer);
+  const pending = deferredResponse(f, "json");
+  const refreshing = f.controller.refresh(); await settled();
+  const signal = f.calls.at(-1).signal;
+  f.controller.setVisible(true); f.controller.setVisible(true);
+  assert.equal(signal.aborted, false);
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.node("Refresh").disabled, true);
+  assert.equal(f.timers.size, 0);
+  pending.succeed(f.snapshots.a); await refreshing;
+  assert.equal(f.node("Refresh").disabled, false);
+  assert.equal(f.timers.size, 1);
+  f.controller.dispose();
+});
+
+for (const type of ["start", "stop"]) {
+  for (const phase of ["fetch", "json", "error body"]) {
+    for (const outcome of ["success", "failure"]) {
+      for (const completion of ["hidden", "reopened"]) {
+        test(`hide preserves ${type} ownership through ${phase} ${outcome} completed ${completion}`, async () => {
+          const f = controllerFixture(); await settled();
+          f.node("Target").value = "https://example.com/";
+          const job = { id: "owned-job", status: "running", target_url: "https://example.com/", sources: [] };
+          if (type === "stop") { f.snapshots.a.jobs = [job]; await f.controller.refresh(); }
+          const pending = deferredResponse(f, phase);
+          const stop = descendants(f.node("Jobs")).find(item => item.dataset.stopJob);
+          if (type === "start") f.node("Form").emit("submit");
+          else f.node("Jobs").emit("click", { target: stop });
+          await settled();
+          const mutationRequest = f.calls.at(-1);
+          const callsBefore = f.calls.length;
+          f.controller.setVisible(false); f.controller.setVisible(false);
+          assert.equal(mutationRequest.signal.aborted, false, "hiding must not abort the POST");
+          assert.equal(f.node("Start").disabled, true);
+          assert.equal(f.node("Refresh").disabled, true);
+          assert.equal(f.timers.size, 0);
+          if (completion === "reopened") { f.controller.setVisible(true); await settled(); }
+          f.node("Form").emit("submit");
+          if (stop) f.node("Jobs").emit("click", { target: stop });
+          await f.controller.refresh();
+          assert.equal(f.calls.length, callsBefore, "pending mutation owns the controls across hide/reopen");
+          assert.equal(mutationRequest.signal.aborted, false);
+          assert.equal(f.node("Target").value, "https://example.com/");
+
+          const succeeded = outcome === "success" && phase !== "error body";
+          if (succeeded) f.snapshots.a.jobs = [{ ...job, status: type === "start" ? "running" : "cancelled" }];
+          if (outcome === "success") pending.succeed(type === "start" ? job : { stopped: true, session_id: "a" });
+          else pending.fail();
+          await settled();
+          assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
+          assert.match(f.node("ActionStatus").textContent, succeeded ? type === "start" ? /Discovery started/ : /Stop requested/ : /Refresh jobs to confirm/);
+          if (completion === "hidden") {
+            assert.equal(f.calls.length, callsBefore, "hidden mutation completion must not launch a GET");
+            assert.equal(f.timers.size, 0);
+            assert.equal(f.node("Refresh").disabled, false);
+            f.controller.setVisible(true); await settled();
+          }
+          assert.equal(f.calls.length, callsBefore + 1, "exactly one read reconciles the visible inventory");
+          assert.equal(f.node("Refresh").disabled, false);
+          assert.equal(f.node("Start").disabled, type === "start" ? succeeded : !succeeded);
+          assert.equal(f.timers.size, 1);
+          assert.equal([...f.timers.values()][0].delay, (type === "start" ? succeeded : !succeeded) ? 2000 : 10000);
+          runRefreshTimer(f); await settled();
+          assert.equal(f.calls.length, callsBefore + 2);
+          assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
+          f.controller.dispose();
+        });
+      }
+    }
+  }
+}
+
+test("reopening recovers immediately even if the previous inventory fetch never settles", async () => {
+  const f = controllerFixture(); await settled();
+  deferredResponse(f, "fetch");
+  void f.controller.refresh(); await settled();
+  f.controller.setVisible(false);
+  f.controller.setVisible(true); await settled();
+  assert.equal(f.calls.length, 3);
+  assert.equal(f.node("Refresh").disabled, false);
+  assert.equal(f.timers.size, 1);
+  f.controller.dispose();
+});
+
+test("repeated hide/reopen cancels each read without cancelling its successor", async () => {
+  const f = controllerFixture(); await settled();
+  const first = deferredResponse(f, "json");
+  const firstRead = f.controller.refresh(); await settled();
+  const firstSignal = f.calls.at(-1).signal;
+  f.controller.setVisible(false);
+  const second = deferredResponse(f, "error body");
+  f.controller.setVisible(true); await settled();
+  const secondSignal = f.calls.at(-1).signal;
+  f.controller.setVisible(false);
+  const third = deferredResponse(f, "fetch");
+  f.controller.setVisible(true); await settled();
+  const thirdSignal = f.calls.at(-1).signal;
+  const before = controllerState(f);
+  second.succeed(); await settled();
+  first.succeed({ session_id: "a", jobs: [], endpoints: [] }); await firstRead;
+  assert.deepEqual(controllerState(f), before);
+  assert.equal(firstSignal.aborted, true);
+  assert.equal(secondSignal.aborted, true);
+  assert.equal(thirdSignal.aborted, false);
+  third.succeed(f.snapshots.a); await settled();
+  assert.equal(f.node("Refresh").disabled, false);
+  assert.equal(f.timers.size, 1);
+  f.controller.dispose();
+});
+
+for (const operation of ["read", "start", "stop"]) {
+  for (const transition of ["session ABA", "dispose"]) {
+    for (const outcome of ["success", "failure"]) {
+      test(`hidden ${operation} late JSON ${outcome} is inert after ${transition}`, async () => {
+        const f = controllerFixture(); await settled();
+        f.node("Target").value = "https://example.com/";
+        if (operation === "stop") {
+          f.snapshots.a.jobs = [{ id: "old-job", status: "running", target_url: "https://example.com/", sources: [] }];
+          await f.controller.refresh();
+        }
+        const pending = deferredResponse(f, "json");
+        if (operation === "read") void f.controller.refresh();
+        else if (operation === "start") f.node("Form").emit("submit");
+        else f.node("Jobs").emit("click", { target: descendants(f.node("Jobs")).find(item => item.dataset.stopJob) });
+        await settled();
+        const request = f.calls.at(-1);
+        f.controller.setVisible(false);
+        assert.equal(request.signal.aborted, operation === "read");
+        if (transition === "dispose") f.controller.dispose();
+        else {
+          f.session = "b"; f.generation += 1; f.controller.syncSession();
+          f.session = "a"; f.generation += 1; f.controller.syncSession();
+          f.snapshots.a.jobs = [];
+          f.snapshots.a.endpoints = [f.snapshots.a.endpoints[110]];
+          f.controller.setVisible(true); await settled();
+        }
+        assert.equal(request.signal.aborted, true, "session reset and disposal still cancel mutations");
+        const before = controllerState(f);
+        if (outcome === "failure") pending.fail();
+        else pending.succeed(operation === "read" ? { session_id: "a", jobs: [], endpoints: [] }
+          : operation === "start" ? { id: "old-start", status: "running" } : { stopped: true, session_id: "a" });
+        await settled();
+        assert.deepEqual(controllerState(f), before);
+        if (transition === "session ABA") {
+          assert.match(f.node("Endpoints").textContent, /api\/110/);
+          assert.equal(f.node("Start").disabled, false);
+          assert.equal(f.timers.size, 1);
+        } else assert.equal(f.timers.size, 0);
+        f.controller.dispose();
+      });
+    }
+  }
+}
 
 test("controller renders bounded pages, search and text-only provenance", async () => {
   const f = controllerFixture(); await settled();
@@ -200,6 +462,20 @@ test("controller renders bounded pages, search and text-only provenance", async 
   f.node("Endpoints").emit("click", { target: button });
   assert.match(f.node("Detail").textContent, /<img src=x/);
   assert.equal(descendants(f.node("Detail")).some(item => item.tagName === "IMG"), false);
+  f.controller.dispose();
+});
+
+test("controller keeps and searches endpoints beyond the old 5,000 display cap", async () => {
+  const f = controllerFixture(); await settled();
+  f.snapshots.a.endpoints = Array.from({ length: 5_101 }, (_, i) => ({
+    url: `https://example.com/large/${i}`, method: "GET", raw_urls: [], evidence: [],
+  }));
+  await f.controller.refresh();
+  assert.match(f.node("InventoryMeta").textContent, /^5,101 endpoints in this session$/);
+  f.node("Search").value = "/large/5100"; f.node("Search").emit("input");
+  assert.equal(f.node("Endpoints").childNodes.length, 1);
+  assert.match(f.node("Endpoints").textContent, /large\/5100/);
+  assert.doesNotMatch(f.node("InventoryMeta").textContent, /cap|partial/);
   f.controller.dispose();
 });
 
@@ -220,22 +496,22 @@ test("successful start and stop use pinned sessions and retain inventory", async
   f.controller.dispose();
 });
 
-test("completed sources retain partial extraction warnings and accurate counts", async () => {
+test("completed sources retain optional budget warnings and accurate counts", async () => {
   const f = controllerFixture(); await settled();
   f.snapshots.a.endpoints = f.snapshots.a.endpoints.slice(0, 1);
   f.snapshots.a.jobs = [{ id: "bounded-job", status: "completed", target_url: "https://example.com/tags", sources: [{
     source: "crawler", status: "completed", requests: 3, discovered: 1, truncated: true,
-    warnings: ["A static document extraction limit was reached; more evidence may exist.", "Collection was bounded; more evidence may exist."],
+    warnings: ["Crawler request budget reached.", "Collection is partial; more evidence may exist."],
   }] }];
   await f.controller.refresh();
   assert.match(f.node("Jobs").textContent, /completed.*3 requests.*1 discovered.*LIMIT REACHED \/ PARTIAL/);
-  assert.match(f.node("Jobs").textContent, /static document extraction limit/);
+  assert.match(f.node("Jobs").textContent, /request budget reached/);
   assert.match(f.node("InventoryMeta").textContent, /^1 endpoints in this session$/);
   assert.equal(descendants(f.node("Jobs")).some(item => item.dataset.stopJob), false);
   f.snapshots.a.jobs[0].sources[0] = { source: "crawler", status: "completed", requests: 4, discovered: 2, truncated: false, warnings: [] };
   await f.controller.refresh();
   assert.match(f.node("Jobs").textContent, /4 requests.*2 discovered/);
-  assert.doesNotMatch(f.node("Jobs").textContent, /LIMIT REACHED|extraction limit/);
+  assert.doesNotMatch(f.node("Jobs").textContent, /LIMIT REACHED|request budget/);
   f.controller.dispose();
 });
 
@@ -373,6 +649,17 @@ test("Recon navigation still toggles its mounted shell and initialized controlle
   assert.deepEqual(calls, [true, false]);
 });
 
+test("Scan navigation names Scan in the status bar, not the tool left behind", () => {
+  const context = panelsFixture({ templatesController: { setVisible() {} } });
+  context.els.templatesShell = new NodeFixture();
+  context.state.activeTool = "fuzzer";
+  context.renderToolPanels();
+  context.state.activeTool = "templates";
+  context.renderToolPanels();
+  assert.equal(context.els.templatesShell.classList.contains("hidden"), false);
+  assert.equal(context.els.footerMode.textContent, "Scan active");
+});
+
 for (const hasController of [false, true]) {
   test(`session listing adopts the new session ${hasController ? "before syncing Recon" : "without requiring Recon"}`, async () => {
     const state = { activeSession: { id: "old" } };
@@ -417,4 +704,257 @@ for (const hasController of [false, true]) {
     assert.equal(context.workspaceLoaded, false);
     assert.deepEqual(generations, hasController ? [8] : []);
   });
+}
+
+// These inventory checks use only synthetic snapshot GETs. Detail rendering is
+// synchronous, so a pending inventory read must resolve the latest selection.
+function selectEndpoint(f, endpoint) {
+  const key = recon.endpointKey(endpoint);
+  const button = descendants(f.node("Endpoints")).find(item => item.dataset.endpointKey === key);
+  assert.ok(button, `Expected a visible endpoint button for ${key}`);
+  f.node("Endpoints").emit("click", { target: button });
+}
+
+function detailFields(f) {
+  const list = f.node("Detail").childNodes.find(node => node.tagName === "DL");
+  if (!list) return null;
+  const fields = {};
+  for (let i = 0; i < list.childNodes.length; i += 2) fields[list.childNodes[i].textContent] = list.childNodes[i + 1].textContent;
+  return fields;
+}
+
+function assertSelectedEndpoint(f, endpoint, visible = true) {
+  assert.equal(detailFields(f)?.Method, endpoint.method);
+  assert.equal(detailFields(f)?.["Normalized URL"], endpoint.url);
+  const selected = descendants(f.node("Endpoints")).filter(item => item.attributes["aria-pressed"] === "true");
+  assert.deepEqual(selected.map(item => item.dataset.endpointKey), visible ? [recon.endpointKey(endpoint)] : []);
+}
+
+for (const phase of ["fetch", "json"]) {
+  for (const selection of ["different endpoint", "same URL different method", "selection ABA"]) {
+    test(`a current ${phase} inventory read refreshes the latest ${selection} detail`, async () => {
+      const f = controllerFixture(); await settled();
+      const first = { ...f.snapshots.a.endpoints[0], raw_urls: ["/first-original"] };
+      const second = { ...f.snapshots.a.endpoints[1], raw_urls: ["/second-original"] };
+      if (selection === "same URL different method") { second.url = first.url; second.method = "POST"; }
+      f.snapshots.a.endpoints = [first, second];
+      await f.controller.refresh();
+      selectEndpoint(f, first);
+      const pending = deferredResponse(f, phase);
+      const read = f.controller.refresh(); await settled();
+      selectEndpoint(f, second);
+      if (selection === "selection ABA") selectEndpoint(f, first);
+      const selected = selection === "selection ABA" ? first : second;
+      assertSelectedEndpoint(f, selected);
+      const selectedIndex = selection === "selection ABA" ? 0 : 1;
+      const latest = [first, second].map((endpoint, index) => ({ ...endpoint, raw_urls: [`/fresh-${index}`] }));
+      pending.succeed({ session_id: "a", jobs: [], endpoints: latest });
+      await read;
+      assertSelectedEndpoint(f, selected);
+      assert.match(f.node("Detail").textContent, new RegExp(`/fresh-${selectedIndex}`));
+      assert.doesNotMatch(f.node("Detail").textContent, /original/);
+      assert.equal(f.node("Refresh").disabled, false);
+      assert.equal(f.timers.size, 1);
+      assert.equal(f.calls.every(call => call.method === "GET"), true);
+      f.controller.dispose();
+    });
+  }
+}
+
+for (const filter of ["Search", "Kind"]) {
+  test(`a pending snapshot uses the latest ${filter} filter without retargeting endpoint detail`, async () => {
+    const f = controllerFixture(); await settled();
+    const [selected, other] = f.snapshots.a.endpoints;
+    f.snapshots.a.endpoints = [selected, { ...other, evidence: [{ source: "wayback", kind: "history", location: "synthetic history" }] }];
+    await f.controller.refresh();
+    selectEndpoint(f, selected);
+    const pending = deferredResponse(f, "json");
+    const read = f.controller.refresh(); await settled();
+    f.node(filter).value = filter === "Search" ? other.url : "history";
+    f.node(filter).emit(filter === "Search" ? "input" : "change");
+    assertSelectedEndpoint(f, selected, false);
+    pending.succeed({ ...f.snapshots.a, endpoints: f.snapshots.a.endpoints.map(endpoint => ({ ...endpoint, raw_urls: ["/latest-filtered-inventory"] })) });
+    await read;
+    assert.equal(f.node("PageMeta").textContent, "1–1 of 1 matching · Page 1 / 1");
+    assertSelectedEndpoint(f, selected, false);
+    assert.match(f.node("Detail").textContent, /latest-filtered-inventory/);
+    f.node(filter).value = filter === "Search" ? "no-synthetic-match" : "live";
+    f.node(filter).emit(filter === "Search" ? "input" : "change");
+    assert.equal(f.node("PageMeta").textContent, "0 matching endpoints");
+    assert.match(f.node("Endpoints").textContent, /No endpoints match these filters/);
+    assertSelectedEndpoint(f, selected, false);
+    f.node(filter).value = "";
+    f.node(filter).emit(filter === "Search" ? "input" : "change");
+    assertSelectedEndpoint(f, selected);
+    f.controller.dispose();
+  });
+}
+
+test("paging during an inventory read preserves the selected endpoint and clamps a shrinking page", async () => {
+  const f = controllerFixture(); await settled();
+  const selected = f.snapshots.a.endpoints[0];
+  selectEndpoint(f, selected);
+  const pending = deferredResponse(f, "fetch");
+  const read = f.controller.refresh(); await settled();
+  f.node("Next").emit("click");
+  f.node("Next").emit("click");
+  assert.match(f.node("PageMeta").textContent, /101–111/);
+  assertSelectedEndpoint(f, selected, false);
+  pending.succeed({ session_id: "a", jobs: [], endpoints: [{ ...selected, raw_urls: ["/latest-page"] }] });
+  await read;
+  assert.equal(f.node("PageMeta").textContent, "1–1 of 1 matching · Page 1 / 1");
+  assertSelectedEndpoint(f, selected);
+  assert.equal(f.node("Previous").disabled, true);
+  assert.equal(f.node("Next").disabled, true);
+  assert.match(f.node("Detail").textContent, /latest-page/);
+  f.controller.dispose();
+});
+
+test("an empty current snapshot clears old detail and never substitutes a different endpoint", async () => {
+  const f = controllerFixture(); await settled();
+  const [selected, other] = f.snapshots.a.endpoints;
+  selectEndpoint(f, selected);
+  f.snapshots.a.endpoints = [];
+  await f.controller.refresh();
+  assert.equal(detailFields(f), null);
+  assert.match(f.node("Detail").textContent, /Select an endpoint/);
+  assert.doesNotMatch(f.node("Detail").textContent, /api\/0/);
+  assert.equal(f.node("PageMeta").textContent, "0 matching endpoints");
+  f.snapshots.a.endpoints = [other];
+  await f.controller.refresh();
+  assert.equal(detailFields(f), null);
+  f.snapshots.a.endpoints = [other, { ...selected, raw_urls: ["/returned-detail"] }];
+  await f.controller.refresh();
+  assertSelectedEndpoint(f, selected);
+  assert.match(f.node("Detail").textContent, /returned-detail/);
+  selectEndpoint(f, other);
+  assertSelectedEndpoint(f, other);
+  f.controller.dispose();
+});
+
+for (const transition of ["different session", "session ABA", "same session generation"]) {
+  for (const outcome of ["success", "failure"]) {
+    test(`old selected detail stays cleared after ${transition} and late ${outcome}`, async () => {
+      const f = controllerFixture(); await settled();
+      const selected = f.snapshots.a.endpoints[0];
+      selectEndpoint(f, selected);
+      const pending = deferredResponse(f, "json");
+      const read = f.controller.refresh(); await settled();
+      if (transition !== "same session generation") { f.session = "b"; f.generation += 1; f.controller.syncSession(); }
+      if (transition !== "different session") { f.session = "a"; f.generation += 1; f.controller.syncSession(); }
+      await settled();
+      assert.equal(detailFields(f), null, "session ownership change clears the previous selection even for identical endpoint keys");
+      const current = f.snapshots[f.session].endpoints[0];
+      selectEndpoint(f, current);
+      const before = controllerState(f);
+      if (outcome === "success") pending.succeed({ session_id: "a", jobs: [], endpoints: [{ ...selected, raw_urls: ["/stale-detail"] }] });
+      else pending.fail();
+      await read;
+      assert.deepEqual(controllerState(f), before);
+      assertSelectedEndpoint(f, current);
+      assert.doesNotMatch(f.node("Detail").textContent, /stale-detail/);
+      f.controller.dispose();
+    });
+  }
+}
+
+for (const phase of ["fetch", "json", "error body"]) {
+  test(`a current ${phase} read error retains the newest selected detail until successful recovery`, async () => {
+    const f = controllerFixture(); await settled();
+    const [first, second] = f.snapshots.a.endpoints;
+    selectEndpoint(f, first);
+    const pending = deferredResponse(f, phase);
+    const read = f.controller.refresh(); await settled();
+    selectEndpoint(f, second);
+    if (phase === "error body") pending.succeed(); else pending.fail();
+    await read;
+    assertSelectedEndpoint(f, second);
+    assert.match(f.node("LoadStatus").textContent, /Showing the last loaded results; status may be out of date/);
+    assert.equal(f.node("Refresh").disabled, false);
+    f.snapshots.a.endpoints = [{ ...second, raw_urls: ["/recovered-detail"] }];
+    await f.controller.refresh();
+    assertSelectedEndpoint(f, second);
+    assert.match(f.node("Detail").textContent, /recovered-detail/);
+    assert.equal(f.node("LoadStatus").textContent, "");
+    f.controller.dispose();
+  });
+}
+
+test("same-session synchronization and repeated visible renders allow the owned detail refresh to finish", async () => {
+  const f = controllerFixture(); await settled();
+  const selected = f.snapshots.a.endpoints[0];
+  selectEndpoint(f, selected);
+  const pending = deferredResponse(f, "json");
+  const read = f.controller.refresh(); await settled();
+  const count = f.calls.length;
+  f.controller.syncSession();
+  f.controller.setVisible(true);
+  f.controller.setVisible(true);
+  assert.equal(f.calls.length, count);
+  assert.equal(f.calls.at(-1).signal.aborted, false);
+  pending.succeed({ session_id: "a", jobs: [], endpoints: [{ ...selected, raw_urls: ["/owned-detail"] }] });
+  await read;
+  assertSelectedEndpoint(f, selected);
+  assert.match(f.node("Detail").textContent, /owned-detail/);
+  assert.equal(f.node("Refresh").disabled, false);
+  assert.equal(f.timers.size, 1);
+  f.controller.dispose();
+});
+
+for (const phase of ["fetch", "json", "error body"]) {
+  for (const outcome of ["success", "failure"]) {
+    test(`workspace read generation keeps Recon live after later UI read failure and old ${phase} ${outcome}`, async () => {
+      const f = controllerFixture(); await settled();
+      const old = deferredResponse(f, phase);
+      const reachedLegacyReset = new Error("Unrelated reset cleanup boundary");
+      const historyFailure = new Error("Synthetic history read failure");
+      const forbidden = label => () => assert.fail(`Unexpected ${label}`);
+      const app = loadAppFunctions(["applyWorkspaceState", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "loadWorkspaceState"], {
+        state: { activeSession: { id: "a" }, replayTabs: [], activeTool: "recon" },
+        workspaceLoaded: true, sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
+        reconController: f.controller, currentSessionId: () => f.session,
+        // The full production reset is stopped immediately after its UI owner
+        // hooks, before unrelated replay cleanup or state-saving machinery.
+        clearReplaySendInFlight() { throw reachedLegacyReset; },
+        fetch: async path => {
+          assert.ok(["/api/sessions", "/api/workspace-state"].includes(path));
+          return { ok: true, json: async () => path === "/api/sessions"
+            ? [{ id: "a", name: "Synthetic session", active: true }]
+            : { session_id: "a", replay: { tabs: [] }, fuzzer: {} } };
+        },
+        requireOkResponse: async () => {}, renderDashboard() {}, loadSettings: async () => {},
+        workspaceSnapshotMatchesActiveSession: snapshot => snapshot.session_id === f.session,
+        hydrateReplayTab: value => value, normalizeFuzzerTargetOverride: () => null,
+        normalizeFuzzerAttackRecord: () => null, setFuzzerAttackRecord() {},
+        fuzzerWorkspaceAttackRecordId: () => null, snapshotWorkspaceState: () => ({}),
+        cloneWorkspaceSnapshotForBaseline: value => value,
+        scheduleWorkspaceStateSave: forbidden("workspace save"), cleanupWsReplayTab: forbidden("replay cleanup"),
+        cleanupWsReplayTabsBeforeStateReset: forbidden("pre-reset cleanup"),
+        loadTransactions: async () => { throw historyFailure; },
+        loadIntercepts: forbidden("load after rejected history read"),
+        renderToolPanels: forbidden("final render after rejected history read"),
+      });
+      Object.defineProperty(app, "workspaceStateGeneration", { get: () => f.generation, set: value => { f.generation = value; } });
+      const resetUiOwner = app.resetSessionScopedUiState;
+      app.resetSessionScopedUiState = () => assert.throws(resetUiOwner, error => error === reachedLegacyReset);
+      await assert.rejects(app.reloadSessionWorkspace({ cleanupBeforeReset: false }), error => error === historyFailure);
+      await settled();
+      assert.equal(f.generation, 2, "reset and accepted workspace hydration each advance the production UI generation");
+      assert.equal(f.node("Refresh").disabled, false, "an unrelated read failure must not strand Recon's Refresh button");
+      assert.equal(f.calls[1].signal.aborted, true, "hydration retires the older-generation inventory read immediately");
+      assert.equal(f.calls.length, 3, "hydration starts a current-generation read without waiting for the final panel render");
+      assert.equal(f.timers.size, 1);
+      const selected = f.snapshots.a.endpoints[1];
+      selectEndpoint(f, selected);
+      const before = controllerState(f);
+      if (outcome === "success") old.succeed({ session_id: "a", jobs: [], endpoints: [] }); else old.fail();
+      await settled();
+      assert.deepEqual(controllerState(f), before, "old completion cannot release the current read, clear detail, or replace its timer");
+      assertSelectedEndpoint(f, selected);
+      await f.controller.refresh();
+      assert.equal(f.calls.length, 4, "manual refresh remains usable after the unrelated read failure");
+      assert.equal(f.timers.size, 1);
+      f.controller.dispose();
+    });
+  }
 }

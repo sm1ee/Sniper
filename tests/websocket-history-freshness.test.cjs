@@ -34,6 +34,8 @@ function fixture(options = {}) {
     'clearWebsocketLoadedSessionsForPendingQuery', 'clearWebsocketSelectionPreview',
   ], {
     state, URLSearchParams, _websocketLoadGeneration: 0, _websocketSummaryMutationGeneration: 0,
+    _websocketDetailGeneration: 0, _websocketDetailPendingId: null,
+    _websocketDetailPendingSessionId: null, _websocketDetailPendingPromise: null,
     _websocketSummaryMutationById: new Map(), _websocketDetailRefreshNeeded: null,
     WEBSOCKET_PAGE_SIZE: 2, WEBSOCKET_MAX_LOADED_SESSIONS: options.cap || 10,
     WEBSOCKET_SORTED_SUMMARY_REFRESH_MIN_MS: 1500, session: 'fixture-session',

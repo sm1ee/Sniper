@@ -72,6 +72,7 @@ function fixture() {
   }
   function snapshot() {
     return { selected: context.selectedFindingId, title: els.findingsDetailTitle.textContent,
+      highlighted: rows.filter(row => row.classList.contains("selected")).map(row => row.dataset.findingId),
       category: els.findingsDetailCategory.textContent, detail: els.findingsDetailDesc.textContent,
       recordId: els.findingsDetailJump.dataset.recordId, disabled: els.findingsDetailJump.disabled,
       request: els.findingsReqView.innerHTML, response: els.findingsResView.innerHTML,
@@ -143,6 +144,7 @@ for (const transition of ["close", "session reset"]) {
           f.state.activeSession = { id: "session-a" }; f.context.resetFindingsUiState();
         }
         assert.equal(f.context.selectedFindingId, null);
+        assert.deepEqual(f.snapshot().highlighted, [], "dismissal clears the visible row selection too");
         if (reopen) { f.click(); await f.finishLatest(); }
         const before = f.snapshot(); await old.settle(outcome);
         assert.deepEqual(f.snapshot(), before); assert.equal(f.errors.length, 0);
@@ -181,6 +183,7 @@ for (const outcome of ["non-OK", "fetch rejection", "JSON rejection"]) {
     else request.resolve({ ok: false });
     await reading;
     assert.equal(f.context.selectedFindingId, null); assert.equal(f.els.findingsDetailTitle.textContent, "");
+    assert.deepEqual(f.snapshot().highlighted, [], "a failed detail read must not leave a selected row");
     assert.equal(f.els.findingsDetailJump.dataset.recordId, undefined); assert.equal(f.els.findingsDetailJump.disabled, true);
     assert.equal(f.els.findingsDetailContent.classList.contains("hidden"), true);
     assert.equal(f.els.findingsDetailPlaceholder.classList.contains("hidden"), false);
@@ -194,6 +197,24 @@ test("older success cannot repopulate detail after the newest same-ID failure", 
   const before = f.snapshot(); await old.settle("success");
   assert.deepEqual(f.snapshot(), before); assert.equal(f.context.selectedFindingId, null);
   assert.equal(f.errors.length, 1);
+});
+
+test("closing loaded detail clears its row highlight and repeated close remains inert", async () => {
+  const f = fixture();
+  f.click("b"); await f.finishLatest();
+  assert.deepEqual(f.snapshot().highlighted, ["b"]);
+  const requestCount = f.requests.length;
+  f.close();
+  assert.equal(f.context.selectedFindingId, null);
+  assert.deepEqual(f.snapshot().highlighted, []);
+  const closed = f.snapshot();
+  f.close();
+  assert.deepEqual(f.snapshot(), closed);
+  assert.equal(f.requests.length, requestCount);
+
+  f.click("a"); await f.finishLatest();
+  assert.equal(f.context.selectedFindingId, "a");
+  assert.deepEqual(f.snapshot().highlighted, ["a"]);
 });
 
 for (const revisit of [false, true]) {

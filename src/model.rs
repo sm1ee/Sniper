@@ -482,6 +482,12 @@ pub struct TransactionRecord {
 /// The note a row sent from Replay carries.
 pub const REPLAY_NOTE: &str = "Sent from Replay.";
 
+/// The note a row Template Scan sent carries; only matched ones are kept.
+pub const TEMPLATE_SCAN_NOTE: &str = "Sent by Template Scan.";
+
+/// The note a row a Fuzzer attack sent carries.
+pub const FUZZER_NOTE: &str = "Sent from Fuzzer.";
+
 impl TransactionRecord {
     pub fn http(
         started_at: DateTime<Utc>,

@@ -107,10 +107,11 @@ function fixture({ joinAnnotations = false } = {}) {
   );
   const context = loadFunctions(functions, {
     session: "fixture-session", MAX_ANNOTATION_NOTE_BYTES: 32 * 1024, TextEncoder,
+    closeScannerSettings() {},
     pendingHistoryNoteRead: null,
     IMPLEMENTED_TOOLS: new Set(["proxy", "replay"]),
     IMPLEMENTED_PROXY_TABS: new Set(["http-history", "websockets-history"]),
-    displaySettingsReturnFocus: null, displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(), filterSettingsReturnFocus: null,
+    compareLoadGeneration: 0, displaySettingsReturnFocus: null, displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(), filterSettingsReturnFocus: null,
     filterSettingsEditedControls: new Set(),
     hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, selectSettingsTab() {},
     hydrateFilterForm() {},

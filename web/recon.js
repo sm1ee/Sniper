@@ -2,7 +2,6 @@
   "use strict";
 
   const PAGE_SIZE = 50;
-  const MAX_ENDPOINTS = 5000;
   const SOURCE_NAMES = { crawler: "Static crawler", urlscan: "urlscan.io history", wayback: "Wayback history", urlscan_submit: "New urlscan.io scan" };
   const KIND_NAMES = { live: "Live", observed: "Observed", history: "Historical", candidate: "Candidate" };
   const ACTIVE_STATUSES = new Set(["running", "queued", "stopping"]);
@@ -18,10 +17,10 @@
     return target;
   }
 
-  function boundedInteger(value, min, max, label) {
-    const number = Number(value);
-    if (String(value).trim() === "" || !Number.isInteger(number) || number < min || number > max) {
-      throw new Error(`${label} must be a whole number from ${min} to ${max}.`);
+  function optionalBudget(value, label) {
+    const number = Number(value ?? 0);
+    if (!Number.isSafeInteger(number) || number < 0) {
+      throw new Error(`${label} must be a nonnegative safe integer (0 means unlimited).`);
     }
     return number;
   }
@@ -47,10 +46,10 @@
       history_acknowledged: history && !!values.historyAcknowledged,
       scan_acknowledged: submission && !!values.scanAcknowledged,
       scan_visibility: submission ? values.scanVisibility : "private",
-      max_requests: boundedInteger(values.maxRequests, 1, 1000, "Crawler requests"),
-      max_depth: boundedInteger(values.maxDepth, 0, 10, "Crawl depth"),
-      max_endpoints: boundedInteger(values.maxEndpoints, 1, MAX_ENDPOINTS, "Endpoint limit"),
-      max_pages: boundedInteger(values.maxPages, 1, 20, "History pages"),
+      max_requests: optionalBudget(values.maxRequests, "Crawler requests"),
+      max_depth: optionalBudget(values.maxDepth, "Crawl depth"),
+      max_endpoints: optionalBudget(values.maxEndpoints, "Endpoint budget"),
+      max_pages: optionalBudget(values.maxPages, "History pages"),
     };
   }
 
@@ -157,8 +156,8 @@
       els.ScanConsentText.textContent = `Allow sharing ${target ? target.href : "the full target URL"} with urlscan.io for a new ${els.ScanVisibility.value} browser scan, including requests outside Sniper's scope.`;
       els.HistoryConsentText.textContent = `Allow sending ${target ? target.hostname : "the target domain"}${els.Subdomains.checked ? " and its subdomain search scope" : ""} to ${services.join(" and ")} for historical lookups.`;
       els.Scope.textContent = target
-        ? `Scope: ${target.protocol}//${target.hostname}:${target.port || (target.protocol === "https:" ? "443" : "80")}${els.Subdomains.checked ? " and subdomains on the same effective port" : " only"}. Default-port HTTP → HTTPS redirects on the same host are allowed.`
-        : "Enter an explicit HTTP or HTTPS URL. Discovery is limited to its scheme, hostname and effective port.";
+        ? `Stays on ${target.protocol}//${target.hostname}:${target.port || (target.protocol === "https:" ? "443" : "80")}${els.Subdomains.checked ? " and its subdomains" : ""}; a same-host redirect from HTTP to HTTPS is followed.`
+        : "Discovery stays on the URL's scheme, host and port.";
     }
     function renderJobs() {
       const fragment = doc.createDocumentFragment();
@@ -264,7 +263,7 @@
       els.Endpoints.replaceChildren(fragment);
       focusedButton?.focus({ preventScroll: true });
       const running = jobs.some((job) => ACTIVE_STATUSES.has(job.status));
-      els.InventoryMeta.textContent = `${number(endpoints.length)} endpoints in this session${running ? " · Discovery in progress" : ""}${inventoryTruncated ? " · Response truncated; inventory is partial" : endpoints.length >= MAX_ENDPOINTS ? " · 5,000 endpoint display cap reached; inventory may be partial" : ""}`;
+      els.InventoryMeta.textContent = `${number(endpoints.length)} endpoints in this session${running ? " · Discovery in progress" : ""}${inventoryTruncated ? " · Response truncated; inventory is partial" : ""}`;
       els.PageMeta.textContent = filtered.length ? `${number(page * PAGE_SIZE + 1)}–${number(Math.min((page + 1) * PAGE_SIZE, filtered.length))} of ${number(filtered.length)} matching · Page ${page + 1} / ${current.pages}` : "0 matching endpoints";
       els.Previous.disabled = page === 0;
       els.Next.disabled = page + 1 >= current.pages;
@@ -287,7 +286,7 @@
       return response.json();
     }
     async function refresh() {
-      if (!sessionId || disposed || read || mutation) return;
+      if (!visible || !sessionId || disposed || read || mutation) return;
       clearTimer();
       const token = guard.capture();
       if (!canUse(token)) return;
@@ -302,8 +301,8 @@
           throw new Error("Recon returned an invalid session snapshot. Refresh to try again.");
         }
         jobs = [...snapshot.jobs].sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")));
-        endpoints = snapshot.endpoints.slice(0, MAX_ENDPOINTS);
-        inventoryTruncated = !!snapshot.truncated || snapshot.endpoints.length > MAX_ENDPOINTS;
+        endpoints = snapshot.endpoints;
+        inventoryTruncated = !!snapshot.truncated;
         loaded = true;
         loadError = "";
         render();
@@ -351,7 +350,7 @@
           if (!job || job.stopped !== true || job.session_id !== token.sessionId) throw new Error("The stop response could not be verified.");
           jobs = jobs.map((item) => item.id === id && ACTIVE_STATUSES.has(item.status) ? { ...item, status: "stopping" } : item);
         }
-        setAction(type === "start" ? "Discovery started. Progress and any limits appear below." : "Stop requested. Results already discovered are retained.");
+        setAction(type === "start" ? "Discovery started. Progress and any optional budgets appear below." : "Stop requested. Results already discovered are retained.");
       } catch (error) {
         if (!canUse(token) || mutation !== request || error.name === "AbortError") return;
         setAction(`${error.message || "The request failed."} Refresh jobs to confirm the current state before trying again.`, true);
@@ -401,8 +400,12 @@
       const changed = visible !== !!next;
       visible = !!next;
       syncSession();
-      if (!visible) clearTimer();
-      else if (changed && !read) void refresh();
+      if (!visible) {
+        clearTimer();
+        // Reads belong to this view; pending start/stop requests still own their result.
+        if (read) { read.controller.abort(); read = null; }
+        renderControls();
+      } else if (changed && !read) void refresh();
     }
 
     on(els.Form, "submit", (event) => { event.preventDefault(); void mutate("start"); });

@@ -445,7 +445,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("node-version: '24'", workflow)
         self.assertIn("cargo test --locked --release", workflow)
         self.assertIn("cargo build --locked --release --bins", workflow)
-        runtime = workflow.split("  runtime-debian13-x86_64:", 1)[1]
+        build, attach = workflow.split("\n  attach-to-release:\n", 1)
+        runtime = build.split("  runtime-debian13-x86_64:", 1)[1]
         self.assertNotIn("\n    container:", runtime)
         self.assertIn("docker run --rm --pull=never --platform linux/amd64", runtime)
         self.assertEqual(runtime.count("--mount "), 3)
@@ -458,7 +459,14 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('command("apt-get", "install", "--no-install-recommends", "--no-remove"', harness)
         self.assertIn("verify_loader_closures(inventory, command, home, custom_data)", harness)
         for forbidden in ("gh release", "contents: write", "git push", "--no-sandbox", "WEBKIT_DISABLE_SANDBOX"):
-            self.assertNotIn(forbidden, workflow)
+            self.assertNotIn(forbidden, build)
+        # Only a tag's release job may write, after the runtime check passed,
+        # and it runs nothing from the checkout or the build.
+        self.assertIn("    if: startsWith(github.ref, 'refs/tags/v')\n", attach)
+        self.assertIn("    needs: [debian13-x86_64, runtime-debian13-x86_64]\n", attach)
+        self.assertIn("      contents: write\n", attach)
+        for forbidden in ("actions/checkout", "cargo ", "docker ", "container:", "git push", "--no-sandbox"):
+            self.assertNotIn(forbidden, attach)
 
 
 class GitOwnershipContractsTests(unittest.TestCase):

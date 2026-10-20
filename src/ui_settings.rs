@@ -40,6 +40,7 @@ const ACTIVE_TOOL_OPTIONS: &[&str] = &[
     "fuzzer",
     "sequence",
     "recon",
+    "templates",
     "replay",
     "tools",
     "logger",

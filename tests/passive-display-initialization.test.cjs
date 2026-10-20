@@ -78,7 +78,7 @@ function fixture() {
     historyColumnWidths: {}, historyColumnOrder: [], wsColumnWidths: {}, workbenchPaneWidths: {},
   };
   const globals = {
-    state, els, document, displaySettingsPreviewActive: false, displaySettingsReturnFocus: null,
+    state, els, document, displaySettingsPreviewActive: false, compareLoadGeneration: 0, displaySettingsReturnFocus: null,
     displaySettingsEditedControls: new Set(), displaySettingsReady: false, pendingDisplaySettingsApply: null,
     uiSettingsLoadState: "loading", uiSettingsLoadPromise: null,
     uiSettingsInitialPostGeneration: 0, uiSettingsInitialPostRevision: 0,

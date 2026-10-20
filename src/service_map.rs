@@ -228,6 +228,11 @@ pub struct ServiceOrigin {
     pub technology_observations: Option<Vec<TechnologyAggregate>>,
     pub redirects: Vec<RedirectInstruction>,
     pub header_links: Vec<HeaderLink>,
+    /// The same rows per source origin, a row naming it in both headers counted
+    /// once, so an arrow for both counts requests. Absent when none, as on older
+    /// servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_sources: Vec<HeaderSource>,
     /// Library and framework versions retained scripts and pages declare; see
     /// `service_map_libraries`. Absent when none, as on older servers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -389,6 +394,18 @@ pub struct HeaderLink {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HeaderSource {
+    pub source_origin: String,
+    pub request_count: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub request_kinds: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cors_allowed_count: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cors_credentials_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HeaderLinkSource {
     pub source_origin: String,
     pub relationship: String,
@@ -455,8 +472,8 @@ pub struct ServiceMapRow {
     /// Response headers no rule named: (`banner`, `header` or `cookie`, value).
     #[serde(skip)]
     pub unnamed: Vec<(&'static str, String)>,
-    /// Sent from Replay: a request a tester chose, whose answer is read
-    /// whatever its status.
+    /// Sent from Replay, or kept by Template Scan because a template matched
+    /// it: a request someone chose, whose answer is read whatever its status.
     #[serde(skip)]
     pub sent_from_replay: bool,
     /// The address the client connected to the proxy from, when kept.
@@ -864,10 +881,11 @@ pub(crate) fn project_record_for_catalog(
         libraries: Vec::new(),
         client: None,
         unnamed: Vec::new(),
-        sent_from_replay: record
-            .notes
-            .iter()
-            .any(|note| note == crate::model::REPLAY_NOTE),
+        sent_from_replay: record.notes.iter().any(|note| {
+            note == crate::model::REPLAY_NOTE
+                || note == crate::model::TEMPLATE_SCAN_NOTE
+                || note == crate::model::FUZZER_NOTE
+        }),
         client_address: record.client_address,
         initiated: false,
         auth: Vec::new(),
@@ -1351,6 +1369,17 @@ pub(crate) fn build(
     .expect("legacy scope matching is unbounded")
 }
 
+/// Whether a row's response let `source` read it (a single
+/// Access-Control-Allow-Origin naming it or `*`), and also allowed credentials.
+fn cors_answer(cors: &Option<(String, bool)>, source: &str) -> (usize, usize) {
+    match cors {
+        Some((allowed, credentials)) if allowed == "*" || allowed == source => {
+            (1, usize::from(*credentials))
+        }
+        _ => (0, 0),
+    }
+}
+
 /// The page an asset row's technologies belong to: its Referer's origin. A
 /// page row's own stay with it.
 pub(crate) fn library_page(row: &ServiceMapRow) -> Option<String> {
@@ -1520,6 +1549,7 @@ impl MapBuilder {
                 technology_observations: Some(vec![]),
                 redirects: vec![],
                 header_links: vec![],
+                header_sources: vec![],
                 front_technologies: vec![],
                 server_technologies: vec![],
                 favicon: None,
@@ -1707,15 +1737,37 @@ impl MapBuilder {
                 self.technology_observation_count += 1;
             }
         }
+        let sources: BTreeSet<String> = row
+            .header_links
+            .iter()
+            .map(|link| link.source_origin.clone())
+            .collect();
+        for source_origin in sources {
+            let (cors_allowed, cors_credentials) = cors_answer(&row.cors, &source_origin);
+            if let Some(existing) = origin
+                .header_sources
+                .iter_mut()
+                .find(|source| source.source_origin == source_origin)
+            {
+                existing.request_count += 1;
+                *existing
+                    .request_kinds
+                    .entry(row.request_kind.into())
+                    .or_default() += 1;
+                existing.cors_allowed_count += cors_allowed;
+                existing.cors_credentials_count += cors_credentials;
+            } else if origin.header_sources.len() < MAX_HEADER_LINKS_PER_ORIGIN {
+                origin.header_sources.push(HeaderSource {
+                    source_origin,
+                    request_count: 1,
+                    request_kinds: BTreeMap::from([(row.request_kind.into(), 1)]),
+                    cors_allowed_count: cors_allowed,
+                    cors_credentials_count: cors_credentials,
+                });
+            }
+        }
         for link in row.header_links {
-            let (cors_allowed, cors_credentials) = match &row.cors {
-                Some((allowed, credentials))
-                    if allowed == "*" || *allowed == link.source_origin =>
-                {
-                    (1, usize::from(*credentials))
-                }
-                _ => (0, 0),
-            };
+            let (cors_allowed, cors_credentials) = cors_answer(&row.cors, &link.source_origin);
             if let Some(existing) = origin.header_links.iter_mut().find(|r| {
                 r.source_origin == link.source_origin && r.relationship == link.relationship
             }) {
@@ -2080,6 +2132,9 @@ impl MapBuilder {
             origin.header_links.sort_by(|a, b| {
                 (&a.source_origin, &a.relationship).cmp(&(&b.source_origin, &b.relationship))
             });
+            origin
+                .header_sources
+                .sort_by(|a, b| a.source_origin.cmp(&b.source_origin));
             origin.redirects.sort_by(|a, b| {
                 (&a.target_origin, &a.target_path).cmp(&(&b.target_origin, &b.target_path))
             });

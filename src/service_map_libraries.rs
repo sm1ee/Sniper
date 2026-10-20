@@ -758,6 +758,17 @@ fn compile(rules: &'static [(&'static str, &'static str)]) -> Signatures {
 
 static SCRIPTS: LazyLock<Signatures> = LazyLock::new(|| compile(SCRIPT_SIGNATURES));
 static PAGES: LazyLock<Signatures> = LazyLock::new(|| compile(PAGE_SIGNATURES));
+// A combined Unicode word-boundary search can lose the regex engine's fast
+// literal search across an entire multilingual page. Individual rules retain
+// their own prefilters; keep the same patterns and separate version eligibility.
+static PAGE_EACH: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    PAGE_SIGNATURES
+        .iter()
+        .map(|(_, pattern)| {
+            Regex::new(&pattern.replace('§', VERSION)).expect("valid front-end signature")
+        })
+        .collect()
+});
 static MARKERS: LazyLock<Signatures> = LazyLock::new(|| compile(URL_MARKERS));
 static GENERATOR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)<meta\b[^>]*\bname\s*=\s*["']generator["'][^>]*>"#)
@@ -904,8 +915,13 @@ pub(crate) fn merge(found: &mut Vec<Detection>, detection: Detection) {
     }
 }
 
-fn scan(signatures: &Signatures, text: &str, found: &mut Vec<Detection>) {
-    for index in signatures.set.matches(text).iter() {
+fn scan_matches(
+    signatures: &Signatures,
+    text: &str,
+    found: &mut Vec<Detection>,
+    indexes: impl IntoIterator<Item = usize>,
+) {
+    for index in indexes {
         let version = signatures.each[index]
             .as_ref()
             .and_then(|rule| rule.captures(text))
@@ -914,6 +930,26 @@ fn scan(signatures: &Signatures, text: &str, found: &mut Vec<Detection>) {
         if let Some(detection) = known(signatures.ids[index], version) {
             merge(found, detection);
         }
+    }
+}
+
+fn scan(signatures: &Signatures, text: &str, found: &mut Vec<Detection>) {
+    scan_matches(signatures, text, found, signatures.set.matches(text));
+}
+
+fn scan_page(text: &str, found: &mut Vec<Detection>) {
+    if text.is_ascii() {
+        scan(&PAGES, text, found);
+    } else {
+        scan_matches(
+            &PAGES,
+            text,
+            found,
+            PAGE_EACH
+                .iter()
+                .enumerate()
+                .filter_map(|(index, rule)| rule.is_match(text).then_some(index)),
+        );
     }
 }
 
@@ -937,7 +973,7 @@ pub(crate) fn detect(body: &str, kind: Kind) -> Vec<Detection> {
             scan(&SCRIPTS, body, &mut found);
         }
         Kind::Page => {
-            scan(&PAGES, body, &mut found);
+            scan_page(body, &mut found);
             for tag in GENERATOR.find_iter(body).take(4) {
                 if let Some(detection) = CONTENT
                     .captures(tag.as_str())
@@ -1231,6 +1267,147 @@ pub(crate) fn read_body(file: &mut File, locator: BodyLocator, record_id: Uuid) 
 mod tests {
     use super::*;
 
+    fn assert_page_scan_equivalent(body: &str) {
+        let mut original = Vec::new();
+        scan(&PAGES, body, &mut original);
+        let mut optimized = Vec::new();
+        scan_page(body, &mut optimized);
+        assert_eq!(optimized, original, "page signature differential: {body:?}");
+        let combined: Vec<_> = PAGES.set.matches(body).into_iter().collect();
+        let separate: Vec<_> = PAGE_EACH
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rule)| rule.is_match(body).then_some(index))
+            .collect();
+        assert_eq!(separate, combined, "page rule-index differential: {body:?}");
+    }
+
+    #[test]
+    fn unicode_page_matching_preserves_boundaries_malformed_tags_and_precedence() {
+        let surroundings = [
+            "", "ascii", "é", "한글", "中", "\u{0301}", "\u{2003}", "\u{00a0}", "😀", "\0", "\r\n",
+        ];
+        let signals = [
+            r#"<app ng-version="17.2.1">"#,
+            r#"<app ng-version="18.0.0">"#,
+            r#"<div data-v-ab12cd34>"#,
+            r#"<div data-v-ab12cd34x>"#,
+            r#"<div class="svelte-abc123">"#,
+            r#"<div class="xsvelte-abc123">"#,
+            r#"<div class="ember-view">"#,
+            r#"<div class="ember-view字">"#,
+            r#"<div q:version="1.2.3" q:container="">"#,
+            r#"<div data-bind="text: name">"#,
+            r#"<div hx-get="/">"#,
+            "<div\u{2003}ng-controller=",
+            "é_nghost-a",
+            " _nghost-a",
+            "<div class='unterminated",
+            "<script id='__NEXT_DATA__'",
+            "<meta name=",
+        ];
+        for prefix in surroundings {
+            for suffix in surroundings {
+                for signal in signals {
+                    assert_page_scan_equivalent(&format!("{prefix}{signal}{suffix}"));
+                }
+            }
+        }
+        assert_page_scan_equivalent(
+            r#"한글 <app ng-version="17.2.1"><app ng-version="18.0.0"><div q:version="1.2.3">"#,
+        );
+        assert_page_scan_equivalent(&format!(
+            "{}<div data-v-ab12cd34>",
+            "<p>한글 中 😀</p>".repeat(4096)
+        ));
+        assert_page_scan_equivalent(&format!("{}é", "<p>ordinary ASCII text</p>".repeat(4096)));
+        let mut first = Vec::new();
+        scan_page(
+            r#"한글 <app ng-version="17.2.1"><app ng-version="18.0.0"><div q:version="1.2.3"><div q:version="2.0.0">"#,
+            &mut first,
+        );
+        let versions = found(first);
+        assert!(versions.contains(&one("angular", Some("17.2.1"))));
+        assert!(versions.contains(&one("qwik", Some("1.2.3"))));
+        assert_page_scan_equivalent(&format!(
+            "{}' data-bind='text: name'>",
+            "<div class='".repeat(256)
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires a reserved, uncontended native timing run"]
+    fn measure_unicode_page_match_paths() {
+        let sized = |unit: &str, bytes: usize| unit.repeat(bytes / unit.len());
+        let ascii = sized("<p>ordinary page text</p>", 1_048_576);
+        let unicode = sized("<p>한글 中文 é page text</p>", 1_048_576);
+        let positive = r#"<app ng-version="17.2.1"><div data-v-ab12cd34 class="svelte-abc123"><div q:version="1.2.3"><div hx-get="/">"#;
+        let mut cases = vec![
+            (
+                "ascii-small-negative",
+                sized("<p>ordinary page text</p>", 4096),
+            ),
+            (
+                "unicode-small-negative",
+                sized("<p>한글 中文 é page text</p>", 4096),
+            ),
+            ("ascii-large-negative", ascii.clone()),
+            ("unicode-large-negative", unicode.clone()),
+            ("ascii-late-positive", format!("{ascii}{positive}")),
+            ("unicode-late-positive", format!("{unicode}{positive}")),
+            ("ascii-dense-positive", sized(positive, 1_048_576)),
+            (
+                "unicode-dense-positive",
+                sized(&format!("한글 中文 é{positive}"), 1_048_576),
+            ),
+        ];
+        for (label, at) in [
+            ("sparse-unicode-start", 0),
+            ("sparse-unicode-middle", ascii.len() / 2),
+            ("sparse-unicode-end", ascii.len()),
+        ] {
+            let mut body = ascii.clone();
+            body.insert(at, 'é');
+            cases.push((label, body));
+        }
+        for (label, body) in cases {
+            assert_page_scan_equivalent(&body);
+            let mut detections = Vec::new();
+            scan_page(&body, &mut detections);
+            assert_eq!(
+                !detections.is_empty(),
+                label.contains("positive"),
+                "{label}"
+            );
+            let measure = |selected: bool| {
+                let started = std::time::Instant::now();
+                let mut found = Vec::new();
+                if selected {
+                    scan_page(std::hint::black_box(&body), &mut found);
+                } else {
+                    scan(&PAGES, std::hint::black_box(&body), &mut found);
+                }
+                std::hint::black_box(found);
+                started.elapsed()
+            };
+            // Alternate order so the selected path is not always measured last.
+            for pair in 0..5 {
+                let selected_first = pair % 2 != 0;
+                let first = measure(selected_first);
+                let second = measure(!selected_first);
+                let (combined, selected) = if selected_first {
+                    (second, first)
+                } else {
+                    (first, second)
+                };
+                eprintln!(
+                    "page {label}: bytes={} pair={pair} selected_first={selected_first} combined={combined:?} selected={selected:?}",
+                    body.len()
+                );
+            }
+        }
+    }
+
     fn found(items: Vec<Detection>) -> Vec<(String, Option<String>)> {
         items
             .into_iter()
@@ -1520,13 +1697,29 @@ mod tests {
                 Some("3.4.21"),
             ),
         ];
+        let mut covered = std::collections::BTreeSet::new();
         for (sample, id, version) in samples {
+            covered.extend(PAGES.set.matches(sample));
+            for (prefix, suffix) in [
+                ("", ""),
+                ("한글 中文 é ", " 😀"),
+                ("", "\n한글"),
+                ("é", "字"),
+                ("\u{2003}", "\u{0301}"),
+            ] {
+                assert_page_scan_equivalent(&format!("{prefix}{sample}{suffix}"));
+            }
             assert!(
                 found(detect(sample, Kind::Page)).contains(&one(id, *version)),
                 "{id} {version:?} in {sample}: {:?}",
                 found(detect(sample, Kind::Page))
             );
         }
+        assert_eq!(
+            covered.into_iter().collect::<Vec<_>>(),
+            (0..PAGE_SIGNATURES.len()).collect::<Vec<_>>(),
+            "Every page rule needs a positive differential fixture"
+        );
         let drupal = generator("Drupal 10 (https://www.drupal.org)").unwrap();
         assert_eq!(
             (drupal.name, drupal.version),

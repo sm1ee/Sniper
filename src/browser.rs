@@ -3430,6 +3430,93 @@ mod tests {
             assert_eq!(leftovers, 0);
         }
 
+        // No browser or credentials: the fixture writes an ordinary sentinel in
+        // its selected user data directory, then exits. A second launch must see
+        // the same bytes after the watcher has forgotten the first process.
+        #[tokio::test]
+        async fn aside_and_ego_keep_their_saved_profile_after_exit_and_relaunch() {
+            for kind in [BrowserKind::Aside, BrowserKind::Ego] {
+                let fixture = Fixture::new();
+                let profile = fixture.profile(kind.name());
+                let out = fixture.dir.join("profile-visits.txt");
+                let exe = fixture.script(&format!(
+                    "for a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${{a#--user-data-dir=}}\";; esac; done\n\
+                     mkdir -p \"$d/Default\"\n\
+                     if [ -f \"$d/Default/synthetic-state.txt\" ]; then\n\
+                       cat \"$d/Default/synthetic-state.txt\" >> '{out}'\n\
+                     else\n\
+                       printf 'synthetic-state\\n' > \"$d/Default/synthetic-state.txt\"\n\
+                       printf 'created\\n' >> '{out}'\n\
+                     fi",
+                    out = out.display()
+                ));
+                let mut names = Vec::new();
+                for _ in 0..2 {
+                    let launched = launch_at(&fixture.ctx(), kind, &exe, LaunchRequest::default())
+                        .await
+                        .unwrap();
+                    assert_eq!(Path::new(&launched.profile_dir), profile);
+                    assert!(!launched.fresh);
+                    assert!(!launched.reused, "the previous fixture has exited");
+                    names.push(
+                        kind.driver()
+                            .server_name(18890, Path::new(&launched.profile_dir)),
+                    );
+                    wait_for_profile_release(&profile).await;
+                    assert_eq!(
+                        fs::read_to_string(profile.join("Default/synthetic-state.txt")).unwrap(),
+                        "synthetic-state\n"
+                    );
+                }
+                assert_eq!(names[0], names[1], "ego's instance name is stable too");
+                assert_eq!(
+                    fs::read_to_string(out).unwrap(),
+                    "created\nsynthetic-state\n"
+                );
+
+                // A deliberate clean launch gets its own directory and its cleanup
+                // must not erase the saved profile that will be used next time.
+                let fresh = launch_at(
+                    &fixture.ctx(),
+                    kind,
+                    &exe,
+                    LaunchRequest {
+                        fresh: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(fresh.fresh);
+                assert_ne!(Path::new(&fresh.profile_dir), profile);
+                for _ in 0..500 {
+                    if !Path::new(&fresh.profile_dir).exists() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                assert!(!Path::new(&fresh.profile_dir).exists());
+                assert_eq!(
+                    fs::read_to_string(profile.join("Default/synthetic-state.txt")).unwrap(),
+                    "synthetic-state\n"
+                );
+            }
+        }
+
+        async fn wait_for_profile_release(profile: &Path) {
+            for _ in 0..500 {
+                let registered = live_profiles()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains_key(profile);
+                if !registered && !profile.join(OWNER_FILE).exists() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("the synthetic browser did not release its profile");
+        }
+
         #[tokio::test]
         async fn a_fresh_profile_is_unique_and_removed_when_the_browser_exits() {
             let fixture = Fixture::new();

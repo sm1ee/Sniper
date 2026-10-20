@@ -1,28 +1,26 @@
 # Debugging HTTP with Sniper
 
-Sniper is an intercepting proxy: a client sends its traffic to Sniper instead of
-straight to the server, Sniper forwards it and keeps a copy of every request and
-response. That is enough to answer the questions an HTTP debugging session
-usually starts with — what did the client actually send, what came back, and
-what happens if one header is different.
+Sniper is an intercepting proxy. A client sends its traffic to Sniper, which
+forwards it and keeps a copy of every request and response. This guide shows how
+to see what a client sent, what came back, and what happens when you change a
+request. The desktop UI and `sniper-cli` drive the same running process.
 
-The desktop UI and `sniper-cli` are two front ends over the same running
-process, so either can drive the whole loop; both paths are shown below where
-the choice matters. For what Sniper is and how to install it see
-[README.md](../../README.md); for why it is built this way see
+For installation see [README.md](../../README.md); for design see
 [architecture.md](../architecture.md).
 
 ## Starting it
 
-The shipped app is `sniper-desktop`, a window that runs the proxy in-process;
-`sniper` is the same server without the window. Both default to a proxy
-listener on `127.0.0.1:8080` and differ on the UI and local API: `sniper`
-defaults to `127.0.0.1:23001`, while `sniper-desktop` asks the OS for a free
-port, so its UI port changes from run to run unless `SNIPER_UI_ADDR` pins it.
+`sniper-desktop` is the app: a window that runs the proxy in-process. `sniper` is
+the same server without the window. Both take proxy traffic on `127.0.0.1:8080`.
+The UI and local API listen on `127.0.0.1:23001` for `sniper`; `sniper-desktop`
+takes a free port on each run unless `SNIPER_UI_ADDR` sets one. The installed app
+shows its UI port as **UI listener** under **Capture ▸ Settings ▸ Runtime
+details**.
 
-Sniper locks its data directory, so only one instance can use a given one.
-The example below runs a throwaway instance on its own directory and ports, so
-you can try any of this without disturbing an existing session:
+Sniper locks its data directory: a second instance on the same directory exits
+with `another Sniper runtime is already using data dir ...`. To try the steps
+below without touching your own session, run a throwaway instance with its own
+directory and ports. Its UI is then at `http://127.0.0.1:18901`.
 
 ```bash
 SNIPER_DATA_DIR=/tmp/sniper-doc-http \
@@ -33,17 +31,7 @@ SNIPER_PROXY_ADDR=127.0.0.1:18902 \
 until curl -s -o /dev/null -m 1 http://127.0.0.1:18901/api/runtime; do sleep 0.2; done
 ```
 
-```
-INFO sniper: starting sniper proxy_addr=127.0.0.1:18902 ui_addr=127.0.0.1:18901 ... data_dir=/tmp/sniper-doc-http
-INFO sniper::proxy: proxy listener ready proxy_addr=127.0.0.1:18902
-INFO sniper::api: ui listener ready ui_addr=127.0.0.1:18901 advertised_ui_addr=127.0.0.1:18901
-```
-
-The UI is at `http://127.0.0.1:18901` in a browser, or in the native window if
-you started `sniper-desktop`. The installed app proxies on `8080`; its UI port
-is printed as **UI listener** under **Capture ▸ Settings ▸ Runtime details**.
-
-Point traffic at a throwaway server rather than at someone else's site:
+Send test traffic to a throwaway server, not to someone else's site:
 
 ```bash
 cat > /tmp/sniper-doc-http-upstream.py <<'PY'
@@ -74,9 +62,8 @@ python3 /tmp/sniper-doc-http-upstream.py &
 
 ## Pointing a client at it
 
-A browser needs its proxy setting — system network settings on macOS and
-Windows, or a browser-level proxy extension — set to HTTP proxy
-`127.0.0.1:8080`. For a command-line client, `curl -x` is the same thing:
+Set the browser's HTTP proxy to `127.0.0.1:8080`, in the system network settings
+on macOS and Windows or with a browser proxy extension. For curl, use `-x`:
 
 ```bash
 unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
@@ -86,63 +73,43 @@ curl -s -x http://127.0.0.1:18902 -X POST http://127.0.0.1:18911/api/orders \
   -H 'content-type: application/json' -d '{"sku":"A-1"}'
 ```
 
-```
-{"method": "GET", "path": "/api/orders?status=open"}
-{"method": "POST", "path": "/api/orders"}
-```
-
-The `unset` matters: a shell that exports `no_proxy` covering loopback makes
-curl ignore `-x` and connect directly, and nothing is captured.
+The `unset` matters: if `no_proxy` covers loopback, curl ignores `-x` and Sniper
+captures nothing.
 
 ### Or open a browser that is already wired
 
-Setting a proxy and trusting a certificate by hand is the part most likely to go
-wrong, so Sniper can open a browser that needs neither. **Open browser** in the top
-bar does it from the UI (an empty history offers the same button). Its arrow lists
-every browser, marks the one that opens by default, and has **Make default** to
-change it. Two boxes there apply to that one opening only: **Let an
-agent drive it** (`--agent`) and **Throwaway profile** (`--fresh`). From the CLI:
+Sniper can also open a browser with the proxy and certificate already set up. In
+the UI, click **Open browser** in the top bar or in an empty history. Its arrow
+lists every browser, marks the default, and has **Make default**. Two checkboxes
+apply to that one opening only: **Let an agent drive it** (`--agent`) and
+**Throwaway profile (discard logins on quit)** (`--fresh`).
+
+From the CLI:
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
   capture browser list
-```
-
-Every browser Sniper knows on this platform is listed, installed or not. Two of
-them, as returned on a Mac that has both:
-
-```json
-{"browser":"chrome","installed":true,"driver":"cdp","platforms":["macos","windows","linux"],
- "path":"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
- "capabilities":{"ui_actions":"via-client","snapshot_refs":false,"handoff":false,"visible_cursor":false}}
-{"browser":"ego","installed":true,"driver":"ego-cli","platforms":["macos"],
- "path":"/Applications/ego lite.app/Contents/MacOS/ego lite",
- "capabilities":{"ui_actions":"built-in","snapshot_refs":true,"handoff":true,"visible_cursor":true},
- "default":true,
- "requirements":[{"name":"ego-browser command","found":true},
-                 {"name":"ego-browser agent skill","found":true}]}
-```
-
-`"default": true` marks the browser that opens when none is named. `"preferred":
-true` marks the saved choice, and stays on it if that browser has since been
-uninstalled, in which case it is not the default (both are left out when false).
-`capture browser prefer --browser <name|auto> --yes` saves the choice, per user and
-not per session; `auto` clears it, and so does **Use auto** in the menu. A saved
-browser that is later uninstalled does not block opening: Sniper opens the next one
-in the automatic order and says so in `warnings`.
-
-A browser that is not installed has `"installed": false`, an `install_url` that is its
-vendor's own download page (the menu shows it as an **Install** link, and an open that
-names a missing browser says it too), and, where the answer is not obvious, an
-`install_hint`; a requirement that is missing carries a `hint` that
-says where to look, never a command to run. Sniper never installs a browser or a
-skill for you. A browser that is not built for the platform is left out: ego does
-not appear on Windows. Opening one that is missing returns the same explanation.
-
-```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
   capture browser open --browser chrome --agent --yes
 ```
+
+`capture browser list` shows every browser Sniper knows on this platform,
+installed or not. `"default": true` marks the one that opens when you name none,
+and `"preferred": true` the saved choice; both are left out when false. A missing
+browser has `"installed": false` and an `install_url` to the vendor's download
+page (the **Install** link in the menu). A missing requirement, such as ego's
+command or agent skill, has a `hint` that says where to look. Sniper never
+installs a browser or a skill.
+
+`capture browser prefer --browser <name|auto> --yes` saves the default per user;
+`auto`, or **Use auto** in the menu, clears it. `--browser` takes `chrome`,
+`edge`, `brave`, `chromium`, `ego`, `aside` or `browseros-neo`. With nothing
+saved, Sniper opens the first installed of ego, Aside, BrowserOS neo, Chrome,
+Edge, Brave and Chromium, in that order. If the saved browser was uninstalled,
+Sniper falls back to that order and says so in `warnings`.
+
+`capture browser open` starts a process, so it needs `--yes`, or `--dry-run` to
+see the request first. The result says how to reach the browser:
 
 ```json
 {"browser":"chrome","driver":"cdp","control":{"driver":"cdp","endpoint":"http://127.0.0.1:53469"},
@@ -150,80 +117,72 @@ not appear on Windows. Opening one that is missing returns the same explanation.
  "proxy":"127.0.0.1:18902","url":"about:blank"}
 ```
 
-Opening a browser starts a process, so the CLI asks for `--yes` (or `--dry-run` to
-see the request first). What the browser is given:
+The browser gets:
 
-- **The proxy and the certificate, for that browser only.** Sniper's root CA is
-  trusted by its public-key hash for that one browser process. Nothing is added to
-  the operating system or to any browser's certificate store.
-- **Loopback through the proxy.** Chromium sends `localhost` and `127.0.0.1`
-  direct by default, which would leave an app you are testing locally out of the
-  history.
-- **A profile of its own**, kept under Sniper's data directory, so logins survive
-  between sessions and your everyday profile is untouched. `--fresh` uses a
-  throwaway profile that is deleted when the browser quits. Closing the last window
-  is not quitting on macOS. If Sniper exits first, the next launch removes the
-  profile once its browser is gone.
-- **A DevTools port only when asked** (`--agent`). For Chromium-family browsers
-  that is what the flag opens, and it is off unless you turn it on: the port lets
-  any other local process drive a browser holding your logged-in sessions. For
-  BrowserOS neo the flag turns on its own server, which is off otherwise. ego and
-  Aside have no port, so `--agent` changes nothing there; their `control` is always
+- **The proxy and Sniper's root CA, for that browser process only.** Nothing is
+  added to the operating system or to any certificate store.
+- **Loopback through the proxy**, so a local app appears in the history. Chromium
+  sends `localhost` and `127.0.0.1` direct by default.
+- **Its own profile** under Sniper's data directory, apart from your everyday one.
+  `--fresh` uses a throwaway profile that is deleted when the browser quits. On
+  macOS, closing the last window does not quit it.
+- **A DevTools port only with `--agent`.** The port lets any local process drive a
+  browser that holds your logins. For BrowserOS neo, `--agent` turns on its own
+  server instead. ego and Aside have no port, and their `control` is always
   returned.
+
+#### Keep logins between launches
+
+Each browser keeps one profile at `<SNIPER_DATA_DIR>/browser-profiles/<browser>`,
+separate from your everyday profile. Sign in once in the window Sniper opened;
+later launches reuse that login as long as you keep the same data directory and
+do not use `--fresh`. Sniper does not copy logins from another profile. If a site
+keeps asking you to sign in, compare the profile path in `chrome://version`
+between launches.
+
+For a one-off clean test, use `--fresh`; the saved profile stays as it is. To
+clear saved logins, clear site data in the Sniper-opened browser; Sniper has no
+reset of its own. Do not clear site data or Aside's password vault to
+troubleshoot a repeated sign-in prompt.
+
+Aside and ego have accounts and first-run screens of their own:
+
+- Sniper does not skip Aside's account screen. Aside supports local profiles
+  without an account ([changelog](https://docs.aside.com/changelog/native),
+  v1.0.728.1); [its own AI models](https://docs.aside.com/help/ai) need one. If
+  onboarding comes back after a restart, check the version: v1.0.922.1 fixed
+  that. The `aside` CLI signs in separately (`aside account status`), and Sniper
+  does not touch its credentials.
+- Finish ego's first-run onboarding before you use the agent workflow; it
+  registers the `ego-browser` command
+  ([quick start](https://lite.ego.app/document/en/docs/quick-start)). Sniper does
+  not create ego Spaces. An agent that creates one with ego's
+  [native API](https://github.com/citrolabs/ego-lite/blob/main/docs/native-bindings-api.md)
+  should address it by numeric ID, since names can repeat. A completed Space
+  belongs to the user; do not claim it automatically.
 
 #### Two ways to drive it
 
-Which browser it is decides how an agent drives it, and that is the `driver`. The
-result's `control` says what to use, in a shape that depends on the driver:
+The browser decides the `driver`, and the result's `control` says how to reach it:
 
 | | `chrome`, `edge`, `brave`, `chromium` | `ego` | `aside` | `browseros-neo` |
 |---|---|---|---|---|
 | `driver` | `cdp` | `ego-cli` | `aside-cli` | `browseros-mcp` |
 | `control` | `{"driver":"cdp","endpoint":"http://127.0.0.1:<port>"}` | `{"driver":"ego-cli","server_name":"…","command":"ego-browser --ego-server-name=… nodejs -e '<script>'"}` | `{"driver":"aside-cli","command":"aside repl '<code>'"}` | `{"driver":"browseros-mcp","endpoint":"http://127.0.0.1:<port>/mcp"}`, with `--agent` |
 | Agent actions | a CDP client you bring | built in | built in, through its REPL | built in, through MCP |
-| Snapshot with `@ref`s, handoff to the user, visible cursor | no | yes, as ego documents them | not documented | not documented |
+| Snapshot with `@ref`s, handoff to the user, visible cursor | no | yes | not documented | not documented |
 | Platforms | macOS, Windows, Linux | macOS | macOS, Windows | macOS, Windows |
 | Needs on this machine | nothing | ego lite, its command, and its agent skill | Aside and its `aside` command | BrowserOS neo |
 
-What Sniper itself does is the same for all of them: the wired browser, its proxy and
-certificate trust, its profile and its lifetime. It does not implement clicking or
-typing. An agent does that through the driver.
+Sniper sets up the browser; the agent clicks and types through the driver. An
+agent that opens a browser without naming one should read `driver` and `control`
+from the result, not assume a DevTools endpoint.
 
-**With `aside-cli`**, drive it only through Aside's REPL, `aside repl '<code>'`, with
-deterministic steps. Aside can also run a task with its own assistant on the account
-signed in to it (`aside "<task>"`, `aside exec`); Sniper does not hand Aside to an
-agent that way. Aside's command has no option to choose a window, so it drives
-whichever Aside is running: quit any other Aside first, or what the agent does there
-is not captured. Aside's extension talks to a daemon on `127.0.0.1:21420` that every
-Aside on the machine shares, and it answers with the signed-in account and its
-password manager, so Sniper sends that port direct and it stays out of the history.
-On macOS Aside takes Sniper's proxy, certificate and profile switches; it ignores
-the page on the first launch of a profile, and a second open shows it. Where Aside
-installs on Windows has not been checked against a running copy.
+**`cdp`:** connect any CDP client to `control.endpoint`, such as Playwright's
+`connectOverCDP` or chrome-devtools-mcp with `--browserUrl`. Sniper bundles none.
 
-**With `browseros-mcp`**, open with `--agent` and connect an MCP client (Streamable
-HTTP) to `control.endpoint`. Each profile runs its own server, and Sniper picks its
-port, so the address reaches this browser and not another BrowserOS neo. Without
-`--agent` the server stays off: it serves the agent endpoint, and the browser then
-also listens on every network interface for it (ports 9010 and 9011 by default).
-The browser opens a DevTools port of its own on loopback (9110 by default) either
-way, which Sniper cannot turn off. Calls its pages make to the server go direct and
-stay out of the history. The servers of all profiles share one database in
-`~/.browserclaw`, and the server bundled with the app will not open it once a newer
-server has updated it. A `--fresh` profile has only the bundled one, so it may give
-no `control` and a warning instead; the persistent profile keeps the newer server it
-downloads. On macOS BrowserOS neo takes Sniper's switches. It has no Linux build, and
-where it installs on Windows has not been checked against a running copy.
-
-**With `cdp`**, connect any CDP client to `control.endpoint`: Playwright's
-`connectOverCDP`, or chrome-devtools-mcp with `--browserUrl`. Sniper bundles none.
-A plain CDP client was checked against Sniper's Chrome for clicking by coordinates,
-typing, JavaScript dialogs, new windows, screenshots, file input, downloads and
-the accessibility tree, so everything ego's actions do has a protocol-level
-equivalent; what plain Chrome lacks is the layer ego adds on top of it.
-
-**With `ego-cli`**, use ego's own agent skill, and put the server name from
-`control` on every `ego-browser` command:
+**`ego-cli`:** use ego's own agent skill, and pass the server name from `control`
+on every `ego-browser` command:
 
 ```bash
 ego-browser --ego-server-name=sniper-18902-3f2a9c1d nodejs -e '
@@ -234,92 +193,66 @@ console.log(String(await page.snapshot()));
 ' 2>&1
 ```
 
-The name is `sniper-<proxy port>-<hash of the profile>`: the same for a profile
-every time, and different for each data directory and each throwaway profile, so
-an ego left running by another run is never the one you reach.
+- **Leave the server name off and you drive your everyday ego**, with your own
+  profile and no proxy, so nothing is captured. ego's skill does not mention
+  this flag.
+- **Script output goes to stderr.** `console.log` inside `ego-browser nodejs`
+  leaves stdout empty. Read it with `2>&1`; a readiness check with `2>/dev/null`
+  never succeeds.
+- **Click as a person does.** Take a snapshot, pick an element by its `@ref` or a
+  `loc=` locator, `page.click` it, then `waitForURL` or take a new snapshot.
+  `page.goto` skips what the site's script does on a click and sends a different
+  request.
 
-Three things that are easy to get wrong:
+**`aside-cli`:** drive it only through `aside repl '<code>'` with deterministic
+steps, not through Aside's own assistant (`aside "<task>"`, `aside exec`). The
+`aside` command drives whichever Aside is running, so quit any other Aside first,
+or nothing is captured. Sniper sends Aside's shared daemon (`127.0.0.1:21420`)
+direct, so its account and password-manager traffic stays out of the history. On
+a profile's first launch Aside does not show the requested page; opening again
+shows it.
 
-- **Leave the server name off and you drive your own everyday ego**, with your
-  logged-in profile and none of this proxy, and nothing is captured. Sniper's
-  browser is a separate instance of ego, and ego's skill does not mention the flag
-  that addresses it.
-- **Script output arrives on stderr.** `console.log` inside `ego-browser nodejs`
-  is written to stderr and stdout stays empty, so a readiness check that discards
-  stderr (`2>/dev/null`) never succeeds. Read it with `2>&1`.
-- **Act on the page the way a person does.** Take a snapshot, pick an element by
-  its `@ref` or a `loc=` locator, `page.click` it, then `waitForURL` or take a new
-  snapshot. Jumping straight to a URL with `page.goto` skips what the site's own
-  script does on a click, and the request a click makes (a same-origin `Referer`,
-  a menu that opens before anything navigates) is not the request a `goto` makes.
-
-ego is a separate program. Sniper does not install it, does not bundle it and does
-not run its installer. The `requirements` in `capture browser list` say whether
-its command and skill are present.
+**`browseros-mcp`:** open with `--agent` and connect an MCP client (Streamable
+HTTP) to `control.endpoint`. Without `--agent` the server stays off; with it, the
+browser also listens on every network interface (ports 9010 and 9011 by
+default). The browser always opens a DevTools port on loopback (9110 by default),
+which Sniper cannot turn off. Calls from its pages to the server stay out of the
+history. A `--fresh` profile may return a warning instead of `control`: its
+bundled server cannot open the shared `~/.browserclaw` database once a newer
+server has updated it. Use the persistent profile, which keeps the newer server.
 
 #### Opening again, limits and warnings
 
-Opening again while a browser is running on the same profile opens another window
-in it (`"reused": true` in the result). That is what the button needs on macOS,
-where closing the last window leaves the browser running. A browser that is still
-opening its first window is not started a second time, and only a few windows can
-be opening in one browser at once. If the running browser was started for a
-different proxy, or without the DevTools port you are now asking for, the call is
-refused and says which, because Chromium would ignore the new settings. A port
-cannot be added to a browser that is already running: quit it and open again with
-`--agent`, or open a separate throwaway one with `--agent --fresh`. Different
-browsers each have a profile of their own and run side by side, and up to eight
-`--fresh` browsers can be open at once.
-
-Some browsers end the process Sniper started and carry on under another one. ego has
-been seen to, usually about nine seconds after it opens. On macOS and Linux Sniper
-does not rely on the process it started: it finds the running browser through the
-profile's own lock and reads the proxy that browser was started for from its command
-line, so opening again right after that still gives another window in it, and a
-browser Sniper lost track of, including one left running by an earlier Sniper, is
-picked up again. An open in the instant before the new process takes the lock is
-recognised as a window handed to the running browser and is not reported as a
-failure. A throwaway profile is deleted only once its browser has gone, not when the
-first process ends, and the cleanup of abandoned throwaway profiles leaves one whose
-browser is still running. Windows has no such lock, so there a browser is tracked by
-the process Sniper started.
-
-A DevTools port is refused while the proxy listens on anything but loopback, since
-a proxy reachable from the network relays requests to local ports. The check
-happens when the browser opens: if you later rebind the proxy beyond loopback,
-quit a browser that was opened with a DevTools port first.
-
-A browser that cannot start, or that ends at once, is reported in the result's
-`warnings` with the last of what it printed. A persistent profile also keeps the
-whole output in `sniper-launch.log`; a throwaway profile is deleted with its log,
-which is why the text travels in the warning. The UI shows that warning in a toast;
-a browser that opened normally needs no confirmation, since its window is one.
-
-`--browser` takes `chrome`, `edge`, `brave`, `chromium`, `ego`, `aside` or
-`browseros-neo`. With none named, Sniper opens the saved default; with none saved,
-ego if it is installed, then Aside, then BrowserOS neo, otherwise the first of Chrome,
-Edge, Brave and Chromium that is. The three lead because an agent drives them
-without bringing a CDP client. The list shows Chrome first with them under it, which
-is not the order they are picked in. An agent that opens a
-browser without naming one should read `driver` and `control` in the result rather
-than assume a DevTools endpoint.
-
-A freshly opened browser also talks to its vendor (updates, variations, crash
-reporting), and that traffic appears in the history. Filtering the history to your
-target's host leaves it out. The first launch on a new profile sends the most.
+- Opening again while a browser runs on the same profile opens another window in
+  it (`"reused": true`).
+- If the running browser was started for a different proxy, or without the
+  DevTools port you now ask for, the open is refused and says which. Quit the
+  browser fully and open it again, with `--agent` if you need the port, or open a
+  separate one with `--agent --fresh`.
+- Different browsers run side by side. Up to eight `--fresh` browsers can be open
+  at once.
+- A DevTools port is refused while the proxy listens beyond loopback, because
+  such a proxy relays requests to local ports. The check runs only when a browser
+  opens, so quit any browser with a DevTools port before you rebind the proxy
+  beyond loopback.
+- A browser that fails to start or exits at once is reported in `warnings` (a
+  toast in the UI) with the end of its output. A persistent profile keeps the full
+  output in `sniper-launch.log`.
+- A new browser also talks to its vendor (updates, variations, crash reporting),
+  most on a new profile's first launch. Filter the history to your target's host
+  to hide that traffic.
 
 ## Watching requests arrive
 
-In the UI: the **Capture** tab, **HTTP** sub-tab. Rows appear as traffic flows.
-
-From the CLI:
+In the UI, open the **Capture** tab, **HTTP** sub-tab. Rows appear as traffic
+flows. From the CLI:
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
   capture http list --limit 10
 ```
 
-That returns a JSON array. Summarised, the two requests above are:
+The result is a JSON array. In short, the two requests above are:
 
 ```
 #2 POST   http://127.0.0.1:18911/api/orders -> 200 (3 ms)
@@ -328,146 +261,65 @@ That returns a JSON array. Summarised, the two requests above are:
 
 `capture http list` also takes `--host`, `--method`, `--status`,
 `--status-range`, `--mime`, `--since` and `--query`, plus `--page` for
-pagination metadata.
-
-`--query` matches request metadata only — method, host, path, status, MIME.
-To find a value inside headers or bodies, search instead:
+pagination metadata. `--query` matches request metadata only: method, host,
+path, status and MIME type. To find a value in headers or bodies, search:
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
   capture http search --value A-1 --side request-body
 ```
 
-```json
-{"bytes_scanned":106,"complete":true,"match_count":1,"records_considered":2,
- "records_scanned":2,"stopped_by":null,"transactions":[{"host":"127.0.0.1:18911",
- "id":"c7994659-…","matches":[{"context":"{\"sku\":\"A-1\"}","offset":8,
- "side":"request-body"}],"method":"POST","path":"/api/orders","sequence":2}],
- "unsearchable":0}
-```
-
-The result groups matches by transaction and reports `complete`. An empty
-result means the value is absent only when `complete` is `true`; otherwise
-`stopped_by` says whether `--max-matches` or `--byte-budget` ran out.
+Matches are grouped by transaction, each with its `side`, `offset` and
+`context`. An empty result means the value is absent only when `complete` is
+`true`; otherwise `stopped_by` says whether `--max-matches` or `--byte-budget`
+ran out.
 
 ## Reading one transaction
 
-Clicking a row in the UI opens the detail panel. The CLI equivalent is:
+Click a row in the UI to open the detail panel. From the CLI:
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
   capture http get --id <transaction-id>
 ```
 
-The result is one object with `method`, `scheme`, `host`, `path`, `status`,
-`duration_ms`, and `request` and `response` objects each holding `headers`,
-`body_preview`, `body_size`, `body_encoding`, `content_type` and
-`preview_truncated`. Piped through a formatter, the POST above reports:
-
-```
-POST http://127.0.0.1:18911/api/orders -> 200 in 3 ms
-request bytes  : 13 response bytes: 41
-```
+The result has `method`, `scheme`, `host`, `path`, `status`, `duration_ms`, and
+`request` and `response` objects. Each of those holds `headers`, `body_preview`,
+`body_size`, `body_encoding`, `content_type` and `preview_truncated`.
 
 ## Trusting the CA, and what that means
 
-HTTPS is opaque to a proxy unless the proxy terminates TLS itself. Sniper
-generates one root CA on first run, keeps it in the data directory, and mints a
-leaf certificate per host as traffic arrives. A client only accepts those leaves
-if it trusts that root.
-
-The root is served by a built-in host that only exists inside the proxy:
+A proxy cannot read HTTPS unless it terminates TLS. Sniper creates one root CA on
+first run, keeps it in the data directory, and signs a certificate for each host
+as traffic arrives. A client accepts those certificates only if it trusts the
+root. Get the root from the proxy's built-in host, `sniper`:
 
 ```bash
 curl -s -x http://127.0.0.1:18902 http://sniper/cert/root.pem -o /tmp/sniper-doc-root-ca.pem
 openssl x509 -in /tmp/sniper-doc-root-ca.pem -noout -subject -issuer -dates
 ```
 
-```
-subject=O=Sniper, CN=Sniper Root CA
-issuer=O=Sniper, CN=Sniper Root CA
-notBefore=Sep 17 00:00:00 2026 GMT
-notAfter=Sep 14 00:00:00 2036 GMT
-```
+In a proxied browser, `http://sniper` (or `https://sniper`) has **Download PEM**
+and **Download DER** buttons. DER is also at `http://sniper/cert/root.der` and at
+`/api/certificates/root.der` on the local API. In the desktop UI,
+**Capture ▸ Settings ▸ Root CA** opens the folder that holds the files.
 
-Open `http://sniper` (or `https://sniper`) in a proxied browser for the same
-file as a page, with **Download PEM** and **Download DER** buttons; DER is also
-at `http://sniper/cert/root.der` and on the local API at
-`/api/certificates/root.der`. In the desktop UI, **Capture ▸ Settings ▸ Root
-CA** reveals the folder the certificate files sit in rather than downloading
-one.
+Trusting the root is a real decision. A machine that trusts it accepts a
+certificate for *any* host from whoever holds the private key, and the key sits
+unencrypted in your data directory. Trust it on the machine you test with, and
+remove it when you are done.
 
-Trusting it is a real decision: a machine that trusts this root accepts a
-certificate for *any* host from whoever holds the matching private key, which
-sits unencrypted in your data directory. Trust it on the machine you test with,
-and remove it when you are done. The difference is visible once the throwaway
-upstream speaks TLS:
-
-```bash
-pkill -f /tmp/sniper-doc-http-upstream.py
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-  -keyout /tmp/sniper-doc-upstream.key -out /tmp/sniper-doc-upstream.crt \
-  -subj "/CN=localhost" -addext "subjectAltName=IP:127.0.0.1"
-```
-
-Serve it with the same handler wrapped in TLS:
-
-```bash
-cat > /tmp/sniper-doc-https-upstream.py <<'PY'
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import json, ssl
-
-class Upstream(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def do_GET(self):
-        body = json.dumps({"method": "GET", "path": self.path, "tls": True}).encode()
-        self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-ctx.load_cert_chain("/tmp/sniper-doc-upstream.crt", "/tmp/sniper-doc-upstream.key")
-srv = HTTPServer(("127.0.0.1", 18911), Upstream)
-srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-srv.serve_forever()
-PY
-python3 /tmp/sniper-doc-https-upstream.py &
-```
-
-Then compare a client that does not trust the root with one that does:
-
-```bash
-curl -s -S -x http://127.0.0.1:18902 https://127.0.0.1:18911/api/orders
-curl -s -x http://127.0.0.1:18902 --cacert /tmp/sniper-doc-root-ca.pem \
-  https://127.0.0.1:18911/api/orders
-```
-
-```
-curl: (60) SSL certificate problem: self signed certificate in certificate chain
-... curl's certificate help text ...
-{"method": "GET", "path": "/api/orders", "tls": true}
-```
-
-Once decrypted, HTTPS requests appear in history like any other, alongside the
-`CONNECT` row for the tunnel:
-
-```
-#8 GET     https://127.0.0.1:18911/api/orders -> 200
-#7 CONNECT tcp://127.0.0.1:18911 -> 200
-```
+A client that does not trust the root fails; curl reports
+`SSL certificate problem: self signed certificate in certificate chain`. For curl,
+`--cacert /tmp/sniper-doc-root-ca.pem` trusts the root for one command. Decrypted
+HTTPS requests appear in the history like any other, next to a `CONNECT` row for
+the tunnel.
 
 ## Filtering by scope
 
-Scope is the list of hosts you care about. In the UI it is the **Scope** tab,
-an include list and an exclude list beside the captured hosts and paths; the
-**In scope** pill above the HTTP
-history filters the table to it. From the CLI:
+Scope is the list of hosts you care about. In the UI, the **Scope** tab shows an
+include list and an exclude list beside the captured hosts and paths, and the
+**In scope** pill above the HTTP history filters the table to it. From the CLI:
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
@@ -477,27 +329,24 @@ history filters the table to it. From the CLI:
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact scope get-scope
 ```
 
-```
-{"api":{"body":{"scope_patterns":null,"session_id":null},"method":"POST","path":"/api/runtime"},"command":"scope set-scope","dry_run":true,"input":{"clear":false,"file":null,"patterns":["127.0.0.1"],"session_id":null,"stdin":false},"notes":["Use --yes to apply this side-effecting operation after reviewing the dry-run."],"operation":"scope.set","requires_confirmation":true,"side_effect":"write"}
-{"scope_patterns":["127.0.0.1"],"session_id":"7111fb35-94c4-4a40-95dc-3137eeec1bd6"}
-{"scope_patterns":["127.0.0.1"]}
-```
+Every write command takes `--dry-run`: it prints the API call it would make,
+marks the output `"dry_run":true`, and changes nothing. `--yes` applies it.
 
-That first line is the dry run. Every write operation takes `--dry-run` first:
-it prints the API call it would make, marks itself `"dry_run":true`, and
-changes nothing. `--yes` applies it.
+Scope matches hosts only:
 
-Scope matches hosts only. `*.example.com` covers the domain and everything under
-it, `log-*.example.com` is a glob, `api.example.com` is exact, and a port or
-path in a pattern is discarded — `127.0.0.1:18911/api/*` is stored as
-`127.0.0.1`. The scoped view of history is a UI toggle and an API parameter
-(`in_scope_only`); `capture http list` has no equivalent flag, so filter it with
-`--host` instead.
+- `*.example.com` matches the domain and everything under it.
+- `log-*.example.com` is a glob.
+- `api.example.com` is exact.
+- A port or path in a pattern is dropped: `127.0.0.1:18911/api/*` is stored as
+  `127.0.0.1`.
+
+The scoped history view is a UI toggle and an API parameter (`in_scope_only`).
+`capture http list` has no such flag; filter with `--host` instead.
 
 ## Replaying a request with a change
 
-In the UI: right-click a history row, **Send to Replay** (⌘R), edit the raw
-request in the Replay tab, press **Send**. The CLI does the same three steps:
+In the UI, right-click a history row, choose **Send to Replay** (⌘R), edit the raw
+request in the Replay tab, and press **Send**. The CLI takes the same three steps:
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
@@ -512,128 +361,84 @@ printf 'GET /api/orders?status=closed HTTP/1.1\r\nhost: 127.0.0.1:18911\r\naccep
   replay send --tab-id <tab-id> --yes
 ```
 
-`replay open` returns the tab, including its `id` and the connection target it
-took from the capture:
-
-```
-tab 36fca91d-7d2c-4e07-a9e3-b837340f3b1a
-target http://127.0.0.1:18911
-GET /api/orders?status=open HTTP/1.1
-```
-
-A tab opened from the CLI is the same tab the UI shows. The send lands in
-history as a new record:
-
-```
-#3 GET    http://127.0.0.1:18911/api/orders?status=closed -> 200 (0 ms)
-#2 POST   http://127.0.0.1:18911/api/orders -> 200 (3 ms)
-#1 GET    http://127.0.0.1:18911/api/orders?status=open -> 200 (8 ms)
-```
+`replay open` returns the tab with its `id` and the target it took from the
+capture. The UI shows the same tab. Each send is recorded in the history as a new
+row.
 
 `--host`, `--port` and `--scheme` on `replay open` and `replay update` change
-where the request is sent without touching the `Host:` header in the request
-text. They are refused when the captured request's own host is an IP literal,
-which is the case everywhere in this guide:
+where the request goes without touching its `Host:` header. When the captured
+request's host is an IP address, as it is everywhere in this guide, they are
+refused with `Replay target override is not supported when the request host is an
+IP address`. An override needs a capture whose `Host:` header is a name.
 
-```
-invalid replay target: Replay target override is not supported when the request host is an IP address
-```
+A request read with `--request-file` or `--stdin` has no scheme of its own, so
+`--scheme`, or the scheme of a URL given to `--host`, becomes its scheme and is
+not an override. Such a request can go to `127.0.0.1` over plain HTTP as long as
+`--host` and `--port` match its `Host:` header.
 
-An override therefore needs a capture whose `Host:` header is a name.
-
-A request read with `--request-file` or `--stdin` names no scheme of its own, so
-`--scheme` (or the scheme of a URL given to `--host`) becomes its scheme rather
-than an override. Sending such a request to `127.0.0.1` over plain HTTP works as
-long as `--host` and `--port` match its `Host:` header.
-
-`--label` on `replay open` and `replay update` names the tab, the same as
-renaming it in the tab strip. An agent firing several requests can mark what
-each tab tests, and an empty `--label ""` clears the name:
-
-```bash
-./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
-  replay update --tab-id <tab-id> --label "closed orders" --yes
-```
-
-A label-only `replay update` also works on a saved WebSocket tab. It updates
-only saved label metadata through a revision-checked server transform, preserving
-frames, queued drafts, targets and other tools. Labels collapse whitespace and
-are limited to 80 characters. Combining `--label` with request or target inputs
-still requires an HTTP tab. No request is sent by a label update.
+`--label` on `replay open` and `replay update` names the tab, so an agent sending
+several requests can mark what each one tests:
+`replay update --tab-id <tab-id> --label "closed orders" --yes`. `--label ""`
+clears the name. A label-only update also works on a saved WebSocket tab; it
+changes only the label and sends no request. Labels collapse whitespace and are
+limited to 80 characters. `--label` combined with request or target options
+needs an HTTP tab.
 
 ## Where sessions live on disk
 
-A session is a workspace: its own captured traffic, scope, replay tabs and
-settings. Sessions live under the data directory — `~/.sniper` by default, or
-whatever `SNIPER_DATA_DIR` names — and `session list` reports the path:
+A session holds its own captured traffic, scope, replay tabs and settings.
+Sessions live under the data directory, `~/.sniper` by default or whatever
+`SNIPER_DATA_DIR` names. `session list` shows each session's `storage_path`. A
+new session starts empty and becomes the active one at once.
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact session list
-```
-
-That returns a JSON array. Summarised, the one session is:
-
-```
-Default session  request_count=8  active=true
-  storage_path /tmp/sniper-doc-http/sessions/7111fb35-94c4-4a40-95dc-3137eeec1bd6
-```
-
-The data directory holds `certificates/`, `sessions/`, `runtime-state.json`,
-`startup-settings.json` and `ui-settings.json`. Each session directory holds
-`snapshot.json`, `state.json`, `workspace.json`, `transactions.ndjson`,
-`transactions.meta.ndjson` and two `.journal` files. Bodies are read back from
-`transactions.ndjson` by byte offset, so these files are not safe to hand-edit
-while Sniper is running.
-
-A new session starts empty and becomes the active one immediately:
-
-```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \
   session create --name 'orders-api' --yes
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact session switch --id <id> --yes
 ```
 
+The data directory holds `certificates/`, `sessions/`, `runtime-state.json`,
+`startup-settings.json` and `ui-settings.json`. Each session directory holds
+`snapshot.json`, `state.json`, `workspace.json`, `transactions.ndjson`,
+`transactions.meta.ndjson` and two `.journal` files. Sniper reads bodies back from
+`transactions.ndjson` by byte offset, so do not edit these files while Sniper is
+running.
+
 ## What the CLI hands back
 
-Captures are stored as they were sent. Cookies, `Authorization` headers and
-request bodies are all in what `capture http get` returns, so anything you pipe
-it into — a log file, a pasted snippet, a coding agent reading the output —
-receives them. Nothing redacts them; deciding what may leave the machine is
-the operator's job.
+Captures are stored as sent. `capture http get` returns cookies, `Authorization`
+headers and request bodies, so anything you pipe it into receives them: a log
+file, a pasted snippet, a coding agent. Nothing redacts them; you decide what
+leaves the machine.
 
-The local API is unauthenticated on its default loopback bind, which means any
-process running as you can read the capture. `SNIPER_UI_ADDR` can bind a
-non-loopback address instead; clients from another host then need the one-time
-bootstrap token Sniper prints at startup. `sniper-cli` without `--api` connects
-to whichever instance it discovers from `runtime-state.json` in the default data
-directory, which may not be the one you just started — pass `--api` explicitly
-when more than one is running.
+The local API has no authentication on its default loopback bind, so any process
+running as you can read the capture. If `SNIPER_UI_ADDR` binds a non-loopback
+address, clients from another host need the one-time bootstrap token Sniper
+prints at startup.
+
+Without `--api`, `sniper-cli` connects to the instance named in
+`runtime-state.json` in the default data directory, which may not be the one you
+started. Pass `--api` when more than one instance is running.
 
 ## What this does not do
 
-- Nothing is captured until a client is pointed at the proxy. Sniper does not
-  hook a browser or the system on its own.
-- HTTPS is only readable by clients that trust the Sniper root. Certificate-
-  pinned apps reject it by design; those hosts have to go in **SSL passthrough
-  hosts** under **Capture ▸ Settings**, and their traffic then tunnels through
-  unread.
-- The MITM path speaks HTTP/1.1 to the client side (`src/proxy.rs` serves both
-  the plain and the terminated-TLS connection with `http1()`), so it is not the
-  tool for reproducing an HTTP/2-specific problem.
-- Scope is host-based. There is no path-level scope.
-- One instance per data directory. A second `sniper` against the same one exits
-  with `another Sniper runtime is already using data dir ...` rather than
-  sharing it.
-- `sniper-cli` covers the operations in `sniper-cli manifest`. The in-scope
-  history toggle, the site map and the Tools tab are not among them.
-- Findings come from a passive scan of traffic that already flowed. Nothing
-  crawls or probes a target on its own. Each issue is listed once — a missing
-  header, a CORS policy or a cookie's flags per host, an exposed endpoint or an
-  open redirect per endpoint, a leaked value per value — and links to the first
-  request that showed it, not to every request that repeats it.
+- Sniper captures only clients that use the proxy. It does not hook a browser or
+  the system on its own.
+- HTTPS is readable only from clients that trust the Sniper root.
+  Certificate-pinned apps reject it. Add their hosts to **SSL passthrough hosts**
+  under **Capture ▸ Settings**; their traffic then tunnels through unread.
+- The MITM path speaks HTTP/1.1 to the client, so it is not the tool for an
+  HTTP/2-specific problem.
+- `sniper-cli manifest` lists what the CLI covers. The in-scope history toggle and
+  the Tools tab are not in it.
+- Findings come from a passive scan of traffic that already flowed; nothing crawls
+  or probes a target on its own. Each issue is listed once per host, endpoint or
+  value, and links to the first request that showed it.
 
-When you are done with the throwaway instance, stop it and delete its directory:
-its capture, its root CA and its session files are all under `SNIPER_DATA_DIR`.
-Other commands do write outside it — `sniper-cli skills install` writes into the
-Claude and Codex skill directories, and `SNIPER_INSTALL_CLI_PATH=1` edits your
-shell profile.
+## Cleaning up
+
+Stop the throwaway instance and delete its directory: its capture, root CA and
+session files all live under `SNIPER_DATA_DIR`. Some commands write outside it:
+`sniper-cli skills install` writes to the Claude and Codex skill directories, and
+`SNIPER_INSTALL_CLI_PATH=1` edits your shell profile.

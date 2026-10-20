@@ -129,9 +129,7 @@ fn schema_discovery_types_match_call_conversion() {
 fn install_schema_and_preflight_require_targets_and_valid_path_strings() {
     let f = Fixture::new();
     let schema = f.input_schema("skills.install");
-    for operation in ["skills.status", "skills.update_preview"] {
-        assert_eq!(schema, f.input_schema(operation));
-    }
+    assert_eq!(schema, f.input_schema("skills.status"));
     assert_eq!(schema["required"], json!([]));
     for field in ["codex", "claude", "all"] {
         assert_eq!(
@@ -225,13 +223,7 @@ fn install_dry_run_keeps_nullable_defaults_and_does_not_resolve_paths() {
 #[test]
 fn unselected_skill_roots_fail_before_confirmation_io_or_api_discovery() {
     let f = Fixture::new();
-    for (operation, action) in [
-        ("skills.install", "install"),
-        ("skills.status", "status"),
-        ("skills.update_preview", "update-preview"),
-        ("skills.enroll", "enroll"),
-        ("skills.stage_update", "stage-update"),
-    ] {
+    for (operation, action) in [("skills.install", "install"), ("skills.status", "status")] {
         for (selected, unused) in [("codex", "claude"), ("claude", "codex")] {
             let selector = format!("--{selected}");
             let root_option = format!("--{unused}-dir");
@@ -250,10 +242,6 @@ fn unselected_skill_roots_fail_before_confirmation_io_or_api_discovery() {
                 if selected_root {
                     input[format!("{selected}_dir")] = json!("relative/path");
                     direct.extend([selected_option.as_str(), "relative/path"]);
-                }
-                if action == "stage-update" {
-                    input["staging_dir"] = json!("candidate");
-                    direct.extend(["--staging-dir", "candidate"]);
                 }
                 let encoded = input.to_string();
                 for dry_run in [false, true] {
@@ -305,15 +293,8 @@ fn unselected_skill_roots_fail_before_confirmation_io_or_api_discovery() {
 #[test]
 fn selected_skill_roots_and_null_overrides_remain_valid_plans() {
     let f = Fixture::new();
-    for operation in [
-        "skills.install",
-        "skills.status",
-        "skills.update_preview",
-        "skills.enroll",
-        "skills.stage_update",
-    ] {
+    for operation in ["skills.install", "skills.status"] {
         let schema = f.input_schema(operation);
-        let allow_all = !matches!(operation, "skills.enroll" | "skills.stage_update");
         let constraints = schema["allOf"].as_array().unwrap();
         assert_eq!(constraints.len(), 2);
         for (constraint, (agent, root)) in constraints
@@ -321,18 +302,16 @@ fn selected_skill_roots_and_null_overrides_remain_valid_plans() {
             .zip([("codex", "codex_dir"), ("claude", "claude_dir")])
         {
             let choices = constraint["anyOf"].as_array().unwrap();
-            assert_eq!(choices.len(), if allow_all { 3 } else { 2 });
+            assert_eq!(choices.len(), 3);
             assert_eq!(choices[0], json!({"properties":{root:{"type":"null"}}}));
             assert_eq!(
                 choices[1],
                 json!({"required":[agent],"properties":{agent:{"const":true}}})
             );
-            if allow_all {
-                assert_eq!(
-                    choices[2],
-                    json!({"required":["all"],"properties":{"all":{"const":true}}})
-                );
-            }
+            assert_eq!(
+                choices[2],
+                json!({"required":["all"],"properties":{"all":{"const":true}}})
+            );
         }
         for selected in ["codex", "claude"] {
             for unused_selector in [json!(false), Value::Null] {
@@ -342,30 +321,19 @@ fn selected_skill_roots_and_null_overrides_remain_valid_plans() {
                     "codex"
                 };
                 let mut input = json!({selected:true,unused:unused_selector,format!("{selected}_dir"):"does-not-exist",format!("{unused}_dir"):null});
-                if operation == "skills.stage_update" {
-                    input["staging_dir"] = json!("candidate");
-                }
                 assert_eq!(f.call(operation, input.clone(), 0)["data"]["dry_run"], true);
                 input[format!("{unused}_dir")] = json!("unused-root");
                 assert_invalid(&f.call(operation, input, 2), operation);
             }
         }
-        if allow_all {
-            for selection in [
-                json!({"all":true,"codex":false,"claude":null}),
-                json!({"codex":true,"claude":true}),
-            ] {
-                let mut input = selection;
-                input["codex_dir"] = json!("codex-root");
-                input["claude_dir"] = json!("claude-root");
-                assert_eq!(f.call(operation, input, 0)["data"]["dry_run"], true);
-            }
-        } else {
-            let mut input = json!({"codex":true,"claude":true,"codex_dir":"codex-root","claude_dir":"claude-root"});
-            if operation == "skills.stage_update" {
-                input["staging_dir"] = json!("candidate");
-            }
-            assert_invalid(&f.call(operation, input, 2), operation);
+        for selection in [
+            json!({"all":true,"codex":false,"claude":null}),
+            json!({"codex":true,"claude":true}),
+        ] {
+            let mut input = selection;
+            input["codex_dir"] = json!("codex-root");
+            input["claude_dir"] = json!("claude-root");
+            assert_eq!(f.call(operation, input, 0)["data"]["dry_run"], true);
         }
     }
 }

@@ -71,7 +71,7 @@ function fixture() {
     targetServiceMapController: { filterChanged: () => mapFilterChanges.push(true) },
     SERVICE_MAP_FILTER_MIME_LABELS: { html: "HTML", script: "script", json: "JSON", css: "CSS", image: "images", websocket: "WebSocket", other: "other types" },
     SERVICE_MAP_FILTER_STATUS_LABELS: { success: "2xx", redirect: "3xx", clientError: "4xx", serverError: "5xx", other: "other status" },
-    state, els, document, activeConfirmDialog: null, filterSettingsReturnFocus: null, filterSettingsEditedControls: new Set(),
+    state, els, document, activeConfirmDialog: null, compareLoadGeneration: 0, filterSettingsReturnFocus: null, filterSettingsEditedControls: new Set(),
     uiSettingsLoadState: "loading", uiSettingsLoadPromise: null, displaySettingsReady: true, pendingDisplaySettingsApply: null,
     uiSettingsInitialPostGeneration: 0, uiSettingsInitialPostRevision: 0,
     updateDisplaySettingsReadiness() {}, hydrateDisplaySettingsForm() {},

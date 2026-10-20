@@ -170,6 +170,8 @@ struct StoredSessionSnapshot {
     #[serde(default)]
     recon: crate::recon::ReconSnapshot,
     #[serde(default)]
+    template_scans: crate::templates::scan::TemplateScanSnapshot,
+    #[serde(default)]
     oast_callbacks: Option<Vec<crate::oast::OastCallback>>,
     #[serde(default)]
     oast_cleared_callback_keys: Vec<crate::oast::OastCallbackDedupKey>,
@@ -332,6 +334,7 @@ pub struct SessionContext {
     pub scanner: Arc<ScannerStore>,
     pub sequence: Arc<SequenceStore>,
     pub recon: Arc<crate::recon::ReconStore>,
+    pub template_scans: Arc<crate::templates::scan::TemplateScanStore>,
     pub oast: Arc<crate::oast::OastStore>,
     pub workspace: Arc<WorkspaceStateStore>,
     websocket_journal_tx: Option<mpsc::Sender<WebSocketJournalCommand>>,
@@ -487,6 +490,9 @@ impl SessionContext {
                 snapshot.sequence_runs,
             )),
             recon: Arc::new(crate::recon::ReconStore::from_snapshot(snapshot.recon)),
+            template_scans: Arc::new(crate::templates::scan::TemplateScanStore::from_snapshot(
+                snapshot.template_scans,
+            )),
             oast: {
                 let store = Arc::new(crate::oast::OastStore::new_with_config(
                     max_entries,
@@ -1067,6 +1073,7 @@ impl SessionContext {
             sequence_definitions: self.sequence.snapshot_definitions().await,
             sequence_runs: self.sequence.snapshot_runs(Some(self.max_entries)).await,
             recon: self.recon.snapshot(),
+            template_scans: self.template_scans.snapshot(),
             oast_callbacks: Some(self.oast.snapshot().await),
             oast_cleared_callback_keys: self.oast.snapshot_cleared_keys().await,
             oast_registration: self.oast.snapshot_registration().await,
@@ -3413,7 +3420,7 @@ fn tighten_private_dir(_path: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn create_private_file(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn create_private_file(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -3423,7 +3430,7 @@ fn create_private_file(path: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(not(unix))]
-fn create_private_file(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn create_private_file(path: &Path) -> io::Result<fs::File> {
     fs::File::create(path)
 }
 
@@ -4727,7 +4734,7 @@ fn persist_session_snapshot(
     write_json(&snapshot_path(&storage_dir), snapshot)
 }
 
-fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     write_json_with_commit_status(path, value).map_err(|failure| failure.error)
 }
 

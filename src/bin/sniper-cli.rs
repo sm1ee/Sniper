@@ -28,6 +28,7 @@ use sniper::{
         BodyEncoding, EditableRequest, EditableResponse, HeaderRecord, RequestTargetOverride,
         TransactionRecord, TransactionSummary, WebSocketSessionRecord, WebSocketSessionSummary,
     },
+    recon::{ReconEndpoint, ReconJob, StartRecon},
     runtime::{
         RuntimeSettingsSnapshot, MAX_OAST_POLLING_INTERVAL_SECS, MIN_OAST_POLLING_INTERVAL_SECS,
     },
@@ -185,10 +186,21 @@ enum Command {
         #[command(subcommand)]
         command: FindingsCommand,
     },
+    /// Discover endpoints with explicit scope and provider consent; list retained evidence.
+    Recon {
+        #[command(subcommand)]
+        command: ReconCommand,
+    },
     /// Manage session-scoped passive regex rules for captured response previews and headers.
     Scanner {
         #[command(subcommand)]
         command: ScannerCommand,
+    },
+    /// Manage the Nuclei template library and the passive templates that judge
+    /// in-scope captured traffic.
+    Templates {
+        #[command(subcommand)]
+        command: TemplatesCommand,
     },
     /// Read stored session event messages.
     #[command(name = "event-log")]
@@ -300,6 +312,100 @@ enum FindingsCommand {
     Get(FindingGetArgs),
     /// Count all findings currently retained in the session.
     Count(SessionReadArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ReconCommand {
+    /// Read this session's complete retained Recon inventory and job statuses.
+    List(ReconSessionArgs),
+    /// Start asynchronous network discovery; requires --dry-run or --yes.
+    Start(ReconStartArgs),
+    /// Cancel local work for this exact job; an accepted urlscan scan cannot be recalled.
+    Stop(ReconStopArgs),
+}
+
+#[derive(Args, Debug)]
+struct ReconSessionArgs {
+    #[arg(long)]
+    session_id: Uuid,
+}
+
+#[derive(Args, Debug)]
+struct ReconStopArgs {
+    #[arg(long)]
+    session_id: Uuid,
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug)]
+struct ReconStartArgs {
+    #[arg(long)]
+    session_id: Uuid,
+    #[arg(long)]
+    target_url: String,
+    #[arg(long)]
+    include_subdomains: bool,
+    /// Repeat to select sources. No provider is enabled implicitly.
+    #[arg(long = "source", required = true, value_parser = ["crawler", "urlscan", "wayback", "urlscan_submit"])]
+    sources: Vec<String>,
+    /// Per-job collection budget; 0 means unbounded, not disabled.
+    #[arg(long, default_value_t = 0)]
+    max_requests: usize,
+    /// Crawl depth budget; 0 means unbounded, not seed-only.
+    #[arg(long, default_value_t = 0)]
+    max_depth: usize,
+    /// New endpoint budget; 0 means unbounded.
+    #[arg(long, default_value_t = 0)]
+    max_endpoints: usize,
+    /// Page budget per history provider; 0 means unbounded.
+    #[arg(long, default_value_t = 0)]
+    max_pages: usize,
+    /// Acknowledge sharing the target hostname with selected history providers.
+    #[arg(long)]
+    history_acknowledged: bool,
+    /// Separately acknowledge submitting the full target URL for a new urlscan scan.
+    #[arg(long)]
+    scan_acknowledged: bool,
+    /// Required for urlscan_submit; unlisted is not private.
+    #[arg(long, value_parser = ["private", "unlisted", "public"])]
+    scan_visibility: Option<String>,
+}
+
+impl ReconStartArgs {
+    fn request(&self) -> StartRecon {
+        StartRecon {
+            session_id: self.session_id,
+            target_url: self.target_url.clone(),
+            include_subdomains: self.include_subdomains,
+            sources: self.sources.clone(),
+            max_requests: self.max_requests,
+            max_depth: self.max_depth,
+            max_endpoints: self.max_endpoints,
+            max_pages: self.max_pages,
+            history_acknowledged: self.history_acknowledged,
+            scan_acknowledged: self.scan_acknowledged,
+            scan_visibility: self.scan_visibility.clone(),
+        }
+    }
+}
+
+impl ReconCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::List(_) => "recon.list",
+            Self::Start(_) => "recon.start",
+            Self::Stop(_) => "recon.stop",
+        }
+    }
+
+    fn session_id(&self) -> Uuid {
+        match self {
+            Self::List(args) => args.session_id,
+            Self::Start(args) => args.session_id,
+            Self::Stop(args) => args.session_id,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -473,6 +579,404 @@ struct FindingGetArgs {
 #[derive(Debug, Deserialize, Serialize)]
 struct FindingsCount {
     count: usize,
+}
+
+#[derive(Subcommand, Debug)]
+enum TemplatesCommand {
+    /// The installed template release: check for, download or import one.
+    Library {
+        #[command(subcommand)]
+        command: TemplatesLibraryCommand,
+    },
+    /// List templates in the installed release.
+    List(TemplatesListArgs),
+    /// One template's metadata, why Sniper can or cannot run it, and its YAML.
+    Get(TemplatesGetArgs),
+    /// Turn passive templates on or off.
+    Passive {
+        #[command(subcommand)]
+        command: TemplatesPassiveCommand,
+    },
+    /// Send templates to targets you name, when you ask: Template Scan.
+    Scan {
+        #[command(subcommand)]
+        command: TemplatesScanCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TemplatesScanCommand {
+    /// Count the templates and requests a scan would send; sends nothing.
+    Preview(TemplatesScanArgs),
+    /// Send each selected template's requests to each target.
+    Start(TemplatesScanArgs),
+    /// The session's scans, newest first, without their results.
+    List(TemplatesScanSessionArgs),
+    /// One scan with its results and its latest requests.
+    Get(TemplatesScanIdArgs),
+    /// Stop the running scan.
+    Stop(TemplatesScanIdArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct TemplatesScanArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// An http(s) origin, optionally with a path; repeat for up to 20. Its
+    /// host must be in Scope.
+    #[arg(long = "target", required = true)]
+    targets: Vec<String>,
+    /// A template id; repeat for several. Not with a filter.
+    #[arg(long = "id")]
+    ids: Vec<String>,
+    #[command(flatten)]
+    filter: TemplatesFilterArgs,
+    /// A risk to allow by name: intrusive, default-login, bruteforce,
+    /// token-spray, credential-stuffing, fuzz, fuzzing, dast, osint,
+    /// method:put, method:delete or method:patch. Repeat for several;
+    /// templates with any other risk are left out, and dos never runs.
+    #[arg(long = "allow-risk")]
+    allow_risks: Vec<String>,
+    /// Requests a second across the scan.
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=50))]
+    rate: u64,
+    /// Templates in flight at once.
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u64).range(1..=8))]
+    concurrency: u64,
+    /// The most requests the scan sends, redirects included.
+    #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u64).range(1..=50_000))]
+    max_requests: u64,
+    /// Apply this session's Match & Replace rules to the requests; one a rule
+    /// would send elsewhere is not sent.
+    #[arg(long)]
+    apply_match_replace: bool,
+}
+
+#[derive(Args, Debug)]
+struct TemplatesScanSessionArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TemplatesScanIdArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Scan id, as `templates scan list` shows it.
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Subcommand, Debug)]
+enum TemplatesLibraryCommand {
+    /// The installed release, its counts, and any download or import in progress.
+    Status,
+    /// Ask GitHub for the newest release tag: one request to api.github.com.
+    Check,
+    /// Download the newest release from GitHub, verify it and install it.
+    Download,
+    /// Install a release archive (.tar.gz) from disk, for networks without GitHub.
+    Import(TemplatesImportArgs),
+}
+
+#[derive(Args, Debug)]
+struct TemplatesImportArgs {
+    /// A nuclei-templates release .tar.gz, at most 64 MiB.
+    #[arg(long)]
+    file: PathBuf,
+}
+
+#[derive(Args, Debug, Default, Clone)]
+struct TemplatesFilterArgs {
+    /// Substring of an id, name, path, tag or CVE, case-insensitive.
+    #[arg(long)]
+    search: Option<String>,
+    /// Comma-separated severities: info, low, medium, high, critical, unknown.
+    #[arg(long)]
+    severity: Option<String>,
+    /// One exact tag.
+    #[arg(long)]
+    tag: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+struct TemplatesListArgs {
+    #[command(flatten)]
+    filter: TemplatesFilterArgs,
+    /// Comma-separated protocols: http, dns, network, code and the rest.
+    #[arg(long)]
+    protocol: Option<String>,
+    /// Templates Sniper can run passively or actively, or neither.
+    #[arg(long, value_parser = ["passive", "active", "unsupported"])]
+    support: Option<String>,
+    /// Only passive templates that are on (true) or off (false).
+    #[arg(long)]
+    enabled: Option<bool>,
+    #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u64).range(1..=30_000))]
+    limit: u64,
+    #[arg(long, default_value_t = 0)]
+    offset: u64,
+}
+
+#[derive(Args, Debug)]
+struct TemplatesGetArgs {
+    /// Template id, as `templates list` shows it.
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Subcommand, Debug)]
+enum TemplatesPassiveCommand {
+    /// Turn passive templates on or off by id, by filter, or all at once.
+    SetEnabled(TemplatesPassiveArgs),
+}
+
+#[derive(Args, Debug)]
+struct TemplatesPassiveArgs {
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+    /// A template id; repeat for several. Not with a filter or --all.
+    #[arg(long = "id")]
+    ids: Vec<String>,
+    #[command(flatten)]
+    filter: TemplatesFilterArgs,
+    /// Every passive-capable template.
+    #[arg(long)]
+    all: bool,
+}
+
+impl TemplatesCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Library { command } => match command {
+                TemplatesLibraryCommand::Status => "templates.library.status",
+                TemplatesLibraryCommand::Check => "templates.library.check",
+                TemplatesLibraryCommand::Download => "templates.library.download",
+                TemplatesLibraryCommand::Import(_) => "templates.library.import",
+            },
+            Self::List(_) => "templates.list",
+            Self::Get(_) => "templates.get",
+            Self::Passive { .. } => "templates.passive.set_enabled",
+            Self::Scan { command } => match command {
+                TemplatesScanCommand::Preview(_) => "templates.scan.preview",
+                TemplatesScanCommand::Start(_) => "templates.scan.start",
+                TemplatesScanCommand::List(_) => "templates.scan.list",
+                TemplatesScanCommand::Get(_) => "templates.scan.get",
+                TemplatesScanCommand::Stop(_) => "templates.scan.stop",
+            },
+        }
+    }
+}
+
+/// Nuclei's own rule for a template id, checked before it becomes a path.
+fn valid_template_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 200
+        && id
+            .split(['-', '_'])
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+fn templates_filter_json(filter: &TemplatesFilterArgs) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    for (key, value) in [
+        ("search", &filter.search),
+        ("severity", &filter.severity),
+        ("tag", &filter.tag),
+    ] {
+        if let Some(value) = value {
+            map.insert(key.into(), json!(value));
+        }
+    }
+    map
+}
+
+fn templates_list_path(args: &TemplatesListArgs) -> String {
+    let mut params: Vec<(String, String)> = templates_filter_json(&args.filter)
+        .into_iter()
+        .map(|(key, value)| (key, value.as_str().unwrap_or_default().to_string()))
+        .collect();
+    if let Some(protocol) = &args.protocol {
+        params.push(("protocol".into(), protocol.clone()));
+    }
+    if let Some(support) = &args.support {
+        params.push(("support".into(), support.clone()));
+    }
+    if let Some(enabled) = args.enabled {
+        params.push(("enabled".into(), enabled.to_string()));
+    }
+    params.push(("limit".into(), args.limit.to_string()));
+    params.push(("offset".into(), args.offset.to_string()));
+    format!("/api/templates?{}", encode_query(params))
+}
+
+/// The passive request body: ids, a filter, or every passive-capable template,
+/// exactly one of them.
+fn templates_passive_body(args: &TemplatesPassiveArgs) -> Result<Value> {
+    let filter = templates_filter_json(&args.filter);
+    let ways = [!args.ids.is_empty(), !filter.is_empty(), args.all];
+    if ways.iter().filter(|way| **way).count() != 1 {
+        bail!("give template ids, a filter (--search, --severity, --tag), or --all; exactly one");
+    }
+    if let Some(id) = args.ids.iter().find(|id| !valid_template_id(id)) {
+        bail!("`{id}` is not a template id");
+    }
+    Ok(if args.ids.is_empty() {
+        let mut filter = filter;
+        filter.insert("support".into(), json!("passive"));
+        json!({"filter": filter, "enabled": args.enabled})
+    } else {
+        json!({"ids": args.ids, "enabled": args.enabled})
+    })
+}
+
+/// A scan request: exactly one of ids or a filter, as the server takes it.
+/// A preview sends nothing; a start carries the operator's acknowledgment,
+/// which `--yes` gave.
+fn templates_scan_body(
+    args: &TemplatesScanArgs,
+    session_id: Option<Uuid>,
+    preview: bool,
+) -> Result<Value> {
+    let filter = templates_filter_json(&args.filter);
+    if args.ids.is_empty() == filter.is_empty() {
+        bail!("give template ids or a filter (--search, --severity, --tag); exactly one");
+    }
+    if let Some(id) = args.ids.iter().find(|id| !valid_template_id(id)) {
+        bail!("`{id}` is not a template id");
+    }
+    let mut body = json!({
+        "session_id": session_id,
+        "targets": args.targets,
+        "allow_risks": args.allow_risks,
+        "rate": args.rate,
+        "concurrency": args.concurrency,
+        "max_requests": args.max_requests,
+        "apply_match_replace": args.apply_match_replace,
+    });
+    if args.ids.is_empty() {
+        body["filter"] = Value::Object(filter);
+    } else {
+        body["ids"] = json!(args.ids);
+    }
+    body[if preview { "preview" } else { "acknowledged" }] = json!(true);
+    Ok(body)
+}
+
+fn templates_scan_input(args: &TemplatesScanArgs) -> Value {
+    let mut input = templates_filter_json(&args.filter);
+    for (key, value) in [
+        ("session_id", json!(args.session_id)),
+        ("targets", json!(args.targets)),
+        ("ids", json!(args.ids)),
+        ("allow_risks", json!(args.allow_risks)),
+        ("rate", json!(args.rate)),
+        ("concurrency", json!(args.concurrency)),
+        ("max_requests", json!(args.max_requests)),
+        ("apply_match_replace", json!(args.apply_match_replace)),
+    ] {
+        input.insert(key.into(), value);
+    }
+    Value::Object(input)
+}
+
+fn templates_input_preview(command: &TemplatesCommand) -> Value {
+    match command {
+        TemplatesCommand::Library {
+            command: TemplatesLibraryCommand::Import(args),
+        } => json!({ "file": args.file }),
+        TemplatesCommand::Library { .. } => json!({}),
+        TemplatesCommand::List(args) => {
+            let mut input = templates_filter_json(&args.filter);
+            input.insert("protocol".into(), json!(args.protocol));
+            input.insert("support".into(), json!(args.support));
+            input.insert("enabled".into(), json!(args.enabled));
+            input.insert("limit".into(), json!(args.limit));
+            input.insert("offset".into(), json!(args.offset));
+            Value::Object(input)
+        }
+        TemplatesCommand::Get(args) => json!({ "id": args.id }),
+        TemplatesCommand::Passive {
+            command: TemplatesPassiveCommand::SetEnabled(args),
+        } => {
+            let mut input = templates_filter_json(&args.filter);
+            input.insert("enabled".into(), json!(args.enabled));
+            input.insert("ids".into(), json!(args.ids));
+            input.insert("all".into(), json!(args.all));
+            Value::Object(input)
+        }
+        TemplatesCommand::Scan { command } => match command {
+            TemplatesScanCommand::Preview(args) | TemplatesScanCommand::Start(args) => {
+                templates_scan_input(args)
+            }
+            TemplatesScanCommand::List(args) => json!({ "session_id": args.session_id }),
+            TemplatesScanCommand::Get(args) | TemplatesScanCommand::Stop(args) => {
+                json!({ "session_id": args.session_id, "id": args.id })
+            }
+        },
+    }
+}
+
+fn templates_api_preview(command: &TemplatesCommand) -> Value {
+    match command {
+        TemplatesCommand::Library { command } => match command {
+            TemplatesLibraryCommand::Status => api_preview("GET", "/api/templates/library", None),
+            TemplatesLibraryCommand::Check => {
+                api_preview("POST", "/api/templates/library/check", Some(json!({})))
+            }
+            TemplatesLibraryCommand::Download => api_preview(
+                "POST",
+                "/api/templates/library/download",
+                Some(json!({ "acknowledged": true })),
+            ),
+            TemplatesLibraryCommand::Import(args) => api_preview(
+                "POST",
+                "/api/templates/library/import",
+                Some(json!({ "file": args.file, "content_type": "application/gzip" })),
+            ),
+        },
+        TemplatesCommand::List(args) => api_preview("GET", templates_list_path(args), None),
+        TemplatesCommand::Get(args) => {
+            api_preview("GET", format!("/api/templates/{}", args.id), None)
+        }
+        TemplatesCommand::Passive {
+            command: TemplatesPassiveCommand::SetEnabled(args),
+        } => api_preview(
+            "POST",
+            "/api/templates/passive",
+            templates_passive_body(args).ok(),
+        ),
+        TemplatesCommand::Scan { command } => match command {
+            TemplatesScanCommand::Preview(args) => api_preview(
+                "POST",
+                "/api/templates/scans",
+                templates_scan_body(args, args.session_id, true).ok(),
+            ),
+            TemplatesScanCommand::Start(args) => api_preview(
+                "POST",
+                "/api/templates/scans",
+                templates_scan_body(args, args.session_id, false).ok(),
+            ),
+            TemplatesScanCommand::List(args) => api_preview(
+                "GET",
+                session_query_path("/api/templates/scans", args.session_id),
+                None,
+            ),
+            TemplatesScanCommand::Get(args) => api_preview(
+                "GET",
+                session_query_path(
+                    &format!("/api/templates/scans/{}", args.id),
+                    args.session_id,
+                ),
+                None,
+            ),
+            TemplatesScanCommand::Stop(args) => api_preview(
+                "POST",
+                format!("/api/templates/scans/{}/stop", args.id),
+                Some(json!({ "session_id": args.session_id })),
+            ),
+        },
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -954,7 +1458,7 @@ struct ServiceMapFilterArgs {
     /// Hide rows that have no response.
     #[arg(long)]
     hide_without_responses: bool,
-    /// Keep only rows whose URL has a query string.
+    /// Keep only rows whose URL has a query string; body fields do not match.
     #[arg(long)]
     only_parameterized: bool,
 }
@@ -1005,6 +1509,11 @@ enum ServiceMapCommand {
         after_help = "Requires the current active session UUID. Reads every retained row of the origin: each method and path template (ID segments as {number}, {uuid}, {hex} or mixed {id}), query and form, top-level JSON or multipart body field names from each observed method/path variant's newest 20 rows, with native JSON types preserved and text types guessed from their values, response statuses with media types, and the credentials the rows showed as security schemes. No captured value is included. Operations that only answered with pages or static files, OPTIONS requests and methods OpenAPI cannot hold are left out; at most 500 operations are listed. No target requests, inactive-session loading or automatic reads."
     )]
     Openapi(ServiceMapOpenApiArgs),
+    /// Show one origin's requests and those of the origins it links to, in time order by page load.
+    #[command(
+        after_help = "Reads the map's newest --max-records rows (default 10000, at most 50000) without bodies. Lanes are the origin and up to five origins it links to directly by an Origin or Referer header or a redirect. Steps are their rows in order, one phase per page load (a navigation), with the same request in one page load folded into a count. Open a step's row with capture http get --id <record_id>."
+    )]
+    Flow(ServiceMapFlowArgs),
     /// List what no rule names across the whole map, most widespread first.
     #[command(
         after_help = "Reads the session's whole map (every retained row) and gathers each origin's unnamed signals: Server and X-Powered-By banners, header names and cookie names no rule names. Each signal comes with how many origins and rows carried it, up to five of those origins and three evidence tokens to open with `scope service-map-evidence`. Most widespread first; --kind keeps one kind and --limit bounds the list. snapshot preserves source-map coverage, including complete, stopped_by and omitted_rows; omitted_signals counts only signals hidden by --limit, after --kind. No target requests or body reads beyond the map's own."
@@ -1179,6 +1688,22 @@ struct ServiceMapOpenApiArgs {
     /// Exact canonical HTTP(S) origin to describe.
     #[arg(long, value_parser = parse_service_map_origin)]
     origin: String,
+}
+
+#[derive(Args, Debug)]
+struct ServiceMapFlowArgs {
+    /// Read this session without switching to it; omitted means the active session.
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    /// Exact canonical HTTP(S) origin to follow.
+    #[arg(long, value_parser = parse_service_map_origin)]
+    origin: String,
+    /// Keep only rows of in-scope hosts.
+    #[arg(long)]
+    in_scope_only: bool,
+    /// Newest retained rows to read, 1 to 50000.
+    #[arg(long, default_value_t = 10_000, value_parser = parse_service_map_max_records)]
+    max_records: usize,
 }
 
 #[derive(Args, Debug)]
@@ -1481,6 +2006,8 @@ enum FuzzerCommand {
     Run(FuzzerRunArgs),
     /// Show fuzzer attack status by ID
     Status(FuzzerStatusArgs),
+    /// Stop the session's running fuzzer attack by ID
+    Stop(FuzzerStatusArgs),
     /// Show fuzzer attack results by ID
     Results(FuzzerResultsArgs),
     /// List past fuzzer attacks
@@ -1491,9 +2018,37 @@ enum FuzzerCommand {
 struct FuzzerRunArgs {
     #[arg(long)]
     session_id: Option<Uuid>,
-    /// Mark async intent in output; the current Sniper API still returns after completion
+    /// Return once the attack starts instead of when it ends
     #[arg(long, alias = "async")]
     r#async: bool,
+    /// How payloads fill the marked positions
+    #[arg(long, value_enum, default_value_t)]
+    attack_type: FuzzerAttackTypeArg,
+    /// Put payloads into the URL as they are instead of percent-encoding them
+    #[arg(long)]
+    raw_payloads: bool,
+    /// Requests sent at once, 1-16
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=16))]
+    concurrency: u8,
+}
+
+/// How payloads fill the marked positions, as Burp Intruder names it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum FuzzerAttackTypeArg {
+    /// Each position in turn takes every payload; the others keep their value
+    Sniper,
+    /// Every position takes the same payload at once
+    #[default]
+    BatteringRam,
+}
+
+impl FuzzerAttackTypeArg {
+    fn api_name(self) -> &'static str {
+        match self {
+            Self::Sniper => "sniper",
+            Self::BatteringRam => "battering_ram",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -1752,119 +2307,9 @@ enum SkillsCommand {
     Install(SkillsInstallArgs),
     /// Inspect installed skill hashes on this CLI host without changing files.
     #[command(
-        after_help = "Reads files on this CLI host, even when --api points elsewhere; no network or file changes.\ncurrent means installed bytes match the current bundle. modified_or_outdated means they differ;\nthis alone cannot distinguish personal edits from an older bundle.\nExit status 0 means inspection completed. Check each entries[].status and error_code;\nit does not mean every installation is current. Preserve edits before any manual update."
+        after_help = "Reads skill files on this CLI host, even when --api points elsewhere.\ncurrent means the installed file matches this build; modified_or_outdated means it differs.\nExit status 0 means the inspection finished; check each entries[].status."
     )]
     Status(SkillsInstallArgs),
-    /// Experimental: record local enrollment for one installed, exact bundled skill.
-    Enroll(SingleSkillArgs),
-    /// Compare local files and enrollment with this CLI's bundle; never writes.
-    #[command(
-        after_help = "Reads files on this CLI host without network or file changes.\nmodified compares installed bytes with the enrollment baseline, not the current bundle.\nupdate_available means the enrolled baseline is unchanged and a different bundle is available.\nAfter a manual update, status may be current while update-preview remains modified.\nExit status 0 means inspection completed. Check each entries[].state, stage_eligible and error_code;\nit does not mean every installation is current or safe to replace. Preserve edited files."
-    )]
-    UpdatePreview(SkillsInstallArgs),
-    /// Experimental: stage a bundled candidate in a new directory without activating it.
-    StageUpdate(SkillsStageArgs),
-    /// Experimental: explicitly activate one reviewed staged update with a durable operation ID.
-    #[command(
-        after_help = "Requires --yes outside dry run. Select exactly one agent and retain the original operation UUID.\nThe staged candidate, enrollment baseline and executing binary bundle must agree; different bytes need a strictly newer semantic version.\nAfter uncertain output, inspect skills update-result with that same UUID before any deliberate retry.\nDoes not grant automatic-update consent or reload the agent. Linux exchange and macOS swap adapters only; Windows is unsupported."
-    )]
-    ApplyUpdate(SkillsApplyArgs),
-    /// Inspect one local update transaction without changing files or resuming it.
-    #[command(
-        after_help = "Read-only and CLI-host local; no --yes, API contact, resume, repair, or agent reload.\nInspect both state and current_state: a historical applied receipt does not prove the active file remains unchanged.\nKeep the original operation UUID and all transaction artifacts. Windows inspection is currently unsupported."
-    )]
-    UpdateResult(SkillsOperationArgs),
-    /// Explicitly restore the baseline of one update transaction, preserving displaced files.
-    #[command(
-        after_help = "Requires --yes outside dry run. Use the original apply-update UUID, not a new rollback ID.\nOnly a bound transaction can be restored; changed or unsupported objects can block rollback.\nAfter uncertain output, inspect skills update-result with the same UUID. Preserve all artifacts and do not blindly retry."
-    )]
-    RollbackUpdate(SkillsOperationArgs),
-    /// Inspect the selected agent's host-local automatic-update policy without writes.
-    #[command(
-        after_help = "CLI-host local only, even with remote --api. Uses the target already stored in the policy; no directory overrides.
-Read-only inspection never creates, repairs, resumes, or enables a policy. Inspect state and error_code; paused is not permission to retry."
-    )]
-    AutoUpdateStatus(StoredSkillArgs),
-    /// Explicitly authorize future bundled updates of one unchanged managed installation.
-    #[command(
-        after_help = "Requires --yes outside dry run. Records consent only; it does not update SKILL.md now.
-Select exactly one agent and an unchanged managed baseline. Re-enabling an existing policy requires its current --policy-revision and creates a fresh authorization generation.
-Only host-local bundled templates are eligible; no network fetch, arbitrary content, or agent reload."
-    )]
-    EnableAutoUpdates(SkillsEnableAutoUpdatesArgs),
-    /// Revoke future automatic updates for the policy's stored target.
-    #[command(
-        after_help = "Requires --yes outside dry run. Uses the selected agent's stored target; no directory overrides.
-Preserves active files, receipts, attempts and recovery artifacts. Does not roll back an already committed update."
-    )]
-    DisableAutoUpdates(StoredSkillArgs),
-    /// Make one guarded automatic-update attempt for an explicitly enabled local policy.
-    #[command(
-        after_help = "Requires --yes outside dry run. Uses the policy's stored target; no directory overrides or replacement operation IDs.
-No policy means no authorization. Modified, replaced, unsupported or uncertain state is preserved and pauses updates. Inspect auto-update-status before any deliberate re-enable."
-    )]
-    AutoUpdateOnce(StoredSkillArgs),
-}
-
-#[derive(Args, Debug, Default)]
-#[command(group(ArgGroup::new("skill_agent").args(["codex", "claude"]).required(true)))]
-struct StoredSkillArgs {
-    #[arg(long)]
-    codex: bool,
-    #[arg(long)]
-    claude: bool,
-}
-
-#[derive(Args, Debug)]
-struct SkillsEnableAutoUpdatesArgs {
-    #[command(flatten)]
-    target: SingleSkillArgs,
-    /// Current policy revision from auto-update-status; required when re-enabling a policy.
-    #[arg(long)]
-    policy_revision: Option<u64>,
-}
-
-#[derive(Args, Debug, Default)]
-#[command(group(ArgGroup::new("skill_agent").args(["codex", "claude"]).required(true)))]
-struct SingleSkillArgs {
-    #[arg(long)]
-    codex: bool,
-    #[arg(long)]
-    claude: bool,
-    #[arg(long)]
-    codex_dir: Option<PathBuf>,
-    #[arg(long)]
-    claude_dir: Option<PathBuf>,
-}
-
-#[derive(Args, Debug)]
-struct SkillsStageArgs {
-    #[command(flatten)]
-    target: SingleSkillArgs,
-    /// New local directory for candidate and staging receipt; it must not exist.
-    #[arg(long)]
-    staging_dir: PathBuf,
-}
-
-#[derive(Args, Debug)]
-struct SkillsApplyArgs {
-    #[command(flatten)]
-    target: SingleSkillArgs,
-    /// Existing reviewed staging directory made by this CLI's bundled version.
-    #[arg(long)]
-    staging_dir: PathBuf,
-    /// Canonical lowercase hyphenated UUID; retain it for result inspection and rollback.
-    #[arg(long)]
-    operation_id: String,
-}
-
-#[derive(Args, Debug)]
-struct SkillsOperationArgs {
-    #[command(flatten)]
-    target: SingleSkillArgs,
-    /// The original apply-update UUID, in canonical lowercase hyphenated form.
-    #[arg(long)]
-    operation_id: String,
 }
 
 #[derive(Args, Debug, Default)]
@@ -2484,7 +2929,9 @@ impl ApiClient {
             Some(body) => request.json(&body).send().await,
             None => request.send().await,
         }
-        .with_context(|| format!("failed to {} {}", method, path))?;
+        .map_err(|error| {
+            api_request_error(error, &method, format!("failed to {} {}", method, path))
+        })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -2503,14 +2950,28 @@ impl ApiClient {
             bail!("request to {} failed ({}): {}", path, status, detail);
         }
 
-        response
-            .json::<T>()
-            .await
-            .with_context(|| format!("failed to decode JSON response from {}", path))
+        response.json::<T>().await.map_err(|error| {
+            api_request_error(
+                error,
+                &method,
+                format!("failed to decode JSON response from {}", path),
+            )
+        })
     }
 
     fn url(&self, path: &str) -> Url {
         api_url(&self.base_url, path).expect("API base URL should be normalized")
+    }
+}
+
+fn api_request_error(error: reqwest::Error, method: &Method, message: String) -> anyhow::Error {
+    let error = anyhow::Error::new(error);
+    if method == Method::GET {
+        // Valid query text must not turn a transport or decode failure into an
+        // input error merely by containing words like "invalid".
+        error.context(ReadRequestError { message })
+    } else {
+        error.context(message)
     }
 }
 
@@ -2690,6 +3151,9 @@ struct FuzzerRunPayload {
     source_transaction_id: Option<Uuid>,
     http_version: Option<String>,
     target: Option<RequestTargetOverride>,
+    attack_type: &'static str,
+    url_encode: bool,
+    concurrency: u8,
 }
 
 #[derive(Serialize)]
@@ -2744,7 +3208,9 @@ impl Command {
             Command::Session { command } => command.operation_name(),
             Command::Capture { command } => command.operation_name(),
             Command::Findings { command } => command.operation_name(),
+            Command::Recon { command } => command.operation_name(),
             Command::Scanner { command } => command.operation_name(),
+            Command::Templates { command } => command.operation_name(),
             Command::EventLog { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
             Command::Replay { command } => command.operation_name(),
@@ -2929,6 +3395,7 @@ impl TargetCommand {
                 }
                 Some(ServiceMapCommand::Parameters(_)) => "target.service_map.parameters.get",
                 Some(ServiceMapCommand::Openapi(_)) => "target.service_map.openapi.get",
+                Some(ServiceMapCommand::Flow(_)) => "target.service_map.flow.get",
                 Some(ServiceMapCommand::Unnamed(_)) => "target.service_map.unnamed.get",
                 None => "target.service_map.get",
             },
@@ -2958,6 +3425,7 @@ impl FuzzerCommand {
             FuzzerCommand::SetPayloads(_) => "fuzzer.set_payloads",
             FuzzerCommand::Run(_) => "fuzzer.run",
             FuzzerCommand::Status(_) => "fuzzer.status",
+            FuzzerCommand::Stop(_) => "fuzzer.stop",
             FuzzerCommand::Results(_) => "fuzzer.results",
             FuzzerCommand::List(_) => "fuzzer.list",
         }
@@ -3054,16 +3522,6 @@ impl SkillsCommand {
         match self {
             SkillsCommand::Install(_) => "skills.install",
             SkillsCommand::Status(_) => "skills.status",
-            SkillsCommand::Enroll(_) => "skills.enroll",
-            SkillsCommand::UpdatePreview(_) => "skills.update_preview",
-            SkillsCommand::StageUpdate(_) => "skills.stage_update",
-            SkillsCommand::ApplyUpdate(_) => "skills.apply_update",
-            SkillsCommand::UpdateResult(_) => "skills.update_result",
-            SkillsCommand::RollbackUpdate(_) => "skills.rollback_update",
-            SkillsCommand::AutoUpdateStatus(_) => "skills.auto_update_status",
-            SkillsCommand::EnableAutoUpdates(_) => "skills.enable_auto_updates",
-            SkillsCommand::DisableAutoUpdates(_) => "skills.disable_auto_updates",
-            SkillsCommand::AutoUpdateOnce(_) => "skills.auto_update_once",
         }
     }
 }
@@ -3115,96 +3573,6 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &[],
             vec![json!({"all":true})],
-        ),
-        op(
-            "skills.enroll",
-            "skills enroll <--codex|--claude>",
-            "Experimental: record explicit local enrollment of one exact bundled skill. Does not permit automatic updates or change SKILL.md.",
-            Write,
-            true,
-            &[],
-            vec![json!({"codex":true,"codex_dir":"/tmp/example-skills"})],
-        ),
-        op(
-            "skills.update_preview",
-            "skills update-preview",
-            "Compare local skills and enrollment against this CLI's bundle without changing files. Unmanaged files remain unmanaged.",
-            Read,
-            false,
-            &[],
-            vec![json!({"all":true}), json!({"codex":true,"codex_dir":"/tmp/example-skills"})],
-        ),
-        op(
-            "skills.stage_update",
-            "skills stage-update <--codex|--claude> --staging-dir <new-directory>",
-            "Experimental: stage one enrolled, unchanged skill's bundled update and receipt in a new local directory. Does not activate it or replace the active SKILL.md.",
-            Write,
-            true,
-            &["staging_dir"],
-            vec![json!({"codex":true,"codex_dir":"/tmp/example-skills","staging_dir":"/tmp/example-skill-candidate"})],
-        ),
-        op(
-            "skills.apply_update",
-            "skills apply-update <--codex|--claude> --staging-dir <reviewed-directory> --operation-id <uuid>",
-            "Experimental: explicitly activate one strictly bound, newer staged bundle. Retain the operation UUID for read-only result inspection and rollback; no startup updates or agent reload.",
-            Write,
-            true,
-            &["staging_dir", "operation_id"],
-            vec![json!({"codex":true,"codex_dir":"/tmp/example-skills","staging_dir":"/tmp/example-skill-candidate","operation_id":"22222222-2222-2222-2222-222222222222"})],
-        ),
-        op(
-            "skills.update_result",
-            "skills update-result <--codex|--claude> --operation-id <original-uuid>",
-            "Read one local skill update transaction and current state without resuming or changing files. Use the original operation UUID after lost output or any recovery-required result.",
-            Read,
-            false,
-            &["operation_id"],
-            vec![json!({"codex":true,"codex_dir":"/tmp/example-skills","operation_id":"22222222-2222-2222-2222-222222222222"})],
-        ),
-        op(
-            "skills.rollback_update",
-            "skills rollback-update <--codex|--claude> --operation-id <original-uuid>",
-            "Explicitly restore a partial or completed skill update's baseline using its original operation UUID. Preserve transaction artifacts and displaced files; never blindly retry an uncertain mutation.",
-            Write,
-            true,
-            &["operation_id"],
-            vec![json!({"codex":true,"codex_dir":"/tmp/example-skills","operation_id":"22222222-2222-2222-2222-222222222222"})],
-        ),
-        op(
-            "skills.auto_update_status",
-            "skills auto-update-status <--codex|--claude>",
-            "Read the selected agent's host-local automatic-update policy and stored target without creating, repairing, or resuming anything. Remote --api is never contacted.",
-            Read,
-            false,
-            &[],
-            vec![json!({"codex":true}), json!({"claude":true})],
-        ),
-        op(
-            "skills.enable_auto_updates",
-            "skills enable-auto-updates <--codex|--claude> [--policy-revision <current-revision>]",
-            "Explicitly authorize future updates from this host's bundled templates for one unchanged managed installation. Records consent only; does not update active files. Re-enabling requires the current policy revision and creates a fresh authorization generation.",
-            Write,
-            true,
-            &[],
-            vec![json!({"codex":true,"codex_dir":"/tmp/example-skills"}), json!({"codex":true,"codex_dir":"/tmp/example-skills","policy_revision":2})],
-        ),
-        op(
-            "skills.disable_auto_updates",
-            "skills disable-auto-updates <--codex|--claude>",
-            "Revoke future automatic updates using the selected agent's stored target. Preserve active files and all policy, attempt, transaction and recovery artifacts; do not roll back committed updates.",
-            Write,
-            true,
-            &[],
-            vec![json!({"codex":true})],
-        ),
-        op(
-            "skills.auto_update_once",
-            "skills auto-update-once <--codex|--claude>",
-            "Run one guarded local bundled-update attempt under existing explicit consent. Uses only the stored target; edited, replaced, unsupported or uncertain objects are preserved and pause updates. Never fetch content or reload an agent.",
-            Write,
-            true,
-            &[],
-            vec![json!({"codex":true})],
         ),
         op(
             "session.list",
@@ -3302,6 +3670,114 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &["browser"],
             vec![json!({"browser":"chrome"})],
+        ),
+        op(
+            "templates.library.status",
+            "templates library status",
+            "Read the installed Nuclei template release (tag, SHA-256, whether the release's checksum verified it), template counts by what Sniper can run, the passive templates turned on, and any download or import in progress. Local; contacts nothing.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "templates.library.check",
+            "templates library check",
+            "Ask GitHub for the newest nuclei-templates release tag: one request to api.github.com through the environment's proxy. Reports whether it differs from the installed one; installs nothing.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "templates.library.download",
+            "templates library download",
+            "Download the newest nuclei-templates release (MIT) from GitHub, verify it against the SHA-256 the release publishes, and install it for every session. Waits until installed. Templates are data: code, javascript and headless templates are listed but never run.",
+            Write,
+            true,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "templates.library.import",
+            "templates library import --file <path>",
+            "Install a nuclei-templates release .tar.gz from this machine, at most 64 MiB, for networks that cannot reach GitHub. Waits until installed. An imported archive is not checksum-verified.",
+            Write,
+            true,
+            &["file"],
+            vec![json!({"file":"nuclei-templates.tar.gz"})],
+        ),
+        op(
+            "templates.list",
+            "templates list",
+            "List templates in the installed release with severity, tags, protocol, whether Sniper can run each passively or actively and why not, risk tags, and whether a passive one is on. Filters narrow it; limit and offset page it.",
+            Read,
+            false,
+            &[],
+            vec![json!({"support":"passive","limit":50}), json!({"search":"wordpress","severity":"high,critical"})],
+        ),
+        op(
+            "templates.get",
+            "templates get --id <id>",
+            "Read one template: metadata, description, references, why Sniper can or cannot run it, and its YAML text.",
+            Read,
+            false,
+            &["id"],
+            vec![json!({"id":"tech-detect"})],
+        ),
+        op(
+            "templates.passive.set_enabled",
+            "templates passive set-enabled --enabled <true|false>",
+            "Turn passive templates on or off, by ids, by a filter, or all passive-capable ones. Enabled passive templates judge captured responses whose host is in a non-empty Scope include list while Passive Scan is on; they never send requests. Findings appear under category nuclei; Rescan applies a change to stored history.",
+            Write,
+            true,
+            &["enabled"],
+            vec![json!({"ids":["tech-detect"],"enabled":true}), json!({"tag":"waf","enabled":false})],
+        ),
+        op(
+            "templates.scan.preview",
+            "templates scan preview --target <url>",
+            "Count what a Template Scan would send: the templates selected by ids or a filter that can run actively, the requests they make before any redirect, and the templates left out by risk. Checks every target is an http(s) origin in a non-empty Scope include list and not Sniper itself. Sends nothing.",
+            Read,
+            false,
+            &["targets"],
+            vec![json!({"targets":["https://app.example.com"],"severity":"high,critical"}), json!({"targets":["https://app.example.com"],"ids":["git-config"]})],
+        ),
+        op(
+            "templates.scan.start",
+            "templates scan start --target <url>",
+            "Send each selected template's requests to each target, paced and bounded, and keep in HTTP history only the exchanges a template matched; their findings appear under category nuclei as nuclei:<template-id>. Redirects are followed only while they stay in Scope. Templates with risk tags or PUT, DELETE or PATCH are left out unless allowed; dos never runs. Returns once the scan starts; read it with templates scan get.",
+            Write,
+            true,
+            &["targets"],
+            vec![json!({"targets":["https://app.example.com"],"severity":"high,critical","rate":5})],
+        ),
+        op(
+            "templates.scan.list",
+            "templates scan list",
+            "List the session's Template Scan jobs, newest first: status, targets, counts of planned, sent, failed, blocked and matched requests, warnings. Results and the request log are left out; templates scan get has them.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "templates.scan.get",
+            "templates scan get --id <uuid>",
+            "Read one Template Scan job with its results (each naming the matched history record) and its latest 200 requests with status, time and errors.",
+            Read,
+            false,
+            &["id"],
+            vec![json!({"id":"22222222-2222-2222-2222-222222222222"})],
+        ),
+        op(
+            "templates.scan.stop",
+            "templates scan stop --id <uuid>",
+            "Stop the session's running Template Scan. Requests in flight are dropped; matches already stored stay.",
+            Write,
+            true,
+            &["id"],
+            vec![json!({"id":"22222222-2222-2222-2222-222222222222"})],
         ),
         op(
             "capture.http.list",
@@ -3494,11 +3970,11 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "fuzzer.run",
             "fuzzer run",
-            "Run the Fuzzer, sending generated HTTP requests.",
+            "Run the Fuzzer, sending the HTTP requests its positions and payloads make, and wait for the attack to end unless `async` is set.",
             Write,
             true,
             &[],
-            vec![json!({})],
+            vec![json!({}), json!({"attack_type":"sniper","concurrency":4})],
         ),
         op(
             "fuzzer.status",
@@ -3506,6 +3982,15 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             "Read Fuzzer attack status.",
             Read,
             false,
+            &["id"],
+            vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "fuzzer.stop",
+            "fuzzer stop --id <uuid>",
+            "Stop the session's running Fuzzer attack. Requests in flight are dropped; results already received stay.",
+            Write,
+            true,
             &["id"],
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
         ),
@@ -3860,6 +4345,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         ),
     ];
     operations.extend(service_map_manifest_operations());
+    operations.extend(recon_manifest_operations());
     operations.extend(scanner_manifest_operations());
     operations.extend(saved_manifest_operations());
     operations
@@ -4011,6 +4497,41 @@ fn service_map_parameters_output_schema() -> Value {
         "omitted_parameters"
     ]);
     result
+}
+
+fn service_map_flow_output_schema() -> Value {
+    use sniper::service_map_flow::MAX_LANES;
+    let string = json!({"type":"string"});
+    let timestamp = json!({"type":"string","format":"date-time"});
+    let target = service_map_object(json!({"origin":string,"path":string}));
+    let mut step = service_map_object(json!({
+        "origin":string,"method":string,"path":string,
+        "request_kind":{"type":"string","enum":sniper::service_map::REQUEST_KINDS},
+        "count":{"type":"integer","minimum":1},
+        "first_seen":timestamp,"last_seen":timestamp,
+        "evidence":{"type":"array","minItems":1,"maxItems":2,"items":string},
+        "record_id":{"type":"string","format":"uuid"}
+    }));
+    step["properties"]["status"] = json!({"type":"integer","minimum":0,"maximum":65535});
+    step["properties"]["redirect"] = target.clone();
+    let mut phase = service_map_object(json!({"steps":{"type":"array","items":step}}));
+    phase["properties"]["page"] = target;
+    let mut flow = service_map_object(json!({
+        "schema_version":{"type":"integer","enum":[1]},
+        "session_id":{"type":"string","format":"uuid"},
+        "origin":string,
+        "lanes":{"type":"array","minItems":1,"maxItems":MAX_LANES,"items":string},
+        "phases":{"type":"array","items":phase},
+        "considered_rows":{"type":"integer","minimum":0},
+        "flow_rows":{"type":"integer","minimum":0},
+        "complete":{"type":"boolean"}
+    }));
+    flow["properties"]["stopped_by"] = json!({
+        "type":"array","items":string,
+        "description":"Why the flow is incomplete: the row window, lanes_limit (more than five linked origins) or steps_limit (the oldest steps were dropped)."
+    });
+    flow["description"] = json!("One origin's retained requests and those of the origins it links to directly, in time order, one phase per page load. A step's count folds the same request in one page load; evidence holds its first and newest rows, and record_id the newest.");
+    flow
 }
 
 fn service_map_openapi_output_schema() -> Value {
@@ -4468,12 +4989,16 @@ fn service_map_output_schema(operation: &str) -> Option<Value> {
             | "target.service_map.socket_peer_matches.get"
             | "target.service_map.parameters.get"
             | "target.service_map.openapi.get"
+            | "target.service_map.flow.get"
             | "target.service_map.unnamed.get"
     ) {
         return None;
     }
     if operation == "target.service_map.unnamed.get" {
         return Some(service_map_unnamed_output_schema());
+    }
+    if operation == "target.service_map.flow.get" {
+        return Some(service_map_flow_output_schema());
     }
     if operation == "target.service_map.parameters.get" {
         return Some(service_map_parameters_output_schema());
@@ -4626,6 +5151,21 @@ fn service_map_output_schema(operation: &str) -> Option<Value> {
     let mut credentials = request_count.clone();
     credentials["description"] = json!("Of those rows, how many named the source origin and sent Access-Control-Allow-Credentials: true. Absent when none.");
     links["properties"]["cors_credentials_count"] = credentials;
+    // Optional: older servers, and origins no header names, omit it.
+    let mut sources = service_map_object(json!({
+        "source_origin":string,"request_count":request_count.clone()
+    }));
+    for field in [
+        "request_kinds",
+        "cors_allowed_count",
+        "cors_credentials_count",
+    ] {
+        sources["properties"][field] = links["properties"][field].clone();
+    }
+    let header_sources = json!({
+        "type":"array","items":sources,
+        "description":"The header_links rows per source origin, a row naming it in both Origin and Referer counted once."
+    });
     let mut redirect = service_map_object(json!({
         "target_origin":string,"target_path":string,
         "relationship":{"type":"string","enum":["redirect_instruction"]},
@@ -4643,6 +5183,7 @@ fn service_map_output_schema(operation: &str) -> Option<Value> {
         "redirects":{"type":"array","items":redirect},
         "header_links":{"type":"array","items":links}
     }));
+    origin["properties"]["header_sources"] = header_sources;
     origin["properties"]["technology_observations"] = json!({
         "type":"array","maxItems":32,"items":service_map_technology_schema(false, CatalogVersion::V2)
     });
@@ -4774,8 +5315,9 @@ fn service_map_input_schema(operation: &str) -> Option<Value> {
                 "status_classes":{"type":["array","null"],"items":{"type":"string","enum":SERVICE_MAP_STATUS_CLASSES},"description":"Display filter: keep only rows in these status classes. Omitted, null or empty keeps every class."},
                 "hidden_extensions":{"type":["array","null"],"items":{"type":"string","pattern":"^\\.?[A-Za-z0-9]{1,16}$"},"description":"Display filter: hide rows whose path ends in these extensions, such as png or woff2. Omitted, null or empty hides none."},
                 "hide_without_responses":{"type":["boolean","null"],"default":false,"description":"Display filter: hide rows that have no response. Null uses false."},
-                "only_parameterized":{"type":["boolean","null"],"default":false,"description":"Display filter: keep only rows whose URL has a query string. Null uses false."}
-            }
+                "only_parameterized":{"type":["boolean","null"],"default":false,"description":"Display filter: keep only rows whose URL has a query string; body fields do not match. Null uses false."}
+            },
+            "not":{"required":["all_rows","max_records"],"properties":{"all_rows":{"const":true},"max_records":{"type":"integer"}}}
         })),
         "target.service_map.socket_peer_matches.get" => Some(json!({
             "type":"object", "additionalProperties":false, "required":["session_id","evidence_id"],
@@ -4810,6 +5352,15 @@ fn service_map_input_schema(operation: &str) -> Option<Value> {
                 "session_id":legacy_uuid_input_schema(false, "Session UUID; the active session when omitted."),
                 "kind":{"type":"string","enum":["banners","headers","cookies"],"description":"Keep only one kind of signal."},
                 "limit":{"type":"integer","minimum":1,"maximum":1000,"default":100,"description":"Signals returned, most widespread first."}
+            }
+        })),
+        "target.service_map.flow.get" => Some(json!({
+            "type":"object", "additionalProperties":false, "required":["origin"],
+            "properties":{
+                "session_id":legacy_uuid_input_schema(true, "Read this session without switching it; omitted or null selects the active session."),
+                "origin":{"type":"string","description":"Exact canonical HTTP(S) origin to follow, as a map card names it."},
+                "in_scope_only":{"type":["boolean","null"],"default":false,"description":"Keep only rows of in-scope hosts."},
+                "max_records":{"type":["integer","null"],"minimum":1,"maximum":50000,"default":10000,"description":"Newest retained rows to read."}
             }
         })),
         "target.service_map.openapi.get" => Some(json!({
@@ -4898,6 +5449,20 @@ fn service_map_parameters_path(args: &ServiceMapParametersArgs) -> String {
     )
 }
 
+fn service_map_flow_path(args: &ServiceMapFlowArgs) -> String {
+    let mut query = vec![
+        ("origin".into(), args.origin.clone()),
+        ("max_records".into(), args.max_records.to_string()),
+    ];
+    if args.in_scope_only {
+        query.push(("in_scope_only".into(), "true".into()));
+    }
+    session_query_path(
+        &format!("/api/target/service-map/flow?{}", encode_query(query)),
+        args.session_id,
+    )
+}
+
 fn service_map_openapi_path(args: &ServiceMapOpenApiArgs) -> String {
     let query = encode_query(vec![("origin".into(), args.origin.clone())]);
     session_query_path(
@@ -4982,6 +5547,15 @@ fn service_map_manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"session_id":"00000000-0000-0000-0000-000000000000","origin":"https://example.com"})],
         ),
         op(
+            "target.service_map.flow.get",
+            "scope service-map flow --origin <origin> [--session-id <uuid>] [--in-scope-only] [--max-records N]",
+            "Show one origin's retained requests and those of the origins it links to directly by Origin, Referer or a redirect, in time order with one phase per page load. The same request in one page load folds into a count; each step names its newest row's record_id. Reads the newest max_records rows (default 10000) without bodies and sends nothing to targets.",
+            CliSideEffect::Read,
+            false,
+            &["origin"],
+            vec![json!({"origin":"https://example.com"}), json!({"session_id":"00000000-0000-0000-0000-000000000000","origin":"https://example.com","max_records":50000})],
+        ),
+        op(
             "target.service_map.html_generators.get",
             "scope service-map html-generators --session-id <uuid> --evidence-id <token>",
             "Explicitly inspect one retained UTF-8 text/html response preview for literal WordPress or Drupal meta generator declarations. Active session only; no loading or activation. Fixed generator catalog 1, independent of response-header catalogs and URL references. One inspection GET after existing identity checks, with no target requests, automatic/batch reads, retries, or fallback. Returns safe products, numeric versions, bounded counters and original preview byte spans, never raw content. Inspect completeness, head closure, truncation and parser stop; partial/unsupported never means no generator found. Declarations do not prove installed software or ownership.",
@@ -5018,6 +5592,284 @@ fn service_map_manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"session_id":"00000000-0000-0000-0000-000000000000","evidence_id":"v1.00000000-0000-0000-0000-000000000000.00000000-0000-0000-0000-000000000000.1.00000000-0000-0000-0000-000000000000.00000000-0000-0000-0000-000000000000","technology_catalog_version":2}), json!({"session_id":"00000000-0000-0000-0000-000000000000","evidence_id":"v1.00000000-0000-0000-0000-000000000000.00000000-0000-0000-0000-000000000000.1.00000000-0000-0000-0000-000000000000.00000000-0000-0000-0000-000000000000","include_socket_peer":true,"technology_catalog_version":1})],
         ),
     ]
+}
+
+fn recon_manifest_operations() -> Vec<CliOperationSpec> {
+    use CliSideEffect::{Read, Write};
+    let session = "00000000-0000-0000-0000-000000000000";
+    vec![
+        op("recon.list", "recon list --session-id <uuid>", "Read all retained Recon jobs and endpoint evidence from one explicit session without target or provider requests. URLs can contain sensitive data.", Read, false, &["session_id"], vec![json!({"session_id":session})]),
+        op("recon.start", "recon start --session-id <uuid> --target-url <url> --source <source>", "Start asynchronous, explicitly scoped endpoint discovery. Requires target authorization, write confirmation and separate provider-sharing acknowledgments. Zero budgets are unbounded; API timeout does not stop the job.", Write, true, &["session_id","target_url","sources"], vec![
+            json!({"session_id":session,"target_url":"https://example.com/","sources":["crawler"],"max_requests":50,"max_depth":2,"max_endpoints":500}),
+            json!({"session_id":session,"target_url":"https://example.com/","sources":["urlscan","wayback"],"history_acknowledged":true,"max_pages":2,"max_endpoints":500}),
+            json!({"session_id":session,"target_url":"https://example.com/","sources":["urlscan_submit"],"scan_acknowledged":true,"scan_visibility":"private","max_endpoints":500}),
+        ]),
+        op("recon.stop", "recon stop --session-id <uuid> --id <uuid>", "Cancel this exact session-owned job's local work. Cannot cancel a scan already accepted by urlscan; never retry a start automatically.", Write, true, &["session_id","id"], vec![json!({"session_id":session,"id":"22222222-2222-2222-2222-222222222222"})]),
+    ]
+}
+
+fn recon_input_schema(operation: &str) -> Option<Value> {
+    if !matches!(operation, "recon.list" | "recon.start" | "recon.stop") {
+        return None;
+    }
+    let mut schema = json!({"type":"object","additionalProperties":false,"required":["session_id"],"properties":{
+        "session_id":{"type":"string","format":"uuid","description":"Explicit session UUID. Never switches the active session."}
+    }});
+    if operation == "recon.stop" {
+        schema["required"] = json!(["session_id", "id"]);
+        schema["properties"]["id"] = json!({"type":"string","format":"uuid"});
+    } else if operation == "recon.start" {
+        schema["required"] = json!(["session_id", "target_url", "sources"]);
+        let fields = json!({
+            "target_url":{"type":"string","format":"uri","description":"Absolute HTTP(S) URL without credentials, control characters, wildcard hostname or port zero. Scope is hostname, scheme and port, not path. urlscan_submit also rejects any query or fragment; do not submit a confidential path."},
+            "include_subdomains":{"type":"boolean","default":false,"description":"Explicitly expand scope to DNS subdomains; not valid for IP literals."},
+            "sources":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,"items":{"type":"string","enum":["crawler","urlscan","wayback","urlscan_submit"]}},
+            "history_acknowledged":{"type":"boolean","default":false,"description":"Explicit consent to disclose the target hostname to selected history providers, separate from --yes."},
+            "scan_acknowledged":{"type":"boolean","default":false,"description":"Explicit consent to submit the full target URL to urlscan and run its remote browser, separate from --yes."},
+            "scan_visibility":{"type":["string","null"],"enum":["private","unlisted","public",null],"description":"Required non-null for urlscan_submit; no fallback. Unlisted is not private."}
+        });
+        for (key, value) in fields.as_object().unwrap() {
+            schema["properties"][key] = value.clone();
+        }
+        for field in ["max_requests", "max_depth", "max_endpoints", "max_pages"] {
+            schema["properties"][field] = json!({"type":"integer","minimum":0,"maximum":usize::MAX,"default":0,"description":"Optional collection budget; zero means unbounded. max_pages applies per history provider; max_endpoints counts new entries."});
+        }
+        schema["allOf"] = json!([
+            {"if":{"properties":{"sources":{"contains":{"enum":["urlscan","wayback"]}}}},"then":{"required":["history_acknowledged"],"properties":{"history_acknowledged":{"const":true}}}},
+            {"if":{"properties":{"sources":{"contains":{"const":"urlscan_submit"}}}},"then":{"required":["scan_acknowledged","scan_visibility"],"properties":{"scan_acknowledged":{"const":true},"scan_visibility":{"type":"string","enum":["private","unlisted","public"]}}}}
+        ]);
+    }
+    Some(schema)
+}
+
+fn recon_output_schema(operation: &str) -> Option<Value> {
+    if !matches!(operation, "recon.list" | "recon.start" | "recon.stop") {
+        return None;
+    }
+    let uuid = json!({"type":"string","format":"uuid"});
+    if operation == "recon.stop" {
+        return Some(service_map_object(
+            json!({"session_id":uuid,"stopped":{"type":"boolean","enum":[true]}}),
+        ));
+    }
+    let timestamp = json!({"type":"string","format":"date-time"});
+    let string = json!({"type":"string"});
+    let strings = json!({"type":"array","items":string});
+    let count = json!({"type":"integer","minimum":0});
+    let source = service_map_object(json!({
+        "source":string,"status":string,"requests":count,"discovered":count,
+        "truncated":{"type":"boolean"},"warnings":strings
+    }));
+    let job = service_map_object(json!({
+        "id":uuid,"target_url":string,"status":string,"started_at":timestamp,
+        "finished_at":{"type":["string","null"],"format":"date-time"},
+        "sources":{"type":"array","items":source},"error":{"type":["string","null"]}
+    }));
+    if operation == "recon.start" {
+        return Some(job);
+    }
+    let evidence = service_map_object(json!({
+        "source":string,"kind":string,"location":string,"timestamp":{"type":["string","null"]},
+        "status":{"type":["integer","null"],"minimum":0,"maximum":65535}
+    }));
+    let endpoint = service_map_object(json!({
+        "url":string,"method":string,"raw_urls":strings,"evidence":{"type":"array","items":evidence},
+        "first_seen":timestamp,"last_seen":timestamp
+    }));
+    let mut schema = service_map_object(json!({
+        "session_id":uuid,"jobs":{"type":"array","items":job},"endpoints":{"type":"array","items":endpoint}
+    }));
+    schema["description"] = json!("Full retained session inventory, not paginated. Check each source status, truncated and warnings. Completed can still be partial; history/candidate/observed evidence never proves current liveness. URLs and evidence can be sensitive.");
+    Some(schema)
+}
+
+fn recon_command_from_input(operation: &str, input: &Value) -> Result<ReconCommand> {
+    let session_id = call_required(operation, input, "session_id")?;
+    Ok(match operation {
+        "recon.list" => ReconCommand::List(ReconSessionArgs { session_id }),
+        "recon.stop" => ReconCommand::Stop(ReconStopArgs {
+            session_id,
+            id: call_required(operation, input, "id")?,
+        }),
+        "recon.start" => ReconCommand::Start(ReconStartArgs {
+            session_id,
+            target_url: call_required(operation, input, "target_url")?,
+            sources: call_required(operation, input, "sources")?,
+            include_subdomains: call_present(operation, input, "include_subdomains")?
+                .unwrap_or(false),
+            max_requests: call_present(operation, input, "max_requests")?.unwrap_or(0),
+            max_depth: call_present(operation, input, "max_depth")?.unwrap_or(0),
+            max_endpoints: call_present(operation, input, "max_endpoints")?.unwrap_or(0),
+            max_pages: call_present(operation, input, "max_pages")?.unwrap_or(0),
+            history_acknowledged: call_present(operation, input, "history_acknowledged")?
+                .unwrap_or(false),
+            scan_acknowledged: call_present(operation, input, "scan_acknowledged")?
+                .unwrap_or(false),
+            scan_visibility: call_optional(operation, input, "scan_visibility")?,
+        }),
+        _ => bail!("unknown operation `{operation}`"),
+    })
+}
+
+fn recon_input_preview(command: &ReconCommand) -> Value {
+    match command {
+        ReconCommand::List(args) => json!({"session_id":args.session_id}),
+        ReconCommand::Start(args) => json!(args.request()),
+        ReconCommand::Stop(args) => json!({"session_id":args.session_id,"id":args.id}),
+    }
+}
+
+fn recon_api_preview(command: &ReconCommand) -> Value {
+    match command {
+        ReconCommand::List(args) => api_preview(
+            "GET",
+            session_query_path("/api/recon", Some(args.session_id)),
+            None,
+        ),
+        ReconCommand::Start(args) => {
+            api_preview("POST", "/api/recon/jobs", Some(json!(args.request())))
+        }
+        ReconCommand::Stop(args) => api_preview(
+            "POST",
+            format!("/api/recon/jobs/{}/stop", args.id),
+            Some(json!({"session_id":args.session_id})),
+        ),
+    }
+}
+
+async fn discover_recon_api(cli_api: Option<String>) -> Result<ApiClient> {
+    // A redirect or transport retry must never repeat a submission elsewhere.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(CLI_API_TIMEOUT)
+        .build()
+        .context("failed to build Recon API client")?;
+    let base_url = discover_api_base_url(cli_api, &client).await?;
+    Ok(ApiClient {
+        base_url,
+        client: client.clone(),
+        long_client: client,
+        session_metadata_write_errors: false,
+    })
+}
+
+#[derive(Debug)]
+struct ReconCliError {
+    code: &'static str,
+    status: Option<u16>,
+    write: bool,
+}
+
+impl fmt::Display for ReconCliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self.code {
+            "HTTP_STATUS_ERROR" => "Recon API returned a non-success status",
+            "INVALID_RESPONSE" => "Recon API returned an invalid or mismatched response",
+            _ => "Recon API request failed or timed out",
+        })
+    }
+}
+impl std::error::Error for ReconCliError {}
+
+async fn recon_request<T: DeserializeOwned>(
+    api: &ApiClient,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<T> {
+    let write = method == Method::POST;
+    let error = |code, status| ReconCliError {
+        code,
+        status,
+        write,
+    };
+    let mut request = api.client.request(method, api.url(path));
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|_| error("API_REQUEST_FAILED", None))?;
+    if !response.status().is_success() {
+        // Do not echo provider diagnostics or raw URLs in failure envelopes.
+        return Err(error("HTTP_STATUS_ERROR", Some(response.status().as_u16())).into());
+    }
+    response
+        .json()
+        .await
+        .map_err(|_| error("INVALID_RESPONSE", None).into())
+}
+
+#[derive(Deserialize, Serialize)]
+struct ReconInventory {
+    session_id: Uuid,
+    jobs: Vec<ReconJob>,
+    endpoints: Vec<ReconEndpoint>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ReconStopped {
+    session_id: Uuid,
+    stopped: bool,
+}
+
+async fn handle_recon(api: ApiClient, command: ReconCommand) -> Result<()> {
+    let session_id = command.session_id();
+    let invalid = |write| ReconCliError {
+        code: "INVALID_RESPONSE",
+        status: None,
+        write,
+    };
+    match command {
+        ReconCommand::List(_) => {
+            let inventory: ReconInventory = recon_request(
+                &api,
+                Method::GET,
+                &session_query_path("/api/recon", Some(session_id)),
+                None,
+            )
+            .await?;
+            if inventory.session_id != session_id {
+                return Err(invalid(false).into());
+            }
+            print_session_read_json(&inventory, session_id)
+        }
+        ReconCommand::Start(args) => {
+            let job: ReconJob = recon_request(
+                &api,
+                Method::POST,
+                "/api/recon/jobs",
+                Some(json!(args.request())),
+            )
+            .await?;
+            if job.target_url != args.target_url
+                || job
+                    .sources
+                    .iter()
+                    .map(|source| &source.source)
+                    .ne(args.sources.iter())
+            {
+                return Err(invalid(true).into());
+            }
+            print_session_read_json(&job, session_id)
+        }
+        ReconCommand::Stop(args) => {
+            let stopped: ReconStopped = recon_request(
+                &api,
+                Method::POST,
+                &format!("/api/recon/jobs/{}/stop", args.id),
+                Some(json!({"session_id":session_id})),
+            )
+            .await?;
+            if stopped.session_id != session_id || !stopped.stopped {
+                return Err(invalid(true).into());
+            }
+            print_session_read_json(&stopped, session_id)
+        }
+    }
 }
 
 fn scanner_manifest_operations() -> Vec<CliOperationSpec> {
@@ -5101,14 +5953,13 @@ fn op(
         output_schema: intercept_rule_update_output_schema(operation)
             .or_else(|| replay_saved_tab_output_schema(operation))
             .or_else(|| service_map_output_schema(operation))
+            .or_else(|| recon_output_schema(operation))
             .or_else(|| scanner_output_schema(operation))
             .or_else(|| upstream_peer_output_schema(operation))
             .or_else(|| history_retention_output_schema(operation))
             .or_else(|| session_list_output_schema(operation))
             .or_else(|| session_read_output_schema(operation))
             .or_else(|| skills_status_output_schema(operation))
-            .or_else(|| skills_managed_output_schema(operation))
-            .or_else(|| skills_auto_update_output_schema(operation))
             .or_else(|| examples_output_schema(operation))
             .or_else(|| history_list_output_schema(operation))
             .unwrap_or_else(|| {
@@ -5120,6 +5971,71 @@ fn op(
             }),
         examples,
     }
+}
+
+fn templates_input_schema(operation: &str) -> Option<Value> {
+    let filter = json!({
+        "search":{"type":["string","null"],"maxLength":200,"description":"Substring of an id, name, path, tag or CVE, case-insensitive."},
+        "severity":{"type":["string","null"],"maxLength":200,"description":"Comma-separated severities: info, low, medium, high, critical, unknown."},
+        "tag":{"type":["string","null"],"maxLength":200,"description":"One exact tag, case-insensitive."}
+    });
+    let empty = json!({"type":"object","additionalProperties":false,"required":[],"properties":{}});
+    Some(match operation {
+        "templates.library.status" | "templates.library.check" | "templates.library.download" => {
+            empty
+        }
+        "templates.library.import" => json!({
+            "type":"object","additionalProperties":false,"required":["file"],
+            "properties":{"file":{"type":"string","minLength":1,"description":"Path to a nuclei-templates release .tar.gz on this machine, at most 64 MiB."}}
+        }),
+        "templates.list" => {
+            let mut properties = filter;
+            properties["protocol"] = json!({"type":["string","null"],"maxLength":200,"description":"Comma-separated protocols: http, dns, network, code and the rest."});
+            properties["support"] = json!({"type":["string","null"],"enum":["passive","active","unsupported",null],"description":"Templates Sniper can run passively or actively, or neither. Omitted or null lists all."});
+            properties["enabled"] = json!({"type":["boolean","null"],"description":"Only passive templates that are on (true) or off (false)."});
+            properties["limit"] = json!({"type":["integer","null"],"minimum":1,"maximum":30000,"default":200,"description":"Page size. Null uses 200."});
+            properties["offset"] = json!({"type":["integer","null"],"minimum":0,"default":0,"description":"Templates to skip. Null uses 0."});
+            json!({"type":"object","additionalProperties":false,"required":[],"properties":properties})
+        }
+        "templates.get" => json!({
+            "type":"object","additionalProperties":false,"required":["id"],
+            "properties":{"id":{"type":"string","minLength":1,"maxLength":200,"pattern":"^([a-zA-Z0-9]+[-_])*[a-zA-Z0-9]+$","description":"Template id."}}
+        }),
+        "templates.scan.preview" | "templates.scan.start" => {
+            let mut properties = filter;
+            properties["session_id"] = legacy_uuid_input_schema(
+                true,
+                "The session to scan in; omitted or null selects the active session.",
+            );
+            properties["targets"] = json!({"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1,"maxLength":2048},"description":"http(s) origins, optionally with a path, without credentials, query or fragment; each host must be in a non-empty Scope include list."});
+            properties["ids"] = json!({"type":["array","null"],"items":{"type":"string","pattern":"^([a-zA-Z0-9]+[-_])*[a-zA-Z0-9]+$"},"maxItems":30000,"description":"Template ids. Exactly one of ids or a filter (search, severity, tag)."});
+            properties["allow_risks"] = json!({"type":["array","null"],"items":{"type":"string","enum":["intrusive","default-login","bruteforce","token-spray","credential-stuffing","fuzz","fuzzing","dast","osint","method:put","method:delete","method:patch"]},"description":"Risks to allow by name; templates with any other risk are left out. dos never runs."});
+            properties["rate"] = json!({"type":["integer","null"],"minimum":1,"maximum":50,"default":10,"description":"Requests a second across the scan. Null uses 10."});
+            properties["concurrency"] = json!({"type":["integer","null"],"minimum":1,"maximum":8,"default":4,"description":"Templates in flight at once. Null uses 4."});
+            properties["max_requests"] = json!({"type":["integer","null"],"minimum":1,"maximum":50000,"default":10000,"description":"The most requests the scan sends, redirects included. Null uses 10000."});
+            properties["apply_match_replace"] = json!({"type":["boolean","null"],"default":false,"description":"Apply the session's Match & Replace rules; a request a rule would send elsewhere is not sent."});
+            json!({"type":"object","additionalProperties":false,"required":["targets"],"properties":properties})
+        }
+        "templates.scan.list" => json!({
+            "type":"object","additionalProperties":false,"required":[],
+            "properties":{"session_id":legacy_uuid_input_schema(true, "Omitted or null selects the active session.")}
+        }),
+        "templates.scan.get" | "templates.scan.stop" => json!({
+            "type":"object","additionalProperties":false,"required":["id"],
+            "properties":{
+                "session_id":legacy_uuid_input_schema(true, "Omitted or null selects the active session."),
+                "id":legacy_uuid_input_schema(false, "Scan id.")
+            }
+        }),
+        "templates.passive.set_enabled" => {
+            let mut properties = filter;
+            properties["enabled"] = json!({"type":"boolean","description":"Turn the selected templates on (true) or off (false)."});
+            properties["ids"] = json!({"type":["array","null"],"items":{"type":"string","pattern":"^([a-zA-Z0-9]+[-_])*[a-zA-Z0-9]+$"},"maxItems":30000,"description":"Template ids. Exactly one of ids, a filter (search, severity, tag) or all."});
+            properties["all"] = json!({"type":["boolean","null"],"default":false,"description":"Every passive-capable template."});
+            json!({"type":"object","additionalProperties":false,"required":["enabled"],"properties":properties})
+        }
+        _ => return None,
+    })
 }
 
 fn examples_output_schema(operation: &str) -> Option<Value> {
@@ -5304,170 +6220,19 @@ fn skills_status_output_schema(operation: &str) -> Option<Value> {
     }))
 }
 
-fn is_skill_auto_update_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        "skills.auto_update_status"
-            | "skills.enable_auto_updates"
-            | "skills.disable_auto_updates"
-            | "skills.auto_update_once"
-    )
-}
-
-fn skills_auto_update_output_schema(operation: &str) -> Option<Value> {
-    if !is_skill_auto_update_operation(operation) {
-        return None;
-    }
-    Some(json!({
-        "type":"object", "additionalProperties":false,
-        "required":["agent","state","enabled","policy_id","revision","generation","path","operation_id","agent_reloaded"],
-        "properties":{
-            "agent":{"type":"string","enum":["codex","claude"]},
-            "state":{"type":"string","enum":["disabled","enabled","paused","current","updated"],"description":"Disabled includes absent consent. Paused requires inspection and fresh explicit re-authorization; enabled alone does not mean an attempt is eligible."},
-            "enabled":{"type":"boolean","description":"Stored consent; may remain true while state is paused. Inspect state and error_code before acting."},
-            "policy_id":{"type":["string","null"]},
-            "revision":{"type":["integer","null"],"minimum":0,"maximum":u64::MAX},
-            "generation":{"type":["string","null"],"description":"Authorization generation; changes on explicit re-enable."},
-            "path":{"type":["string","null"],"description":"The policy's stored absolute active SKILL.md path; never source text."},
-            "operation_id":{"type":["string","null"],"description":"Retained operation ID for the policy's update attempt; never replace it to bypass recovery."},
-            "agent_reloaded":{"type":"boolean","const":false},
-            "error_code":{"type":"string","description":"Stable bounded local refusal code. A durable pause reports policy_paused; inspect pause_reason for its retained cause."},
-            "pause_reason":{"type":["string","null"],"minLength":1,"maxLength":64,"pattern":"^[a-z_]+$","description":"Optional bounded stored cause of a durable pause; no source text. Pending attempts can be paused without a recorded cause."}
-        }
-    }))
-}
-
-fn skills_managed_output_schema(operation: &str) -> Option<Value> {
-    let string = json!({"type":"string"});
-    let hash = json!({"type":"string","pattern":"^[0-9a-f]{64}$"});
-    let mut entry = json!({
-        "type":"object", "additionalProperties":false,
-        "required":["agent","path","receipt_path"],
-        "properties":{
-            "agent":{"type":"string","enum":["codex","claude"]},
-            "path":{"type":"string","description":"Absolute active local SKILL.md path; source text is never returned."},
-            "receipt_path":{"type":"string"}
-        }
-    });
-    let (required, properties) = match operation {
-        "skills.update_preview" => (
-            json!([
-                "installed_sha256",
-                "bundled_sha256",
-                "bundled_version",
-                "enrolled_sha256",
-                "enrolled_version",
-                "state",
-                "stage_eligible"
-            ]),
-            json!({
-                "installed_sha256":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},
-                "bundled_sha256":hash,
-                "bundled_version":string,
-                "enrolled_sha256":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},
-                "enrolled_version":{"type":["string","null"],"description":"Recorded enrollment version, not inferred provenance."},
-                "state":{"type":"string","enum":["unmanaged","current","update_available","modified","missing","error"],"description":"Unmanaged files are never adopted by preview. Update availability requires enrolled bytes still matching the active file."},
-                "stage_eligible":{"type":"boolean"},
-                "error_code":{"type":"string","description":"Stable local inspection error code; no file contents."}
-            }),
-        ),
-        "skills.enroll" => (
-            json!([
-                "enrolled_sha256",
-                "enrolled_version",
-                "allows_automatic_updates"
-            ]),
-            json!({
-                "enrolled_sha256":hash,
-                "enrolled_version":string,
-                "allows_automatic_updates":{"type":"boolean","const":false}
-            }),
-        ),
-        "skills.stage_update" => (
-            json!([
-                "staging_dir",
-                "candidate_path",
-                "installed_sha256",
-                "bundled_sha256",
-                "bundled_version",
-                "activated"
-            ]),
-            json!({
-                "staging_dir":string,
-                "candidate_path":{"type":"string","description":"Staged candidate only; active SKILL.md remains unchanged."},
-                "installed_sha256":hash,
-                "bundled_sha256":hash,
-                "bundled_version":string,
-                "activated":{"type":"boolean","const":false}
-            }),
-        ),
-        "skills.apply_update" | "skills.update_result" | "skills.rollback_update" => (
-            json!([
-                "transaction_dir",
-                "operation_id",
-                "state",
-                "current_state",
-                "installed_sha256",
-                "allows_automatic_updates",
-                "agent_reloaded"
-            ]),
-            json!({
-                "transaction_dir":string,
-                "operation_id":skill_operation_id_schema(),
-                "state":{"type":"string","enum":["prepared","applied","rolled_back","recovery_required"],"description":"Recorded transaction state; inspect current_state separately. A recovered result does not itself resume a write."},
-                "current_state":{"type":"string","enum":["baseline","updated","changed","unavailable"],"description":"Current observation relative to the bound baseline and update; changed or unavailable requires inspection."},
-                "installed_sha256":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},
-                "allows_automatic_updates":{"type":"boolean","const":false},
-                "agent_reloaded":{"type":"boolean","const":false},
-                "error_code":{"type":"string","description":"Stable bounded inspection or recovery code; never source text."}
-            }),
-        ),
-        _ => return None,
-    };
-    entry["required"]
-        .as_array_mut()?
-        .extend(required.as_array()?.iter().cloned());
-    entry["properties"].as_object_mut()?.extend(
-        properties
-            .as_object()?
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone())),
-    );
-    if operation == "skills.update_preview" {
-        Some(json!({
-            "type":"object","additionalProperties":false,
-            "required":["scope","bundled_version","entries"],
-            "properties":{
-                "scope":{"type":"string","const":"cli_host"},
-                "bundled_version":string,
-                "entries":{"type":"array","minItems":1,"maxItems":2,"items":entry}
-            }
-        }))
-    } else {
-        Some(entry)
-    }
-}
-
 // A root override must never silently fall back to another agent's default root.
-fn skill_root_selection_schema(allow_all: bool) -> Value {
+fn skill_root_selection_schema() -> Value {
     let constraints: Vec<Value> = [("codex", "codex_dir"), ("claude", "claude_dir")]
         .into_iter()
         .map(|(agent, root)| {
-            let mut choices = vec![
-                json!({"properties":{root:{"type":"null"}}}),
-                json!({"required":[agent],"properties":{agent:{"const":true}}}),
-            ];
-            if allow_all {
-                choices.push(json!({"required":["all"],"properties":{"all":{"const":true}}}));
-            }
-            json!({"anyOf":choices})
+            json!({"anyOf":[
+                {"properties":{root:{"type":"null"}}},
+                {"required":[agent],"properties":{agent:{"const":true}}},
+                {"required":["all"],"properties":{"all":{"const":true}}},
+            ]})
         })
         .collect();
     json!(constraints)
-}
-
-fn skill_operation_id_schema() -> Value {
-    json!({"type":"string","minLength":36,"maxLength":36,"pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$","description":"Exact canonical lowercase hyphenated UUID. Save the original apply-update ID for result inspection and rollback; alternate spellings are rejected."})
 }
 
 // Legacy Uuid arguments accept spellings that strict JSON Schema uuid formats reject.
@@ -5502,31 +6267,7 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
     if let Some(schema) = history_retention_input_schema(operation) {
         return schema;
     }
-    if is_skill_auto_update_operation(operation) {
-        let mut schema = json!({
-            "type":"object", "additionalProperties":false, "required":[],
-            "properties":{
-                "codex":{"type":["boolean","null"],"default":false},
-                "claude":{"type":["boolean","null"],"default":false}
-            },
-            "oneOf":[
-                {"required":["codex"],"properties":{"codex":{"const":true},"claude":{"enum":[false,null]}}},
-                {"required":["claude"],"properties":{"claude":{"const":true},"codex":{"enum":[false,null]}}}
-            ]
-        });
-        if operation == "skills.enable_auto_updates" {
-            for (agent, root) in [("codex", "codex_dir"), ("claude", "claude_dir")] {
-                schema["properties"][root] = json!({"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":format!("Host-local {agent} skills root; requires its matching selector. Omission or null uses that agent's install default. Only enable may select a target; later commands use the recorded target.")});
-            }
-            schema["allOf"] = skill_root_selection_schema(false);
-            schema["properties"]["policy_revision"] = json!({"type":["integer","null"],"minimum":0,"maximum":u64::MAX,"description":"Expected current revision from auto-update-status. Required to re-enable an existing policy; omission or null does not authorize replacing existing consent."});
-        }
-        return schema;
-    }
-    if matches!(
-        operation,
-        "skills.install" | "skills.status" | "skills.update_preview"
-    ) {
+    if matches!(operation, "skills.install" | "skills.status") {
         return json!({
             "type":"object", "additionalProperties":false, "required":[],
             "properties":{
@@ -5536,55 +6277,13 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
                 "codex_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Codex skills root on the CLI host; requires the matching agent selector (or all where supported); omission or null uses the selected agent’s install default."},
                 "claude_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Claude skills root on the CLI host; requires the matching agent selector (or all where supported); omission or null uses the selected agent’s install default."}
             },
-            "allOf":skill_root_selection_schema(true),
+            "allOf":skill_root_selection_schema(),
             "anyOf":[
                 {"required":["codex"],"properties":{"codex":{"const":true}}},
                 {"required":["claude"],"properties":{"claude":{"const":true}}},
                 {"required":["all"],"properties":{"all":{"const":true}}}
             ]
         });
-    }
-    if matches!(
-        operation,
-        "skills.enroll"
-            | "skills.stage_update"
-            | "skills.apply_update"
-            | "skills.update_result"
-            | "skills.rollback_update"
-    ) {
-        let mut schema = json!({
-            "type":"object", "additionalProperties":false, "required":[],
-            "properties":{
-                "codex":{"type":["boolean","null"],"default":false},
-                "claude":{"type":["boolean","null"],"default":false},
-                "codex_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Codex skills root on the CLI host; requires the matching agent selector (or all where supported); omission or null uses the selected agent’s install default."},
-                "claude_dir":{"type":["string","null"],"minLength":1,"pattern":"^[^\\u0000]*$","description":"Claude skills root on the CLI host; requires the matching agent selector (or all where supported); omission or null uses the selected agent’s install default."}
-            },
-            "allOf":skill_root_selection_schema(false),
-            "oneOf":[
-                {"required":["codex"],"properties":{"codex":{"const":true},"claude":{"enum":[false,null]}}},
-                {"required":["claude"],"properties":{"claude":{"const":true},"codex":{"enum":[false,null]}}}
-            ]
-        });
-        if operation == "skills.stage_update" {
-            schema["required"] = json!(["staging_dir"]);
-            schema["properties"]["staging_dir"] = json!({"type":"string","minLength":1,"pattern":"^[^\\u0000]*$","description":"Explicit new local staging directory, which must not exist. The active SKILL.md is never replaced."});
-        }
-        if operation == "skills.apply_update" {
-            schema["required"] = json!(["staging_dir"]);
-            schema["properties"]["staging_dir"] = json!({"type":"string","minLength":1,"pattern":"^[^\\u0000]*$","description":"Existing reviewed staging directory; candidate, staging receipt, enrollment baseline and running binary bundle must agree."});
-        }
-        if matches!(
-            operation,
-            "skills.apply_update" | "skills.update_result" | "skills.rollback_update"
-        ) {
-            schema["required"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!("operation_id"));
-            schema["properties"]["operation_id"] = skill_operation_id_schema();
-        }
-        return schema;
     }
     if matches!(
         operation,
@@ -5652,7 +6351,13 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
         }
         return schema;
     }
+    if let Some(schema) = recon_input_schema(operation) {
+        return schema;
+    }
     if let Some(schema) = scanner_input_schema(operation, required_fields) {
+        return schema;
+    }
+    if let Some(schema) = templates_input_schema(operation) {
         return schema;
     }
     let mut properties = serde_json::Map::new();
@@ -5808,37 +6513,29 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "manifest" | "session.list" => &[],
         "schema" => &["kind", "operation"],
         "examples" => &["operation"],
-        "skills.install" | "skills.status" | "skills.update_preview" => {
+        "skills.install" | "skills.status" => {
             &["codex", "claude", "all", "codex_dir", "claude_dir"]
-        }
-        "skills.enroll" => &["codex", "claude", "codex_dir", "claude_dir"],
-        "skills.auto_update_status" | "skills.disable_auto_updates" | "skills.auto_update_once" => {
-            &["codex", "claude"]
-        }
-        "skills.enable_auto_updates" => &[
-            "codex",
-            "claude",
-            "codex_dir",
-            "claude_dir",
-            "policy_revision",
-        ],
-        "skills.stage_update" => &["codex", "claude", "codex_dir", "claude_dir", "staging_dir"],
-        "skills.apply_update" => &[
-            "codex",
-            "claude",
-            "codex_dir",
-            "claude_dir",
-            "staging_dir",
-            "operation_id",
-        ],
-        "skills.update_result" | "skills.rollback_update" => {
-            &["codex", "claude", "codex_dir", "claude_dir", "operation_id"]
         }
         "session.create" => &["name"],
         "session.rename" => &["id", "name"],
         "findings.list" | "event_log.list" => &["session_id", "limit"],
         "findings.get" => &["id", "session_id"],
         "findings.count" => &["session_id"],
+        "recon.list" => &["session_id"],
+        "recon.stop" => &["session_id", "id"],
+        "recon.start" => &[
+            "session_id",
+            "target_url",
+            "include_subdomains",
+            "sources",
+            "max_requests",
+            "max_depth",
+            "max_endpoints",
+            "max_pages",
+            "history_acknowledged",
+            "scan_acknowledged",
+            "scan_visibility",
+        ],
         "scanner.config.get" | "scanner.custom.list" => &["session_id"],
         "scanner.config.set_enabled" => &["session_id", "enabled"],
         "scanner.builtin.set_enabled" => &["session_id", "id", "enabled"],
@@ -5879,6 +6576,30 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "sort_key",
             "sort_direction",
         ],
+        "templates.library.status" | "templates.library.check" | "templates.library.download" => {
+            &[]
+        }
+        "templates.library.import" => &["file"],
+        "templates.list" => &[
+            "search", "severity", "tag", "protocol", "support", "enabled", "limit", "offset",
+        ],
+        "templates.get" => &["id"],
+        "templates.passive.set_enabled" => &["enabled", "ids", "search", "severity", "tag", "all"],
+        "templates.scan.preview" | "templates.scan.start" => &[
+            "session_id",
+            "targets",
+            "ids",
+            "search",
+            "severity",
+            "tag",
+            "allow_risks",
+            "rate",
+            "concurrency",
+            "max_requests",
+            "apply_match_replace",
+        ],
+        "templates.scan.list" => &["session_id"],
+        "templates.scan.get" | "templates.scan.stop" => &["session_id", "id"],
         "capture.browser.list" => &[],
         "capture.browser.open" => &["browser", "url", "fresh", "agent"],
         "capture.browser.prefer" => &["browser"],
@@ -5934,6 +6655,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         | "target.service_map.link_declarations.get" => &["session_id", "evidence_id"],
         "target.service_map.parameters.get" => &["session_id", "origin", "method", "path"],
         "target.service_map.openapi.get" => &["session_id", "origin"],
+        "target.service_map.flow.get" => &["session_id", "origin", "in_scope_only", "max_records"],
         "target.service_map.unnamed.get" => &["session_id", "kind", "limit"],
         "target.service_map.socket_peer_matches.get" => {
             &["session_id", "evidence_id", "in_scope_only", "max_records"]
@@ -5981,8 +6703,15 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         ],
         "replay.send" => &["tab_id", "session_id"],
         "fuzzer.set_payloads" => &["session_id", "payloads", "payload", "file", "stdin"],
-        "fuzzer.run" => &["session_id", "async", "r#async"],
-        "fuzzer.status" | "fuzzer.results" => &["id", "session_id"],
+        "fuzzer.run" => &[
+            "session_id",
+            "async",
+            "r#async",
+            "attack_type",
+            "raw_payloads",
+            "concurrency",
+        ],
+        "fuzzer.status" | "fuzzer.results" | "fuzzer.stop" => &["id", "session_id"],
         "fuzzer.list" => &["session_id", "limit"],
         "capture.intercept.on"
         | "capture.intercept.off"
@@ -6109,7 +6838,9 @@ fn command_input_preview(command: &Command) -> Value {
                 BrowserCommand::Prefer(args) => json!({ "browser": args.browser }),
             },
         },
+        Command::Recon { command } => recon_input_preview(command),
         Command::Scanner { command } => scanner_input_preview(command),
+        Command::Templates { command } => templates_input_preview(command),
         Command::Findings { command } => match command {
             FindingsCommand::List(args) => json!({"session_id":args.session_id,"limit":args.limit}),
             FindingsCommand::Get(args) => json!({"session_id":args.session_id,"id":args.id}),
@@ -6141,6 +6872,10 @@ fn command_input_preview(command: &Command) -> Value {
                 }),
                 Some(ServiceMapCommand::Openapi(args)) => json!({
                     "session_id":args.session_id,"origin":args.origin,
+                }),
+                Some(ServiceMapCommand::Flow(args)) => json!({
+                    "session_id":args.session_id,"origin":args.origin,
+                    "in_scope_only":args.in_scope_only,"max_records":args.max_records,
                 }),
                 Some(ServiceMapCommand::Unnamed(args)) => json!({
                     "session_id":args.session_id,"kind":args.kind,"limit":args.limit,
@@ -6181,53 +6916,20 @@ fn command_input_preview(command: &Command) -> Value {
         Command::Replay { command } => replay_input_preview(command),
         Command::Fuzzer { command } => fuzzer_input_preview(command),
         Command::Sequence { command } => sequence_input_preview(command),
-        Command::Skills { command } => match command {
-            SkillsCommand::Install(args)
-            | SkillsCommand::Status(args)
-            | SkillsCommand::UpdatePreview(args) => json!({
-                "codex": args.codex,
-                "claude": args.claude,
-                "all": args.all,
-                "codex_dir": args.codex_dir,
-                "claude_dir": args.claude_dir,
-            }),
-            SkillsCommand::Enroll(args) => single_skill_input_preview(args),
-            SkillsCommand::AutoUpdateStatus(args)
-            | SkillsCommand::DisableAutoUpdates(args)
-            | SkillsCommand::AutoUpdateOnce(args) => {
-                json!({"codex":args.codex,"claude":args.claude})
-            }
-            SkillsCommand::EnableAutoUpdates(args) => {
-                let mut input = single_skill_input_preview(&args.target);
-                input["policy_revision"] = json!(args.policy_revision);
-                input
-            }
-            SkillsCommand::StageUpdate(args) => {
-                let mut input = single_skill_input_preview(&args.target);
-                input["staging_dir"] = json!(args.staging_dir);
-                input
-            }
-            SkillsCommand::ApplyUpdate(args) => {
-                let mut input = single_skill_input_preview(&args.target);
-                input["staging_dir"] = json!(args.staging_dir);
-                input["operation_id"] = json!(args.operation_id);
-                input
-            }
-            SkillsCommand::UpdateResult(args) | SkillsCommand::RollbackUpdate(args) => {
-                let mut input = single_skill_input_preview(&args.target);
-                input["operation_id"] = json!(args.operation_id);
-                input
-            }
-        },
+        Command::Skills {
+            command: SkillsCommand::Install(args) | SkillsCommand::Status(args),
+        } => json!({
+            "codex": args.codex,
+            "claude": args.claude,
+            "all": args.all,
+            "codex_dir": args.codex_dir,
+            "claude_dir": args.claude_dir,
+        }),
         Command::History { command } => history_input_preview(command),
         Command::Intercept { command } => intercept_input_preview(command),
         Command::Websocket { command } => websocket_input_preview(command),
         Command::AutoReplace { command } => auto_replace_input_preview(command),
     }
-}
-
-fn single_skill_input_preview(args: &SingleSkillArgs) -> Value {
-    json!({"codex":args.codex,"claude":args.claude,"codex_dir":args.codex_dir,"claude_dir":args.claude_dir})
 }
 
 fn history_input_preview(command: &HistoryCommand) -> Value {
@@ -6372,8 +7074,16 @@ fn fuzzer_input_preview(command: &FuzzerCommand) -> Value {
             "file": args.file,
             "stdin": args.stdin,
         }),
-        FuzzerCommand::Run(args) => json!({ "session_id": args.session_id, "async": args.r#async }),
-        FuzzerCommand::Status(args) => json!({ "id": args.id, "session_id": args.session_id }),
+        FuzzerCommand::Run(args) => json!({
+            "session_id": args.session_id,
+            "async": args.r#async,
+            "attack_type": args.attack_type.api_name(),
+            "raw_payloads": args.raw_payloads,
+            "concurrency": args.concurrency,
+        }),
+        FuzzerCommand::Status(args) | FuzzerCommand::Stop(args) => {
+            json!({ "id": args.id, "session_id": args.session_id })
+        }
         FuzzerCommand::Results(args) => json!({ "id": args.id, "session_id": args.session_id }),
         FuzzerCommand::List(args) => json!({ "session_id": args.session_id, "limit": args.limit }),
     }
@@ -6554,7 +7264,9 @@ fn command_api_preview(command: &Command) -> Result<Value> {
                 Some(json!({})),
             ),
         },
+        Command::Recon { command } => recon_api_preview(command),
         Command::Scanner { command } => scanner_api_preview(command),
+        Command::Templates { command } => templates_api_preview(command),
         Command::Findings { command } => findings_api_preview(command),
         Command::EventLog {
             command: EventLogCommand::List(args),
@@ -6577,6 +7289,9 @@ fn command_api_preview(command: &Command) -> Result<Value> {
                 }
                 Some(ServiceMapCommand::Openapi(args)) => {
                     api_preview("GET", service_map_openapi_path(args), None)
+                }
+                Some(ServiceMapCommand::Flow(args)) => {
+                    api_preview("GET", service_map_flow_path(args), None)
                 }
                 Some(ServiceMapCommand::Unnamed(args)) => service_map_catalog_api_preview(
                     service_map_path(&args.map_args(), args.session_id),
@@ -6790,7 +7505,12 @@ fn fuzzer_api_preview(command: &FuzzerCommand) -> Value {
         FuzzerCommand::Run(_) => api_preview(
             "POST",
             "/api/fuzzer/attacks",
-            Some(json!({ "note": "runs payload-generated HTTP requests" })),
+            Some(json!({ "note": "starts payload-generated HTTP requests in the background" })),
+        ),
+        FuzzerCommand::Stop(args) => api_preview(
+            "POST",
+            format!("/api/fuzzer/attacks/{}/stop", args.id),
+            Some(json!({ "session_id": args.session_id })),
         ),
         FuzzerCommand::Status(args) => api_preview(
             "GET",
@@ -7107,9 +7827,12 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
             | "target.service_map.socket_peer_matches.get"
             | "target.service_map.parameters.get"
             | "target.service_map.openapi.get"
+            | "target.service_map.flow.get"
             | "target.service_map.unnamed.get"
     ) {
-        if command.operation_name() == "target.service_map.unnamed.get" {
+        if command.operation_name() == "target.service_map.flow.get" {
+            notes.push("Reads the map's newest max_records rows without bodies in one GET; no target requests, automatic reads, retries or fallback.");
+        } else if command.operation_name() == "target.service_map.unnamed.get" {
             notes.push("Reads the session's whole map, as `scope service-map --all-rows` does, and gathers its unnamed signals locally. snapshot preserves source-map coverage; omitted_signals counts only --limit truncation after --kind. One GET; no target requests, retries or fallback.");
             notes.push("Signals are banner values, header names and cookie names, never header or cookie values. Counts are origins and rows in this map; open the evidence tokens before naming anything.");
         } else if command.operation_name() == "target.service_map.openapi.get" {
@@ -7156,32 +7879,6 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
         notes.push("Saved HTTP tabs only, including legacy empty types. No request parsing, body hydration, Replay send, WebSocket connection or full workspace replacement occurs. Success returns only acknowledgement metadata.");
     }
     if matches!(
-        command,
-        Command::Skills {
-            command: SkillsCommand::Enroll(_)
-                | SkillsCommand::UpdatePreview(_)
-                | SkillsCommand::StageUpdate(_)
-        }
-    ) {
-        notes.push("CLI-host local only; no Sniper API discovery or contact. Dry-run validates arguments and describes the plan without reading skill files or checking eligibility.");
-        notes.push("Enrollment records explicit local opt-in only and does not enable startup or automatic updates. Preview never implies ownership of unmanaged files.");
-        notes.push("Staging requires an unchanged enrolled skill with different bundled bytes and a new output directory. It writes a candidate and receipt only; the active SKILL.md remains unchanged and nothing is activated.");
-    }
-    if is_skill_auto_update_operation(command.operation_name()) {
-        notes.push("CLI-host local only; remote --api is never contacted. Dry-run validates arguments only, with no filesystem reads/writes, policy inspection, eligibility checks, or API discovery.");
-        notes.push("Canonical call dry runs require inline JSON in --input; @file and stdin are rejected before opening or reading them. Other commands retain their ordinary input-source behavior.");
-        notes.push("Enable records consent for one unchanged managed baseline without updating active files. Existing consent can be re-enabled only with its current policy revision, creating a new authorization generation.");
-        notes.push("Status, disable and one-shot execution use only the stored target. No automatic enrollment, adoption of edits, network templates, overwrite fallback, artifact pruning, or agent reload. Paused or uncertain state needs inspection and fresh explicit re-authorization.");
-    }
-    if matches!(
-        command.operation_name(),
-        "skills.apply_update" | "skills.update_result" | "skills.rollback_update"
-    ) {
-        notes.push("CLI-host local only; dry-run validates arguments without filesystem reads, host/API discovery, or checking eligibility. It does not reserve the operation UUID.");
-        notes.push("This explicit operation does not grant automatic-update consent or reload an agent. Apply requires a reviewed candidate bound to the unchanged enrollment baseline and this binary's newer bundle.");
-        notes.push("Keep the original operation UUID and all transaction artifacts. After uncertain output, use skills update-result with that same UUID; do not blindly retry or replace the ID. Rollback uses that original UUID and preserves displaced objects.");
-    }
-    if matches!(
         command.operation_name(),
         "capture.http.upstream_peer.get" | "capture.http.upstream_peer.set"
     ) {
@@ -7200,6 +7897,19 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
             notes.push("The exact requested policy is shown in api.write.body.policy. Write execution pins one session, fetches its policy-configuration config_token and sends one compare-and-swap write. An inferred session also carries expected_active_session_id. No redirect, automatic retry or uncertain-write readback is performed.");
         }
         notes.push("Off is the default. Keep-newest is a soft total-history target: oldest unprotected rows are removed first, while durable saved HTTP tab source originals and in-progress rows survive. Policy-save success does not mean pending logical or disk cleanup is finished.");
+    }
+    if let Command::Recon { command } = command {
+        notes.push("Offline preview only; session existence and current job state are not checked. Explicit session_id never switches the active session.");
+        notes.push("Recon URLs, raw spellings, evidence locations and warnings can contain sensitive paths or query values; summarize rather than paste them.");
+        match command {
+            ReconCommand::Start(_) => {
+                notes.push("Only start against an authorized target. Crawler sends scoped unauthenticated GETs, which can still have side effects. Scope is host/scheme/port, not path; subdomains must be selected explicitly.");
+                notes.push("History sends the target hostname to selected providers. urlscan_submit sends the full URL and triggers a remote browser that may load out-of-scope resources; unlisted is not private. Provider acknowledgments are separate from --yes.");
+                notes.push("Zero budgets mean unbounded collection. Start returns a job immediately; the 60-second API timeout does not cancel it. Read recon list before any deliberate retry after an uncertain result; never resubmit automatically.");
+            }
+            ReconCommand::Stop(_) => notes.push("Stops local work only; an accepted urlscan submission cannot be cancelled. An already finished or unknown job may return not found; reread its state rather than assuming it is running."),
+            ReconCommand::List(_) => notes.push("Reads all retained jobs and endpoints without target/provider requests. Check each source's status, truncated flag and warnings; history and candidate evidence do not prove current liveness."),
+        }
     }
     if matches!(command, Command::Scanner { .. }) {
         notes.push("Dry-run is offline and validates supplied rule JSON before API discovery. It does not resolve sessions, fetch configuration, apply writes or inspect traffic.");
@@ -7220,6 +7930,13 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
         "replay.send" | "fuzzer.run" | "sequence.run"
     ) {
         notes.push("This operation may send traffic; failed sends should not be retried blindly.");
+    }
+    match command.operation_name() {
+        "templates.library.check" | "templates.library.download" => notes.push("Contacts GitHub through the environment's proxy: the latest-release API, then for a download the release's checksums file and source .tar.gz. A download that does not match the published SHA-256 is not installed. Dry-run contacts nothing."),
+        "templates.library.import" => notes.push("Reads the local .tar.gz and uploads it to the running Sniper, which installs it; nothing contacts GitHub. Dry-run reads nothing."),
+        "templates.passive.set_enabled" => notes.push("Enabled passive templates judge captured responses whose host is in a non-empty Scope include list while Passive Scan is on, and never send requests. Run findings rescan to apply a change to stored history."),
+        "templates.scan.start" => notes.push("Sends the templates' requests to the targets once it runs. Dry-run contacts nothing; templates scan preview asks Sniper what would be sent and still sends nothing to a target."),
+        _ => {}
     }
     notes
 }
@@ -7292,91 +8009,15 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         "examples" => Command::Examples {
             operation: call_optional(operation, input, "operation")?,
         },
-        "skills.status" | "skills.update_preview" => {
-            let args = SkillsInstallArgs {
+        "skills.status" => Command::Skills {
+            command: SkillsCommand::Status(SkillsInstallArgs {
                 codex: call_bool(operation, input, "codex")?,
                 claude: call_bool(operation, input, "claude")?,
                 all: call_bool(operation, input, "all")?,
                 codex_dir: call_optional_path(operation, input, "codex_dir")?,
                 claude_dir: call_optional_path(operation, input, "claude_dir")?,
-            };
-            Command::Skills {
-                command: if operation == "skills.status" {
-                    SkillsCommand::Status(args)
-                } else {
-                    SkillsCommand::UpdatePreview(args)
-                },
-            }
-        }
-        "skills.auto_update_status" | "skills.disable_auto_updates" | "skills.auto_update_once" => {
-            let target = StoredSkillArgs {
-                codex: call_bool(operation, input, "codex")?,
-                claude: call_bool(operation, input, "claude")?,
-            };
-            Command::Skills {
-                command: match operation {
-                    "skills.auto_update_status" => SkillsCommand::AutoUpdateStatus(target),
-                    "skills.disable_auto_updates" => SkillsCommand::DisableAutoUpdates(target),
-                    _ => SkillsCommand::AutoUpdateOnce(target),
-                },
-            }
-        }
-        "skills.enable_auto_updates" => Command::Skills {
-            command: SkillsCommand::EnableAutoUpdates(SkillsEnableAutoUpdatesArgs {
-                target: SingleSkillArgs {
-                    codex: call_bool(operation, input, "codex")?,
-                    claude: call_bool(operation, input, "claude")?,
-                    codex_dir: call_optional_path(operation, input, "codex_dir")?,
-                    claude_dir: call_optional_path(operation, input, "claude_dir")?,
-                },
-                policy_revision: call_optional(operation, input, "policy_revision")?,
             }),
         },
-        "skills.enroll"
-        | "skills.stage_update"
-        | "skills.apply_update"
-        | "skills.update_result"
-        | "skills.rollback_update" => {
-            let target = SingleSkillArgs {
-                codex: call_bool(operation, input, "codex")?,
-                claude: call_bool(operation, input, "claude")?,
-                codex_dir: call_optional_path(operation, input, "codex_dir")?,
-                claude_dir: call_optional_path(operation, input, "claude_dir")?,
-            };
-            Command::Skills {
-                command: match operation {
-                    "skills.enroll" => SkillsCommand::Enroll(target),
-                    "skills.stage_update" => SkillsCommand::StageUpdate(SkillsStageArgs {
-                        target,
-                        staging_dir: PathBuf::from(call_required::<String>(
-                            operation,
-                            input,
-                            "staging_dir",
-                        )?),
-                    }),
-                    "skills.apply_update" => SkillsCommand::ApplyUpdate(SkillsApplyArgs {
-                        target,
-                        staging_dir: PathBuf::from(call_required::<String>(
-                            operation,
-                            input,
-                            "staging_dir",
-                        )?),
-                        operation_id: call_required(operation, input, "operation_id")?,
-                    }),
-                    _ => {
-                        let args = SkillsOperationArgs {
-                            target,
-                            operation_id: call_required(operation, input, "operation_id")?,
-                        };
-                        if operation == "skills.update_result" {
-                            SkillsCommand::UpdateResult(args)
-                        } else {
-                            SkillsCommand::RollbackUpdate(args)
-                        }
-                    }
-                },
-            }
-        }
         "skills.install" => Command::Skills {
             command: SkillsCommand::Install(SkillsInstallArgs {
                 codex: call_bool(operation, input, "codex")?,
@@ -7611,9 +8252,128 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 },
             }
         }
+        operation if operation.starts_with("recon.") => Command::Recon {
+            command: recon_command_from_input(operation, input)?,
+        },
         operation if operation.starts_with("scanner.") => Command::Scanner {
             command: scanner_command_from_input(operation, input)?,
         },
+        "templates.library.status" => Command::Templates {
+            command: TemplatesCommand::Library {
+                command: TemplatesLibraryCommand::Status,
+            },
+        },
+        "templates.library.check" => Command::Templates {
+            command: TemplatesCommand::Library {
+                command: TemplatesLibraryCommand::Check,
+            },
+        },
+        "templates.library.download" => Command::Templates {
+            command: TemplatesCommand::Library {
+                command: TemplatesLibraryCommand::Download,
+            },
+        },
+        "templates.library.import" => Command::Templates {
+            command: TemplatesCommand::Library {
+                command: TemplatesLibraryCommand::Import(TemplatesImportArgs {
+                    file: call_required::<String>(operation, input, "file")?.into(),
+                }),
+            },
+        },
+        "templates.list" => {
+            let limit = call_optional::<u64>(operation, input, "limit")?.unwrap_or(200);
+            if !(1..=30_000).contains(&limit) {
+                bail!("invalid field `limit` for `{operation}`; expected 1 to 30000");
+            }
+            Command::Templates {
+                command: TemplatesCommand::List(TemplatesListArgs {
+                    filter: call_templates_filter(operation, input)?,
+                    protocol: call_optional(operation, input, "protocol")?,
+                    support: call_optional_enum_string(
+                        operation,
+                        input,
+                        "support",
+                        &["passive", "active", "unsupported"],
+                    )?,
+                    enabled: call_optional(operation, input, "enabled")?,
+                    limit,
+                    offset: call_optional(operation, input, "offset")?.unwrap_or(0),
+                }),
+            }
+        }
+        "templates.get" => {
+            let id: String = call_required(operation, input, "id")?;
+            if !valid_template_id(&id) {
+                bail!("invalid field `id` for `{operation}`");
+            }
+            Command::Templates {
+                command: TemplatesCommand::Get(TemplatesGetArgs { id }),
+            }
+        }
+        "templates.passive.set_enabled" => {
+            let args = TemplatesPassiveArgs {
+                enabled: call_required(operation, input, "enabled")?,
+                ids: call_optional(operation, input, "ids")?.unwrap_or_default(),
+                filter: call_templates_filter(operation, input)?,
+                all: call_bool(operation, input, "all")?,
+            };
+            templates_passive_body(&args)?;
+            Command::Templates {
+                command: TemplatesCommand::Passive {
+                    command: TemplatesPassiveCommand::SetEnabled(args),
+                },
+            }
+        }
+        "templates.scan.preview" | "templates.scan.start" => {
+            let bounded = |field: &str, default: u64, max: u64| -> Result<u64> {
+                let value = call_optional::<u64>(operation, input, field)?.unwrap_or(default);
+                if !(1..=max).contains(&value) {
+                    bail!("invalid field `{field}` for `{operation}`; expected 1 to {max}");
+                }
+                Ok(value)
+            };
+            let args = TemplatesScanArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+                targets: call_required(operation, input, "targets")?,
+                ids: call_optional(operation, input, "ids")?.unwrap_or_default(),
+                filter: call_templates_filter(operation, input)?,
+                allow_risks: call_optional(operation, input, "allow_risks")?.unwrap_or_default(),
+                rate: bounded("rate", 10, 50)?,
+                concurrency: bounded("concurrency", 4, 8)?,
+                max_requests: bounded("max_requests", 10_000, 50_000)?,
+                apply_match_replace: call_bool(operation, input, "apply_match_replace")?,
+            };
+            templates_scan_body(&args, None, true)?;
+            let command = if operation == "templates.scan.preview" {
+                TemplatesScanCommand::Preview(args)
+            } else {
+                TemplatesScanCommand::Start(args)
+            };
+            Command::Templates {
+                command: TemplatesCommand::Scan { command },
+            }
+        }
+        "templates.scan.list" => Command::Templates {
+            command: TemplatesCommand::Scan {
+                command: TemplatesScanCommand::List(TemplatesScanSessionArgs {
+                    session_id: call_optional(operation, input, "session_id")?,
+                }),
+            },
+        },
+        "templates.scan.get" | "templates.scan.stop" => {
+            let args = TemplatesScanIdArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+                id: call_required(operation, input, "id")?,
+            };
+            let command = if operation == "templates.scan.get" {
+                TemplatesScanCommand::Get(args)
+            } else {
+                TemplatesScanCommand::Stop(args)
+            };
+            Command::Templates {
+                command: TemplatesCommand::Scan { command },
+            }
+        }
         "findings.list" => Command::Findings {
             command: FindingsCommand::List(SessionReadListArgs {
                 session_id: call_optional(operation, input, "session_id")?,
@@ -7738,6 +8498,32 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             Command::Scope {
                 command: TargetCommand::ServiceMap(ServiceMapArgs {
                     command: Some(ServiceMapCommand::Unnamed(args)),
+                    session_id: None,
+                    origin: None,
+                    in_scope_only: false,
+                    max_records: 10_000,
+                    all_rows: false,
+                    technology_catalog_version: 2,
+                    filter: ServiceMapFilterArgs::default(),
+                }),
+            }
+        }
+        "target.service_map.flow.get" => {
+            let origin: String = call_required(operation, input, "origin")?;
+            let max_records =
+                call_optional::<usize>(operation, input, "max_records")?.unwrap_or(10_000);
+            if !(1..=50_000).contains(&max_records) {
+                bail!("max_records must be between 1 and 50000");
+            }
+            let args = ServiceMapFlowArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+                origin: parse_service_map_origin(&origin).map_err(|message| anyhow!(message))?,
+                in_scope_only: call_bool(operation, input, "in_scope_only")?,
+                max_records,
+            };
+            Command::Scope {
+                command: TargetCommand::ServiceMap(ServiceMapArgs {
+                    command: Some(ServiceMapCommand::Flow(args)),
                     session_id: None,
                     origin: None,
                     in_scope_only: false,
@@ -8065,10 +8851,35 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 }),
             }
         }
-        "fuzzer.run" => Command::Fuzzer {
-            command: FuzzerCommand::Run(FuzzerRunArgs {
+        "fuzzer.run" => {
+            let attack_type = call_optional_enum_string(
+                operation,
+                input,
+                "attack_type",
+                &["sniper", "battering-ram", "battering_ram"],
+            )?;
+            let concurrency = call_optional::<u8>(operation, input, "concurrency")?.unwrap_or(1);
+            if !(1..=16).contains(&concurrency) {
+                bail!("invalid field `concurrency` for `{operation}`; expected 1-16");
+            }
+            Command::Fuzzer {
+                command: FuzzerCommand::Run(FuzzerRunArgs {
+                    session_id: call_optional(operation, input, "session_id")?,
+                    r#async: call_bool_any(operation, input, &["async", "r#async"])?,
+                    attack_type: if attack_type.as_deref() == Some("sniper") {
+                        FuzzerAttackTypeArg::Sniper
+                    } else {
+                        FuzzerAttackTypeArg::BatteringRam
+                    },
+                    raw_payloads: call_bool_any(operation, input, &["raw_payloads"])?,
+                    concurrency,
+                }),
+            }
+        }
+        "fuzzer.stop" => Command::Fuzzer {
+            command: FuzzerCommand::Stop(FuzzerStatusArgs {
+                id: call_required(operation, input, "id")?,
                 session_id: call_optional(operation, input, "session_id")?,
-                r#async: call_bool_any(operation, input, &["async", "r#async"])?,
             }),
         },
         "fuzzer.status" => Command::Fuzzer {
@@ -8559,6 +9370,14 @@ fn call_optional_path(operation: &str, input: &Value, field: &str) -> Result<Opt
     Ok(call_optional::<String>(operation, input, field)?.map(PathBuf::from))
 }
 
+fn call_templates_filter(operation: &str, input: &Value) -> Result<TemplatesFilterArgs> {
+    Ok(TemplatesFilterArgs {
+        search: call_optional(operation, input, "search")?,
+        severity: call_optional(operation, input, "severity")?,
+        tag: call_optional(operation, input, "tag")?,
+    })
+}
+
 fn call_bool(operation: &str, input: &Value, field: &str) -> Result<bool> {
     Ok(call_optional::<bool>(operation, input, field)?.unwrap_or(false))
 }
@@ -8926,22 +9745,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Call(args) if args.operation.starts_with("saved.v1.") => {
             return run_saved_call(api_override, args, dry_run, yes).await;
         }
-        Command::Call(args) => {
-            // These previews promise argument-only execution, including input
-            // acquisition. Never open an input file or block on a stdin stream.
-            if dry_run
-                && is_skill_auto_update_operation(&args.operation)
-                && args
-                    .input
-                    .as_deref()
-                    .is_some_and(|source| source == "-" || source.starts_with('@'))
-            {
-                return Err(CallInputError::Source(
-                    "Automatic-update dry runs require inline JSON in --input; @file and stdin are not opened.".into(),
-                ).into());
-            }
-            command_from_call_args(args)?
-        }
+        Command::Call(args) => command_from_call_args(args)?,
         command => command,
     };
 
@@ -9006,103 +9810,10 @@ async fn run(cli: Cli) -> Result<()> {
             let result = install_skills(args)?;
             print_json(&result)
         }
-        Command::Skills {
-            command: SkillsCommand::UpdatePreview(args),
-        } => print_json(&skills_update_preview(args)?),
-        Command::Skills {
-            command: SkillsCommand::AutoUpdateStatus(args),
-        } => {
-            let (agent, _) = stored_skill_agent(args);
-            print_json(&sniper::skill_auto_update::status(&cli_data_dir(), agent)?)
-        }
-        Command::Skills {
-            command: SkillsCommand::EnableAutoUpdates(args),
-        } => {
-            let (agent, root, bundled) = single_skill_target(args.target)?;
-            print_json(&sniper::skill_auto_update::enable(
-                &cli_data_dir(),
-                agent,
-                &root,
-                bundled,
-                env!("CARGO_PKG_VERSION"),
-                args.policy_revision,
-            )?)
-        }
-        Command::Skills {
-            command: SkillsCommand::DisableAutoUpdates(args),
-        } => {
-            let (agent, _) = stored_skill_agent(args);
-            print_json(&sniper::skill_auto_update::disable(&cli_data_dir(), agent)?)
-        }
-        Command::Skills {
-            command: SkillsCommand::AutoUpdateOnce(args),
-        } => {
-            let (agent, bundled) = stored_skill_agent(args);
-            print_json(&sniper::skill_auto_update::run_once(
-                &cli_data_dir(),
-                agent,
-                bundled,
-                env!("CARGO_PKG_VERSION"),
-            )?)
-        }
-        Command::Skills {
-            command: SkillsCommand::Enroll(args),
-        } => {
-            let (agent, root, bundled) = single_skill_target(args)?;
-            print_json(&sniper::skill_managed::enroll_skill(
-                agent,
-                &root,
-                bundled,
-                env!("CARGO_PKG_VERSION"),
-            )?)
-        }
-        Command::Skills {
-            command: SkillsCommand::StageUpdate(args),
-        } => {
-            let (agent, root, bundled) = single_skill_target(args.target)?;
-            print_json(&sniper::skill_managed::stage_skill_update(
-                agent,
-                &root,
-                bundled,
-                env!("CARGO_PKG_VERSION"),
-                &args.staging_dir,
-            )?)
-        }
-        Command::Skills {
-            command: SkillsCommand::ApplyUpdate(args),
-        } => {
-            let (agent, root, bundled) = single_skill_target(args.target)?;
-            print_json(&sniper::skill_activation::apply_skill_update(
-                agent,
-                &root,
-                bundled,
-                env!("CARGO_PKG_VERSION"),
-                &args.staging_dir,
-                &args.operation_id,
-            )?)
-        }
-        Command::Skills {
-            command: SkillsCommand::UpdateResult(args),
-        } => {
-            let (agent, root, _) = single_skill_target(args.target)?;
-            print_json(&sniper::skill_activation::update_result(
-                agent,
-                &root,
-                &args.operation_id,
-            )?)
-        }
-        Command::Skills {
-            command: SkillsCommand::RollbackUpdate(args),
-        } => {
-            let (agent, root, _) = single_skill_target(args.target)?;
-            print_json(&sniper::skill_activation::rollback_skill_update(
-                agent,
-                &root,
-                &args.operation_id,
-            )?)
-        }
         command => {
-            let api = if matches!(
+            let api = if matches!(command, Command::Recon { .. }) {
+                discover_recon_api(api_override).await?
+            } else if matches!(
                 command.operation_name(),
                 "target.service_map.get"
                     | "target.service_map.evidence.get"
@@ -9112,6 +9823,7 @@ async fn run(cli: Cli) -> Result<()> {
                     | "target.service_map.socket_peer_matches.get"
                     | "target.service_map.parameters.get"
                     | "target.service_map.openapi.get"
+                    | "target.service_map.flow.get"
                     | "target.service_map.unnamed.get"
                     | "capture.http.upstream_peer.get"
                     | "capture.http.upstream_peer.set"
@@ -9139,7 +9851,9 @@ async fn run(cli: Cli) -> Result<()> {
                     CaptureCommand::Oast { command } => handle_oast(api, command).await,
                     CaptureCommand::Browser { command } => handle_browser(api, command).await,
                 },
+                Command::Recon { command } => handle_recon(api, command).await,
                 Command::Scanner { command } => handle_scanner(api, command).await,
+                Command::Templates { command } => handle_templates(api, command).await,
                 Command::Findings { command } => handle_findings(api, command).await,
                 Command::EventLog { command } => handle_event_log(api, command).await,
                 Command::Scope { command } => handle_target(api, command).await,
@@ -9165,25 +9879,34 @@ fn validate_skill_root_selection(
     claude_selected: bool,
     codex_dir: &Option<PathBuf>,
     claude_dir: &Option<PathBuf>,
-    allow_all: bool,
 ) -> Result<()> {
     for (agent, selected, root) in [
         ("codex", codex_selected, codex_dir),
         ("claude", claude_selected, claude_dir),
     ] {
         if root.is_some() && !selected {
-            let all = if allow_all {
-                " or --all (all=true)"
-            } else {
-                ""
-            };
-            bail!("invalid directory override: --{agent}-dir ({agent}_dir) requires --{agent} ({agent}=true){all}; select that agent or omit its directory override");
+            bail!("invalid directory override: --{agent}-dir ({agent}_dir) requires --{agent} ({agent}=true) or --all (all=true); select that agent or omit its directory override");
         }
     }
     Ok(())
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Recon {
+        command: ReconCommand::Start(args),
+    } = command
+    {
+        args.request()
+            .validate()
+            .map_err(|message| anyhow!("invalid Recon input: {message}"))?;
+        if args
+            .scan_visibility
+            .as_deref()
+            .is_some_and(|visibility| !["private", "unlisted", "public"].contains(&visibility))
+        {
+            bail!("invalid Recon scan_visibility");
+        }
+    }
     match command {
         Command::Capture {
             command:
@@ -9229,10 +9952,7 @@ fn validate_command_preflight(command: &Command) -> Result<()> {
     }
 
     if let Command::Skills {
-        command:
-            SkillsCommand::Install(args)
-            | SkillsCommand::Status(args)
-            | SkillsCommand::UpdatePreview(args),
+        command: SkillsCommand::Install(args) | SkillsCommand::Status(args),
     } = command
     {
         if !(args.codex || args.claude || args.all) {
@@ -9243,65 +9963,9 @@ fn validate_command_preflight(command: &Command) -> Result<()> {
             args.claude || args.all,
             &args.codex_dir,
             &args.claude_dir,
-            true,
         )?;
         for path in [&args.codex_dir, &args.claude_dir].into_iter().flatten() {
             validate_skill_cli_path(path)?;
-        }
-    }
-
-    if let Command::Skills {
-        command:
-            SkillsCommand::Enroll(args)
-            | SkillsCommand::EnableAutoUpdates(SkillsEnableAutoUpdatesArgs { target: args, .. })
-            | SkillsCommand::StageUpdate(SkillsStageArgs { target: args, .. })
-            | SkillsCommand::ApplyUpdate(SkillsApplyArgs { target: args, .. })
-            | SkillsCommand::UpdateResult(SkillsOperationArgs { target: args, .. })
-            | SkillsCommand::RollbackUpdate(SkillsOperationArgs { target: args, .. }),
-    } = command
-    {
-        if args.codex == args.claude {
-            bail!("must select exactly one destination with --codex or --claude");
-        }
-        validate_skill_root_selection(
-            args.codex,
-            args.claude,
-            &args.codex_dir,
-            &args.claude_dir,
-            false,
-        )?;
-        for path in [&args.codex_dir, &args.claude_dir].into_iter().flatten() {
-            validate_skill_cli_path(path)?;
-        }
-    }
-    if let Command::Skills {
-        command:
-            SkillsCommand::AutoUpdateStatus(args)
-            | SkillsCommand::DisableAutoUpdates(args)
-            | SkillsCommand::AutoUpdateOnce(args),
-    } = command
-    {
-        if args.codex == args.claude {
-            bail!("must select exactly one destination with --codex or --claude");
-        }
-    }
-    if let Command::Skills {
-        command:
-            SkillsCommand::StageUpdate(SkillsStageArgs { staging_dir, .. })
-            | SkillsCommand::ApplyUpdate(SkillsApplyArgs { staging_dir, .. }),
-    } = command
-    {
-        validate_skill_cli_path(staging_dir)?;
-    }
-    if let Command::Skills {
-        command:
-            SkillsCommand::ApplyUpdate(SkillsApplyArgs { operation_id, .. })
-            | SkillsCommand::UpdateResult(SkillsOperationArgs { operation_id, .. })
-            | SkillsCommand::RollbackUpdate(SkillsOperationArgs { operation_id, .. }),
-    } = command
-    {
-        if !sniper::skill_activation::valid_operation_id(operation_id) {
-            bail!("operation_id must be a canonical lowercase hyphenated UUID");
         }
     }
 
@@ -9402,6 +10066,148 @@ fn browser_open_body(args: &BrowserOpenArgs) -> Value {
         "fresh": args.fresh,
         "agent": args.agent,
     })
+}
+
+/// How long a download or import may take before the CLI stops waiting; the
+/// server keeps going and `templates library status` reports the outcome.
+const TEMPLATE_LIBRARY_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+const MAX_TEMPLATE_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+
+async fn wait_for_template_library(api: &ApiClient) -> Result<Value> {
+    let deadline = std::time::Instant::now() + TEMPLATE_LIBRARY_WAIT;
+    loop {
+        let status: Value = api.get_json("/api/templates/library").await?;
+        match status["state"].as_str() {
+            Some("idle") => return Ok(status),
+            Some("failed") => bail!(
+                "the template library failed: {}",
+                status["error"].as_str().unwrap_or("unknown error")
+            ),
+            _ if std::time::Instant::now() >= deadline => bail!(
+                "still busy after {} seconds; `templates library status` reports the outcome",
+                TEMPLATE_LIBRARY_WAIT.as_secs()
+            ),
+            _ => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+        }
+    }
+}
+
+async fn handle_templates(api: ApiClient, command: TemplatesCommand) -> Result<()> {
+    match command {
+        TemplatesCommand::Library { command } => match command {
+            TemplatesLibraryCommand::Status => {
+                let status: Value = api.get_json("/api/templates/library").await?;
+                print_json(&status)
+            }
+            TemplatesLibraryCommand::Check => {
+                let checked: Value = api
+                    .post_json("/api/templates/library/check", &json!({}))
+                    .await?;
+                print_json(&checked)
+            }
+            TemplatesLibraryCommand::Download => {
+                let _: Value = api
+                    .post_json(
+                        "/api/templates/library/download",
+                        &json!({ "acknowledged": true }),
+                    )
+                    .await?;
+                print_json(&wait_for_template_library(&api).await?)
+            }
+            TemplatesLibraryCommand::Import(args) => {
+                let size = std::fs::metadata(&args.file)
+                    .with_context(|| format!("cannot read {}", args.file.display()))?
+                    .len();
+                if size > MAX_TEMPLATE_ARCHIVE_BYTES {
+                    bail!("{} is larger than 64 MiB", args.file.display());
+                }
+                let bytes = std::fs::read(&args.file)
+                    .with_context(|| format!("cannot read {}", args.file.display()))?;
+                const PATH: &str = "/api/templates/library/import";
+                let response = api
+                    .long_client
+                    .post(api.url(PATH))
+                    .header(reqwest::header::CONTENT_TYPE, "application/gzip")
+                    .body(bytes)
+                    .send()
+                    .await
+                    .with_context(|| format!("failed to POST {PATH}"))?;
+                let status = response.status();
+                if !status.is_success() {
+                    let message = response.text().await.unwrap_or_default();
+                    bail!(
+                        "request to {PATH} failed ({status}): {}",
+                        api_failure_detail(status, message)
+                    );
+                }
+                print_json(&wait_for_template_library(&api).await?)
+            }
+        },
+        TemplatesCommand::List(args) => {
+            let page: Value = api.get_json(&templates_list_path(&args)).await?;
+            print_json(&page)
+        }
+        TemplatesCommand::Get(args) => {
+            if !valid_template_id(&args.id) {
+                bail!("`{}` is not a template id", args.id);
+            }
+            let detail: Value = api.get_json(&format!("/api/templates/{}", args.id)).await?;
+            print_json(&detail)
+        }
+        TemplatesCommand::Passive {
+            command: TemplatesPassiveCommand::SetEnabled(args),
+        } => {
+            let body = templates_passive_body(&args)?;
+            let saved: Value = api.post_json("/api/templates/passive", &body).await?;
+            print_json(&saved)
+        }
+        TemplatesCommand::Scan { command } => {
+            let explicit = match &command {
+                TemplatesScanCommand::Preview(args) | TemplatesScanCommand::Start(args) => {
+                    args.session_id
+                }
+                TemplatesScanCommand::List(args) => args.session_id,
+                TemplatesScanCommand::Get(args) | TemplatesScanCommand::Stop(args) => {
+                    args.session_id
+                }
+            };
+            let session_id = resolve_session_id_arg(&api, explicit)
+                .await?
+                .ok_or_else(|| anyhow!("no session; pass --session-id"))?;
+            let result: Value = match command {
+                TemplatesScanCommand::Preview(args) => {
+                    let body = templates_scan_body(&args, Some(session_id), true)?;
+                    api.post_json("/api/templates/scans", &body).await?
+                }
+                TemplatesScanCommand::Start(args) => {
+                    let body = templates_scan_body(&args, Some(session_id), false)?;
+                    api.post_json("/api/templates/scans", &body).await?
+                }
+                TemplatesScanCommand::List(_) => {
+                    api.get_json(&session_query_path(
+                        "/api/templates/scans",
+                        Some(session_id),
+                    ))
+                    .await?
+                }
+                TemplatesScanCommand::Get(args) => {
+                    api.get_json(&session_query_path(
+                        &format!("/api/templates/scans/{}", args.id),
+                        Some(session_id),
+                    ))
+                    .await?
+                }
+                TemplatesScanCommand::Stop(args) => {
+                    api.post_json(
+                        &format!("/api/templates/scans/{}/stop", args.id),
+                        &json!({ "session_id": session_id }),
+                    )
+                    .await?
+                }
+            };
+            print_json(&result)
+        }
+    }
 }
 
 async fn handle_browser(api: ApiClient, command: BrowserCommand) -> Result<()> {
@@ -10019,6 +10825,14 @@ async fn service_map_get_with_catalog<T: DeserializeOwned>(
                 status: Some(404),
             }.into());
         }
+        if path.starts_with("/api/target/service-map/flow?") && status == StatusCode::NOT_FOUND {
+            return Err(ServiceMapCliError {
+                code: "UNSUPPORTED_FEATURE",
+                message: "The selected API does not draw flows; update the app to use this feature",
+                status: Some(404),
+            }
+            .into());
+        }
         if path.starts_with("/api/target/service-map/openapi?") {
             if status == StatusCode::NOT_FOUND {
                 return Err(ServiceMapCliError {
@@ -10384,6 +11198,16 @@ fn validate_service_map_response(
                         && link.request_kinds.values().sum::<usize>() == link.request_count
                         && link.cors_credentials_count <= link.cors_allowed_count
                         && link.cors_allowed_count <= link.request_count
+                })
+                && origin.header_sources.iter().all(|source| {
+                    service_map_safe_origin(&source.source_origin)
+                        && source
+                            .request_kinds
+                            .keys()
+                            .all(|kind| sniper::service_map::REQUEST_KINDS.contains(&kind.as_str()))
+                        && source.request_kinds.values().sum::<usize>() == source.request_count
+                        && source.cors_credentials_count <= source.cors_allowed_count
+                        && source.cors_allowed_count <= source.request_count
                 })
                 && origin
                     .favicon
@@ -11319,6 +12143,63 @@ fn validate_service_map_openapi_response(
     Ok(())
 }
 
+/// One origin's flow, checked against the origin and session asked for and the
+/// server's own bounds before any of it is printed. Returns its session.
+fn validate_service_map_flow_response(flow: &Value, args: &ServiceMapFlowArgs) -> Result<Uuid> {
+    use sniper::service_map_flow::{MAX_LANES, MAX_STEPS};
+    let lanes: Vec<&str> = flow["lanes"]
+        .as_array()
+        .map(|lanes| lanes.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let steps: Vec<&Value> = flow["phases"]
+        .as_array()
+        .map(|phases| {
+            phases
+                .iter()
+                .flat_map(|phase| phase["steps"].as_array().into_iter().flatten())
+                .collect()
+        })
+        .unwrap_or_default();
+    let session = flow["session_id"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok());
+    let valid = flow["schema_version"] == 1
+        && flow["origin"] == args.origin
+        && session.is_some_and(|session| args.session_id.is_none_or(|asked| asked == session))
+        && lanes.first() == Some(&args.origin.as_str())
+        && lanes.len() <= MAX_LANES
+        && flow["lanes"]
+            .as_array()
+            .is_some_and(|all| all.len() == lanes.len())
+        && steps.len() <= MAX_STEPS
+        && steps.iter().all(|step| {
+            step["origin"]
+                .as_str()
+                .is_some_and(|origin| lanes.contains(&origin))
+                && step["count"].as_u64().is_some_and(|count| count >= 1)
+                && step["record_id"]
+                    .as_str()
+                    .is_some_and(|id| Uuid::parse_str(id).is_ok())
+        });
+    match session {
+        Some(session) if valid => Ok(session),
+        _ => Err(service_map_error(
+            "INVALID_RESPONSE",
+            "The flow does not match the requested origin, session or bounds",
+        )),
+    }
+}
+
+async fn read_service_map_flow(
+    api: &ApiClient,
+    args: &ServiceMapFlowArgs,
+) -> Result<(Value, Uuid)> {
+    let client = service_map_read_client()?;
+    let flow: Value = service_map_get(api, &client, &service_map_flow_path(args)).await?;
+    let session = validate_service_map_flow_response(&flow, args)?;
+    Ok((flow, session))
+}
+
 async fn read_service_map_openapi(api: &ApiClient, args: &ServiceMapOpenApiArgs) -> Result<Value> {
     let client = service_map_read_client()?;
     let document: Value = service_map_get(api, &client, &service_map_openapi_path(args)).await?;
@@ -11416,6 +12297,10 @@ async fn handle_target(api: ApiClient, command: TargetCommand) -> Result<()> {
             Some(ServiceMapCommand::Openapi(args)) => {
                 let result = read_service_map_openapi(&api, args).await?;
                 print_session_read_json(&result, args.session_id)
+            }
+            Some(ServiceMapCommand::Flow(args)) => {
+                let (result, session) = read_service_map_flow(&api, args).await?;
+                print_session_read_json(&result, session)
             }
             Some(ServiceMapCommand::Unnamed(args)) => {
                 let map = read_service_map(&api, &args.map_args()).await?;
@@ -12228,7 +13113,7 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
                 bail!("fuzzer payloads are empty");
             }
 
-            let record: FuzzerAttackRecord = api
+            let started: FuzzerAttackRecord = api
                 .post_json_long(
                     "/api/fuzzer/attacks",
                     &FuzzerRunPayload {
@@ -12243,15 +13128,35 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
                         source_transaction_id: workspace.fuzzer.source_transaction_id,
                         http_version: parsed_template.http_version,
                         target,
+                        attack_type: args.attack_type.api_name(),
+                        url_encode: !args.raw_payloads,
+                        concurrency: args.concurrency.max(1),
                     },
                 )
                 .await?;
-            workspace.fuzzer.attack_record_id = Some(record.id);
+            workspace.fuzzer.attack_record_id = Some(started.id);
             workspace.fuzzer.attack_record = None;
             workspace.fuzzer.notice.clear();
             let workspace_save_error = post_workspace_state(&api, &mut workspace, args.session_id)
                 .await
                 .err();
+
+            if args.r#async {
+                let mut async_output = json!({
+                    "async_requested": true,
+                    "session_id": workspace.session_id,
+                    "message": format!(
+                        "The attack runs in the background. Read it with `fuzzer status --id {id}` or `fuzzer results --id {id}`, and stop it with `fuzzer stop --id {id}`.",
+                        id = started.id
+                    ),
+                    "attack": started,
+                });
+                if let Some(save_error) = workspace_save_error.as_ref() {
+                    attach_workspace_save_error(&mut async_output, save_error);
+                }
+                return print_json(&async_output);
+            }
+            let record = wait_for_fuzzer_attack(&api, started.id, workspace.session_id).await?;
 
             let record_value =
                 serde_json::to_value(&record).context("failed to inspect JSON status")?;
@@ -12275,21 +13180,7 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
                 workspace.session_id,
                 workspace_save_error.as_ref(),
             )?;
-            if args.r#async {
-                let mut async_output = json!({
-                    "async_requested": true,
-                    "session_id": workspace.session_id,
-                    "message": "Fuzzer attack completed. The current Sniper API creates attacks synchronously, so the CLI waits until the server returns the attack record.",
-                    "attack": record,
-                });
-                if let Some(save_error) = workspace_save_error.as_ref() {
-                    attach_workspace_save_error(&mut async_output, save_error);
-                }
-                print_json(&async_output)?;
-            } else {
-                print_json(&record_output)?;
-            }
-            Ok(())
+            print_json(&record_output)
         }
         FuzzerCommand::Status(args) => {
             let session_id = resolve_session_id_arg(&api, args.session_id).await?;
@@ -12301,12 +13192,32 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
                 .await?;
             print_json(&json!({
                 "id": record.id,
-                "status": record.status,
+                "status": fuzzer_attack_state(&record),
+                "running": record.running,
+                "stopped": record.stopped,
                 "started_at": record.started_at,
                 "completed_at": record.completed_at,
                 "payload_count": record.payload_count,
+                "planned": record.planned,
                 "result_count": record.results.len(),
                 "marker_count": record.marker_count,
+            }))
+        }
+        FuzzerCommand::Stop(args) => {
+            let session_id = resolve_session_id_arg(&api, args.session_id).await?;
+            let record: FuzzerAttackRecord = api
+                .post_json(
+                    &format!("/api/fuzzer/attacks/{}/stop", args.id),
+                    &json!({ "session_id": session_id }),
+                )
+                .await?;
+            print_json(&json!({
+                "id": record.id,
+                "status": fuzzer_attack_state(&record),
+                "running": record.running,
+                "stopped": record.stopped,
+                "planned": record.planned,
+                "result_count": record.results.len(),
             }))
         }
         FuzzerCommand::Results(args) => {
@@ -12337,6 +13248,34 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
             let attacks: Vec<serde_json::Value> = api.get_json(&path).await?;
             print_json(&attacks)
         }
+    }
+}
+
+/// One word for where an attack is. The record keeps `status` to completed and
+/// failed, which older builds read, and says running and stopped apart.
+fn fuzzer_attack_state(record: &FuzzerAttackRecord) -> Value {
+    if record.running {
+        json!("running")
+    } else if record.stopped {
+        json!("stopped")
+    } else {
+        json!(record.status)
+    }
+}
+
+/// Reads an attack until it ends; the attack itself caps how long that is.
+async fn wait_for_fuzzer_attack(
+    api: &ApiClient,
+    id: Uuid,
+    session_id: Option<Uuid>,
+) -> Result<FuzzerAttackRecord> {
+    let path = session_query_path(&format!("/api/fuzzer/attacks/{id}"), session_id);
+    loop {
+        let record: FuzzerAttackRecord = api.get_json(&path).await?;
+        if !record.running {
+            return Ok(record);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 
@@ -16855,6 +17794,19 @@ impl fmt::Display for ReadHttpStatusError {
 impl std::error::Error for ReadHttpStatusError {}
 
 #[derive(Debug)]
+struct ReadRequestError {
+    message: String,
+}
+
+impl fmt::Display for ReadRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ReadRequestError {}
+
+#[derive(Debug)]
 struct SessionMetadataHttpStatusError {
     status: StatusCode,
 }
@@ -17169,6 +18121,25 @@ fn clap_error_payload(error: &clap::Error) -> CliErrorPayload {
 }
 
 fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload {
+    if let Some(recon) = error.downcast_ref::<ReconCliError>() {
+        return CliErrorPayload {
+            code: recon.code,
+            message: recon.to_string(),
+            hint: Some(if recon.write {
+                "The operation may have applied. Inspect recon list --session-id <the same UUID> before a deliberate retry; never automatically resubmit. Stopping local work cannot recall an accepted urlscan scan."
+            } else {
+                "Inspect the selected API and session deliberately; a failed read is not an empty inventory."
+            }),
+            retryable: false,
+            details: json!({"status":recon.status,"outcome":if recon.write {"unknown"} else {"not_applied"}}),
+            exit_code: if recon.status.is_some_and(|status| status < 500) {
+                5
+            } else {
+                6
+            },
+        };
+    }
+
     if let Some(map) = error.downcast_ref::<ServiceMapCliError>() {
         return CliErrorPayload {
             code: map.code,
@@ -17222,78 +18193,6 @@ fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload 
                 json!({ "operation": operation })
             },
             exit_code: 2,
-        };
-    }
-    if let Some(managed) = error.downcast_ref::<sniper::skill_managed::ManagedSkillError>() {
-        let (message, hint) = match (operation, managed.code) {
-            (operation, "policy_revision_conflict" | "policy_revision_required") if is_skill_auto_update_operation(operation) => (
-                "The automatic-update policy needs fresh explicit authorization at its current revision.",
-                "Inspect skills auto-update-status for the same agent. Preserve all files and recovery artifacts; only deliberately re-enable with the returned --policy-revision after reviewing the stored target and pause reason.",
-            ),
-            (operation, _) if is_skill_auto_update_operation(operation) => (
-                "The host-local automatic-update action could not complete safely.",
-                "Inspect skills auto-update-status for the same agent and preserve active files, policy, attempt and transaction artifacts. Paused or uncertain state is not permission to retry, replace operation IDs, adopt edits or use legacy install. Re-enable only after review with the current --policy-revision.",
-            ),
-            ("skills.apply_update" | "skills.rollback_update", "recovery_required") => (
-                "The local skill mutation requires recovery inspection; its outcome must not be assumed.",
-                "Use skills update-result with the same selected agent, root and original --operation-id. Preserve all transaction and staging artifacts and displaced files; do not blindly retry or use a new operation ID.",
-            ),
-            ("skills.apply_update" | "skills.rollback_update", "platform_unsupported" | "swap_unsupported" | "metadata_unsupported") => (
-                "Safe skill activation or rollback is unavailable on this platform or filesystem.",
-                "Preserve the active skill and all artifacts. Use skills update-result with the original --operation-id if a transaction exists; never fall back to overwrite or legacy install.",
-            ),
-            ("skills.apply_update", "version_conflict") => (
-                "Different skill bytes do not have a strictly newer semantic version.",
-                "Preserve the active file, enrollment and stage. Inspect their versions and hashes; equal semantic-version precedence with different bytes is refused, including build-metadata-only changes.",
-            ),
-            ("skills.apply_update", "downgrade") => (
-                "The candidate's semantic version is older than the enrolled baseline.",
-                "Preserve the active file, enrollment and staged candidate. This activation path only accepts strictly newer bundled versions; use transaction-bound rollback with the original operation ID to restore that transaction's baseline.",
-            ),
-            ("skills.apply_update", "request_conflict") => (
-                "The operation ID is already bound to a different skill update request.",
-                "Inspect skills update-result using the original --operation-id, agent and root. Preserve its artifacts; do not reuse the ID for another bundle or staging directory or replace the ID to bypass an unresolved transaction.",
-            ),
-            ("skills.apply_update" | "skills.rollback_update", "transaction_busy" | "pending_transaction") => (
-                "Another local skill transaction blocks this action.",
-                "Stop concurrent writers and inspect the existing transaction with skills update-result and its original --operation-id. Preserve its lock and recovery artifacts; do not remove them or invent another ID to bypass the transaction.",
-            ),
-            ("skills.apply_update" | "skills.update_result" | "skills.rollback_update", _) => (
-                "The local skill transaction could not be completed or inspected safely.",
-                "Use skills update-result with the same selected agent, root and original --operation-id. Preserve transaction and staging artifacts and displaced files; inspect the reason before any deliberate action, and do not blindly retry or replace the operation ID.",
-            ),
-            ("skills.stage_update", "already_current") => (
-                "The active skill already matches this binary's bundled template.",
-                "Use skills status to check the active bytes; no update candidate is needed.",
-            ),
-            ("skills.enroll", "already_exists") => (
-                "The enrollment receipt path already exists.",
-                "Use skills update-preview to inspect the recorded baseline. Preserve the existing path; it may contain a valid or malformed receipt, or be a directory or link.",
-            ),
-            ("skills.stage_update", "already_exists") => (
-                "The staging directory or an output path already exists.",
-                "Inspect the staging directory and any partial output, then choose a new staging directory whose parent exists and which is outside the active skill directory.",
-            ),
-            ("skills.enroll", "installed_not_current") => (
-                "Enrollment requires active skill bytes that exactly match this binary's bundled template.",
-                "Use skills status to compare the active bytes. Review differences and preserve customizations; do not overwrite edits just to enroll.",
-            ),
-            ("skills.stage_update", "installed_modified") => (
-                "The active skill differs from its recorded enrollment baseline.",
-                "Use skills status to compare active bytes with the bundle and skills update-preview to inspect the baseline. Manual activation can leave an old receipt; preserve customizations before considering optional receipt recovery.",
-            ),
-            _ => (
-                "Local skill operation could not be completed safely.",
-                "Inspect skills update-preview and the local staging directory before deliberately trying again. No activation is performed.",
-            ),
-        };
-        return CliErrorPayload {
-            code: "MANAGED_SKILL_ERROR",
-            message: message.to_owned(),
-            hint: Some(hint),
-            retryable: false,
-            details: json!({"reason":managed.code}),
-            exit_code: 5,
         };
     }
     if let Some(peer) = error.downcast_ref::<UpstreamPeerCliError>() {
@@ -17412,6 +18311,15 @@ fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload 
             retryable: status >= 500,
             details: json!({ "status": status }),
             exit_code: if status < 500 { 5 } else { 6 },
+        }
+    } else if let Some(read) = error.downcast_ref::<ReadRequestError>() {
+        CliErrorPayload {
+            code: "CLI_ERROR",
+            message: read.to_string(),
+            hint: None,
+            retryable: false,
+            details: json!({}),
+            exit_code: 1,
         }
     } else if message.contains("requires --dry-run or --yes") {
         CliErrorPayload {
@@ -17699,71 +18607,6 @@ fn validate_skill_cli_path(path: &Path) -> Result<()> {
         bail!("skill directory must be nonempty and contain no NUL characters");
     }
     Ok(())
-}
-
-fn stored_skill_agent(args: StoredSkillArgs) -> (&'static str, &'static str) {
-    if args.codex {
-        ("codex", skills::CODEX_SKILL_TEMPLATE)
-    } else {
-        ("claude", skills::CLAUDE_SKILL_TEMPLATE)
-    }
-}
-
-fn single_skill_target(args: SingleSkillArgs) -> Result<(&'static str, PathBuf, &'static str)> {
-    let (agent, root, default_root, bundled) = if args.codex {
-        (
-            "codex",
-            args.codex_dir,
-            skills::default_codex_skills_dir as fn() -> Option<PathBuf>,
-            skills::CODEX_SKILL_TEMPLATE,
-        )
-    } else {
-        (
-            "claude",
-            args.claude_dir,
-            skills::default_claude_skills_dir as fn() -> Option<PathBuf>,
-            skills::CLAUDE_SKILL_TEMPLATE,
-        )
-    };
-    let root = root.or_else(default_root).with_context(|| {
-        format!("could not determine {agent} skills directory; set HOME or pass --{agent}-dir")
-    })?;
-    Ok((agent, root, bundled))
-}
-
-fn skills_update_preview(args: SkillsInstallArgs) -> Result<Value> {
-    let mut entries = Vec::new();
-    for (selected, agent, root, default_root, bundled) in [
-        (
-            args.all || args.codex,
-            "codex",
-            args.codex_dir,
-            skills::default_codex_skills_dir as fn() -> Option<PathBuf>,
-            skills::CODEX_SKILL_TEMPLATE,
-        ),
-        (
-            args.all || args.claude,
-            "claude",
-            args.claude_dir,
-            skills::default_claude_skills_dir as fn() -> Option<PathBuf>,
-            skills::CLAUDE_SKILL_TEMPLATE,
-        ),
-    ] {
-        if selected {
-            let root = root.or_else(default_root).with_context(|| {
-                format!(
-                    "could not determine {agent} skills directory; set HOME or pass --{agent}-dir"
-                )
-            })?;
-            entries.push(sniper::skill_managed::preview_skill_update(
-                agent,
-                &root,
-                bundled,
-                env!("CARGO_PKG_VERSION"),
-            )?);
-        }
-    }
-    Ok(json!({"scope":"cli_host","bundled_version":env!("CARGO_PKG_VERSION"),"entries":entries}))
 }
 
 fn skills_status(args: SkillsInstallArgs) -> Result<Value> {
@@ -20227,6 +21070,62 @@ mod tests {
     }
 
     #[test]
+    fn fuzzer_run_and_stop_take_the_attack_options_from_flags_and_calls() {
+        let Cli {
+            command:
+                Command::Fuzzer {
+                    command: FuzzerCommand::Run(args),
+                },
+            ..
+        } = Cli::try_parse_from([
+            "sniper-cli",
+            "fuzzer",
+            "run",
+            "--attack-type",
+            "sniper",
+            "--raw-payloads",
+            "--concurrency",
+            "4",
+        ])
+        .unwrap()
+        else {
+            panic!("expected fuzzer run");
+        };
+        assert_eq!(args.attack_type, super::FuzzerAttackTypeArg::Sniper);
+        assert!(args.raw_payloads);
+        assert_eq!(args.concurrency, 4);
+        assert!(
+            Cli::try_parse_from(["sniper-cli", "fuzzer", "run", "--concurrency", "17"]).is_err()
+        );
+
+        let Command::Fuzzer {
+            command: FuzzerCommand::Run(args),
+        } = command_from_operation_input("fuzzer.run", &json!({})).unwrap()
+        else {
+            panic!("expected fuzzer run");
+        };
+        assert_eq!(
+            (args.attack_type, args.raw_payloads, args.concurrency),
+            (super::FuzzerAttackTypeArg::BatteringRam, false, 1),
+            "a call without options keeps the attack the API ran before Sniper"
+        );
+        assert!(command_from_operation_input("fuzzer.run", &json!({"concurrency":0})).is_err());
+        assert!(
+            command_from_operation_input("fuzzer.run", &json!({"attack_type":"pitchfork"}))
+                .is_err()
+        );
+
+        let id = "22222222-2222-2222-2222-222222222222";
+        let Command::Fuzzer {
+            command: FuzzerCommand::Stop(args),
+        } = command_from_operation_input("fuzzer.stop", &json!({ "id": id })).unwrap()
+        else {
+            panic!("expected fuzzer stop");
+        };
+        assert_eq!(args.id.to_string(), id);
+    }
+
+    #[test]
     fn oast_configure_rejects_enable_disable_conflict() {
         assert!(Cli::try_parse_from([
             "sniper-cli",
@@ -20288,6 +21187,119 @@ mod tests {
         }
     }
 
+    // Turning passive templates on takes exactly one selection, so a missing
+    // filter can never mean "all of them".
+    #[test]
+    fn templates_commands_validate_before_contacting_sniper() {
+        let passive =
+            |input: Value| command_from_operation_input("templates.passive.set_enabled", &input);
+        assert!(passive(json!({"enabled":true})).is_err());
+        assert!(passive(json!({"enabled":true,"ids":["tech-detect"],"all":true})).is_err());
+        assert!(passive(json!({"enabled":true,"ids":["../x"]})).is_err());
+        let by_tag = passive(json!({"enabled":false,"tag":"waf"})).unwrap();
+        assert_eq!(
+            super::command_api_preview(&by_tag).unwrap()["body"],
+            json!({"filter":{"tag":"waf","support":"passive"},"enabled":false})
+        );
+        assert!(command_from_operation_input("templates.get", &json!({"id":"a/b"})).is_err());
+        assert!(command_from_operation_input("templates.list", &json!({"limit":0})).is_err());
+        let list = command_from_operation_input(
+            "templates.list",
+            &json!({"search":"a b&c","support":"passive"}),
+        )
+        .unwrap();
+        assert_eq!(
+            super::command_api_preview(&list).unwrap()["path"],
+            "/api/templates?search=a+b%26c&support=passive&limit=200&offset=0"
+        );
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "templates",
+            "passive",
+            "set-enabled",
+            "--enabled",
+            "true",
+            "--all"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["sniper-cli", "templates", "list", "--limit", "0"]).is_err());
+        let download =
+            command_from_operation_input("templates.library.download", &json!({})).unwrap();
+        assert!(download.requires_confirmation());
+        assert!(super::dry_run_notes(&download)
+            .iter()
+            .any(|note| note.contains("Contacts GitHub")));
+    }
+
+    // A scan names its targets and exactly one selection; starting one is a
+    // confirmed write, and the body the server gets carries that confirmation.
+    #[test]
+    fn template_scans_need_targets_one_selection_and_confirmation() {
+        let scan = |operation: &str, input: Value| command_from_operation_input(operation, &input);
+        let target = json!(["https://app.example.com"]);
+        assert!(scan("templates.scan.start", json!({"ids":["git-config"]})).is_err());
+        assert!(scan("templates.scan.start", json!({"targets":target})).is_err());
+        assert!(scan(
+            "templates.scan.start",
+            json!({"targets":target,"ids":["git-config"],"tag":"cve"})
+        )
+        .is_err());
+        assert!(scan(
+            "templates.scan.start",
+            json!({"targets":target,"ids":["git-config"],"rate":51})
+        )
+        .is_err());
+        let start = scan(
+            "templates.scan.start",
+            json!({"targets":target,"severity":"high","allow_risks":["intrusive"]}),
+        )
+        .unwrap();
+        assert!(start.requires_confirmation());
+        assert_eq!(
+            super::command_api_preview(&start).unwrap()["body"],
+            json!({
+                "session_id":null,"targets":["https://app.example.com"],"allow_risks":["intrusive"],
+                "rate":10,"concurrency":4,"max_requests":10000,"apply_match_replace":false,
+                "filter":{"severity":"high"},"acknowledged":true
+            })
+        );
+        let preview = scan(
+            "templates.scan.preview",
+            json!({"targets":target,"ids":["git-config"]}),
+        )
+        .unwrap();
+        assert!(!preview.requires_confirmation());
+        assert_eq!(
+            super::command_api_preview(&preview).unwrap()["body"]["preview"],
+            json!(true)
+        );
+        let id = "22222222-2222-2222-2222-222222222222";
+        let stop = scan("templates.scan.stop", json!({"id":id})).unwrap();
+        assert!(stop.requires_confirmation());
+        assert_eq!(
+            super::command_api_preview(&stop).unwrap()["path"],
+            format!("/api/templates/scans/{id}/stop")
+        );
+        let direct = Cli::try_parse_from([
+            "sniper-cli",
+            "templates",
+            "scan",
+            "start",
+            "--target",
+            "https://app.example.com",
+            "--id",
+            "git-config",
+            "--allow-risk",
+            "method:put",
+        ])
+        .unwrap()
+        .command;
+        assert_eq!(direct.operation_name(), "templates.scan.start");
+        assert!(
+            Cli::try_parse_from(["sniper-cli", "templates", "scan", "start", "--id", "x"]).is_err()
+        );
+    }
+
     // The desktop map reads every retained row; the CLI can too, without a
     // row window, and never with one.
     #[test]
@@ -20326,6 +21338,15 @@ mod tests {
         ])
         .is_err());
         assert!(Cli::try_parse_from(["sniper-cli", "scope", "service-map", "--all-rows"]).is_ok());
+        // The schema says so too, so an agent learns it before calling.
+        let forbidden = &super::service_map_input_schema("target.service_map.get").unwrap()["not"];
+        assert_eq!(forbidden["required"], json!(["all_rows", "max_records"]));
+        assert_eq!(forbidden["properties"]["all_rows"]["const"], true);
+        assert!(command_from_operation_input(
+            "target.service_map.get",
+            &json!({"all_rows":true,"max_records":null})
+        )
+        .is_ok());
     }
 
     #[test]
@@ -20672,6 +21693,68 @@ mod tests {
         let mut relative = document.clone();
         relative["paths"] = json!({"v1/items":{}});
         assert!(super::validate_service_map_openapi_response(&relative, &args).is_err());
+    }
+
+    // An origin's flow: an exact origin in, a flow for that origin and session
+    // within the server's bounds out.
+    #[test]
+    fn service_map_flow_reads_one_origin_and_checks_the_answer() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let input =
+            json!({"origin":"https://example.com","max_records":50000,"in_scope_only":true});
+        let command = command_from_operation_input("target.service_map.flow.get", &input).unwrap();
+        assert_eq!(command.operation_name(), "target.service_map.flow.get");
+        let path = super::command_api_preview(&command).unwrap()["path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            path.starts_with("/api/target/service-map/flow?")
+                && path.contains("origin=https%3A%2F%2Fexample.com")
+                && path.contains("max_records=50000")
+                && path.contains("in_scope_only=true"),
+            "{path}"
+        );
+        for bad in [
+            json!({"origin":"https://example.com/x"}),
+            json!({}),
+            json!({"origin":"https://example.com","max_records":50001}),
+            json!({"origin":"https://example.com","path":"/"}),
+        ] {
+            assert!(
+                command_from_operation_input("target.service_map.flow.get", &bad).is_err(),
+                "{bad}"
+            );
+        }
+        let args = super::ServiceMapFlowArgs {
+            session_id: Some(session.parse().unwrap()),
+            origin: "https://example.com".into(),
+            in_scope_only: false,
+            max_records: 10_000,
+        };
+        let step = json!({"origin":"https://api.example.com","method":"GET","path":"/v1/items","status":200,
+            "request_kind":"api","count":2,"first_seen":"2026-10-20T00:00:00Z","last_seen":"2026-10-20T00:00:01Z",
+            "evidence":["v1.a","v1.b"],"record_id":"00000000-0000-0000-0000-000000000002"});
+        let flow = json!({"schema_version":1,"session_id":session,"origin":"https://example.com",
+            "lanes":["https://example.com","https://api.example.com"],
+            "phases":[{"page":{"origin":"https://example.com","path":"/"},"steps":[step]}],
+            "considered_rows":2,"flow_rows":2,"complete":true});
+        assert_eq!(
+            super::validate_service_map_flow_response(&flow, &args).unwrap(),
+            session.parse::<Uuid>().unwrap()
+        );
+        let mut other_session = flow.clone();
+        other_session["session_id"] = json!("00000000-0000-0000-0000-000000000009");
+        let mut stray_lane = flow.clone();
+        stray_lane["phases"][0]["steps"][0]["origin"] = json!("https://other.example.com");
+        let mut other_origin = flow.clone();
+        other_origin["lanes"][0] = json!("https://other.example.com");
+        for bad in [other_session, stray_lane, other_origin] {
+            assert!(
+                super::validate_service_map_flow_response(&bad, &args).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -21399,109 +22482,6 @@ mod tests {
     }
 
     #[test]
-    fn managed_skill_errors_have_operation_specific_guidance_and_stable_contracts() {
-        for (operation, reason, message, hint_fragments) in [
-            (
-                "skills.stage_update",
-                "already_current",
-                "The active skill already matches this binary's bundled template.",
-                vec!["skills status", "no update candidate is needed"],
-            ),
-            (
-                "skills.enroll",
-                "already_exists",
-                "The enrollment receipt path already exists.",
-                vec!["skills update-preview", "malformed", "directory or link"],
-            ),
-            (
-                "skills.stage_update",
-                "already_exists",
-                "The staging directory or an output path already exists.",
-                vec!["partial output", "new staging directory", "parent exists", "outside the active skill directory"],
-            ),
-            (
-                "skills.enroll",
-                "installed_not_current",
-                "Enrollment requires active skill bytes that exactly match this binary's bundled template.",
-                vec!["skills status", "preserve customizations", "do not overwrite edits"],
-            ),
-            (
-                "skills.stage_update",
-                "installed_modified",
-                "The active skill differs from its recorded enrollment baseline.",
-                vec!["skills status", "skills update-preview", "Manual activation", "old receipt", "optional receipt recovery"],
-            ),
-            (
-                "skills.enroll",
-                "unrecognized_reason",
-                "Local skill operation could not be completed safely.",
-                vec!["local staging directory", "No activation is performed"],
-            ),
-            (
-                "skills.enroll",
-                "already_current",
-                "Local skill operation could not be completed safely.",
-                vec!["local staging directory", "No activation is performed"],
-            ),
-            (
-                "unknown.operation",
-                "already_exists",
-                "Local skill operation could not be completed safely.",
-                vec!["local staging directory", "No activation is performed"],
-            ),
-        ] {
-            let error = anyhow::Error::new(sniper::skill_managed::ManagedSkillError { code: reason });
-            let payload = cli_error_payload(operation, &error);
-            assert_eq!(payload.code, "MANAGED_SKILL_ERROR");
-            assert_eq!(payload.exit_code, 5);
-            assert!(!payload.retryable);
-            assert_eq!(payload.details, json!({"reason": reason}));
-            assert_eq!(payload.message, message);
-            for fragment in hint_fragments {
-                assert!(payload.hint.unwrap().contains(fragment), "{operation}/{reason}: {fragment}");
-            }
-        }
-    }
-
-    #[test]
-    fn activation_recovery_errors_preserve_original_operation_guidance() {
-        for operation in ["skills.apply_update", "skills.rollback_update"] {
-            let error = anyhow::Error::new(sniper::skill_managed::ManagedSkillError {
-                code: "recovery_required",
-            });
-            let payload = cli_error_payload(operation, &error);
-            assert_eq!(payload.code, "MANAGED_SKILL_ERROR");
-            assert_eq!(payload.exit_code, 5);
-            assert!(!payload.retryable);
-            assert_eq!(payload.details, json!({"reason":"recovery_required"}));
-            let hint = payload.hint.unwrap();
-            for fragment in [
-                "skills update-result",
-                "original --operation-id",
-                "Preserve",
-                "do not blindly retry",
-                "new operation ID",
-            ] {
-                assert!(hint.contains(fragment), "{operation}: {fragment}");
-            }
-            assert!(!hint.contains("No activation is performed"));
-        }
-        for operation in [
-            "skills.apply_update",
-            "skills.update_result",
-            "skills.rollback_update",
-        ] {
-            let error = anyhow::Error::new(sniper::skill_managed::ManagedSkillError {
-                code: "unrecognized_reason",
-            });
-            let hint = cli_error_payload(operation, &error).hint.unwrap();
-            assert!(hint.contains("skills update-result"));
-            assert!(hint.contains("original --operation-id"));
-            assert!(!hint.contains("No activation is performed"));
-        }
-    }
-
-    #[test]
     fn api_probe_rejections_are_api_unavailable() {
         let payload = cli_error_payload(
             "session.list",
@@ -21855,6 +22835,46 @@ mod tests {
                 assert!(payload.hint.unwrap().contains("partially applied"));
             }
         }
+    }
+
+    #[test]
+    fn read_request_errors_keep_their_context_without_using_query_words_as_error_kinds() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let message = "failed to GET /api/transactions-search?value=invalid";
+        for method in [
+            reqwest::Method::GET,
+            reqwest::Method::POST,
+            reqwest::Method::PATCH,
+            reqwest::Method::DELETE,
+        ] {
+            // A builder error supplies a reqwest source without making a request.
+            let source = client.get("://").build().unwrap_err();
+            let legacy =
+                anyhow::Error::new(client.get("://").build().unwrap_err()).context(message);
+            let expected_chain = format!("{legacy:#}");
+            let error = super::api_request_error(source, &method, message.to_owned());
+            assert_eq!(error.to_string(), message);
+            assert_eq!(format!("{error:#}"), expected_chain);
+            assert!(error.downcast_ref::<reqwest::Error>().is_some());
+            assert_eq!(
+                error.downcast_ref::<super::ReadRequestError>().is_some(),
+                method == reqwest::Method::GET
+            );
+            if method == reqwest::Method::GET {
+                let error = error.context("requires --dry-run or --yes");
+                let payload = cli_error_payload("capture.http.search", &error);
+                assert_eq!(payload.code, "CLI_ERROR");
+                assert_eq!(payload.exit_code, 1);
+                assert_eq!(payload.message, message);
+                assert!(!payload.retryable);
+                assert_eq!(payload.details, json!({}));
+                assert!(payload.hint.is_none());
+            }
+        }
+
+        let invalid = cli_error_payload("capture.http.search", &anyhow::anyhow!("invalid input"));
+        assert_eq!(invalid.code, "INVALID_INPUT");
+        assert_eq!(invalid.exit_code, 2);
     }
 
     #[test]

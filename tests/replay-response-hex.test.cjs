@@ -46,6 +46,7 @@ function fixture(message = {}, mode = "hex", legacy = false) {
     state, els, TextEncoder, TextDecoder, Uint8Array, atob,
     _replayResponseCMView: null, _replayResponseCMMode: null, SniperCodeView: CodeView,
     getActiveReplayTab: () => tab, ensureRepeaterTab: () => tab,
+    getRenderedHttpReplayDraftOwner: () => null,
     syncReplayResponsePreview(text) { if (legacy) shown = text; },
     renderReplayViewTabs() {}, renderReplayTabs() {}, syncReplayToolbar() {},
     updateCodePaneCM() {}, syncReplayRequestTextFromEditor() {},

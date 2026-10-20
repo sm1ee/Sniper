@@ -17,7 +17,11 @@ use uuid::Uuid;
 
 const DELETE_CHUNK_SIZE: usize = 256;
 const COMPACTION_DEBOUNCE: Duration = Duration::from_millis(250);
+#[cfg(not(test))]
 const MIN_COMPACTION_INTERVAL: Duration = Duration::from_secs(30);
+// Short enough for a test to outwait it.
+#[cfg(test)]
+const MIN_COMPACTION_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -257,6 +261,10 @@ pub(crate) fn start_worker(session: &Arc<SessionContext>, environment: Retention
     let task = runtime.spawn(async move {
         let mut compact_after: Option<tokio::time::Instant> = None;
         let mut last_compaction: Option<tokio::time::Instant> = None;
+        // The policy revision the last cleanup ran under, and the snapshotted
+        // bytes trimmed since then.
+        let mut compacted_revision: Option<u64> = None;
+        let mut trimmed_bytes: u64 = 0;
         loop {
             if let Some(deadline) = compact_after {
                 tokio::select! { _ = notify.notified() => (), _ = tokio::time::sleep_until(deadline) => () }
@@ -283,7 +291,9 @@ pub(crate) fn start_worker(session: &Arc<SessionContext>, environment: Retention
                 // the store's insertion/lease critical section.
                 let protected = session.workspace.http_replay_source_ids().await;
                 match session.store.trim_retention(target, &protected, DELETE_CHUNK_SIZE).await {
-                    Ok(result) if !result.deleted_ids.is_empty() => {}
+                    Ok(result) if !result.deleted_ids.is_empty() => {
+                        trimmed_bytes = trimmed_bytes.saturating_add(result.reclaimable_bytes);
+                    }
                     Ok(_) => break,
                     Err(error) => {
                         tracing::warn!(session_id = %session.id(), ?error, "HTTP history retention persistence failed");
@@ -305,7 +315,26 @@ pub(crate) fn start_worker(session: &Arc<SessionContext>, environment: Retention
                 // before selecting another bounded deletion batch.
                 tokio::task::yield_now().await;
             }
-            if !session.store.retention_compaction_pending() || environment.workspace_is_uncertain(session.id()) || environment.persistence_is_uncertain(&session) {
+            if !session.store.retention_compaction_pending() {
+                // A snapshot written for another reason already reclaimed it.
+                compact_after = None;
+                trimmed_bytes = 0;
+                continue;
+            }
+            if environment.workspace_is_uncertain(session.id()) || environment.persistence_is_uncertain(&session) {
+                compact_after = None;
+                continue;
+            }
+            // At the cap every capture trims a row. Its tombstone is already
+            // durable in the journal, and the snapshot that journal growth forces
+            // reclaims the space with everything else, so rewriting the whole
+            // session for each trickle of trims was pure cost: a full rewrite every
+            // MIN_COMPACTION_INTERVAL for as long as capture ran. A changed policy
+            // still cleans up promptly, and so do trimmed bodies worth a rewrite.
+            let revision = session.runtime.history_retention_config().await.1;
+            if compacted_revision == Some(revision)
+                && trimmed_bytes < crate::proxy::TRANSACTION_JOURNAL_COMPACT_BYTES
+            {
                 compact_after = None;
                 continue;
             }
@@ -322,6 +351,8 @@ pub(crate) fn start_worker(session: &Arc<SessionContext>, environment: Retention
             match session.persist_mutation_locked().await {
                 Ok(metadata) => {
                     last_compaction = Some(tokio::time::Instant::now());
+                    compacted_revision = Some(revision);
+                    trimmed_bytes = 0;
                     if let Some(registry) = environment.sessions.upgrade() {
                         if let Err(error) = registry.update_metadata(metadata) { tracing::warn!(?error, "retention session metadata update failed"); }
                     }
@@ -634,7 +665,8 @@ mod tests {
             compaction_deadline(start, None),
             start + COMPACTION_DEBOUNCE
         );
-        for milliseconds in 0..29_000 {
+        let quiet = (MIN_COMPACTION_INTERVAL - COMPACTION_DEBOUNCE).as_millis() as u64;
+        for milliseconds in 0..quiet {
             let next =
                 compaction_deadline(start + Duration::from_millis(milliseconds), Some(start));
             assert_eq!(next, start + MIN_COMPACTION_INTERVAL);
