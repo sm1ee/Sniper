@@ -13,7 +13,7 @@ const deferred = () => {
 const response = (id = "record-a") => ({ ok: true, json: async () => ({ id }) });
 function button() {
   const classes = new Set();
-  return { disabled: false, dataset: {}, listeners: {},
+  return { disabled: false, dataset: {}, listeners: {}, classes,
     classList: { add: (...names) => names.forEach(name => classes.add(name)),
       remove: (...names) => names.forEach(name => classes.delete(name)) },
     addEventListener(name, callback) { this.listeners[name] = callback; },
@@ -27,7 +27,7 @@ function fixture() {
   els.findingsDetailJump.dataset.recordId = "record-a";
   const c = loadFunctions([
     "runFindingAction", "sendFindingToReplay", "sendFindingToFuzzer", "openFuzzerFromRecordLoader",
-    "setActiveTool", "setActiveProxyTab", "clearFindingDetail", "setFindingDetailActionsEnabled",
+    "setActiveTool", "setActiveProxyTab", "clearFindingDetail", "renderFindingDetailLoading", "setFindingDetailActionsEnabled",
     "onClickWithProgress", "withButtonProgress", "requireOkResponse", "readApiErrorMessage",
     "formatStructuredApiErrorMessage",
   ], {
@@ -219,3 +219,38 @@ test("an inactive or closed Findings view cannot start an action", async () => {
   assert.equal(await f.c.sendFindingToFuzzer("record-a"), false);
   assert.equal(f.reads.length, 0);
 });
+
+
+for (const kind of ["replay", "fuzzer"]) {
+  for (const boundary of ["close", "loading"]) {
+    test(`${kind} progress cannot re-enable a ${boundary} detail`, async () => {
+      const f = fixture();
+      const button = f.buttons[kind === "replay" ? "findingsDetailSendReplay" : "findingsDetailSendFuzzer"];
+      const pending = f.begin(kind, "mouse");
+      assert.equal(button.disabled, true);
+      assert.equal(button.classes.has("is-working"), true);
+      if (boundary === "close") f.c.clearFindingDetail();
+      else { f.c.findingsDetailGeneration += 1; f.c.renderFindingDetailLoading(); }
+      f.reads[0].resolve(response());
+      await pending; await tick();
+      assert.equal(button.disabled, true, "detail state still owns the disabled button");
+      assert.equal(button.classes.size, 0);
+      assert.deepEqual(f.opens, []);
+    });
+  }
+  test(`${kind} old cleanup cannot clear a newer selected finding's progress`, async () => {
+    const f = fixture();
+    const button = f.buttons[kind === "replay" ? "findingsDetailSendReplay" : "findingsDetailSendFuzzer"];
+    const old = f.begin(kind, "mouse");
+    f.select("b");
+    const newer = f.begin(kind, "mouse");
+    assert.equal(f.reads.length, 2);
+    f.reads[0].resolve(response()); await old; await tick();
+    assert.equal(button.disabled, true);
+    assert.equal(button.classes.has("is-working"), true);
+    f.reads[1].resolve(response("record-b")); await newer; await tick();
+    assert.equal(button.disabled, false);
+    assert.equal(button.classes.size, 0);
+    assert.deepEqual(f.opens, [[kind, "record-b"]]);
+  });
+}

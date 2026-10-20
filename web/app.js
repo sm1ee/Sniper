@@ -264,17 +264,28 @@ async function withButtonProgress(button, work) {
   // Already running. Returning without calling work() is the double-submit
   // guard — the caller is a click handler, so there is no value to lose.
   if (button.disabled) return undefined;
+  button._buttonProgress?.finish();
+  const progress = {
+    finish() {
+      clearTimeout(progress.reveal);
+      if (button._buttonProgress !== progress) return;
+      delete button._buttonProgress;
+      button.disabled = false;
+      button.classList.remove("is-working", "is-working-shown");
+    },
+  };
+  button._buttonProgress = progress;
   button.disabled = true;
   button.classList.add("is-working");
-  const reveal = setTimeout(() => button.classList.add("is-working-shown"), BUTTON_PROGRESS_DELAY_MS);
+  progress.reveal = setTimeout(() => {
+    if (button._buttonProgress === progress) button.classList.add("is-working-shown");
+  }, BUTTON_PROGRESS_DELAY_MS);
   try {
     return await work();
   } finally {
-    clearTimeout(reveal);
-    // Many of these actions re-render the markup the button lived in, so this
-    // often writes to a detached element. Harmless, and cheaper than checking.
-    button.disabled = false;
-    button.classList.remove("is-working", "is-working-shown");
+    // Detail changes can reuse this element for a newer action. Only its
+    // current owner may restore the button or remove the progress bar.
+    progress.finish();
   }
 }
 
@@ -9692,7 +9703,9 @@ function setFindingDetailActionsEnabled(enabled) {
     document.getElementById("findingsDetailSendReplay"),
     document.getElementById("findingsDetailSendFuzzer"),
   ].forEach((button) => {
-    if (button) button.disabled = !enabled;
+    if (!button) return;
+    button._buttonProgress?.finish();
+    button.disabled = !enabled;
   });
 }
 
