@@ -42,7 +42,7 @@ function fixture() {
     unavailable: [], deferred: [], warnings: [] });
   const state = { activeTool: 'map', activeTargetView: 'service-map', replayTabs: [] };
   const els = Object.fromEntries(['dashboardShell', 'proxyShell', 'replayShell', 'toolsShell', 'fuzzerShell', 'sequenceShell', 'targetShell', 'mapShell', 'loggerShell', 'reconShell', 'footerMode'].map(name => [name, node()]));
-  const context = loadFunctions(['initializeTargetWorkspace', 'setActiveTargetView', 'setActiveTool', 'renderToolPanels',
+  const context = loadFunctions(['initializeTargetWorkspace', 'setActiveTargetView', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',
     'loadTransactionRecordById', 'openTransactionRecordInReplay'], {
     window, document, URL, URLSearchParams, AbortController, state, els, mainTabs: [],
     workspaceStateGeneration: 1, compareLoadGeneration: 0, targetServiceMapController: null,

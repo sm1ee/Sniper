@@ -61,7 +61,7 @@ function fixture() {
     'buildRawRequest', 'buildRawResponse', 'buildRawRequestHead', 'buildRawResponseHead', 'normalizedHeaders',
     'mergeHeaders', 'headerNameEquals', 'renderBody', 'binaryBodyPlaceholder', 'prettyFormat', 'prettyJsonText',
     'resetFuzzer', 'invalidateFuzzerRun', 'updateFuzzerRequestText', 'markFuzzerDraftChanged',
-    'requireOkResponse', 'readApiErrorMessage', 'setActiveTool', 'renderToolPanels',
+    'requireOkResponse', 'readApiErrorMessage', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',
   ], {
     compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0,
     state, els, document, mainTabs: [], _fuzzerDetailViewModes: { request: 'raw', response: 'raw' },

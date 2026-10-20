@@ -1207,11 +1207,21 @@ function resetLayoutTextareas() {
   }
 }
 
+function invalidateFindingNavigation() {
+  state._findingsNavigationGeneration = (state._findingsNavigationGeneration || 0) + 1;
+  if (state.activeTool !== "proxy" || state.activeProxyTab !== "findings") return;
+  // Retained details can be revisited before their obsolete read settles.
+  // Only retire an existing progress owner; loading/closed buttons stay disabled.
+  for (const id of ["findingsDetailSendReplay", "findingsDetailSendFuzzer"]) {
+    document.getElementById(id)?._buttonProgress?.finish();
+  }
+}
+
 function setActiveTool(tool, options = {}) {
   const next = sanitizeActiveTool(tool);
   if (next !== state.activeTool) {
     closeScannerSettings(false);
-    state._findingsNavigationGeneration = (state._findingsNavigationGeneration || 0) + 1;
+    invalidateFindingNavigation();
     // Returning to Fuzzer must not revive reads started before navigation.
     state._fuzzerNavigationGeneration = (state._fuzzerNavigationGeneration || 0) + 1;
     state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
@@ -1227,7 +1237,7 @@ function setActiveProxyTab(tab, options = {}) {
   const next = sanitizeActiveProxyTab(tab);
   if (next !== state.activeProxyTab) {
     closeScannerSettings(false);
-    state._findingsNavigationGeneration = (state._findingsNavigationGeneration || 0) + 1;
+    invalidateFindingNavigation();
     state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
   }
   state.activeProxyTab = next;
@@ -21974,7 +21984,7 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   const activeTool = sanitizeActiveTool(snapshot?.active_tool);
   const activeProxyTab = sanitizeActiveProxyTab(snapshot?.active_proxy_tab);
   if (activeTool !== state.activeTool || activeProxyTab !== state.activeProxyTab) {
-    state._findingsNavigationGeneration = (state._findingsNavigationGeneration || 0) + 1;
+    invalidateFindingNavigation();
   }
   if (activeTool !== state.activeTool) {
     state._fuzzerNavigationGeneration = (state._fuzzerNavigationGeneration || 0) + 1;

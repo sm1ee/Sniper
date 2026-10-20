@@ -128,7 +128,7 @@ function fixture() {
   const state = { activeTool: 'map', activeTargetView: 'service-map' };
   const window = { document, getComputedStyle: node => ({ visibility: node.visibility }) };
   const context = loadFunctions([
-    'initializeTargetWorkspace', 'setActiveTargetView', 'setActiveTool', 'renderToolPanels',
+    'initializeTargetWorkspace', 'setActiveTargetView', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',
     'getActiveModalAction', 'isModalVisible', 'isEditableTarget', 'trapModalFocus', 'restoreModalFocus',
     'openCompareModal',
   ], {

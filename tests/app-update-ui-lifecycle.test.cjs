@@ -101,7 +101,7 @@ function fixture() {
   };
   const context = loadFunctions([
     "loadAppVersionInfo", "performSelfUpdate", "requireOkResponse",
-    "readApiErrorMessage", "formatStructuredApiErrorMessage", "setActiveTool",
+    "readApiErrorMessage", "formatStructuredApiErrorMessage", "invalidateFindingNavigation", "setActiveTool",
   ], {
     closeScannerSettings() {},
     TextDecoder,

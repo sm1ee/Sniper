@@ -51,7 +51,7 @@ function fixture() {
     'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
     'clearFuzzerResponsePane', 'invalidateFuzzerRun', 'resetFuzzer', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'cloneEditableRequest', 'buildEditableRawRequest', 'normalizedHeaders', 'mergeHeaders', 'headerNameEquals',
-    'setCompareBase', 'openCompareModal', 'closeCompareModal', 'splitFuzzerPayloadLines', 'setActiveTool',
+    'setCompareBase', 'openCompareModal', 'closeCompareModal', 'splitFuzzerPayloadLines', 'invalidateFindingNavigation', 'setActiveTool',
   ], { state, els, TextEncoder, document: { getElementById: id => els[id], activeElement: null },
     _fuzzerAttackLoadGeneration: 0, _fuzzerDetailGeneration: 0,
     compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0,

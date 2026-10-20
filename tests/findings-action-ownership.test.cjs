@@ -27,7 +27,7 @@ function fixture() {
   els.findingsDetailJump.dataset.recordId = "record-a";
   const c = loadFunctions([
     "runFindingAction", "sendFindingToReplay", "sendFindingToFuzzer", "openFuzzerFromRecordLoader",
-    "setActiveTool", "setActiveProxyTab", "clearFindingDetail", "renderFindingDetailLoading", "setFindingDetailActionsEnabled",
+    "invalidateFindingNavigation", "setActiveTool", "setActiveProxyTab", "clearFindingDetail", "renderFindingDetailLoading", "setFindingDetailActionsEnabled",
     "onClickWithProgress", "withButtonProgress", "requireOkResponse", "readApiErrorMessage",
     "formatStructuredApiErrorMessage",
   ], {
@@ -253,4 +253,60 @@ for (const kind of ["replay", "fuzzer"]) {
     assert.equal(button.classes.size, 0);
     assert.deepEqual(f.opens, [[kind, "record-b"]]);
   });
+}
+
+
+for (const kind of ["replay", "fuzzer"]) {
+  for (const boundary of ["tool-aba", "tab-aba", "settings-tool-aba", "settings-tab-aba"]) {
+    for (const stage of ["fetch", "json"]) {
+      for (const outcome of ["success", "failure"]) {
+        test(`${kind} ${boundary} retires ${stage} progress before obsolete ${outcome}`, async () => {
+          const f = fixture();
+          const button = f.buttons[kind === "replay" ? "findingsDetailSendReplay" : "findingsDetailSendFuzzer"];
+          const old = f.begin(kind, "mouse"), body = deferred();
+          let oldRead = f.reads[0];
+          if (stage === "json") {
+            oldRead.resolve({ ok: true, json: () => body.promise }); await tick(); oldRead = body;
+          }
+          crossBoundary(f, boundary);
+          assert.equal(button.disabled, false, "returning to a retained detail permits a fresh action");
+          assert.equal(button.classes.size, 0, "obsolete progress no longer owns the retained button");
+          const newer = f.begin(kind, "mouse");
+          assert.equal(f.reads.length, 2);
+          if (outcome === "failure") oldRead.reject(new Error("Obsolete request failed."));
+          else oldRead.resolve(stage === "json" ? { id: "record-a" } : response());
+          await old; await tick();
+          assert.equal(button.disabled, true, "late cleanup cannot retire the newer action");
+          assert.equal(button.classes.has("is-working"), true);
+          f.reads[1].resolve(response()); await newer; await tick();
+          assert.equal(button.disabled, false); assert.equal(button.classes.size, 0);
+          assert.deepEqual(f.opens, [[kind, "record-a"]]); assert.deepEqual(f.errors, []);
+        });
+      }
+    }
+  }
+  test(`${kind} no-op navigation and same-view settings retain current progress`, async () => {
+    const f = fixture();
+    const button = f.buttons[kind === "replay" ? "findingsDetailSendReplay" : "findingsDetailSendFuzzer"];
+    const pending = f.begin(kind, "mouse");
+    f.c.setActiveTool("proxy"); f.c.setActiveProxyTab("findings"); wireSettingsSnapshot(f);
+    f.c.applyUiSettingsSnapshot({ active_tool: "proxy", active_proxy_tab: "findings" });
+    assert.equal(button.disabled, true); assert.equal(button.classes.has("is-working"), true);
+    f.begin(kind, "mouse"); assert.equal(f.reads.length, 1);
+    f.reads[0].resolve(response()); await pending; await tick();
+    assert.deepEqual(f.opens, [[kind, "record-a"]]);
+  });
+  for (const state of ["closed", "loading"]) {
+    test(`${kind} navigation does not enable an intrinsically ${state} detail`, async () => {
+      const f = fixture();
+      const button = f.buttons[kind === "replay" ? "findingsDetailSendReplay" : "findingsDetailSendFuzzer"];
+      const pending = f.begin(kind, "mouse");
+      if (state === "closed") f.c.clearFindingDetail();
+      else { f.c.findingsDetailGeneration += 1; f.c.renderFindingDetailLoading(); }
+      crossBoundary(f, "tool-aba");
+      assert.equal(button.disabled, true); assert.equal(button.classes.size, 0);
+      f.reads[0].resolve(response()); await pending; await tick();
+      assert.equal(button.disabled, true); assert.deepEqual(f.opens, []);
+    });
+  }
 }
