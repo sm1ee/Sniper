@@ -125,8 +125,6 @@ const HTTP_HISTORY_MAX_LOADED_ITEMS = HTTP_HISTORY_PAGE_SIZE;
 const HTTP_HISTORY_BACKFILL_DELAY_MS = 80;
 const HTTP_HISTORY_SCROLL_PREFETCH_ROWS = 120;
 const HTTP_HISTORY_POLL_FALLBACK_MS = 30000;
-// Scope changed from the CLI reaches an open Scan tool within this.
-const SCAN_SCOPE_POLL_MS = 5000;
 const WEBSOCKET_POLL_FALLBACK_MS = 30000;
 const WEBSOCKET_PAGE_SIZE = 500;
 const WEBSOCKET_MAX_LOADED_SESSIONS = 5000;
@@ -205,7 +203,7 @@ const FUZZER_RESULT_BUFFER_ROWS = 30;
 const FINDINGS_ROW_HEIGHT = 27;
 let measuredFindingsRowHeight = FINDINGS_ROW_HEIGHT;
 const FINDINGS_BUFFER_ROWS = 20;
-const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "map", "fuzzer", "sequence", "replay", "recon", "templates", "tools", "logger"]);
+const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "map", "fuzzer", "sequence", "replay", "recon", "tools", "logger"]);
 const IMPLEMENTED_PROXY_TABS = new Set(["intercept", "http-history", "websockets-history", "replace", "findings", "oast", "proxy-settings"]);
 const DECODER_SCRIPT_SOURCES = [
   "/decoder/lib/jquery-1.7.2.min.js",
@@ -424,7 +422,6 @@ const state = {
   selectedId: null,
   selectedRecord: null,
   loadingDetailId: null,
-  historyDetailError: "",
   historyPaging: createHistoryPagingState(),
   historyListError: "",
   historyDirty: false,
@@ -487,12 +484,6 @@ const state = {
   responseIntercepts: [],
   interceptRules: [],
   interceptQueueTab: "request",
-  interceptLoadGeneration: 0,
-  interceptAcceptedLoadGeneration: 0,
-  interceptDetailGeneration: 0,
-  responseInterceptLoadGeneration: 0,
-  responseInterceptAcceptedLoadGeneration: 0,
-  responseInterceptDetailGeneration: 0,
   selectedInterceptId: null,
   selectedInterceptRecord: null,
   selectedResponseInterceptId: null,
@@ -551,16 +542,8 @@ const state = {
   fuzzerAttackRecordId: null,
   fuzzerAttackRecord: null,
   fuzzerRunning: false,
-  // How the next attack sends; the record of each attack keeps its own.
-  fuzzerAttackType: "sniper",
-  fuzzerUrlEncode: true,
-  fuzzerConcurrency: 4,
-  // The attack this session runs now, so Stop can reach it.
-  fuzzerRunningAttackId: null,
-  fuzzerNoticeError: false,
   fuzzerDraftVersion: 0,
   fuzzerRunToken: 0,
-  fuzzerResultsWorkflow: null,
   oastTokenClearPending: false,
   _cachedVisibleEntries: null,
   _cachedVisibleEntriesKey: "",
@@ -581,8 +564,6 @@ const state = {
 let _historyPagingGeneration = 0;
 let _historyDetailGeneration = 0;
 let _historyDetailLoadingTimer = null;
-let _fuzzerAttackLoadGeneration = 0;
-let _fuzzerDetailGeneration = 0;
 let _websocketLoadGeneration = 0;
 let _websocketDetailGeneration = 0;
 let _eventLogLoadGeneration = 0;
@@ -607,7 +588,6 @@ let _websocketFilteredReloadTimer = 0;
 let _websocketFilteredReloadDueAt = 0;
 let _websocketSearchReloadTimer = 0;
 let _lastHttpHistoryFallbackPoll = Date.now();
-let _lastScanScopePoll = 0;
 let _lastWebsocketFallbackPoll = Date.now();
 let _lastWebsocketPageRefreshAt = 0;
 let _interceptToggleRequestSeq = 0;
@@ -615,7 +595,6 @@ let _interceptToggleInFlight = false;
 
 const els = {
   reconShell: document.getElementById("reconShell"),
-  templatesShell: document.getElementById("templatesShell"),
   dashboardShell: document.getElementById("dashboardShell"),
   dashboardCurrentSessionName: document.getElementById("dashboardCurrentSessionName"),
   dashboardCurrentSessionStatus: document.getElementById("dashboardCurrentSessionStatus"),
@@ -693,7 +672,6 @@ const els = {
   findingsResSearchInput: document.getElementById("findingsResSearchInput"),
   findingsResSearchMeta: document.getElementById("findingsResSearchMeta"),
   findingsClearButton: document.getElementById("findingsClearButton"),
-  findingsRescanButton: document.getElementById("findingsRescanButton"),
   findingsSettingsButton: document.getElementById("findingsSettingsButton"),
   findingsFilterSeverity: document.getElementById("findingsFilterSeverity"),
   findingsFilterCategory: document.getElementById("findingsFilterCategory"),
@@ -900,7 +878,6 @@ const els = {
   replayResponseCM: document.getElementById("replayResponseCM"),
   replayResponseSearchInput: document.getElementById("replayResponseSearchInput"),
   curlImportModal: document.getElementById("curlImportModal"),
-  compareModal: document.getElementById("compareModal"),
   replayResponseSearchMeta: document.getElementById("replayResponseSearchMeta"),
   sendReplayButton: document.getElementById("sendReplayButton"),
   cancelReplayButton: document.getElementById("cancelReplayButton"),
@@ -931,21 +908,6 @@ const els = {
   fuzzerRequestEditor: document.getElementById("fuzzerRequestEditor"),
   fuzzerPayloadsEditor: document.getElementById("fuzzerPayloadsEditor"),
   fuzzerMeta: document.getElementById("fuzzerMeta"),
-  fuzzerResultStatus: document.getElementById("fuzzerResultStatus"),
-  fuzzerResultMinBytes: document.getElementById("fuzzerResultMinBytes"),
-  fuzzerResultMaxBytes: document.getElementById("fuzzerResultMaxBytes"),
-  fuzzerResultMinMs: document.getElementById("fuzzerResultMinMs"),
-  fuzzerResultMaxMs: document.getElementById("fuzzerResultMaxMs"),
-  fuzzerResultSort: document.getElementById("fuzzerResultSort"),
-  fuzzerResultDirection: document.getElementById("fuzzerResultDirection"),
-  fuzzerResultFilterCount: document.getElementById("fuzzerResultFilterCount"),
-  fuzzerCompareBaseButton: document.getElementById("fuzzerCompareBaseButton"),
-  fuzzerCompareButton: document.getElementById("fuzzerCompareButton"),
-  fuzzerSavedRunSelect: document.getElementById("fuzzerSavedRunSelect"),
-  fuzzerRefreshRunsButton: document.getElementById("fuzzerRefreshRunsButton"),
-  fuzzerViewRunButton: document.getElementById("fuzzerViewRunButton"),
-  fuzzerReuseRunButton: document.getElementById("fuzzerReuseRunButton"),
-  fuzzerSavedRunNotice: document.getElementById("fuzzerSavedRunNotice"),
   fuzzerResultsBody: document.getElementById("fuzzerResultsBody"),
   fuzzerDetailPanel: document.getElementById("fuzzerDetailPanel"),
   fuzzerDetailReqCM: document.getElementById("fuzzerDetailReqCM"),
@@ -953,7 +915,6 @@ const els = {
   fuzzerDetailResRenderView: document.getElementById("fuzzerDetailResRenderView"),
   fuzzerDetailResponseMeta: document.getElementById("fuzzerDetailResponseMeta"),
   startFuzzerButton: document.getElementById("startFuzzerButton"),
-  stopFuzzerButton: document.getElementById("stopFuzzerButton"),
   resetFuzzerButton: document.getElementById("resetFuzzerButton"),
   contextMenu: document.getElementById("contextMenu"),
   interceptContextMenu: document.getElementById("interceptContextMenu"),
@@ -1006,7 +967,6 @@ let sortHeaders = Array.from(document.querySelectorAll(".sort-header"));
 let historyColumnHandles = Array.from(document.querySelectorAll(".column-resize-handle"));
 
 let reconController = null;
-let templatesController = null;
 let targetServiceMapController = null;
 let targetServiceMapEventStreamReady = () => false;
 let refreshTimer = null;
@@ -1068,7 +1028,6 @@ let displaySettingsPreviewActive = false;
 let displaySettingsReturnFocus = null;
 const cliPathState = createCliPathState();
 let filterSettingsReturnFocus = null;
-let curlImportReturnFocus = null;
 const filterSettingsEditedControls = new Set();
 let activeConfirmDialog = null;
 
@@ -1205,14 +1164,7 @@ function resetLayoutTextareas() {
 }
 
 function setActiveTool(tool, options = {}) {
-  const next = sanitizeActiveTool(tool);
-  if (next !== state.activeTool) {
-    closeScannerSettings(false);
-    // Returning to Fuzzer must not revive reads started before navigation.
-    state._fuzzerNavigationGeneration = (state._fuzzerNavigationGeneration || 0) + 1;
-    state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
-  }
-  state.activeTool = next;
+  state.activeTool = sanitizeActiveTool(tool);
   if (options.persist !== false) {
     scheduleUiSettingsSave(options.delay);
   }
@@ -1220,12 +1172,7 @@ function setActiveTool(tool, options = {}) {
 }
 
 function setActiveProxyTab(tab, options = {}) {
-  const next = sanitizeActiveProxyTab(tab);
-  if (next !== state.activeProxyTab) {
-    closeScannerSettings(false);
-    state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
-  }
-  state.activeProxyTab = next;
+  state.activeProxyTab = sanitizeActiveProxyTab(tab);
   if (options.persist !== false) {
     scheduleUiSettingsSave(options.delay);
   }
@@ -1239,15 +1186,6 @@ function bindEvents() {
       root: els.reconShell,
       getSessionId: currentSessionId,
       getSessionGeneration: () => workspaceStateGeneration,
-    });
-  }
-  if (window.SniperTemplates && els.templatesShell) {
-    templatesController = window.SniperTemplates.createController({
-      root: els.templatesShell,
-      getScopeIncludeCount: () => (state.runtime?.scope_patterns || []).length,
-      onShow: () => loadRuntimeSettings().catch((error) => console.error(error)),
-      getSessionId: currentSessionId,
-      openRecord: jumpToTransaction,
     });
   }
   window.addEventListener("resize", resetLayoutTextareas);
@@ -1989,7 +1927,11 @@ function bindEvents() {
           })
           .catch(handleSendActionError);
       } else if (action === "send-to-fuzzer") {
-        openFuzzerFromRecordLoader(() => loadMenuTargetRecord(target))
+        loadMenuTargetRecord(target)
+          .then((record) => {
+            if (!record) throw new Error("Selected transaction could not be loaded.");
+            openFuzzerFromRecord(record);
+          })
           .catch(handleSendActionError);
       } else if (action === "send-to-sequence") {
         loadMenuTargetRecord(target)
@@ -1998,8 +1940,24 @@ function bindEvents() {
             return sendRecordToSequence(record);
           })
           .catch(handleSendActionError);
-      } else if (action.startsWith("copy-response-") || action.startsWith("copy-as-")) {
-        copyMenuTargetRecord(target, action);
+      } else if (action.startsWith("copy-response-")) {
+        loadMenuTargetRecord(target)
+          .then((record) => {
+            if (!record) throw new Error("Selected transaction could not be loaded.");
+            return copyResponseContentForRecord(record, action.replace("copy-", ""));
+          })
+          .catch(handleClipboardActionError);
+      }
+      else if (action.startsWith("copy-as-")) {
+        const fmt = action.replace("copy-as-", "");
+        loadMenuTargetRecord(target)
+          .then((record) => {
+            if (!record) throw new Error("Selected transaction could not be loaded.");
+            const text = recordToFormat(record, fmt);
+            if (!text) return null;
+            return copyTextToClipboard(text).then(() => showToast(`Copied as ${fmt}`));
+          })
+          .catch(handleClipboardActionError);
       }
     });
   }
@@ -2081,14 +2039,9 @@ function bindEvents() {
     });
   });
   els.resetFuzzerButton.addEventListener("click", resetFuzzer);
-  els.stopFuzzerButton?.addEventListener("click", () => {
-    stopFuzzerAttack().catch((error) => console.error("Fuzzer stop error:", error));
-  });
 
   // Fuzzer layout resizers
   initFuzzerResizers();
-  initFuzzerSetupControls();
-  initFuzzerResultsWorkflow();
 
   // Fuzzer results shell (for keyboard navigation + focus)
   const fuzzerResultsShell = els.fuzzerResultsBody.closest(".history-table-shell");
@@ -2116,7 +2069,7 @@ function bindEvents() {
     fuzzerResultsShell.addEventListener("keydown", (e) => {
       if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
       e.preventDefault();
-      const totalCount = visibleFuzzerResults().length;
+      const totalCount = jsonArray(state.fuzzerAttackRecord?.results).length;
       if (!totalCount) return;
       const selectedIndex = fuzzerSelectedResultIndex();
       const fallbackIndex = e.key === "ArrowDown" ? 0 : totalCount - 1;
@@ -2438,9 +2391,6 @@ function bindEvents() {
       return;
     } else if (event.key === "Escape") {
       if (event.defaultPrevented || event.isComposing) return;
-      // Compare is not visible until both records arrive; Escape also cancels
-      // that pending open without changing focus in the workspace.
-      closeCompareModal();
       closeDisplaySettingsModal();
       closeCertificateModal();
       closeFilterModal();
@@ -2813,7 +2763,19 @@ function bindEvents() {
   }
   // WS Handshake search
   if (els.wsHandshakeSearchInput) {
-    els.wsHandshakeSearchInput.addEventListener("input", updateWsHandshakeSearch);
+    els.wsHandshakeSearchInput.addEventListener("input", () => {
+      // CM path
+      const cv = getCMView("wsHandshake");
+      if (cv) {
+        const query = (els.wsHandshakeSearchInput.value || "").trim();
+        const result = cv.applySearch(query);
+        if (els.wsHandshakeSearchMeta) {
+          els.wsHandshakeSearchMeta.innerHTML = buildSearchMeta(cv.view.state.doc.lines, "raw", result.matchCount);
+        }
+        return;
+      }
+      updateWsHandshakeSearch();
+    });
     initSearchHitNavigation(els.wsHandshakeSearchMeta, () => {
       const resBtn = document.getElementById("wsHandshakeResBtn");
       return resBtn?.classList.contains("active") ? els.websocketResponseView : els.websocketRequestView;
@@ -2903,7 +2865,6 @@ async function _applySettings(response) {
   syncHttpCapturePill();
   state.activeSession = state.settings.active_session;
   if (typeof reconController !== "undefined") reconController?.syncSession();
-  if (typeof templatesController !== "undefined") templatesController?.syncSession();
   state.oastTokenClearPending = false;
   // Sync intercept scope pill with server state
   const interceptScopePill = document.getElementById("interceptInScopeToggle");
@@ -3154,7 +3115,6 @@ async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwn
   state.sessions = sessions;
   state.activeSession = nextActiveSession;
   if (typeof reconController !== "undefined") reconController?.syncSession();
-  if (typeof templatesController !== "undefined") templatesController?.syncSession();
   renderDashboard();
 }
 
@@ -3248,8 +3208,6 @@ function applyWorkspaceState(snapshot) {
     return;
   }
   workspaceStateGeneration += 1;
-  // Later UI reads can fail before panels render and synchronize this owner.
-  if (typeof reconController !== "undefined") reconController?.syncSession();
   for (const tab of state.replayTabs || []) {
     if (tab?.type === "websocket") {
       cleanupWsReplayTab(tab, { guardWorkspaceRevision: false }).catch((error) => console.error(error));
@@ -5056,7 +5014,6 @@ async function cleanupWsReplayTabsBeforeStateReset(options = {}) {
 
 function resetSessionScopedUiState() {
   workspaceStateGeneration += 1;
-  state._recordClipboardSessionGeneration = (state._recordClipboardSessionGeneration || 0) + 1;
   if (typeof reconController !== "undefined") reconController?.reset();
   state.historyRetentionSettings = null;
   state.upstreamPeerSettings = null;
@@ -5100,11 +5057,6 @@ function resetSessionScopedUiState() {
   invalidateVisibleEntriesCache();
   state.intercepts = [];
   state.responseIntercepts = [];
-  // Invalidate reads even when the operator returns to the same session ID.
-  state.interceptAcceptedLoadGeneration = state.interceptLoadGeneration = (state.interceptLoadGeneration || 0) + 1;
-  state.responseInterceptAcceptedLoadGeneration = state.responseInterceptLoadGeneration = (state.responseInterceptLoadGeneration || 0) + 1;
-  state.interceptDetailGeneration = (state.interceptDetailGeneration || 0) + 1;
-  state.responseInterceptDetailGeneration = (state.responseInterceptDetailGeneration || 0) + 1;
   state.interceptRules = [];
   state.selectedInterceptId = null;
   state.selectedInterceptRecord = null;
@@ -5485,7 +5437,6 @@ async function loadRuntimeSettings() {
   }
   if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
   state.runtime = runtime;
-  if (typeof templatesController !== "undefined") templatesController?.scopeChanged?.();
   renderInterceptStatus();
   renderProxySettings();
 }
@@ -5823,71 +5774,61 @@ async function loadTransactionDetail(id) {
   const generation = ++_historyDetailGeneration;
   const sessionId = currentSessionId();
   const reconcileRetention = state._historyRetentionReconcile === true;
-  try {
-    while (true) {
-      const annotationGeneration = state._historyDetailAnnotationGeneration || 0;
-      const response = await fetch(transactionPath(id, sessionId));
-      if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
-        return null;
-      }
-      if (annotationGeneration !== (state._historyDetailAnnotationGeneration || 0)) continue;
-      if (!response.ok) {
-        if (response.status === 404) {
-          if (reconcileRetention) {
-            applyConfirmedHistoryRemoval([id], sessionId);
-            return null;
-          }
-          const index = state.items.findIndex((item) => item.id === id);
-          let nextSelectedId = null;
-          if (index >= 0) {
-            state.items.splice(index, 1);
-            nextSelectedId = state.items[Math.min(index, state.items.length - 1)]?.id ?? null;
-            state._itemsVersion += 1;
-            adjustHistoryPagingAfterLocalRemoval(1);
-            precomputeItemIndexes();
-            invalidateVisibleEntriesCache();
-            refreshHistoryPagingCursorFromItems();
-            renderHistory();
-          }
-          if (state.selectedId === id) {
-            await selectHistoryTransaction(nextSelectedId, { scroll: true });
-          }
-        } else if (state.selectedId === id) {
-          renderEmptyDetail("Failed to load selected transaction. Select the row again to retry.");
+  while (true) {
+    const annotationGeneration = state._historyDetailAnnotationGeneration || 0;
+    const response = await fetch(transactionPath(id, sessionId));
+    if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
+      return null;
+    }
+    if (annotationGeneration !== (state._historyDetailAnnotationGeneration || 0)) continue;
+    if (!response.ok) {
+      if (response.status === 404) {
+        if (reconcileRetention) {
+          applyConfirmedHistoryRemoval([id], sessionId);
+          return null;
         }
-        return null;
+        const index = state.items.findIndex((item) => item.id === id);
+        let nextSelectedId = null;
+        if (index >= 0) {
+          state.items.splice(index, 1);
+          nextSelectedId = state.items[Math.min(index, state.items.length - 1)]?.id ?? null;
+          state._itemsVersion += 1;
+          adjustHistoryPagingAfterLocalRemoval(1);
+          precomputeItemIndexes();
+          invalidateVisibleEntriesCache();
+          refreshHistoryPagingCursorFromItems();
+          renderHistory();
+        }
+        if (state.selectedId === id) {
+          await selectHistoryTransaction(nextSelectedId, { scroll: true });
+        }
+      } else if (state.selectedId === id) {
+        state.selectedId = null;
+        updateHistorySelection(null);
+        renderEmptyDetail();
       }
+      return null;
+    }
 
-      const record = await response.json();
-      if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
-        return null;
-      }
-      if (record?.id !== id) {
-        throw new Error("Selected transaction detail did not match the requested record.");
-      }
-      // A successful save can finish after this read captured its annotations. The
-      // pending overlay is gone by then, and a summary only has a truncated note.
-      // Read again under the same selection owner rather than display stale text.
-      if (annotationGeneration !== (state._historyDetailAnnotationGeneration || 0)) continue;
-      const pending = state._pendingAnnotations?.get(id);
-      if (pending?.sessionId === sessionId) {
-        for (const key of ["user_note", "color_tag"]) {
-          if (pending.payload?.[key] !== undefined) record[key] = pending.payload[key];
-        }
-      }
-      state.loadingDetailId = null;
-      observeAnnotationRevision(record);
-      state.selectedRecord = record;
-      renderDetail(state.selectedRecord);
-      return record;
+    const record = await response.json();
+    if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
+      return null;
     }
-  } catch (_error) {
-    // A failed read owns the placeholder only while its selection and session
-    // are current; a late rejection must not erase a newer row or retry.
-    if (generation === _historyDetailGeneration && state.selectedId === id && sessionId === currentSessionId()) {
-      renderEmptyDetail("Failed to load selected transaction. Select the row again to retry.");
+    // A successful save can finish after this read captured its annotations. The
+    // pending overlay is gone by then, and a summary only has a truncated note.
+    // Read again under the same selection owner rather than display stale text.
+    if (annotationGeneration !== (state._historyDetailAnnotationGeneration || 0)) continue;
+    const pending = state._pendingAnnotations?.get(id);
+    if (pending?.sessionId === sessionId) {
+      for (const key of ["user_note", "color_tag"]) {
+        if (pending.payload?.[key] !== undefined) record[key] = pending.payload[key];
+      }
     }
-    return null;
+    state.loadingDetailId = null;
+    observeAnnotationRevision(record);
+    state.selectedRecord = record;
+    renderDetail(state.selectedRecord);
+    return record;
   }
 }
 
@@ -6009,7 +5950,6 @@ function createTransactionRecordMenuTarget(id, sessionId = currentSessionId()) {
     record: state.selectedRecord?.id === id ? state.selectedRecord : null,
     loadPromise: null,
     loadError: null,
-    clipboardSessionGeneration: state._recordClipboardSessionGeneration || 0,
   };
   if (!target.record) {
     target.loadPromise = loadTransactionRecordById(id, sessionId)
@@ -6045,72 +5985,30 @@ function transactionUrlFromSource(source) {
   return buildUrlFromTarget(scheme, host, "", path);
 }
 
-function createRecordClipboardOwner(sessionId = currentSessionId(), generation = state._recordClipboardSessionGeneration || 0) {
-  // Choosing another row or hydrating the same workspace does not abandon an
-  // explicit copy. A session reset does, even after switching away and back.
-  return () => sessionId === currentSessionId()
-    && generation === (state._recordClipboardSessionGeneration || 0);
-}
-
-async function copyMenuTargetRecord(target, action) {
-  if (!target?.id) return;
-  const isCurrent = createRecordClipboardOwner(target.sessionId, target.clipboardSessionGeneration);
-  if (!isCurrent()) return;
-  try {
-    const record = await loadMenuTargetRecord(target);
-    if (!isCurrent()) return;
-    if (!record) throw new Error("Selected transaction could not be loaded.");
-    if (action.startsWith("copy-response-")) {
-      await copyResponseContentForRecord(record, action.replace("copy-", ""), { isCurrent });
-      return;
-    }
-    const format = action.replace("copy-as-", "");
-    const text = recordToFormat(record, format);
-    if (!text) return;
-    await copyTextToClipboard(text, { isCurrent });
-    if (isCurrent()) showToast(`Copied as ${format}`);
-  } catch (error) {
-    if (isCurrent()) handleClipboardActionError(error);
-  }
-}
-
 function copyMenuTargetUrl(target) {
   if (!target?.id || target.sessionId !== currentSessionId()) {
     showToast("The selected session changed. Open the menu again.", "error");
     return;
   }
-  const isCurrent = createRecordClipboardOwner(target.sessionId, target.clipboardSessionGeneration);
-  if (!isCurrent()) return;
   const source = target.record || getHistoryItem(target.id);
   const url = transactionUrlFromSource(source);
   if (!url) {
     showToast("Selected transaction could not be loaded.", "error");
     return;
   }
-  copyTextToClipboard(url, { isCurrent })
-    .then(() => { if (isCurrent()) showToast("Copied URL"); })
-    .catch(() => { if (isCurrent()) showToast("Failed to copy", "error"); });
+  copyTextToClipboard(url)
+    .then(() => showToast("Copied URL"))
+    .catch(() => showToast("Failed to copy", "error"));
 }
 
 async function loadIntercepts(preserveSelection = true) {
   const sessionId = currentSessionId();
-  const generation = state.interceptLoadGeneration = (state.interceptLoadGeneration || 0) + 1;
-  const isCurrent = () => sessionId === currentSessionId()
-    && generation >= (state.interceptAcceptedLoadGeneration || 0);
-  let intercepts;
-  try {
-    const response = await fetch(sessionQueryPath("/api/intercepts", sessionId));
-    if (!isCurrent()) return;
-    await requireOkResponse(response, "Failed to load intercepted requests.");
-    intercepts = jsonArray(await response.json());
-  } catch (error) {
-    if (isCurrent()) throw error;
+  const response = await fetch(sessionQueryPath("/api/intercepts", sessionId));
+  await requireOkResponse(response, "Failed to load intercepted requests.");
+  const intercepts = jsonArray(await response.json());
+  if (sessionId !== currentSessionId()) {
     return;
   }
-  if (!isCurrent()) return;
-  // A pending or failed newer poll need not block a usable snapshot, but an
-  // older snapshot must never resurrect a queue after a newer one was accepted.
-  state.interceptAcceptedLoadGeneration = generation;
   state.intercepts = intercepts;
 
   const visibleIntercepts = getVisibleRequestInterceptSummaries();
@@ -6136,25 +6034,22 @@ async function loadIntercepts(preserveSelection = true) {
 
 async function loadInterceptDetail(id) {
   const sessionId = currentSessionId();
-  const generation = state.interceptDetailGeneration = (state.interceptDetailGeneration || 0) + 1;
-  const isCurrent = () => sessionId === currentSessionId()
-    && state.selectedInterceptId === id && state.interceptDetailGeneration === generation;
-  try {
-    const response = await fetch(sessionQueryPath(`/api/intercepts/${id}`, sessionId));
-    if (!isCurrent()) return;
-    if (!response.ok) {
-      state.selectedInterceptRecord = null;
-      renderIntercepts();
-      return;
-    }
-
-    const record = await response.json();
-    if (!isCurrent()) return;
-    state.selectedInterceptRecord = record;
-    renderIntercepts();
-  } catch (error) {
-    if (isCurrent()) throw error;
+  const response = await fetch(sessionQueryPath(`/api/intercepts/${id}`, sessionId));
+  if (sessionId !== currentSessionId() || state.selectedInterceptId !== id) {
+    return;
   }
+  if (!response.ok) {
+    state.selectedInterceptRecord = null;
+    renderIntercepts();
+    return;
+  }
+
+  const record = await response.json();
+  if (sessionId !== currentSessionId() || state.selectedInterceptId !== id) {
+    return;
+  }
+  state.selectedInterceptRecord = record;
+  renderIntercepts();
 }
 
 /* ─── Intercept Rules ─── */
@@ -6634,11 +6529,6 @@ function clearWebsocketSearchReload() {
 
 function clearWebsocketSelectionPreview(options = {}) {
   state._websocketSelectionGeneration = (state._websocketSelectionGeneration || 0) + 1;
-  // Returning to the same row after a filter reset starts a new detail owner.
-  _websocketDetailGeneration += 1;
-  _websocketDetailPendingId = null;
-  _websocketDetailPendingSessionId = null;
-  _websocketDetailPendingPromise = null;
   state.selectedWebsocketId = null;
   state.selectedFrameIdx = null;
   state.selectedWebsocketRecord = null;
@@ -7006,10 +6896,6 @@ async function loadWebsocketDetail(id, options = {}) {
     _websocketDetailRefreshNeeded = null;
   }
   const generation = ++_websocketDetailGeneration;
-  if (state.selectedWebsocketId === id && state.selectedWebsocketDetailError) {
-    state.selectedWebsocketDetailError = "";
-    renderWebsocketSessions();
-  }
   if (state.selectedWebsocketId !== id) {
     hideFrameDetail();
   }
@@ -7060,9 +6946,6 @@ async function loadWebsocketDetail(id, options = {}) {
     const detail = await response.json();
     if (generation !== _websocketDetailGeneration || sessionId !== currentSessionId() || state.selectedWebsocketId !== id) {
       return;
-    }
-    if (!detail || typeof detail !== "object" || Array.isArray(detail) || detail.id !== id) {
-      throw new Error("Invalid WebSocket detail response.");
     }
     const summary = state.websocketSessions.find((item) => item.id === id);
     const previousFrames = state.selectedWebsocketRecord?.id === id
@@ -7373,9 +7256,6 @@ async function loadOlderWebsocketFrames() {
     }
     const detail = await response.json();
     if (!isCurrent()) return;
-    if (!detail || typeof detail !== "object" || Array.isArray(detail) || detail.id !== id) {
-      throw new Error("Failed to load older WebSocket frames.");
-    }
     const incomingFrames = normalizeWebsocketFrames(detail.frames)
       .filter((frame) => frame.index < firstLoadedFrameIndex);
     const current = state.selectedWebsocketRecord;
@@ -7805,12 +7685,10 @@ async function pollAuxiliaryData() {
     tasks.push(loadEventLog());
   }
 
-  if (state.activeTool === "target") tasks.push(loadTargetSiteMap());
-
-  if (state.activeTool === "templates" && now - _lastScanScopePoll >= SCAN_SCOPE_POLL_MS) {
-    _lastScanScopePoll = now;
-    tasks.push(loadRuntimeSettings());
+  if (state.activeTool === "map" && typeof targetServiceMapController !== "undefined") {
+    tasks.push(targetServiceMapController?.refresh());
   }
+  if (state.activeTool === "target") tasks.push(loadTargetSiteMap());
 
   if (state.activeTool === "proxy" && state.activeProxyTab === "findings") {
     tasks.push(loadFindings());
@@ -7902,10 +7780,7 @@ function applyHistoryRetentionDeletedEvent(event, sessionId = currentSessionId()
 
 function applyConfirmedHistoryRemoval(ids, sessionId = currentSessionId(), cause = "unavailable") {
   if (sessionId !== currentSessionId()) return false;
-  if (typeof targetServiceMapController !== "undefined") {
-    if (cause === "automatic_cleanup") targetServiceMapController?.retentionChanged();
-    else targetServiceMapController?.invalidate();
-  }
+  if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.invalidate();
   state._historyRetentionEpoch = (state._historyRetentionEpoch || 0) + 1;
   state._historyRetentionReconcile = true;
   // Only this batch is needed: old requests carry an epoch, and the server/SSE
@@ -8974,7 +8849,6 @@ function renderToolPanels() {
   const mapVisible = state.activeTool === "map";
   const loggerVisible = state.activeTool === "logger";
   const reconVisible = state.activeTool === "recon";
-  const templatesVisible = state.activeTool === "templates";
   els.dashboardShell.classList.toggle("hidden", !dashboardVisible);
   els.proxyShell.classList.toggle("hidden", !proxyVisible);
   els.replayShell.classList.toggle("hidden", !replayVisible);
@@ -8986,8 +8860,6 @@ function renderToolPanels() {
   els.loggerShell.classList.toggle("hidden", !loggerVisible);
   els.reconShell?.classList.toggle("hidden", !reconVisible);
   if (typeof reconController !== "undefined") reconController?.setVisible(reconVisible);
-  els.templatesShell?.classList.toggle("hidden", !templatesVisible);
-  if (typeof templatesController !== "undefined") templatesController?.setVisible(templatesVisible);
 
   if (dashboardVisible) {
     renderDashboard();
@@ -9043,11 +8915,6 @@ function renderToolPanels() {
 
   if (reconVisible) {
     els.footerMode.textContent = "Recon active";
-    return;
-  }
-
-  if (templatesVisible) {
-    els.footerMode.textContent = "Scan active";
     return;
   }
 
@@ -9380,7 +9247,6 @@ document.addEventListener("click", () => closeSessionContextMenu());
 document.addEventListener("contextmenu", () => closeSessionContextMenu());
 
 function showConfirmDialog(message, onConfirm, { title = "Confirm", confirmLabel = "Delete" } = {}) {
-  compareLoadGeneration += 1;
   activeConfirmDialog?.close();
   const returnFocus = document.activeElement;
   const backdrop = document.createElement("div");
@@ -9494,7 +9360,6 @@ let scannerConfigSavePending = null;
 let scannerSettingsSessionId = null;
 let scannerSettingsBaseline = null;
 let scannerSettingsGeneration = 0;
-let scannerSettingsReturnFocus = null;
 let scannerSettingsSavePending = null;
 let scannerQuickTogglePending = null;
 let findingsSortKey = "found_at";
@@ -9538,7 +9403,7 @@ async function loadFindings() {
     try {
       const countPromise = fetchFindingsCount(sessionId).catch(() => null);
       const response = await fetch(sessionQueryPath(`/api/findings?limit=${FINDINGS_LIST_LIMIT}`, sessionId));
-      if (!response.ok) return false;
+      if (!response.ok) return;
       const findings = jsonArray(await response.json());
       const fullCount = await countPromise;
       if (
@@ -9556,13 +9421,7 @@ async function loadFindings() {
       renderFindings();
       if (badgeAccepted) updateFindingsBadge();
     } catch (error) {
-      if (
-        sessionId !== currentSessionId()
-        || stateGeneration !== findingsStateGeneration
-        || loadGeneration !== findingsLoadGeneration
-      ) return;
       console.error("Failed to load findings:", error);
-      return false;
     } finally {
       if (
         findingsLoadPromise === loadPromise
@@ -9689,7 +9548,6 @@ function handleFindingEvent(event) {
 function clearFindingDetail() {
   findingsDetailGeneration += 1;
   selectedFindingId = null;
-  if (els.findingsBody) updateFindingsSelection(null);
   if (els.findingsDetailJump) {
     delete els.findingsDetailJump.dataset.recordId;
   }
@@ -9882,9 +9740,6 @@ function updateCategoryFilter() {
   if (!els.findingsFilterCategory) return;
   const current = els.findingsFilterCategory.value;
   const extraCats = new Set();
-  // The capped list may no longer contain this category. Keep the active
-  // filter, like built-in categories, rather than silently showing all rows.
-  if (current && !BUILTIN_FINDING_CATEGORIES.has(current)) extraCats.add(current);
   // Remove old custom options
   Array.from(els.findingsFilterCategory.options).forEach((opt) => {
     if (opt.dataset.custom) opt.remove();
@@ -10365,9 +10220,7 @@ function jumpToTransaction(recordId) {
   const hadRenderedDetail = Boolean(state.selectedRecord?.id);
   state.selectedId = recordId;
   state.selectedRecord = null;
-  // Called from other tools too (Templates' scan results), so the main panel
-  // switches as well, not only Capture's tabs.
-  renderToolPanels();
+  renderProxyPanels();
   scheduleHistoryDetailLoading(recordId, "Loading selected transaction...", {
     immediate: !hadRenderedDetail,
   });
@@ -10532,11 +10385,29 @@ function isWebSocketUpgradeRecord(record) {
 
 async function sendFindingToFuzzer(recordId) {
   const sessionId = currentSessionId();
-  return openFuzzerFromRecordLoader(async () => {
-    const response = await fetch(transactionPath(recordId, sessionId));
-    await requireOkResponse(response, "Failed to load finding transaction.");
-    return response.json();
-  });
+  const response = await fetch(transactionPath(recordId, sessionId));
+  if (currentSessionId() !== sessionId) return;
+  await requireOkResponse(response, "Failed to load finding transaction.");
+  const record = await response.json();
+  if (currentSessionId() !== sessionId) return;
+  if (!record || record.kind === "tunnel") {
+    throw new Error("Tunnel records cannot be sent to Fuzzer.");
+  }
+  const request = editableRequestFromRecord(record);
+  invalidateFuzzerRun();
+  state.fuzzerBaseRequest = request;
+  state.fuzzerSourceTransactionId = record.id;
+  state.fuzzerTarget = null;
+  state.fuzzerTargetRequestText = null;
+  updateFuzzerRequestText(buildEditableRawRequest(request), { userEdit: true });
+  state.fuzzerNotice = isRequestPreviewTruncated(record) ? buildTruncatedBodyNotice(record, "Fuzzer") : "";
+  updateFuzzerPayloadsText("", { userEdit: true });
+  clearFuzzerAttackRecord();
+  state._selectedFuzzerResultKey = null;
+  hideFuzzerDetailPanel();
+  setActiveTool("fuzzer");
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
 }
 
 function handleFindingActionError(error) {
@@ -10552,7 +10423,7 @@ function resetScannerConfigUiState() {
   scannerConfigCache = null;
   scannerConfigSavePending = null;
   scannerQuickTogglePending = null;
-  closeScannerSettings(false);
+  closeScannerSettings();
   if (els.scannerQuickToggle) els.scannerQuickToggle.disabled = false;
 }
 
@@ -10654,24 +10525,15 @@ async function saveScannerConfig(config, sessionId, expectedConfigToken) {
 }
 
 async function openScannerSettings() {
-  if (state.activeTool !== "proxy" || !els.proxyShell.getClientRects().length) return;
-  const proxyTab = state.activeProxyTab;
   const sessionId = currentSessionId();
   if (scannerSettingsBaseline && scannerSettingsSessionId === sessionId) return;
-  const dialogGeneration = ++compareLoadGeneration;
-  const returnFocus = document.activeElement;
   const stateGeneration = scannerConfigStateGeneration;
   const generation = ++scannerSettingsGeneration;
   const isCurrent = () => generation === scannerSettingsGeneration
-    && dialogGeneration === compareLoadGeneration
-    && scannerConfigContextIsCurrent(sessionId, stateGeneration)
-    && state.activeTool === "proxy" && state.activeProxyTab === proxyTab
-    && els.proxyShell.getClientRects().length;
+    && scannerConfigContextIsCurrent(sessionId, stateGeneration);
   try {
     const config = await loadScannerConfig(sessionId);
-    // The editor belongs to the Capture view that requested it, and must not
-    // reappear after a newer dialog is opened and dismissed while it loads.
-    if (!config || !isCurrent() || getActiveModalAction()) return;
+    if (!config || !isCurrent()) return;
     scannerSettingsSessionId = sessionId;
     // The editor's read version must not follow later cache refreshes or toggles.
     scannerSettingsBaseline = scannerConfigSnapshot(config, sessionId);
@@ -10687,9 +10549,7 @@ async function openScannerSettings() {
       .join("");
 
     renderCustomRulesEditor(config.custom_rules);
-    scannerSettingsReturnFocus = returnFocus;
     els.scannerSettingsBackdrop.classList.remove("hidden");
-    els.scannerSettingsClose.focus();
   } catch (error) {
     if (!isCurrent()) return;
     console.error(error);
@@ -10774,10 +10634,7 @@ function collectScannerConfig() {
   };
 }
 
-function closeScannerSettings(returnFocus = true) {
-  // Navigation/reset callers must not return focus to a soon-hidden control.
-  const restoreFocus = returnFocus && isModalVisible(els.scannerSettingsBackdrop)
-    && getActiveModalAction()?.modal === els.scannerSettingsBackdrop;
+function closeScannerSettings() {
   scannerSettingsGeneration += 1;
   scannerSettingsSessionId = null;
   scannerSettingsBaseline = null;
@@ -10785,8 +10642,6 @@ function closeScannerSettings(returnFocus = true) {
   if (els.scannerSettingsBackdrop) {
     els.scannerSettingsBackdrop.classList.add("hidden");
   }
-  if (restoreFocus) restoreModalFocus(scannerSettingsReturnFocus, els.findingsSettingsButton);
-  scannerSettingsReturnFocus = null;
 }
 
 async function saveScannerSettingsFromModal() {
@@ -11177,35 +11032,6 @@ function bindFindingsEvents() {
       return recordId ? sendFindingToFuzzer(recordId).catch(handleFindingActionError) : undefined;
     });
   }
-  if (els.findingsRescanButton) {
-    onClickWithProgress(els.findingsRescanButton, async () => {
-      const sessionId = currentSessionId();
-      const stateGeneration = findingsStateGeneration;
-      // A cleared or revisited session must not revive this older action's UI.
-      const isCurrent = () => sessionId === currentSessionId()
-        && stateGeneration === findingsStateGeneration;
-      try {
-        const response = await fetch(sessionWritePath("/api/findings/rescan", sessionId), { method: "POST" });
-        if (!isCurrent()) return;
-        await requireOkResponse(response, "Failed to rescan findings.");
-        if (!isCurrent()) return;
-        resetFindingsUiState();
-        const refreshGeneration = findingsStateGeneration;
-        const refreshed = await loadFindings();
-        if (
-          refreshed === false
-          && sessionId === currentSessionId()
-          && refreshGeneration === findingsStateGeneration
-        ) {
-          showToast("Rescan completed, but findings could not be refreshed. Reopen the Findings tab to retry.", "error");
-        }
-      } catch (error) {
-        if (!isCurrent()) return;
-        console.error(error);
-        showToast(error?.message || "Failed to rescan findings.", "error");
-      }
-    });
-  }
   if (els.findingsClearButton) {
     onClickWithProgress(els.findingsClearButton, async () => {
       const sessionId = currentSessionId();
@@ -11241,6 +11067,12 @@ function bindFindingsEvents() {
 
   // Arrow key navigation
   document.addEventListener("keydown", (e) => {
+    // Skip if scanner settings modal is open
+    if (els.scannerSettingsBackdrop && !els.scannerSettingsBackdrop.classList.contains("hidden")) {
+      if (e.key === "Escape") { e.preventDefault(); closeScannerSettings(); }
+      if (e.key === "Enter" && !e.target.matches("input, textarea, select")) { e.preventDefault(); saveScannerSettingsFromModal(); }
+      return;
+    }
     // Only handle when findings tab is active and owns unmodified arrow keys
     if (state.activeTool !== "proxy" || state.activeProxyTab !== "findings") return;
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
@@ -11426,10 +11258,9 @@ function initFindingsResizer() {
       }
       const delta = moveEvent.clientY - event.clientY;
       const nextDetail = Math.max(120, Math.min(start.detail - delta, combinedHeight - 60));
-      // Only the detail height is user-sized. The table must still consume
-      // space when the window grows, and the detail must shrink with it.
-      tableShell.style.flex = "1 1 0px";
-      els.findingsDetailPanel.style.flex = "0 1 " + Math.round(nextDetail) + "px";
+      const nextTable = combinedHeight - nextDetail;
+      tableShell.style.flex = "0 0 " + Math.round(nextTable) + "px";
+      els.findingsDetailPanel.style.flex = "0 0 " + Math.round(nextDetail) + "px";
     };
 
     const onUp = () => {
@@ -11464,7 +11295,6 @@ function renderProxyPanels() {
   const showProxySettings = state.activeProxyTab === "proxy-settings";
   const showPlaceholder = !showHistory && !showIntercept && !showWebsockets && !showMatchReplace && !showFindings && !showOast && !showProxySettings;
 
-  els.proxyShell?.classList.toggle("findings-active", showFindings);
   els.colorTagFilter.classList.toggle("hidden", !showHistory);
   els.filterBar.classList.toggle("hidden", !showHistory);
   els.trafficRegion.classList.toggle("hidden", !showHistory);
@@ -11478,47 +11308,36 @@ function renderProxyPanels() {
   els.proxySettingsPanel.classList.toggle("hidden", !showProxySettings);
   els.proxySubPlaceholder.classList.toggle("hidden", !showPlaceholder);
 
-  // Startup renders these panels whichever tool was left open; only Capture in
-  // front may name its tab in the status bar.
-  const footer = (text) => {
-    if (state.activeTool === "proxy") els.footerMode.textContent = text;
-  };
-
   if (showHistory) {
-    footer("HTTP active");
+    els.footerMode.textContent = "HTTP active";
     return;
   }
 
   if (showIntercept) {
-    footer("Intercept active");
+    els.footerMode.textContent = "Intercept active";
     return;
   }
 
   if (showWebsockets) {
     applySavedWebsocketPaneWidth();
-    footer("Web Socket active");
+    els.footerMode.textContent = "Web Socket active";
     return;
   }
 
   if (showMatchReplace) {
     renderMatchReplaceRules();
-    footer("Replace active");
+    els.footerMode.textContent = "Replace active";
     return;
   }
 
   if (showFindings) {
     loadFindings();
-    footer("Findings active");
-    return;
-  }
-
-  if (showOast) {
-    footer("OAST active");
+    els.footerMode.textContent = "Findings active";
     return;
   }
 
   if (showProxySettings) {
-    footer("Settings active");
+    els.footerMode.textContent = "Settings active";
     return;
   }
 
@@ -11526,7 +11345,7 @@ function renderProxyPanels() {
   els.proxySubPath.textContent = `Proxy / ${label}`;
   els.proxySubTitle.textContent = `${label} is planned next`;
   els.proxySubDescription.textContent = `${label} will plug into the same capture store and message workbench.`;
-  footer(`${label} placeholder active`);
+  els.footerMode.textContent = `${label} placeholder active`;
 }
 
 // Set by a rail-tab click so the next render scrolls to that section once.
@@ -11631,7 +11450,7 @@ function renderHistory(options = {}) {
   if (state.method) summary.push(`method: ${state.method}`);
   if (state.filterSettings.inScopeOnly) summary.push("scope only");
   if (state.filterSettings.hideWithoutResponses) summary.push("responses only");
-  if (state.filterSettings.onlyParameterized) summary.push("query parameters only");
+  if (state.filterSettings.onlyParameterized) summary.push("parameterized only");
   if (state.filterSettings.onlyNotes) summary.push("notes only");
   if (state.filterSettings.searchTerm) summary.push(`advanced: ${state.filterSettings.searchTerm}`);
   if (state.filterSettings.colorTags?.size) summary.push(`color: ${[...state.filterSettings.colorTags].join(", ")}`);
@@ -12076,8 +11895,7 @@ function isEditableTarget(target) {
     return true;
   }
 
-  // Passive previews own native copy and scrolling while keeping traffic read-only.
-  const editableParent = target.closest("input, textarea, select, [contenteditable='true'], .encoded-preview-tooltip");
+  const editableParent = target.closest("input, textarea, select, [contenteditable='true']");
   if (editableParent) {
     return true;
   }
@@ -12241,8 +12059,8 @@ function getSelectedCMText(targetPane) {
   return ranges.join("\n");
 }
 
-async function copyTextToClipboard(text, { isCurrent = () => true } = {}) {
-  if (text == null || !isCurrent()) {
+async function copyTextToClipboard(text) {
+  if (text == null) {
     return;
   }
   const clipboardText = String(text);
@@ -12257,9 +12075,6 @@ async function copyTextToClipboard(text, { isCurrent = () => true } = {}) {
     }
   }
 
-  // The browser's pending write cannot be cancelled, but a rejected write
-  // must not start a fallback after its document or newer copy took ownership.
-  if (!isCurrent()) return;
   const textarea = document.createElement("textarea");
   textarea.value = clipboardText;
   textarea.setAttribute("readonly", "true");
@@ -12333,7 +12148,6 @@ function renderDetail(record, options = {}) {
   if (!els.detailTitle) return;
   cancelHistoryDetailLoading();
   state.loadingDetailId = null;
-  state.historyDetailError = "";
   if (!options.preserveOriginalToggles) {
     state.showOriginal.request = false;
     state.showOriginal.response = false;
@@ -12388,11 +12202,10 @@ function renderDetail(record, options = {}) {
   renderMessagePanes();
 }
 
-function renderEmptyDetail(errorMessage = "") {
+function renderEmptyDetail() {
   cancelHistoryDetailLoading();
   state.selectedRecord = null;
   state.loadingDetailId = null;
-  state.historyDetailError = errorMessage;
   els.detailTitle.textContent = "Inspector";
   els.detailTags.innerHTML = "";
   els.protocolStrip.innerHTML = renderProtocolStrip({ current: "HTTP/1", supportsHttp2: false });
@@ -12400,10 +12213,10 @@ function renderEmptyDetail(errorMessage = "") {
   els.requestHeaderCount.textContent = "0";
   els.responseHeaderCount.textContent = "0";
   els.summaryList.innerHTML = renderSummaryRows([
-    { label: "Status", value: errorMessage || "Select a transaction to inspect it." },
+    { label: "Status", value: "Select a transaction to inspect it." },
   ]);
-  els.requestHeadersBody.innerHTML = `<p class="empty-copy">${escapeHtml(errorMessage || "Select a transaction from HTTP.")}</p>`;
-  els.responseHeadersBody.innerHTML = `<p class="empty-copy">${escapeHtml(errorMessage || "No response selected.")}</p>`;
+  els.requestHeadersBody.innerHTML = "<p class=\"empty-copy\">Select a transaction from HTTP.</p>";
+  els.responseHeadersBody.innerHTML = "<p class=\"empty-copy\">No response selected.</p>";
   els.notesCard.innerHTML = "<p>No anomalies were recorded for this transaction.</p>";
   renderViewTabs();
   renderMessagePanes();
@@ -12412,7 +12225,6 @@ function renderEmptyDetail(errorMessage = "") {
 function renderLoadingDetail(message = "Loading selected transaction...") {
   state.selectedRecord = null;
   state.loadingDetailId = state.selectedId;
-  state.historyDetailError = "";
   els.detailTitle.textContent = "Inspector";
   els.detailTags.innerHTML = "";
   els.protocolStrip.innerHTML = renderProtocolStrip({ current: "HTTP/1", supportsHttp2: false });
@@ -12448,10 +12260,10 @@ function renderMessagePanes() {
     : record;
   const requestText = requestRecord
     ? buildMessagePresentation("request", requestRecord)
-    : (state.historyDetailError || (detailLoading ? "Loading selected transaction..." : "Select a transaction from HTTP."));
+    : (detailLoading ? "Loading selected transaction..." : "Select a transaction from HTTP.");
   const responseText = responseRecord
     ? buildMessagePresentation("response", responseRecord)
-    : (state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected."));
+    : (detailLoading ? "Loading response details." : "No response selected.");
 
   const reqMode = state.messageViews.request;
   const resMode = state.messageViews.response;
@@ -12510,7 +12322,7 @@ function renderMessagePanes() {
           key: `${responseRecord.id}:${state.showOriginal.response}`,
           url: recordPageUrl(responseRecord),
         }
-      : { note: state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected.") },
+      : { note: detailLoading ? "Loading response details." : "No response selected." },
   );
 }
 
@@ -13018,13 +12830,8 @@ function renderIntercepts() {
 
   if (!state.selectedInterceptRecord) {
     state.interceptEditorSeedId = null;
-    if (state.interceptQueueTab === "request") {
-      els.interceptDetailPath.textContent = "Intercept";
-      els.interceptDetailTitle.textContent = "No request selected";
-      els.interceptMeta.textContent = state.runtime?.intercept_enabled
-        ? "Intercept is on. New requests will queue here."
-        : "Intercept is off. Toggle it on to pause requests before forwarding.";
-    }
+    els.interceptDetailPath.textContent = "Intercept";
+    els.interceptDetailTitle.textContent = "No request selected";
     if (els.interceptRequestCM) {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM, "", {
         mode: "http", readOnly: false,
@@ -13034,20 +12841,16 @@ function renderIntercepts() {
       els.interceptRequestEditor.value = "";
       renderInterceptRequestHighlight("");
     }
+    els.interceptMeta.textContent = state.runtime?.intercept_enabled
+      ? "Intercept is on. New requests will queue here."
+      : "Intercept is off. Toggle it on to pause requests before forwarding.";
     els.forwardInterceptButton.disabled = true;
     els.dropInterceptButton.disabled = true;
     return;
   }
 
-  if (state.interceptQueueTab === "request") {
-    els.interceptDetailPath.textContent = `${state.selectedInterceptRecord.request.scheme.toUpperCase()} / ${state.selectedInterceptRecord.peer_addr}`;
-    els.interceptDetailTitle.textContent = `${state.selectedInterceptRecord.request.method} ${state.selectedInterceptRecord.request.host}`;
-    els.interceptMeta.textContent = [
-      state.selectedInterceptRecord.is_websocket ? "WebSocket upgrade" : "HTTP request",
-      `queued at ${formatTimestamp(state.selectedInterceptRecord.started_at)}`,
-      state.selectedInterceptRecord.request.preview_truncated ? "captured request body is preview-truncated" : "body captured in memory",
-    ].join(" · ");
-  }
+  els.interceptDetailPath.textContent = `${state.selectedInterceptRecord.request.scheme.toUpperCase()} / ${state.selectedInterceptRecord.peer_addr}`;
+  els.interceptDetailTitle.textContent = `${state.selectedInterceptRecord.request.method} ${state.selectedInterceptRecord.request.host}`;
   // Polling refreshes the held record, but the editor owns its draft until the
   // selection changes. Losing focus (including to search) must not re-seed it.
   if (els.interceptRequestCM) {
@@ -13064,6 +12867,11 @@ function renderIntercepts() {
     }
     renderInterceptRequestHighlight(els.interceptRequestEditor.value);
   }
+  els.interceptMeta.textContent = [
+    state.selectedInterceptRecord.is_websocket ? "WebSocket upgrade" : "HTTP request",
+    `queued at ${formatTimestamp(state.selectedInterceptRecord.started_at)}`,
+    state.selectedInterceptRecord.request.preview_truncated ? "captured request body is preview-truncated" : "body captured in memory",
+  ].join(" · ");
   els.forwardInterceptButton.disabled = false;
   els.dropInterceptButton.disabled = false;
 }
@@ -13173,7 +12981,6 @@ function renderWebsocketSessions(options = {}) {
   renderWebsocketSessionTable(sortedEntries);
 
   if (!state.selectedWebsocketRecord) {
-    hideFrameDetail();
     const detailLoading = Boolean(state.selectedWebsocketId);
     if (!detailLoading) {
       cancelWebsocketDetailLoading();
@@ -13223,6 +13030,12 @@ function renderWebsocketSessions(options = {}) {
     // Hide legacy views
     if (els.websocketRequestView) els.websocketRequestView.classList.add("hidden");
     if (els.websocketResponseView) els.websocketResponseView.classList.add("hidden");
+    // Apply handshake search via CM
+    const query = (els.wsHandshakeSearchInput?.value || "").trim();
+    if (query) {
+      const cv = getCMView("wsHandshake");
+      if (cv) cv.applySearch(query);
+    }
   } else {
     // Legacy fallback
     const savedReqFocus = window._saveCodeViewFocus?.(els.websocketRequestView);
@@ -14313,17 +14126,7 @@ function renderReplay(options = {}) {
     return;
   }
 
-  const previousOwner = getRenderedHttpReplayDraftOwner(tab);
-  const draftOwner = {
-    tab,
-    sessionId: currentSessionId(),
-    generation: workspaceStateGeneration,
-    // Keep the editor's history on redraw, while refreshing draft-capture state.
-    editorOwner: previousOwner?.editorOwner || {},
-  };
-  // Async captured-record opens and workspace adoption can change owners without
-  // going through a tab-click handler. Focus only protects this owner's draft.
-  syncReplayToolbar(tab, { force: options.forceToolbarSync || !previousOwner });
+  syncReplayToolbar(tab, { force: options.forceToolbarSync });
   const reqMode = state.replayMessageViews.request;
   if (els.replayRequestCM) {
     // CM path for all modes
@@ -14335,9 +14138,9 @@ function renderReplay(options = {}) {
       }
       const hexText = toHexDumpFromBytes(tab.requestBytes);
       updateCodePaneCM("replayReq", els.replayRequestCM, hexText, {
-        mode: "hex", readOnly: true, owner: draftOwner.editorOwner,
+        mode: "hex", readOnly: true,
       });
-      updateReplaySearchPane("request", hexText, { scrollToFirst: !previousOwner });
+      updateReplaySearchPane("request", hexText);
     } else {
       // Pretty/Raw mode: editable
       if (tab.requestBytes) {
@@ -14346,10 +14149,10 @@ function renderReplay(options = {}) {
         tab.requestOriginalBytes = null;
       }
       updateCodePaneCM("replayReq", els.replayRequestCM, tab.requestText, {
-        mode: "http", readOnly: false, owner: draftOwner.editorOwner,
+        mode: "http", readOnly: false,
         onChange: syncReplayRequestTextFromEditor,
       });
-      updateReplaySearchPane("request", tab.requestText, { scrollToFirst: !previousOwner });
+      updateReplaySearchPane("request", tab.requestText);
     }
   } else if (reqMode === "hex") {
     if (els.replayRequestHighlight) els.replayRequestHighlight.removeAttribute("contenteditable");
@@ -14375,10 +14178,14 @@ function renderReplay(options = {}) {
     }
     if (els.replayRequestEditor) els.replayRequestEditor.value = tab.requestText;
     renderReplayRequestHighlight(tab.requestText);
-    updateReplaySearchPane("request", tab.requestText, { scrollToFirst: !previousOwner });
+    updateReplaySearchPane("request", tab.requestText);
   }
 
-  renderedHttpReplayDraftOwner = draftOwner;
+  renderedHttpReplayDraftOwner = {
+    tab,
+    sessionId: currentSessionId(),
+    generation: workspaceStateGeneration,
+  };
 
   if (!tab.responseRecord) {
     renderReplayEmptyResponse(tab);
@@ -14587,8 +14394,8 @@ function renderFuzzerRequestHighlight(text) {
   }
 
   let html = renderCodeHtml(text, "pretty", "request");
-  // Highlight positions: §original§ and $payload$, as the server reads them.
-  html = html.replace(/(\$payload\$|§[^§<\n]*§)/g, '<span class="hl-payload-placeholder">$1</span>');
+  // Highlight $payload$ markers
+  html = html.replace(/(\$payload\$)/gi, '<span class="hl-payload-placeholder">$1</span>');
   els.fuzzerRequestHighlight.innerHTML = html;
   syncFuzzerRequestHighlightScroll();
 }
@@ -14710,9 +14517,7 @@ function renderReplayViewContent(target) {
           tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
         }
         const hexText = toHexDumpFromBytes(tab.requestBytes);
-        updateCodePaneCM("replayReq", els.replayRequestCM, hexText, {
-          mode: "hex", readOnly: true, owner: getRenderedHttpReplayDraftOwner(tab)?.editorOwner,
-        });
+        updateCodePaneCM("replayReq", els.replayRequestCM, hexText, { mode: "hex", readOnly: true });
         updateReplaySearchPane("request", hexText);
       } else {
         if (tab.requestBytes) {
@@ -14723,7 +14528,6 @@ function renderReplayViewContent(target) {
         updateCodePaneCM("replayReq", els.replayRequestCM, tab.requestText, {
           mode: "http",
           readOnly: false,
-          owner: getRenderedHttpReplayDraftOwner(tab)?.editorOwner,
           onChange: syncReplayRequestTextFromEditor,
         });
         updateReplaySearchPane("request", tab.requestText);
@@ -15002,7 +14806,6 @@ function renderMatchReplaceRules() {
 function initializeTargetWorkspace() {
   const panel = document.getElementById("targetServiceMapPanel");
   if (!panel || !window.SniperServiceMap) return;
-  if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.destroy();
   targetServiceMapController = window.SniperServiceMap.createController({
     elements: {
       panel,
@@ -15014,8 +14817,6 @@ function initializeTargetWorkspace() {
       mapControls: document.getElementById("serviceMapViewControls"),
       allOrigins: document.getElementById("serviceMapAllOrigins"),
       directRelations: document.getElementById("serviceMapDirectRelations"),
-      flow: document.getElementById("serviceMapFlow"),
-      flowMermaid: document.getElementById("serviceMapFlowMermaid"),
       focusSelection: document.getElementById("serviceMapFocusSelection"),
       canvas: document.getElementById("serviceMapCanvas"),
       viewport: document.getElementById("serviceMapViewport"),
@@ -15051,29 +14852,15 @@ function initializeTargetWorkspace() {
       scheduleUiSettingsSave();
     },
     request: (path, options) => fetch(path, options),
-    onApiDocsOpen: () => { compareLoadGeneration += 1; },
-    isActiveModal: (modal) => getActiveModalAction()?.modal === modal,
-    restoreFocus: (previous) => restoreModalFocus(previous, document.querySelector("[data-target-view].active")),
-    copyText: (text, label, isCurrent = () => true) => copyTextToClipboard(text, { isCurrent })
-      .then(() => { if (isCurrent()) showToast(label); })
-      .catch(() => { if (isCurrent()) showToast("Failed to copy", "error"); }),
-    sendToReplay: (id, isCurrent = () => true) => {
-      const sessionId = currentSessionId(), generation = workspaceStateGeneration;
-      // Dialog openers already invalidate pending Compare reveals. Share that
-      // intent token so opening and closing Settings cannot revive this send.
-      const dialogGeneration = compareLoadGeneration;
-      const ownsAction = () => isCurrent() && state.activeTool === "map"
-        && dialogGeneration === compareLoadGeneration
-        && sessionId === currentSessionId() && generation === workspaceStateGeneration;
-      return loadTransactionRecordById(id, sessionId)
-        .then((record) => {
-          if (!ownsAction()) return;
-          if (record?.id !== id) throw new Error("The row could not be loaded.");
-          openTransactionRecordInReplay(record);
-        })
-        .catch((error) => { if (ownsAction()) showToast(error?.message || "Failed to open Replay", "error"); });
-    },
-    openInHistory: (id) => jumpToTransaction(id),
+    copyText: (text, label) => copyTextToClipboard(text)
+      .then(() => showToast(label))
+      .catch(() => showToast("Failed to copy", "error")),
+    sendToReplay: (id) => loadTransactionRecordById(id)
+      .then((record) => {
+        if (!record) throw new Error("The row could not be loaded.");
+        openTransactionRecordInReplay(record);
+      })
+      .catch((error) => showToast(error?.message || "Failed to open Replay", "error")),
     // The desktop app hands an external page to the default browser.
     openUrl: (url) => window.open(url, "_blank", "noopener,noreferrer"),
   });
@@ -15177,7 +14964,7 @@ function renderTarget() {
               >
                 <div class="target-host-copy">
                   <div class="target-host-title">${escapeHtml(hostName)}</div>
-                  <div class="target-path-meta">${requestCount} captured request(s) · ${paths.length} path(s) · ${escapeHtml(schemes.join(", ") || "http")}</div>
+                  <div class="target-path-meta">${requestCount} request(s) · ${paths.length} path(s) · ${escapeHtml(schemes.join(", ") || "http")}</div>
                 </div>
                 <div class="target-host-actions">
                   <span class="detail-chip ${host.in_scope ? "ok" : "none"}">${host.in_scope ? "In scope" : "Out of scope"}</span>
@@ -15188,19 +14975,12 @@ function renderTarget() {
                 ${paths.map((path) => {
                   const methods = Array.isArray(path.methods) ? path.methods.map(String) : [];
                   const noteCount = Number.isFinite(Number(path.note_count)) ? Number(path.note_count) : 0;
-                  // Older servers omit provenance: their paths are all captured.
-                  const captured = path.captured !== false;
-                  const discovered = path.discovered === true;
-                  const reconSources = Array.isArray(path.recon_sources) ? path.recon_sources.map(String) : [];
-                  const reconKinds = Array.isArray(path.recon_kinds) ? path.recon_kinds.map(String) : [];
-                  const provenance = captured ? (discovered ? "Captured + Recon" : "Captured") : "Recon discovery · not captured";
                   return `
                     <div class="target-path-item">
                       <div class="target-path-title">${escapeHtml(path.path || "/")}</div>
                       <div class="target-path-meta">
-                        ${escapeHtml(provenance)} · ${escapeHtml(methods.join(", "))}${captured ? ` · ${escapeHtml(formatStatus(path.status))}` : ""} · ${captured ? "Last captured" : "Last discovered"}: ${escapeHtml(formatTimestamp(path.last_seen))}${path.is_websocket ? " · websocket" : ""}${noteCount ? ` · ${noteCount} note(s)` : ""}
+                        ${escapeHtml(methods.join(", "))} · ${escapeHtml(formatStatus(path.status))} · ${escapeHtml(formatTimestamp(path.last_seen))}${path.is_websocket ? " · websocket" : ""}${noteCount ? ` · ${noteCount} note(s)` : ""}
                       </div>
-                      ${discovered ? `<div class="target-path-meta">Recon: ${escapeHtml(reconSources.join(", ") || "unknown source")}${reconKinds.length ? ` · ${escapeHtml(reconKinds.join(", "))}` : ""}</div>` : ""}
                     </div>
                   `;
                 }).join("")}
@@ -15209,7 +14989,7 @@ function renderTarget() {
           `;
         })
         .join("")
-    : "<p class=\"empty-copy\">No targets yet. Capture proxy traffic or run Recon to build a site map.</p>";
+    : "<p class=\"empty-copy\">No captured targets yet. Send traffic through the proxy to build a site map.</p>";
 
   const hostButtons = Array.from(targetTree.querySelectorAll(".target-host-toggle"));
   hostButtons.forEach((button) => {
@@ -15244,7 +15024,6 @@ function renderTarget() {
 }
 
 function renderFuzzer() {
-  renderFuzzerResultsWorkflow();
   if (els.fuzzerRequestCM) {
     // CM path
     const cv = getCMView("fuzzerReq");
@@ -15252,7 +15031,7 @@ function renderFuzzer() {
       updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, state.fuzzerRequestText, {
         mode: "http", readOnly: false,
         payloadHighlight: true,
-        placeholder: "Paste an HTTP request, then mark the values to fuzz",
+        placeholder: "Paste an HTTP request with $payload$ markers...",
       });
       // Wire onChange to sync state
       const newCv = getCMView("fuzzerReq");
@@ -15273,358 +15052,30 @@ function renderFuzzer() {
   if (els.fuzzerPayloadsEditor.value !== state.fuzzerPayloadsText) {
     els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText;
   }
-  const attackRunning = !!state.fuzzerRunning || !!state.fuzzerRunningAttackId;
   if (els.startFuzzerButton) {
-    els.startFuzzerButton.disabled = attackRunning;
-  }
-  if (els.stopFuzzerButton) {
-    els.stopFuzzerButton.classList.toggle("hidden", !state.fuzzerRunningAttackId);
+    els.startFuzzerButton.disabled = !!state.fuzzerRunning;
   }
   if (els.resetFuzzerButton) {
     els.resetFuzzerButton.disabled = !!state.fuzzerRunning;
   }
 
-  if (typeof renderFuzzerSetup === "function") renderFuzzerSetup();
   const attackRecord = normalizeFuzzerAttackRecord(state.fuzzerAttackRecord);
   state.fuzzerAttackRecord = attackRecord;
   if (attackRecord?.id) {
     state.fuzzerAttackRecordId = attackRecord.id;
   }
   if (!attackRecord) {
-    els.fuzzerMeta.textContent = state.fuzzerNotice || "No results yet.";
-    renderEmptyFuzzerResults(state.fuzzerNotice || "Results appear here after running.");
+    els.fuzzerMeta.textContent = state.fuzzerNotice || "No fuzz run has been started yet.";
+    renderEmptyFuzzerResults(state.fuzzerNotice || "Use $payload$ markers in the request template, then click Start.");
     return;
   }
 
-  const planned = attackRecord.planned || attackRecord.payload_count || attackRecord.results.length;
-  const sent = attackRecord.results.length;
   els.fuzzerMeta.textContent = [
-    attackRecord.running ? `Sending… ${sent} of ${planned} requests`
-      : attackRecord.stopped ? `Stopped after ${sent} of ${planned} requests`
-        : `${attackRecord.payload_count ?? sent} payload(s)`,
-    `${attackRecord.marker_count ?? 0} position(s)`,
-    ...(attackRecord.running || attackRecord.stopped ? [] : [attackRecord.status || "completed"]),
+    `${attackRecord.payload_count ?? attackRecord.results.length} payload(s)`,
+    `${attackRecord.marker_count ?? 0} marker(s)`,
+    attackRecord.status || "completed",
   ].join(" · ");
   renderFuzzerResultsVirtual();
-}
-
-function fuzzerResultsWorkflowState() {
-  const sessionId = currentSessionId();
-  if (!state.fuzzerResultsWorkflow || state.fuzzerResultsWorkflow.sessionId !== sessionId) {
-    state.fuzzerResultsWorkflow = {
-      sessionId, status: "all", minBytes: "", maxBytes: "", minMs: "", maxMs: "",
-      sort: "index", direction: "asc", runs: [], selectedRunId: "", listGeneration: 0,
-      readGeneration: 0, listBusy: false, readBusy: false, invalidInputs: {}, notice: "Refresh to list retained runs in this session.",
-      compareGeneration: null,
-    };
-  }
-  return state.fuzzerResultsWorkflow;
-}
-
-function fuzzerResultMetric(value) {
-  if (value == null || String(value).trim() === "") return null;
-  const numeric = Number(value);
-  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
-}
-
-function fuzzerResultFilterValidation(view = fuzzerResultsWorkflowState()) {
-  const errors = {};
-  const labels = { minBytes: "Minimum bytes", maxBytes: "Maximum bytes", minMs: "Minimum duration", maxMs: "Maximum duration" };
-  for (const [field, label] of Object.entries(labels)) {
-    const raw = String(view[field] || "").trim();
-    const value = Number(raw);
-    if (view.invalidInputs?.[field] || (raw && (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER
-      || (field.endsWith("Bytes") && !Number.isInteger(value))))) {
-      errors[field] = `${label} must be a non-negative ${field.endsWith("Bytes") ? "whole number" : "number"} within the safe numeric range.`;
-    }
-  }
-  for (const [min, max, label] of [["minBytes", "maxBytes", "bytes"], ["minMs", "maxMs", "duration"]]) {
-    if (!errors[min] && !errors[max] && String(view[min] || "").trim() && String(view[max] || "").trim()
-      && Number(view[min]) > Number(view[max])) {
-      errors[min] = errors[max] = `Minimum ${label} cannot exceed maximum ${label}.`;
-    }
-  }
-  return { valid: !Object.keys(errors).length, errors, message: [...new Set(Object.values(errors))].join(" ") };
-}
-
-function visibleFuzzerResults() {
-  const view = fuzzerResultsWorkflowState();
-  if (!fuzzerResultFilterValidation(view).valid) return [];
-  const minBytes = fuzzerResultMetric(view.minBytes), maxBytes = fuzzerResultMetric(view.maxBytes);
-  const minMs = fuzzerResultMetric(view.minMs), maxMs = fuzzerResultMetric(view.maxMs);
-  const inRange = (value, min, max) => (min == null && max == null)
-    || (value != null && (min == null || value >= min) && (max == null || value <= max));
-  const entries = jsonArray(state.fuzzerAttackRecord?.results).map((result, sourceIndex) => ({ result, sourceIndex }));
-  const filtered = entries.filter(({ result }) => {
-    const status = fuzzerResultMetric(result.status);
-    if (view.status === "error" && status != null && status > 0) return false;
-    if (/^[2-5]xx$/.test(view.status) && Math.floor((status || 0) / 100) !== Number(view.status[0])) return false;
-    return inRange(fuzzerResultMetric(result.response_bytes), minBytes, maxBytes)
-      && inRange(fuzzerResultMetric(result.duration_ms), minMs, maxMs);
-  });
-  const valueFor = ({ result, sourceIndex }) => {
-    if (view.sort === "status") return fuzzerResultMetric(result.status);
-    if (view.sort === "bytes") return fuzzerResultMetric(result.response_bytes);
-    if (view.sort === "duration") return fuzzerResultMetric(result.duration_ms);
-    return fuzzerResultMetric(result.index) ?? sourceIndex;
-  };
-  filtered.sort((a, b) => {
-    const left = valueFor(a), right = valueFor(b);
-    // Unknown metrics remain at the end in either direction; ties keep run order.
-    if (left == null || right == null) return left == right ? a.sourceIndex - b.sourceIndex : left == null ? 1 : -1;
-    return (left - right) * (view.direction === "desc" ? -1 : 1) || a.sourceIndex - b.sourceIndex;
-  });
-  return filtered;
-}
-
-function initFuzzerResultsWorkflow() {
-  const fields = {
-    fuzzerResultStatus: "status", fuzzerResultMinBytes: "minBytes", fuzzerResultMaxBytes: "maxBytes",
-    fuzzerResultMinMs: "minMs", fuzzerResultMaxMs: "maxMs", fuzzerResultSort: "sort", fuzzerResultDirection: "direction",
-  };
-  for (const [id, field] of Object.entries(fields)) {
-    const input = els[id];
-    input?.addEventListener(["status", "sort", "direction"].includes(field) ? "change" : "input", () => {
-      const workflow = fuzzerResultsWorkflowState();
-      workflow[field] = input.value;
-      workflow.invalidInputs ||= {};
-      workflow.invalidInputs[field] = !!(input.validity?.badInput || input.validity?.stepMismatch);
-      const shell = fuzzerResultsShell();
-      if (shell) shell.scrollTop = 0;
-      renderFuzzerResultsVirtual();
-      renderFuzzerResultsWorkflow();
-    });
-  }
-  els.fuzzerSavedRunSelect?.addEventListener("change", () => {
-    const workflow = fuzzerResultsWorkflowState();
-    workflow.selectedRunId = els.fuzzerSavedRunSelect.value;
-    workflow.readGeneration += 1;
-    workflow.readBusy = false;
-    workflow.notice = "View keeps the current draft. Reuse asks before replacing it.";
-    renderFuzzerResultsWorkflow();
-  });
-  els.fuzzerRefreshRunsButton?.addEventListener("click", () => refreshFuzzerSavedRuns());
-  els.fuzzerViewRunButton?.addEventListener("click", () => readFuzzerSavedRun("view"));
-  els.fuzzerReuseRunButton?.addEventListener("click", () => readFuzzerSavedRun("reuse"));
-  els.fuzzerCompareBaseButton?.addEventListener("click", () => useFuzzerComparisonBase());
-  els.fuzzerCompareButton?.addEventListener("click", () => compareSelectedFuzzerResult());
-}
-
-function fuzzerSelectedTransactionId() {
-  const entry = visibleFuzzerResults()[fuzzerSelectedResultIndex()];
-  const transactionId = entry?.result?.transaction_id;
-  return transactionId && state._fuzzerDetailRecord?.id === transactionId ? transactionId : null;
-}
-
-function renderFuzzerResultsWorkflow() {
-  const workflow = fuzzerResultsWorkflowState();
-  const validation = fuzzerResultFilterValidation(workflow);
-  const fields = {
-    fuzzerResultStatus: "status", fuzzerResultMinBytes: "minBytes", fuzzerResultMaxBytes: "maxBytes",
-    fuzzerResultMinMs: "minMs", fuzzerResultMaxMs: "maxMs", fuzzerResultSort: "sort", fuzzerResultDirection: "direction",
-  };
-  for (const [id, field] of Object.entries(fields)) {
-    const input = els[id];
-    if (!input) continue;
-    if (input.value !== workflow[field] || (!workflow.invalidInputs?.[field] && input.validity?.badInput)) input.value = workflow[field];
-    if (["minBytes", "maxBytes", "minMs", "maxMs"].includes(field)) {
-      input.setAttribute("aria-invalid", validation.errors[field] ? "true" : "false");
-      input.setCustomValidity?.(validation.errors[field] || "");
-    }
-  }
-  if (els.fuzzerResultFilterCount) {
-    els.fuzzerResultFilterCount.textContent = validation.valid
-      ? `${visibleFuzzerResults().length} of ${jsonArray(state.fuzzerAttackRecord?.results).length} results`
-      : `Invalid filters: ${validation.message}`;
-  }
-  const transactionId = fuzzerSelectedTransactionId();
-  if (els.fuzzerCompareBaseButton) els.fuzzerCompareBaseButton.disabled = !transactionId;
-  if (els.fuzzerCompareButton) {
-    els.fuzzerCompareButton.disabled = !transactionId || !compareBaseId
-      || compareBaseSessionId !== currentSessionId() || compareBaseId === transactionId;
-  }
-  if (els.fuzzerSavedRunSelect) {
-    const options = '<option value="">Choose a retained run</option>' + workflow.runs.map((run) => {
-      const state = run.running ? "running" : run.stopped ? "stopped" : run.status || "completed";
-      const label = `${run.started_at || "Saved run"} · ${run.host || ""}${run.path || ""} · ${run.payload_count ?? run.result_count ?? 0} payload(s) · ${state}`;
-      return `<option value="${escapeHtml(run.id)}">${escapeHtml(label)}</option>`;
-    }).join("");
-    if (els.fuzzerSavedRunSelect.innerHTML !== options) els.fuzzerSavedRunSelect.innerHTML = options;
-    els.fuzzerSavedRunSelect.value = workflow.selectedRunId;
-  }
-  if (els.fuzzerRefreshRunsButton) els.fuzzerRefreshRunsButton.disabled = workflow.listBusy;
-  const unavailable = !workflow.selectedRunId || workflow.readBusy || !!state.fuzzerRunning;
-  if (els.fuzzerViewRunButton) els.fuzzerViewRunButton.disabled = unavailable;
-  if (els.fuzzerReuseRunButton) els.fuzzerReuseRunButton.disabled = unavailable;
-  if (els.fuzzerSavedRunNotice) els.fuzzerSavedRunNotice.textContent = workflow.notice;
-}
-
-function cancelPendingFuzzerComparison() {
-  const workflow = state.fuzzerResultsWorkflow;
-  if (workflow?.compareGeneration != null) {
-    if (workflow.compareGeneration === compareLoadGeneration) compareLoadGeneration += 1;
-    workflow.compareGeneration = null;
-  }
-}
-
-async function useFuzzerComparisonBase() {
-  const transactionId = fuzzerSelectedTransactionId();
-  if (!transactionId) return;
-  await setCompareBase(transactionId);
-  renderFuzzerResultsWorkflow();
-}
-
-async function compareSelectedFuzzerResult() {
-  const transactionId = fuzzerSelectedTransactionId();
-  if (!transactionId || !compareBaseId || compareBaseId === transactionId || compareBaseSessionId !== currentSessionId()) return;
-  const workflow = fuzzerResultsWorkflowState();
-  const navigationGeneration = state._fuzzerNavigationGeneration || 0;
-  const ownsOrigin = () => workflow === state.fuzzerResultsWorkflow
-    && navigationGeneration === (state._fuzzerNavigationGeneration || 0);
-  const pending = openCompareModal(transactionId, ownsOrigin);
-  const generation = compareLoadGeneration;
-  workflow.compareGeneration = generation;
-  try {
-    await pending;
-  } catch (error) {
-    if (ownsOrigin() && generation === compareLoadGeneration) {
-      showToast(error?.message || "Failed to load comparison.", "error", 4000);
-    }
-  } finally {
-    if (workflow.compareGeneration === generation) workflow.compareGeneration = null;
-  }
-}
-
-function fuzzerSavedReadOwner(workflow, generation, field) {
-  const sessionId = currentSessionId();
-  const attackGeneration = _fuzzerAttackLoadGeneration;
-  const navigationGeneration = state._fuzzerNavigationGeneration || 0;
-  const draftVersion = state.fuzzerDraftVersion || 0;
-  const runToken = state.fuzzerRunToken || 0;
-  return () => workflow === state.fuzzerResultsWorkflow && workflow[field] === generation
-    && currentSessionId() === sessionId && _fuzzerAttackLoadGeneration === attackGeneration
-    && navigationGeneration === (state._fuzzerNavigationGeneration || 0)
-    && (state.fuzzerDraftVersion || 0) === draftVersion && (state.fuzzerRunToken || 0) === runToken;
-}
-
-async function refreshFuzzerSavedRuns() {
-  const workflow = fuzzerResultsWorkflowState();
-  if (!workflow.sessionId) return;
-  const generation = ++workflow.listGeneration;
-  const ownsRead = fuzzerSavedReadOwner(workflow, generation, "listGeneration");
-  workflow.listBusy = true;
-  const loadingNotice = "Loading retained runs...";
-  workflow.notice = loadingNotice;
-  renderFuzzerResultsWorkflow();
-  try {
-    const response = await fetch(sessionQueryPath("/api/fuzzer/attacks", workflow.sessionId));
-    if (!ownsRead()) return;
-    await requireOkResponse(response, "Failed to list saved fuzzer runs.");
-    const runs = await response.json();
-    if (!ownsRead()) return;
-    workflow.runs = jsonArray(runs).filter((run) => typeof run?.id === "string" && run.id);
-    if (!workflow.runs.some((run) => run.id === workflow.selectedRunId)) {
-      workflow.selectedRunId = "";
-      workflow.readGeneration += 1;
-      workflow.readBusy = false;
-    }
-    workflow.notice = workflow.runs.length
-      ? `${workflow.runs.length} retained run(s). View keeps the current draft; Reuse asks before replacing it.`
-      : "No retained fuzzer runs are available in this session.";
-  } catch (error) {
-    if (ownsRead()) workflow.notice = error?.message || "Failed to list saved fuzzer runs.";
-  } finally {
-    if (workflow === state.fuzzerResultsWorkflow && workflow.listGeneration === generation) {
-      workflow.listBusy = false;
-      if (workflow.notice === loadingNotice) workflow.notice = "";
-      renderFuzzerResultsWorkflow();
-    }
-  }
-}
-
-async function readFuzzerSavedRun(action) {
-  const workflow = fuzzerResultsWorkflowState();
-  const recordId = workflow.selectedRunId;
-  if (!recordId || !workflow.sessionId || state.fuzzerRunning || !["view", "reuse"].includes(action)) return;
-  // A picker load supersedes workspace hydration without changing the draft or
-  // discarding the currently displayed results before the replacement is ready.
-  _fuzzerAttackLoadGeneration += 1;
-  const generation = ++workflow.readGeneration;
-  const ownsRead = fuzzerSavedReadOwner(workflow, generation, "readGeneration");
-  const ownsSelection = () => ownsRead() && workflow.selectedRunId === recordId;
-  workflow.readBusy = true;
-  const loadingNotice = "Loading saved run...";
-  workflow.notice = loadingNotice;
-  renderFuzzerResultsWorkflow();
-  try {
-    const response = await fetch(sessionQueryPath(`/api/fuzzer/attacks/${encodeURIComponent(recordId)}`, workflow.sessionId));
-    if (!ownsSelection()) return;
-    if (response.status === 404) {
-      workflow.notice = "This saved run is no longer available. Refresh the retained-run list.";
-      return;
-    }
-    await requireOkResponse(response, "Failed to load saved fuzzer run.");
-    const record = normalizeFuzzerAttackRecord(await response.json());
-    if (!ownsSelection()) return;
-    if (!record || record.id !== recordId) throw new Error("Saved-run response did not match the selected run.");
-    if (action === "view") {
-      setFuzzerAttackRecord(record);
-      workflow.notice = "Viewing retained results. Your request, payloads and target are unchanged.";
-      scheduleWorkspaceStateSave();
-      renderFuzzer();
-    } else {
-      if (!record.template || typeof record.template !== "object") throw new Error("This run has no reusable request template.");
-      if (record.results.some((result) => /[\r\n]/.test(String(result.payload ?? "")))) {
-        throw new Error("A saved payload contains a line break and cannot be restored into the one-payload-per-line editor.");
-      }
-      const requestText = buildEditableRawRequest(record.template);
-      // Sniper sends the whole list at its first position before the next, so
-      // its first payload_count results are the list, repeats included.
-      const listed = record.attack_type === "sniper"
-        ? record.results.slice(0, record.payload_count || record.results.length)
-        : record.results;
-      const payloads = listed.map((result) => String(result.payload ?? ""));
-      const payloadsText = payloads.join("\n") + (payloads.at(-1) === "" ? "\n" : "");
-      if (new TextEncoder().encode(requestText).length > 2 * 1024 * 1024
-        || new TextEncoder().encode(payloadsText).length > 4 * 1024 * 1024 || payloads.length > 5000) {
-        throw new Error("This retained run exceeds the request or payload editor limits. The current draft was not replaced.");
-      }
-      workflow.notice = "Reuse requires confirmation. Original source and transport overrides are not retained.";
-      showConfirmDialog(
-        "Replace the current request and payload draft with this retained run?\n\nThe request is reconstructed from its saved template; original raw formatting, source transaction and target override are unavailable. Any current source and target override will be cleared. A saved template HTTP version is kept when present; otherwise the draft uses HTTP/1.1. The original separate HTTP-version override cannot be recovered. Review the destination and HTTP version before starting. Reuse does not send requests.",
-        () => {
-          if (!ownsSelection()) return;
-          const template = cloneEditableRequest(record.template);
-          if (record.template.http_version) template.http_version = record.template.http_version;
-          invalidateFuzzerRun();
-          state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
-          state.fuzzerBaseRequest = template;
-          state.fuzzerRequestText = requestText;
-          state.fuzzerPayloadsText = payloadsText;
-          if (record.attack_type) state.fuzzerAttackType = record.attack_type;
-          if (typeof record.url_encode === "boolean") state.fuzzerUrlEncode = record.url_encode;
-          if (record.concurrency) state.fuzzerConcurrency = record.concurrency;
-          state.fuzzerSourceTransactionId = null;
-          state.fuzzerTarget = null;
-          state.fuzzerTargetRequestText = null;
-          clearFuzzerAttackRecord();
-          state.fuzzerNotice = "Reused saved template and result payloads. Source and target overrides were cleared; review the destination and HTTP version before starting.";
-          workflow.notice = "Saved run reused as a new draft. No requests were sent.";
-          scheduleWorkspaceStateSave();
-          renderFuzzer();
-        },
-        { title: "Reuse saved fuzzer run?", confirmLabel: "Replace draft" },
-      );
-    }
-  } catch (error) {
-    if (ownsSelection()) workflow.notice = error?.message || "Failed to load saved fuzzer run.";
-  } finally {
-    if (workflow === state.fuzzerResultsWorkflow && workflow.readGeneration === generation) {
-      workflow.readBusy = false;
-      if (workflow.notice === loadingNotice) workflow.notice = "";
-      renderFuzzerResultsWorkflow();
-    }
-  }
 }
 
 function fuzzerSelectionKeyForResult(result, rowIndex) {
@@ -15634,8 +15085,18 @@ function fuzzerSelectionKeyForResult(result, rowIndex) {
 
 function fuzzerSelectedResultIndex() {
   const selectionKey = String(state._selectedFuzzerResultKey || "");
-  return selectionKey ? visibleFuzzerResults().findIndex(({ result, sourceIndex }) =>
-    fuzzerSelectionKeyForResult(result, sourceIndex) === selectionKey) : -1;
+  if (!selectionKey) {
+    return -1;
+  }
+  if (selectionKey.startsWith("row:")) {
+    const rowIndex = Number(selectionKey.slice(4));
+    return Number.isFinite(rowIndex) ? rowIndex : -1;
+  }
+  if (selectionKey.startsWith("tx:")) {
+    const txId = selectionKey.slice(3);
+    return jsonArray(state.fuzzerAttackRecord?.results).findIndex((result) => result?.transaction_id === txId);
+  }
+  return -1;
 }
 
 function fuzzerResultsShell() {
@@ -15656,31 +15117,21 @@ function renderEmptyFuzzerResults(message) {
   }
   state._selectedFuzzerResultKey = null;
   hideFuzzerDetailPanel();
-  renderFuzzerResultsWorkflow();
 }
 
 function renderFuzzerResultsVirtual() {
-  const results = visibleFuzzerResults();
+  const results = jsonArray(state.fuzzerAttackRecord?.results);
   if (!els.fuzzerResultsBody) {
     return;
   }
   if (!results.length) {
-    const validation = fuzzerResultFilterValidation();
-    renderEmptyFuzzerResults(!validation.valid ? `Fix the result filters. ${validation.message}`
-      : jsonArray(state.fuzzerAttackRecord?.results).length
-        ? "No results match these filters." : "No fuzzer results are available for this run.");
+    renderEmptyFuzzerResults("No fuzzer results are available for this run.");
     return;
   }
   const shell = fuzzerResultsShell();
   if (!shell) {
     return;
   }
-
-  if (state._selectedFuzzerResultKey && fuzzerSelectedResultIndex() < 0) {
-    state._selectedFuzzerResultKey = null;
-    hideFuzzerDetailPanel();
-  }
-  renderFuzzerResultsWorkflow();
 
   const rowHeight = measuredFuzzerResultRowHeight || FUZZER_RESULT_ROW_HEIGHT;
   const viewportHeight = shell.clientHeight || rowHeight;
@@ -15698,14 +15149,14 @@ function renderFuzzerResultsVirtual() {
 
   const rows = [];
   for (let rowIndex = startIdx; rowIndex < endIdx; rowIndex++) {
-    const { result, sourceIndex } = results[rowIndex];
-    const resultIndex = Number.isFinite(Number(result.index)) ? Number(result.index) : sourceIndex;
-    const selectionKey = fuzzerSelectionKeyForResult(result, sourceIndex);
+    const result = results[rowIndex];
+    const resultIndex = Number.isFinite(Number(result.index)) ? Number(result.index) : rowIndex;
+    const selectionKey = fuzzerSelectionKeyForResult(result, rowIndex);
     const selectedClass = state._selectedFuzzerResultKey === selectionKey ? " fuzzer-result-selected" : "";
     rows.push(`
-      <tr class="fuzzer-result-row${selectedClass}" data-transaction-id="${escapeHtml(result.transaction_id || "")}" data-result-index="${resultIndex}" data-row-index="${rowIndex}" data-source-index="${sourceIndex}">
+      <tr class="fuzzer-result-row${selectedClass}" data-transaction-id="${escapeHtml(result.transaction_id || "")}" data-result-index="${resultIndex}" data-row-index="${rowIndex}">
         <td>${resultIndex + 1}</td>
-        <td class="cell-url">${result.position != null && (state.fuzzerAttackRecord?.marker_count || 0) > 1 ? `<span class="fuzzer-position">§${Number(result.position) + 1}</span> ` : ""}${escapeHtml(result.payload)}</td>
+        <td class="cell-url">${escapeHtml(result.payload)}</td>
         <td>${escapeHtml(formatStatus(result.status))}</td>
         <td>${result.duration_ms == null ? "-" : `${result.duration_ms} ms`}</td>
         <td>${escapeHtml(formatSize(result.response_bytes))}</td>
@@ -15738,14 +15189,13 @@ function scrollFuzzerResultToIndex(rowIndex) {
 }
 
 function selectFuzzerResultIndex(rowIndex, options = {}) {
-  const results = visibleFuzzerResults();
+  const results = jsonArray(state.fuzzerAttackRecord?.results);
   if (rowIndex < 0 || rowIndex >= results.length) {
     return;
   }
-  const { result, sourceIndex } = results[rowIndex];
-  cancelPendingFuzzerComparison();
+  const result = results[rowIndex];
   const txId = String(result?.transaction_id || "");
-  const selectionKey = fuzzerSelectionKeyForResult(result, sourceIndex);
+  const selectionKey = fuzzerSelectionKeyForResult(result, rowIndex);
   state._selectedFuzzerResultKey = selectionKey;
 
   if (options.scroll !== false) {
@@ -15757,7 +15207,6 @@ function selectFuzzerResultIndex(rowIndex, options = {}) {
   if (txId) {
     showFuzzerResultDetail(txId, selectionKey).catch((err) => console.error(err));
   } else {
-    _fuzzerDetailGeneration += 1;
     state._fuzzerDetailRecord = null;
     if (els.fuzzerDetailPanel) els.fuzzerDetailPanel.classList.remove("hidden");
     const detailResizer = document.getElementById("fuzzerDetailResizer");
@@ -15766,7 +15215,6 @@ function selectFuzzerResultIndex(rowIndex, options = {}) {
     clearFuzzerResponsePane();
     if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
   }
-  renderFuzzerResultsWorkflow();
 }
 
 function selectFuzzerRow(row) {
@@ -15788,9 +15236,6 @@ function normalizeFuzzerAttackRecord(record) {
 }
 
 function setFuzzerAttackRecord(record) {
-  _fuzzerAttackLoadGeneration += 1;
-  state._selectedFuzzerResultKey = null;
-  hideFuzzerDetailPanel();
   const attackRecord = normalizeFuzzerAttackRecord(record);
   state.fuzzerAttackRecord = attackRecord;
   state.fuzzerAttackRecordId = typeof attackRecord?.id === "string" && attackRecord.id
@@ -15800,7 +15245,8 @@ function setFuzzerAttackRecord(record) {
 }
 
 function clearFuzzerAttackRecord() {
-  setFuzzerAttackRecord(null);
+  state.fuzzerAttackRecord = null;
+  state.fuzzerAttackRecordId = null;
 }
 
 function fuzzerWorkspaceAttackRecordId(fuzzerWS, legacyRecord = null) {
@@ -15812,14 +15258,10 @@ function fuzzerWorkspaceAttackRecordId(fuzzerWS, legacyRecord = null) {
 
 async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
   if (!recordId) return;
-  // IDs alone cannot distinguish an earlier visit to the same saved run.
-  const generation = ++_fuzzerAttackLoadGeneration;
   const expectedSessionId = sessionId || currentSessionId();
-  const ownsLoad = () => generation === _fuzzerAttackLoadGeneration
-    && state.fuzzerAttackRecordId === recordId && currentSessionId() === expectedSessionId;
   try {
     const response = await fetch(sessionQueryPath(`/api/fuzzer/attacks/${encodeURIComponent(recordId)}`, expectedSessionId));
-    if (!ownsLoad()) {
+    if (state.fuzzerAttackRecordId !== recordId || currentSessionId() !== expectedSessionId) {
       return;
     }
     if (response.status === 404) {
@@ -15833,7 +15275,7 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
     }
     await requireOkResponse(response, "Failed to load saved fuzzer run.");
     const detail = await response.json();
-    if (!ownsLoad()) {
+    if (state.fuzzerAttackRecordId !== recordId || currentSessionId() !== expectedSessionId) {
       return;
     }
     const attackRecord = setFuzzerAttackRecord(detail);
@@ -15843,16 +15285,9 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
     if (state.fuzzerNotice === "Loading saved fuzzer run...") {
       state.fuzzerNotice = "";
     }
-    if (attackRecord.running && !state.fuzzerRunning) {
-      state.fuzzerRunningAttackId = attackRecord.id;
-      renderFuzzer();
-      const ended = await followFuzzerAttack(recordId, expectedSessionId, ownsLoad);
-      if (state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
-      if (ended && ownsLoad()) state.fuzzerAttackRecord = ended;
-    }
     renderFuzzer();
   } catch (error) {
-    if (!ownsLoad()) {
+    if (state.fuzzerAttackRecordId !== recordId || currentSessionId() !== expectedSessionId) {
       return;
     }
     console.error(error);
@@ -15894,13 +15329,6 @@ function redrawResponsePreviews() {
 /** Show request/response detail for a fuzzer result. */
 async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transactionId}`) {
   if (!transactionId || !els.fuzzerDetailPanel) return;
-  // Returning to the same row must not revive its older response or error.
-  const generation = ++_fuzzerDetailGeneration;
-  const sessionId = currentSessionId();
-  const attackRecordId = state.fuzzerAttackRecordId;
-  const ownsSelection = () => generation === _fuzzerDetailGeneration
-    && sessionId === currentSessionId() && attackRecordId === state.fuzzerAttackRecordId
-    && state._selectedFuzzerResultKey === selectionKey;
 
   els.fuzzerDetailPanel.classList.remove("hidden");
   const detailResizer = document.getElementById("fuzzerDetailResizer");
@@ -15911,24 +15339,25 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
   clearFuzzerResponsePane();
 
   try {
+    const sessionId = currentSessionId();
     const resp = await fetch(transactionPath(transactionId, sessionId));
-    if (!ownsSelection()) return;
+    if (sessionId !== currentSessionId()) return;
     if (!resp.ok) {
+      if (state._selectedFuzzerResultKey !== selectionKey) return;
       updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, `Failed to load transaction: ${resp.status}`, { mode: "http" });
       clearFuzzerResponsePane();
       if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
       return;
     }
     const record = await resp.json();
-    if (!ownsSelection()) return;
+    if (state._selectedFuzzerResultKey !== selectionKey || sessionId !== currentSessionId()) return;
 
     // Store for mode switching
     state._fuzzerDetailRecord = record;
-    renderFuzzerResultsWorkflow();
 
     renderFuzzerDetailPanes(record);
   } catch (err) {
-    if (!ownsSelection()) return;
+    if (state._selectedFuzzerResultKey !== selectionKey) return;
     updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, `Error: ${err.message}`, { mode: "http" });
     clearFuzzerResponsePane();
     if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
@@ -15993,8 +15422,6 @@ function renderFuzzerDetailPanes(record) {
 }
 
 function hideFuzzerDetailPanel() {
-  cancelPendingFuzzerComparison();
-  _fuzzerDetailGeneration += 1;
   if (els.fuzzerDetailPanel) els.fuzzerDetailPanel.classList.add("hidden");
   const dr = document.getElementById("fuzzerDetailResizer");
   if (dr) dr.classList.add("hidden");
@@ -16163,332 +15590,11 @@ async function saveTargetScope(options = {}) {
   return true;
 }
 
-function fuzzerRequestTextForAction() {
-  const editor = getCMView("fuzzerReq");
-  const visible = editor ? editor.getContent() : els.fuzzerRequestEditor?.value;
-  const saved = String(state.fuzzerRequestText || "");
-  // CodeMirror normalizes line breaks. Preserve the untouched source bytes when
-  // its displayed document still matches that source (notably multipart CRLF).
-  if (visible == null || String(visible) === saved.replace(/\r\n?/g, "\n")) return saved;
-  return String(visible);
-}
-
-function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || createDefaultEditableRequest()) {
-  const raw = String(text || "");
-  const boundary = /\r?\n\r?\n/.exec(raw);
-  const { body } = splitRawHttpMessage(raw);
-  const bodyLength = editableRequestBodyLength(body, fallback?.body_encoding === "base64" ? "base64" : "utf8");
-  const headEnd = boundary ? boundary.index : raw.length;
-  // The engine always recalculates Content-Length after expansion. Normalize
-  // only this derived field before using the shared parser, independent of the
-  // Replay editor preference. Other framing validation remains unchanged.
-  const originalHead = raw.slice(0, headEnd);
-  const lengths = [...originalHead.matchAll(/^[ \t]*content-length[ \t]*:[ \t]*([^\r\n]*)/gmi)].map((match) => match[1].trim());
-  if (lengths.some((value) => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)))
-    || lengths.some((value) => Number(value) !== Number(lengths[0]))) {
-    throw new Error("Invalid or conflicting Content-Length headers in the request template.");
-  }
-  const head = originalHead.replace(/^([ \t]*content-length[ \t]*:[ \t]*)[^\r\n]*/gmi, (_line, prefix) => `${prefix}${bodyLength}`);
-  return parseEditableRawRequest(head + raw.slice(headEnd), fallback);
-}
-
-function fuzzerSetupNode(id) {
-  return document.getElementById(id);
-}
-
-function fuzzerSetupError(error) {
-  const notice = fuzzerSetupNode("fuzzerPreflightNotice");
-  if (notice) notice.textContent = error?.message || String(error || "Unable to update Fuzzer setup.");
-  showToast(error?.message || "Unable to update Fuzzer setup.", "error", 4000);
-}
-
-function fuzzerPayloadCount(text) {
-  if (!text) return 0;
-  let count = 1;
-  for (let index = 0; index < text.length; index++) {
-    if (text[index] === "\r" || text[index] === "\n") {
-      count++;
-      if (text[index] === "\r" && text[index + 1] === "\n") index++;
-    }
-  }
-  return count - (/[\r\n]$/.test(text) ? 1 : 0);
-}
-
-function fuzzerPayloadTextWithinLimits(text, payloads) {
-  if (new TextEncoder().encode(text).length > 4 * 1024 * 1024) {
-    throw new Error("Payload editor text, including line separators, cannot exceed 4 MiB.");
-  }
-  if (fuzzerPayloadCount(text) > 5000) throw new Error("Fuzzer payload count cannot exceed 5000.");
-  payloads = payloads || splitFuzzerPayloadLines(text);
-  const check = SniperFuzzerWorkflow.validatePayloads(payloads);
-  if (!check.valid) throw new Error(check.errors.join(" "));
-  return payloads;
-}
-
-function fuzzerSetupPreflight(raw = fuzzerRequestTextForAction()) {
-  if (!raw.trim()) throw new Error("Choose a captured request or paste a raw HTTP request to begin.");
-  if (new TextEncoder().encode(raw).length > 2 * 1024 * 1024) throw new Error("Request editor text cannot exceed 2 MiB.");
-  const template = parseFuzzerRequestTemplate(raw);
-  const payloadText = state.fuzzerPayloadsText || "";
-  if (new TextEncoder().encode(payloadText).length > 4 * 1024 * 1024) throw new Error("Payload editor text, including line separators, cannot exceed 4 MiB.");
-  if (fuzzerPayloadCount(payloadText) > 5000) throw new Error("Fuzzer payload count cannot exceed 5000.");
-  const payloads = splitFuzzerPayloadLines(payloadText);
-  const target = activeFuzzerTargetForRequest(raw);
-  const httpVersion = replayHttpVersionFromText(raw) || template.http_version || undefined;
-  const options = { target, httpVersion, attackType: state.fuzzerAttackType || "sniper", urlEncode: state.fuzzerUrlEncode !== false };
-  return { ...SniperFuzzerWorkflow.preflight(template, payloads, options), template, payloads, target, httpVersion };
-}
-
-function renderFuzzerSetup() {
-  if (typeof SniperFuzzerWorkflow === "undefined" || !fuzzerSetupNode("fuzzerPreflightSummary")) return;
-  const raw = fuzzerRequestTextForAction();
-  const select = fuzzerSetupNode("fuzzerCandidateSelect");
-  let candidates = [];
-  let model = null;
-  let error = "";
-  let candidateKey = `${currentSessionId()}|${raw}|${state.fuzzerBaseRequest?.body_encoding}|${state.fuzzerBaseRequest?.preview_truncated}`;
-  try {
-    if (new TextEncoder().encode(raw).length > 2 * 1024 * 1024) throw new Error("Request editor text cannot exceed 2 MiB.");
-    const template = parseFuzzerRequestTemplate(raw);
-    candidates = SniperFuzzerWorkflow.candidates(raw, { bodyEncoding: template.body_encoding, previewTruncated: template.preview_truncated });
-    model = fuzzerSetupPreflight(raw);
-  } catch (failure) {
-    error = failure?.message || "Review the request template.";
-  }
-  if (select && select._fuzzerCandidateKey !== candidateKey) {
-    select.innerHTML = `<option value="">${candidates.length ? "Choose a value" : "Select text in the request"}</option>` + candidates.map((candidate, index) =>
-      `<option value="${index}">${escapeHtml(candidate.label)}</option>`).join("");
-    select._fuzzerCandidateKey = candidateKey;
-    select._fuzzerRaw = raw;
-    select._fuzzerCandidates = candidates;
-  }
-  const busy = !!state.fuzzerRunning;
-  if (select) select.disabled = busy || candidates.length === 0;
-  const attackType = fuzzerSetupNode("fuzzerAttackType");
-  const urlEncode = fuzzerSetupNode("fuzzerUrlEncode");
-  const concurrency = fuzzerSetupNode("fuzzerConcurrency");
-  if (attackType) { attackType.value = state.fuzzerAttackType || "sniper"; attackType.disabled = busy; }
-  if (urlEncode) { urlEncode.checked = state.fuzzerUrlEncode !== false; urlEncode.disabled = busy; }
-  if (concurrency) { concurrency.value = String(state.fuzzerConcurrency || 4); concurrency.disabled = busy; }
-  for (const id of ["fuzzerMarkSelectionButton", "fuzzerMarkCandidateButton", "fuzzerImportPayloadButton", "fuzzerApplyPresetButton", "fuzzerGenerateRangeButton"]) {
-    const button = fuzzerSetupNode(id);
-    if (button) button.disabled = busy;
-  }
-  const markCandidate = fuzzerSetupNode("fuzzerMarkCandidateButton");
-  if (markCandidate) markCandidate.disabled = busy || !select?.value || candidates.length === 0;
-  const undo = state._fuzzerMarkerUndo;
-  const undoButton = fuzzerSetupNode("fuzzerUndoMarkerButton");
-  if (undoButton) undoButton.disabled = busy || !undo || undo.after !== raw || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken;
-  const summary = fuzzerSetupNode("fuzzerPreflightSummary");
-  const notice = fuzzerSetupNode("fuzzerPreflightNotice");
-  const samples = fuzzerSetupNode("fuzzerPreviewSamples");
-  const previewNotes = fuzzerSetupNode("fuzzerPreviewNotes");
-  if (!model) {
-    summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "No request selected.";
-    notice.textContent = raw.trim() ? error : "Send a request from History or Replay.";
-    if (previewNotes) previewNotes.textContent = "";
-    if (samples) samples.textContent = "Add a valid request and payloads to preview.";
-    return;
-  }
-  const destination = typeof model.effectiveTarget === "string" ? model.effectiveTarget : JSON.stringify(model.effectiveTarget);
-  const authorityMayChange = (model.warnings || []).some((message) => /^(Host markers|Header-name markers)/.test(message));
-  const sharing = model.attackType === "sniper" ? " (one at a time)" : " (shared payload)";
-  summary.textContent = `${model.payloadCount} payload${model.payloadCount === 1 ? "" : "s"} → ${model.requestCount} planned request${model.requestCount === 1 ? "" : "s"} · ${model.markerCount} position${model.markerCount === 1 ? "" : "s"}${model.markerCount > 1 ? sharing : ""} · ${authorityMayChange ? "Template target: " : ""}${destination || "Target unavailable"} · ${model.httpVersion || "Automatic HTTP"}`;
-  const errors = (model.errors || []).filter((message) => !message.startsWith("Mark at least one position") && message !== "Fuzzer needs at least one payload.");
-  const running = state.fuzzerAttackRecord?.running ? state.fuzzerAttackRecord : null;
-  // A start that failed says so here, beside Start, until the draft changes.
-  const failed = !busy && state.fuzzerNoticeError && state.fuzzerNotice ? state.fuzzerNotice : "";
-  notice.textContent = busy ? (running ? `Sending… ${running.results.length} of ${running.planned || model.requestCount}` : "Starting…")
-    : failed || errors[0] || (!model.markerCount ? "Select a value to replace." : !model.payloadCount ? "Add payloads." : "");
-  notice.classList?.toggle("fuzzer-notice-error", !!failed || (!busy && !!errors[0]));
-  if (!notice.textContent && authorityMayChange) {
-    notice.textContent = "Request authority or framing may change. Check Preview.";
-  }
-  if (previewNotes) previewNotes.textContent = (model.warnings || []).join(" ");
-  if (samples) {
-    samples.innerHTML = (model.samples || []).map((sample) => {
-      const text = buildEditableRawRequest(sample.request);
-      const preview = text.slice(0, 16384);
-      return `<details class="fuzzer-request-sample"><summary>Template-expanded sample ${sample.index + 1} · ${escapeHtml(sample.effectiveTarget || destination || "")}${text.length > preview.length ? " (display truncated)" : ""}</summary><pre>${escapeHtml(preview)}</pre></details>`;
-    }).join("") || (model.samplesOmitted ? "Samples omitted because the expanded requests exceed the local preview budget." : "Samples appear after adding at least one payload and one marker.");
-  }
-}
-
-function scheduleFuzzerSetupRender() {
-  clearTimeout(state._fuzzerSetupRenderTimer);
-  state._fuzzerSetupRenderTimer = setTimeout(() => {
-    state._fuzzerSetupRenderTimer = null;
-    renderFuzzerSetup();
-  }, 120);
-}
-
-function fuzzerRawOffsetForEditorOffset(raw, offset) {
-  let visibleOffset = 0;
-  for (let index = 0; index < raw.length; index++) {
-    if (visibleOffset === offset) return index;
-    if (raw[index] === "\r" && raw[index + 1] === "\n") index++;
-    visibleOffset++;
-  }
-  if (visibleOffset === offset) return raw.length;
-  throw new Error("The selection changed. Select a value again.");
-}
-
-function markFuzzerPosition(start, end, expectedRaw = fuzzerRequestTextForAction()) {
-  if (state.fuzzerRunning) throw new Error("Wait for the current run to finish before changing positions.");
-  const raw = fuzzerRequestTextForAction();
-  if (raw !== expectedRaw) throw new Error("The request changed. Choose the value again.");
-  const template = parseFuzzerRequestTemplate(raw);
-  const boundary = /\r?\n\r?\n/.exec(raw);
-  const bodyStart = boundary ? boundary.index + boundary[0].length : raw.length;
-  if (end > bodyStart && (template.body_encoding === "base64" || template.preview_truncated)) {
-    throw new Error("Body positions require a complete UTF-8 request body. Header and query positions remain available.");
-  }
-  const next = SniperFuzzerWorkflow.replaceSelection(raw, start, end);
-  state._fuzzerMarkerUndo = { before: raw, after: next, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
-  updateFuzzerRequestText(next, { userEdit: true });
-  scheduleWorkspaceStateSave();
-  renderFuzzer();
-  const editor = getCMView("fuzzerReq");
-  if (editor?.view) {
-    const anchor = next.slice(0, start).replace(/\r\n?/g, "\n").length;
-    const marked = next.slice(start, end + 2).replace(/\r\n?/g, "\n").length;
-    editor.view.dispatch({ selection: { anchor, head: anchor + marked }, scrollIntoView: true });
-    editor.view.focus();
-  }
-}
-
-function markFuzzerEditorSelection() {
-  const raw = fuzzerRequestTextForAction();
-  const editor = getCMView("fuzzerReq");
-  const selection = editor?.view?.state?.selection?.main;
-  if (selection) {
-    if (selection.empty || selection.from === selection.to) throw new Error("Select the value in the request editor first.");
-    markFuzzerPosition(fuzzerRawOffsetForEditorOffset(raw, selection.from), fuzzerRawOffsetForEditorOffset(raw, selection.to), raw);
-  } else {
-    const input = els.fuzzerRequestEditor;
-    if (!input || input.selectionStart === input.selectionEnd) throw new Error("Select the value in the request editor first.");
-    markFuzzerPosition(input.selectionStart, input.selectionEnd, raw);
-  }
-}
-
-function undoFuzzerMarker() {
-  const undo = state._fuzzerMarkerUndo;
-  if (state.fuzzerRunning || !undo || undo.after !== fuzzerRequestTextForAction() || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken) {
-    throw new Error("The request changed after that position was added. Use the editor's undo instead.");
-  }
-  state._fuzzerMarkerUndo = null;
-  updateFuzzerRequestText(undo.before, { userEdit: true });
-  scheduleWorkspaceStateSave();
-  renderFuzzer();
-}
-
-function applyFuzzerPayloadList(payloads, mode = "append") {
-  if (state.fuzzerRunning) throw new Error("Wait for the current run to finish before loading payloads.");
-  const incoming = SniperFuzzerWorkflow.validatePayloads(payloads);
-  if (!incoming.valid) throw new Error(incoming.errors.join(" "));
-  const existing = mode === "replace" || !state.fuzzerPayloadsText ? [] : fuzzerPayloadTextWithinLimits(state.fuzzerPayloadsText);
-  if (existing.length + payloads.length > 5000) throw new Error("Fuzzer payload count cannot exceed 5000.");
-  const next = [...existing, ...payloads];
-  const text = SniperFuzzerWorkflow.payloadText(next);
-  fuzzerPayloadTextWithinLimits(text, next);
-  updateFuzzerPayloadsText(text, { userEdit: true });
-  scheduleWorkspaceStateSave();
-  renderFuzzer();
-}
-
-async function importFuzzerPayloadFile(file, mode = "append") {
-  if (!file) return;
-  // Even a rejected replacement selection supersedes an older pending read.
-  const generation = (state._fuzzerFileGeneration || 0) + 1;
-  state._fuzzerFileGeneration = generation;
-  if (file.size > 4 * 1024 * 1024) throw new Error("Payload files cannot exceed 4 MiB.");
-  const sessionId = currentSessionId();
-  const draftVersion = state.fuzzerDraftVersion || 0;
-  const runToken = state.fuzzerRunToken;
-  const ownsImport = () => state._fuzzerFileGeneration === generation && currentSessionId() === sessionId
-    && (state.fuzzerDraftVersion || 0) === draftVersion && state.fuzzerRunToken === runToken && !state.fuzzerRunning;
-  try {
-    const bytes = await file.arrayBuffer();
-    if (!ownsImport()) return false;
-    if (bytes.byteLength > 4 * 1024 * 1024) throw new Error("Payload files cannot exceed 4 MiB.");
-    // Fatal UTF-8 decoding rejects binary/invalid input rather than silently
-    // changing bytes. A BOM is preserved as a literal payload character.
-    let text;
-    try {
-      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-    } catch (_error) {
-      throw new Error("Use a valid UTF-8 text file; invalid bytes were not imported.");
-    }
-    const payloads = fuzzerPayloadTextWithinLimits(text);
-    if (!payloads.length) throw new Error("The selected file contains no payloads.");
-    applyFuzzerPayloadList(payloads, mode);
-    return true;
-  } catch (error) {
-    if (!ownsImport()) return false;
-    throw error;
-  }
-}
-
-function initFuzzerSetupControls() {
-  const bind = (id, callback) => fuzzerSetupNode(id)?.addEventListener("click", () => {
-    try { callback(); } catch (error) { fuzzerSetupError(error); }
-  });
-  bind("fuzzerMarkSelectionButton", markFuzzerEditorSelection);
-  bind("fuzzerUndoMarkerButton", undoFuzzerMarker);
-  fuzzerSetupNode("fuzzerCandidateSelect")?.addEventListener("change", (event) => {
-    const button = fuzzerSetupNode("fuzzerMarkCandidateButton");
-    if (button) button.disabled = !!state.fuzzerRunning || !event.target.value;
-  });
-  bind("fuzzerMarkCandidateButton", () => {
-    const select = fuzzerSetupNode("fuzzerCandidateSelect");
-    const candidate = select?.value !== "" ? select?._fuzzerCandidates?.[Number(select.value)] : null;
-    if (!candidate) throw new Error("Choose a query or form value first.");
-    markFuzzerPosition(candidate.start, candidate.end, select._fuzzerRaw);
-  });
-  fuzzerSetupNode("fuzzerAttackType")?.addEventListener("change", (event) => {
-    state.fuzzerAttackType = event.target.value === "battering_ram" ? "battering_ram" : "sniper";
-    renderFuzzerSetup();
-  });
-  fuzzerSetupNode("fuzzerUrlEncode")?.addEventListener("change", (event) => {
-    state.fuzzerUrlEncode = !!event.target.checked;
-    renderFuzzerSetup();
-  });
-  fuzzerSetupNode("fuzzerConcurrency")?.addEventListener("change", (event) => {
-    const value = Math.round(Number(event.target.value));
-    state.fuzzerConcurrency = Number.isFinite(value) ? Math.min(16, Math.max(1, value)) : 4;
-    renderFuzzerSetup();
-  });
-  bind("fuzzerImportPayloadButton", () => fuzzerSetupNode("fuzzerPayloadFile")?.click());
-  fuzzerSetupNode("fuzzerPayloadFile")?.addEventListener("change", (event) => {
-    const file = event.target.files?.[0];
-    const mode = fuzzerSetupNode("fuzzerPayloadImportMode")?.value || "append";
-    event.target.value = "";
-    importFuzzerPayloadFile(file, mode).catch(fuzzerSetupError);
-  });
-  bind("fuzzerApplyPresetButton", () => {
-    const preset = SniperFuzzerWorkflow.presets.find((item) => item.id === fuzzerSetupNode("fuzzerPayloadPreset")?.value);
-    if (!preset) throw new Error("Choose a payload preset first.");
-    applyFuzzerPayloadList([...preset.payloads], fuzzerSetupNode("fuzzerPayloadImportMode")?.value || "append");
-  });
-  bind("fuzzerGenerateRangeButton", () => applyFuzzerPayloadList(SniperFuzzerWorkflow.numericRange(
-    fuzzerSetupNode("fuzzerRangeStart")?.value,
-    fuzzerSetupNode("fuzzerRangeEnd")?.value,
-    fuzzerSetupNode("fuzzerRangeStep")?.value,
-  ), fuzzerSetupNode("fuzzerPayloadImportMode")?.value || "append"));
-}
-
 async function openFuzzerFromReplay() {
-  if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   const tab = getActiveReplayTab();
   if (!tab || tab.type === "websocket") {
     throw new Error("Select an HTTP Replay tab before sending to Fuzzer.");
   }
-  const validation = validateManualRepeaterTargetInput(
-    els.replayHostInput?.value ?? tab.targetHost,
-    els.replayPortInput?.value ?? tab.targetPort,
-  );
-  setReplayTargetInputValidity(validation);
-  if (!validation.valid) throw new Error(validation.hostError || validation.portError);
   const request = parseEditableRawRequest(tab.requestText, tab.baseRequest);
   const target = getRepeaterTargetConfig(tab, request);
   invalidateFuzzerRun();
@@ -16498,7 +15604,7 @@ async function openFuzzerFromReplay() {
   state.fuzzerTargetRequestText = state.fuzzerTarget ? fuzzerTargetAuthorityFromRequestText(tab.requestText) : null;
   state.fuzzerNotice = "";
   state.fuzzerRequestText = tab.requestText;
-  state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+  state.fuzzerPayloadsText = "";
   clearFuzzerAttackRecord();
   state._selectedFuzzerResultKey = null;
   hideFuzzerDetailPanel();
@@ -16507,43 +15613,16 @@ async function openFuzzerFromReplay() {
   renderToolPanels();
 }
 
-async function openFuzzerFromRecordLoader(loadRecord, sourceIsCurrent = () => true) {
-  if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
-  const generation = state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
-  const sessionId = currentSessionId();
-  const workspaceGeneration = workspaceStateGeneration;
-  const draftVersion = state.fuzzerDraftVersion || 0;
-  const runToken = state.fuzzerRunToken || 0;
-  const ownsImport = () => generation === state._fuzzerImportGeneration
-    && sessionId === currentSessionId() && workspaceGeneration === workspaceStateGeneration
-    && draftVersion === (state.fuzzerDraftVersion || 0) && runToken === (state.fuzzerRunToken || 0)
-    && !state.fuzzerRunning && sourceIsCurrent();
-  let record;
-  try {
-    record = await loadRecord();
-  } catch (error) {
-    if (!ownsImport()) return false;
-    throw error;
-  }
-  if (!ownsImport()) return false;
-  if (!record) throw new Error("Selected transaction could not be loaded.");
-  openFuzzerFromRecord(record);
-  return true;
-}
-
 async function openFuzzerFromSelection() {
-  const id = state.selectedId;
-  const sessionId = currentSessionId();
-  const selectionGeneration = state._historySelectionGeneration || 0;
-  const record = state.selectedRecord?.id === id ? state.selectedRecord : null;
-  return openFuzzerFromRecordLoader(
-    () => record || loadTransactionRecordById(id, sessionId),
-    () => state.selectedId === id && selectionGeneration === (state._historySelectionGeneration || 0),
-  );
+  const record = await loadSelectedTransactionRecord();
+
+  if (!record) {
+    throw new Error("Selected transaction could not be loaded.");
+  }
+  openFuzzerFromRecord(record);
 }
 
 function openFuzzerFromRecord(record) {
-  if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   if (record.kind === "tunnel") {
     throw new Error("Tunnel records cannot be sent to Fuzzer.");
   }
@@ -16558,7 +15637,7 @@ function openFuzzerFromRecord(record) {
     ? buildTruncatedBodyNotice(record, "Fuzzer")
     : "";
   state.fuzzerRequestText = buildEditableRawRequest(request);
-  state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+  state.fuzzerPayloadsText = "";
   clearFuzzerAttackRecord();
   state._selectedFuzzerResultKey = null;
   hideFuzzerDetailPanel();
@@ -16741,7 +15820,6 @@ function updateFuzzerRequestText(text, { userEdit = false } = {}) {
   if (state.fuzzerRequestText !== normalized) {
     state.fuzzerRequestText = normalized;
     if (userEdit) markFuzzerDraftChanged();
-    if (typeof scheduleFuzzerSetupRender === "function") scheduleFuzzerSetupRender();
   }
 }
 
@@ -16750,7 +15828,6 @@ function updateFuzzerPayloadsText(text, { userEdit = false } = {}) {
   if (state.fuzzerPayloadsText !== normalized) {
     state.fuzzerPayloadsText = normalized;
     if (userEdit) markFuzzerDraftChanged();
-    if (typeof scheduleFuzzerSetupRender === "function") scheduleFuzzerSetupRender();
   }
 }
 
@@ -16772,8 +15849,7 @@ function invalidateFuzzerRun() {
 
 function fuzzerRequestAuthorityFromText(requestText, fallbackRequest = state.fuzzerBaseRequest || createDefaultEditableRequest()) {
   try {
-    const parser = typeof parseFuzzerRequestTemplate === "function" ? parseFuzzerRequestTemplate : parseEditableRawRequest;
-    const request = parser(
+    const request = parseEditableRawRequest(
       requestText,
       fallbackRequest || createDefaultEditableRequest(),
     );
@@ -16858,7 +15934,6 @@ async function runFuzzerAttack() {
   const sessionId = state.activeSession?.id || null;
   state.fuzzerRunToken = runToken;
   state.fuzzerRunning = true;
-  state.fuzzerNoticeError = false;
   renderFuzzer();
   const draftVersion = state.fuzzerDraftVersion || 0;
   try {
@@ -16872,10 +15947,12 @@ async function runFuzzerAttack() {
       body_encoding: "utf8",
       preview_truncated: false,
     };
-    const fuzzerReqText = fuzzerRequestTextForAction();
+    const fuzzerReqText = getCMView("fuzzerReq")
+      ? getCMView("fuzzerReq").getContent()
+      : (els.fuzzerRequestEditor ? els.fuzzerRequestEditor.value : "");
     if (!fuzzerReqText.trim()) {
       clearFuzzerAttackRecord();
-      state.fuzzerNotice = "Request template is empty. Paste a raw HTTP request and mark the values to fuzz, or send one from HTTP History (Command+I).";
+      state.fuzzerNotice = "Request template is empty. Paste a raw HTTP request with $payload$ markers, or send one from HTTP History (Command+I).";
       scheduleWorkspaceStateSave();
       renderFuzzer();
       return;
@@ -16883,7 +15960,7 @@ async function runFuzzerAttack() {
 
     let template;
     try {
-      template = parseFuzzerRequestTemplate(fuzzerReqText, fallback);
+      template = parseEditableRawRequest(fuzzerReqText, fallback);
     } catch (parseErr) {
       clearFuzzerAttackRecord();
       state.fuzzerNotice = parseErr.message || "Failed to parse the request template.";
@@ -16893,13 +15970,7 @@ async function runFuzzerAttack() {
     }
 
     const payloadsText = els.fuzzerPayloadsEditor.value;
-    const payloads = fuzzerPayloadTextWithinLimits(payloadsText);
-    if (new TextEncoder().encode(fuzzerReqText).length > 2 * 1024 * 1024) throw new Error("Request editor text cannot exceed 2 MiB.");
-    const attackType = state.fuzzerAttackType || "sniper";
-    const urlEncode = state.fuzzerUrlEncode !== false;
-    const concurrency = Math.min(16, Math.max(1, Number(state.fuzzerConcurrency) || 4));
-    const setupCheck = SniperFuzzerWorkflow.preflight(template, payloads, { attackType, urlEncode });
-    if (!setupCheck.valid) throw new Error(setupCheck.errors.join(" "));
+    const payloads = splitFuzzerPayloadLines(payloadsText);
 
     if (payloads.length === 0) {
       clearFuzzerAttackRecord();
@@ -16911,18 +15982,7 @@ async function runFuzzerAttack() {
 
     const target = activeFuzzerTargetForRequest(fuzzerReqText);
     const httpVersion = replayHttpVersionFromText(fuzzerReqText) || undefined;
-    const sourceTransactionId = state.fuzzerSourceTransactionId;
     const expectedWorkspaceRevision = await flushWorkspaceStateForReplayAction();
-    if (!isCurrentFuzzerRun(runToken, sessionId)) return;
-    if ((state.fuzzerDraftVersion || 0) !== draftVersion
-      || fuzzerRequestTextForAction() !== fuzzerReqText
-      || els.fuzzerPayloadsEditor.value !== payloadsText
-      || state.fuzzerSourceTransactionId !== sourceTransactionId
-      || JSON.stringify(activeFuzzerTargetForRequest(fuzzerReqText)) !== JSON.stringify(target)) {
-      state.fuzzerNotice = "The draft changed while preparing the run. Review it and click Start again; no requests were sent.";
-      renderFuzzer();
-      return;
-    }
     const response = await fetch("/api/fuzzer/attacks", {
       method: "POST",
       headers: {
@@ -16934,12 +15994,9 @@ async function runFuzzerAttack() {
         expected_workspace_revision: expectedWorkspaceRevision,
         template,
         payloads,
-        source_transaction_id: sourceTransactionId,
+        source_transaction_id: state.fuzzerSourceTransactionId,
         http_version: httpVersion,
         target,
-        attack_type: attackType,
-        url_encode: urlEncode,
-        concurrency,
       }),
     });
     if (!isCurrentFuzzerRun(runToken, sessionId)) {
@@ -16962,26 +16019,13 @@ async function runFuzzerAttack() {
       }
       clearFuzzerAttackRecord();
       state.fuzzerNotice = notice;
-      state.fuzzerNoticeError = true;
       scheduleWorkspaceStateSave();
       renderFuzzer();
       return;
     }
-    let attackRecord = normalizeFuzzerAttackRecord(await response.json());
+    const attackRecord = normalizeFuzzerAttackRecord(await response.json());
     if (!isCurrentFuzzerRun(runToken, sessionId)) {
       return;
-    }
-    // The attack sends on the server; show its results as they arrive.
-    const followed = !!attackRecord?.running;
-    if (followed) {
-      state.fuzzerRunningAttackId = attackRecord.id;
-      if ((state.fuzzerDraftVersion || 0) === draftVersion) {
-        setFuzzerAttackRecord(attackRecord);
-        scheduleWorkspaceStateSave();
-      }
-      renderFuzzer();
-      attackRecord = await followFuzzerAttack(attackRecord.id, sessionId, () => isCurrentFuzzerRun(runToken, sessionId));
-      if (!attackRecord) return;
     }
     const draftUnchanged = (state.fuzzerDraftVersion || 0) === draftVersion;
     if (!draftUnchanged) {
@@ -17000,14 +16044,9 @@ async function runFuzzerAttack() {
     state.fuzzerRequestText = fuzzerReqText;
     state.fuzzerPayloadsText = payloadsText;
     state.fuzzerNotice = "";
-    if (followed && state.fuzzerAttackRecord?.id === attackRecord.id) {
-      // Already shown while it ran: keep the result the operator selected.
-      state.fuzzerAttackRecord = attackRecord;
-    } else {
-      state._selectedFuzzerResultKey = null;
-      hideFuzzerDetailPanel();
-      setFuzzerAttackRecord(attackRecord);
-    }
+    state._selectedFuzzerResultKey = null;
+    hideFuzzerDetailPanel();
+    setFuzzerAttackRecord(attackRecord);
     scheduleWorkspaceStateSave();
     renderFuzzer();
     scheduleRefresh();
@@ -17027,54 +16066,13 @@ async function runFuzzerAttack() {
     }
     clearFuzzerAttackRecord();
     state.fuzzerNotice = error?.message || "An unexpected error occurred while starting the fuzzer.";
-    state.fuzzerNoticeError = true;
     scheduleWorkspaceStateSave();
     renderFuzzer();
   } finally {
     if (isCurrentFuzzerRun(runToken, sessionId)) {
       state.fuzzerRunning = false;
-      state.fuzzerRunningAttackId = null;
       renderFuzzer();
     }
-  }
-}
-
-const FUZZER_POLL_MS = 700;
-
-// Reads a running attack until it ends, showing each read in place so the
-// selected result stays selected. Null when `owns` says the view moved on.
-async function followFuzzerAttack(recordId, sessionId, owns) {
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, FUZZER_POLL_MS));
-    if (!owns()) return null;
-    const response = await fetch(sessionQueryPath(`/api/fuzzer/attacks/${encodeURIComponent(recordId)}`, sessionId));
-    if (!owns()) return null;
-    await requireOkResponse(response, "Could not read the running attack.");
-    const record = normalizeFuzzerAttackRecord(await response.json());
-    if (!owns()) return null;
-    if (!record?.running) return record;
-    if (state.fuzzerAttackRecord?.id === record.id) state.fuzzerAttackRecord = record;
-    renderFuzzer();
-  }
-}
-
-async function stopFuzzerAttack() {
-  const id = state.fuzzerRunningAttackId;
-  const sessionId = currentSessionId();
-  if (!id || !sessionId) return;
-  if (els.stopFuzzerButton) els.stopFuzzerButton.disabled = true;
-  try {
-    const response = await fetch(`/api/fuzzer/attacks/${encodeURIComponent(id)}/stop`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ session_id: sessionId }),
-    });
-    // 404: it ended on its own meanwhile; the run reads its end either way.
-    if (!response.ok && response.status !== 404) {
-      showToast(await readApiErrorMessage(response, "Could not stop the attack."), "error", 4000);
-    }
-  } finally {
-    if (els.stopFuzzerButton) els.stopFuzzerButton.disabled = false;
   }
 }
 
@@ -17949,7 +16947,7 @@ function mountBrowserLaunchers(root = document) {
   root.querySelectorAll("[data-browser-launcher]:not(.browser-launcher)").forEach((host) => {
     host.classList.add("browser-launcher");
     host.innerHTML = `
-      <button class="browser-launch-main" type="button" title="Open a browser through Sniper using its saved Sniper profile">Open browser</button>
+      <button class="browser-launch-main" type="button" title="Open a browser that already sends its traffic through Sniper and trusts its certificate">Open browser</button>
       <button class="browser-launch-caret" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Choose a browser">&#9662;</button>
     `;
     const [main, caret] = host.children;
@@ -18088,8 +17086,7 @@ function renderBrowserMenu(catalog) {
     ${rows.join("")}
     <div class="context-menu-divider"></div>
     <label class="browser-menu-option"><input type="checkbox" data-option="agent" ${wasChecked("agent")}> Let an agent drive it</label>
-    <label class="browser-menu-option"><input type="checkbox" data-option="fresh" ${wasChecked("fresh")}> Throwaway profile (discard logins on quit)</label>
-    <div class="browser-menu-hint">By default, reuse this browser's saved Sniper profile. Your everyday browser profile is separate. Site data stays between launches; sites can still expire logins.</div>
+    <label class="browser-menu-option"><input type="checkbox" data-option="fresh" ${wasChecked("fresh")}> Throwaway profile</label>
   `;
   element.onclick = async (event) => {
     const prefer = event.target.closest("[data-prefer]");
@@ -18262,23 +17259,12 @@ async function dropSelectedIntercept() {
 
 async function loadResponseIntercepts(preserveSelection = true) {
   const sessionId = currentSessionId();
-  const generation = state.responseInterceptLoadGeneration = (state.responseInterceptLoadGeneration || 0) + 1;
-  const isCurrent = () => sessionId === currentSessionId()
-    && generation >= (state.responseInterceptAcceptedLoadGeneration || 0);
-  let responseIntercepts;
-  try {
-    const response = await fetch(sessionQueryPath("/api/response-intercepts", sessionId));
-    if (!isCurrent()) return;
-    await requireOkResponse(response, "Failed to load intercepted responses.");
-    responseIntercepts = jsonArray(await response.json());
-  } catch (error) {
-    if (isCurrent()) throw error;
+  const response = await fetch(sessionQueryPath("/api/response-intercepts", sessionId));
+  await requireOkResponse(response, "Failed to load intercepted responses.");
+  const responseIntercepts = jsonArray(await response.json());
+  if (sessionId !== currentSessionId()) {
     return;
   }
-  if (!isCurrent()) return;
-  // A pending or failed newer poll need not block a usable snapshot, but an
-  // older snapshot must never resurrect a queue after a newer one was accepted.
-  state.responseInterceptAcceptedLoadGeneration = generation;
   state.responseIntercepts = responseIntercepts;
 
   const visibleResponseIntercepts = getVisibleResponseInterceptSummaries();
@@ -18304,25 +17290,22 @@ async function loadResponseIntercepts(preserveSelection = true) {
 
 async function loadResponseInterceptDetail(id) {
   const sessionId = currentSessionId();
-  const generation = state.responseInterceptDetailGeneration = (state.responseInterceptDetailGeneration || 0) + 1;
-  const isCurrent = () => sessionId === currentSessionId()
-    && state.selectedResponseInterceptId === id && state.responseInterceptDetailGeneration === generation;
-  try {
-    const response = await fetch(sessionQueryPath(`/api/response-intercepts/${id}`, sessionId));
-    if (!isCurrent()) return;
-    if (!response.ok) {
-      state.selectedResponseInterceptRecord = null;
-      renderResponseIntercepts();
-      return;
-    }
-
-    const record = await response.json();
-    if (!isCurrent()) return;
-    state.selectedResponseInterceptRecord = record;
-    renderResponseIntercepts();
-  } catch (error) {
-    if (isCurrent()) throw error;
+  const response = await fetch(sessionQueryPath(`/api/response-intercepts/${id}`, sessionId));
+  if (sessionId !== currentSessionId() || state.selectedResponseInterceptId !== id) {
+    return;
   }
+  if (!response.ok) {
+    state.selectedResponseInterceptRecord = null;
+    renderResponseIntercepts();
+    return;
+  }
+
+  const record = await response.json();
+  if (sessionId !== currentSessionId() || state.selectedResponseInterceptId !== id) {
+    return;
+  }
+  state.selectedResponseInterceptRecord = record;
+  renderResponseIntercepts();
 }
 
 function buildEditableRawResponse(resp) {
@@ -18434,18 +17417,18 @@ function renderResponseIntercepts() {
 
   if (!state.selectedResponseInterceptRecord) {
     state.responseInterceptEditorSeedId = null;
-    if (els.interceptResponseCM) {
-      setInterceptPaneContent("interceptRes", els.interceptResponseCM, "", {
-        mode: "http", readOnly: false,
-        placeholder: "Intercepted response will appear here...",
-      });
-    } else {
-      els.interceptResponseEditor.value = "";
-      renderInterceptResponseHighlight("");
-    }
     if (state.interceptQueueTab === "response") {
       els.interceptDetailPath.textContent = "Response Intercept";
       els.interceptDetailTitle.textContent = "No response selected";
+      if (els.interceptResponseCM) {
+        setInterceptPaneContent("interceptRes", els.interceptResponseCM, "", {
+          mode: "http", readOnly: false,
+          placeholder: "Intercepted response will appear here...",
+        });
+      } else {
+        els.interceptResponseEditor.value = "";
+        renderInterceptResponseHighlight("");
+      }
       els.interceptMeta.textContent = state.runtime?.intercept_enabled
         ? "Intercept is on. Matched responses will queue here."
         : "Intercept is off. Toggle it on to pause responses before forwarding.";
@@ -21133,7 +20116,6 @@ function selectSettingsTab(name) {
 
 function openDisplaySettingsModal() {
   if (isModalVisible(els.displaySettingsModal)) return;
-  compareLoadGeneration += 1;
   displaySettingsReturnFocus = document.activeElement;
   hydrateDisplaySettingsForm();
   applyDisplaySettingsState();
@@ -21433,7 +20415,6 @@ function closeDisplaySettingsModal() {
 // state.filterModalTarget says which.
 function openFilterModal(target) {
   if (isModalVisible(els.filterModal)) return;
-  compareLoadGeneration += 1;
   state.filterModalTarget = target === "serviceMap" ? "serviceMap" : "history";
   const forMap = state.filterModalTarget === "serviceMap";
   const title = document.getElementById?.("filterModalTitle");
@@ -21464,16 +20445,14 @@ function isModalVisible(modal) {
 }
 
 function restoreModalFocus(previous, fallback = document.querySelector(".main-tab.active")) {
-  const canFocus = (target) => target?.isConnected && !target.disabled && target.tabIndex >= 0
-    && target.getClientRects().length && window.getComputedStyle(target).visibility !== "hidden";
-  let target = [previous, fallback].find(canFocus);
-  // Navigation can hide the supplied region while the dialog is loading.
-  if (!target) target = [document.querySelector(".main-tab.active")].find(canFocus);
+  const target = previous?.isConnected && !previous.disabled && previous.tabIndex >= 0
+    && previous.getClientRects().length && window.getComputedStyle(previous).visibility !== "hidden"
+    ? previous : fallback;
   target?.focus({ preventScroll: true });
 }
 
 function trapModalFocus(event, modal) {
-  const controls = Array.from(modal.querySelectorAll("button, [href], input, select, textarea, summary, [tabindex]"))
+  const controls = Array.from(modal.querySelectorAll("button, [href], input, select, textarea, [tabindex]"))
     .filter((control) => !control.disabled && control.tabIndex >= 0 && control.getClientRects().length
       && window.getComputedStyle(control).visibility !== "hidden");
   const first = controls[0], last = controls[controls.length - 1];
@@ -21506,30 +20485,7 @@ function getActiveModalAction() {
 
   if (isModalVisible(els.curlImportModal)) {
     return {
-      modal: els.curlImportModal,
       close: closeCurlImportModal,
-      apply: null,
-    };
-  }
-
-  // Scanner lives inside Capture; its own class cannot reveal a hidden parent.
-  if (isModalVisible(els.scannerSettingsBackdrop) && els.scannerSettingsBackdrop.getClientRects().length) {
-    return {
-      modal: els.scannerSettingsBackdrop,
-      close: closeScannerSettings,
-      apply: null,
-    };
-  }
-
-  if (typeof targetServiceMapController !== "undefined") {
-    const apiDocs = targetServiceMapController?.getApiDocsModalAction?.();
-    if (apiDocs) return apiDocs;
-  }
-
-  if (isModalVisible(els.compareModal)) {
-    return {
-      modal: els.compareModal,
-      close: closeCompareModal,
       apply: null,
     };
   }
@@ -22067,11 +21023,7 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
     monoFont: snapshot?.display_settings?.mono_font,
     renderResources: snapshot?.display_settings?.render_resources,
   });
-  const activeTool = sanitizeActiveTool(snapshot?.active_tool);
-  if (activeTool !== state.activeTool) {
-    state._fuzzerNavigationGeneration = (state._fuzzerNavigationGeneration || 0) + 1;
-  }
-  state.activeTool = activeTool;
+  state.activeTool = sanitizeActiveTool(snapshot?.active_tool);
   state.activeProxyTab = sanitizeActiveProxyTab(snapshot?.active_proxy_tab);
   state.historyColumnWidths = sanitizeHistoryColumnWidths(snapshot?.history_column_widths);
   state.historyColumnOrder = sanitizeHistoryColumnOrder(snapshot?.history_column_order);
@@ -22588,7 +21540,7 @@ function serviceMapFilterSummary() {
   const statusOff = Object.entries(SERVICE_MAP_FILTER_STATUS_LABELS).filter(([key]) => !filters.status[key]).map(([, label]) => label);
   if (statusOff.length) parts.push(`no ${statusOff.join(", ")}`);
   if (filters.hideWithoutResponses) parts.push("responses only");
-  if (filters.onlyParameterized) parts.push("query parameters only");
+  if (filters.onlyParameterized) parts.push("parameterized only");
   if (filters.onlyNotes) parts.push("notes only");
   if (filters.port) parts.push(`port ${filters.port}`);
   if (filters.searchTerm) parts.push(`${filters.negativeSearch ? "without" : "with"} "${filters.searchTerm}"`);
@@ -27289,10 +26241,7 @@ let compareBaseSessionId = null;
 let compareActiveTab = "request";
 let compareBaseRecord = null;
 let compareTargetRecord = null;
-// Other dialog openers advance this too: closing a newer dialog must not
-// revive a comparison that was still loading when it opened.
 let compareLoadGeneration = 0;
-let compareReturnFocus = null;
 
 function computeUnifiedDiff(linesA, linesB, labelA, labelB) {
   const result = [`--- ${labelA}`, `+++ ${labelB}`];
@@ -27321,7 +26270,7 @@ async function setCompareBase(transactionId) {
   if (btn) btn.textContent = sequence == null ? "Compare with base" : `Compare with #${sequence}`;
 }
 
-async function openCompareModal(targetId, ownsOrigin = () => true) {
+async function openCompareModal(targetId) {
   const generation = ++compareLoadGeneration;
   const baseId = compareBaseId;
   if (!baseId || baseId === targetId) return;
@@ -27335,22 +26284,13 @@ async function openCompareModal(targetId, ownsOrigin = () => true) {
     fetch(transactionPath(targetId, sessionId)).then((r) => r.ok ? r.json() : null),
   ]);
   // A dismissed or superseded comparison must not reopen from a late response.
-  if (generation !== compareLoadGeneration || currentSessionId() !== sessionId || !ownsOrigin()) return;
+  if (generation !== compareLoadGeneration || currentSessionId() !== sessionId) return;
   if (!baseRes || !targetRes) return;
-  const modal = document.getElementById("compareModal");
-  // A currently open dialog takes precedence over a delayed Compare reveal.
-  const activeModal = getActiveModalAction();
-  if (activeModal && activeModal.modal !== modal) return;
-  const wasVisible = isModalVisible(modal);
-  if (!wasVisible) compareReturnFocus = document.activeElement;
   compareBaseRecord = baseRes;
   compareTargetRecord = targetRes;
   compareActiveTab = "request";
   renderCompareModal();
-  modal.classList.remove("hidden");
-  if (!wasVisible) {
-    document.getElementById("closeCompareButton")?.focus();
-  }
+  document.getElementById("compareModal").classList.remove("hidden");
 }
 
 function renderCompareModal() {
@@ -27382,11 +26322,7 @@ function renderCompareModal() {
 
 function closeCompareModal() {
   compareLoadGeneration += 1;
-  const modal = document.getElementById("compareModal");
-  const restoreFocus = isModalVisible(modal) && getActiveModalAction()?.modal === modal;
-  modal.classList.add("hidden");
-  if (restoreFocus) restoreModalFocus(compareReturnFocus, els.trafficRegion);
-  compareReturnFocus = null;
+  document.getElementById("compareModal").classList.add("hidden");
 }
 
 function clearCompareState() {
@@ -27396,7 +26332,6 @@ function clearCompareState() {
   compareBaseRecord = null;
   compareTargetRecord = null;
   compareActiveTab = "request";
-  compareReturnFocus = null;
   const btn = document.getElementById("compareWithBaseBtn");
   if (btn) {
     btn.disabled = true;
@@ -27569,13 +26504,11 @@ function decorateContextMenuShortcuts(root = document) {
 // ─── Intercept queue context menu ───
 
 let interceptContextMenuTargetId = null;
-let interceptContextMenuClipboardOwner = null;
 
 function openInterceptContextMenu(x, y, interceptId) {
   const menu = els.interceptContextMenu;
   if (!menu) return;
   interceptContextMenuTargetId = interceptId;
-  interceptContextMenuClipboardOwner = createRecordClipboardOwner();
   menu.classList.remove("hidden");
   const maxX = window.innerWidth - menu.offsetWidth - 8;
   const maxY = window.innerHeight - menu.offsetHeight - 8;
@@ -27586,7 +26519,6 @@ function openInterceptContextMenu(x, y, interceptId) {
 function closeInterceptContextMenu() {
   els.interceptContextMenu?.classList.add("hidden");
   interceptContextMenuTargetId = null;
-  interceptContextMenuClipboardOwner = null;
 }
 
 // A held request is not a transaction yet, so the history menu's record loader
@@ -27622,12 +26554,9 @@ async function loadInterceptForMenu(interceptId) {
   return response.json();
 }
 
-function runInterceptMenuAction(action, interceptId, clipboardOwner = createRecordClipboardOwner()) {
-  const isCopyAction = action === "copy-url" || action.startsWith("copy-as-");
-  if (isCopyAction && !clipboardOwner?.()) return;
+function runInterceptMenuAction(action, interceptId) {
   loadInterceptForMenu(interceptId)
     .then((intercept) => {
-      if (isCopyAction && !clipboardOwner()) return;
       if (action === "send-to-replay") {
         // Deliberately no sourceTransactionId: the id belongs to the intercept
         // queue, and replay would reject a send that cites it as a capture.
@@ -27649,21 +26578,17 @@ function runInterceptMenuAction(action, interceptId, clipboardOwner = createReco
       if (action === "copy-url") {
         const url = transactionUrlFromSource(record);
         if (!url) throw new Error("This request has no URL to copy.");
-        return copyTextToClipboard(url, { isCurrent: clipboardOwner })
-          .then(() => { if (clipboardOwner()) showToast("Copied URL"); });
+        return copyTextToClipboard(url).then(() => showToast("Copied URL"));
       }
       if (action.startsWith("copy-as-")) {
         const format = action.replace("copy-as-", "");
         const text = recordToFormat(record, format);
         if (!text) return null;
-        return copyTextToClipboard(text, { isCurrent: clipboardOwner })
-          .then(() => { if (clipboardOwner()) showToast(`Copied as ${format}`); });
+        return copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`));
       }
       return null;
     })
-    .catch((error) => {
-      if (!isCopyAction || clipboardOwner()) handleClipboardActionError(error);
-    });
+    .catch(handleClipboardActionError);
 }
 
 function closeContextMenu() {
@@ -28237,10 +27162,9 @@ els.interceptContextMenu?.querySelectorAll("[data-intercept-action]").forEach((i
   item.addEventListener("click", () => {
     const action = item.dataset.interceptAction;
     const id = interceptContextMenuTargetId;
-    const clipboardOwner = interceptContextMenuClipboardOwner;
     closeInterceptContextMenu();
     if (!action || !id) return;
-    runInterceptMenuAction(action, id, clipboardOwner);
+    runInterceptMenuAction(action, id);
   });
 });
 
@@ -28294,7 +27218,11 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
         })
         .catch(handleSendActionError);
     } else if (action === "send-to-fuzzer") {
-      openFuzzerFromRecordLoader(loadTargetRecord)
+      loadTargetRecord()
+        .then((record) => {
+          if (!record) throw new Error("Selected transaction could not be loaded.");
+          openFuzzerFromRecord(record);
+        })
         .catch(handleSendActionError);
     } else if (action === "send-to-sequence") {
       loadTargetRecord()
@@ -28306,7 +27234,15 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
     } else if (action === "copy-url") {
       copyMenuTargetUrl(target);
     } else if (action?.startsWith("copy-as-")) {
-      copyMenuTargetRecord(target, action);
+      const format = action.replace("copy-as-", "");
+      loadTargetRecord()
+        .then((record) => {
+          if (!record) throw new Error("Selected transaction could not be loaded.");
+          const text = recordToFormat(record, format);
+          if (!text) return null;
+          return copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`));
+        })
+        .catch(handleClipboardActionError);
     } else if (action === "compare-set-base") {
       setCompareBase(targetId);
     } else if (action === "compare-with-base") {
@@ -28583,13 +27519,7 @@ function parseRequestForExport(rawText, scheme, host, port) {
   // Normalize header lines only: multipart and signed text bodies need their
   // original CRLF bytes, even when the editor uses LF for the request head.
   const lines = String(rawText || "").split("\n");
-  const normalizedLines = lines.map((line) => line.replace(/\r$/, ""));
-  // A final split item after one newline terminates the head; only a second
-  // newline supplies a blank separator and an explicitly empty body.
-  if (normalizedLines.length > 1 && normalizedLines.at(-1) === "") {
-    normalizedLines.pop();
-  }
-  const [startLine = "GET / HTTP/1.1", ...rest] = normalizedLines;
+  const [startLine = "GET / HTTP/1.1", ...rest] = lines.map((line) => line.replace(/\r$/, ""));
   const match = startLine.match(/^([A-Za-z0-9!#$%&'*+.^_`|~-]+)\s+(\S+)(?:\s+(HTTP\/[0-9.]+))?$/);
   if (!match) return null;
   const method = match[1];
@@ -28772,8 +27702,7 @@ function requestToCurl(parsed) {
   if (versionFlag) parts.push(versionFlag);
   if (urlNeedsPathAsIs(parsed.url)) parts.push("--path-as-is");
   for (const h of exportableHeaders(parsed.headers, parsed.url)) {
-    // cURL uses a semicolon for an empty field; a colon suppresses the field.
-    parts.push(`-H ${shellQuote(h.value ? `${h.name}: ${h.value}` : `${h.name};`)}`);
+    parts.push(`-H ${shellQuote(`${h.name}: ${h.value}`)}`);
   }
   if (parsed.bodyProvided || parsed.body.length > 0) {
     parts.push(`--data-raw ${shellQuote(parsed.body)}`);
@@ -28791,11 +27720,7 @@ function curlHttpVersionFlag(httpVersion) {
 }
 
 function urlNeedsPathAsIs(url) {
-  const target = rawPathFromUrlString(url || "") || "";
-  // Retain existing flag decisions and also protect encoded dot segments:
-  // modern curl removes them unless --path-as-is is set.
-  return /(?:^|\/)\.\.?(?=\/|\?|$)/.test(target)
-    || /(?:^|\/)(?:\.|%2e){1,2}(?=\/|$)/i.test(target.split("?", 1)[0]);
+  return /(?:^|\/)\.\.?(?=\/|\?|$)/.test(rawPathFromUrlString(url || "") || "");
 }
 
 function replayRequestToFormat(format, tab = getActiveReplayTab()) {
@@ -28838,8 +27763,8 @@ function copyResponseContent(format) {
   copyResponseContentForRecord(record, format);
 }
 
-function copyResponseContentForRecord(record, format, { isCurrent = () => true } = {}) {
-  if (!record?.response || !isCurrent()) return;
+function copyResponseContentForRecord(record, format) {
+  if (!record?.response) return;
   let text = "";
   if (format === "response-headers") {
     text = `${buildRawResponseHead(record).replace(/\n/g, "\r\n")}\r\n`;
@@ -28860,9 +27785,9 @@ function copyResponseContentForRecord(record, format, { isCurrent = () => true }
       : format === "response-body"
         ? "Copied body"
         : "Copied raw response";
-  return copyTextToClipboard(text, { isCurrent })
-    .then(() => { if (isCurrent()) showToast(label); })
-    .catch(() => { if (isCurrent()) showToast("Failed to copy", "error"); });
+  return copyTextToClipboard(text)
+    .then(() => showToast(label))
+    .catch(() => showToast("Failed to copy", "error"));
 }
 
 // Synchronous version using already-loaded selectedRecord (preserves user gesture for clipboard)
@@ -28953,7 +27878,6 @@ function parseCurlCommand(text) {
   const bodyParts = [];
   let bodyProvided = false;
   let needsDefaultFormContentType = false;
-  let needsDefaultJsonHeaders = false;
   const curlOptionsWithValue = new Set([
     "--abstract-unix-socket",
     "--cacert",
@@ -29002,16 +27926,11 @@ function parseCurlCommand(text) {
   const addHeader = (rawHeader, flag = "-H") => {
     const hVal = String(rawHeader || "");
     const ci = hVal.indexOf(":");
-    const emptyField = ci < 0 && /^[!#$%&'*+.^_`|~0-9A-Za-z-]+;$/.test(hVal);
-    if (!emptyField && ci <= 0) return `cURL ${flag} requires a header in Name: Value or Name; form.`;
-    const name = (emptyField ? hVal.slice(0, -1) : hVal.slice(0, ci)).trim();
+    if (ci <= 0) return `cURL ${flag} requires a header in Name: Value form.`;
+    const name = hVal.slice(0, ci).trim();
     if (!name) return `cURL ${flag} requires a header name.`;
-    const value = emptyField ? "" : hVal.slice(ci + 1).trim();
-    if (!emptyField && !value) {
-      return "cURL header suppression is not supported. Use Name; to import an empty header value.";
-    }
     if (headerNameEquals({ name }, "content-length")) return "";
-    headers.push({ name, value });
+    headers.push({ name, value: hVal.slice(ci + 1).trim() });
     return "";
   };
   const addBodyPart = (flag, value, options = {}) => {
@@ -29048,7 +27967,8 @@ function parseCurlCommand(text) {
     }
     const error = addBodyPart("--json", raw, { defaultContentType: false });
     if (error) return error;
-    needsDefaultJsonHeaders = true;
+    ensureHeader("Content-Type", "application/json");
+    ensureHeader("Accept", "application/json");
     return "";
   };
   for (var t = 0; t < tokens.length; t++) {
@@ -29056,20 +27976,19 @@ function parseCurlCommand(text) {
     if (tok === "-X" || tok === "--request") {
       const value = requireOptionValue(tok);
       if (value.error) return value;
-      method = value.value;
+      method = value.value.toUpperCase();
       methodExplicit = true;
     }
     else if (tok.startsWith("-X") && tok.length > 2) {
-      method = tok.slice(2);
+      method = tok.slice(2).toUpperCase() || "GET";
       methodExplicit = true;
     }
     else if (tok.startsWith("--request=")) {
-      method = tok.slice("--request=".length);
-      if (!method) return { error: "cURL --request requires a value." };
+      method = tok.slice("--request=".length).toUpperCase() || "GET";
       methodExplicit = true;
     }
     else if (tok === "-I" || tok === "--head") {
-      if (!methodExplicit) method = "HEAD";
+      method = "HEAD";
       methodExplicit = true;
     }
     else if (tok === "-G" || tok === "--get") {
@@ -29229,12 +28148,6 @@ function parseCurlCommand(text) {
     port = parsed.port || defaultHttpPortForScheme(scheme);
     path = pathAsIs ? rawPathFromUrlString(url) : `${parsed.pathname || "/"}${parsed.search || ""}`;
   } catch (_) { return null; }
-  // JSON defaults must wait until all explicit headers have been read, so
-  // a later -H overrides them just as it does when it precedes --json.
-  if (needsDefaultJsonHeaders) {
-    ensureHeader("Content-Type", "application/json");
-    ensureHeader("Accept", "application/json");
-  }
   if (needsDefaultFormContentType && !getMode) {
     ensureHeader("Content-Type", "application/x-www-form-urlencoded");
   }
@@ -29475,20 +28388,13 @@ function decodeAnsiCStringEscape(input, index) {
 
 function openCurlImportModal() {
   const modal = document.getElementById("curlImportModal");
-  if (isModalVisible(modal)) return;
-  compareLoadGeneration += 1;
-  curlImportReturnFocus = document.activeElement;
   document.getElementById("curlImportInput").value = "";
   modal.classList.remove("hidden");
   document.getElementById("curlImportInput").focus();
 }
 
 function closeCurlImportModal() {
-  const modal = document.getElementById("curlImportModal");
-  const restoreFocus = isModalVisible(modal) && getActiveModalAction()?.modal === modal;
-  modal.classList.add("hidden");
-  if (restoreFocus) restoreModalFocus(curlImportReturnFocus);
-  curlImportReturnFocus = null;
+  document.getElementById("curlImportModal").classList.add("hidden");
 }
 
 function applyCurlImport() {
@@ -30122,7 +29028,7 @@ function buildPayloadDecorations(view) {
   const doc = view.state.doc;
   const text = doc.toString();
   if (!text) return CM.Decoration.none;
-  const re = /\$payload\$|§[^§\n]*§/g;
+  const re = /\$payload\$/gi;
   const builder = [];
   let m;
   while ((m = re.exec(text)) !== null) {
@@ -30223,289 +29129,6 @@ function buildSearchDecorations(doc, query, activeIndex = -1, classes = CM_DEFAU
   };
 }
 
-// Passive decoding is deliberately separate from Decoder tools: never transform
-// the document, fetch a target, or retain decoded traffic outside this view.
-const ENCODED_PREVIEW_INPUT_LIMIT = 4096;
-const ENCODED_PREVIEW_OUTPUT_LIMIT = 2048;
-const ENCODED_PREVIEW_LAYER_LIMIT = 3;
-let encodedPreviewId = 0;
-
-function decodePreviewLayer(value) {
-  if (!value || value.length > ENCODED_PREVIEW_INPUT_LIMIT) return null;
-  let text, encoding;
-  try {
-    if (/%[0-9a-f]{2}/i.test(value)) {
-      // A literal + is ambiguous outside a form field; never change it to space.
-      text = decodeURIComponent(value);
-      encoding = "URL percent encoding";
-    } else {
-      // Require a complete, canonical token. Do not guess at hashes, arbitrary
-      // hex, broken padding, binary bodies or a suffix of an oversized value.
-      if (value.length < 8 || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(value)
-        || /[+\/]/.test(value) && /[-_]/.test(value)) return null;
-      const bare = value.replace(/=+$/, "");
-      if (bare.length % 4 === 1 || value.includes("=") && value.length % 4 !== 0) return null;
-      const standard = bare.replace(/-/g, "+").replace(/_/g, "/");
-      const bytes = atob(standard + "=".repeat((4 - standard.length % 4) % 4));
-      if (btoa(bytes).replace(/=+$/, "") !== standard) return null;
-      text = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes, c => c.charCodeAt(0)));
-      encoding = /[-_]/.test(value) ? "Base64URL" : "Base64";
-    }
-  } catch {
-    return null;
-  }
-  if (text === value || !text.trim() || text.length > ENCODED_PREVIEW_OUTPUT_LIMIT
-    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(text)) return null;
-  return { encoding, text };
-}
-
-function decodePreviewLayers(value) {
-  const layers = [];
-  for (let i = 0; i < ENCODED_PREVIEW_LAYER_LIMIT; i += 1) {
-    const layer = decodePreviewLayer(value);
-    if (!layer) break;
-    layers.push(layer);
-    value = layer.text;
-  }
-  return layers;
-}
-
-function encodedPreviewAt(doc, position) {
-  if (!Number.isInteger(position) || position < 0 || position >= doc.length) return null;
-  const start = Math.max(0, position - ENCODED_PREVIEW_INPUT_LIMIT - 1);
-  const end = Math.min(doc.length, position + ENCODED_PREVIEW_INPUT_LIMIT + 2);
-  const text = doc.sliceString(start, end), local = position - start;
-  for (const kind of ["url", "base64"]) {
-    const atom = kind === "url" ? /[^\s"'<>\\\[\]{}(),;:=&?#]/ : /[A-Za-z0-9+/_-]/;
-    let point = local;
-    // '=' is only part of a Base64 token when it is trailing padding.
-    if (kind === "base64" && text[point] === "=") {
-      while (point > 0 && text[point] === "=" && local - point < 2) point -= 1;
-    }
-    if (!atom.test(text[point] || "")) continue;
-    let from = point, to = point + 1;
-    while (from > 0 && atom.test(text[from - 1])) from -= 1;
-    while (to < text.length && atom.test(text[to])) to += 1;
-    if (kind === "base64") while (to < text.length && text[to] === "=") to += 1;
-    if (local < from || local >= to || to - from > ENCODED_PREVIEW_INPUT_LIMIT
-      || from === 0 && start > 0 || to === text.length && end < doc.length) continue;
-    const value = text.slice(from, to);
-    if (kind === "url" && !/%[0-9a-f]{2}/i.test(value)) continue;
-    // A malformed percent escape must not be reinterpreted as a Base64 suffix.
-    if (kind === "base64" && (text[from - 1] === "%" || text[to] === "%")) continue;
-    const layers = decodePreviewLayers(value);
-    if (layers.length) return { from: start + from, to: start + to, layers };
-  }
-  return null;
-}
-
-function encodedPreviewPointerPosition(view, event) {
-  const nearest = view.posAtCoords({ x: event.clientX, y: event.clientY });
-  if (nearest === null) return null;
-  // CodeMirror returns the nearest caret, not the character under the pointer.
-  // Check both sides, including the last character and visual wrap boundaries.
-  for (const position of [nearest, nearest - 1]) {
-    if (position < 0 || position >= view.state.doc.length) continue;
-    const a = view.coordsAtPos(position, 1), b = view.coordsAtPos(position + 1, -1);
-    if (a && b && a.top === b.top && event.clientY >= a.top && event.clientY <= a.bottom
-      && event.clientX >= Math.min(a.left, b.left) && event.clientX <= Math.max(a.right, b.right)) return position;
-  }
-  return null;
-}
-
-class EncodedPreviewController {
-  constructor(view) {
-    this.view = view;
-    this.document = view.dom.ownerDocument;
-    this.window = this.document.defaultView;
-    this.timer = null;
-    this.position = null;
-    this.tooltip = null;
-    this.destroyed = false;
-    this.generation = 0;
-    this.button = this.document.createElement("button");
-    this.button.type = "button";
-    this.button.className = "encoded-preview-trigger";
-    this.button.textContent = "Decode";
-    this.button.title = "Preview encoded value at cursor or selection";
-    this.button.setAttribute("aria-label", this.button.title);
-    this.button.addEventListener("click", () => this.showAtSelection());
-    this.button.addEventListener("keydown", event => {
-      const tooltip = this.tooltip;
-      if (!tooltip || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-      const page = Math.max(40, tooltip.clientHeight - 24);
-      const delta = { ArrowDown: 40, ArrowUp: -40, PageDown: page, PageUp: -page }[event.key];
-      if (delta !== undefined) tooltip.scrollTop += delta;
-      else if (event.key === "Home") tooltip.scrollTop = 0;
-      else if (event.key === "End") tooltip.scrollTop = tooltip.scrollHeight;
-      else return;
-      event.preventDefault();
-      event.stopPropagation();
-    });
-    view.dom.appendChild(this.button);
-    view.sniperDecodedPreview = this;
-    this.onMove = event => this.pointerMove(event);
-    this.onLeave = event => { if (!view.dom.contains(event.relatedTarget)) this.scheduleHide(); };
-    this.onFocusOut = event => { if (!view.dom.contains(event.relatedTarget)) this.hide(); };
-    this.onDismiss = event => {
-      if (event.type === "keydown" && (event.key !== "Escape" || event.isComposing)) return;
-      if (this.tooltip?.contains(event.target) && event.type !== "keydown") {
-        // Native text selection must not blur a non-focusable popup to body and
-        // dismiss it before the drag begins. Do not prevent the pointer event.
-        if (event.type === "pointerdown") this.tooltip.focus({ preventScroll: true });
-        return;
-      }
-      const restoreFocus = event.type === "keydown" && this.tooltip?.contains(this.document.activeElement);
-      if (event.type === "keydown" && this.tooltip) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-      this.hide();
-      if (restoreFocus) this.button.focus({ preventScroll: true });
-    };
-    view.dom.addEventListener("mousemove", this.onMove);
-    view.dom.addEventListener("mouseleave", this.onLeave);
-    view.dom.addEventListener("focusout", this.onFocusOut);
-  }
-
-  listen(active) {
-    if (this.listening === active) return;
-    this.listening = active;
-    const method = active ? "addEventListener" : "removeEventListener";
-    for (const type of ["pointerdown", "keydown", "scroll"]) this.document[method](type, this.onDismiss, true);
-    this.window[method]("blur", this.onDismiss);
-    this.window[method]("resize", this.onDismiss);
-  }
-
-  scheduleHide() {
-    const generation = this.generation;
-    if (this.leaveTimer == null) this.leaveTimer = this.window.setTimeout(() => {
-      if (generation === this.generation) this.hide();
-    }, 150);
-  }
-
-  pointerMove(event) {
-    if (this.leaveTimer != null) this.window.clearTimeout(this.leaveTimer);
-    this.leaveTimer = null;
-    if (this.tooltip?.contains(event.target) || event.target === this.button) return;
-    const { view } = this;
-    if (event.buttons || !view.contentDOM.contains(event.target) || !view.state.selection.main.empty) {
-      this.hide();
-      return;
-    }
-    const position = encodedPreviewPointerPosition(view, event);
-    if (position === null) { this.scheduleHide(); return; }
-    if (this.position === position || this.result && position >= this.result.from && position < this.result.to) return;
-    this.hide();
-    this.position = position;
-    const doc = view.state.doc, generation = this.generation;
-    this.listen(true);
-    this.timer = this.window.setTimeout(() => {
-      if (generation !== this.generation) return;
-      this.timer = null;
-      if (this.destroyed || view.state.doc !== doc || !view.dom.isConnected || !view.dom.getClientRects().length) {
-        this.hide();
-        return;
-      }
-      const result = encodedPreviewAt(doc, position);
-      if (result) this.show(result, false);
-      else this.listen(false);
-    }, 300);
-  }
-
-  showAtSelection() {
-    this.hide();
-    const { doc, selection } = this.view.state;
-    const range = selection.main;
-    let result = null;
-    if (!range.empty && range.to - range.from <= ENCODED_PREVIEW_INPUT_LIMIT) {
-      const layers = decodePreviewLayers(doc.sliceString(range.from, range.to));
-      if (layers.length) result = { from: range.from, to: range.to, layers };
-    } else if (range.empty) {
-      result = encodedPreviewAt(doc, range.head);
-      if (!result && range.head > 0) result = encodedPreviewAt(doc, range.head - 1);
-    }
-    this.show(result || { from: range.head, to: range.head, layers: [] }, true);
-  }
-
-  show(result, keyboard) {
-    if (this.destroyed || !this.view.dom.isConnected || !this.view.dom.getClientRects().length) return;
-    const anchor = this.view.coordsAtPos(keyboard ? result.from : this.position ?? result.from)
-      || this.button.getBoundingClientRect();
-    const tooltip = this.document.createElement("div");
-    tooltip.className = "encoded-preview-tooltip";
-    tooltip.tabIndex = -1;
-    tooltip.id = `encoded-preview-${++encodedPreviewId}`;
-    tooltip.setAttribute("role", "tooltip");
-    if (keyboard) tooltip.setAttribute("aria-live", "polite");
-    const title = this.document.createElement("div");
-    title.className = "encoded-preview-title";
-    title.textContent = keyboard
-      ? "Decoded preview · Arrow keys to scroll · Esc to close"
-      : "Decoded preview · Esc to close";
-    tooltip.appendChild(title);
-    for (const layer of result.layers) {
-      const label = this.document.createElement("div");
-      label.className = "encoded-preview-label";
-      label.textContent = layer.encoding;
-      const value = this.document.createElement("pre");
-      value.textContent = layer.text;
-      tooltip.appendChild(label);
-      tooltip.appendChild(value);
-    }
-    if (!result.layers.length) {
-      const note = this.document.createElement("div");
-      note.textContent = "No supported encoded text at the cursor or selection.";
-      tooltip.appendChild(note);
-    }
-    this.result = result;
-    this.tooltip = tooltip;
-    this.view.dom.appendChild(tooltip);
-    this.described = keyboard ? this.button : this.view.contentDOM;
-    this.oldDescription = this.described.getAttribute("aria-describedby");
-    this.described.setAttribute("aria-describedby", [this.oldDescription, tooltip.id].filter(Boolean).join(" "));
-    const box = tooltip.getBoundingClientRect();
-    const width = this.document.documentElement.clientWidth, height = this.document.documentElement.clientHeight;
-    tooltip.style.left = `${Math.max(8, Math.min(anchor.left, width - box.width - 8))}px`;
-    tooltip.style.top = `${Math.max(8, Math.min(anchor.bottom + 6, height - box.height - 8))}px`;
-    this.listen(true);
-  }
-
-  hide() {
-    this.generation += 1;
-    if (this.leaveTimer != null) this.window.clearTimeout(this.leaveTimer);
-    this.leaveTimer = null;
-    if (this.timer !== null) this.window.clearTimeout(this.timer);
-    this.timer = null;
-    this.position = null;
-    this.result = null;
-    this.tooltip?.remove();
-    this.tooltip = null;
-    if (this.described) {
-      if (this.oldDescription === null) this.described.removeAttribute("aria-describedby");
-      else this.described.setAttribute("aria-describedby", this.oldDescription);
-      this.described = null;
-    }
-    this.listen(false);
-  }
-
-  update(update) {
-    if (update.docChanged || update.selectionSet || update.viewportChanged || update.geometryChanged) this.hide();
-  }
-
-  destroy() {
-    this.destroyed = true;
-    this.hide();
-    this.view.dom.removeEventListener("mousemove", this.onMove);
-    this.view.dom.removeEventListener("mouseleave", this.onLeave);
-    this.view.dom.removeEventListener("focusout", this.onFocusOut);
-    this.button.remove();
-    delete this.view.sniperDecodedPreview;
-  }
-}
-
-const encodedPreviewPlugin = CM.ViewPlugin.fromClass(EncodedPreviewController);
-
 function createBaseExtensions(options = {}) {
   const exts = [
     sniperCMTheme,
@@ -30541,7 +29164,7 @@ function createBaseExtensions(options = {}) {
   if (options.placeholder) {
     exts.push(CM.placeholder(options.placeholder));
   }
-  if (options.httpHighlight) exts.push(httpDecoPlugin, encodedPreviewPlugin);
+  if (options.httpHighlight) exts.push(httpDecoPlugin);
   if (options.hexHighlight) {
     exts.push(hexDecoPlugin);
     // Match non-CM hex font exactly
@@ -30643,8 +29266,7 @@ class SniperCodeView {
     this._searchNavIndex = -1;
     this.view = new CM.EditorView({
       state: CM.EditorState.create({
-        // Initial content is a baseline, not an undoable edit from an empty pane.
-        doc: options.content || "",
+        doc: "",
         extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField],
       }),
       parent: container,
@@ -30658,10 +29280,8 @@ class SniperCodeView {
 
   setContent(text) {
     const { view } = this;
-    // Even an identical replacement can belong to a newer selected record.
-    view.sniperDecodedPreview?.hide();
     const nextText = text || "";
-    if (view.state.doc.toString() === nextText.replace(/\r\n?/g, "\n")) {
+    if (view.state.doc.toString() === nextText) {
       return;
     }
     cmProgrammaticViews.add(view);
@@ -30676,9 +29296,8 @@ class SniperCodeView {
 
   setContentPreservingSelection(text) {
     const { view } = this;
-    view.sniperDecodedPreview?.hide();
     const nextText = text || "";
-    if (view.state.doc.toString() === nextText.replace(/\r\n?/g, "\n")) {
+    if (view.state.doc.toString() === nextText) {
       return;
     }
     const selection = view.state.selection.main;
@@ -30753,18 +29372,13 @@ function initCMSearchNavigation(metaElement, cmKey) {
 function updateCodePaneCM(key, container, text, options = {}) {
   const mode = options.mode || "http"; // "http" | "hex" | "diff"
   const editable = options.readOnly === false;
-  let restoreFocus = false;
-  // Undo history belongs to one document owner. Tab/session replacement must
-  // retire it even when the new document has the same text or persisted ID.
-  if (_cmViews[key] && (_cmViews[key]._hlMode !== mode || !!_cmViews[key]._editable !== editable
-    || _cmViews[key]._owner !== options.owner)) {
-    restoreFocus = _cmViews[key]._hlMode === mode && !!_cmViews[key]._editable === editable
-      && _cmViews[key].view.hasFocus;
+  // Recreate CM view if highlight mode or editable changed
+  if (_cmViews[key] && (_cmViews[key]._hlMode !== mode || !!_cmViews[key]._editable !== editable)) {
     _cmViews[key].destroy();
     delete _cmViews[key];
   }
   if (!_cmViews[key]) {
-    const cmOpts = { content: text || "" };
+    const cmOpts = {};
     cmOpts.readOnly = !editable;
     if (mode === "http") cmOpts.httpHighlight = true;
     else if (mode === "hex") cmOpts.hexHighlight = true;
@@ -30774,7 +29388,6 @@ function updateCodePaneCM(key, container, text, options = {}) {
     _cmViews[key] = new SniperCodeView(container, cmOpts);
     _cmViews[key]._hlMode = mode;
     _cmViews[key]._editable = editable;
-    _cmViews[key]._owner = options.owner;
   }
   const cv = _cmViews[key];
   if (editable && options.onChange && !cv._onChangeWired) {
@@ -30790,9 +29403,6 @@ function updateCodePaneCM(key, container, text, options = {}) {
   // Changed-line highlights (Modified view). Applied after setContent, which
   // clears them, so this is the authoritative re-apply for the new text.
   cv.applyChangedLines(options.changedRanges);
-  // Keyboard tab cycling can leave focus inside the editor being replaced.
-  // Do not claim focus when a toolbar field or tab button owns it instead.
-  if (restoreFocus) cv.view.focus();
 
   const lineCount = cv.view.state.doc.lines;
   return {

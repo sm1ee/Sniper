@@ -103,7 +103,6 @@ function fixture() {
     "loadAppVersionInfo", "performSelfUpdate", "requireOkResponse",
     "readApiErrorMessage", "formatStructuredApiErrorMessage", "setActiveTool",
   ], {
-    closeScannerSettings() {},
     TextDecoder,
     state,
     els: { openUpdateButton: button, appVersionLabel: element() },

@@ -1633,9 +1633,10 @@ fn servlet_engine(set_cookie: &str) -> Option<&'static str> {
         .then_some("jeus")
 }
 
-fn detect_body_matches(body: &str, indexes: impl IntoIterator<Item = usize>) -> Vec<Detection> {
+/// What a page or an error response's body says about its servers.
+pub(crate) fn detect_body(body: &str) -> Vec<Detection> {
     let mut found = Vec::new();
-    for index in indexes {
+    for index in BODIES.set.matches(body).iter() {
         if let Some(detection) = known(
             BODY_RULES[index].0,
             version_of(&BODIES.each[index], body),
@@ -1645,25 +1646,6 @@ fn detect_body_matches(body: &str, indexes: impl IntoIterator<Item = usize>) -> 
         }
     }
     found
-}
-
-/// What a page or an error response's body says about its servers.
-pub(crate) fn detect_body(body: &str) -> Vec<Detection> {
-    if body.is_ascii() {
-        detect_body_matches(body, BODIES.set.matches(body))
-    } else {
-        // Unicode word boundaries can make the combined search expensive on
-        // multilingual text. Preserve every rule and its declaration order,
-        // while letting each precompiled regex use its own literal prefilter.
-        detect_body_matches(
-            body,
-            BODIES
-                .each
-                .iter()
-                .enumerate()
-                .filter_map(|(index, rule)| rule.is_match(body).then_some(index)),
-        )
-    }
 }
 
 /// Where a body is, for what it may give away: a script's URLs, or any text
@@ -2595,169 +2577,6 @@ mod tests {
         );
     }
 
-    fn assert_body_scan_equivalent(body: &str) {
-        let original = detect_body_matches(body, BODIES.set.matches(body));
-        assert_eq!(
-            detect_body(body),
-            original,
-            "server signature differential: {body:?}"
-        );
-        let combined: Vec<_> = BODIES.set.matches(body).into_iter().collect();
-        let separate: Vec<_> = BODIES
-            .each
-            .iter()
-            .enumerate()
-            .filter_map(|(index, rule)| rule.is_match(body).then_some(index))
-            .collect();
-        assert_eq!(
-            separate, combined,
-            "server rule-index differential: {body:?}"
-        );
-    }
-
-    #[test]
-    fn unicode_body_matching_preserves_anchors_whitespace_captures_and_precedence() {
-        let surroundings = [
-            "", "ascii", "é", "한글", "中", "\u{0301}", "\u{2003}", "\u{00a0}", "😀", "\0", "\r\n",
-        ];
-        let signals = [
-            "[core]\nrepositoryformatversion = 0",
-            "[core] repositoryformatversion\u{2003}= 0",
-            "APP_KEY=example\n",
-            "404 page not found\n",
-            "no healthy upstream",
-            "<title>Payara Server 7.2026.10- Error report</title>",
-            "<title>GlassFish Server Open Source Edition  4.1.2  - Error report</title>",
-            "<hr><center>nginx/1.25.3</center><hr><center>nginx/1.26.0</center>",
-            "<address>Apache/2.4.58 (Ubuntu) Server at example.com Port 80</address>",
-            r#"{"version":{"number":"7.17.15"},"tagline":"You Know, for Search"}"#,
-            r#"{"cmdline":["/app"]}"#,
-            "<title>Index of /",
-            "<address>Apache/",
-            "\u{fffd}",
-        ];
-        for prefix in surroundings {
-            for suffix in surroundings {
-                for signal in signals {
-                    assert_body_scan_equivalent(&format!("{prefix}{signal}{suffix}"));
-                }
-            }
-        }
-        assert_body_scan_equivalent(&format!(
-            "{}<hr><center>nginx/1.25.3</center>",
-            "<p>한글 中 😀</p>".repeat(4096)
-        ));
-        assert_body_scan_equivalent(&format!("{}é", "<p>ordinary ASCII text</p>".repeat(4096)));
-        for body in [
-            "<hr><center>nginx</center> 日本語 <hr><center>nginx/1.25.3</center>",
-            "<hr><center>nginx/1.25.3</center> 日本語 <hr><center>nginx</center>",
-            r#"日本語 window.grafanaBootData = { "buildInfo":{"version":"13.2.4"}"#,
-            "日本語 <b>Warning</b>: example on line <b>1</b><title>PHP 8.2.12 - phpinfo()</title>",
-            "日本語 <title>IIS Windows Server</title><title>IIS 10.0 Detailed Error",
-            "You’re seeing this error because you have <code>DEBUG = True</code>",
-            "at java.文字.方法(文字.java:10)",
-        ] {
-            assert_body_scan_equivalent(body);
-        }
-        assert!(found(detect_body(
-            "<hr><center>nginx</center> 日本語 <hr><center>nginx/1.25.3</center>"
-        ))
-        .contains(&one("nginx", None)));
-        assert!(found(detect_body(
-            "<hr><center>nginx/1.25.3</center> 日本語 <hr><center>nginx</center>"
-        ))
-        .contains(&one("nginx", Some("1.25.3"))));
-        for gap in [199, 200, 201] {
-            assert_body_scan_equivalent(&format!(
-                "[core]{}repositoryformatversion = 0 中",
-                " ".repeat(gap)
-            ));
-        }
-        for gap in [799, 800, 801] {
-            for unit in [" ", "中"] {
-                let body = format!(
-                    r#""number":"7.17.15"{}"tagline":"You Know, for Search" 中"#,
-                    unit.repeat(gap)
-                );
-                assert_body_scan_equivalent(&body);
-                assert_eq!(
-                    found(detect_body(&body)).contains(&one("elasticsearch", Some("7.17.15"))),
-                    gap <= 800
-                );
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "requires a reserved, uncontended native timing run"]
-    fn measure_unicode_body_match_paths() {
-        let sized = |unit: &str, bytes: usize| unit.repeat(bytes / unit.len());
-        let ascii = sized("<p>ordinary page text</p>", 1_048_576);
-        let unicode = sized("<p>한글 中文 é page text</p>", 1_048_576);
-        let positive = r#"<hr><center>nginx/1.25.3</center><address>Apache/2.4.58 (Ubuntu) Server at example.com Port 80</address><title>PHP 8.2.12 - phpinfo()</title><script>window.grafanaBootData = {"buildInfo":{"version":"13.2.4"}}</script>"#;
-        let mut cases = vec![
-            (
-                "ascii-small-negative",
-                sized("<p>ordinary page text</p>", 4096),
-            ),
-            (
-                "unicode-small-negative",
-                sized("<p>한글 中文 é page text</p>", 4096),
-            ),
-            ("ascii-large-negative", ascii.clone()),
-            ("unicode-large-negative", unicode.clone()),
-            ("ascii-late-positive", format!("{ascii}{positive}")),
-            ("unicode-late-positive", format!("{unicode}{positive}")),
-            ("ascii-dense-positive", sized(positive, 1_048_576)),
-            (
-                "unicode-dense-positive",
-                sized(&format!("한글 中文 é{positive}"), 1_048_576),
-            ),
-        ];
-        for (label, at) in [
-            ("sparse-unicode-start", 0),
-            ("sparse-unicode-middle", ascii.len() / 2),
-            ("sparse-unicode-end", ascii.len()),
-        ] {
-            let mut body = ascii.clone();
-            body.insert(at, 'é');
-            cases.push((label, body));
-        }
-        for (label, body) in cases {
-            assert_body_scan_equivalent(&body);
-            assert_eq!(
-                !detect_body(&body).is_empty(),
-                label.contains("positive"),
-                "{label}"
-            );
-            let measure = |selected: bool| {
-                let started = std::time::Instant::now();
-                let found = if selected {
-                    detect_body(std::hint::black_box(&body))
-                } else {
-                    detect_body_matches(std::hint::black_box(&body), BODIES.set.matches(&body))
-                };
-                std::hint::black_box(found);
-                started.elapsed()
-            };
-            // Alternate order so the selected path is not always measured last.
-            for pair in 0..5 {
-                let selected_first = pair % 2 != 0;
-                let first = measure(selected_first);
-                let second = measure(!selected_first);
-                let (combined, selected) = if selected_first {
-                    (second, first)
-                } else {
-                    (first, second)
-                };
-                eprintln!(
-                    "body {label}: bytes={} pair={pair} selected_first={selected_first} combined={combined:?} selected={selected:?}",
-                    body.len()
-                );
-            }
-        }
-    }
-
     // One body per rule, as each server writes it.
     #[test]
     fn bodies_name_their_servers_and_exposures() {
@@ -2773,8 +2592,6 @@ mod tests {
             ("<address>Apache/2.4.37 (Red Hat Enterprise Linux) Server at example.com Port 80</address>", "red_hat", None),
             ("<address>Apache/2.4.58 (Win64) OpenSSL/3.1.3 Server at example.com Port 80</address>", "windows", None),
             ("<address>Apache/2.4.58 (Unix) Server at example.com Port 80</address>", "unix", None),
-            ("<address>Apache/2.4.58 (Rocky Linux) Server at example.com Port 80</address>", "rocky_linux", None),
-            ("<address>Apache/2.4.58 (AlmaLinux) Server at example.com Port 80</address>", "almalinux", None),
             ("<title>Index of /uploads</title>", "directory_listing", None),
             ("[core]\n\trepositoryformatversion = 0\n\tfilemode = true", "git_config", None),
             ("APP_NAME=Shop\nAPP_KEY=base64:x\n", "dotenv", None),
@@ -2876,29 +2693,13 @@ mod tests {
             ("WRONGTYPE Operation against a key holding the wrong kind of value", "redis", None),
             ("ORA-01756: quoted string not properly terminated", "sql_error", None),
         ];
-        let mut covered = std::collections::BTreeSet::new();
         for (body, id, version) in samples {
-            covered.extend(BODIES.set.matches(body));
-            for (prefix, suffix) in [
-                ("", ""),
-                ("한글 中文 é ", " 😀"),
-                ("", "\n한글"),
-                ("é", "字"),
-                ("\u{2003}", "\u{0301}"),
-            ] {
-                assert_body_scan_equivalent(&format!("{prefix}{body}{suffix}"));
-            }
             assert!(
                 found(detect_body(body)).contains(&one(id, *version)),
                 "{id} {version:?} in {body}: {:?}",
                 found(detect_body(body))
             );
         }
-        assert_eq!(
-            covered.into_iter().collect::<Vec<_>>(),
-            (0..BODY_RULES.len()).collect::<Vec<_>>(),
-            "Every body rule needs a positive differential fixture"
-        );
         for body in [
             "<p>An ordinary page about nginx and Apache.</p>",
             r#"{"detail":"Order shipped"}"#,

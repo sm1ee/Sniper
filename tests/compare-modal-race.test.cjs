@@ -16,13 +16,12 @@ function createFixture() {
     remove: (name) => classes.delete(name),
     contains: (name) => classes.has(name),
   } };
-  const button = { disabled: false, textContent: "Compare with #1", focus() {} };
+  const button = { disabled: false, textContent: "Compare with #1" };
   const context = loadFunctions([
-    "openCompareModal", "closeCompareModal", "clearCompareState", "setCompareBase", "isModalVisible",
+    "openCompareModal", "closeCompareModal", "clearCompareState", "setCompareBase",
   ], {
     compareBaseId: "base", compareBaseSessionId: "session-a", compareActiveTab: "request",
-    compareBaseRecord: null, compareTargetRecord: null, compareLoadGeneration: 0, compareReturnFocus: null,
-    els: { trafficRegion: null }, getActiveModalAction: () => ({ modal }), restoreModalFocus() {},
+    compareBaseRecord: null, compareTargetRecord: null, compareLoadGeneration: 0,
     sessionId: "session-a",
     transactionPath: (id, sessionId) => `${sessionId}/${id}`,
     getHistoryItem: () => ({ index: 1 }),

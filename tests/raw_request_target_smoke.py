@@ -237,8 +237,7 @@ def main():
                            *tls_options]
             negatives = [
                 ("untrusted CA", ["--cacert", str(wrong_ca), f"https://127.0.0.1:{port}/tls-negative"],
-                    # LibreSSL, macOS's curl, spells it without the hyphen.
-                    ["self-signed certificate", "self signed certificate", "unable to get local issuer",
+                    ["self-signed certificate", "unable to get local issuer",
                      "untrusted_root", "untrusted root", "unknown ca"]),
                 ("hostname mismatch", ["--cacert", ca, "--connect-to",
                     f"example.com:{port}:127.0.0.1:{port}", f"https://example.com:{port}/tls-negative"],

@@ -1,25 +1,34 @@
 # Saved-data contract v1
 
-The `saved.v1.*` operations read and change saved HTTP records and session
-names. They never send requests or change capture or runtime settings. Other
-commands get no receipts, and their output and the `2026-06-22` call envelope
-are unchanged.
+The opt-in `saved.v1.*` operations manage already saved HTTP records and session
+names. They do not send requests, change capture/runtime settings, or operate
+Replay, Fuzzer, Scanner, or other active testing features. Existing commands,
+legacy array output, and the `2026-06-22` call envelope remain unchanged.
+
+Inspect supported input and successful `data` output schemas with:
+
+```sh
+sniper-cli schema input saved.v1.http.list
+sniper-cli schema output saved.v1.http.list
+sniper-cli manifest
+```
+
+The seven supported operations are:
 
 | Operation | Purpose |
 | --- | --- |
-| `saved.v1.http.list` | One page of saved HTTP summaries |
-| `saved.v1.http.select` | Preview matching IDs and get a selection token |
-| `saved.v1.http.delete` | Delete explicit IDs or a previewed selection |
-| `saved.v1.http.clear` | Clear saved HTTP records in a session |
-| `saved.v1.session.list` | One page of saved sessions |
-| `saved.v1.session.rename` | Rename a saved session |
-| `saved.v1.operation.get` | Read a mutation receipt |
+| `saved.v1.http.list` | Bounded saved HTTP summary page |
+| `saved.v1.http.select` | Review IDs/count and a session-bound selection token |
+| `saved.v1.http.delete` | Delete explicit IDs or a reviewed filtered selection |
+| `saved.v1.http.clear` | Clear saved HTTP records in an explicit session |
+| `saved.v1.session.list` | Bounded saved session page |
+| `saved.v1.session.rename` | Rename an explicit saved session |
+| `saved.v1.operation.get` | Read a durable mutation receipt |
 
-```sh
-sniper-cli manifest
-sniper-cli schema input saved.v1.http.list
-sniper-cli schema output saved.v1.http.list
-```
+Other commands do not gain this contract or receipts. HTTP detail/body reads,
+annotations, session creation/deletion, and active session switching retain their
+existing interfaces. The v1 HTTP list intentionally has one stable descending
+sequence order and no filters; use select to review metadata filters.
 
 ## Pages
 
@@ -27,92 +36,148 @@ sniper-cli schema output saved.v1.http.list
 sniper-cli call saved.v1.http.list --input '{"limit":50}'
 ```
 
-`data` holds `contract_version`, `session_id`, `items`, `limit`, `has_more` and
-`continuation`. `limit` defaults to 50 (1–200). Without `session_id`, the first
-request uses the active session and later pages stay on it. HTTP pages run
-newest first with no filters; use `select` to filter.
+`data` contains `contract_version`, the resolved `session_id`, `items`, `limit`,
+`has_more`, and `continuation`. Defaults are 50 items; allowed limits are 1–200.
+The first request resolves the active session once when `session_id` is omitted.
+A page never mixes sessions. Existing summary fields remain intact.
 
-While `has_more` is true, send back the returned continuation unchanged and
-without a top-level `session_id` or `limit`:
+If `has_more` is true, send the returned continuation object unchanged:
 
 ```json
 {"continuation":{"session_id":"00000000-0000-0000-0000-000000000000","store_generation":"11111111-1111-1111-1111-111111111111","before_sequence":42,"limit":50}}
 ```
 
-The last page has `has_more:false` and `continuation:null`. Session pages run in
-ascending UUID order; pass their continuation object (`after_id`, `limit`) as
-the next input. Pages are not a snapshot: newer HTTP records never appear,
-deleted ones can drop out, and added or removed sessions can change later
-session pages. A store reload or restart expires HTTP continuations with
-`STALE_CONTINUATION`; start a new listing.
+Do not combine `continuation` with top-level `session_id` or `limit`. An exhausted
+page has `has_more:false` and `continuation:null`. Empty and exact-limit final
+pages terminate the same way. Changing the active session does not redirect a
+continuation. Newer inserts do not enter subsequent pages of that traversal.
+Deletion can remove rows between pages: this is a live keyset traversal, not a
+snapshot. Store reload/restart expires HTTP continuations with the typed
+`STALE_CONTINUATION` error, preventing reused sequence numbers from silently
+admitting new records into an old traversal. Start a new listing deliberately.
 
-`select` returns every matching ID with a count and token, not a page, so a
-broad filter gives a large preview.
+Session listing uses ascending UUID order. Its continuation is an input object
+containing `after_id` and `limit`; pass that object directly as the next input.
+Session additions/removals can change later pages. A session page does not imply
+that its `active` flag or counts remain unchanged after it was read.
 
-## Mutations
+Selection previews intentionally return the complete selected ID set and a
+count/token, not a page of summaries. A very broad filter can therefore have a
+large preview. No deletion is authorized by a list continuation.
 
-Every mutation needs `session_id` and an `operation_id` UUID that you generate
-and keep **before** sending. `--dry-run` validates offline; the same request
-with `--yes` applies it.
+The CLI rejects structurally valid read responses that do not match the request:
+explicit-ID previews must return the same UUID set, page limits must match the
+requested or default limit, and continuation pages must respect the requested
+cursor boundary. HTTP next cursors also retain the supplied store generation.
+Pages have unique IDs in their documented order. UUID spelling case and explicit
+selection input order do not change identity. A mismatch returns
+`INVALID_RESPONSE` without presenting the rows as successful data; the CLI does
+not automatically retry the request. These checks validate the response, not a
+snapshot guarantee for a live traversal.
+
+## Mutations and receipts
+
+Every v1 mutation requires `session_id` and a caller-chosen UUID `operation_id`.
+Generate and retain the operation ID **before** sending the request. The existing
+CLI `--dry-run` / `--yes` confirmation gate still applies. Dry run validates input
+without contacting the API, resolving selections, or reserving the ID.
 
 ```sh
 sniper-cli call saved.v1.http.delete --dry-run --input '{"session_id":"00000000-0000-0000-0000-000000000000","operation_id":"22222222-2222-2222-2222-222222222222","ids":["11111111-1111-1111-1111-111111111111"]}'
 ```
 
-A filtered delete needs the token from `select`. A delete fails as a whole if
-the matches changed or an explicit ID is missing. `clear` takes no IDs or
-filters.
+After review, `--yes` applies that same request. Filtered deletion additionally
+requires the selection token returned by `saved.v1.http.select`; changed matches
+or missing explicit IDs reject the entire selection. Clear accepts neither IDs
+nor filters and affects only saved HTTP records in the explicit session.
 
-The result holds `contract_version`, `receipt` and `replayed`.
-`receipt.outcome` says what happened:
+The result has `contract_version`, `receipt`, and `replayed`. Receipt fields are
+fully described by the output schema. `receipt.outcome` is authoritative:
 
-- `applied`: the change and its receipt are stored
-- `not_applied`: nothing changed
-- `unknown`: the outcome cannot be established
+- `applied`: the mutation and its result receipt were durably acknowledged
+- `not_applied`: this attempted mutation definitively made no change
+- `unknown`: evidence is insufficient to establish the mutation's outcome
 
-`ok:true` and exit status 0 only mean a receipt came back. Check
-`receipt.outcome` before reporting success; the CLI adds a `warnings` entry for
-`unknown`, `not_applied` or a missing receipt.
+`ok:true` means a valid receipt or read result was returned. It does **not** imply
+that `receipt.outcome` is `applied`. Check that field before reporting success.
 
-## Receipts and lost responses
+A durable unknown intent is saved before starting a mutation. The operation ID
+is bound to the operation name, explicit session, and validated input. Reusing
+that ID with identical input returns the existing receipt and **never runs the
+mutation again**, even when its outcome is unknown. Different input gives
+`OPERATION_CONFLICT`. Object key order is ignored; array order and exact string
+values are part of input identity. Replaying a clear cannot remove newer rows.
 
-An operation ID is bound to the operation, session and input. Sending the same
-ID and input again returns the stored receipt and **never reruns the mutation**,
-even when the outcome is `unknown`. The same ID with different input returns
-`OPERATION_CONFLICT`; object key order does not matter, but array order and
-exact string values do. Receipts last for the life of the data directory and
-hold no captured HTTP content.
+Receipt files are separate from saved session contents, so later session changes
+do not remove the operation record. They persist across runtime restarts, for the
+lifetime of this data directory. They contain a hash of input, outcome metadata,
+counts, or renamed session metadata; captured HTTP contents are not copied into
+them. There is no automatic retry, expiry, cleanup, or recovery mutation.
 
-If a response is lost or times out, look up the original ID:
+If a response is lost or a request times out, query the original ID:
 
 ```sh
 sniper-cli call saved.v1.operation.get --input '{"operation_id":"22222222-2222-2222-2222-222222222222"}'
 ```
 
-The lookup returns `found`, `outcome` and `receipt`. `found:false` comes with
-`outcome:"unknown"` and does not prove nothing happened. An interrupted mutation
-also stays `unknown`, and the server never reapplies it. Inspect the saved data
-before acting, and never repeat an uncertain mutation under a new operation ID.
+Lookup returns `found`, `outcome`, and nullable `receipt`. Missing receipts mean
+`found:false,outcome:"unknown"`, not proof that no action happened. Pending
+operations remain unknown after an interruption; the server does not infer
+success from rows being absent or reapply a deletion. Final-receipt persistence
+failure also reports unknown. Inspect saved data and decide deliberately; do not
+silently substitute a new ID. Mutation calls are serialized, while receipt
+lookup remains available during a pending mutation.
 
-## Errors
+## Schemas and typed errors
 
-Inputs reject unknown members, explicit nulls for optional fields, malformed
-UUIDs, invalid limits and incompatible combinations. Schemas use JSON Schema
-2020-12; `x-sniper-*` annotations mark extra checks, such as integer form and
-session names (trimmed, nonblank, at most 256 UTF-8 bytes, no control
-characters). Bad input fails before any API call with `INVALID_INPUT`, exit
-status 2 and `outcome: "not_applied"`.
+All v1 inputs reject unknown members, explicit null optionals, malformed UUIDs,
+invalid limits, and incompatible combinations. The CLI and server run the same
+schema-based validator. The CLI validates successful output against the
+published schema before reporting it as a v1 result. An invalid/missing write
+response is classified as unknown rather than automatically retried.
 
-The error envelope has `error.code`, `message`, `hint`, `retryable`, `details`
-and `schema_version:"saved.v1"`; `details` carries `outcome`, `operation_id` and
-`session_id` when known. Every v1 error has `retryable:false`. The CLI never
-retries or follows redirects (`REDIRECT_REFUSED`), and returns
-`INVALID_RESPONSE` for a response that does not match its request. After a
-failed mutation, read its receipt by the original operation ID.
+Schemas use JSON Schema 2020-12. Standard validators can validate structural
+shape, nested properties, arrays, types, bounds, enums, and required fields.
+`x-sniper-*` annotations document additional enforced semantics: unsigned JSON
+integer representation (not `1.0`), UTF-8 session-name byte length, trimmed
+nonblank names, ordered HTTP status ranges, and valid relative/date filters.
+Session rename accepts already trimmed names of at most 256 UTF-8 bytes with no
+control characters. An ordinary JSON Schema validator alone does not implement
+these annotated checks; the shared runtime validator does.
 
-## API
+Input errors are diagnosed before contacting an API. An unreadable, non-regular,
+oversized, or non-UTF-8 file/stdin source gets source-read guidance; malformed
+JSON gets syntax guidance. Valid JSON that violates the operation contract gets
+schema guidance. These remain `INVALID_INPUT`, exit status `2`, and
+`outcome: "not_applied"`; diagnostics do not echo paths or input contents.
 
-`POST /api/saved/v1/call` with a body such as
-`{"operation":"saved.v1.http.list","input":{}}` returns `ok` plus `data` or a
-typed `error`. It sits behind the same authentication and origin checks as the
-rest of the local API.
+The v1 CLI error envelope retains `error.code`, `message`, `hint`, `retryable`,
+and `details`, with `schema_version:"saved.v1"`. `details` includes mutation
+`outcome`, `operation_id`, and `session_id` when parseable. All v1 errors set
+`retryable:false`; transport failure does not authorize destructive retry.
+Errors are typed at their source and never inferred from matching message text.
+The saved-only HTTP client disables both automatic protocol retries and redirects.
+Redirects return `REDIRECT_REFUSED`. For mutations or receipt lookup, inspect
+the receipt using the original operation ID. Ordinary metadata reads have no
+mutation receipt: inspect the selected API/session context before deliberately
+rerunning the read. A redirect does not authorize following an alternate endpoint
+or automatically retrying a mutation.
+Successful output and typed errors are checked against the original operation ID
+and explicit/pinned session before their outcomes are attributed to the request.
+Applied rename receipts also bind the nested session ID to the receipt's session
+ID. A rename call requires the returned name to equal its original requested
+name, including for a replayed receipt. Receipt lookup validates internal session
+identity but has no requested name to compare; neither path compares historical
+receipts with newer session state.
+A successful receipt response keeps `ok:true` and exit status zero even when the
+mutation outcome is `unknown` or `not_applied`: success describes reading the
+receipt. The CLI also adds a static `warnings` entry for those outcomes and for
+an absent receipt, without changing `data`. An absent receipt does not prove a
+mutation failed. Inspect the original receipt and current saved state; never
+repeat an uncertain mutation automatically or use a new operation ID to bypass
+that uncertainty. Applied receipts and ordinary reads have no outcome warning.
+
+The local API endpoint is `POST /api/saved/v1/call` with body
+`{"operation":"saved.v1.http.list","input":{}}`. It returns the versioned wire
+wrapper with `ok` and either `data` or a typed `error`. It remains behind the same
+listener authentication and origin checks as the existing local API.

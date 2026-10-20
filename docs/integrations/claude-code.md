@@ -1,8 +1,14 @@
 # Using Sniper from Claude Code
 
-Claude Code drives Sniper through [`sniper-cli`](../../README.md#cli), not the
-UI. A bundled skill teaches it the commands, that writes need `--dry-run` before
-`--yes`, and that captured records carry real credentials.
+Claude Code drives Sniper through [`sniper-cli`](../../README.md#cli), not through the
+UI. A bundled skill teaches it the command surface — which operation to reach for,
+that writes need `--dry-run` before `--yes`, and that captured records carry real
+credentials. This page covers installing that skill, confirming it loaded, and what
+to ask for once it has.
+
+The runtime examples below were run against an isolated instance on
+`127.0.0.1:18903` with a throwaway upstream on `127.0.0.1:18913`. Output is real
+and trimmed for length. The install commands need no running instance.
 
 ## Install the skill
 
@@ -11,34 +17,72 @@ sniper-cli skills install --claude --dry-run
 sniper-cli skills install --claude --yes
 ```
 
-`--dry-run` prints the plan and writes nothing; `--yes` writes the skill and
-prints where it landed. The default destination is `$CLAUDE_HOME/skills`, or
-`~/.claude/skills` when `CLAUDE_HOME` is unset. `--claude-dir` installs into
-another folder, such as a project's `.claude/skills`.
+`--dry-run` prints the plan and writes nothing:
 
-The installed file is a copy of
+```json
+{
+  "api": { "local": true },
+  "command": "skills install",
+  "dry_run": true,
+  "input": { "all": false, "claude": true, "claude_dir": null, "codex": false, "codex_dir": null },
+  "notes": ["Use --yes to apply this side-effecting operation after reviewing the dry-run."],
+  "operation": "skills.install",
+  "requires_confirmation": true,
+  "side_effect": "write"
+}
+```
+
+`--yes` reports where the skill landed. This run redirected `CLAUDE_HOME` to a
+scratch directory so it would not overwrite a real install:
+
+```json
+{ "installed": [ { "agent": "claude", "path": "<scratch>/.claude/skills/sniper-operator" } ] }
+```
+
+The destination flags are `--codex`, `--claude`, `--all`, `--codex-dir` and
+`--claude-dir`; `--yes` with none of them exits `1` and names the three it accepts.
+There is no `--force` and no uninstall; a second `--yes` overwrites `SKILL.md` in
+place, so a locally edited skill is lost without warning. The default destination is
+`$CLAUDE_HOME/skills` when `CLAUDE_HOME` is set and `~/.claude/skills` otherwise,
+putting the skill at `~/.claude/skills/sniper-operator/SKILL.md` — byte-identical to
 [`packaging/skills/claude/sniper-operator/SKILL.md`](../../packaging/skills/claude/sniper-operator/SKILL.md).
-The desktop app overwrites the copy in the default folder on every launch, so it
-follows Sniper updates and local edits do not last. A copy installed with
-`--claude-dir` is not updated; install it again after an update. `skills install`
-needs no running Sniper and does not
-change `PATH`; see the [CLI section of the README](../../README.md#cli).
+Use `--claude-dir` to install into a project's `.claude/skills` instead.
+
+Before replacing an existing copy, use `skills status --claude` or
+`skills update-preview --claude` to inspect it without writing. See
+[safe skill maintenance](skill-maintenance.md) for explicit enrollment,
+experimental candidate staging, and preservation limits. Staging does not
+activate an update or enable unattended startup replacement. Automatic updates
+are Off by default and require separate explicit `enable-auto-updates --claude
+--yes` consent; it only records authorization. Inspect the host-local policy with
+`auto-update-status --claude`.
+
+Two things `skills install` does not do. It never touches `PATH` — put `sniper-cli`
+there yourself, as the [CLI section of the README](../../README.md#cli) describes. And
+it needs no running Sniper: `"api": {"local": true}` means the whole operation is a
+local file write, so the install works before Sniper has ever been started.
 
 ### OpenCode
 
-OpenCode reads the same skill. According to
-[OpenCode's documentation](https://opencode.ai/docs/skills/), it looks for
+OpenCode reads the same skill, so there is no separate install for it. According to
+[OpenCode's documentation](https://opencode.ai/docs/skills/) it looks for
 `<name>/SKILL.md` in `~/.claude/skills`, `~/.config/opencode/skills` and
-`~/.agents/skills`, and in a project's `.claude/skills`, `.opencode/skills` and
-`.agents/skills`. The install above therefore covers OpenCode too. To give
-OpenCode its own copy and leave `~/.claude` alone:
+`~/.agents/skills`, and in the `.claude/skills`, `.opencode/skills` and
+`.agents/skills` folders of a project, and it recognises only the `name` and
+`description` fields of the front matter, which is all this skill has.
+`sniper-cli skills install --claude --yes` therefore already makes it available to
+OpenCode. To give OpenCode its own copy and leave `~/.claude` alone, point
+`--claude-dir` at OpenCode's folder:
 
 ```bash
 sniper-cli skills install --claude --claude-dir ~/.config/opencode/skills --yes
 ```
 
-Installing into both folders leaves two skills with the same name, which
-OpenCode may flag.
+That was run against a scratch folder and wrote `sniper-operator/SKILL.md` there; the
+steps above for choosing the instance and reading the results apply unchanged. OpenCode
+itself was not run, so the folder names are the documentation's, not something this
+was tested against. Installing into both `~/.claude/skills` and OpenCode's folder
+leaves two skills with the same name, which OpenCode may flag.
 
 ## Confirm Claude Code picked it up
 
@@ -47,15 +91,20 @@ ls ~/.claude/skills/sniper-operator/SKILL.md
 claude -p "Answer in one line. Is a skill named sniper-operator available to you?" < /dev/null
 ```
 
-The first command shows the file exists; the second shows that Claude Code
-loaded it. Restart any Claude Code session that was open before the install.
+```
+Yes — a skill named `sniper-operator` is available to me.
+```
+
+The second command is the one that matters. A file on disk only proves the install
+ran; this proves the running agent loaded it. Restart any Claude Code session that
+was open before the install.
 
 ## Point the CLI at the right instance
 
-With no `--api`, `sniper-cli` reads `runtime-state.json` from the data
-directory: `$SNIPER_DATA_DIR`, or `~/.sniper` by default, which the desktop app
-owns. To reach a scratch instance, give the CLI the data directory it was
-started with:
+With no `--api`, `sniper-cli` reads `runtime-state.json` out of the data directory —
+`~/.sniper` by default, or `$SNIPER_DATA_DIR`. A scratch instance is therefore
+reachable without any flag, as long as the CLI is given the same data directory the
+server was started with:
 
 ```bash
 # from a source checkout, an instance that owns /tmp/sniper-test
@@ -68,21 +117,40 @@ SNIPER_PROXY_ADDR=127.0.0.1:18904 \
 SNIPER_DATA_DIR=/tmp/sniper-test sniper-cli --output compact session list
 ```
 
-If no instance owns that directory, the CLI exits `6` with `could not discover`.
-On macOS, the headless `sniper` binary comes only from a source checkout; the
-app bundle ships `sniper-desktop` and `sniper-cli`.
+Both lines are needed. `SNIPER_DATA_DIR` only tells the CLI where to look; run the
+second line against a directory no instance owns and it exits `6` with `could not
+discover`, the error two sections down. Only a source checkout has the headless
+`sniper` binary — the macOS app bundle ships `sniper-desktop` and `sniper-cli`, and
+the desktop app owns `~/.sniper`, which is what the CLI reads with no variable set.
 
-`--api http://127.0.0.1:PORT`, or `SNIPER_API_ADDR` with the same value, skips
-the lookup and probes that address directly. Tell Claude Code the port once and
-it passes `--api` on every call.
+Two overrides skip that lookup entirely and probe an address directly: `--api
+http://127.0.0.1:PORT`, and `SNIPER_API_ADDR` with the same value. Either works with
+no data directory present. Tell Claude Code the port once and it will pass `--api` on
+every call.
+
+Legacy `session create`, `rename`, `switch`, and `delete` classify unsuccessful
+HTTP responses from headers alone, without reading or echoing error bodies.
+They return `HTTP_STATUS_ERROR` with the actual `error.details.status`, exit `5`
+for 3xx/4xx or `6` for 5xx, and always `retryable:false`. Their details include
+`idempotent:false` and `outcome:"unknown"`: the status does not establish whether
+the mutation applied. Inspect `session list` and current state before deliberately
+issuing another write; these operations have no `saved.v1` mutation receipts.
+A locally missing `--yes` still returns `CONFIRMATION_REQUIRED` before API access.
 
 ## What to ask for
 
-**"What has the proxy caught?"** `capture http list` returns metadata only,
-which makes it the cheap way to survey a session:
+**"What has the proxy caught?"** — `capture http list` returns metadata only, which
+makes it the cheap way to survey a session:
 
 ```bash
 sniper-cli --output compact capture http list --limit 2
+```
+
+```json
+[{"content_type":"application/json","duration_ms":3,"has_response":true,
+  "host":"127.0.0.1:18913","id":"ba342404-…","label":"#7 GET 127.0.0.1:18913/api/orders",
+  "method":"GET","path":"/api/orders","request_bytes":0,"response_bytes":36,
+  "sequence":7,"started_at":"2026-09-17T01:40:15.293195Z","status":200, …}, …]
 ```
 
 **"Scope this to my target and drop the noise."**
@@ -92,8 +160,13 @@ sniper-cli scope set-scope --pattern '*.example.com' --dry-run
 sniper-cli --output compact scope set-scope --pattern '*.example.com' --yes
 ```
 
-Scope filters views and holds; it does not stop capture. Patterns are
-normalised: `127.0.0.1:18913` is saved as `127.0.0.1`.
+```json
+{"scope_patterns":["*.example.com"],"session_id":"47417766-…"}
+```
+
+Scope filters views and holds; it does not stop capture. With scope set to
+`*.example.com`, a request to the local upstream was still recorded as `#8`. Patterns
+are normalised — `127.0.0.1:18913` comes back as `127.0.0.1`, port dropped.
 
 **"Hold the next request so I can look at it before it goes out."**
 
@@ -103,8 +176,17 @@ sniper-cli --output compact capture intercept list
 sniper-cli --output compact capture intercept forward --id <uuid> --yes
 ```
 
-`intercept_scope_only` defaults to `true`, so an out-of-scope request goes
-straight through, with no error. Set scope to the host you are testing first.
+```json
+[{"host":"127.0.0.1:18913","id":"6aad29c1-…","method":"GET","path":"/api/orders",
+  "peer_addr":"127.0.0.1:63379","scheme":"http","started_at":"2026-09-17T01:40:25.114230Z"}]
+{"action":"forward","id":"6aad29c1-…","ok":true,"session_id":"47417766-…"}
+```
+
+`intercept_scope_only` defaults to `true`, and an out-of-scope request is forwarded
+rather than queued (`src/proxy.rs` returns `Forward` before the hold). With scope on
+`*.example.com`, the same local request went straight through — curl got its response
+at normal speed and the queue stayed `[]`. Nothing hangs and nothing errors, so set
+scope to the host you are testing first or the hold silently does nothing.
 
 **"Resend that 404 and tell me whether it is consistent."**
 
@@ -113,95 +195,134 @@ sniper-cli --output compact replay open --transaction-id <uuid> --yes
 sniper-cli --output compact replay send --tab-id <tab-id> --yes
 ```
 
-`replay open` returns a tab with `request_text` and a separate
-`target_host`/`target_port`. The target is only the connection destination;
-changing it does not change the `Host:` header in the request text, or the
-reverse. `replay send` returns the full transaction record, tagged
+`replay open` returns a tab carrying `request_text` plus a separate
+`target_host`/`target_port`. The target is the connection destination only; the
+`Host:` header inside the request text is untouched, so overriding one does not
+change the other. `replay send` returns a full transaction record and tags it
 `"notes": ["Sent from Replay."]`.
 
-Stored findings and event logs are read-only: `findings list`,
-`findings get --id <uuid>`, `findings count` and `event-log list` need no
-`--yes`. Lists return the newest 100 entries by default, and `--session-id`
-reads another session without switching to it. See the
-[CLI contract](../../README.md#cli).
+## Read stored findings and event logs
 
-## What needs your approval
+Use `findings list`, `findings get --id <uuid>`, `findings count`, and `event-log list`
+without `--yes`. The equivalent `call` names are `findings.list`, `findings.get`,
+`findings.count`, and `event_log.list`. Both lists default to 100 newest retained
+entries; `--limit` is positive and there is no offset/cursor pagination. Each read
+pins the active session once, or reads an explicit `--session-id` without switching
+it. `call` returns the pinned ID in `meta.session_id` for reuse on related reads.
+These commands only read stored data. See the [CLI contract](../../README.md#cli).
 
-Every write needs `--dry-run` to preview it or `--yes` to apply it, and the
-skill tells Claude Code to review the dry run before it applies anything. These
-need more care:
+## Manage opt-in HTTP history retention
 
-- **HTTP history retention** (`capture http retention set`) is off by default.
-  Keep-newest permanently deletes the oldest unprotected rows above a soft
-  total, so approve it explicitly. A saved policy does not mean the cleanup has
-  finished, and a lost response does not mean nothing changed; do not retry
-  automatically. See [the retention contract](http-history-retention.md).
-- **Passive scanner changes** (`scanner config set-enabled`,
-  `scanner builtin set-enabled`, `scanner custom create`, `update`, `delete`)
-  send no traffic. A write that conflicts is not retried; read the config again
-  before you retry. See
-  [the passive scanner CLI contract](passive-scanner.md).
-- **Recon discovery** (`recon start`) crawls an authorized target or consults
-  external history providers. Preview with `--dry-run`, agree on the exact
-  target, sources and positive budgets, then start with `--yes`. Every Recon
-  call needs an explicit session UUID. Provider history and new urlscan scans
-  require separate disclosure acknowledgments; a CLI timeout does not cancel
-  the job, and Stop cannot cancel an accepted remote scan. Read
-  [the Recon CLI contract](recon.md#cli-and-operator-skill) first.
-- **Nuclei templates.** `templates library download` contacts GitHub, so ask
-  first. `templates passive set-enabled` sends nothing. `templates scan start`
-  sends the selected templates' requests to targets in Scope: run
-  `templates scan preview`, ask, then start it with `--yes` and follow it with
-  `templates scan get`. See [the template contract](nuclei-templates.md).
-- **Observed socket peer capture** (`capture http upstream-peer set`) is off by
-  default. Observations stay in session files, exports and full-record JSON,
-  even after you turn it off. A peer can be a proxy, CDN or shared endpoint, so
-  it does not show who owns the origin. Read the
-  [capture, privacy and recovery contract](observed-socket-peer.md) first.
+`capture http retention get` reads a session's saved policy and cleanup status.
+`capture http retention set --off` or `--max-entries N` requires `--yes`; use
+`--dry-run` for an offline exact-policy preview. Off is the default. Keep-newest
+permanently removes oldest unprotected excess rows toward a soft total-history
+target, protecting in-progress records and durably saved HTTP tab source originals.
+Obtain explicit approval for this destructive opt-in. Policy-save success does
+not mean pending logical or disk cleanup is finished. Prefer `--session-id`;
+never automatically retry or infer that a lost response means no change.
+See [the retention contract](http-history-retention.md) for canonical `call`
+names, limits, and same-session recovery reads.
+
+## Manage passive scanner configuration
+
+Use `scanner config get`, `scanner custom list`, and `scanner custom get --id <id>`
+to inspect saved settings. Changes use `scanner config set-enabled --enabled
+<true|false>`, `scanner builtin set-enabled --id <id> --enabled <true|false>`, and
+`scanner custom create`, `update`, or `delete`. Mutations require `--yes`;
+`--dry-run` parses and validates input offline before any API discovery.
+
+Create accepts complete rule JSON with a stable `id` via `--file` or `--stdin`.
+Update accepts `--id` and a nonempty partial rule JSON with no `id` field. Omission
+preserves a field; `false` and empty optional text are applied literally. Unknown
+fields and nulls are rejected. Exact IDs are required; other rules and their order
+are retained. Read [the passive scanner CLI contract](../../README.md#passive-scanner-configuration)
+for the rule shape and limits.
+
+The canonical `call` names are `scanner.config.get`, `scanner.config.set_enabled`,
+`scanner.builtin.set_enabled`, `scanner.custom.list`, `scanner.custom.get`,
+`scanner.custom.create`, `scanner.custom.update`, and `scanner.custom.delete`.
+Create takes `rule` (or `file`/`stdin`); update takes `id` and `patch` (or
+`file`/`stdin`). All support `session_id`, including inactive sessions. Omitted
+sessions are resolved once; writes carry both the pinned session guard and the
+fetched configuration token. Conflicts are not retried; inspect the current config
+before any deliberate retry. An unchanged mutation reports `changed: false`
+without a write.
+
+These commands configure passive regex checks of captured body previews and
+headers only. They do not send traffic, run probes, rescan saved traffic, clear
+findings, or replace arbitrary whole configurations. Rule patterns and descriptions
+can themselves contain sensitive text, so review output before sharing it.
 
 ## What the agent sees
 
-`capture http list` returns no headers and no bodies. `capture http get`,
-`replay open` and `replay send` return both verbatim, so any cookie,
-`Authorization` header or token in a capture goes into the model's context and
-into whatever transcript or log your Claude Code setup keeps. `findings get`
-returns stored evidence that can hold the same values, and finding metadata and
-event-log messages can be sensitive too. `recon list` includes unredacted
-URLs, raw URL spellings and evidence locations, which can expose paths or
-query values even without captured bodies. Sniper redacts none of it; the skill
-only asks the agent to summarise instead of paste. Which captures an agent may
-open is your decision.
+`findings list` omits detail and evidence. `findings get` includes stored detail and
+evidence, which can contain sensitive captured values, without fetching the linked
+HTTP record or its raw bodies. Summary metadata and event-log messages may also be
+sensitive; these commands do not add redaction. Prefer summaries before details.
 
-The agent sees no traffic from another session unless it passes
-`--session-id`, and nothing of the desktop window. It does see the Replay
-workspace: `replay list` returns every tab with its request text and send
-history. The configured OAST token is the only stored value that comes back
-masked, as `********`.
+`capture http list` returns no headers and no bodies. `capture http get`,
+`replay open` and `replay send` return both, verbatim — request headers, response
+headers, and a `body_preview`. Any cookie, `Authorization` header or token in a
+capture goes straight into the model's context when one of those runs, and from
+there into whatever transcript or log your Claude Code setup keeps. Sniper does not
+redact and the skill only asks the agent to summarise rather than paste. Deciding
+which captures an agent may open is your job, not the tool's.
+
+Beyond the captures themselves the agent sees only what the CLI returns: no traffic
+from another session unless it passes `--session-id`, and nothing about the desktop
+window. It does see the Replay workspace — `replay list` returns every tab, its
+request text and its send history. The configured OAST token is the one stored value
+that comes back masked as `********`.
 
 ## When it does not work
 
-These all return `API_UNAVAILABLE` and exit `6`:
+Sniper not running, explicit `--api`:
 
-- `failed to probe Sniper API at ...`: Sniper is not running at the `--api`
-  address.
-- `could not discover Sniper API address`: no `--api`, and no instance owns the
-  data directory.
-- `Sniper API probe returned 404 Not Found`: the `--api` address answers HTTP
-  but is not Sniper.
+```json
+{"error":{"code":"API_UNAVAILABLE","message":"failed to probe Sniper API at http://127.0.0.1:18903: error sending request for url (http://127.0.0.1:18903/api/settings)","retryable":true,"hint":"Start Sniper Desktop, or pass --api http://HOST:PORT explicitly."},"ok":false,"operation":"session.list"}
+```
 
-If `sniper-cli` is not on `PATH`, the command exits `127`; the skill tells the
-agent to say so instead of falling back to the UI. If Claude Code answers a
-Sniper question without running `sniper-cli`, the skill did not load: re-run the
-install, then the `claude -p` check above.
+Nothing to discover — no `--api`, no instance for that data directory:
 
-When `session create`, `rename`, `switch` or `delete` gets an HTTP error, it
-reports `HTTP_STATUS_ERROR` with `outcome: "unknown"`, because the status does
-not show whether the change applied. Check `session list` before you write
-again.
+```json
+{"error":{"code":"API_UNAVAILABLE","message":"could not discover Sniper API address; pass --api or start sniper-desktop first","retryable":true,…},"ok":false}
+```
+
+`--api` pointing at something that answers HTTP but is not Sniper:
+
+```json
+{"error":{"code":"API_UNAVAILABLE","message":"Sniper API probe returned 404 Not Found","retryable":true,…},"ok":false}
+```
+
+All three exit `6`. `sniper-cli` missing from `PATH` exits `127` with
+`env: sniper-cli: No such file or directory`, and the skill tells the agent to say so
+rather than fall back to scraping the UI.
+
+If Claude Code answers a Sniper question without running `sniper-cli`, the skill did
+not load. Re-run the install, then re-run the `claude -p` check above.
 
 ## Limits
 
-The paths on this page are macOS paths. The headless `sniper` binary serves the
-same API as `sniper-desktop`. The local API is unauthenticated and bound to
-loopback by design ([architecture](../architecture.md)). A remote headless
-listener adds a bootstrap token, but point the agent at a loopback instance.
+Skill installation and the CLI are built for macOS and Windows; every command on this
+page was run on macOS, and the paths shown are macOS paths. Nothing here needs
+`sniper-desktop` specifically — the headless `sniper` binary serves the same API,
+which is what the examples used. The local API is unauthenticated and bound to
+loopback by design ([architecture](../architecture.md)); a remote headless listener
+adds a bootstrap token, but `sniper-cli` is only ever tested same-machine.
+
+## Opt-in observed socket peer capture
+
+`capture http upstream-peer get --session-id <active-uuid>` reads the saved
+switch and effective status. `set --session-id <active-uuid> --enabled true|false
+--yes` explicitly changes future eligibility; use `--dry-run` first for an
+offline plan. Canonical operations are `capture.http.upstream_peer.get` and
+`capture.http.upstream_peer.set`. The CLI performs one pinned settings GET and
+one token-bound POST, with no automatic retry or session activation.
+
+Default map/evidence reads remain unchanged. Explicit `--include-socket-peer`
+on exact-row evidence adds a retained observation without enabling capture or
+sending probes. A peer may be a proxy, CDN or shared endpoint, not evidence of
+origin ownership. Observations persist in session files, exports and full-record
+JSON, including after Off. Read the [capture, privacy and recovery contract](observed-socket-peer.md)
+before enabling it or sharing those files.

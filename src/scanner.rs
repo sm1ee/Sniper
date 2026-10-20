@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -317,16 +317,6 @@ pub struct ScannerStore {
     config: RwLock<ScannerConfig>,
     seen: RwLock<HashSet<FindingDedupKey>>,
     clear_generation: AtomicU64,
-    rescanning: AtomicBool,
-}
-
-/// Held while a rescan runs; dropping it lets the next one start.
-pub struct RescanSlot<'a>(&'a AtomicBool);
-
-impl Drop for RescanSlot<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
 }
 
 impl ScannerStore {
@@ -339,13 +329,7 @@ impl ScannerStore {
             config: RwLock::new(ScannerConfig::default()),
             seen: RwLock::new(HashSet::new()),
             clear_generation: AtomicU64::new(0),
-            rescanning: AtomicBool::new(false),
         }
-    }
-
-    /// One rescan per session at a time.
-    pub fn begin_rescan(&self) -> Option<RescanSlot<'_>> {
-        (!self.rescanning.swap(true, Ordering::AcqRel)).then_some(RescanSlot(&self.rescanning))
     }
 
     /// Push a finding unless the same issue is already listed (see `finding_scope`).
@@ -459,7 +443,6 @@ impl ScannerStore {
             config: RwLock::new(sanitize_scanner_config(config)),
             seen: RwLock::new(seen),
             clear_generation: AtomicU64::new(0),
-            rescanning: AtomicBool::new(false),
         }
     }
 
@@ -504,14 +487,6 @@ fn finding_scope(finding: &ScannerFinding) -> String {
         let path = finding.path.split(['?', '#']).next().unwrap_or("");
         crate::service_map::path_group(path).unwrap_or_else(|| path.to_string())
     };
-    // A scan's evidence can be a random value it sent and saw reflected; the
-    // template and the endpoint it matched are the issue.
-    if finding
-        .rule_id
-        .starts_with(crate::templates::ACTIVE_RULE_PREFIX)
-    {
-        return endpoint();
-    }
     if !finding.rule_id.is_empty() {
         return finding.evidence.clone();
     }
@@ -546,74 +521,6 @@ const ENDPOINT_INFO_TITLES: &[&str] = &[
     "WSDL service definition exposed",
 ];
 
-/// Scans retained records again with the current rules, for a session whose
-/// findings came from older ones. Keeps the first finding of each issue in the
-/// order the records come, oldest first, as live capture keeps the first it sees.
-pub struct Rescan {
-    config: ScannerConfig,
-    seen: HashSet<FindingDedupKey>,
-    findings: Vec<ScannerFinding>,
-    scanned: HashSet<Uuid>,
-    templates: Option<RescanTemplates>,
-}
-
-/// The passive Nuclei templates a rescan runs, with the scope they apply to,
-/// read once when it starts.
-pub struct RescanTemplates {
-    pub set: std::sync::Arc<crate::templates::engine::PassiveSet>,
-    pub include: Vec<String>,
-    pub exclude: Vec<String>,
-}
-
-impl Rescan {
-    pub fn new(config: ScannerConfig) -> Self {
-        Self {
-            config,
-            seen: HashSet::new(),
-            findings: Vec::new(),
-            scanned: HashSet::new(),
-            templates: None,
-        }
-    }
-
-    pub fn with_templates(mut self, templates: Option<RescanTemplates>) -> Self {
-        self.templates = templates;
-        self
-    }
-
-    pub fn scan(&mut self, record: &TransactionRecord) {
-        self.scanned.insert(record.id);
-        // A rule that panics on one row must not end the rescan; that row just
-        // gets no findings.
-        let Ok(mut found) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan_transaction(record, &self.config)
-        })) else {
-            return;
-        };
-        if let Some(templates) = self.templates.as_ref().filter(|_| self.config.enabled) {
-            if crate::templates::passive_applies(record, &templates.include, &templates.exclude) {
-                if let Ok(more) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::templates::passive_findings(&templates.set, record)
-                })) {
-                    found.extend(more);
-                }
-            }
-        }
-        for finding in found {
-            if self.seen.insert(finding_dedup_key(&finding)) {
-                self.findings.push(finding);
-            }
-        }
-    }
-
-    /// The findings newest first, as the store lists them, and the records scanned.
-    pub fn finish(self) -> (Vec<ScannerFinding>, HashSet<Uuid>) {
-        let mut findings = self.findings;
-        findings.reverse();
-        (findings, self.scanned)
-    }
-}
-
 /// Keeps the first of each issue, newest first, as a store built before
 /// findings were grouped by issue may hold one per request.
 fn distinct_findings(findings: Vec<ScannerFinding>) -> Vec<ScannerFinding> {
@@ -638,11 +545,9 @@ fn is_binary_body(msg: &MessageRecord) -> bool {
 /// almost always false positives — the token pattern coincidentally appears within
 /// base64-encoded binary data.
 fn is_embedded_in_base64(body: &str, m: &regex::Match) -> bool {
-    is_span_embedded_in_base64(body, m.start(), m.end())
-}
-
-fn is_span_embedded_in_base64(body: &str, start: usize, end: usize) -> bool {
     let bytes = body.as_bytes();
+    let start = m.start();
+    let end = m.end();
 
     // Count continuous base64 chars before the match
     let pre = (0..start)
@@ -836,7 +741,7 @@ fn make_finding(
     }
 }
 
-pub(crate) fn infer_finding_location(
+fn infer_finding_location(
     record: &TransactionRecord,
     finding: &ScannerFinding,
 ) -> Option<FindingLocation> {
@@ -1269,7 +1174,7 @@ fn analyze_jwt(
             Severity::Medium,
             "jwt",
             "JWT without expiration",
-            format!("JWT token in {source} has no 'exp' claim, so it does not declare an expiration time. Server-side session expiry, revocation, or other validation may still limit its lifetime; this capture does not establish indefinite reuse."),
+            format!("JWT token in {source} has no 'exp' claim. Tokens without expiration never expire and can be reused indefinitely if stolen."),
             truncate_evidence(token, 120),
         ));
     }
@@ -1314,10 +1219,8 @@ fn check_security_headers(record: &TransactionRecord, findings: &mut Vec<Scanner
     }
 
     // Redirects too: an apex that only redirects to `www` still needs HSTS, or
-    // the first visit to it can be downgraded. RFC 6797 excludes IP literals
-    // from HSTS hosts; their missing header is not an actionable HSTS finding.
+    // the first visit to it can be downgraded.
     if record.scheme.eq_ignore_ascii_case("https")
-        && !host_is_ip_literal(&record.host)
         && matches!(record.status, Some(200..=399))
         && !header_value("strict-transport-security").is_some_and(valid_hsts_header_value)
     {
@@ -1372,16 +1275,6 @@ fn check_security_headers(record: &TransactionRecord, findings: &mut Vec<Scanner
             "",
         ));
     }
-}
-
-fn host_is_ip_literal(host: &str) -> bool {
-    // Stored hosts can also retain an authority's explicit port.
-    host.parse::<std::net::IpAddr>().is_ok()
-        || host.parse::<std::net::SocketAddr>().is_ok()
-        || host
-            .strip_prefix('[')
-            .and_then(|value| value.strip_suffix(']'))
-            .is_some_and(|value| value.parse::<std::net::Ipv6Addr>().is_ok())
 }
 
 fn valid_hsts_header_value(value: &str) -> bool {
@@ -1463,6 +1356,15 @@ fn check_cookie_flags(record: &TransactionRecord, findings: &mut Vec<ScannerFind
         if !cookie_requires_security_flags(cookie_name, cookie_value) {
             continue;
         }
+        // An ad or analytics service's own cookie, named by the map's cookie
+        // rules (`everest_session_v2` is Adobe Advertising's), is read by its
+        // script on purpose; it is not the target's session.
+        if crate::service_map_servers::detect_header("set-cookie", &header.value)
+            .iter()
+            .any(|detection| detection.category == crate::service_map_libraries::ANALYTICS)
+        {
+            continue;
+        }
         let attributes = cookie_attribute_names(&header.value);
 
         if !attributes.contains("httponly") {
@@ -1530,22 +1432,10 @@ fn cookie_requires_security_flags(name: &str, value: &str) -> bool {
 }
 
 fn cookie_looks_auth_sensitive(name: &str, value: &str) -> bool {
-    let value = value.trim().trim_matches('"');
-    if value.is_empty() || value.eq_ignore_ascii_case("null") {
-        return false;
+    if is_auth_cookie_name(name) {
+        return true;
     }
-    if !is_auth_cookie_name(name) && !looks_like_jwt(&normalize_jwt_token_candidate(value)) {
-        return false;
-    }
-    // Use the same known analytics-cookie exclusion for cache checks as for
-    // cookie flags. Their session identifiers do not authenticate this user.
-    if crate::service_map_servers::detect_header("set-cookie", &format!("{name}={value}"))
-        .iter()
-        .any(|detection| detection.category == crate::service_map_libraries::ANALYTICS)
-    {
-        return false;
-    }
-    true
+    looks_like_jwt(&normalize_jwt_token_candidate(value))
 }
 
 fn set_cookie_is_deletion(value: &str) -> bool {
@@ -1589,10 +1479,6 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         return;
     }
     let script = javascript_or_css_response(record, response);
-    let page = response
-        .header_value("content-type")
-        .or(response.content_type.as_deref())
-        .is_some_and(|value| value.to_ascii_lowercase().contains("html"));
 
     static PATTERNS: &[(&str, &str, Severity)] = &[
         // ── Cloud provider secrets ──
@@ -1875,43 +1761,17 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
 
     for &(pattern, label, ref severity) in PATTERNS {
         if let Ok(re) = Regex::new(pattern) {
-            if label == "Password in response" {
-                if let Some(span) = password_response_match(body, script, &re) {
-                    let mut finding = make_finding(
-                        record,
-                        severity.clone(),
-                        "disclosure",
-                        format!("{label} detected in response"),
-                        format!("{label} found in response body. This may expose sensitive information to clients."),
-                        truncate_evidence(&body[span.clone()], 80),
-                    );
-                    let line = response.headers.len()
-                        + 3
-                        + body[..span.start]
-                            .bytes()
-                            .filter(|byte| *byte == b'\n')
-                            .count();
-                    finding.location = Some(location_for_line(record, "response", line));
-                    findings.push(finding);
-                }
-                continue;
-            }
             for captures in re.captures_iter(body) {
                 let Some(m) = captures.get(0) else {
                     continue;
                 };
-                if is_generic_secret_label(label)
-                    && !generic_secret_candidate_looks_like_secret(&captures)
+                if label == "Password in response"
+                    && !password_candidate_looks_like_secret(&captures, script)
                 {
                     continue;
                 }
-                // A page or a script hands its SDK keys to every visitor; there
-                // only a key named a secret is worth a finding.
-                if label == "API Key/Secret pattern"
-                    && (script || page)
-                    && !body[m.start()..captures.get(1).map_or(m.end(), |value| value.start())]
-                        .to_ascii_lowercase()
-                        .contains("secret")
+                if is_generic_secret_label(label)
+                    && !generic_secret_candidate_looks_like_secret(&captures)
                 {
                     continue;
                 }
@@ -1942,9 +1802,6 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
                 if label == "Mailgun API Key" && !mailgun_key_match_has_context(body, &m) {
                     continue;
                 }
-                if label == "Replicate API Token" && !replicate_token_has_boundaries(body, &m) {
-                    continue;
-                }
                 if label == "Sensitive file path exposed"
                     && sensitive_file_path_match_is_template(body, &m)
                 {
@@ -1955,48 +1812,20 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
                 if is_embedded_in_base64(body, &m) {
                     continue;
                 }
-                let mut finding = make_finding(
+                findings.push(make_finding(
                     record,
                     severity.clone(),
                     "disclosure",
                     format!("{label} detected in response"),
                     format!("{label} found in response body. This may expose sensitive information to clients."),
                     truncate_evidence(m.as_str(), 80),
-                );
-                if label == "Replicate API Token" {
-                    // The same value may occur earlier inside a rejected opaque
-                    // identifier or header. Navigate to this accepted body match.
-                    let line = response.headers.len()
-                        + 3
-                        + body[..m.start()]
-                            .bytes()
-                            .filter(|byte| *byte == b'\n')
-                            .count();
-                    finding.location = Some(location_for_line(record, "response", line));
-                }
-                findings.push(finding);
+                ));
                 break;
             }
         }
     }
 
     check_internal_ip_disclosure(record, body, findings);
-}
-
-// A supported token can occur inside a longer URL-safe opaque identifier.
-// Inspect adjacent bytes without consuming delimiters or slicing UTF-8. Unicode
-// prose remains a delimiter; ASCII hyphens conservatively count as continuation,
-// even when a genuine token happens to touch hyphen punctuation.
-fn replicate_token_has_boundaries(body: &str, m: &regex::Match<'_>) -> bool {
-    let bytes = body.as_bytes();
-    let adjacent = [
-        m.start().checked_sub(1).and_then(|index| bytes.get(index)),
-        bytes.get(m.end()),
-    ];
-    !adjacent
-        .into_iter()
-        .flatten()
-        .any(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
 }
 
 fn check_internal_ip_disclosure(
@@ -2121,90 +1950,17 @@ fn token_mixes_cases_and_digits(token: &str) -> bool {
         && body.bytes().any(|byte| byte.is_ascii_lowercase())
 }
 
-// Keep the old accepted candidates as a compatibility floor. Completing a
-// quoted prefix can expose a suffix rejected by existing heuristics; that must
-// improve evidence, not silently remove an already reported finding.
-fn password_response_match(
-    body: &str,
-    script: bool,
-    legacy: &Regex,
-) -> Option<std::ops::Range<usize>> {
-    let legacy_match = legacy.captures_iter(body).find_map(|captures| {
-        let m = captures.get(0)?;
-        if !password_candidate_looks_like_secret(&captures, script)
-            || is_embedded_in_base64(body, &m)
-        {
-            return None;
-        }
-        let end = captures
-            .get(1)
-            .or(captures.get(2))
-            .and_then(|value| password_quoted_end(body, value.start() - 1))
-            .unwrap_or(m.end());
-        Some(m.start()..end)
-    });
-
-    // Discover keys independently: a rejected or malformed earlier literal
-    // must not consume a later key. Only quoted candidates are supplemented;
-    // the unquoted signature and its filtering remain on the legacy path.
-    let heads = Regex::new(r#"(?i)(?:\b|[_-])(?:password|passwd|pwd)\b\s*["']?\s*[:=]\s*["']"#)
-        .expect("valid password key pattern");
-    for head in heads.find_iter(body) {
-        if legacy_match
-            .as_ref()
-            .is_some_and(|span| head.start() >= span.start)
-        {
-            break;
-        }
-        let Some(end) = password_quoted_end(body, head.end() - 1) else {
-            continue;
-        };
-        let value = &body[head.end()..end - 1];
-        // Preserve the regex's four raw Unicode scalars, then the existing
-        // heuristic's eight raw UTF-8 bytes. Do not decode any escape spelling.
-        if value.chars().take(4).count() == 4
-            && password_value_looks_like_secret(value, true, script)
-            && !is_span_embedded_in_base64(body, head.start(), end)
-        {
-            return Some(head.start()..end);
-        }
-    }
-    legacy_match
-}
-
-// ASCII quote/backslash offsets are always UTF-8 boundaries. Each discovered
-// opening quote follows ':'/'='/whitespace and is therefore unescaped. For
-// either quote kind its next closing quote is no later than the next opener of
-// that kind, so scans (including rejected/unterminated candidates) total O(n),
-// rather than repeatedly scanning an unclosed suffix. No source is decoded.
-fn password_quoted_end(body: &str, opening: usize) -> Option<usize> {
-    let quote = body.as_bytes()[opening];
-    let mut escaped = false;
-    for (offset, &byte) in body.as_bytes()[opening + 1..].iter().enumerate() {
-        if byte == quote && !escaped {
-            return Some(opening + offset + 2);
-        }
-        escaped = byte == b'\\' && !escaped;
-    }
-    None
-}
-
 fn password_candidate_looks_like_secret(captures: &regex::Captures<'_>, script: bool) -> bool {
     let Some(value) = captured_secret_value(captures) else {
         return false;
     };
-    let quoted = captures.get(1).or(captures.get(2)).is_some();
-    password_value_looks_like_secret(value, quoted, script)
-}
-
-fn password_value_looks_like_secret(value: &str, quoted: bool, script: bool) -> bool {
-    let value = value.trim();
     if value.len() < 8 {
         return false;
     }
     // Code, not a value: in a script anything unquoted (`e.password,text:…`);
     // anywhere an unquoted flag, comparison or call (`!0`, `==e.type`, `f(x)`),
     // or a quote closing a string before a concatenation (`"pw: "+e.pw`).
+    let quoted = captures.get(1).or(captures.get(2)).is_some();
     if value.starts_with('+')
         || (!quoted && (script || value.starts_with(['!', '=']) || value.contains('(')))
     {
@@ -2564,61 +2320,48 @@ fn check_cors(record: &TransactionRecord, findings: &mut Vec<ScannerFinding>) {
         None => return,
     };
 
-    // Fetch combines duplicate field lines, which cannot yield a singleton
-    // ACAO origin or the exact ACAC token. Reading only the first line would
-    // report browser access that the CORS check actually rejects.
-    let Some(origin) = cors_single_header_value(response, "access-control-allow-origin") else {
-        return;
-    };
-    if cors_single_header_value(response, "access-control-allow-credentials") != Some("true") {
-        return;
-    }
+    let acao = response
+        .header_value("access-control-allow-origin")
+        .map(str::trim);
+    let acac = response
+        .header_value("access-control-allow-credentials")
+        .map(str::trim);
 
-    if origin == "null" {
-        findings.push(make_finding(
-            record,
-            Severity::Medium,
-            "cors",
-            "CORS: null origin with credentials",
-            "Access-Control-Allow-Origin: null with Access-Control-Allow-Credentials: true can expose credentialed responses to sandboxed or file-origin contexts.",
-            "ACAO: null, ACAC: true",
-        ));
-    } else if origin != "*" && is_serialized_cors_origin(origin) {
-        let req_origin = cors_single_header_value(&record.request, "origin").unwrap_or("");
-        if origin == req_origin && !origin_is_same_site(origin, &record.scheme, &record.host) {
-            // One answer cannot show reflection: an allowlist answers its
-            // own origins the same way. A site trusting its own hosts is
-            // the usual setup and is left out above.
+    if let Some(origin) = acao {
+        if origin == "*" {
+            // Browsers block wildcard ACAO when credentials are enabled, so this
+            // is a policy smell rather than a browser-exploitable passive finding.
+        } else if origin.eq_ignore_ascii_case("null")
+            && acac.is_some_and(|v| v.eq_ignore_ascii_case("true"))
+        {
             findings.push(make_finding(
                 record,
-                Severity::Low,
+                Severity::Medium,
                 "cors",
-                "CORS: another site allowed with credentials",
-                format!("Response headers allow credentialed CORS access for {origin}, another site, if the browser's other checks pass. This capture does not establish that credentials were sent, sensitive data was returned, or another site actually read the response. One answer cannot distinguish an intentional allowlist from unrestricted origin reflection."),
-                format!("ACAO: {origin}, ACAC: true"),
+                "CORS: null origin with credentials",
+                "Access-Control-Allow-Origin: null with Access-Control-Allow-Credentials: true can expose credentialed responses to sandboxed or file-origin contexts.",
+                "ACAO: null, ACAC: true",
             ));
+        } else if acac.is_some_and(|v| v.eq_ignore_ascii_case("true")) {
+            let req_origin = record.request.header_value("origin").unwrap_or("").trim();
+            if !req_origin.is_empty()
+                && origin == req_origin
+                && !origin_is_same_site(origin, &record.scheme, &record.host)
+            {
+                // One answer cannot show reflection: an allowlist answers its
+                // own origins the same way. A site trusting its own hosts is
+                // the usual setup and is left out above.
+                findings.push(make_finding(
+                    record,
+                    Severity::Low,
+                    "cors",
+                    "CORS: another site allowed with credentials",
+                    format!("The response let {origin}, another site, read it with credentials. One answer cannot tell an allowlist from a server that reflects any origin: replay the request with an Origin the server cannot expect, and the finding stands if that origin comes back with credentials allowed."),
+                    format!("ACAO: {origin}, ACAC: true"),
+                ));
+            }
         }
     }
-}
-
-fn cors_single_header_value<'a>(message: &'a MessageRecord, name: &str) -> Option<&'a str> {
-    let mut values = message
-        .headers
-        .iter()
-        .filter(|header| header.name.eq_ignore_ascii_case(name));
-    let value = &values.next()?.value;
-    if values.next().is_some() {
-        return None;
-    }
-    // HTTP optional whitespace, not arbitrary Unicode whitespace.
-    Some(value.trim_matches([' ', '\t']))
-}
-
-fn is_serialized_cors_origin(origin: &str) -> bool {
-    url::Url::parse(origin).is_ok_and(|url| {
-        let serialized = url.origin().ascii_serialization();
-        serialized != "null" && serialized == origin
-    })
 }
 
 /// Whether an origin is on the same site as the request, as browsers judge
@@ -2932,116 +2675,22 @@ fn check_error_messages(record: &TransactionRecord, findings: &mut Vec<ScannerFi
     ];
 
     for &(pattern, label, ref severity) in ERROR_PATTERNS {
-        let matched = match pattern {
-            "ora-" => {
-                oracle_error_code_match(&body_lower).map(|(index, length)| (index, length, None))
+        if body_lower.contains(pattern) {
+            if error_pattern_is_too_generic(pattern, &body_lower) {
+                continue;
             }
-            "error occurred while processing request" => coldfusion_error_phrase_match(&body_lower)
-                .map(|(index, marker_start, marker_len)| {
-                    (index, pattern.len(), Some((marker_start, marker_len)))
-                }),
-            _ => body_lower
-                .find(pattern)
-                .filter(|_| !error_pattern_is_too_generic(pattern, &body_lower))
-                .map(|index| (index, pattern.len(), None)),
-        };
-        if let Some((evidence_start, evidence_len, corroborator)) = matched {
-            let evidence = error_match_evidence(body, evidence_start, evidence_len, corroborator);
-            let mut finding = make_finding(
+            let evidence_start = body_lower.find(pattern).unwrap_or(0);
+            let evidence = evidence_window(body, evidence_start, pattern.len(), 20, 60);
+            findings.push(make_finding(
                 record,
                 severity.clone(),
                 "error",
                 format!("{label} in error response"),
                 format!("HTTP {status} response contains {label}. Detailed error messages help attackers understand the backend stack."),
-                evidence,
-            );
-            if pattern == "ora-" || corroborator.is_some() {
-                // Searching the excerpt again can jump to an earlier repeated
-                // prefix or a lookalike that failed the contextual predicate.
-                let offset = corroborator.map_or(evidence_start, |(start, _)| start);
-                let line = response.headers.len()
-                    + 3
-                    + body[..offset].bytes().filter(|byte| *byte == b'\n').count();
-                finding.location = Some(location_for_line(record, "response", line));
-            }
-            findings.push(finding);
+                truncate_evidence(evidence, 120),
+            ));
             break; // One finding per response is enough
         }
-    }
-}
-
-fn oracle_error_code_match(body_lower: &str) -> Option<(usize, usize)> {
-    // Oracle's displayed ORA code is five digits. Bare prefixes also occur in
-    // ordinary words such as "flora-guide"; an excerpt must use the qualifying
-    // occurrence, not an earlier prefix that failed these checks.
-    body_lower.match_indices("ora-").find_map(|(index, _)| {
-        let end = index + 9;
-        let digits = body_lower.as_bytes().get(index + 4..end)?;
-        let before = body_lower[..index].chars().next_back();
-        let after = body_lower.get(end..)?.chars().next();
-        (digits.iter().all(u8::is_ascii_digit)
-            && before.is_none_or(|ch| !ch.is_alphanumeric() && ch != '_')
-            && after.is_none_or(|ch| !ch.is_alphanumeric() && ch != '_'))
-        .then_some((index, 9))
-    })
-}
-
-fn coldfusion_error_phrase_match(body_lower: &str) -> Option<(usize, usize, usize)> {
-    const PHRASE: &str = "error occurred while processing request";
-    // The heading is generic. Return its offset plus the corroborator's offset
-    // and length so the bounded excerpt can display both pieces of evidence.
-    body_lower.match_indices(PHRASE).find_map(|(index, _)| {
-        let context_start = previous_char_boundary(body_lower, index.saturating_sub(512));
-        let context_end = next_char_boundary(
-            body_lower,
-            (index + PHRASE.len() + 512).min(body_lower.len()),
-        );
-        let context = &body_lower[context_start..context_end];
-        [
-            "coldfusion.runtime.",
-            "coldfusion.tagext.",
-            "coldfusion.filter.",
-            "coldfusion.sql.",
-            "coldfusion.compiler.",
-            "check the coldfusion documentation",
-            "enable robust exception information",
-        ]
-        .iter()
-        .find_map(|marker| {
-            context.match_indices(marker).find_map(|(start, _)| {
-                let marker_start = context_start + start;
-                // A cropped window must not invent a boundary inside a word.
-                body_lower[..marker_start]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|ch| !ch.is_alphanumeric() && ch != '_')
-                    .then_some((index, marker_start, marker.len()))
-            })
-        })
-    })
-}
-
-fn error_match_evidence(
-    body: &str,
-    match_start: usize,
-    match_len: usize,
-    corroborator: Option<(usize, usize)>,
-) -> String {
-    if let Some((marker_start, marker_len)) = corroborator {
-        // A generic heading alone cannot explain vendor attribution. Keep both
-        // matches visible even when their local context is too far apart for
-        // one excerpt. Put the real marker excerpt on its own first line so
-        // finding-location lookup can still locate the corroborating text.
-        truncate_evidence(
-            &format!(
-                "{}\n{}",
-                evidence_window(body, marker_start, marker_len, 0, 32),
-                &body[match_start..match_start + match_len],
-            ),
-            120,
-        )
-    } else {
-        truncate_evidence(evidence_window(body, match_start, match_len, 20, 60), 120)
     }
 }
 
@@ -3284,51 +2933,40 @@ fn check_security_misconfig(record: &TransactionRecord, findings: &mut Vec<Scann
             .any(|h| h.name.eq_ignore_ascii_case(name))
     };
 
-    // All enforced policies apply independently. A permissive policy cannot
-    // override a restrictive one, and report-only headers impose no limit.
-    let policies: Vec<_> = response
-        .headers
-        .iter()
-        .enumerate()
-        .filter(|(_, header)| header.name.eq_ignore_ascii_case("content-security-policy"))
-        .flat_map(|(index, header)| {
-            header
-                .value
-                .split(',')
-                .map(move |policy| CspScriptPolicy::parse(policy, index + 2))
-        })
-        .collect();
-    if let Some((evidence, location)) = [CspScriptContext::Element, CspScriptContext::Attribute]
-        .into_iter()
-        .find_map(|context| csp_finding_evidence(&policies, context))
-    {
-        let mut finding = make_finding(
-            record,
-            Severity::Medium,
-            "misconfig",
-            "CSP allows unsafe-inline",
-            "Content-Security-Policy contains 'unsafe-inline', which undermines XSS protection by allowing inline scripts.",
-            evidence,
-        );
-        finding.location = Some(location);
-        findings.push(finding);
-    }
-    if let Some((evidence, location)) = csp_finding_evidence(&policies, CspScriptContext::Eval) {
-        let mut finding = make_finding(
-            record,
-            Severity::Medium,
-            "misconfig",
-            "CSP allows unsafe-eval",
-            "Content-Security-Policy contains 'unsafe-eval', which allows eval() and similar dynamic code execution.",
-            evidence,
-        );
-        finding.location = Some(location);
-        findings.push(finding);
+    let header_value = |name: &str| -> Option<String> {
+        response
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case(name))
+            .map(|h| h.value.clone())
+    };
+
+    // CSP with unsafe-inline or unsafe-eval
+    if let Some(csp) = header_value("content-security-policy") {
+        if csp_script_sources_have_actionable_unsafe_inline(&csp) {
+            findings.push(make_finding(
+                record,
+                Severity::Medium,
+                "misconfig",
+                "CSP allows unsafe-inline",
+                "Content-Security-Policy contains 'unsafe-inline', which undermines XSS protection by allowing inline scripts.",
+                truncate_evidence(&csp, 120),
+            ));
+        }
+        if csp_script_sources_contain(&csp, "'unsafe-eval'") {
+            findings.push(make_finding(
+                record,
+                Severity::Medium,
+                "misconfig",
+                "CSP allows unsafe-eval",
+                "Content-Security-Policy contains 'unsafe-eval', which allows eval() and similar dynamic code execution.",
+                truncate_evidence(&csp, 120),
+            ));
+        }
     }
 
-    // Session or authorization indicators need not mean an authenticated user.
-    // Browsers send cookies with images, styles and scripts too, whose public
-    // caching is right.
+    // Cache-Control missing on authenticated responses. Browsers send cookies
+    // with every image, style and script too, whose public caching is right.
     let has_auth = has_authenticated_cache_context(record, response)
         && !matches!(
             crate::service_map::request_kind(record),
@@ -3339,180 +2977,111 @@ fn check_security_misconfig(record: &TransactionRecord, findings: &mut Vec<Scann
             record,
             Severity::Low,
             "misconfig",
-            "Missing Cache-Control with session or authorization indicators",
-            "An Authorization header or session-like cookie was observed. This does not establish an authenticated user. The response lacks Cache-Control, so any sensitive content may be cached by browsers or proxies.",
+            "Missing Cache-Control on authenticated response",
+            "Response to an authenticated request lacks Cache-Control header. Sensitive data may be cached by browsers or proxies.",
             "",
         ));
     }
 
-    // A directive name is significant, not a substring inside an extension
-    // or a quoted field-name list. Multiple field lines form one policy.
+    // Sensitive data in Cache-Control: public
     if has_auth {
-        let cache_control: Vec<_> = response
-            .headers
-            .iter()
-            .filter(|header| header.name.eq_ignore_ascii_case("cache-control"))
-            .map(|header| header.value.as_str())
-            .collect();
-        let directives: Vec<_> = cache_control
-            .iter()
-            .flat_map(|value| header_list_members(value))
-            .map(str::trim)
-            .collect();
-        if directives
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case("public"))
-            && !directives.iter().any(|value| {
-                value.eq_ignore_ascii_case("no-store") || value.eq_ignore_ascii_case("private")
-            })
+        if let Some(cc) = header_value("cache-control") {
+            let cc_lower = cc.to_ascii_lowercase();
+            if cc_lower.contains("public") && !cc_lower.contains("no-store") {
+                findings.push(make_finding(
+                    record,
+                    Severity::Medium,
+                    "misconfig",
+                    "Cache-Control: public on authenticated response",
+                    "Authenticated response has Cache-Control: public, allowing caching of potentially sensitive data.",
+                    format!("Cache-Control: {cc}"),
+                ));
+            }
+        }
+    }
+}
+
+fn csp_script_sources_contain(csp: &str, token: &str) -> bool {
+    let token = token.to_ascii_lowercase();
+    let mut default_sources: Option<Vec<String>> = None;
+    let mut has_script_directive = false;
+    let mut matched_script_directive = false;
+
+    for directive in csp.split(';') {
+        let mut parts = directive.split_whitespace();
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        let name = name.to_ascii_lowercase();
+        let sources = parts.map(str::to_ascii_lowercase).collect::<Vec<String>>();
+        if name == "default-src" {
+            default_sources = Some(sources);
+            continue;
+        }
+        if matches!(
+            name.as_str(),
+            "script-src" | "script-src-elem" | "script-src-attr"
+        ) {
+            has_script_directive = true;
+            matched_script_directive |= sources.iter().any(|source| source == &token);
+        }
+    }
+
+    if has_script_directive {
+        matched_script_directive
+    } else {
+        default_sources
+            .as_deref()
+            .is_some_and(|sources| sources.iter().any(|source| source == &token))
+    }
+}
+
+fn csp_script_sources_have_actionable_unsafe_inline(csp: &str) -> bool {
+    let mut default_sources: Option<Vec<String>> = None;
+    let mut script_sources: Option<Vec<String>> = None;
+    let mut script_elem_sources: Option<Vec<String>> = None;
+    let mut script_attr_sources: Option<Vec<String>> = None;
+
+    for directive in csp.split(';') {
+        let mut parts = directive.split_whitespace();
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        let name = name.to_ascii_lowercase();
+        let sources = parts.map(str::to_ascii_lowercase).collect::<Vec<String>>();
+        if name == "default-src" {
+            default_sources = Some(sources);
+            continue;
+        }
+        match name.as_str() {
+            "script-src" => script_sources = Some(sources),
+            "script-src-elem" => script_elem_sources = Some(sources),
+            "script-src-attr" => script_attr_sources = Some(sources),
+            _ => {}
+        }
+    }
+
+    let effective_script = script_sources.as_deref().or(default_sources.as_deref());
+    let effective_elem = script_elem_sources
+        .as_deref()
+        .or(script_sources.as_deref())
+        .or(default_sources.as_deref());
+    let effective_attr = script_attr_sources
+        .as_deref()
+        .or(script_sources.as_deref())
+        .or(default_sources.as_deref());
+
+    for sources in [effective_script, effective_elem, effective_attr]
+        .into_iter()
+        .flatten()
+    {
+        if csp_sources_contain(sources, "'unsafe-inline'")
+            && !csp_sources_have_nonce_or_hash(sources)
         {
-            findings.push(make_finding(
-                record,
-                Severity::Medium,
-                "misconfig",
-                "Cache-Control: public with session or authorization indicators",
-                "An Authorization header or session-like cookie was observed. This does not establish an authenticated user. Cache-Control: public may allow shared caching of any sensitive content in this response.",
-                format!("Cache-Control: {}", cache_control.join(", ")),
-            ));
+            return true;
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum CspScriptContext {
-    Element,
-    Attribute,
-    Eval,
-}
-
-struct CspScriptDirective {
-    raw: String,
-    sources: Vec<String>,
-}
-
-impl CspScriptDirective {
-    fn evidence(&self, context: CspScriptContext) -> String {
-        if self.raw.len() <= 120 {
-            return self.raw.clone();
-        }
-        // A long source list can hide the unsafe keyword even after selecting
-        // the operative directive. Keep both visible; location retains the
-        // exact original header when this abbreviated excerpt is not contiguous.
-        let keyword = match context {
-            CspScriptContext::Eval => "'unsafe-eval'",
-            CspScriptContext::Element | CspScriptContext::Attribute => "'unsafe-inline'",
-        };
-        let name = self.raw.split_ascii_whitespace().next().unwrap_or_default();
-        let source = self
-            .raw
-            .split_ascii_whitespace()
-            .find(|source| source.eq_ignore_ascii_case(keyword))
-            .unwrap_or(keyword);
-        format!("{name} ... {source}")
-    }
-}
-
-#[derive(Default)]
-struct CspScriptPolicy {
-    header_line: usize,
-    default: Option<CspScriptDirective>,
-    script: Option<CspScriptDirective>,
-    element: Option<CspScriptDirective>,
-    attribute: Option<CspScriptDirective>,
-}
-
-impl CspScriptPolicy {
-    fn parse(policy: &str, header_line: usize) -> Self {
-        let mut parsed = Self {
-            header_line,
-            ..Self::default()
-        };
-        for directive in policy.split(';') {
-            // CSP parsing discards non-ASCII directives rather than allowing
-            // Unicode whitespace to create a browser-inert source restriction.
-            if !directive.is_ascii() {
-                continue;
-            }
-            let mut parts = directive.split_ascii_whitespace();
-            let Some(name) = parts.next() else {
-                continue;
-            };
-            let slot = match name.to_ascii_lowercase().as_str() {
-                "default-src" => &mut parsed.default,
-                "script-src" => &mut parsed.script,
-                "script-src-elem" => &mut parsed.element,
-                "script-src-attr" => &mut parsed.attribute,
-                _ => continue,
-            };
-            // Browsers ignore a repeated directive after its first occurrence.
-            if slot.is_none() {
-                *slot = Some(CspScriptDirective {
-                    raw: directive.trim().to_string(),
-                    sources: parts.map(str::to_ascii_lowercase).collect(),
-                });
-            }
-        }
-        parsed
-    }
-
-    fn directive(&self, context: CspScriptContext) -> Option<&CspScriptDirective> {
-        let script = self.script.as_ref().or(self.default.as_ref());
-        match context {
-            CspScriptContext::Element => self.element.as_ref().or(script),
-            CspScriptContext::Attribute => self.attribute.as_ref().or(script),
-            // script-src-elem/attr do not govern eval(), even when present.
-            CspScriptContext::Eval => script,
-        }
-    }
-
-    fn sources(&self, context: CspScriptContext) -> Option<&[String]> {
-        self.directive(context)
-            .map(|directive| directive.sources.as_slice())
-    }
-}
-
-fn csp_finding_evidence(
-    policies: &[CspScriptPolicy],
-    context: CspScriptContext,
-) -> Option<(String, FindingLocation)> {
-    if !csp_policies_allow(policies, context) {
-        return None;
-    }
-    // Select a representative directive only after every enforced policy has
-    // allowed this same context, preserving intersection and fallback semantics.
-    policies.iter().find_map(|policy| {
-        let directive = policy.directive(context)?;
-        Some((
-            directive.evidence(context),
-            FindingLocation {
-                side: "response".to_string(),
-                section: "header".to_string(),
-                line: Some(policy.header_line),
-            },
-        ))
-    })
-}
-
-fn csp_policies_allow(policies: &[CspScriptPolicy], context: CspScriptContext) -> bool {
-    let mut explicitly_allowed = false;
-    for policy in policies {
-        let Some(sources) = policy.sources(context) else {
-            continue; // This policy does not constrain this script context.
-        };
-        let allowed = match context {
-            CspScriptContext::Eval => csp_sources_contain(sources, "'unsafe-eval'"),
-            CspScriptContext::Element | CspScriptContext::Attribute => {
-                csp_sources_contain(sources, "'unsafe-inline'")
-                    && !csp_sources_have_nonce_or_hash(sources)
-                    && !csp_sources_contain(sources, "'strict-dynamic'")
-            }
-        };
-        if !allowed {
-            return false;
-        }
-        explicitly_allowed = true;
-    }
-    explicitly_allowed
+    false
 }
 
 fn csp_sources_contain(sources: &[String], token: &str) -> bool {
@@ -3521,19 +3090,11 @@ fn csp_sources_contain(sources: &[String], token: &str) -> bool {
 
 fn csp_sources_have_nonce_or_hash(sources: &[String]) -> bool {
     sources.iter().any(|source| {
-        let Some(source) = source.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else {
-            return false;
-        };
-        let Some((kind, value)) = source.split_once('-') else {
-            return false;
-        };
-        let unpadded = value.trim_end_matches('=');
-        matches!(kind, "nonce" | "sha256" | "sha384" | "sha512")
-            && !unpadded.is_empty()
-            && value.len() - unpadded.len() <= 2
-            && unpadded.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_')
-            })
+        let source = source.trim_matches('\'');
+        source.starts_with("nonce-")
+            || source.starts_with("sha256-")
+            || source.starts_with("sha384-")
+            || source.starts_with("sha512-")
     })
 }
 
@@ -3695,8 +3256,7 @@ fn check_info_disclosure(record: &TransactionRecord, findings: &mut Vec<ScannerF
     }
 
     // HTML comments with sensitive keywords
-    if response_can_contain_html_comments(record, response) {
-        let comment_re = Regex::new(r"<!--[\s\S]{0,500}?-->").unwrap();
+    if let Ok(comment_re) = Regex::new(r"<!--[\s\S]{0,500}?-->") {
         for m in comment_re.find_iter(body) {
             let comment = m.as_str().to_ascii_lowercase();
             if let Some(keyword) = sensitive_html_comment_keyword(&comment) {
@@ -3970,24 +3530,6 @@ fn push_source_map_header_finding(
     }
 }
 
-fn response_can_contain_html_comments(
-    record: &TransactionRecord,
-    response: &MessageRecord,
-) -> bool {
-    if let Some(content_type) = response
-        .header_value("content-type")
-        .or(response.content_type.as_deref())
-        .filter(|value| !value.trim().is_empty())
-    {
-        let essence = content_type.split(';').next().unwrap_or("").trim();
-        // An HTML error page can be served at a .js path; conversely a MIME
-        // parameter containing "text/html" does not make JSON into HTML.
-        return essence.eq_ignore_ascii_case("text/html")
-            || essence.eq_ignore_ascii_case("application/xhtml+xml");
-    }
-    !javascript_or_css_response(record, response) && is_html_page_response(response)
-}
-
 fn sensitive_html_comment_keyword(comment_lower: &str) -> Option<&'static str> {
     const SENSITIVE_KEYWORDS: &[&str] = &[
         "password",
@@ -4001,7 +3543,7 @@ fn sensitive_html_comment_keyword(comment_lower: &str) -> Option<&'static str> {
         "debug",
     ];
     for keyword in SENSITIVE_KEYWORDS {
-        if contains_comment_keyword(comment_lower, keyword) {
+        if comment_lower.contains(keyword) {
             return Some(*keyword);
         }
     }
@@ -4010,41 +3552,13 @@ fn sensitive_html_comment_keyword(comment_lower: &str) -> Option<&'static str> {
         &["todo", "fixme", "hack", "bug", "temporary", "remove before"];
     DEV_NOTE_KEYWORDS
         .iter()
-        .find(|keyword| contains_comment_keyword(comment_lower, keyword))
+        .find(|keyword| comment_lower.contains(**keyword))
         .copied()
         .filter(|_| {
             ["auth", "login", "session", "role", "permission", "prod"]
                 .iter()
-                .any(|context| contains_comment_keyword(comment_lower, context))
+                .any(|context| comment_lower.contains(context))
         })
-}
-
-fn contains_comment_keyword(comment: &str, keyword: &str) -> bool {
-    let aliases: &[&str] = match keyword {
-        "password" => &["password", "passwords"],
-        "secret" => &["secret", "secrets"],
-        "credential" => &["credential", "credentials"],
-        "token" => &["token", "tokens"],
-        "auth" => &["auth", "authentication", "authorization"],
-        "role" => &["role", "roles"],
-        "permission" => &["permission", "permissions"],
-        "prod" => &["prod", "production"],
-        _ => &[keyword],
-    };
-    aliases.iter().any(|keyword| {
-        comment.match_indices(keyword).any(|(index, _)| {
-            // Underscores delimit names such as access_token or db_password.
-            let is_word = |ch: char| ch.is_alphanumeric();
-            comment[..index]
-                .chars()
-                .next_back()
-                .is_none_or(|ch| !is_word(ch))
-                && comment[index + keyword.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|ch| !is_word(ch))
-        })
-    })
 }
 
 // ── Exposures the Service Map names ──
@@ -4143,7 +3657,7 @@ fn map_exposure_severity(product_id: &str) -> Option<Severity> {
 
 fn check_auth_issues(record: &TransactionRecord, findings: &mut Vec<ScannerFinding>) {
     // Session token in URL
-    if let Some(param) = session_token_parameter_in_url(record) {
+    if let Some(param) = session_token_parameter_in_url(&record.path) {
         findings.push(make_finding(
                 record,
                 Severity::Medium,
@@ -4258,54 +3772,22 @@ fn check_auth_issues(record: &TransactionRecord, findings: &mut Vec<ScannerFindi
         }
     }
 
-    if record.scheme == "http" {
-        if let Some(response) = &record.response {
-            for header in &response.headers {
-                if !header.name.eq_ignore_ascii_case("www-authenticate")
-                    || !header_list_members(&header.value).iter().any(|member| {
-                        let (scheme, rest) = member
-                            .split_once(char::is_whitespace)
-                            .unwrap_or((member, ""));
-                        scheme.eq_ignore_ascii_case("basic") && !rest.trim_start().starts_with('=')
-                    })
-                {
-                    continue;
-                }
+    // WWW-Authenticate header reveals auth scheme
+    if let Some(response) = &record.response {
+        if let Some(www_auth) = response.header_value("www-authenticate") {
+            let wa_lower = www_auth.to_ascii_lowercase();
+            if wa_lower.contains("basic") && record.scheme == "http" {
                 findings.push(make_finding(
                     record,
                     Severity::Medium,
                     "auth",
                     "Server requests Basic auth over HTTP",
                     "WWW-Authenticate header requests Basic authentication over unencrypted HTTP.",
-                    format!("WWW-Authenticate: {}", header.value),
+                    format!("WWW-Authenticate: {www_auth}"),
                 ));
-                break;
             }
         }
     }
-}
-
-/// Commas in quoted header parameters belong to that value, not to a new
-/// challenge or directive (for example Digest realm="basic, account").
-fn header_list_members(value: &str) -> Vec<&str> {
-    let mut members = Vec::new();
-    let mut start = 0;
-    let mut quoted = false;
-    let mut escaped = false;
-    for (index, ch) in value.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if quoted && ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            quoted = !quoted;
-        } else if ch == ',' && !quoted {
-            members.push(value[start..index].trim());
-            start = index + 1;
-        }
-    }
-    members.push(value[start..].trim());
-    members
 }
 
 fn is_external_redirect_location(location: &str, request_scheme: &str, request_host: &str) -> bool {
@@ -4379,8 +3861,7 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-fn session_token_parameter_in_url(record: &TransactionRecord) -> Option<String> {
-    let path = &record.path;
+fn session_token_parameter_in_url(path: &str) -> Option<String> {
     let lower = path.to_ascii_lowercase();
     if lower.contains(";jsessionid=") || lower.contains(";phpsessid=") {
         return path.split(';').skip(1).find_map(|segment| {
@@ -4398,33 +3879,9 @@ fn session_token_parameter_in_url(record: &TransactionRecord) -> Option<String> 
         let key = key.replace('+', " ");
         let decoded = percent_decode(&key).to_ascii_lowercase();
         (is_session_token_parameter_name(&decoded)
-            && (!session_token_name_needs_cookie(&decoded)
-                || request_cookie_carries(record, value))
             && session_token_value_looks_sensitive(&decoded, value))
         .then_some(decoded)
     })
-}
-
-// Analytics, ad and bot beacons send their own ids as `sid`, `token` or
-// `api_key`. Under these names only the request's own cookie copied into the
-// URL is a session leaking.
-fn session_token_name_needs_cookie(name: &str) -> bool {
-    matches!(
-        name,
-        "sessionid" | "session_id" | "sid" | "token" | "api_key"
-    )
-}
-
-fn request_cookie_carries(record: &TransactionRecord, value: &str) -> bool {
-    let value = percent_decode(value);
-    record
-        .request
-        .headers
-        .iter()
-        .filter(|header| header.name.eq_ignore_ascii_case("cookie"))
-        .flat_map(|header| header.value.split(';'))
-        .filter_map(|pair| pair.split_once('='))
-        .any(|(_, cookie)| percent_decode(cookie.trim()) == value)
 }
 
 fn is_session_token_parameter_name(name: &str) -> bool {
@@ -5123,198 +4580,6 @@ mod tests {
                 .any(|finding| finding.title == "GitLab Token detected in response"),
             "documented GitLab token prefixes should still be reported"
         );
-    }
-
-    // All token-shaped test values are synthetic, not usable credentials.
-    const SYNTHETIC_REPLICATE_TOKEN: &str = "r8_Ab1Cd2Ab1Cd2Ab1Cd2Ab1Cd2Ab1Cd2Ab1Cd2Xy";
-
-    fn replicate_findings_for_body(
-        body: &str,
-        content_type: &str,
-        status: u16,
-    ) -> Vec<ScannerFinding> {
-        let mut record = make_record(vec![], vec![("Content-Type", content_type)], body, status);
-        record.response.as_mut().unwrap().content_type = Some(content_type.into());
-        findings_for_rule(&record, "disclosure")
-            .into_iter()
-            .filter(|finding| finding.title == "Replicate API Token detected in response")
-            .collect()
-    }
-
-    #[test]
-    fn replicate_token_boundary_rejects_opaque_ascii_identifiers() {
-        let token = SYNTHETIC_REPLICATE_TOKEN;
-        assert_eq!(token.len(), 41);
-        let challenge = format!(
-            "<!doctype html><script>window.challenge={{mdrd:'prefix.ABCDE{token}WXYZ.suffix'}};</script>"
-        );
-        assert!(replicate_findings_for_body(&challenge, "text/html", 403).is_empty());
-        assert!(replicate_findings_for_body(
-            &format!(r#"{{"blob":"ABCDE{token}WXYZ"}}"#),
-            "application/json",
-            200,
-        )
-        .is_empty());
-        for adjacent in ["A", "z", "0", "_", "-"] {
-            for body in [
-                format!("{adjacent}{token}"),
-                format!("{token}{adjacent}"),
-                format!("{adjacent}{token}{adjacent}"),
-            ] {
-                assert!(
-                    replicate_findings_for_body(&body, "text/plain", 200).is_empty(),
-                    "{body}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn replicate_token_boundary_preserves_delimiters_and_exact_evidence() {
-        let token = SYNTHETIC_REPLICATE_TOKEN;
-        for (content_type, body) in [
-            ("text/plain", token.to_string()),
-            ("text/plain", format!("'{token}'")),
-            ("text/plain", format!("\"{token}\"")),
-            ("text/plain", format!("\n{token}\n")),
-            ("text/plain", format!("({token});")),
-            ("application/json", format!(r#"{{"token":"{token}"}}"#)),
-            (
-                "text/html",
-                format!("<!doctype html><script>const replicateToken=\"{token}\";</script>"),
-            ),
-            ("text/plain", format!("Authorization: Bearer {token}\r\n")),
-            (
-                "text/plain",
-                format!("https://example.com/?token={token}&view=1"),
-            ),
-        ] {
-            // A challenge/error status does not suppress a separately delimited
-            // supported token. Header-shaped text is still response body text.
-            for status in [200, 403] {
-                let findings = replicate_findings_for_body(&body, content_type, status);
-                assert_eq!(findings.len(), 1, "{content_type} / {status} / {body}");
-                let finding = &findings[0];
-                assert_eq!(finding.severity, Severity::High);
-                assert_eq!(finding.category, "disclosure");
-                assert!(finding.rule_id.is_empty());
-                assert_eq!(finding.evidence, token);
-                assert_eq!(finding.evidence.len(), 41);
-                assert_eq!(finding_scope(finding), token);
-                let body_line = body[..body.find(token).unwrap()]
-                    .bytes()
-                    .filter(|byte| *byte == b'\n')
-                    .count();
-                assert_eq!(
-                    finding.location,
-                    Some(FindingLocation {
-                        side: "response".into(),
-                        section: "body".into(),
-                        line: Some(body_line + 4),
-                    })
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn replicate_token_boundary_preserves_unicode_prose_adjacency() {
-        let token = SYNTHETIC_REPLICATE_TOKEN;
-        for (prefix, suffix) in [
-            ("é", ""),
-            ("", "é"),
-            ("前", "後"),
-            ("\u{301}", ""),
-            ("", "\u{301}"),
-            ("“", "”"),
-        ] {
-            let body = format!("{prefix}{token}{suffix}");
-            let findings = replicate_findings_for_body(&body, "text/plain; charset=utf-8", 200);
-            assert_eq!(findings.len(), 1, "{body}");
-            assert_eq!(findings[0].evidence, token);
-            assert_eq!(findings[0].severity, Severity::High);
-            assert_eq!(
-                findings[0].location,
-                Some(FindingLocation {
-                    side: "response".into(),
-                    section: "body".into(),
-                    line: Some(4),
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn replicate_token_boundary_continues_after_rejected_candidate() {
-        let rejected = SYNTHETIC_REPLICATE_TOKEN;
-        for accepted in [rejected.to_string(), format!("r8_{}Xy", "Ef3Gh4".repeat(6))] {
-            assert_eq!(accepted.len(), 41);
-            let body = format!("前ABCDE{rejected}WXYZ\n中\n後\"{accepted}\"");
-            let record = make_record(
-                vec![],
-                vec![
-                    ("Content-Type", "text/plain; charset=utf-8"),
-                    ("X-Example-Note", rejected),
-                ],
-                &body,
-                200,
-            );
-            let findings: Vec<_> = findings_for_rule(&record, "disclosure")
-                .into_iter()
-                .filter(|finding| finding.title == "Replicate API Token detected in response")
-                .collect();
-            assert_eq!(findings.len(), 1);
-            assert_eq!(findings[0].evidence, accepted);
-            assert_eq!(findings[0].evidence.len(), 41);
-            assert_eq!(findings[0].severity, Severity::High);
-            assert_eq!(finding_scope(&findings[0]), accepted);
-            assert_eq!(
-                findings[0].location,
-                Some(FindingLocation {
-                    side: "response".into(),
-                    section: "body".into(),
-                    line: Some(7),
-                })
-            );
-            let raw = raw_response_text_for_finding(&record).unwrap();
-            assert_eq!(raw.lines().nth(6).unwrap(), format!("後\"{accepted}\""));
-        }
-    }
-
-    #[test]
-    fn replicate_token_boundary_keeps_existing_supported_format() {
-        for body in [
-            format!("r8_{}", "A".repeat(37)),
-            format!("r8_{}", "A".repeat(39)),
-            format!("R8_{}", "A".repeat(38)),
-            format!("r8_{}-Z", "A".repeat(36)),
-            format!("r8_{}_Z", "A".repeat(36)),
-        ] {
-            assert!(
-                replicate_findings_for_body(&body, "text/plain", 200).is_empty(),
-                "{body}"
-            );
-        }
-    }
-
-    #[test]
-    fn replicate_token_boundary_does_not_suppress_other_provider_findings() {
-        let github = format!("ghp_{}", "Ab1Cd2".repeat(6));
-        let body = format!(
-            "<script>window.challenge={{mdrd:'ABCDE{}WXYZ'}};const credential=\"{github}\";</script>",
-            SYNTHETIC_REPLICATE_TOKEN
-        );
-        let record = make_record(vec![], vec![("Content-Type", "text/html")], &body, 403);
-        let findings = findings_for_rule(&record, "disclosure");
-        assert!(!findings
-            .iter()
-            .any(|finding| finding.title == "Replicate API Token detected in response"));
-        let github_finding = findings
-            .iter()
-            .find(|finding| finding.title == "GitHub Personal Access Token detected in response")
-            .expect("the Replicate boundary check must not suppress another provider");
-        assert_eq!(github_finding.evidence, github);
-        assert_eq!(github_finding.severity, Severity::High);
     }
 
     #[test]
@@ -6348,19 +5613,12 @@ mod tests {
 
     #[test]
     fn session_token_detection_ignores_public_api_key_identifiers() {
-        for key in [
-            "AIzaabcdefghijklmnopqrstuvwxyz123456789",
-            "pk_live_1234567890abcdefghijklmnop",
+        for path in [
+            "/maps?api_key=AIzaabcdefghijklmnopqrstuvwxyz123456789",
+            "/checkout?api_key=pk_live_1234567890abcdefghijklmnop",
         ] {
-            let cookie = format!("api_key={key}");
-            let mut record = make_record(
-                vec![("cookie", cookie.as_str())],
-                vec![("content-type", "text/html")],
-                "",
-                200,
-            );
-            let path = format!("/maps?api_key={key}");
-            record.path = path.clone();
+            let mut record = make_record(vec![], vec![("content-type", "text/html")], "", 200);
+            record.path = path.to_string();
             let findings = scan_transaction(&record, &ScannerConfig::default());
 
             assert!(
@@ -6374,12 +5632,7 @@ mod tests {
 
     #[test]
     fn session_token_detection_still_reports_random_api_key_parameter() {
-        let mut record = make_record(
-            vec![("cookie", "api_key=Ab3dEf6hIj9kLm2nOp5qRs8t")],
-            vec![("content-type", "text/html")],
-            "",
-            200,
-        );
+        let mut record = make_record(vec![], vec![("content-type", "text/html")], "", 200);
         record.path = "/api?api_key=Ab3dEf6hIj9kLm2nOp5qRs8t".to_string();
         let findings = scan_transaction(&record, &ScannerConfig::default());
 
@@ -6409,39 +5662,6 @@ mod tests {
                 .any(|finding| finding.title == "Session/token parameter in URL: foo"),
             "unrelated matrix parameters should not be reported as session tokens"
         );
-    }
-
-    #[test]
-    fn session_token_detection_needs_the_cookie_value_for_generic_names() {
-        let reported = |path: &str, cookie: Option<&str>| {
-            let headers = cookie.map(|cookie| vec![("cookie", cookie)]);
-            let mut record = make_record(
-                headers.unwrap_or_default(),
-                vec![("content-type", "text/html")],
-                "",
-                200,
-            );
-            record.path = path.to_string();
-            scan_transaction(&record, &ScannerConfig::default())
-                .iter()
-                .any(|finding| finding.title.starts_with("Session/token parameter in URL"))
-        };
-
-        assert!(!reported("/b?sid=abcdef1234567890", None));
-        assert!(!reported(
-            "/b?token=abcdef1234567890",
-            Some("token=other1234567890")
-        ));
-        assert!(reported(
-            "/b?sid=abcdef1234567890",
-            Some("lang=en; sid=abcdef1234567890")
-        ));
-        assert!(reported(
-            "/b?token=Ab3d%2BEf6hIj9kLm2n",
-            Some("t=Ab3d+Ef6hIj9kLm2n")
-        ));
-        assert!(reported("/b?access_token=abcdef1234567890", None));
-        assert!(reported("/app;jsessionid=abcdef1234567890", None));
     }
 
     #[test]
@@ -6651,156 +5871,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_context_wording_qualifies_observed_indicators() {
-        for (request_headers, session_headers) in [
-            (
-                vec![],
-                vec![(
-                    "Set-Cookie",
-                    "JSESSIONID=synthetic-session; Path=/; Secure; HttpOnly",
-                )],
-            ),
-            (vec![("Cookie", "JSESSIONID=synthetic-session")], vec![]),
-            (
-                vec![("Authorization", "Bearer synthetic-credential")],
-                vec![],
-            ),
-        ] {
-            for public in [false, true] {
-                let mut response_headers = vec![("Content-Type", "text/html")];
-                response_headers.extend(session_headers.clone());
-                if public {
-                    response_headers.push(("Cache-Control", "public, max-age=60"));
-                }
-                let cache_header_line = response_headers.len() + 1;
-                let record = make_record(
-                    request_headers.clone(),
-                    response_headers,
-                    "<html>Example content</html>",
-                    200,
-                );
-                let findings = findings_for_rule(&record, "misconfig");
-                assert_eq!(findings.len(), 1);
-                let finding = &findings[0];
-                let (title, detail, severity, evidence, section, line) = if public {
-                    (
-                        "Cache-Control: public with session or authorization indicators",
-                        "An Authorization header or session-like cookie was observed. This does not establish an authenticated user. Cache-Control: public may allow shared caching of any sensitive content in this response.",
-                        Severity::Medium,
-                        "Cache-Control: public, max-age=60",
-                        "header",
-                        Some(cache_header_line),
-                    )
-                } else {
-                    (
-                        "Missing Cache-Control with session or authorization indicators",
-                        "An Authorization header or session-like cookie was observed. This does not establish an authenticated user. The response lacks Cache-Control, so any sensitive content may be cached by browsers or proxies.",
-                        Severity::Low,
-                        "",
-                        "headers",
-                        None,
-                    )
-                };
-                assert_eq!(finding.title, title);
-                assert_eq!(finding.detail, detail);
-                assert_eq!(finding.severity, severity);
-                assert_eq!(finding.category, "misconfig");
-                assert!(finding.rule_id.is_empty());
-                assert_eq!(finding.evidence, evidence);
-                assert_eq!(
-                    finding.location,
-                    Some(FindingLocation {
-                        side: "response".into(),
-                        section: section.into(),
-                        line,
-                    })
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn cache_context_wording_preserves_no_indicator_controls() {
-        for (request_headers, session_headers) in [
-            (vec![], vec![]),
-            (vec![("Authorization", " ")], vec![]),
-            (
-                vec![("Cookie", "csrf_token=synthetic-token; theme=dark")],
-                vec![],
-            ),
-            (
-                vec![],
-                vec![("Set-Cookie", "JSESSIONID=deleted; Max-Age=0; Path=/")],
-            ),
-            (
-                vec![("Cookie", "everest_session_v2=synthetic-session")],
-                vec![],
-            ),
-        ] {
-            for public in [false, true] {
-                let mut response_headers = vec![("Content-Type", "text/html")];
-                response_headers.extend(session_headers.clone());
-                if public {
-                    response_headers.push(("Cache-Control", "public, max-age=60"));
-                }
-                let record = make_record(
-                    request_headers.clone(),
-                    response_headers,
-                    "<html>Example content</html>",
-                    200,
-                );
-                assert!(findings_for_rule(&record, "misconfig").is_empty());
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn cache_context_title_change_keeps_endpoint_scope_and_legacy_until_rescan() {
-        for (response_headers, legacy_title) in [
-            (vec![], "Missing Cache-Control on authenticated response"),
-            (
-                vec![("Cache-Control", "public, max-age=60")],
-                "Cache-Control: public on authenticated response",
-            ),
-        ] {
-            let record = make_record(
-                vec![("Authorization", "Bearer synthetic-credential")],
-                response_headers,
-                "<html>Example content</html>",
-                200,
-            );
-            let current = findings_for_rule(&record, "misconfig").remove(0);
-            let mut legacy = current.clone();
-            legacy.id = Uuid::new_v4();
-            legacy.title = legacy_title.into();
-            assert_eq!(finding_scope(&current), "/test");
-            assert_eq!(finding_scope(&legacy), finding_scope(&current));
-            assert_ne!(finding_dedup_key(&legacy), finding_dedup_key(&current));
-            let mut same_endpoint = current.clone();
-            same_endpoint.path = "/test?view=next".into();
-            assert_eq!(
-                finding_dedup_key(&current),
-                finding_dedup_key(&same_endpoint)
-            );
-            let mut different_endpoint = current.clone();
-            different_endpoint.path = "/another".into();
-            assert_ne!(
-                finding_dedup_key(&current),
-                finding_dedup_key(&different_endpoint)
-            );
-
-            // A title change does not migrate saved findings: live capture can
-            // coexist with the legacy title until an explicit successful Rescan.
-            let store = ScannerStore::from_findings(10, vec![legacy]);
-            assert!(store.push(current.clone()).await);
-            assert!(!store.push(same_endpoint).await);
-            assert_eq!(store.count().await, 2);
-            let restored = ScannerStore::from_findings(10, store.snapshot(None).await);
-            assert_eq!(restored.count().await, 2);
-        }
-    }
-
-    #[test]
     fn cache_control_check_treats_auth_cookies_as_authenticated() {
         let record = make_record(
             vec![("cookie", "session=abc123; theme=dark")],
@@ -6810,8 +5880,9 @@ mod tests {
         );
         let findings = scan_transaction(&record, &ScannerConfig::default());
 
-        assert!(findings.iter().any(|finding| finding.title
-            == "Missing Cache-Control with session or authorization indicators"));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.title == "Missing Cache-Control on authenticated response"));
     }
 
     #[test]
@@ -6824,8 +5895,9 @@ mod tests {
         );
         let findings = scan_transaction(&record, &ScannerConfig::default());
 
-        assert!(findings.iter().any(|finding| finding.title
-            == "Missing Cache-Control with session or authorization indicators"));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.title == "Missing Cache-Control on authenticated response"));
     }
 
     #[test]
@@ -6845,7 +5917,7 @@ mod tests {
         assert!(
             findings
                 .iter()
-                .any(|finding| finding.title == "Missing Cache-Control with session or authorization indicators"),
+                .any(|finding| finding.title == "Missing Cache-Control on authenticated response"),
             "JWT-valued cookies should establish authenticated cache-control context even with generic names"
         );
     }
@@ -6868,8 +5940,9 @@ mod tests {
         let findings = scan_transaction(&record, &ScannerConfig::default());
 
         assert!(
-            findings.iter().any(|finding| finding.title
-                == "Missing Cache-Control with session or authorization indicators"),
+            findings
+                .iter()
+                .any(|finding| finding.title == "Missing Cache-Control on authenticated response"),
             "JWT-valued Set-Cookie headers should establish authenticated cache-control context"
         );
     }
@@ -6887,8 +5960,9 @@ mod tests {
         );
         let findings = scan_transaction(&record, &ScannerConfig::default());
 
-        assert!(findings.iter().any(|finding| finding.title
-            == "Cache-Control: public with session or authorization indicators"));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.title == "Cache-Control: public on authenticated response"));
     }
 
     #[test]
@@ -6902,8 +5976,9 @@ mod tests {
         let findings = scan_transaction(&record, &ScannerConfig::default());
 
         assert!(
-            !findings.iter().any(|finding| finding.title
-                == "Missing Cache-Control with session or authorization indicators"),
+            !findings
+                .iter()
+                .any(|finding| finding.title == "Missing Cache-Control on authenticated response"),
             "CSRF-only cookies do not establish an authenticated response context"
         );
     }
@@ -6925,8 +6000,9 @@ mod tests {
         let findings = scan_transaction(&record, &ScannerConfig::default());
 
         assert!(
-            !findings.iter().any(|finding| finding.title
-                == "Missing Cache-Control with session or authorization indicators"),
+            !findings
+                .iter()
+                .any(|finding| finding.title == "Missing Cache-Control on authenticated response"),
             "deleting an auth cookie should not establish an authenticated response context"
         );
     }
@@ -7843,12 +6919,7 @@ mod tests {
 
     #[test]
     fn session_token_url_check_ignores_short_low_signal_values() {
-        let mut record = make_record(
-            vec![("cookie", "token=1; sid=abc")],
-            vec![("content-type", "text/html")],
-            "",
-            200,
-        );
+        let mut record = make_record(vec![], vec![("content-type", "text/html")], "", 200);
         record.path = "/app?token=1&sid=abc".to_string();
         let findings = scan_transaction(&record, &ScannerConfig::default());
 
@@ -7936,34 +7007,6 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.title.contains("API Key/Secret pattern")));
-    }
-
-    #[test]
-    fn sensitive_scanner_reports_api_keys_in_browser_code_only_when_named_secret() {
-        let key = "Ab3dEf6hIj9kLm2nOp5qRs8t";
-        let reported = |content_type: &str, body: String| {
-            let record = make_record(vec![], vec![("content-type", content_type)], &body, 200);
-            scan_transaction(&record, &ScannerConfig::default())
-                .iter()
-                .any(|finding| finding.title.contains("API Key/Secret pattern"))
-        };
-
-        assert!(!reported(
-            "application/javascript",
-            format!(r#"analytics.init({{apiKey:"{key}"}})"#)
-        ));
-        assert!(!reported(
-            "text/html; charset=utf-8",
-            format!(r#"<script>var api_key = "{key}";</script>"#)
-        ));
-        assert!(reported(
-            "application/javascript",
-            format!(r#"var api_secret = "{key}";"#)
-        ));
-        assert!(reported(
-            "application/json",
-            format!(r#"{{"apiKey":"{key}"}}"#)
-        ));
     }
 
     #[test]
@@ -8432,288 +7475,6 @@ mod tests {
         assert!(!page.contains(&password), "a comparison in a page's script");
     }
 
-    fn password_match_for_test(body: &str, script: bool, corrected: bool) -> Option<String> {
-        let legacy = Regex::new(r#"(?i)(?:\b|[_-])(?:password|passwd|pwd)\b\s*["']?\s*[:=]\s*(?:"([^"]{4,})"|'([^']{4,})'|([^\s"'<>{}]{4,}))"#).unwrap();
-        if corrected {
-            password_response_match(body, script, &legacy).map(|span| body[span].to_string())
-        } else {
-            legacy.captures_iter(body).find_map(|captures| {
-                let m = captures.get(0)?;
-                (password_candidate_looks_like_secret(&captures, script)
-                    && !is_embedded_in_base64(body, &m))
-                .then(|| m.as_str().to_string())
-            })
-        }
-    }
-
-    #[test]
-    fn password_quotes_recover_matching_escapes_and_preserve_opposite_quotes() {
-        for (body, legacy_found) in [
-            (r#"password:"Ab12\"Cd34""#, false),
-            (r#"password:'Ab12\'Cd34'"#, false),
-            (r#"password:"Ab12'Cd34""#, true),
-            (r#"password:'Ab12"Cd34'"#, true),
-            (r#"password:"Ab12\\Cd34""#, true),
-            (r#"password:"\u0041b12Cd34""#, true),
-            (r#"password:"\u5BC6\u78BCAb12Cd34""#, true),
-            (r#"password:"Enter\npasscode""#, true),
-            (r#"password:"Ab12🔐Cd34""#, true),
-        ] {
-            assert_eq!(
-                password_match_for_test(body, true, false).is_some(),
-                legacy_found,
-                "{body}"
-            );
-            assert_eq!(
-                password_match_for_test(body, true, true).as_deref(),
-                Some(body),
-                "{body}"
-            );
-        }
-    }
-
-    #[test]
-    fn password_quotes_respect_odd_and_even_backslash_runs() {
-        for quote in ['"', '\''] {
-            for count in 0..=8 {
-                let slashes = "\\".repeat(count);
-                let body = format!("password:{quote}Ab12Cd34{slashes}{quote}Ef56Gh78{quote}");
-                let expected = if count % 2 == 0 {
-                    format!("password:{quote}Ab12Cd34{slashes}{quote}")
-                } else {
-                    body.clone()
-                };
-                assert!(password_match_for_test(&body, true, false).is_some());
-                assert_eq!(password_match_for_test(&body, true, true), Some(expected));
-            }
-        }
-    }
-
-    #[test]
-    fn password_quotes_preserve_legacy_acceptance_when_complete_suffix_is_rejected() {
-        for suffix in [
-            " human label",
-            "password",
-            "passwd",
-            "://host",
-            "密碼",
-            "placeholder",
-        ] {
-            let body = format!(r#"password:"Ab12Cd34\"{suffix}""#);
-            assert!(
-                password_match_for_test(&body, true, false).is_some(),
-                "{body}"
-            );
-            assert!(
-                !password_value_looks_like_secret(&body[10..body.len() - 1], true, true),
-                "{body}"
-            );
-            assert_eq!(password_match_for_test(&body, true, true), Some(body));
-        }
-        // Extending evidence must not add a new base64 veto to a legacy hit.
-        let body = format!(
-            r#"{}_password:"Ab12Cd34\"Ef56Gh78"{}"#,
-            "A".repeat(21),
-            "B".repeat(21)
-        );
-        assert!(password_match_for_test(&body, true, false).is_some());
-        assert_eq!(
-            password_match_for_test(&body, true, true).as_deref(),
-            Some(r#"_password:"Ab12Cd34\"Ef56Gh78""#)
-        );
-        // Newly recognized candidates still use the complete-span base64 guard.
-        let body = format!(
-            r#"{}_password:"Ab12\"Cd34"{};password:"Ef56Gh78""#,
-            "A".repeat(21),
-            "B".repeat(21)
-        );
-        assert_eq!(
-            password_match_for_test(&body, true, true).as_deref(),
-            Some(r#"password:"Ef56Gh78""#)
-        );
-    }
-
-    #[test]
-    fn password_quotes_keep_raw_scalar_and_byte_floors() {
-        for (body, accepted) in [
-            (r#"password:"Ab12Cd3""#, false),
-            (r#"password:"Ab12Cd34""#, true),
-            (r#"password:"Ab1\"Cd2""#, true),
-            (r#"password:"Ab1\"Cd23""#, true),
-            (r#"password:"🔐🌙✨""#, false),
-            (r#"password:"🔐🌙✨🗝""#, true),
-            (r#"password:"密碼Ab12Cd34""#, false),
-        ] {
-            assert_eq!(
-                password_match_for_test(body, true, true).is_some(),
-                accepted,
-                "{body}"
-            );
-        }
-    }
-
-    #[test]
-    fn password_quotes_find_later_candidates_independently() {
-        for rejected in [
-            "password:\"Enter passcode\";\n",
-            "password:\"unterminated\n",
-            "password:'unterminated\\\n",
-        ] {
-            let body = format!("{rejected}password:\"Ab12\\\"Cd34\";");
-            assert_eq!(password_match_for_test(&body, true, false), None, "{body}");
-            assert_eq!(
-                password_match_for_test(&body, true, true).as_deref(),
-                Some(r#"password:"Ab12\"Cd34""#),
-                "{body}"
-            );
-        }
-        let body = "password:\"unterminated\npassword:\"Ef56Gh78\";";
-        assert_eq!(password_match_for_test(body, true, false), None);
-        assert_eq!(
-            password_match_for_test(body, true, true).as_deref(),
-            Some(r#"password:"Ef56Gh78""#)
-        );
-        let body = r#"password:"Ab12\"Cd34";password:"Ef56Gh78""#;
-        assert_eq!(
-            password_match_for_test(body, true, false).as_deref(),
-            Some(r#"password:"Ef56Gh78""#)
-        );
-        assert_eq!(
-            password_match_for_test(body, true, true).as_deref(),
-            Some(r#"password:"Ab12\"Cd34""#)
-        );
-    }
-
-    #[test]
-    fn password_quotes_do_not_invent_closing_delimiters() {
-        for body in [
-            "password:\"Ab12Cd34",
-            "password:'Ab12Cd34\\",
-            r#"password:"Ab1\"Cd2"#,
-        ] {
-            assert_eq!(password_match_for_test(body, true, false), None);
-            assert_eq!(password_match_for_test(body, true, true), None);
-        }
-        // A legacy accepted prefix in malformed input is retained verbatim.
-        let body = r#"password:"Ab12Cd34\""#;
-        assert_eq!(password_quoted_end(body, 9), None);
-        assert_eq!(
-            password_match_for_test(body, true, false).as_deref(),
-            Some(body)
-        );
-        assert_eq!(
-            password_match_for_test(body, true, true).as_deref(),
-            Some(body)
-        );
-    }
-
-    #[test]
-    fn password_quotes_leave_unquoted_behavior_unchanged() {
-        for script in [false, true] {
-            for body in [
-                "db_password=Rj62Zk91Mn",
-                "password=Ab12Cd3",
-                "password=state.passcode",
-                "password=!0;password=Ab12Cd34",
-                "password=f(Ab12Cd34)",
-                "password=Enter passcode;pwd=Ef56Gh78",
-            ] {
-                assert_eq!(
-                    password_match_for_test(body, script, true),
-                    password_match_for_test(body, script, false),
-                    "{body}, script={script}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn password_quotes_keep_ui_shaped_values_and_one_finding() {
-        for value in ["#login-pw", "login_form_2", "required|min:8", "string(64)"] {
-            for context in ["labels", "credentials"] {
-                let body =
-                    format!(r#"const {context}={{password:"{value}"}};password:"Ef56Gh78";"#);
-                let expected = format!(r#"password:"{value}""#);
-                assert_eq!(
-                    password_match_for_test(&body, true, false),
-                    Some(expected.clone())
-                );
-                assert_eq!(password_match_for_test(&body, true, true), Some(expected));
-            }
-        }
-    }
-
-    #[test]
-    fn password_quotes_handle_many_malformed_heads_and_large_values() {
-        let body = format!(
-            "{}password:\"Ab12\\\"Cd34\"",
-            "password:\"unterminated\n".repeat(10_000)
-        );
-        assert_eq!(
-            password_match_for_test(&body, true, true).as_deref(),
-            Some(r#"password:"Ab12\"Cd34""#)
-        );
-        let body = format!(
-            "{}password:'Ab12\\'Cd34'",
-            "pwd:\"Enter passcode\npwd:'Enter passcode\n".repeat(10_000)
-        );
-        assert_eq!(
-            password_match_for_test(&body, true, true).as_deref(),
-            Some("password:'Ab12\\'Cd34'")
-        );
-        let body = format!(r#"password:"Ab12\"{}""#, "🔐".repeat(64 * 1024));
-        assert_eq!(password_match_for_test(&body, true, false), None);
-        assert_eq!(password_match_for_test(&body, true, true), Some(body));
-    }
-
-    #[test]
-    fn password_quotes_use_exact_raw_evidence_and_accepted_body_location() {
-        let evidence = r#"password:"Ab12\"Cd34""#;
-        let body =
-            format!("🔐 introductory text\nconst cfg={{{evidence}}};\npassword:\"Ef56Gh78\";");
-        let mut record = make_record(vec![], vec![("x-copy", evidence)], &body, 200);
-        record.response.as_mut().unwrap().content_type = Some("application/javascript".into());
-        let findings = scan_transaction(&record, &ScannerConfig::default());
-        let passwords: Vec<_> = findings
-            .iter()
-            .filter(|f| f.title == "Password in response detected in response")
-            .collect();
-        assert_eq!(passwords.len(), 1);
-        assert_eq!(passwords[0].evidence, evidence);
-        assert_eq!(passwords[0].severity, Severity::High);
-        assert_eq!(passwords[0].category, "disclosure");
-        assert_eq!(
-            passwords[0].location,
-            Some(location_for_line(&record, "response", 5))
-        );
-    }
-
-    #[test]
-    fn password_quotes_preserve_display_truncation_and_provider_findings() {
-        let raw = format!(r#"password:"Ab12\"{}""#, "🔐".repeat(30));
-        let body = format!("{raw};const token='ghp_{}';", "Ab12".repeat(9));
-        let mut record = make_record(vec![], vec![], &body, 200);
-        record.response.as_mut().unwrap().content_type = Some("application/javascript".into());
-        let findings = scan_transaction(&record, &ScannerConfig::default());
-        let passwords: Vec<_> = findings
-            .iter()
-            .filter(|f| f.title == "Password in response detected in response")
-            .collect();
-        assert_eq!(passwords.len(), 1);
-        assert_eq!(passwords[0].evidence, truncate_evidence(&raw, 80));
-        assert!(passwords[0].evidence.ends_with("..."));
-        assert_eq!(
-            findings
-                .iter()
-                .filter(
-                    |f| f.title == "GitHub Personal Access Token detected in response"
-                        && f.severity == Severity::High
-                )
-                .count(),
-            1
-        );
-    }
-
     #[test]
     fn card_rule_ignores_uuid_heads_and_scripts() {
         let visa = |path: &str, content_type: &str, body: &str| {
@@ -8770,22 +7531,16 @@ mod tests {
 
     #[test]
     fn session_token_rule_ignores_short_numbers() {
-        let reported = |sid: &str| {
-            let cookie = format!("sid={sid}");
-            let mut record = make_record(
-                vec![("cookie", cookie.as_str())],
-                vec![("content-type", "text/html")],
-                "",
-                200,
-            );
-            record.path = format!("/collect?sid={sid}");
+        let reported = |path: &str| {
+            let mut record = make_record(vec![], vec![("content-type", "text/html")], "", 200);
+            record.path = path.to_string();
             scan_transaction(&record, &ScannerConfig::default())
                 .iter()
                 .any(|finding| finding.title.starts_with("Session/token parameter"))
         };
 
-        assert!(!reported("1760000000"), "a session start time");
-        assert!(reported("Zm9vYmFyYmF6cXV4MTIz"));
+        assert!(!reported("/collect?sid=1760000000"), "a session start time");
+        assert!(reported("/collect?sid=Zm9vYmFyYmF6cXV4MTIz"));
     }
 
     #[test]
@@ -8802,10 +7557,7 @@ mod tests {
             }
             scan_transaction(&record, &ScannerConfig::default())
                 .iter()
-                .any(|finding| {
-                    finding.title
-                        == "Missing Cache-Control with session or authorization indicators"
-                })
+                .any(|finding| finding.title == "Missing Cache-Control on authenticated response")
         };
 
         assert!(missing("empty", "application/json"));
@@ -8872,1228 +7624,5 @@ mod tests {
             !findings.iter().any(|finding| finding.category == "cookie"),
             "a load balancer's cookie is not a session token"
         );
-    }
-
-    fn findings_for_rule(record: &TransactionRecord, rule_id: &str) -> Vec<ScannerFinding> {
-        let mut config = ScannerConfig::default();
-        for &(id, _) in BUILTIN_RULES {
-            config.rules.insert(id.to_string(), id == rule_id);
-        }
-        scan_transaction(record, &config)
-    }
-
-    #[test]
-    fn comment_keywords_require_word_boundaries_in_html() {
-        for comment in [
-            "tokenization component",
-            "secretary contact section",
-            "internalization notes",
-            "debugger display label",
-            "TODO: update product badge",
-            "FIXME: repair author biography",
-        ] {
-            let body = format!("<html><!-- {comment} --></html>");
-            let record = make_record(vec![], vec![], &body, 200);
-            assert!(findings_for_rule(&record, "info").is_empty(), "{comment}");
-        }
-        for comment in [
-            "TODO: remove admin password check",
-            "internal: /admin/recovery",
-            "api_key: Ab19Cd28Ef37Gh46Ij55",
-            "FIXME: auth bypass remains enabled",
-            "token = Ab19Cd28Ef37Gh46Ij55",
-            "access_token = Ab19Cd28Ef37Gh46Ij55",
-            "client_secret = Ab19Cd28Ef37Gh46Ij55",
-            "db_password = Ab19Cd28Ef37Gh46Ij55",
-            "credentials for recovery",
-            "TODO: verify authorization rules",
-            "TODO: remove before production",
-        ] {
-            let body = format!("<html><!-- {comment} --></html>");
-            let record = make_record(vec![], vec![], &body, 200);
-            let found = findings_for_rule(&record, "info");
-            assert!(
-                found
-                    .iter()
-                    .any(|finding| finding.title.starts_with("HTML comment contains")),
-                "{comment}"
-            );
-        }
-    }
-
-    #[test]
-    fn html_comment_markers_in_non_html_content_are_not_comments() {
-        for content_type in [
-            "application/javascript",
-            "text/css",
-            "application/json",
-            "text/plain",
-            "application/json; profile=\"text/html\"",
-        ] {
-            let mut record = make_record(
-                vec![],
-                vec![("content-type", content_type)],
-                r#"const template = "<!-- password field -->";"#,
-                200,
-            );
-            record.response.as_mut().unwrap().content_type = Some(content_type.into());
-            assert!(
-                findings_for_rule(&record, "info").is_empty(),
-                "{content_type}"
-            );
-        }
-    }
-
-    #[test]
-    fn html_comments_follow_mime_essence_before_path_or_parameters() {
-        for content_type in [
-            "text/html",
-            "application/xhtml+xml",
-            "text/html; note=\"javascript\"",
-        ] {
-            let mut record = make_record(
-                vec![],
-                vec![("content-type", content_type)],
-                "<html><!-- credentials for recovery --></html>",
-                200,
-            );
-            record.path = "/bundle.js".into();
-            let findings = findings_for_rule(&record, "info");
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.title.starts_with("HTML comment contains")),
-                "{content_type}"
-            );
-        }
-    }
-
-    #[test]
-    fn basic_auth_challenge_requires_an_actual_scheme_not_parameter_copy() {
-        for challenge in [
-            r#"Digest realm="basic account", nonce="abc123""#,
-            r#"Bearer error_description="basic authentication is disabled""#,
-            r#"Digest realm="member, Basic account", nonce="abc123""#,
-            r#"Digest realm="member\", Basic account", nonce="abc123""#,
-            r#"Digest realm="member", basic=enabled"#,
-            r#"Digest realm="member", basic = enabled"#,
-            "Digest realm=member, basic\t=enabled",
-            r#"NotBasic realm="member""#,
-        ] {
-            let mut record = make_record(vec![], vec![("www-authenticate", challenge)], "", 401);
-            record.scheme = "http".into();
-            assert!(findings_for_rule(&record, "auth").is_empty(), "{challenge}");
-        }
-        for challenge in [
-            r#"Basic realm="member""#,
-            r#"bAsIc realm="member""#,
-            "Basic\trealm=member",
-            r#"Digest realm="member\\", Basic realm="fallback""#,
-            r#"Digest realm="member, account", nonce="abc123", Basic realm="fallback""#,
-        ] {
-            let mut record = make_record(vec![], vec![("www-authenticate", challenge)], "", 401);
-            record.scheme = "http".into();
-            assert!(
-                findings_for_rule(&record, "auth")
-                    .iter()
-                    .any(|finding| finding.title == "Server requests Basic auth over HTTP"),
-                "{challenge}"
-            );
-        }
-    }
-
-    #[test]
-    fn basic_auth_challenge_checks_multiple_fields_and_transport() {
-        let mut record = make_record(
-            vec![],
-            vec![
-                ("www-authenticate", r#"Bearer realm="member""#),
-                ("www-authenticate", r#"Basic realm="fallback""#),
-            ],
-            "",
-            401,
-        );
-        assert!(
-            findings_for_rule(&record, "auth").is_empty(),
-            "HTTPS is not cleartext"
-        );
-        record.scheme = "http".into();
-        let findings = findings_for_rule(&record, "auth");
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].title, "Server requests Basic auth over HTTP");
-        assert!(findings[0].evidence.contains("fallback"));
-    }
-
-    #[test]
-    fn cache_public_requires_exact_directives_and_honors_restrictions() {
-        for cache_control in [
-            "x-public-cache=enabled, max-age=60",
-            "private=\"x-public-id\", max-age=60",
-            "public, no-store",
-            "public, private",
-            "public=false, max-age=60",
-        ] {
-            let record = make_record(
-                vec![("cookie", "session=Ab19Cd28Ef37Gh46")],
-                vec![("cache-control", cache_control)],
-                r#"{"private":true}"#,
-                200,
-            );
-            assert!(
-                findings_for_rule(&record, "misconfig").is_empty(),
-                "{cache_control}"
-            );
-        }
-        for cache_control in [
-            "public, max-age=60",
-            "PUBLIC, MAX-AGE=60",
-            "public, x-no-store=disabled",
-            "public, private=\"x-no-store, x-public-id\"",
-        ] {
-            let record = make_record(
-                vec![("cookie", "session=Ab19Cd28Ef37Gh46")],
-                vec![("cache-control", cache_control)],
-                r#"{"private":true}"#,
-                200,
-            );
-            assert!(
-                findings_for_rule(&record, "misconfig")
-                    .iter()
-                    .any(|finding| finding.title
-                        == "Cache-Control: public with session or authorization indicators"),
-                "{cache_control}"
-            );
-        }
-        let record = make_record(
-            vec![("cookie", "session=Ab19Cd28Ef37Gh46")],
-            vec![("cache-control", "public"), ("cache-control", "no-store")],
-            r#"{"private":true}"#,
-            200,
-        );
-        assert!(
-            findings_for_rule(&record, "misconfig").is_empty(),
-            "multiple Cache-Control fields share restrictions"
-        );
-    }
-
-    #[test]
-    fn cache_auth_context_excludes_empty_and_known_analytics_cookies() {
-        for cookie in [
-            "session=",
-            "session=null",
-            "session=\"\"",
-            "everest_session_v2=Ab19Cd28Ef37Gh46",
-        ] {
-            let record = make_record(vec![("cookie", cookie)], vec![], r#"{"ok":true}"#, 200);
-            assert!(
-                findings_for_rule(&record, "misconfig").is_empty(),
-                "{cookie}"
-            );
-            let record = make_record(vec![], vec![("set-cookie", cookie)], r#"{"ok":true}"#, 200);
-            assert!(
-                findings_for_rule(&record, "misconfig").is_empty(),
-                "Set-Cookie: {cookie}"
-            );
-        }
-        for cookie in [
-            "session=Ab19Cd28Ef37Gh46",
-            "session=Ab19Cd28Ef37Gh46; everest_session_v2=Ab19Cd28Ef37Gh46",
-        ] {
-            let record = make_record(vec![("cookie", cookie)], vec![], r#"{"private":true}"#, 200);
-            assert!(
-                findings_for_rule(&record, "misconfig")
-                    .iter()
-                    .any(|finding| finding.title
-                        == "Missing Cache-Control with session or authorization indicators"),
-                "{cookie}"
-            );
-        }
-    }
-    #[test]
-    fn mixed_cookie_and_cache_fields_keep_real_auth_context() {
-        let record = make_record(
-            vec![],
-            vec![
-                ("set-cookie", "everest_session_v2=Ab19Cd28Ef37Gh46"),
-                ("set-cookie", "session=Ab19Cd28Ef37Gh46"),
-            ],
-            r#"{"private":true}"#,
-            200,
-        );
-        assert!(findings_for_rule(&record, "misconfig")
-            .iter()
-            .any(|finding| finding.title
-                == "Missing Cache-Control with session or authorization indicators"));
-        let record = make_record(
-            vec![("cookie", "session=Ab19Cd28Ef37Gh46")],
-            vec![("cache-control", "public"), ("cache-control", "private")],
-            r#"{"private":true}"#,
-            200,
-        );
-        assert!(findings_for_rule(&record, "misconfig").is_empty());
-    }
-
-    fn csp_titles(headers: Vec<(&str, &str)>) -> Vec<String> {
-        let record = make_record(vec![], headers, "<html></html>", 200);
-        findings_for_rule(&record, "misconfig")
-            .into_iter()
-            .map(|finding| finding.title)
-            .collect()
-    }
-
-    #[test]
-    fn csp_evidence_selects_unsafe_attribute_after_protected_script_prefix() {
-        for protection in [
-            "'nonce-Zml4dHVyZQ=='",
-            "'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='",
-        ] {
-            let policy = format!(
-                "default-src 'self' https://example.com/default-source-padding-to-keep-the-operative-script-directive-after-the-truncation-boundary; script-src 'self' 'unsafe-inline' {protection}; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
-            );
-            assert!(policy.find("script-src-attr").unwrap() > 120);
-            let record = make_record(
-                vec![],
-                vec![("content-security-policy", &policy)],
-                "<html><button onclick=\"void 0\">Example</button></html>",
-                200,
-            );
-            let findings = findings_for_rule(&record, "misconfig");
-            assert_eq!(findings.len(), 1);
-            assert_eq!(findings[0].title, "CSP allows unsafe-inline");
-            assert_eq!(findings[0].severity, Severity::Medium);
-            assert_eq!(findings[0].evidence, "script-src-attr 'unsafe-inline'");
-            assert_eq!(
-                findings[0].location,
-                Some(FindingLocation {
-                    side: "response".into(),
-                    section: "header".into(),
-                    line: Some(2),
-                })
-            );
-            let restricted =
-                policy.replace("script-src-attr 'unsafe-inline'", "script-src-attr 'none'");
-            assert!(csp_titles(vec![("content-security-policy", &restricted)]).is_empty());
-        }
-    }
-
-    #[test]
-    fn csp_evidence_targets_enforced_header_despite_identical_decoys() {
-        let directive = "ScRiPt-SrC-AtTr\t'UNSAFE-INLINE'";
-        let record = make_record(
-            vec![("x-example-copy", directive)],
-            vec![
-                ("x-example-copy", directive),
-                ("Content-Security-Policy-Report-Only", directive),
-                ("Content-Security-Policy", "img-src 'none'"),
-                ("Content-Security-Policy", directive),
-            ],
-            directive,
-            200,
-        );
-        let findings = findings_for_rule(&record, "misconfig");
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].evidence, directive);
-        let location = findings[0].location.as_ref().unwrap();
-        assert_eq!(location.side, "response");
-        assert_eq!(location.section, "header");
-        assert_eq!(location.line, Some(5));
-        assert_eq!(
-            raw_response_text_for_finding(&record)
-                .unwrap()
-                .lines()
-                .nth(location.line.unwrap() - 1)
-                .unwrap(),
-            format!("Content-Security-Policy: {directive}")
-        );
-    }
-
-    #[test]
-    fn csp_evidence_preserves_first_duplicate_and_effective_fallback() {
-        for (policy, expected) in [
-            (
-                "default-src 'unsafe-inline'; default-src 'none'",
-                "default-src 'unsafe-inline'",
-            ),
-            (
-                "script-src 'unsafe-inline'; script-src 'none'",
-                "script-src 'unsafe-inline'",
-            ),
-            (
-                "script-src-elem 'unsafe-inline'; script-src-elem 'none'",
-                "script-src-elem 'unsafe-inline'",
-            ),
-            (
-                "script-src-attr 'unsafe-inline'; script-src-attr 'none'",
-                "script-src-attr 'unsafe-inline'",
-            ),
-            (
-                "default-src 'unsafe-inline'; script-src-elem 'none'",
-                "default-src 'unsafe-inline'",
-            ),
-            (
-                "script-src 'unsafe-inline'; script-src-elem 'nonce-Zml4dHVyZQ=='",
-                "script-src 'unsafe-inline'",
-            ),
-            (
-                "script-src\u{a0}'none'; script-src 'unsafe-inline'",
-                "script-src 'unsafe-inline'",
-            ),
-            (
-                "script-src-attr; script-src-attr 'unsafe-inline'; script-src-elem 'unsafe-inline'",
-                "script-src-elem 'unsafe-inline'",
-            ),
-        ] {
-            let record = make_record(vec![], vec![("content-security-policy", policy)], "", 200);
-            let findings = findings_for_rule(&record, "misconfig");
-            assert_eq!(findings.len(), 1, "{policy}");
-            assert_eq!(findings[0].evidence, expected, "{policy}");
-        }
-    }
-
-    #[test]
-    fn csp_evidence_uses_context_allowed_across_all_enforced_policies() {
-        let element = "script-src-elem 'unsafe-inline'";
-        let attribute = "script-src-elem 'none'; script-src-attr 'unsafe-inline'";
-        let combined = format!("{element}, {attribute}");
-        for (headers, line) in [
-            (
-                vec![
-                    ("content-security-policy", element),
-                    ("content-security-policy", attribute),
-                ],
-                3,
-            ),
-            (vec![("content-security-policy", combined.as_str())], 2),
-        ] {
-            let record = make_record(vec![], headers, "", 200);
-            let findings = findings_for_rule(&record, "misconfig");
-            assert_eq!(findings.len(), 1);
-            assert_eq!(findings[0].evidence, "script-src-attr 'unsafe-inline'");
-            assert_eq!(findings[0].location.as_ref().unwrap().line, Some(line));
-        }
-        let restricted_element = "script-src-elem 'unsafe-inline'; script-src-attr 'none'";
-        let blocked = format!("{restricted_element}, {attribute}");
-        for headers in [
-            vec![
-                ("content-security-policy", restricted_element),
-                ("content-security-policy", attribute),
-            ],
-            vec![("content-security-policy", blocked.as_str())],
-        ] {
-            assert!(csp_titles(headers).is_empty());
-        }
-    }
-
-    #[test]
-    fn csp_eval_evidence_uses_script_or_default_instead_of_element_decoy() {
-        for directive in ["script-src", "default-src"] {
-            let policy = format!(
-                "script-src-elem 'unsafe-eval'; script-src-attr 'none'; {directive} 'nonce-Zml4dHVyZQ==' 'unsafe-eval'"
-            );
-            let record = make_record(vec![], vec![("content-security-policy", &policy)], "", 200);
-            let findings = findings_for_rule(&record, "misconfig");
-            assert_eq!(findings.len(), 1);
-            assert_eq!(findings[0].title, "CSP allows unsafe-eval");
-            assert_eq!(
-                findings[0].evidence,
-                format!("{directive} 'nonce-Zml4dHVyZQ==' 'unsafe-eval'")
-            );
-        }
-    }
-
-    #[test]
-    fn csp_evidence_bounds_long_directives_without_hiding_unsafe_keyword() {
-        let policy = format!(
-            "SCRIPT-SRC https://example.com/{} 'UNSAFE-INLINE' 'UNSAFE-EVAL'",
-            "x".repeat(160)
-        );
-        let record = make_record(
-            vec![],
-            vec![
-                ("content-security-policy-report-only", &policy),
-                ("content-security-policy", &policy),
-            ],
-            "",
-            200,
-        );
-        let findings = findings_for_rule(&record, "misconfig");
-        assert_eq!(findings.len(), 2);
-        for (finding, keyword) in findings.iter().zip(["'UNSAFE-INLINE'", "'UNSAFE-EVAL'"]) {
-            assert_eq!(finding.evidence, format!("SCRIPT-SRC ... {keyword}"));
-            assert!(finding.evidence.len() <= 120);
-            assert_eq!(finding.location.as_ref().unwrap().line, Some(3));
-        }
-        for length in [120, 121] {
-            let prefix = "script-src https://example.com/";
-            let suffix = " 'unsafe-inline'";
-            let policy = format!(
-                "{prefix}{}{suffix}",
-                "x".repeat(length - prefix.len() - suffix.len())
-            );
-            assert_eq!(policy.len(), length);
-            let record = make_record(vec![], vec![("content-security-policy", &policy)], "", 200);
-            let findings = findings_for_rule(&record, "misconfig");
-            assert_eq!(findings.len(), 1);
-            let expected = if length == 120 {
-                policy.as_str()
-            } else {
-                "script-src ... 'unsafe-inline'"
-            };
-            assert_eq!(findings[0].evidence, expected);
-            assert!(findings[0].evidence.len() <= 120);
-        }
-    }
-
-    #[test]
-    fn csp_evidence_keeps_host_dedup_and_rescan_first_record() {
-        let first = make_record(
-            vec![],
-            vec![("content-security-policy", "script-src-attr 'unsafe-inline'")],
-            "",
-            200,
-        );
-        let mut later = make_record(
-            vec![],
-            vec![("content-security-policy", "script-src 'unsafe-inline'")],
-            "",
-            200,
-        );
-        later.path = "/another".into();
-        let first_finding = findings_for_rule(&first, "misconfig").remove(0);
-        let later_finding = findings_for_rule(&later, "misconfig").remove(0);
-        assert_ne!(first_finding.evidence, later_finding.evidence);
-        assert_eq!(
-            finding_dedup_key(&first_finding),
-            finding_dedup_key(&later_finding)
-        );
-        let mut legacy_preview = first_finding.clone();
-        legacy_preview.evidence = "default-src 'self'; script-src 'nonce-Zml4dHVyZQ=='...".into();
-        assert_eq!(
-            finding_dedup_key(&legacy_preview),
-            finding_dedup_key(&first_finding)
-        );
-        let mut config = ScannerConfig::default();
-        for &(id, _) in BUILTIN_RULES {
-            config.rules.insert(id.into(), id == "misconfig");
-        }
-        let mut rescan = Rescan::new(config);
-        rescan.scan(&first);
-        rescan.scan(&later);
-        let (findings, scanned) = rescan.finish();
-        assert_eq!(scanned.len(), 2);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].record_id, first.id);
-        assert_eq!(findings[0].evidence, first_finding.evidence);
-        assert_eq!(findings[0].location, first_finding.location);
-    }
-
-    #[test]
-    fn csp_eval_uses_script_default_fallback_not_element_or_attribute() {
-        for policy in [
-            "script-src 'self'; script-src-elem 'unsafe-eval'",
-            "default-src 'self'; script-src-attr 'unsafe-eval'",
-            "script-src-elem 'unsafe-eval'",
-        ] {
-            assert!(
-                !csp_titles(vec![("content-security-policy", policy)])
-                    .contains(&"CSP allows unsafe-eval".into()),
-                "{policy}"
-            );
-        }
-        for policy in [
-            "script-src 'unsafe-eval'; script-src-elem 'none'",
-            "default-src 'unsafe-eval'; script-src-attr 'none'",
-            "script-src 'unsafe-eval'; default-src 'none'",
-        ] {
-            assert!(
-                csp_titles(vec![("content-security-policy", policy)])
-                    .contains(&"CSP allows unsafe-eval".into()),
-                "{policy}"
-            );
-        }
-    }
-
-    #[test]
-    fn csp_inline_uses_only_effective_element_and_attribute_sources() {
-        for policy in [
-            "script-src 'unsafe-inline'; script-src-elem 'self'; script-src-attr 'none'",
-            "default-src 'unsafe-inline'; script-src-elem 'self'; script-src-attr 'none'",
-        ] {
-            assert!(
-                csp_titles(vec![("content-security-policy", policy)]).is_empty(),
-                "{policy}"
-            );
-        }
-        for policy in [
-            "script-src 'unsafe-inline'; script-src-elem 'self'",
-            "default-src 'unsafe-inline'; script-src-attr 'none'",
-            "script-src-elem 'unsafe-inline'; script-src-attr 'none'",
-            "script-src-elem 'none'; script-src-attr 'unsafe-inline'",
-            "script-src 'nonce-abc123'; script-src-attr 'unsafe-inline'",
-        ] {
-            assert!(
-                csp_titles(vec![("content-security-policy", policy)])
-                    .contains(&"CSP allows unsafe-inline".into()),
-                "{policy}"
-            );
-        }
-    }
-
-    #[test]
-    fn csp_first_duplicate_directive_wins_in_both_orders() {
-        for directive in [
-            "default-src",
-            "script-src",
-            "script-src-elem",
-            "script-src-attr",
-        ] {
-            let safe_first =
-                format!("{directive} 'none'; {directive} 'unsafe-inline' 'unsafe-eval'");
-            assert!(
-                csp_titles(vec![("content-security-policy", &safe_first)]).is_empty(),
-                "{safe_first}"
-            );
-            let empty_first = format!("{directive}; {directive} 'unsafe-inline' 'unsafe-eval'");
-            assert!(
-                csp_titles(vec![("content-security-policy", &empty_first)]).is_empty(),
-                "{empty_first}"
-            );
-            let unsafe_first =
-                format!("{directive} 'unsafe-inline' 'unsafe-eval'; {directive} 'none'");
-            assert!(
-                csp_titles(vec![("content-security-policy", &unsafe_first)])
-                    .contains(&"CSP allows unsafe-inline".into()),
-                "{unsafe_first}"
-            );
-        }
-    }
-
-    #[test]
-    fn csp_intersects_multiple_enforced_headers_and_comma_policies() {
-        let permissive = "script-src 'unsafe-inline' 'unsafe-eval'";
-        let restrictive = "script-src 'none'";
-        for headers in [
-            vec![
-                ("content-security-policy", permissive),
-                ("content-security-policy", restrictive),
-            ],
-            vec![
-                ("content-security-policy", restrictive),
-                ("content-security-policy", permissive),
-            ],
-            vec![(
-                "content-security-policy",
-                "script-src 'unsafe-inline' 'unsafe-eval', script-src 'none'",
-            )],
-            vec![
-                (
-                    "content-security-policy",
-                    "script-src-elem 'unsafe-inline'; script-src-attr 'none'",
-                ),
-                (
-                    "content-security-policy",
-                    "script-src-elem 'none'; script-src-attr 'unsafe-inline'",
-                ),
-            ],
-        ] {
-            assert!(csp_titles(headers.clone()).is_empty(), "{headers:?}");
-        }
-        for headers in [
-            vec![
-                ("content-security-policy", permissive),
-                ("content-security-policy", permissive),
-            ],
-            vec![
-                ("content-security-policy", permissive),
-                ("content-security-policy", "img-src 'none'"),
-            ],
-            vec![
-                ("content-security-policy", permissive),
-                ("content-security-policy-report-only", restrictive),
-            ],
-        ] {
-            let titles = csp_titles(headers.clone());
-            assert!(
-                titles.contains(&"CSP allows unsafe-inline".into()),
-                "{headers:?}"
-            );
-            assert!(
-                titles.contains(&"CSP allows unsafe-eval".into()),
-                "{headers:?}"
-            );
-        }
-        assert!(csp_titles(vec![("content-security-policy-report-only", permissive)]).is_empty());
-    }
-
-    #[test]
-    fn csp_inline_overrides_require_valid_source_syntax() {
-        for source in ["'nonce-abc123'", "'sha256-abc123'", "'strict-dynamic'"] {
-            let policy = format!("script-src 'unsafe-inline' {source}");
-            assert!(
-                csp_titles(vec![("content-security-policy", &policy)]).is_empty(),
-                "{policy}"
-            );
-        }
-        for source in [
-            "nonce-abc123",
-            "'nonce-'",
-            "'sha256-'",
-            "'nonce-???'",
-            "'nonce-abc==='",
-            "'sha256-ab=c'",
-        ] {
-            let policy = format!("script-src 'unsafe-inline' {source}");
-            assert!(
-                csp_titles(vec![("content-security-policy", &policy)])
-                    .contains(&"CSP allows unsafe-inline".into()),
-                "{policy}"
-            );
-        }
-        let policy = "script-src 'unsafe-inline'; script-src 'none'";
-        assert!(csp_titles(vec![("content-security-policy", policy)])
-            .contains(&"CSP allows unsafe-inline".into()));
-    }
-
-    #[test]
-    fn comment_context_preserves_sniffed_html_and_metadata_xhtml() {
-        let mut record = make_record(
-            vec![],
-            vec![],
-            "<html><!-- internal route /admin --></html>",
-            200,
-        );
-        record.response.as_mut().unwrap().content_type = None;
-        assert!(findings_for_rule(&record, "info")
-            .iter()
-            .any(|finding| finding.title.starts_with("HTML comment contains")));
-        record.response.as_mut().unwrap().content_type = Some("application/xhtml+xml".into());
-        assert!(findings_for_rule(&record, "info")
-            .iter()
-            .any(|finding| finding.title.starts_with("HTML comment contains")));
-        let record = make_record(
-            vec![(
-                "cookie",
-                "everest_session_v2=Ab19Cd28Ef37Gh46; session=Ab19Cd28Ef37Gh46",
-            )],
-            vec![],
-            r#"{"private":true}"#,
-            200,
-        );
-        assert!(findings_for_rule(&record, "misconfig")
-            .iter()
-            .any(|finding| finding.title
-                == "Missing Cache-Control with session or authorization indicators"));
-    }
-
-    #[test]
-    fn refined_rules_keep_rescan_filtering_and_issue_deduplication() {
-        let mut config = ScannerConfig::default();
-        for &(id, _) in BUILTIN_RULES {
-            config.rules.insert(id.to_string(), id == "auth");
-        }
-        let mut benign = make_record(
-            vec![],
-            vec![("www-authenticate", r#"Digest realm="basic account""#)],
-            "",
-            401,
-        );
-        benign.scheme = "http".into();
-        let mut positive = make_record(
-            vec![],
-            vec![("www-authenticate", r#"Basic realm="member""#)],
-            "",
-            401,
-        );
-        positive.scheme = "http".into();
-        let mut repeated = positive.clone();
-        repeated.id = Uuid::new_v4();
-        repeated.path = "/another".into();
-        let mut rescan = Rescan::new(config);
-        rescan.scan(&benign);
-        rescan.scan(&positive);
-        rescan.scan(&repeated);
-        let (findings, scanned) = rescan.finish();
-        assert_eq!(scanned.len(), 3);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].record_id, positive.id);
-        assert_eq!(findings[0].title, "Server requests Basic auth over HTTP");
-    }
-
-    #[test]
-    fn csp_empty_or_non_ascii_first_directives_follow_browser_parsing() {
-        for directive in [
-            "default-src",
-            "script-src",
-            "script-src-elem",
-            "script-src-attr",
-        ] {
-            let policy = format!("{directive}; {directive} 'unsafe-inline' 'unsafe-eval'");
-            assert!(
-                csp_titles(vec![("content-security-policy", &policy)]).is_empty(),
-                "{policy}"
-            );
-        }
-        for directive in ["default-src", "script-src"] {
-            for policy in [
-                format!("{directive} 'unsafe-inline' 'unsafe-eval'; {directive} 'none'"),
-                format!("{directive} 'none'; {directive} 'unsafe-inline' 'unsafe-eval'"),
-            ] {
-                let titles = csp_titles(vec![("content-security-policy", &policy)]);
-                assert!(
-                    titles.contains(&"CSP allows unsafe-inline".into()),
-                    "{policy}"
-                );
-                assert!(
-                    titles.contains(&"CSP allows unsafe-eval".into()),
-                    "{policy}"
-                );
-            }
-        }
-    }
-
-    fn cors_value_fixture(origin: &str, credentials: &str) -> TransactionRecord {
-        let mut record = make_record(
-            vec![("origin", origin)],
-            vec![
-                ("access-control-allow-origin", origin),
-                ("access-control-allow-credentials", credentials),
-            ],
-            r#"{"private":true}"#,
-            200,
-        );
-        // Synthetic distinct-site target; no network request is made.
-        record.host = "127.0.0.1".into();
-        record
-    }
-
-    #[test]
-    fn cors_credentials_value_is_case_sensitive() {
-        for origin in ["null", "https://example.com"] {
-            for credentials in [
-                "True",
-                "TRUE",
-                "false",
-                "true, true",
-                "true\u{a0}",
-                "\u{a0}true",
-            ] {
-                let record = cors_value_fixture(origin, credentials);
-                assert!(
-                    findings_for_rule(&record, "cors").is_empty(),
-                    "{origin} / {credentials:?}"
-                );
-            }
-            for credentials in ["true", " \ttrue\t "] {
-                let record = cors_value_fixture(origin, credentials);
-                assert_eq!(
-                    findings_for_rule(&record, "cors").len(),
-                    1,
-                    "{origin} / {credentials:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn cors_origin_requires_exact_null_or_serialized_tuple_origin() {
-        for origin in [
-            "Null",
-            "NULL",
-            "*",
-            "https://example.com/",
-            "https://example.com/path",
-            "https://example.com?query=1",
-            "https://example.com#fragment",
-            "https://user:pass@example.com",
-            "https://example.com:443",
-            "http://example.com:80",
-            "https://192.000.002.001",
-            "https://[2001:db8:0:0:0:0:0:1]",
-            "file:///example",
-            "data:text/plain,example",
-            "blob:https://example.com/id",
-            "HTTPS://EXAMPLE.COM",
-            "https://example.com, https://example.com",
-            "not-an-origin",
-            "null\u{a0}",
-        ] {
-            let record = cors_value_fixture(origin, "true");
-            assert!(findings_for_rule(&record, "cors").is_empty(), "{origin:?}");
-        }
-        for origin in [
-            "null",
-            "https://example.com",
-            "https://example.com:8443",
-            "http://example.com",
-            "ftp://example.com",
-            "ws://example.com",
-            "wss://example.com",
-            "https://192.0.2.1",
-            "https://[2001:db8::1]",
-            "https://xn--bcher-kva.example.com",
-            "https://example.com.",
-            "https://example.com:0",
-        ] {
-            let record = cors_value_fixture(origin, "true");
-            let found = findings_for_rule(&record, "cors");
-            assert_eq!(found.len(), 1, "{origin}");
-            if origin == "null" {
-                assert_eq!(found[0].title, "CORS: null origin with credentials");
-                assert_eq!(found[0].severity, Severity::Medium);
-            } else {
-                assert_eq!(
-                    found[0].title,
-                    "CORS: another site allowed with credentials"
-                );
-                assert_eq!(found[0].severity, Severity::Low);
-            }
-        }
-        for origin in ["null", "https://example.com"] {
-            for (request, response) in [
-                (format!(" \t{origin}\t "), origin.to_string()),
-                (origin.to_string(), format!(" \t{origin}\t ")),
-            ] {
-                let mut record = cors_value_fixture(origin, "true");
-                record.request.headers[0].value = request;
-                record.response.as_mut().unwrap().headers[0].value = response;
-                assert_eq!(findings_for_rule(&record, "cors").len(), 1);
-            }
-        }
-        // This is a policy observation, not proof the captured request passed CORS.
-        for request_origin in [None, Some("https://example.com")] {
-            let mut record = cors_value_fixture("null", "true");
-            record.request.headers.clear();
-            if let Some(value) = request_origin {
-                record.request.headers.push(HeaderRecord {
-                    name: "origin".into(),
-                    value: value.into(),
-                });
-            }
-            let found = findings_for_rule(&record, "cors");
-            assert_eq!(found.len(), 1);
-            assert_eq!(found[0].severity, Severity::Medium);
-        }
-    }
-
-    #[test]
-    fn cors_duplicate_response_fields_do_not_imply_browser_access() {
-        for origin in ["null", "https://example.com"] {
-            for (name, value) in [
-                ("Access-Control-Allow-Origin", origin),
-                ("Access-Control-Allow-Origin", ""),
-                ("Access-Control-Allow-Credentials", "true"),
-                ("Access-Control-Allow-Credentials", "false"),
-            ] {
-                let mut record = cors_value_fixture(origin, "true");
-                record
-                    .response
-                    .as_mut()
-                    .unwrap()
-                    .headers
-                    .push(HeaderRecord {
-                        name: name.into(),
-                        value: value.into(),
-                    });
-                assert!(
-                    findings_for_rule(&record, "cors").is_empty(),
-                    "{origin} / {name}: {value}"
-                );
-            }
-        }
-        let mut record = cors_value_fixture("https://example.com", "true");
-        record.request.headers.push(HeaderRecord {
-            name: "Origin".into(),
-            value: "https://example.com".into(),
-        });
-        assert!(findings_for_rule(&record, "cors").is_empty());
-        let mut record = cors_value_fixture("https://example.com", "true");
-        record
-            .response
-            .as_mut()
-            .unwrap()
-            .headers
-            .push(HeaderRecord {
-                name: "Vary".into(),
-                value: "Origin".into(),
-            });
-        assert_eq!(findings_for_rule(&record, "cors").len(), 1);
-    }
-    #[test]
-    fn oracle_errors_require_a_complete_numeric_code_token() {
-        for body in [
-            "The flora-guide page was not found.",
-            "flora-00942 guide unavailable",
-            "ORA-",
-            "ORA-code",
-            "ORA-0094",
-            "ORA-942: abbreviated code",
-            "ORA-009420",
-            "ORA-00942x",
-            "error_ORA-00942",
-            "ORA-00942_suffix",
-            "éORA-00942",
-            "ORA-00942é",
-            "ORA-１２３４５",
-        ] {
-            let record = make_record(vec![], vec![], body, 404);
-            assert!(findings_for_rule(&record, "error").is_empty(), "{body}");
-        }
-        for body in [
-            "ORA-00942: table or view does not exist",
-            "ora-01017: invalid username/password; logon denied",
-            "[ORA-00600] internal error code",
-            "ORA-06502: PL/SQL: numeric or value error\nORA-06512: at line 1",
-            "ORA-00942",
-        ] {
-            let record = make_record(vec![], vec![], body, 500);
-            let found = findings_for_rule(&record, "error");
-            assert_eq!(found.len(), 1, "{body}");
-            assert_eq!(
-                found[0].title,
-                "Oracle DB error disclosure in error response"
-            );
-            assert_eq!(found[0].severity, Severity::Medium);
-        }
-        let record = make_record(vec![], vec![], "ORA-00942", 200);
-        assert!(findings_for_rule(&record, "error").is_empty());
-    }
-
-    #[test]
-    fn oracle_error_evidence_uses_the_qualifying_occurrence() {
-        let body = format!(
-            "flora-guide ORA-short {}\nORA-00942: table or view does not exist",
-            "가".repeat(80)
-        );
-        let record = make_record(vec![], vec![], &body, 500);
-        let found = findings_for_rule(&record, "error");
-        assert_eq!(found.len(), 1);
-        assert!(found[0].evidence.contains("ORA-00942"));
-        assert!(!found[0].evidence.contains("flora-guide"));
-        assert!(!found[0].evidence.contains("ORA-short"));
-        assert_eq!(found[0].location.as_ref().unwrap().line, Some(4));
-
-        let body = format!(
-            "flora-00942: table or view does not exist\n{}\nORA-00942: table or view does not exist",
-            "가".repeat(80)
-        );
-        let record = make_record(vec![], vec![], &body, 500);
-        let found = findings_for_rule(&record, "error");
-        assert_eq!(found.len(), 1);
-        assert!(found[0].evidence.contains("ORA-00942"));
-        let location = found[0].location.as_ref().unwrap();
-        assert_eq!(location.side, "response");
-        assert_eq!(location.section, "body");
-        assert_eq!(location.line, Some(5), "skip the identical code in a word");
-    }
-
-    #[test]
-    fn coldfusion_heading_needs_local_diagnostic_context() {
-        const HEADING: &str = "Error Occurred While Processing Request";
-        for body in [
-            HEADING.to_string(),
-            format!(r#"{{"message":"{HEADING}","retry":true}}"#),
-            format!("{HEADING}. ColdFusion guide is unavailable."),
-            format!("{HEADING}. notcoldfusion.runtime.Example"),
-            format!(
-                "{HEADING} {} coldfusion.runtime.TemplateNotFoundException",
-                "x".repeat(1100)
-            ),
-        ] {
-            let record = make_record(vec![], vec![], &body, 500);
-            assert!(findings_for_rule(&record, "error").is_empty(), "{body}");
-        }
-        let embedded_marker = "coldfusion.runtime.Example";
-        let body = format!(
-            "not{embedded_marker}{}{HEADING}",
-            " ".repeat(512 - embedded_marker.len())
-        );
-        let record = make_record(vec![], vec![], &body, 500);
-        assert!(findings_for_rule(&record, "error").is_empty());
-        for marker in [
-            "coldfusion.runtime.TemplateNotFoundException",
-            "coldfusion.tagext.sql.QueryTag",
-            "coldfusion.filter.FormValidationException",
-            "coldfusion.sql.QueryTable",
-            "coldfusion.compiler.ParseException",
-            "Check the ColdFusion documentation to verify the syntax.",
-            "Enable Robust Exception Information to provide greater detail.",
-        ] {
-            let body = format!("{HEADING}\n{marker}");
-            let record = make_record(vec![], vec![], &body, 500);
-            let found = findings_for_rule(&record, "error");
-            assert_eq!(found.len(), 1, "{marker}");
-            assert_eq!(found[0].title, "ColdFusion error in error response");
-            assert_eq!(found[0].severity, Severity::Medium);
-        }
-        let body = format!("{HEADING}\ncoldfusion.filter.FormValidationException");
-        let record = make_record(vec![], vec![], &body, 200);
-        assert!(findings_for_rule(&record, "error").is_empty());
-    }
-
-    #[test]
-    fn coldfusion_error_evidence_uses_the_corroborated_occurrence() {
-        let body = format!(
-            "FIRST Error Occurred While Processing Request {}\nError Occurred While Processing Request\ncoldfusion.runtime.TemplateNotFoundException",
-            "가".repeat(400)
-        );
-        let record = make_record(vec![], vec![], &body, 500);
-        let found = findings_for_rule(&record, "error");
-        assert_eq!(found.len(), 1);
-        assert!(found[0].evidence.contains("coldfusion.runtime."));
-        assert!(!found[0].evidence.contains("FIRST"));
-        let location = found[0].location.as_ref().unwrap();
-        assert_eq!(location.side, "response");
-        assert_eq!(location.section, "body");
-        assert_eq!(location.line, Some(5), "locate the later vendor diagnostic");
-        let duplicate_marker = "coldfusion.runtime.TemplateNotFoundException";
-        let body = format!(
-            "{duplicate_marker}\n{}\nError Occurred While Processing Request\n{duplicate_marker}",
-            "가".repeat(400)
-        );
-        let record = make_record(vec![], vec![], &body, 500);
-        let found = findings_for_rule(&record, "error");
-        assert_eq!(found.len(), 1);
-        assert_eq!(
-            found[0].location.as_ref().unwrap().line,
-            Some(6),
-            "skip an identical unassociated marker"
-        );
-        for body in [
-            format!("Error Occurred While Processing Request {} coldfusion.runtime.TemplateNotFoundException", "가".repeat(66)),
-            format!("coldfusion.runtime.TemplateNotFoundException {} Error Occurred While Processing Request", "가".repeat(66)),
-        ] {
-            let record = make_record(vec![], vec![], &body, 500);
-            let found = findings_for_rule(&record, "error");
-            assert_eq!(found.len(), 1);
-            assert!(found[0].evidence.contains("Error Occurred While Processing Request"));
-            assert!(found[0].evidence.contains("coldfusion.runtime."));
-            assert!(found[0].evidence.len() <= 123);
-            assert!(found[0].evidence.lines().next().unwrap().contains("coldfusion.runtime."));
-            let location = found[0].location.as_ref().unwrap();
-            assert_eq!(location.side, "response");
-            assert_eq!(location.section, "body");
-            assert_eq!(location.line, Some(3));
-        }
-    }
-
-    #[test]
-    fn hsts_missing_header_excludes_only_parsed_ip_literals() {
-        for host in [
-            "192.0.2.1",
-            "127.0.0.1",
-            "2001:db8::1",
-            "[2001:db8::1]",
-            "[::1]",
-            "192.0.2.1:443",
-            "192.0.2.1:8443",
-            "[2001:db8::1]:8443",
-            "[::1]:443",
-        ] {
-            let mut record = make_record(
-                vec![("sec-fetch-dest", "document")],
-                vec![],
-                "<html></html>",
-                200,
-            );
-            record.host = host.into();
-            let found = findings_for_rule(&record, "header");
-            assert!(
-                !found
-                    .iter()
-                    .any(|f| f.title == "Missing Strict-Transport-Security"),
-                "{host}"
-            );
-            assert!(
-                found
-                    .iter()
-                    .any(|f| f.title == "Missing Content-Security-Policy"),
-                "other header rules remain active for {host}"
-            );
-        }
-        for host in [
-            "example.com",
-            "localhost",
-            "192.0.2.1.example.com",
-            "[example.com]",
-            "[192.0.2.1]",
-            "example.com:443",
-            "192.0.2.1.example.com:8443",
-            "192.0.2.1:",
-            "192.0.2.1:invalid",
-            "192.0.2.1:65536",
-            "[2001:db8::1]:invalid",
-            "[2001:db8::1]:65536",
-            "[192.0.2.1]:443",
-            "[2001:db8::1]suffix:443",
-        ] {
-            let mut record = make_record(
-                vec![("sec-fetch-dest", "document")],
-                vec![],
-                "<html></html>",
-                200,
-            );
-            record.host = host.into();
-            let found = findings_for_rule(&record, "header");
-            assert!(
-                found
-                    .iter()
-                    .any(|f| f.title == "Missing Strict-Transport-Security"),
-                "{host}"
-            );
-        }
-        for (host, expected) in [
-            ("example.com", true),
-            ("example.com:8443", true),
-            ("192.0.2.1", false),
-            ("192.0.2.1:443", false),
-            ("[2001:db8::1]:8443", false),
-        ] {
-            let mut record = make_record(
-                vec![("sec-fetch-dest", "document")],
-                vec![("location", "https://example.com/")],
-                "",
-                301,
-            );
-            record.host = host.into();
-            assert_eq!(
-                findings_for_rule(&record, "header")
-                    .iter()
-                    .any(|f| f.title == "Missing Strict-Transport-Security"),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn jwt_and_cors_details_distinguish_observation_from_proven_impact() {
-        let token = jwt_token(
-            serde_json::json!({"alg": "HS256", "typ": "JWT"}),
-            serde_json::json!({"sub": "synthetic"}),
-        );
-        let authorization = format!("Bearer {token}");
-        let record = make_record(vec![("authorization", &authorization)], vec![], "", 200);
-        let found = findings_for_rule(&record, "jwt");
-        let jwt = found
-            .iter()
-            .find(|f| f.title == "JWT without expiration")
-            .unwrap();
-        assert_eq!(jwt.severity, Severity::Medium);
-        assert!(jwt.detail.contains("Server-side session expiry"));
-        assert!(jwt.detail.contains("does not establish indefinite reuse"));
-        assert!(!jwt.detail.contains("never expire"));
-
-        let record = cors_value_fixture("https://example.com", "true");
-        let found = findings_for_rule(&record, "cors");
-        assert_eq!(found.len(), 1);
-        assert_eq!(
-            found[0].title,
-            "CORS: another site allowed with credentials"
-        );
-        assert_eq!(found[0].severity, Severity::Low);
-        assert!(found[0]
-            .detail
-            .contains("does not establish that credentials were sent"));
-        assert!(found[0].detail.contains("intentional allowlist"));
-        assert!(!found[0].detail.contains("read it with credentials"));
     }
 }

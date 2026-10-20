@@ -3238,284 +3238,6 @@ body.pane-resizing-y {
   padding-bottom: 8px;
 }
 
-/* Keep setup helpers collapsed by default so the request and results stay central. */
-.fuzzer-shell > .fuzzer-workflow-header {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-}
-
-.fuzzer-header-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.fuzzer-header-row > div:first-child {
-  min-width: 0;
-}
-
-.fuzzer-header-row > .toolbar-actions {
-  flex: 0 0 auto;
-}
-
-.fuzzer-shell .fuzzer-help {
-  margin: 0;
-  color: var(--text-soft);
-  font-size: var(--font-xs);
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
-.fuzzer-help + .fuzzer-help {
-  margin-top: 3px;
-}
-
-.fuzzer-preflight {
-  min-width: 0;
-  padding-top: 7px;
-  border-top: 1px solid var(--line);
-}
-
-.fuzzer-preflight-summary {
-  color: var(--text);
-  font-size: var(--font-sm);
-  overflow-wrap: anywhere;
-  user-select: text;
-  -webkit-user-select: text;
-}
-
-.fuzzer-shell #fuzzerPreflightNotice:not(:empty) {
-  margin-top: 4px;
-  color: var(--warning);
-}
-
-/* A start the server refused, or a draft it would refuse. */
-.fuzzer-shell #fuzzerPreflightNotice.fuzzer-notice-error {
-  color: var(--danger);
-}
-
-.fuzzer-attack-options {
-  align-items: end;
-  flex-wrap: wrap;
-}
-
-.fuzzer-attack-options .fuzzer-concurrency-field input {
-  width: 64px;
-}
-
-.fuzzer-check {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--font-sm);
-  color: var(--text-soft);
-  white-space: nowrap;
-}
-
-.fuzzer-position {
-  color: var(--point);
-  font-family: var(--mono);
-  font-size: var(--font-xs);
-}
-
-.fuzzer-shell #fuzzerPreflightNotice:empty,
-.fuzzer-shell #fuzzerSavedRunNotice:empty {
-  display: none;
-}
-
-.fuzzer-layout {
-  overflow: auto;
-}
-
-.fuzzer-top-row {
-  min-height: 220px;
-}
-
-.fuzzer-top-row > .fuzzer-template-card,
-.fuzzer-top-row > .fuzzer-payloads-card {
-  display: flex;
-  flex-direction: column;
-  overflow: auto;
-}
-
-.fuzzer-top-row .panel-toolbar,
-.fuzzer-results-card > .panel-toolbar {
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 10px;
-}
-
-.fuzzer-top-row .panel-toolbar h2,
-.fuzzer-results-card > .panel-toolbar h2 {
-  font-size: var(--font-sm);
-}
-
-.fuzzer-top-row .editor-panel {
-  flex: 1 0 80px;
-  min-height: 80px;
-}
-
-.fuzzer-shell .fuzzer-editor-help {
-  flex: 0 0 auto;
-  padding: 6px 10px;
-  border-top: 1px solid var(--line);
-}
-
-.fuzzer-disclosure {
-  min-width: 0;
-  color: var(--text-soft);
-  font-size: var(--font-xs);
-}
-
-.fuzzer-disclosure > summary {
-  min-height: var(--control-h);
-  padding: 5px 10px;
-  cursor: pointer;
-  color: var(--text);
-  overflow-wrap: anywhere;
-}
-
-.fuzzer-disclosure > summary:hover {
-  background: var(--accent-soft);
-}
-
-.fuzzer-disclosure > summary:focus-visible,
-.fuzzer-shell .compact-field input:focus-visible,
-.fuzzer-shell .compact-field select:focus-visible,
-.fuzzer-shell button:focus-visible,
-.fuzzer-shell .request-editor:focus-visible {
-  outline: 2px solid var(--point);
-  outline-offset: -2px;
-}
-
-.fuzzer-disclosure-body {
-  display: grid;
-  gap: 9px;
-  max-height: min(24vh, 180px);
-  padding: 8px 10px 10px;
-  overflow: auto;
-  overscroll-behavior: contain;
-}
-
-.fuzzer-preview-disclosure {
-  margin-top: 3px;
-}
-
-.fuzzer-preview-disclosure > summary {
-  padding-left: 0;
-}
-
-.fuzzer-preview-samples {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel-code);
-  user-select: text;
-  -webkit-user-select: text;
-  overflow-wrap: anywhere;
-}
-
-.fuzzer-preview-samples pre {
-  max-width: 100%;
-  margin: 0;
-  overflow: auto;
-  font-family: var(--mono);
-  font-size: var(--font-xs);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.fuzzer-control-disclosure {
-  flex: 0 0 auto;
-  border-bottom: 1px solid var(--line);
-}
-
-.fuzzer-control-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 7px;
-  min-width: 0;
-}
-
-.fuzzer-quick-controls {
-  flex: 0 0 auto;
-  padding: 7px 10px;
-  border-bottom: 1px solid var(--line);
-}
-
-.fuzzer-field-grow {
-  flex: 1 1 140px;
-  min-width: 0;
-}
-
-.fuzzer-control-row > .secondary-action,
-.fuzzer-range-fields > .secondary-action {
-  min-height: var(--control-h);
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: var(--font-xs);
-}
-
-.fuzzer-range-fields {
-  display: grid;
-  gap: 7px;
-  min-width: 0;
-  margin: 0;
-  padding: 7px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-}
-
-.fuzzer-range-fields legend {
-  padding: 0 4px;
-  font-size: var(--font-xs);
-  color: var(--text-soft);
-}
-
-.fuzzer-range-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.fuzzer-range-grid .compact-field,
-.fuzzer-filter-grid .compact-field {
-  min-width: 0;
-}
-
-.fuzzer-results-card {
-  flex: 1 0 240px;
-  overflow: auto;
-}
-
-.fuzzer-result-tools {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  flex: 0 0 auto;
-  border-bottom: 1px solid var(--line);
-}
-
-.fuzzer-result-tools > .fuzzer-disclosure {
-  flex: 1 1 300px;
-}
-
-.fuzzer-filter-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(95px, 1fr));
-  gap: 8px;
-}
-
-.fuzzer-shell .fuzzer-filter-count {
-  flex: 0 0 auto;
-  padding: 4px 10px;
-}
-
 .target-tree {
   display: grid;
   gap: 10px;
@@ -4528,17 +4250,10 @@ button.utility-button.replay-tab-add {
 
 /* ── Findings (Passive Scanner) ── */
 
-.proxy-shell.findings-active {
-  /* Findings owns its own split. Do not make its percentage-height flex panes
-     span the hidden HTTP toolbar, history, and saved message-height tracks. */
-  grid-template-rows: auto minmax(0, 1fr);
-}
-
 #findingsPanel {
   padding: 0;
   display: flex;
   flex-direction: column;
-  height: 100%;
 }
 
 #findingsPanel .history-table-shell {
@@ -6091,16 +5806,7 @@ button.utility-button.replay-tab-add {
   .fuzzer-payloads-card {
     flex: none !important;
     width: auto !important;
-    min-height: 220px;
-  }
-  .fuzzer-top-row {
-    gap: 10px;
-  }
-  .fuzzer-top-row .editor-panel {
-    min-height: 100px;
-  }
-  .fuzzer-results-card {
-    flex-basis: 320px;
+    min-height: 160px;
   }
 
   .tools-workbench {
@@ -7673,10 +7379,7 @@ button.utility-button.replay-tab-add {
 .target-passive-label { margin-left: auto; color: var(--text-dim); font-size: var(--font-xs); white-space: nowrap; }
 .target-shell .panel-card { min-height: 0; }
 #targetPathsPanel { display: grid; grid-template-rows: auto minmax(0, 1fr); }
-.service-map-workspace { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 12px; gap: 10px; }
-/* A column, not grid rows: the alert and the inactive view are display:none,
-   and fixed rows put the map in an auto row as tall as the inspector. */
-.service-map-content, .service-map-api-catalog { flex: 1; }
+.service-map-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; padding: 12px; gap: 10px; }
 .service-map-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-height: var(--control-h); padding: 0 3px; position: relative; }
 /* Every control in the row has the app's compact toolbar box, as in HTTP
    history. The shared .secondary-action alone is a 40px dialog button, so the
@@ -7740,64 +7443,6 @@ button.utility-button.replay-tab-add {
 .service-map-edge:where(.kind-api) { stroke: var(--service-map-api-edge); opacity: .5; }
 .service-map-edge:where(.kind-script, .kind-static) { opacity: .3; }
 .service-map-edge.selected { stroke: var(--point); opacity: 1; stroke-width: calc(var(--edge-weight, 1.5px) + 0.5px); }
-/* Flow: one lane per origin, a card per page load and an arrow per step; a
-   step opens its newest row in HTTP history, another lane shows its own flow.
-   Method and status pills take the colours of HTTP history. */
-.service-map-flow { display: block; overflow: visible; font-size: 12px; --service-map-api-edge: var(--token-url-color); }
-.service-map-flow text { fill: var(--text-soft); }
-.service-map-flow-phase { fill: var(--panel-code); stroke: var(--line); }
-.service-map-flow-phase-accent { fill: var(--point); opacity: .6; }
-.service-map-flow-phase-title rect { fill: var(--panel-code); }
-.service-map-flow .service-map-flow-kicker { font-size: 10px; font-weight: 700; letter-spacing: .08em; fill: var(--text-dim); }
-.service-map-flow .service-map-flow-place { font-family: var(--mono); fill: var(--text); }
-.service-map-flow-lane rect { fill: var(--panel-elevated); stroke: var(--line-strong); }
-.service-map-flow .service-map-flow-lane-name { fill: var(--text); font-weight: 600; }
-.service-map-flow .service-map-flow-lane-detail { font-size: 11px; fill: var(--text-dim); }
-.service-map-flow-lane[data-selected] rect { stroke: var(--point); stroke-width: 1.5px; }
-.service-map-flow .service-map-flow-lane[data-selected] .service-map-flow-lane-name { fill: var(--point); }
-.service-map-flow-lane[data-service-flow-lane], .service-map-flow-step { cursor: pointer; }
-.service-map-flow-lane[data-service-flow-lane]:is(:hover, :focus-visible) rect { stroke: var(--point-border); }
-.service-map-flow-life { stroke: var(--line-strong); stroke-dasharray: 3 5; }
-.service-map-flow-row { fill: transparent; }
-.service-map-flow-step:is(:hover, :focus-visible) .service-map-flow-row { fill: var(--point-soft); }
-.service-map-flow-step:focus-visible .service-map-flow-row { stroke: var(--point-border); }
-.service-map-flow .service-map-flow-time { font-size: 11px; fill: var(--text-dim); font-variant-numeric: tabular-nums; }
-/* The halo keeps a path legible where a lifeline runs behind it. */
-.service-map-flow .service-map-flow-path { font-family: var(--mono); fill: var(--text); stroke: var(--panel-code); stroke-width: 4px; stroke-linejoin: round; paint-order: stroke; }
-.service-map-flow-pill rect { fill: var(--panel-elevated); stroke: var(--line-strong); }
-.service-map-flow .service-map-flow-pill text { font-size: 10.5px; font-weight: 700; fill: var(--text-soft); }
-.service-map-flow-pill.method-get rect { fill: var(--point-soft); stroke: none; }
-.service-map-flow .service-map-flow-pill.method-get text { fill: var(--accent-strong); }
-.service-map-flow-pill.method-post rect { fill: rgba(246, 196, 110, 0.12); stroke: none; }
-.service-map-flow .service-map-flow-pill.method-post text { fill: var(--warning); }
-.service-map-flow-pill:is(.method-put, .method-patch) rect { fill: rgba(130, 184, 255, 0.12); stroke: none; }
-.service-map-flow .service-map-flow-pill:is(.method-put, .method-patch) text { fill: var(--info); }
-.service-map-flow-pill.method-delete rect { fill: rgba(255, 142, 142, 0.12); stroke: none; }
-.service-map-flow .service-map-flow-pill.method-delete text { fill: var(--danger); }
-.service-map-flow .service-map-flow-pill.status-ok text { fill: var(--success); }
-.service-map-flow .service-map-flow-pill.status-info text { fill: var(--info); }
-.service-map-flow .service-map-flow-pill.status-warn text { fill: var(--warning); }
-.service-map-flow .service-map-flow-pill.status-error text { fill: var(--danger); }
-/* Arrows by request kind: API calls stand out, pages read plainly, scripts
-   and static files recede; a redirect back to the client is gold and dashed. */
-.service-map-flow-step line { stroke: var(--text-soft); stroke-width: 1.5px; }
-.service-map-flow-head { fill: var(--text-soft); }
-.service-map-flow-step.kind-api line { stroke: var(--service-map-api-edge); }
-.service-map-flow-step.kind-api .service-map-flow-head { fill: var(--service-map-api-edge); }
-.service-map-flow-step:is(.kind-script, .kind-static, .kind-other) line { stroke: var(--text-dim); }
-.service-map-flow-step:is(.kind-script, .kind-static, .kind-other) .service-map-flow-head { fill: var(--text-dim); }
-.service-map-flow-step.redirect line { stroke: var(--point); stroke-dasharray: 6 4; }
-.service-map-flow-step.redirect .service-map-flow-head { fill: var(--point); }
-.service-map-flow-step:is(:hover, :focus-visible) line { stroke-width: 2px; }
-.service-map-flow :focus-visible { outline: none; }
-/* The legend shows the map's line kinds, or in Flow the flow's; the wrappers
-   leave their samples items of the legend's own row. */
-.service-map-legend-lines, .service-map-legend-flow { display: contents; }
-.service-map-legend.flow-active .service-map-legend-lines, .service-map-legend:not(.flow-active) .service-map-legend-flow { display: none; }
-.service-map-line.flow-api { border-top-color: var(--token-url-color); }
-.service-map-line.flow-page { border-top-color: var(--text-soft); }
-.service-map-line.flow-static { border-top-color: var(--text-dim); }
-.service-map-line.flow-redirect { border-top: 2px dashed var(--point); }
 /* A wide transparent stroke over each recorded arrow takes the pointer. */
 .service-map-hit { fill: none; stroke: transparent; stroke-width: 10px; pointer-events: stroke; cursor: pointer; }
 .service-map-card { display: flex; gap: 8px; position: absolute; width: var(--service-map-card-width); height: var(--service-map-card-height); box-sizing: border-box; align-items: flex-start; padding: 10px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel-elevated); color: var(--text); text-align: left; cursor: pointer; box-shadow: 0 4px 18px rgba(0,0,0,.12); }
@@ -7952,8 +7597,7 @@ button.utility-button.replay-tab-add {
   .service-map-detail-header { flex-wrap: wrap; }
 }
 @media (max-width: 720px) {
-  .service-map-workspace { overflow: auto; padding: 8px; }
-  .service-map-content, .service-map-api-catalog { flex: none; }
+  .service-map-workspace { overflow: auto; grid-template-rows: auto auto auto auto; padding: 8px; }
   .service-map-content { grid-template-columns: minmax(0, 1fr); grid-template-rows: 340px minmax(280px, auto); }
   .service-map-resizer { display: none; }
   .service-map-detail { max-height: 560px; }
@@ -8066,8 +7710,7 @@ button.utility-button.replay-tab-add {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(290px, 340px) minmax(0, 1fr);
-  /* Jobs take the room they need, up to a little over a quarter. */
-  grid-template-rows: fit-content(28%) minmax(0, 1fr);
+  grid-template-rows: minmax(125px, 28%) minmax(0, 1fr);
   gap: 12px;
   padding: 12px;
   overflow: hidden;
@@ -8076,9 +7719,8 @@ button.utility-button.replay-tab-add {
 .recon-shell .panel-card { min-width: 0; min-height: 0; }
 .recon-setup { grid-row: 1 / 3; overflow: auto; }
 .recon-form { display: grid; gap: 12px; padding: 14px; }
-/* The card is taller than its form; keep the rows at their own height. */
-.recon-setup .recon-form { align-content: start; }
-.recon-start { justify-self: start; }
+.recon-target-row { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.recon-target-field { flex: 1 1 230px; }
 .recon-field { display: grid; gap: 5px; color: var(--text-soft); }
 .recon-shell input:not([type="checkbox"]), .recon-shell select {
   min-width: 0; width: 100%; min-height: var(--control-h);
@@ -8111,10 +7753,10 @@ button.utility-button.replay-tab-add {
 .recon-source-status { font-size: var(--font-sm); color: var(--text-soft); }
 .recon-warning { margin: 3px 0; overflow-wrap: anywhere; }
 .recon-inventory { display: flex; flex-direction: column; overflow: hidden; }
-.recon-inventory-toolbar { flex-wrap: wrap; align-items: center; gap: 10px; }
+.recon-inventory-toolbar { flex-wrap: wrap; gap: 10px; }
 .recon-search-controls { display: flex; gap: 8px; flex: 1 1 320px; }
 .recon-search-controls input { flex: 1 1 160px; }
-.recon-search-controls select { flex: 0 0 auto; width: auto; min-width: 130px; }
+.recon-search-controls select { flex: 0 0 130px; }
 .recon-results { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 34%); flex: 1; min-height: 0; overflow: hidden; }
 .recon-table-scroll { min-width: 0; overflow: auto; }
 .recon-table { width: 100%; table-layout: fixed; }
@@ -8152,119 +7794,4 @@ button.utility-button.replay-tab-add {
 }
 .recon-scan-options { display: grid; gap: 10px; padding: 10px; border: 1px solid var(--point-border); background: var(--point-soft); border-radius: 5px; }
 .recon-scan-options .recon-check { overflow-wrap: anywhere; }
-/* Templates reuses Recon's form, table and detail styles; only its layout is its own. */
-.templates-shell {
-  height: 100%;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(290px, 340px) minmax(0, 1fr);
-  gap: 12px;
-  padding: 12px;
-  overflow: hidden;
-  background: var(--shell);
-}
-.templates-shell .panel-card { min-width: 0; min-height: 0; }
-/* The library and the scan form share the left column, which scrolls as one. */
-.templates-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; overflow: auto; }
-.templates-side .panel-card { flex: 0 0 auto; }
-/* The card is taller than its form; keep the rows at their own height. */
-.templates-library .recon-form { align-content: start; }
-.templates-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.templates-shell input:not([type="checkbox"]):not([type="file"]), .templates-shell select, .templates-shell textarea {
-  min-width: 0; width: 100%; min-height: var(--control-h);
-  border: 1px solid var(--line-strong); border-radius: 5px;
-  background: var(--panel-code); color: var(--text); padding: 5px 8px;
-}
-.templates-shell textarea { resize: vertical; font-family: var(--mono); }
-/* The list's filters keep their own width beside the search box: sized to the
-   column like the form's controls, the search box shrinks to nothing. */
-.templates-shell .recon-search-controls select { width: auto; min-width: 130px; }
-.templates-status { white-space: pre-line; }
-.templates-shell input:focus-visible, .templates-shell select:focus-visible, .templates-shell button:focus-visible,
-.templates-shell textarea:focus-visible, .templates-shell summary:focus-visible {
-  outline: 2px solid var(--info); outline-offset: 2px;
-}
-.templates-table th:first-child { width: 44px; }
-.templates-table th:nth-child(2) { width: 76px; }
-.templates-table th:nth-child(4) { width: 130px; }
-.templates-table th:nth-child(5) { width: 26%; }
-.templates-yaml {
-  margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 5px;
-  background: var(--panel-code); font-family: var(--mono); font-size: var(--font-sm);
-  white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;
-}
-@media (max-width: 760px) {
-  .templates-shell { display: flex; flex-direction: column; overflow: auto; }
-  .templates-side { flex: 0 0 auto; overflow: visible; }
-  .templates-list { flex: 0 0 650px; }
-}
 .recon-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-
-/* Inert, view-owned decoding previews share the active theme. The button stays
-   in the tab order without reserving a new toolbar row in every traffic pane. */
-.encoded-preview-trigger {
-  position: absolute;
-  right: 18px;
-  top: 5px;
-  z-index: 2;
-  padding: 2px 7px;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  background: var(--panel-elevated);
-  color: var(--text-soft);
-  font: 11px var(--sans);
-  cursor: pointer;
-  opacity: 0;
-}
-.cm-editor:hover .encoded-preview-trigger,
-.cm-editor:focus-within .encoded-preview-trigger { opacity: 1; }
-.encoded-preview-trigger:focus-visible { outline: 2px solid var(--point); outline-offset: 2px; }
-.encoded-preview-tooltip {
-  position: fixed;
-  z-index: 1200;
-  max-width: min(480px, calc(100vw - 16px));
-  max-height: min(320px, calc(100vh - 16px));
-  overflow: auto;
-  padding: 10px 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--panel-elevated);
-  color: var(--text);
-  box-shadow: var(--shadow);
-  font: 12px/1.45 var(--sans);
-  user-select: text;
-}
-.encoded-preview-title { color: var(--text-soft); font-weight: 600; }
-.encoded-preview-label { margin-top: 8px; color: var(--point); font-size: 11px; }
-.encoded-preview-tooltip pre {
-  margin: 3px 0 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font: 12px/1.5 var(--mono);
-}
-
-@media (max-width: 620px) {
-  .fuzzer-header-row {
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .fuzzer-header-row > .toolbar-actions {
-    margin-left: auto;
-  }
-  .fuzzer-layout {
-    padding: 8px;
-  }
-  .fuzzer-top-row > .fuzzer-template-card,
-  .fuzzer-top-row > .fuzzer-payloads-card {
-    min-width: 0;
-  }
-  .fuzzer-result-tools > .fuzzer-disclosure {
-    flex-basis: 100%;
-  }
-  .fuzzer-result-tools > .fuzzer-disclosure + .fuzzer-disclosure {
-    border-top: 1px solid var(--line);
-  }
-  .fuzzer-filter-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}

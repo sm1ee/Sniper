@@ -58,7 +58,7 @@ for (const kind of ["newer detail", "selection return", "session switch"]) {
     await started.promise;
     replaceContext(f, kind);
     const before = snapshot(f);
-    body.resolve({ id: "saved-fixture", frames: frames([0, 1]) });
+    body.resolve({ frames: frames([0, 1]) });
     await loading;
     assert.equal(snapshot(f), before, "stale data must not change frames, loading state, rendering, or scroll");
   });
@@ -85,7 +85,7 @@ test("current older-frame success merges the page and clears its loading state",
   const loading = f.c.loadOlderWebsocketFrames();
   assert.equal(f.state.selectedWebsocketRecord.older_frames_loading, true);
   assert.deepEqual(f.requests[0].path, { id: "saved-fixture", session: "session-fixture-a", beforeIndex: 2 });
-  f.requests[0].resolve({ ok: true, json: async () => ({ id: "saved-fixture", frames: frames([0, 1]) }) });
+  f.requests[0].resolve({ ok: true, json: async () => ({ frames: frames([0, 1]) }) });
   await loading;
   assert.deepEqual(Array.from(f.state.selectedWebsocketRecord.frames, frame => frame.index), [0, 1, 2, 3]);
   assert.equal(f.state.selectedWebsocketRecord.older_frames_loading, false);
@@ -104,7 +104,7 @@ for (const failure of ["network", "HTTP", "JSON"]) {
     assert.equal(f.state.selectedWebsocketRecord.older_frames_loading, false);
     assert.deepEqual(f.errors, ["Current failure"]);
     const retry = f.c.loadOlderWebsocketFrames();
-    f.requests[1].resolve({ ok: true, json: async () => ({ id: "saved-fixture", frames: frames([0, 1]) }) });
+    f.requests[1].resolve({ ok: true, json: async () => ({ frames: frames([0, 1]) }) });
     await retry;
     assert.equal(f.state.selectedWebsocketRecord.older_frames_loading, false);
     assert.deepEqual(Array.from(f.state.selectedWebsocketRecord.frames, frame => frame.index), [0, 1, 2, 3]);
@@ -121,7 +121,7 @@ for (const outcome of ["success", "failure"]) {
     await started.promise;
     // A newer detail read can fail without replacing the retained record.
     f.c._websocketDetailGeneration += 1;
-    if (outcome === "success") body.resolve({ id: "saved-fixture", frames: frames([0, 1]) });
+    if (outcome === "success") body.resolve({ frames: frames([0, 1]) });
     else body.reject(new Error("Stale failure"));
     await loading;
     assert.equal(f.state.selectedWebsocketRecord, original);
@@ -130,7 +130,7 @@ for (const outcome of ["success", "failure"]) {
     assert.deepEqual(f.errors, []);
     const retry = f.c.loadOlderWebsocketFrames();
     assert.equal(f.requests.length, 2, "the retained window must remain retryable");
-    f.requests[1].resolve({ ok: true, json: async () => ({ id: "saved-fixture", frames: frames([0, 1]) }) });
+    f.requests[1].resolve({ ok: true, json: async () => ({ frames: frames([0, 1]) }) });
     await retry;
     assert.deepEqual(Array.from(original.frames, frame => frame.index), [0, 1, 2, 3]);
   });
@@ -149,7 +149,7 @@ for (const outcome of ["success", "failure"]) {
     assert.notEqual(clone, original);
     assert.equal(clone.older_frames_loading, true);
     f.c._websocketDetailGeneration += 1;
-    if (outcome === "success") body.resolve({ id: "saved-fixture", frames: frames([0, 1]) });
+    if (outcome === "success") body.resolve({ frames: frames([0, 1]) });
     else body.reject(new Error("Stale failure"));
     await loading;
     assert.equal(f.state.selectedWebsocketRecord, clone);
@@ -159,7 +159,7 @@ for (const outcome of ["success", "failure"]) {
     assert.deepEqual(f.errors, []);
     const retry = f.c.loadOlderWebsocketFrames();
     assert.equal(f.requests.length, 2);
-    f.requests[1].resolve({ ok: true, json: async () => ({ id: "saved-fixture", frames: frames([0, 1]) }) });
+    f.requests[1].resolve({ ok: true, json: async () => ({ frames: frames([0, 1]) }) });
     await retry;
     assert.deepEqual(Array.from(clone.frames, frame => frame.index), [0, 1, 2, 3]);
   });
@@ -174,7 +174,7 @@ for (const outcome of ["success", "failure"]) {
     f.state.selectedWebsocketRecord = { ...record([6, 7]), older_frames_loading: true, _olderFramesLoadToken: {} };
     const owner = f.state.selectedWebsocketRecord._olderFramesLoadToken;
     const before = snapshot(f);
-    if (outcome === "success") body.resolve({ id: "saved-fixture", frames: frames([0, 1]) });
+    if (outcome === "success") body.resolve({ frames: frames([0, 1]) });
     else body.reject(new Error("Stale failure"));
     await loading;
     assert.equal(snapshot(f), before);

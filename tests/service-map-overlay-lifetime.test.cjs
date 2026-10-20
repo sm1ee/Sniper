@@ -167,7 +167,7 @@ for (const boundary of ['refresh failure', 'dirty history']) test(`a newly inspe
   assert.equal(f.requests.length, count + (boundary === 'refresh failure' ? 2 : 1));
 });
 
-test('opposite directions, metadata and body links use distinct deterministic curves', () => {
+test('opposite directions and all relationship types use distinct deterministic curves', () => {
   const a = { ...origin(SOURCE), captured: true }, b = { ...origin(OTHER), captured: true };
   for (const [source, target] of [[a, b], [b, a]]) {
     source.redirects = [{ target_origin: target.origin }];
@@ -175,13 +175,12 @@ test('opposite directions, metadata and body links use distinct deterministic cu
   }
   const bodyEdges = [{ source: SOURCE, target: OTHER, relationship: 'body_url_reference', label: 'Literal body URL reference' }];
   const layout = map.graphLayout([a, b], [SOURCE, OTHER], new Map(), SOURCE, bodyEdges);
-  // Metadata is one arrow each way; the inspected body link keeps its own.
-  assert.equal(layout.edges.length, 3); assert.equal(layout.edgeCount, 3);
+  assert.equal(layout.edges.length, 7); assert.equal(layout.edgeCount, 7);
   const geometry = edge => {
     const [x1, y1, c1x, c1y, c2x, c2y, x2, y2] = edge.path.match(/-?\d+(?:\.\d+)?/g).map(Number);
     return [[x1, y1, c1x, c1y, c2x, c2y, x2, y2].join(','), [x2, y2, c2x, c2y, c1x, c1y, x1, y1].join(',')].sort()[0];
   };
-  assert.equal(new Set(layout.edges.map(geometry)).size, 3);
+  assert.equal(new Set(layout.edges.map(geometry)).size, 7);
   const repeated = map.graphLayout([a, b], [SOURCE, OTHER], layout.slots, SOURCE, bodyEdges);
   assert.equal(JSON.stringify(repeated.edges), JSON.stringify(layout.edges));
 });
@@ -229,7 +228,7 @@ test('body priority keeps separate metadata omissions and partial coverage visib
   assert.equal((f.els.canvas.innerHTML.match(/data-service-origin=/g) || []).length, 24);
   assert.equal((f.els.canvas.innerHTML.match(/data-relationship="body_url_reference"/g) || []).length, 23);
   assert.match(f.els.graphDiagnostics.textContent, /Body URL typed arrows: 23 \/ 100 shown · 77 outside displayed cards · 0 omitted by arrow cap/);
-  assert.match(f.els.graphDiagnostics.textContent, /Metadata arrows: 0 \/ 25 shown · 25 outside displayed cards · 0 omitted by arrow cap/);
+  assert.match(f.els.graphDiagnostics.textContent, /Metadata typed arrows: 0 \/ 25 shown · 25 outside displayed cards · 0 omitted by arrow cap/);
   assert.match(f.els.overlayStatus.innerHTML, /Partial retained-preview scan/);
   assert.match(f.els.overlayStatus.innerHTML, /Origin output limit reached/);
   assert.match(f.els.overlayStatus.innerHTML, /3 reference occurrence\(s\) omitted/);

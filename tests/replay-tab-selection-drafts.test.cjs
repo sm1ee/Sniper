@@ -79,10 +79,7 @@ function setup() {
   for (const name of ['sendReplayButton', 'cancelReplayButton', 'replayBackButton', 'replayForwardButton']) f.els[name] = {};
   // Exercise the real render-to-toolbar forwarding while omitting unrelated response painting.
   const toolbarCall = source('renderReplay').match(/  syncReplayToolbar\(tab[^;]*;/)[0];
-  vm.runInContext(`function renderSavedToolbar(tab, options = {}) {
-    const previousOwner = getRenderedHttpReplayDraftOwner(tab);
-    ${toolbarCall}
-  }`, f.context);
+  vm.runInContext(`function renderSavedToolbar(tab, options = {}) { ${toolbarCall} }`, f.context);
   f.context.renderReplay = options => {
     const tab = f.context.ensureRepeaterTab(); f.renders.push({ kind: 'full', options });
     f.context.renderReplayTabs();
@@ -93,12 +90,6 @@ function setup() {
       if (f.els.replayRequestHighlight) f.els.replayRequestHighlight.innerText = tab.requestText;
       f.els.replayRequestEditor.value = tab.requestText;
     }
-    f.context.renderedHttpReplayDraftOwner = {
-      tab, sessionId: f.context.currentSessionId(), generation: f.context.workspaceStateGeneration,
-    };
-  };
-  f.context.renderedHttpReplayDraftOwner = {
-    tab: f.a, sessionId: f.context.currentSessionId(), generation: f.context.workspaceStateGeneration,
   };
   f.document.addEventListener = (type, callback) => { if (type === 'keydown') f.keyHandler = callback; };
   bindListener(f, '  document.addEventListener("keydown", (event) => {');
