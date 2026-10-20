@@ -299,25 +299,33 @@ async fn flush_pending_persists_waits_for_streaming_body_pump_store() {
         .find(|record| record.path == "/stream")
         .expect("streaming record should be stored before flush returns");
     assert_eq!(record.status, Some(200));
-    let response = record
-        .response
-        .as_ref()
-        .expect("response should be captured");
-    assert_eq!(response.body_preview, "hello");
     assert!(record
         .notes
         .iter()
         .any(|note| note.contains("Shutdown finalized streamed response capture")));
+    let record_id = record.id;
+
+    // Shutdown persists the active session right after the flush, and the flush
+    // persists it itself when the pump's last write outlasts its wait. Either way
+    // the body moves to disk, where `snapshot` leaves it, so read it back with
+    // `get` as the API does.
+    state.persist_active_session().await.unwrap();
+    let stored = session.store.get(record_id).await.unwrap();
+    assert_eq!(
+        stored.response.map(|response| response.body_preview),
+        Some("hello".to_string())
+    );
 
     let restored = state.sessions.load_context(session.id()).unwrap();
-    let restored_records = restored.store.snapshot(Some(10)).await;
-    assert!(restored_records
-        .iter()
-        .any(|record| record.path == "/stream"
-            && record
-                .response
-                .as_ref()
-                .is_some_and(|response| response.body_preview == "hello")));
+    let restored = restored
+        .store
+        .get(record_id)
+        .await
+        .expect("streaming record should survive a reload");
+    assert_eq!(
+        restored.response.map(|response| response.body_preview),
+        Some("hello".to_string())
+    );
 
     drop(stream);
     proxy_handle.abort();
