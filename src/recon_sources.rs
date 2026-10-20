@@ -1,4 +1,4 @@
-//! Passive provider readers and static document discovery.
+//! Bounded, passive provider readers and static document discovery.
 //!
 //! Provider URLs are constructed here, never taken from returned API links. The
 //! caller supplies a dedicated client with redirects disabled and no target
@@ -20,6 +20,10 @@ use reqwest::{
 use serde_json::Value;
 use url::Url;
 
+pub const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_STATIC_ITEMS: usize = 10_000;
+const MAX_WARNINGS: usize = 32;
+const MAX_URL_BYTES: usize = 16_384;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Clone, Debug)]
@@ -43,7 +47,7 @@ pub struct SourceReport {
 impl SourceReport {
     fn warn(&mut self, warning: impl Into<String>) {
         let warning = warning.into();
-        if !self.warnings.contains(&warning) {
+        if self.warnings.len() < MAX_WARNINGS && !self.warnings.contains(&warning) {
             self.warnings.push(warning);
         }
     }
@@ -58,6 +62,7 @@ impl SourceReport {
 enum FetchError {
     Cancelled,
     Http(u16),
+    TooLarge,
     Transport,
     InvalidText,
 }
@@ -67,6 +72,7 @@ impl std::fmt::Display for FetchError {
         match self {
             Self::Cancelled => f.write_str("Cancelled"),
             Self::Http(status) => write!(f, "Provider returned HTTP {status}"),
+            Self::TooLarge => f.write_str("Provider response exceeded the 2 MiB limit"),
             Self::Transport => f.write_str("Provider request failed or timed out"),
             Self::InvalidText => f.write_str("Provider returned invalid UTF-8"),
         }
@@ -127,9 +133,15 @@ async fn fetch_text(
         if !status.is_success() {
             return Err(FetchError::Http(status.as_u16()));
         }
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(FetchError::TooLarge);
+        }
         let mut bytes = Vec::new();
-        // Keep cancellation responsive while reading the complete response,
-        // including bodies streamed without a Content-Length header.
+        // chunk() is used rather than text()/json() so chunked responses cannot
+        // allocate an unbounded body before the size check is performed.
         loop {
             let chunk = tokio::select! {
                 _ = cancelled(cancel) => return Err(FetchError::Cancelled),
@@ -138,6 +150,9 @@ async fn fetch_text(
             let Some(chunk) = chunk else {
                 break;
             };
+            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(FetchError::TooLarge);
+            }
             bytes.extend_from_slice(&chunk);
         }
         return String::from_utf8(bytes).map_err(|_| FetchError::InvalidText);
@@ -198,13 +213,17 @@ fn result_url(uuid: &str) -> Option<Url> {
 
 fn sort_cursor(value: &Value) -> Option<String> {
     let values = value.as_array()?;
-    if values.is_empty() {
+    if values.is_empty() || values.len() > 8 {
         return None;
     }
     let mut parts = Vec::new();
     for value in values {
         let part = match value {
-            Value::String(value) if !value.is_empty() && !value.contains([',', '\r', '\n']) => {
+            Value::String(value)
+                if !value.is_empty()
+                    && value.len() <= 1024
+                    && !value.contains([',', '\r', '\n']) =>
+            {
                 value.clone()
             }
             Value::Number(value) => value.to_string(),
@@ -232,42 +251,14 @@ fn text_at<'a>(value: &'a Value, paths: &[&str]) -> Option<&'a str> {
 
 fn method(value: Option<&str>) -> String {
     let value = value.unwrap_or("GET");
-    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-') {
+    if !value.is_empty()
+        && value.len() <= 32
+        && value.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-')
+    {
         value.to_ascii_uppercase()
     } else {
         "GET".into()
     }
-}
-
-fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
-    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
-}
-
-/// A zero budget means collect until the source is exhausted or cancelled.
-fn limit_reached(limit: usize, count: usize) -> bool {
-    limit != 0 && count >= limit
-}
-
-fn batch_size(limit: usize, count: usize, provider_batch: usize) -> usize {
-    if limit == 0 {
-        provider_batch
-    } else {
-        limit.saturating_sub(count).min(provider_batch)
-    }
-}
-
-fn urlscan_has_more(data: &Value, page_results: usize, scanned: usize, size: usize) -> bool {
-    if page_results == 0 {
-        return false;
-    }
-    // An explicit provider exhaustion signal takes precedence over page size.
-    data.get("has_more")
-        .and_then(Value::as_bool)
-        .unwrap_or_else(|| {
-            data.get("total")
-                .and_then(Value::as_u64)
-                .map_or(page_results >= size, |total| total > scanned as u64)
-        })
 }
 
 fn push_discovery(
@@ -278,6 +269,9 @@ fn push_discovery(
 ) -> bool {
     if item.url.is_empty() {
         return true;
+    }
+    if item.url.len() > MAX_URL_BYTES {
+        return false;
     }
     let key = (item.url.clone(), item.method.clone(), item.location.clone());
     if seen.contains(&key) {
@@ -296,7 +290,7 @@ fn push_discovery(
         }
         return true;
     }
-    if limit_reached(max, out.len()) {
+    if out.len() >= max {
         return false;
     }
     seen.insert(key);
@@ -311,20 +305,16 @@ fn urlscan_discoveries_filtered(
     location: &str,
     max: usize,
     in_scope: impl Fn(&str) -> bool,
-    cancel: Option<&AtomicBool>,
 ) -> (Vec<Discovery>, bool) {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     let timestamp = document
         .pointer("/task/time")
         .and_then(Value::as_str)
+        .filter(|s| s.len() <= 128)
         .map(str::to_string);
     let mut complete = true;
     let mut add = |url: &str, verb: Option<&str>, code: Option<u16>| {
-        if is_cancelled(cancel) {
-            complete = false;
-            return;
-        }
         if !in_scope(url) {
             return;
         }
@@ -349,13 +339,9 @@ fn urlscan_discoveries_filtered(
         add(url, None, status(document.pointer("/page/status")));
     }
     // Prefer the detailed observations before derivative lists so methods and
-    // status codes survive when an explicit result budget fills up.
+    // status codes survive when the bounded output fills up.
     if let Some(requests) = document.pointer("/data/requests").and_then(Value::as_array) {
         for request in requests {
-            if is_cancelled(cancel) {
-                drop(add);
-                return (out, true);
-            }
             let verb = text_at(
                 request,
                 &["/request/request/method", "/request/method", "/method"],
@@ -379,10 +365,6 @@ fn urlscan_discoveries_filtered(
     }
     if let Some(urls) = document.pointer("/lists/urls").and_then(Value::as_array) {
         for url in urls.iter().filter_map(Value::as_str) {
-            if is_cancelled(cancel) {
-                drop(add);
-                return (out, true);
-            }
             add(url, None, None);
         }
     }
@@ -410,10 +392,6 @@ fn urlscan_discoveries_filtered(
     ] {
         if let Some(entries) = document.pointer(path).and_then(Value::as_array) {
             for entry in entries {
-                if is_cancelled(cancel) {
-                    drop(add);
-                    return (out, true);
-                }
                 if let Some(url) = entry.as_str() {
                     add(url, None, None);
                 }
@@ -452,15 +430,17 @@ pub async fn urlscan(
             return (out, report);
         }
     };
-    let size = batch_size(max_results, 0, 100);
+    if max_pages == 0 || max_results == 0 {
+        report.truncated = true;
+        return (out, report);
+    }
+    let size = max_results.min(100);
     let mut after: Option<String> = None;
     let mut cursors = HashSet::new();
     let mut scan_ids = HashSet::new();
     let mut seen = HashSet::new();
     let mut scanned = 0usize;
-    let mut page_index = 0usize;
-    loop {
-        page_index += 1;
+    for page_index in 0..max_pages {
         let url = urlscan_search_url(host, include_subdomains, size, after.as_deref());
         let text = match fetch_text(
             authenticated(client.get(url), &key),
@@ -497,7 +477,13 @@ pub async fn urlscan(
             break;
         }
         scanned += results.len();
-        let more = urlscan_has_more(&data, results.len(), scanned, size);
+        let total = data.get("total").and_then(Value::as_u64);
+        let more = data
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || total.is_some_and(|n| n > scanned as u64)
+            || (total.is_none() && results.len() >= size);
         for result in results {
             if cancel.load(Ordering::Relaxed) {
                 report.fail("Cancelled");
@@ -509,28 +495,17 @@ pub async fn urlscan(
                 .as_ref()
                 .map(Url::as_str)
                 .unwrap_or("https://urlscan.io/api/v1/search/");
-            let (summary, clipped) = urlscan_discoveries_filtered(
-                result,
-                location,
-                max_results,
-                |url| crate::recon::discovery_in_scope(target, include_subdomains, url),
-                Some(cancel),
-            );
+            let (summary, clipped) =
+                urlscan_discoveries_filtered(result, location, max_results, |url| {
+                    crate::recon::discovery_in_scope(target, include_subdomains, url)
+                });
             report.truncated |= clipped;
-            if cancel.load(Ordering::Relaxed) {
-                report.fail("Cancelled");
-                break;
-            }
             for item in summary {
-                if cancel.load(Ordering::Relaxed) {
-                    report.fail("Cancelled");
-                    break;
-                }
                 if !push_discovery(&mut out, &mut seen, item, max_results) {
                     report.truncated = true;
                 }
             }
-            if limit_reached(max_results, out.len()) {
+            if out.len() >= max_results {
                 report.truncated = true;
                 break;
             }
@@ -573,36 +548,25 @@ pub async fn urlscan(
                     continue;
                 }
             };
-            let (found, clipped) = urlscan_discoveries_filtered(
-                &document,
-                full_url.as_str(),
-                max_results,
-                |url| crate::recon::discovery_in_scope(target, include_subdomains, url),
-                Some(cancel),
-            );
+            let (found, clipped) =
+                urlscan_discoveries_filtered(&document, full_url.as_str(), max_results, |url| {
+                    crate::recon::discovery_in_scope(target, include_subdomains, url)
+                });
             report.truncated |= clipped;
-            if cancel.load(Ordering::Relaxed) {
-                report.fail("Cancelled");
-                break;
-            }
             for item in found {
-                if cancel.load(Ordering::Relaxed) {
-                    report.fail("Cancelled");
-                    break;
-                }
                 if !push_discovery(&mut out, &mut seen, item, max_results) {
                     report.truncated = true;
                 }
             }
-            if limit_reached(max_results, out.len()) {
+            if out.len() >= max_results {
                 report.truncated = true;
                 break;
             }
         }
-        if report.error.is_some() || limit_reached(max_results, out.len()) || !more {
+        if report.error.is_some() || out.len() >= max_results || !more {
             break;
         }
-        if limit_reached(max_pages, page_index) {
+        if page_index + 1 == max_pages {
             report.truncated = true;
             report.warn("urlscan search page limit reached");
             break;
@@ -654,7 +618,6 @@ fn parse_cdx_filtered(
     text: &str,
     max: usize,
     in_scope: impl Fn(&str) -> bool,
-    cancel: Option<&AtomicBool>,
 ) -> Result<(Vec<Discovery>, Option<String>, bool), String> {
     let mut stream = serde_json::Deserializer::from_str(text).into_iter::<Value>();
     let value = stream
@@ -680,9 +643,6 @@ fn parse_cdx_filtered(
     let mut clipped = false;
     let mut malformed = false;
     for row in &rows[1..] {
-        if is_cancelled(cancel) {
-            return Ok((out, resume, true));
-        }
         let Some(row) = row.as_array() else {
             malformed = true;
             continue;
@@ -691,7 +651,10 @@ fn parse_cdx_filtered(
             continue;
         }
         if row.len() == 1 {
-            if let Some(cursor) = row[0].as_str().filter(|s| !s.is_empty()) {
+            if let Some(cursor) = row[0]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= MAX_URL_BYTES)
+            {
                 resume = Some(cursor.to_string());
             }
             continue;
@@ -703,14 +666,18 @@ fn parse_cdx_filtered(
         if !in_scope(url) {
             continue;
         }
-        if limit_reached(max, out.len()) {
+        if out.len() >= max {
+            clipped = true;
+            continue;
+        }
+        if url.len() > MAX_URL_BYTES {
             clipped = true;
             continue;
         }
         let time = timestamp
             .and_then(|i| row.get(i))
             .and_then(Value::as_str)
-            .filter(|s| *s != "-");
+            .filter(|s| *s != "-" && s.len() <= 128);
         out.push(Discovery {
             url: url.into(),
             method: "GET".into(),
@@ -729,7 +696,7 @@ fn parse_cdx_filtered(
             Err(_) if !tail.contains(['\r', '\n']) => Some(tail.into()),
             Err(_) => None,
         };
-        if let Some(cursor) = cursor.filter(|s| !s.is_empty()) {
+        if let Some(cursor) = cursor.filter(|s| !s.is_empty() && s.len() <= MAX_URL_BYTES) {
             resume = Some(cursor);
         } else {
             malformed = true;
@@ -746,27 +713,6 @@ pub async fn wayback(
     max_results: usize,
     cancel: &AtomicBool,
 ) -> (Vec<Discovery>, SourceReport) {
-    read_wayback(
-        client,
-        target,
-        include_subdomains,
-        max_pages,
-        max_results,
-        cancel,
-        wayback_url,
-    )
-    .await
-}
-
-async fn read_wayback(
-    client: &Client,
-    target: &Url,
-    include_subdomains: bool,
-    max_pages: usize,
-    max_results: usize,
-    cancel: &AtomicBool,
-    page_url: impl Fn(&str, bool, usize, Option<&str>) -> Url,
-) -> (Vec<Discovery>, SourceReport) {
     let mut out = Vec::new();
     let mut report = SourceReport::default();
     let host = match provider_host(target) {
@@ -776,13 +722,15 @@ async fn read_wayback(
             return (out, report);
         }
     };
+    if max_pages == 0 || max_results == 0 {
+        report.truncated = true;
+        return (out, report);
+    }
     let mut resume: Option<String> = None;
     let mut cursors = HashSet::new();
-    let mut page = 0usize;
-    loop {
-        page += 1;
-        let limit = batch_size(max_results, out.len(), 1000);
-        let url = page_url(host, include_subdomains, limit, resume.as_deref());
+    for page in 0..max_pages {
+        let limit = max_results.saturating_sub(out.len()).min(1000);
+        let url = wayback_url(host, include_subdomains, limit, resume.as_deref());
         // Deliberately never attach urlscan's key to Archive.org requests.
         let text = match fetch_text(client.get(url), cancel, &mut report, true).await {
             Ok(text) => text,
@@ -791,13 +739,9 @@ async fn read_wayback(
                 break;
             }
         };
-        let remaining = max_results.saturating_sub(out.len());
-        let (found, cursor, clipped) = match parse_cdx_filtered(
-            &text,
-            remaining,
-            |url| crate::recon::discovery_in_scope(target, include_subdomains, url),
-            Some(cancel),
-        ) {
+        let (found, cursor, clipped) = match parse_cdx_filtered(&text, limit, |url| {
+            crate::recon::discovery_in_scope(target, include_subdomains, url)
+        }) {
             Ok(parsed) => parsed,
             Err(e) => {
                 report.fail(e);
@@ -805,10 +749,6 @@ async fn read_wayback(
             }
         };
         out.extend(found);
-        if cancel.load(Ordering::Relaxed) {
-            report.fail("Cancelled");
-            break;
-        }
         report.truncated |= clipped;
         if clipped {
             report.warn("Some CDX rows were malformed or exceeded the result limit");
@@ -816,7 +756,7 @@ async fn read_wayback(
         let Some(cursor) = cursor else {
             break;
         };
-        if limit_reached(max_results, out.len()) || limit_reached(max_pages, page) {
+        if out.len() >= max_results || page + 1 == max_pages {
             report.truncated = true;
             report.warn("Wayback result or page limit reached");
             break;
@@ -843,6 +783,10 @@ pub async fn submit_urlscan(
     on_submitted: impl Fn(&str) + Send + Sync,
 ) -> (Vec<Discovery>, SourceReport) {
     let mut report = SourceReport::default();
+    if max_results == 0 {
+        report.fail("A positive result limit is required to submit a scan");
+        return (Vec::new(), report);
+    }
     if !matches!(visibility, "private" | "unlisted" | "public") {
         report.fail("urlscan visibility must be private, unlisted, or public");
         return (Vec::new(), report);
@@ -932,24 +876,12 @@ pub async fn submit_urlscan(
                         break;
                     }
                 };
-                let (mut found, clipped) = urlscan_discoveries_filtered(
-                    &value,
-                    url.as_str(),
-                    max_results,
-                    |found| crate::recon::discovery_in_scope(target, include_subdomains, found),
-                    Some(cancel),
-                );
-                let mut converted = 0;
+                let (mut found, clipped) =
+                    urlscan_discoveries_filtered(&value, url.as_str(), max_results, |found| {
+                        crate::recon::discovery_in_scope(target, include_subdomains, found)
+                    });
                 for item in &mut found {
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
                     item.kind = "observed".into();
-                    converted += 1;
-                }
-                found.truncate(converted);
-                if cancel.load(Ordering::Relaxed) {
-                    report.fail("Cancelled");
                 }
                 report.truncated |= clipped;
                 return (found, report);
@@ -1003,7 +935,11 @@ fn entity_decode(value: &str) -> String {
 
 fn resolve(base: &Url, literal: &str) -> Option<String> {
     let literal = literal.trim();
-    if literal.is_empty() || literal.starts_with('#') || literal.chars().any(char::is_control) {
+    if literal.is_empty()
+        || literal.starts_with('#')
+        || literal.len() > MAX_URL_BYTES
+        || literal.chars().any(char::is_control)
+    {
         return None;
     }
     // Absolute observations retain spelling, encoding and duplicate query
@@ -1024,17 +960,14 @@ struct Tag {
     body: Option<(usize, usize)>,
 }
 
-fn attributes(source: &str, cancel: Option<&AtomicBool>) -> HashMap<String, String> {
+fn attributes(source: &str) -> HashMap<String, String> {
     static ATTR: OnceLock<Regex> = OnceLock::new();
     let regex = ATTR.get_or_init(|| {
         Regex::new(r#"(?s)([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?"#)
             .expect("attribute pattern")
     });
     let mut attrs = HashMap::new();
-    for capture in regex.captures_iter(source) {
-        if is_cancelled(cancel) {
-            break;
-        }
+    for capture in regex.captures_iter(source).take(128) {
         let name = capture[1].to_ascii_lowercase();
         let value = capture
             .get(2)
@@ -1047,17 +980,14 @@ fn attributes(source: &str, cancel: Option<&AtomicBool>) -> HashMap<String, Stri
     attrs
 }
 
-/// A literal tokenizer, not a browser DOM parser. It skips comments
+/// A bounded literal tokenizer, not a browser DOM parser. It skips comments
 /// and raw-text elements so fake tags inside scripts cannot become crawl links.
-fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
+fn html_tags(body: &str) -> (Vec<Tag>, bool) {
     let bytes = body.as_bytes();
     let lower_body = body.to_ascii_lowercase();
     let mut tags = Vec::new();
     let mut cursor = 0;
-    while cursor < bytes.len() {
-        if is_cancelled(cancel) {
-            break;
-        }
+    while cursor < bytes.len() && tags.len() < MAX_STATIC_ITEMS {
         let Some(relative) = body[cursor..].find('<') else {
             break;
         };
@@ -1089,9 +1019,6 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
         let attr_start = index;
         let mut quote = None;
         while index < bytes.len() {
-            if is_cancelled(cancel) {
-                return tags;
-            }
             let byte = bytes[index];
             if let Some(q) = quote {
                 if byte == q {
@@ -1111,7 +1038,7 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
         let mut tag = Tag {
             name,
             closing,
-            attrs: attributes(&body[attr_start..index], cancel),
+            attrs: attributes(&body[attr_start..index]),
             body: None,
         };
         if !closing && matches!(tag.name.as_str(), "script" | "style" | "textarea" | "title") {
@@ -1139,7 +1066,10 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
         }
         tags.push(tag);
     }
-    tags
+    // Do not scan past the token budget to prove that the remaining text is
+    // harmless. Retain the bounded prefix and conservatively report partial.
+    let truncated = tags.len() == MAX_STATIC_ITEMS && cursor < bytes.len();
+    (tags, truncated)
 }
 
 fn static_discovery(url: String, method: String, kind: &str, label: &str, base: &Url) -> Discovery {
@@ -1158,7 +1088,6 @@ fn js_candidates(
     body: &str,
     out: &mut Vec<Discovery>,
     seen: &mut HashSet<(String, String, String)>,
-    cancel: Option<&AtomicBool>,
 ) -> bool {
     // String-literal heuristics only. No interpolation, JS evaluation, guessed
     // variable contents, or inferred response/HTTP-method claims.
@@ -1167,8 +1096,12 @@ fn js_candidates(
         Regex::new(r#"(?s)"((?:\\.|[^"\\])+)"|'((?:\\.|[^'\\])+)'|`((?:\\.|[^`\\])+)`"#)
             .expect("JS literal pattern")
     });
-    for capture in regex.captures_iter(body) {
-        if is_cancelled(cancel) {
+    for (index, capture) in regex
+        .captures_iter(body)
+        .take(MAX_STATIC_ITEMS + 1)
+        .enumerate()
+    {
+        if index == MAX_STATIC_ITEMS {
             return true;
         }
         let literal = capture
@@ -1177,6 +1110,9 @@ fn js_candidates(
             .or_else(|| capture.get(3))
             .unwrap()
             .as_str();
+        if literal.len() > 8192 {
+            continue;
+        }
         let literal = literal
             .replace("\\/", "/")
             .replace("\\u002f", "/")
@@ -1202,7 +1138,7 @@ fn js_candidates(
                 out,
                 seen,
                 static_discovery(url, "GET".into(), "candidate", "javascript", base),
-                0,
+                MAX_STATIC_ITEMS,
             ) {
                 return true;
             }
@@ -1228,32 +1164,14 @@ pub fn is_javascript_document(base: &Url, content_type: &str) -> bool {
 /// Extracts static evidence without executing scripts or submitting forms.
 /// Relative literals in external JavaScript are resolved against the script
 /// URL as a heuristic; the location label keeps them distinct from observations.
-/// Static extraction has no implicit byte, token, URL, or discovery budget;
-/// the boolean reports incomplete extraction (for example, cancellation).
+/// The boolean reports when a byte, token, or discovery budget left a partial result.
 pub fn extract_document(base: &Url, content_type: &str, body: &str) -> (Vec<Discovery>, bool) {
-    extract_document_inner(base, content_type, body, None)
-}
-
-/// The cancellation-aware crawler path preserves evidence collected before stop.
-pub fn extract_document_cancellable(
-    base: &Url,
-    content_type: &str,
-    body: &str,
-    cancel: &AtomicBool,
-) -> (Vec<Discovery>, bool) {
-    extract_document_inner(base, content_type, body, Some(cancel))
-}
-
-fn extract_document_inner(
-    base: &Url,
-    content_type: &str,
-    body: &str,
-    cancel: Option<&AtomicBool>,
-) -> (Vec<Discovery>, bool) {
-    if is_cancelled(cancel) {
-        return (Vec::new(), true);
+    let mut end = body.len().min(MAX_RESPONSE_BYTES);
+    while !body.is_char_boundary(end) {
+        end -= 1;
     }
-    let mut truncated = false;
+    let mut truncated = end < body.len();
+    let body = &body[..end];
     let content_type = content_type
         .split(';')
         .next()
@@ -1263,13 +1181,14 @@ fn extract_document_inner(
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     if is_javascript_document(base, &content_type) {
-        truncated |= js_candidates(base, body, &mut out, &mut seen, cancel);
+        truncated |= js_candidates(base, body, &mut out, &mut seen);
         return (out, truncated);
     }
     if base.path().ends_with("/robots.txt") {
-        for line in body.lines() {
-            if is_cancelled(cancel) {
-                return (out, true);
+        for (index, line) in body.lines().take(MAX_STATIC_ITEMS + 1).enumerate() {
+            if index == MAX_STATIC_ITEMS {
+                truncated = true;
+                break;
             }
             let line = line.split('#').next().unwrap_or("").trim();
             let Some((key, value)) = line.split_once(':') else {
@@ -1294,7 +1213,7 @@ fn extract_document_inner(
                     &mut out,
                     &mut seen,
                     static_discovery(url, "GET".into(), kind, label, base),
-                    0,
+                    MAX_STATIC_ITEMS,
                 ) {
                     truncated = true;
                     break;
@@ -1309,9 +1228,14 @@ fn extract_document_inner(
             Regex::new(r"(?is)<(?:[a-z0-9_-]+:)?loc\b[^>]*>(.*?)</(?:[a-z0-9_-]+:)?loc\s*>")
                 .expect("sitemap loc pattern")
         });
-        for capture in regex.captures_iter(body) {
-            if is_cancelled(cancel) {
-                return (out, true);
+        for (index, capture) in regex
+            .captures_iter(body)
+            .take(MAX_STATIC_ITEMS + 1)
+            .enumerate()
+        {
+            if index == MAX_STATIC_ITEMS {
+                truncated = true;
+                break;
             }
             let literal = capture[1].trim();
             let literal = literal
@@ -1323,7 +1247,7 @@ fn extract_document_inner(
                     &mut out,
                     &mut seen,
                     static_discovery(url, "GET".into(), "observed", "sitemap", base),
-                    0,
+                    MAX_STATIC_ITEMS,
                 ) {
                     truncated = true;
                     break;
@@ -1340,7 +1264,8 @@ fn extract_document_inner(
     ) {
         return (out, truncated);
     }
-    let tags = html_tags(body, cancel);
+    let (tags, clipped) = html_tags(body);
+    truncated |= clipped;
     let document_base = tags
         .iter()
         .filter(|tag| !tag.closing && tag.name == "base")
@@ -1366,11 +1291,12 @@ fn extract_document_inner(
             item.location
                 .push_str(&format!(" (field names: {})", names.join(", ")));
         }
-        push_discovery(out, seen, item, 0)
+        push_discovery(out, seen, item, MAX_STATIC_ITEMS)
     };
     for tag in tags {
-        if is_cancelled(cancel) {
-            return (out, true);
+        if out.len() >= MAX_STATIC_ITEMS {
+            truncated = true;
+            break;
         }
         if tag.closing {
             if tag.name == "form" {
@@ -1411,7 +1337,11 @@ fn extract_document_inner(
         ) && !tag.attrs.contains_key("disabled")
         {
             if let (Some((_, _, names)), Some(name)) = (&mut current_form, tag.attrs.get("name")) {
-                if !name.is_empty() && !names.contains(name) {
+                if !name.is_empty()
+                    && name.len() <= 256
+                    && names.len() < 128
+                    && !names.contains(name)
+                {
                     names.push(name.clone());
                 }
             }
@@ -1434,7 +1364,7 @@ fn extract_document_inner(
                         &mut out,
                         &mut seen,
                         static_discovery(url, "GET".into(), "observed", label, base),
-                        0,
+                        MAX_STATIC_ITEMS,
                     );
                 }
             }
@@ -1453,23 +1383,14 @@ fn extract_document_inner(
                 &mut out,
                 &mut seen,
                 static_discovery(action, method(verb), "candidate", "form", base),
-                0,
+                MAX_STATIC_ITEMS,
             );
         }
         if tag.name == "script" {
             if let Some((start, end)) = tag.body {
-                truncated |= js_candidates(
-                    &document_base,
-                    &body[start..end],
-                    &mut out,
-                    &mut seen,
-                    cancel,
-                );
+                truncated |= js_candidates(&document_base, &body[start..end], &mut out, &mut seen);
             }
         }
-    }
-    if is_cancelled(cancel) {
-        return (out, true);
     }
     if let Some(form) = current_form.take() {
         truncated |= !flush_form(form, &mut out, &mut seen);
@@ -1492,10 +1413,10 @@ mod tests {
     use serde_json::json;
 
     fn urlscan_discoveries(document: &Value, location: &str, max: usize) -> (Vec<Discovery>, bool) {
-        urlscan_discoveries_filtered(document, location, max, |_| true, None)
+        urlscan_discoveries_filtered(document, location, max, |_| true)
     }
     fn parse_cdx(text: &str, max: usize) -> Result<(Vec<Discovery>, Option<String>, bool), String> {
-        parse_cdx_filtered(text, max, |_| true, None)
+        parse_cdx_filtered(text, max, |_| true)
     }
     fn base() -> Url {
         Url::parse("https://example.com/folder/page.html").unwrap()
@@ -1598,52 +1519,6 @@ mod tests {
         );
         assert_eq!(found.len(), 1);
         assert!(clipped);
-    }
-
-    #[test]
-    fn zero_budgets_are_unbounded_and_positive_budgets_are_explicit() {
-        assert!(!limit_reached(0, usize::MAX));
-        assert!(!limit_reached(3, 2));
-        assert!(limit_reached(3, 3));
-        assert!(limit_reached(3, 4));
-        assert_eq!(batch_size(0, 50_000, 100), 100);
-        assert_eq!(batch_size(0, 50_000, 1000), 1000);
-        assert_eq!(batch_size(3, 2, 100), 1);
-        let urls = (0..10_001)
-            .map(|index| format!("https://example.com/{index}"))
-            .collect::<Vec<_>>();
-        let document = json!({"lists": {"urls": urls}});
-        let (found, clipped) = urlscan_discoveries(&document, "fixture", 0);
-        assert_eq!(found.len(), 10_001);
-        assert!(!clipped);
-        let (found, clipped) = urlscan_discoveries(&document, "fixture", 3);
-        assert_eq!(found.len(), 3);
-        assert!(clipped);
-    }
-
-    #[test]
-    fn urlscan_pagination_obeys_exhaustion_signals_and_preserves_long_cursors() {
-        assert!(!urlscan_has_more(
-            &json!({"has_more": false}),
-            100,
-            100,
-            100
-        ));
-        assert!(!urlscan_has_more(&json!({"has_more": true}), 0, 100, 100));
-        assert!(urlscan_has_more(&json!({"has_more": true}), 1, 1, 100));
-        assert!(urlscan_has_more(&json!({"total": 101}), 100, 100, 100));
-        assert!(!urlscan_has_more(&json!({"total": 100}), 100, 100, 100));
-        assert!(urlscan_has_more(&json!({}), 100, 100, 100));
-        assert!(!urlscan_has_more(&json!({}), 99, 99, 100));
-        let parts = vec!["x".repeat(2048); 10];
-        assert_eq!(sort_cursor(&json!(parts)).unwrap(), parts.join(","));
-        assert!(sort_cursor(&json!(["bad\ncursor"])).is_none());
-        let cursor = "c".repeat(20_000);
-        let fixture = json!([["original", "timestamp"], [], [cursor]]).to_string();
-        assert_eq!(
-            parse_cdx(&fixture, 0).unwrap().1.as_deref(),
-            Some(cursor.as_str())
-        );
     }
 
     #[test]
@@ -1835,22 +1710,32 @@ mod tests {
     }
 
     #[test]
-    fn html_scans_all_tokens_and_attributes_without_implicit_caps() {
-        let attributes = (0..300)
-            .map(|index| format!(" data-fixture-{index}='ignored'"))
-            .collect::<String>();
-        let body = format!(
-            "{}<a{attributes} href='/late'>late</a>",
-            "<span></span>".repeat(10_001)
+    fn html_token_limit_reports_unscanned_suffix_but_preserves_the_boundary_prefix() {
+        let prefix = "<span></span>".repeat(MAX_STATIC_ITEMS / 2);
+        let (found, clipped) = extract_document(&base(), "text/html", &prefix);
+        assert!(found.is_empty());
+        assert!(!clipped);
+        let (_, clipped) = extract_document(
+            &base(),
+            "text/html",
+            &format!("{prefix}<a href='/late'>late</a>"),
         );
-        let (found, clipped) = extract_document(&base(), "text/html", &body);
+        assert!(clipped);
+        // At the budget boundary, suffix bytes are deliberately not scanned,
+        // including whitespace or a comment which may conceal more markup.
+        assert!(extract_document(&base(), "text/html", &format!("{prefix}\n")).1);
+        let before = format!(
+            "{}<a href='/retained'>link</a>",
+            "<span></span>".repeat(MAX_STATIC_ITEMS / 2 - 1)
+        );
+        let (found, clipped) = extract_document(&base(), "text/html", &before);
         assert!(!clipped);
         assert_eq!(found.len(), 1);
-        assert!(found[0].url.ends_with("/late"));
+        assert!(found[0].url.ends_with("/retained"));
     }
 
     #[test]
-    fn static_extraction_scans_past_large_non_url_prefixes() {
+    fn static_item_limits_report_clipping_even_when_the_prefix_has_no_urls() {
         for (path, media_type, empty_item, final_item) in [
             (
                 "/bundle.js",
@@ -1867,68 +1752,45 @@ mod tests {
             ),
         ] {
             let url = Url::parse(&format!("https://example.com{path}")).unwrap();
-            let body = format!("{}{final_item}", empty_item.repeat(10_001));
+            let body = empty_item.repeat(MAX_STATIC_ITEMS);
             let (found, clipped) = extract_document(&url, media_type, &body);
-            assert_eq!(found.len(), 1, "{path}");
-            assert!(found[0].url.ends_with("/late"), "{path}");
+            assert!(found.is_empty(), "{path}");
             assert!(!clipped, "{path}");
+            let (found, clipped) =
+                extract_document(&url, media_type, &format!("{body}{final_item}"));
+            assert!(found.is_empty(), "{path}");
+            assert!(clipped, "{path}");
         }
-        let inline = format!("<script>{}'/late'</script>", "'not-a-url';".repeat(10_001));
-        let (found, clipped) = extract_document(&base(), "text/html", &inline);
-        assert_eq!(found.len(), 1);
-        assert!(!clipped);
+        let inline = format!(
+            "<script>{}'/late'</script>",
+            "'not-a-url';".repeat(MAX_STATIC_ITEMS)
+        );
+        assert!(extract_document(&base(), "text/html", &inline).1);
     }
 
     #[test]
-    fn static_documents_preserve_more_than_ten_thousand_discoveries() {
-        let count = 10_001;
-        for (path, media_type, body) in [
-            (
-                "/index.html",
-                "text/html",
-                (0..count)
-                    .map(|index| format!("<a href='/page/{index}'>"))
-                    .collect::<String>(),
-            ),
-            (
-                "/bundle.js",
-                "application/javascript",
-                (0..count)
-                    .map(|index| format!("'/api/{index}';"))
-                    .collect::<String>(),
-            ),
-            (
-                "/robots.txt",
-                "text/plain",
-                (0..count)
-                    .map(|index| format!("Allow: /page/{index}\n"))
-                    .collect::<String>(),
-            ),
-            (
-                "/sitemap.xml",
-                "application/xml",
-                (0..count)
-                    .map(|index| format!("<loc>/page/{index}</loc>"))
-                    .collect::<String>(),
-            ),
-        ] {
-            let url = Url::parse(&format!("https://example.com{path}")).unwrap();
-            let (found, clipped) = extract_document(&url, media_type, &body);
-            assert!(!clipped, "{path}");
-            assert_eq!(found.len(), count, "{path}");
-            assert!(found.last().unwrap().url.ends_with("/10000"), "{path}");
-        }
+    fn discovery_output_limit_reports_partial_and_never_expands_the_result_cap() {
+        let body = (0..MAX_STATIC_ITEMS / 3 + 1)
+            .map(|index| {
+                format!("<object data='/data/{index}' src='/src/{index}' href='/link/{index}'>")
+            })
+            .collect::<String>();
+        let (found, clipped) = extract_document(&base(), "text/html", &body);
+        assert!(clipped);
+        assert_eq!(found.len(), MAX_STATIC_ITEMS);
     }
 
     #[test]
-    fn large_documents_preserve_the_suffix_and_multibyte_text() {
-        for padding in [" ".repeat(2 * 1024 * 1024 - 1) + "é", "😀".repeat(600_000)] {
-            let body = format!("{padding}<a href='/late'>late</a>");
-            let (found, clipped) = extract_document(&base(), "text/html", &body);
-            assert_eq!(found.len(), 1);
-            assert!(found[0].url.ends_with("/late"));
-            assert!(!clipped);
-        }
+    fn document_byte_limit_is_reported_and_preserves_utf8_boundaries() {
+        let body = " ".repeat(MAX_RESPONSE_BYTES);
+        assert!(!extract_document(&base(), "text/html", &body).1);
+        let body = format!(
+            "{}é<a href='/late'>late</a>",
+            " ".repeat(MAX_RESPONSE_BYTES - 1)
+        );
+        let (found, clipped) = extract_document(&base(), "text/html", &body);
+        assert!(found.is_empty());
+        assert!(clipped);
     }
 
     #[test]
@@ -1948,60 +1810,17 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_media_is_not_treated_as_html() {
+    fn unsupported_media_and_long_multibyte_body_are_bounded() {
         assert!(
             extract_document(&base(), "image/svg+xml", "<a href='/not-a-page'>")
                 .0
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn long_urls_literals_methods_and_metadata_are_preserved() {
-        let long_url = format!("https://example.com/{}", "a".repeat(20_000));
-        let time = "t".repeat(300);
-        let verb = "CUSTOM".repeat(10);
-        let document = json!({
-            "task": {"time": time},
-            "data": {"requests": [{"request": {"url": long_url, "method": verb}}]}
-        });
-        let (found, clipped) = urlscan_discoveries(&document, "fixture", 0);
-        assert!(!clipped);
-        assert_eq!(found[0].url, long_url);
-        assert_eq!(found[0].method, verb);
-        assert_eq!(found[0].timestamp.as_deref(), Some(time.as_str()));
-        let cdx = json!([["original", "timestamp"], [long_url, time]]).to_string();
-        let (found, _, clipped) = parse_cdx(&cdx, 0).unwrap();
-        assert!(!clipped);
-        assert_eq!(found[0].url, long_url);
-        assert_eq!(found[0].timestamp.as_deref(), Some(time.as_str()));
-        for (media_type, body) in [
-            ("text/html", format!("<a href='{long_url}'>")),
-            ("application/javascript", format!("fetch('{long_url}')")),
-            ("application/xml", format!("<loc>{long_url}</loc>")),
-        ] {
-            let (found, clipped) = extract_document(&base(), media_type, &body);
-            assert!(!clipped, "{media_type}");
-            assert_eq!(found[0].url, long_url, "{media_type}");
-        }
-    }
-
-    #[test]
-    fn forms_preserve_all_field_names_without_collecting_values() {
-        let long_name = "n".repeat(300);
-        let fields = (0..300)
-            .map(|index| format!("<input name='field{index}' value='private-value'>"))
-            .collect::<String>();
-        let body = format!("<form action='/search'>{fields}<input name='{long_name}'></form>");
-        let (found, clipped) = extract_document(&base(), "text/html", &body);
-        assert!(!clipped);
-        assert_eq!(found.len(), 1);
-        let url = Url::parse(&found[0].url).unwrap();
-        assert_eq!(url.query_pairs().count(), 301);
-        assert!(found[0].location.contains("field299"));
-        assert!(found[0].location.contains(&long_name));
-        assert!(!found[0].location.contains("private-value"));
-        assert!(!found[0].url.contains("private-value"));
+        let body = format!(
+            "{}<a href='/past-limit'>",
+            "😀".repeat(MAX_RESPONSE_BYTES / 4 + 1)
+        );
+        assert!(extract_document(&base(), "text/html", &body).0.is_empty());
     }
 
     #[test]
@@ -2010,79 +1829,10 @@ mod tests {
         for i in 0..100 {
             report.warn(format!("warning {i}"));
         }
-        report.warn("warning 0");
-        assert_eq!(report.warnings.len(), 100);
+        assert_eq!(report.warnings.len(), MAX_WARNINGS);
         report.fail("fixture failure");
         assert!(report.truncated);
         assert_eq!(report.error.as_deref(), Some("fixture failure"));
-    }
-
-    #[test]
-    fn cancelled_static_extraction_does_not_process_the_document() {
-        let cancel = AtomicBool::new(true);
-        for (path, media_type, body) in [
-            ("/index.html", "text/html", "<a href='/link'>"),
-            ("/bundle.js", "application/javascript", "fetch('/api')"),
-            ("/robots.txt", "text/plain", "Allow: /path"),
-            ("/sitemap.xml", "application/xml", "<loc>/path</loc>"),
-        ] {
-            let url = Url::parse(&format!("https://example.com{path}")).unwrap();
-            let (found, clipped) = extract_document_cancellable(&url, media_type, body, &cancel);
-            assert!(found.is_empty(), "{path}");
-            assert!(clipped, "{path}");
-        }
-        cancel.store(false, Ordering::Relaxed);
-        let (found, clipped) =
-            extract_document_cancellable(&base(), "text/html", "<a href='/link'>", &cancel);
-        assert_eq!(found.len(), 1);
-        assert!(!clipped);
-    }
-
-    #[test]
-    fn provider_extraction_preserves_the_prefix_when_cancelled_mid_document() {
-        use std::cell::Cell;
-        let cancel = AtomicBool::new(false);
-        let calls = Cell::new(0usize);
-        let urls = (0..100)
-            .map(|index| format!("https://example.com/{index}"))
-            .collect::<Vec<_>>();
-        let document = json!({"lists": {"urls": urls}});
-        let (found, clipped) = urlscan_discoveries_filtered(
-            &document,
-            "fixture",
-            0,
-            |_| {
-                calls.set(calls.get() + 1);
-                if calls.get() == 5 {
-                    cancel.store(true, Ordering::Relaxed);
-                }
-                true
-            },
-            Some(&cancel),
-        );
-        assert_eq!(found.len(), 5);
-        assert!(clipped);
-        cancel.store(false, Ordering::Relaxed);
-        calls.set(0);
-        let body = cdx_page(
-            &(0..100).map(|index| index.to_string()).collect::<Vec<_>>(),
-            None,
-        );
-        let (found, _, clipped) = parse_cdx_filtered(
-            &body,
-            0,
-            |_| {
-                calls.set(calls.get() + 1);
-                if calls.get() == 5 {
-                    cancel.store(true, Ordering::Relaxed);
-                }
-                true
-            },
-            Some(&cancel),
-        )
-        .unwrap();
-        assert_eq!(found.len(), 5);
-        assert!(clipped);
     }
 
     #[tokio::test]
@@ -2102,9 +1852,9 @@ mod tests {
         .await;
         assert!(matches!(result, Err(FetchError::Cancelled)));
         assert_eq!(report.requests, 0);
-        let (_, report) = urlscan(&client, &base(), false, 0, 0, &cancel).await;
+        let (_, report) = urlscan(&client, &base(), false, 2, 100, &cancel).await;
         assert_eq!(report.requests, 0);
-        let (_, report) = wayback(&client, &base(), false, 0, 0, &cancel).await;
+        let (_, report) = wayback(&client, &base(), false, 2, 100, &cancel).await;
         assert_eq!(report.requests, 0);
     }
 
@@ -2126,168 +1876,21 @@ mod tests {
         let document = json!({"lists":{"urls":[
             "https://static.example.com/first", "https://example.com/wanted"
         ]}});
-        let (found, clipped) = urlscan_discoveries_filtered(
-            &document,
-            "fixture",
-            1,
-            |url| url.starts_with("https://example.com/"),
-            None,
-        );
+        let (found, clipped) = urlscan_discoveries_filtered(&document, "fixture", 1, |url| {
+            url.starts_with("https://example.com/")
+        });
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].url, "https://example.com/wanted");
         assert!(!clipped);
         let fixture = r#"[["original","statuscode"],["https://static.example.com/first","200"],["https://example.com/wanted","200"]]"#;
-        let (found, _, clipped) = parse_cdx_filtered(
-            fixture,
-            1,
-            |url| url.starts_with("https://example.com/"),
-            None,
-        )
-        .unwrap();
+        let (found, _, clipped) =
+            parse_cdx_filtered(fixture, 1, |url| url.starts_with("https://example.com/")).unwrap();
         assert_eq!(found[0].url, "https://example.com/wanted");
         assert!(!clipped);
     }
 
-    async fn wayback_fixture(
-        bodies: Vec<String>,
-        max_pages: usize,
-        max_results: usize,
-    ) -> (Vec<Discovery>, SourceReport, Vec<String>) {
-        use tokio::{
-            io::{AsyncReadExt, AsyncWriteExt},
-            net::TcpListener,
-        };
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let fixture = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for body in bodies {
-                let (mut connection, _) =
-                    tokio::time::timeout(Duration::from_secs(5), listener.accept())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                let mut request = [0u8; 4096];
-                let len = connection.read(&mut request).await.unwrap();
-                requests.push(String::from_utf8(request[..len].to_vec()).unwrap());
-                let headers = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                connection.write_all(headers.as_bytes()).await.unwrap();
-                connection.write_all(body.as_bytes()).await.unwrap();
-            }
-            requests
-        });
-        let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .build()
-            .unwrap();
-        let cancel = AtomicBool::new(false);
-        let (found, report) = read_wayback(
-            &client,
-            &base(),
-            false,
-            max_pages,
-            max_results,
-            &cancel,
-            |host, subdomains, limit, resume| {
-                let production = wayback_url(host, subdomains, limit, resume);
-                let mut local = Url::parse(&format!("http://{address}/fixture")).unwrap();
-                local.set_query(production.query());
-                local
-            },
-        )
-        .await;
-        (found, report, fixture.await.unwrap())
-    }
-
-    fn cdx_page(paths: &[String], cursor: Option<&str>) -> String {
-        let mut rows = vec![json!(["original", "timestamp"])];
-        rows.extend(
-            paths
-                .iter()
-                .map(|path| json!([format!("https://example.com/{path}"), "20200101000000"])),
-        );
-        if let Some(cursor) = cursor {
-            rows.push(json!([]));
-            rows.push(json!([cursor]));
-        }
-        serde_json::to_string(&rows).unwrap()
-    }
-
     #[tokio::test]
-    async fn wayback_zero_budgets_follow_all_pages_until_cursor_exhaustion() {
-        let bodies = (0..26)
-            .map(|page| {
-                let paths = if page == 0 {
-                    (0..1001).map(|index| format!("first/{index}")).collect()
-                } else {
-                    vec![format!("page/{page}")]
-                };
-                cdx_page(
-                    &paths,
-                    (page < 25).then(|| format!("cursor-{page}")).as_deref(),
-                )
-            })
-            .collect();
-        let (found, report, requests) = wayback_fixture(bodies, 0, 0).await;
-        assert_eq!(found.len(), 1026);
-        assert_eq!(report.requests, 26);
-        assert!(!report.truncated);
-        assert!(report.error.is_none());
-        assert!(requests
-            .iter()
-            .all(|request| request.contains("limit=1000")));
-        assert!(!requests[0].contains("resumeKey="));
-        assert!(requests[25].contains("resumeKey=cursor-24"));
-    }
-
-    #[tokio::test]
-    async fn wayback_explicit_page_and_result_budgets_still_stop_collection() {
-        let pages = vec![
-            cdx_page(&["one".into()], Some("a")),
-            cdx_page(&["two".into()], Some("b")),
-        ];
-        let (found, report, _) = wayback_fixture(pages, 2, 0).await;
-        assert_eq!(found.len(), 2);
-        assert_eq!(report.requests, 2);
-        assert!(report.truncated);
-        assert!(report.error.is_none());
-        let pages = vec![
-            cdx_page(&["one".into(), "two".into()], Some("a")),
-            cdx_page(&["three".into(), "four".into()], Some("b")),
-        ];
-        let (found, report, requests) = wayback_fixture(pages, 0, 3).await;
-        assert_eq!(found.len(), 3);
-        assert_eq!(report.requests, 2);
-        assert!(report.truncated);
-        assert!(report.error.is_none());
-        assert!(requests[0].contains("limit=3"));
-        assert!(requests[1].contains("limit=1"));
-    }
-
-    #[tokio::test]
-    async fn wayback_cursor_cycles_stop_without_discarding_collected_evidence() {
-        let pages = vec![
-            cdx_page(&["one".into()], Some("a")),
-            cdx_page(&["two".into()], Some("b")),
-            cdx_page(&["three".into()], Some("a")),
-        ];
-        let (found, report, _) = wayback_fixture(pages, 0, 0).await;
-        assert_eq!(found.len(), 3);
-        assert_eq!(report.requests, 3);
-        assert!(report.truncated);
-        assert!(report.error.is_none());
-        assert!(report
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("repeated a resume cursor")));
-    }
-
-    #[tokio::test]
-    async fn large_response_bodies_are_read_completely_with_or_without_content_length() {
+    async fn response_body_limits_apply_before_unbounded_buffering() {
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
             net::TcpListener,
@@ -2301,17 +1904,18 @@ mod tests {
                 let _ = connection.read(&mut request).await;
                 if chunked {
                     let _ = connection.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await;
-                    let header = format!("{:x}\r\n", 2 * 1024 * 1024 + 1);
+                    let header = format!("{:x}\r\n", MAX_RESPONSE_BYTES + 1);
                     let _ = connection.write_all(header.as_bytes()).await;
-                    let _ = connection.write_all(&vec![b'x'; 2 * 1024 * 1024 + 1]).await;
+                    let _ = connection
+                        .write_all(&vec![b'x'; MAX_RESPONSE_BYTES + 1])
+                        .await;
                     let _ = connection.write_all(b"\r\n0\r\n\r\n").await;
                 } else {
                     let headers = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        2 * 1024 * 1024 + 1
+                        MAX_RESPONSE_BYTES + 1
                     );
                     let _ = connection.write_all(headers.as_bytes()).await;
-                    let _ = connection.write_all(&vec![b'x'; 2 * 1024 * 1024 + 1]).await;
                 }
             });
             let client = Client::builder()
@@ -2328,59 +1932,10 @@ mod tests {
                 true,
             )
             .await;
-            assert_eq!(result.unwrap(), "x".repeat(2 * 1024 * 1024 + 1));
+            assert!(matches!(result, Err(FetchError::TooLarge)));
             assert_eq!(report.requests, 1);
             fixture.await.unwrap();
         }
-    }
-
-    #[tokio::test]
-    async fn streamed_response_reads_remain_cancellable() {
-        use tokio::{
-            io::{AsyncReadExt, AsyncWriteExt},
-            net::TcpListener,
-            sync::oneshot,
-        };
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (started, ready) = oneshot::channel();
-        let fixture = tokio::spawn(async move {
-            let (mut connection, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            let _ = connection.read(&mut request).await.unwrap();
-            connection.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\nx\r\n").await.unwrap();
-            started.send(()).unwrap();
-            // Leave the body open until cancellation closes the client socket.
-            let mut byte = [0u8; 1];
-            let _ = tokio::time::timeout(Duration::from_secs(5), connection.read(&mut byte))
-                .await
-                .unwrap();
-        });
-        let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .build()
-            .unwrap();
-        let cancel = AtomicBool::new(false);
-        let mut report = SourceReport::default();
-        let fetched = fetch_text(
-            client.get(format!("http://{address}/fixture")),
-            &cancel,
-            &mut report,
-            true,
-        );
-        let stop = async {
-            ready.await.unwrap();
-            cancel.store(true, Ordering::Relaxed);
-        };
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::join!(fetched, stop)
-        })
-        .await
-        .unwrap();
-        assert!(matches!(result, Err(FetchError::Cancelled)));
-        assert_eq!(report.requests, 1);
-        fixture.await.unwrap();
     }
 
     #[tokio::test]

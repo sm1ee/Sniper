@@ -45,7 +45,7 @@ function fixture(options = {}, sniperMap = map) {
   els.viewport.clientWidth = 300; els.viewport.clientHeight = 300;
   const document = { activeElement: null, body: {}, documentElement: node(), querySelector: () => null };
   document.documentElement.style.setProperty('--ui-root-size', '12px');
-  const controller = sniperMap.createController({ ...options, elements: els, getSessionId: options.getSessionId || (() => 'session-one'), document, request(path) { const pending = deferred(); pending.path = path; requests.push(pending); return pending.promise; } });
+  const controller = sniperMap.createController({ ...options, elements: els, getSessionId: () => 'session-one', document, request(path) { const pending = deferred(); pending.path = path; requests.push(pending); return pending.promise; } });
   controller.setVisible(true);
   return { controller, els, requests, state: controller.getState(), async load(payload) { const pending = controller.refresh(); requests.at(-1).resolve(response(payload)); await pending; } };
 }
@@ -495,7 +495,7 @@ test("a site's origins share one card and one arrow, and the leading origin's si
   assert.match(html(), /→ \*\.example\.net · Referer header · referer_header · 3 requests \(API calls 3\)<\/title>/, 'both links share the arrow and add up');
 
   press(f, { serviceSite: 'example.net' });
-  assert.match(f.els.detail.innerHTML, /\*\.example\.net[^]*2 loaded origins in this site/);
+  assert.match(f.els.detail.innerHTML, /\*\.example\.net[^]*2 origins grouped by site/);
   assert.match(html(), /service-map-site\s+selected/);
   press(f, { serviceOrigin: imgCdn });
   assert.equal(f.state.selectedOrigin, imgCdn);
@@ -517,128 +517,6 @@ test("a site's origins share one card and one arrow, and the leading origin's si
   assert.equal(display.groupSites, false);
   assert.match(f.els.siteControls.innerHTML, /data-service-group-sites="toggle"[^>]*aria-pressed="false"/);
   assert.equal(saves.length, 4, 'expand, hide, show all and the toggle each save once');
-});
-
-for (const query of ['example.net', 'img.example.net', 'not-loaded']) test(`site selection survives local origin search: ${query}`, async () => {
-  const f = fixture();
-  await f.load(snapshot(siteOrigins()));
-  press(f, { serviceSite: 'example.net' });
-  assert.equal(f.state.selectedSite, 'example.net');
-  const detail = f.els.detail.innerHTML;
-
-  f.els.search.value = query; f.els.search.dispatch('input');
-  assert.equal(f.state.selectedSite, 'example.net');
-  assert.equal(f.els.detail.innerHTML, detail, 'search only changes the graph, as for an origin inspector');
-  assert.match(f.els.graphBounds.textContent, /Selected site has no grouped card in this view; inspector retained/);
-  assert.ok(f.els.detail.innerHTML.includes(`data-service-origin="${imgCdn}"`));
-  assert.ok(f.els.detail.innerHTML.includes(`data-service-origin="${cssCdn}"`));
-
-  f.els.search.value = ''; f.els.search.dispatch('input');
-  assert.equal(f.state.selectedSite, 'example.net');
-  assert.match(f.els.canvas.innerHTML, /service-map-site\s+selected/);
-  assert.doesNotMatch(f.els.graphBounds.textContent, /Selected site has no grouped card/);
-  assert.equal(f.requests.length, 1, 'local search does not read more data');
-});
-
-test('site selection remains inspectable through product filtering and grouping display changes', async () => {
-  const f = fixture();
-  await f.load(snapshot(siteOrigins()));
-  press(f, { serviceSite: 'example.net' });
-  const detail = f.els.detail.innerHTML;
-  f.controller.setProductFilter('product', 'nginx');
-  assert.equal(f.state.selectedSite, 'example.net');
-  assert.equal(f.els.detail.innerHTML, detail);
-  f.controller.setProductFilter('clear');
-  press(f, { serviceGroupSites: 'toggle' });
-  assert.equal(f.state.selectedSite, 'example.net');
-  assert.equal(f.els.detail.innerHTML, detail);
-  assert.doesNotMatch(f.els.canvas.innerHTML, /data-service-site=/);
-  assert.equal(f.requests.length, 1);
-});
-
-test('a filtered site inspector expands current members and still honors explicit hide', async () => {
-  let display = { groupSites: true, expandedSites: [], hidden: [] };
-  const f = fixture({ getSiteDisplay: () => display, setSiteDisplay: next => { display = next; } });
-  await f.load(snapshot(siteOrigins()));
-  press(f, { serviceSite: 'example.net' });
-  f.els.search.value = 'not-loaded'; f.els.search.dispatch('input');
-  press(f, { serviceSiteExpand: 'example.net' });
-  assert.equal(f.state.selectedSite, null);
-  assert.equal(f.state.selectedOrigin, imgCdn);
-  assert.deepEqual([...display.expandedSites], ['example.net']);
-  assert.match(f.els.detail.innerHTML, /img\.example\.net/);
-  assert.equal(f.requests.length, 1, 'expanding and selecting a loaded origin issues no read');
-
-  f.els.search.value = ''; f.els.search.dispatch('input');
-  press(f, { serviceSiteCollapse: 'example.net' });
-  press(f, { serviceSite: 'example.net' });
-  press(f, { serviceHide: 'example.net' });
-  assert.equal(f.state.selectedSite, null, 'explicit Hide site still dismisses the site inspector');
-  assert.match(f.els.detail.innerHTML, /Select an origin/);
-  assert.deepEqual([...display.hidden], ['example.net']);
-});
-
-test('a selected site uses current loaded members and clears when its last member disappears', async () => {
-  let display = { groupSites: true, expandedSites: [], hidden: [] };
-  const f = fixture({ getSiteDisplay: () => display, setSiteDisplay: next => { display = next; } });
-  await f.load(snapshot(siteOrigins()));
-  press(f, { serviceSite: 'example.net' });
-  f.els.search.value = 'not-loaded'; f.els.search.dispatch('input');
-  await f.load(snapshot([origin(app), origin(cssCdn, { request_count: 7 })]));
-  assert.equal(f.state.selectedSite, 'example.net');
-  assert.match(f.els.detail.innerHTML, /1 loaded origin in this site/);
-  assert.match(f.els.detail.innerHTML, /7 sampled rows/);
-  assert.doesNotMatch(f.els.detail.innerHTML, /img\.example\.net/);
-  assert.ok(f.els.detail.innerHTML.includes(`data-service-origin="${cssCdn}"`));
-  press(f, { serviceOrigin: imgCdn });
-  assert.equal(f.state.selectedSite, 'example.net', 'a stale removed-member button cannot replace selection');
-  assert.equal(f.state.selectedOrigin, null);
-
-  await f.load(snapshot([origin(app)]));
-  assert.equal(f.state.selectedSite, null);
-  assert.match(f.els.detail.innerHTML, /Select an origin/);
-  press(f, { serviceSiteExpand: 'example.net' });
-  assert.deepEqual([...display.expandedSites], [], 'a stale removed-site button has no display action');
-  assert.equal(f.state.selectedOrigin, null);
-  await f.load(snapshot(siteOrigins()));
-  assert.equal(f.state.selectedSite, null, 'later reappearance does not resurrect a removed selection');
-});
-
-test('site identity survives transient invalidation but no stale member buttons do', async () => {
-  const f = fixture();
-  await f.load(snapshot(siteOrigins()));
-  press(f, { serviceSite: 'example.net' });
-  f.els.search.value = 'not-loaded'; f.els.search.dispatch('input');
-  const stale = f.controller.refresh();
-  const staleRequest = f.requests.at(-1);
-  const current = f.controller.invalidate();
-  assert.equal(f.state.selectedSite, 'example.net');
-  assert.doesNotMatch(f.els.detail.innerHTML, /data-service-origin=|data-service-site-expand=/);
-  f.requests.at(-1).resolve(response(snapshot([origin(app), origin(cssCdn, { request_count: 9 })])));
-  await current;
-  assert.equal(f.state.selectedSite, 'example.net');
-  assert.match(f.els.detail.innerHTML, /9 sampled rows/);
-  staleRequest.resolve(response(snapshot(siteOrigins()))); await stale;
-  assert.doesNotMatch(f.els.detail.innerHTML, /img\.example\.net/);
-  assert.match(f.els.detail.innerHTML, /9 sampled rows/);
-});
-
-test('session reset clears a filtered site selection and fences a pending old-session refresh', async () => {
-  let session = 'session-one';
-  const f = fixture({ getSessionId: () => session });
-  await f.load(snapshot(siteOrigins()));
-  press(f, { serviceSite: 'example.net' });
-  f.els.search.value = 'not-loaded'; f.els.search.dispatch('input');
-  const pending = f.controller.refresh(), oldRequest = f.requests.at(-1);
-  session = 'session-two'; f.controller.reset();
-  assert.equal(f.state.selectedSite, null);
-  assert.equal(f.state.snapshot, null);
-  assert.doesNotMatch(f.els.detail.innerHTML, /example\.net/);
-  await f.load({ ...snapshot([origin(app), origin(cssCdn)]), session_id: session });
-  oldRequest.resolve(response(snapshot(siteOrigins()))); await pending;
-  assert.equal(f.state.sessionId, session);
-  assert.equal(f.state.selectedSite, null);
-  assert.doesNotMatch(f.els.detail.innerHTML, /origins? in this site|img\.example\.net/);
 });
 
 test('a card leads with what its origin serves, or with a declared front-end product', () => {
@@ -754,8 +632,7 @@ test('one arrow per direction carries every relationship between two cards', () 
   assert.deepEqual([...layout.edges[0].relationships], ['redirect_instruction', 'referer_header', 'origin_header']);
   assert.equal(layout.edges[0].relationship, 'redirect_instruction', 'drawn as the first of them');
   const pinned = map.graphLayout([a, b], [app, api], new Map(), app);
-  assert.equal(pinned.edges.length, 1, 'Direct relations merges them too');
-  assert.deepEqual([...pinned.edges[0].relationships], ['redirect_instruction', 'referer_header', 'origin_header']);
+  assert.equal(pinned.edges.length, 3, 'Direct relations keeps each relationship apart');
 });
 
 test('clients lead the map in their own column and point at the cards where it starts', async () => {

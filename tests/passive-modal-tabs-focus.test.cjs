@@ -83,8 +83,6 @@ function tabFixture() {
     "setActiveProxyTab", "sanitizeActiveProxyTab", "renderProxyPanels", "selectSettingsTab",
     "openDisplaySettingsModal", "closeDisplaySettingsModal", "isModalVisible", "restoreModalFocus",
   ], {
-    closeScannerSettings() {},
-    compareLoadGeneration: 0,
     document, els, state,
     IMPLEMENTED_PROXY_TABS: new Set(captureTabs.map(tab => tab.dataset.proxyTab)),
     scheduleUiSettingsSave: delay => saved.push(delay),
@@ -220,7 +218,6 @@ test("modal restoration tolerates no saved invoker or no available fallback", ()
   f.context.restoreModalFocus(null);
   assert.equal(f.document.activeElement, f.fallback);
   f.document.activeElement = null;
-  f.document.querySelector = () => null;
   f.context.restoreModalFocus(undefined, null);
   assert.equal(f.document.activeElement, null);
 });
@@ -344,26 +341,3 @@ for (const shiftKey of [false, true]) {
     assert.equal(controls.some(control => control.focusCalls.length), false);
   });
 }
-
-
-for (const [reason, options] of [
-  ["detached", { isConnected: false }], ["disabled", { disabled: true }],
-  ["outside tab order", { tabIndex: -1 }], ["not laid out", { rects: [] }],
-  ["hidden", { visibility: "hidden" }],
-]) {
-  test(`modal restoration skips a ${reason} supplied fallback for the visible main tab`, () => {
-    const f = focusFixture(), previous = f.node({ isConnected: false }), supplied = f.node(options);
-    f.context.restoreModalFocus(previous, supplied);
-    assert.equal(f.document.activeElement, f.fallback);
-    assert.equal(supplied.focusCalls.length, 0);
-    assert.equal(f.fallback.focusCalls[0].preventScroll, true);
-  });
-}
-
-test("modal restoration does not try a hidden default fallback when no eligible target exists", () => {
-  const f = focusFixture(), previous = f.node({ isConnected: false }), supplied = f.node({ disabled: true });
-  f.fallback.visibility = "hidden";
-  f.context.restoreModalFocus(previous, supplied);
-  assert.equal(f.fallback.focusCalls.length, 0);
-  assert.equal(supplied.focusCalls.length, 0);
-});

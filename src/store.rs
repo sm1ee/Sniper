@@ -389,9 +389,6 @@ pub struct RetentionTrimOutcome {
     pub current_count: usize,
     pub protected_count: usize,
     pub event_sequence: u64,
-    /// Bytes the deleted rows still occupy in `transactions.ndjson`, which only
-    /// a snapshot rewrite reclaims. Rows not yet snapshotted count nothing.
-    pub reclaimable_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1493,7 +1490,7 @@ impl TransactionStore {
             .host
             .as_ref()
             .map(|value| value.to_ascii_lowercase());
-        let since_dt = filters.since.as_deref().and_then(parse_history_since);
+        let since_dt = filters.since.as_deref().and_then(parse_since);
         let status_pred = filters
             .status
             .map(StatusPredicate::Exact)
@@ -3014,50 +3011,6 @@ impl TransactionStore {
         Some(self.rehydrate(record, &inner))
     }
 
-    /// Calls `visit` with every retained record and its bodies, oldest first.
-    /// Reading every body back is file I/O far too long to hold a runtime worker
-    /// that proxy tasks share, so it runs on a blocking thread. Also returns how
-    /// many records were skipped because their bodies could not be read; None
-    /// if the walk itself failed.
-    pub async fn visit_records<T: Send + 'static>(
-        &self,
-        mut accumulator: T,
-        visit: impl Fn(&mut T, &TransactionRecord) + Send + 'static,
-    ) -> Option<(T, usize)> {
-        let ids: Vec<Uuid> = {
-            let inner = self.inner.read().await;
-            inner.entries.iter().map(|record| record.id).collect()
-        };
-        let storage_dir = self.storage_dir.clone();
-        let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            let mut unreadable = 0;
-            for id in ids {
-                // By ID, not position: a trim meanwhile shifts every later row.
-                let record = {
-                    let inner = inner.blocking_read();
-                    let Some(&index) = inner.by_id.get(&id) else {
-                        continue;
-                    };
-                    let generation = inner.body_generations[index];
-                    if inner.unresolved_body_generations.contains(&generation) {
-                        None
-                    } else {
-                        rehydrate_checked(&inner.entries[index], &inner, storage_dir.as_deref())
-                            .ok()
-                    }
-                };
-                match record {
-                    Some(record) => visit(&mut accumulator, &record),
-                    None => unreadable += 1,
-                }
-            }
-            (accumulator, unreadable)
-        })
-        .await
-        .ok()
-    }
-
     pub async fn snapshot(&self, limit: Option<usize>) -> Vec<TransactionRecord> {
         let inner = self.inner.read().await;
         snapshot_entries(&inner, limit)
@@ -3871,7 +3824,7 @@ impl TransactionStore {
     ) -> io::Result<RetentionTrimOutcome> {
         const MAX_TOMBSTONE_IDS: usize = 1024;
         let _mutation_guard = self.insert_lock.lock().await;
-        let (ids, reclaimable_bytes) = {
+        let ids = {
             let inner = self.inner.read().await;
             let protected = self.protected_existing_ids(&inner, saved_source_ids);
             let mut remaining = inner.entries.len().saturating_sub(max_entries);
@@ -3902,12 +3855,7 @@ impl TransactionStore {
                     remaining -= count;
                 }
             }
-            let bytes = ids
-                .iter()
-                .filter_map(|id| inner.locators.get(id))
-                .map(|locator| u64::from(locator.len))
-                .sum();
-            (ids, bytes)
+            ids
         };
         if !ids.is_empty() {
             self.delete_ids_locked_with_event(&ids, true).await?;
@@ -3918,7 +3866,6 @@ impl TransactionStore {
             current_count: inner.entries.len(),
             protected_count: self.protected_existing_ids(&inner, saved_source_ids).len(),
             event_sequence: self.latest_event_sequence(),
-            reclaimable_bytes,
         })
     }
 
@@ -4434,19 +4381,7 @@ fn parse_status_range(input: &str) -> Option<StatusPredicate> {
     None
 }
 
-pub(crate) fn parse_history_since(input: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    // History queries have always required positive relative durations.
-    parse_since_with_minimum(input, 1)
-}
-
 fn parse_since(input: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    parse_since_with_minimum(input, 0)
-}
-
-fn parse_since_with_minimum(
-    input: &str,
-    minimum_relative_amount: i64,
-) -> Option<chrono::DateTime<chrono::Utc>> {
     let trimmed = input.trim();
     // Relative: "1h", "30m", "2d", "7d"
     for (unit, seconds_per_unit) in [('h', 3600_i64), ('m', 60), ('d', 86400), ('s', 1)] {
@@ -4455,9 +4390,6 @@ fn parse_since_with_minimum(
                 return None;
             }
             let amount: i64 = rest.parse().ok()?;
-            if amount < minimum_relative_amount {
-                return None;
-            }
             let duration = chrono::Duration::try_seconds(amount.checked_mul(seconds_per_unit)?)?;
             return chrono::Utc::now().checked_sub_signed(duration);
         }
@@ -4931,11 +4863,6 @@ fn format_size(bytes: usize) -> String {
         index += 1;
     }
     let precision = if size >= 10.0 || index == 0 { 0 } else { 1 };
-    // The UI uses toFixed, which rounds positive ties up. Rust's formatter
-    // rounds ties to even, so round first to keep displayed-size queries equal.
-    // One-decimal values are below 10 GB, making size * 10 exact for byte counts.
-    let factor = if precision == 0 { 1.0 } else { 10.0 };
-    let size = (size * factor).round() / factor;
     format!("{size:.precision$} {}", units[index])
 }
 
@@ -5055,109 +4982,6 @@ pub(crate) mod tests {
             None,
             None,
         )
-    }
-
-    #[test]
-    fn history_size_format_matches_ui_rounding_and_unit_boundaries() {
-        for (bytes, expected) in [
-            (0, "0 B"),
-            (512, "512 B"),
-            (1023, "1023 B"),
-            (1024, "1.0 KB"),
-            (1279, "1.2 KB"),
-            (1280, "1.3 KB"),
-            (1281, "1.3 KB"),
-            (10239, "10.0 KB"),
-            (10240, "10 KB"),
-            (10751, "10 KB"),
-            (10752, "11 KB"),
-            (10753, "11 KB"),
-            (1048575, "1024 KB"),
-            (1048576, "1.0 MB"),
-            (1310720, "1.3 MB"),
-            (11010048, "11 MB"),
-            (1073741824, "1.0 GB"),
-            (1342177280, "1.3 GB"),
-        ] {
-            assert_eq!(format_size(bytes), expected, "{bytes} bytes");
-        }
-    }
-
-    #[test]
-    fn history_size_search_matches_displayed_half_unit_values() {
-        for (bytes, displayed) in [(1280, "1.3 KB"), (10752, "11 KB"), (512, "512 B")] {
-            let mut summary = test_record("example.com").summary();
-            summary.request_bytes = bytes;
-            summary.response_bytes = 0;
-            let cached = CachedSummary::new(summary);
-            assert!(matches_filters(
-                &cached,
-                Some(&displayed.to_ascii_lowercase()),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                &ListFilters::default(),
-                None,
-                false,
-            ));
-        }
-    }
-
-    #[test]
-    fn history_since_parser_rejects_nonpositive_and_unusable_cutoffs() {
-        for since in [
-            "+1h",
-            "9223372036854775807h",
-            "9223372036854775807s",
-            "999999999d",
-            "-1h",
-            "0s",
-            "00m",
-            "000h",
-            "0d",
-            "1.5h",
-            "2026-02-30",
-            " ",
-        ] {
-            assert!(parse_history_since(since).is_none(), "{since}");
-        }
-    }
-
-    #[test]
-    fn history_since_parser_retains_cutoffs_for_valid_inputs() {
-        let old = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let mut summary = test_record("example.com").summary();
-        summary.started_at = old;
-        let cached = CachedSummary::new(summary);
-        for since in ["1h", "30m", "2d", "60s", " 1h ", "01h", "2026-01-01"] {
-            let cutoff = parse_history_since(since).expect(since);
-            assert!(!matches_filters(
-                &cached,
-                None,
-                None,
-                None,
-                None,
-                Some(&cutoff),
-                None,
-                None,
-                &ListFilters::default(),
-                None,
-                false,
-            ));
-        }
-        let midnight = parse_history_since("2026-01-01").unwrap();
-        assert_eq!(parse_history_since("2026-01-01T00:00:00Z"), Some(midnight));
-        assert_eq!(
-            parse_history_since("2026-01-01T05:30:00+05:30"),
-            Some(midnight)
-        );
-        // Keep the pre-existing parser contract for callers outside history reads.
-        assert!(parse_since("0s").is_some());
     }
 
     mod service_map_body_tests {
@@ -7353,29 +7177,6 @@ pub(crate) mod tests {
             assert!(store.retention_compaction_pending());
             store.mark_retention_compacted(second.event_sequence);
             assert!(!store.retention_compaction_pending());
-            drop(store);
-            fs::remove_dir_all(path).unwrap();
-        }
-
-        // The retention worker rewrites the session only when trims free enough
-        // of transactions.ndjson; a row that lives only in the journal frees none.
-        #[tokio::test]
-        async fn retention_trims_report_the_snapshotted_bytes_they_free() {
-            let records = records(3);
-            let ids: Vec<_> = records.iter().map(|record| record.id).collect();
-            let (store, path) = journal_store(records);
-            store
-                .adopt_written_locators(HashMap::from([(
-                    ids[0],
-                    crate::session::BodyLocator {
-                        offset: 0,
-                        len: 700,
-                    },
-                )]))
-                .await;
-            let outcome = store.trim_retention(1, &HashSet::new(), 10).await.unwrap();
-            assert_eq!(outcome.deleted_ids, vec![ids[0], ids[1]]);
-            assert_eq!(outcome.reclaimable_bytes, 700);
             drop(store);
             fs::remove_dir_all(path).unwrap();
         }

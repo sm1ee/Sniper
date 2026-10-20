@@ -219,7 +219,7 @@ for (const remaining of [["one.example.com"], []]) {
     assert.equal(f.document.activeElement, f.document.body);
     assert.equal(f.focusCalls.length, 0);
     assert.equal(f.state.targetExpandedHosts.has("two.example.com"), false);
-    if (!remaining.length) assert.match(f.tree.innerHTML, /No targets yet/);
+    if (!remaining.length) assert.match(f.tree.innerHTML, /No captured targets yet/);
   });
 }
 
@@ -374,40 +374,4 @@ test("a tree without a current session never restores a previous host's focus", 
   f.render();
   assert.equal(f.document.activeElement, f.document.body);
   assert.equal(f.focusCalls.length, 0);
-});
-
-
-test("Recon discoveries show provenance without implying captured traffic or a live status", () => {
-  const f = targetFixture(["example.com"]);
-  f.state.targetSiteMap[0].request_count = 0;
-  f.state.targetSiteMap[0].paths = [{
-    path: "/archived?item=1", methods: ["GET"], status: null,
-    captured: false, discovered: true, last_seen: "discovery-time",
-    recon_sources: ["wayback", "<script>"], recon_kinds: ["history", "candidate"],
-  }];
-  f.render();
-  assert.match(f.tree.innerHTML, /0 captured request\(s\)/);
-  assert.match(f.tree.innerHTML, /Recon discovery · not captured/);
-  assert.match(f.tree.innerHTML, /Last discovered: discovery-time/);
-  assert.match(f.tree.innerHTML, /Recon: wayback, &lt;script&gt; · history, candidate/);
-  assert.doesNotMatch(f.tree.innerHTML, /null|<script>|Last captured/);
-});
-
-test("captured paths with Recon evidence retain captured status and source labels", () => {
-  const f = targetFixture(["example.com"]);
-  Object.assign(f.state.targetSiteMap[0].paths[0], {
-    captured: true, discovered: true, recon_sources: ["crawler"], recon_kinds: ["live"],
-  });
-  f.render();
-  assert.match(f.tree.innerHTML, /Captured \+ Recon · GET · 200 · Last captured: inert/);
-  assert.match(f.tree.innerHTML, /Recon: crawler · live/);
-  assert.doesNotMatch(f.tree.innerHTML, /not captured/);
-});
-
-test("legacy sitemap responses remain captured and empty state offers Recon", () => {
-  const f = targetFixture(["example.com"]);
-  assert.match(f.tree.innerHTML, /Captured · GET · 200 · Last captured: inert/);
-  f.setHosts([]);
-  f.render();
-  assert.match(f.tree.innerHTML, /Capture proxy traffic or run Recon/);
 });

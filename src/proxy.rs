@@ -554,19 +554,9 @@ pub async fn send_replay_request_for_session(
         target,
         source_transaction_id,
         http_version,
-        SentFrom::Replay,
     )
     .await
     .map_err(ReplaySendError::into_error)
-}
-
-/// Who sent a request the operator built: the note its row carries, and
-/// whether the event log gets a line for it. A Fuzzer attack logs itself once
-/// instead of once for each of its requests.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SentFrom {
-    Replay,
-    Fuzzer,
 }
 
 #[derive(Debug)]
@@ -614,7 +604,6 @@ pub async fn try_send_replay_request_for_session(
     target: Option<RequestTargetOverride>,
     source_transaction_id: Option<Uuid>,
     http_version: Option<String>,
-    sent_from: SentFrom,
 ) -> std::result::Result<TransactionRecord, ReplaySendError> {
     request
         .try_body_bytes()
@@ -651,13 +640,7 @@ pub async fn try_send_replay_request_for_session(
     .map_err(ReplaySendError::without_record)?;
     let outbound_uri_authority = build_replay_outbound_uri_authority(&request, target.as_ref())
         .map_err(ReplaySendError::without_record)?;
-    notes.push(
-        match sent_from {
-            SentFrom::Replay => crate::model::REPLAY_NOTE,
-            SentFrom::Fuzzer => crate::model::FUZZER_NOTE,
-        }
-        .to_string(),
-    );
+    notes.push(crate::model::REPLAY_NOTE.to_string());
     let exchange = execute_http_exchange(
         state.clone(),
         session.clone(),
@@ -703,17 +686,15 @@ pub async fn try_send_replay_request_for_session(
         return Err(ReplaySendError::with_record(message, record));
     }
 
-    if sent_from == SentFrom::Replay {
-        session
-            .event_log
-            .push(
-                EventLevel::Info,
-                "replay",
-                "Request sent",
-                format!("{} {}{}", record.method, record.host, record.path),
-            )
-            .await;
-    }
+    session
+        .event_log
+        .push(
+            EventLevel::Info,
+            "replay",
+            "Request sent",
+            format!("{} {}{}", record.method, record.host, record.path),
+        )
+        .await;
     store_record_and_scan_unconditionally(&state, &session, record.clone()).await;
     Ok(record)
 }
@@ -722,16 +703,7 @@ fn build_client(
     upstream_insecure: bool,
     proxy: &crate::upstream_proxy::UpstreamProxy,
 ) -> Result<ProxyClient> {
-    client_builder(upstream_insecure, proxy)?
-        .build()
-        .context("failed to build upstream HTTP client")
-}
-
-fn client_builder(
-    upstream_insecure: bool,
-    proxy: &crate::upstream_proxy::UpstreamProxy,
-) -> Result<reqwest::ClientBuilder> {
-    Ok(proxy
+    proxy
         .apply(Client::builder())?
         // Enabling native-tls for the legacy retry changes reqwest's default;
         // keep the first attempt on rustls.
@@ -739,118 +711,9 @@ fn client_builder(
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure)
         .connect_timeout(REPLAY_CONNECT_TIMEOUT)
-        .http1_only())
-}
-
-/// How long one Template Scan request may take before it counts as failed,
-/// unless a raw request's `@timeout:` says otherwise.
-pub(crate) const TEMPLATE_SCAN_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Template Scan's client: one per job, so its connections are reused, with
-/// the session's TLS setting and upstream chain like everything Sniper sends.
-/// The scan times each request itself, as a template may ask for longer.
-pub(crate) fn build_template_scan_client(
-    upstream_insecure: bool,
-    proxy: &crate::upstream_proxy::UpstreamProxy,
-) -> Result<Client> {
-    client_builder(upstream_insecure, proxy)?
+        .http1_only()
         .build()
-        .context("failed to build the Template Scan client")
-}
-
-/// Why a Template Scan request has no answer to judge.
-#[derive(Debug)]
-pub(crate) enum TemplateScanSendError {
-    /// A Match & Replace rule would have sent it somewhere else.
-    Blocked,
-    /// No response: the reason, never a synthetic 502 a matcher could read.
-    Failed(String),
-}
-
-/// Sends one Template Scan request with the job's client. The record is not
-/// stored here: a scan keeps only the exchanges a template matched.
-pub(crate) async fn send_template_scan_request(
-    state: &Arc<AppState>,
-    session: &Arc<SessionContext>,
-    client: &Client,
-    request: EditableRequest,
-    apply_match_replace: bool,
-) -> std::result::Result<TransactionRecord, TemplateScanSendError> {
-    let started_at = Utc::now();
-    let started = Instant::now();
-    let (request, mut notes, original_request_capture) = if apply_match_replace {
-        let (scheme, host) = (request.scheme.clone(), request.host.clone());
-        let applied =
-            apply_request_match_replace(session.as_ref(), request, state.config.body_preview_bytes)
-                .await;
-        // The operator chose the target: a rule may change what is sent,
-        // never where it goes.
-        let request = &applied.0;
-        let host_header = request
-            .headers
-            .iter()
-            .find(|header| header.name.eq_ignore_ascii_case("host"))
-            .map(|header| header.value.as_str());
-        if !request.scheme.eq_ignore_ascii_case(&scheme)
-            || !request.host.eq_ignore_ascii_case(&host)
-            || host_header.is_some_and(|value| !value.eq_ignore_ascii_case(&host))
-        {
-            return Err(TemplateScanSendError::Blocked);
-        }
-        applied
-    } else {
-        (request, Vec::new(), None)
-    };
-    notes.push(crate::model::TEMPLATE_SCAN_NOTE.to_string());
-    let exchange = execute_http_exchange(
-        state.clone(),
-        session.clone(),
-        client,
-        request,
-        started_at,
-        started,
-        notes,
-        false,
-        original_request_capture,
-        Some(Version::HTTP_11),
-        None,
-        None,
-        SocketPeerCapture::Disabled,
-    )
-    .await;
-    match exchange.response {
-        Ok(_) => Ok(exchange.record),
-        Err(error) => Err(TemplateScanSendError::Failed(error.message)),
-    }
-}
-
-/// Whether `scheme://authority` reaches one of Sniper's own listeners, the
-/// proxy or the UI, by address or by a name that resolves to this machine.
-pub(crate) async fn targets_own_listener(
-    state: &AppState,
-    session: &SessionContext,
-    scheme: &str,
-    authority: &str,
-) -> bool {
-    let Ok(uri) = Uri::builder()
-        .scheme(scheme)
-        .authority(authority)
-        .path_and_query("/")
-        .build()
-    else {
-        return true;
-    };
-    for listener in [
-        state.get_active_proxy_addr().await,
-        state.get_active_ui_addr().await,
-    ] {
-        if request_targets_own_listener(&uri, listener)
-            || name_resolves_to_own_listener(session, &uri, listener).await
-        {
-            return true;
-        }
-    }
-    false
+        .context("failed to build upstream HTTP client")
 }
 
 const RENDER_RESOURCE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -3753,32 +3616,24 @@ async fn store_record_and_scan(
 /// The same, for traffic the operator asked for by hand. A replay send is an
 /// explicit action and its result is the answer to it, so pausing capture must
 /// not swallow it.
-pub(crate) async fn store_record_and_scan_unconditionally(
+async fn store_record_and_scan_unconditionally(
     state: &Arc<AppState>,
     session: &Arc<SessionContext>,
     record: TransactionRecord,
 ) {
     let insert_outcome =
         insert_transaction_quiet(session, record.clone(), "captured transaction").await;
-    scan_record_for_session(state, session, record);
+    scan_record_for_session(session, record);
     persist_transaction_insert_outcome(state, session, insert_outcome).await;
 }
 
-fn scan_record_for_session(
-    state: &Arc<AppState>,
-    session: &Arc<SessionContext>,
-    record: TransactionRecord,
-) {
+fn scan_record_for_session(session: &Arc<SessionContext>, record: TransactionRecord) {
     let scanner = session.scanner.clone();
     let scan_generation = scanner.clear_generation();
     let scan_session = Arc::clone(session);
-    let templates = Arc::clone(&state.templates);
     spawn_tracked_proxy_task(session.id(), PROXY_WORK_CAPTURE_TASK, async move {
         let config = scanner.get_config().await;
-        let mut findings = crate::scanner::scan_transaction(&record, &config);
-        if config.enabled {
-            findings.extend(passive_template_findings(&templates, &scan_session, record).await);
-        }
+        let findings = crate::scanner::scan_transaction(&record, &config);
         let mut accepted_findings = false;
         for finding in findings {
             accepted_findings |= scanner.push_if_generation(finding, scan_generation).await;
@@ -3791,33 +3646,6 @@ fn scan_record_for_session(
             persist_session_state_quiet(&scan_session);
         }
     });
-}
-
-/// The findings of the Nuclei templates the operator turned on, for a record
-/// in scope. They run on the blocking pool; when a burst already fills it,
-/// the record skips them rather than wait inside a proxy task, which would
-/// hold the session busy. Rescan covers what was skipped.
-async fn passive_template_findings(
-    templates: &crate::templates::library::TemplateLibrary,
-    session: &SessionContext,
-    record: TransactionRecord,
-) -> Vec<crate::scanner::ScannerFinding> {
-    let Some(set) = templates.passive_set() else {
-        return Vec::new();
-    };
-    let (include, exclude) = session.runtime.scope_lists().await;
-    if !crate::templates::passive_applies(&record, &include, &exclude) {
-        return Vec::new();
-    }
-    let Some(permit) = templates.try_passive_permit() else {
-        return Vec::new();
-    };
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        crate::templates::passive_findings(&set, &record)
-    })
-    .await
-    .unwrap_or_default()
 }
 
 async fn insert_transaction_quiet(
@@ -3891,7 +3719,7 @@ async fn persist_transaction_insert_outcome(
 /// is about 5,000 records at the average record size of a real session. Raising it
 /// makes the expensive snapshot rewrites rarer, at the cost of a slower load and a
 /// longer window of non-journaled state (event log entries) to lose in a crash.
-pub(crate) const TRANSACTION_JOURNAL_COMPACT_BYTES: u64 = 64 * 1024 * 1024;
+const TRANSACTION_JOURNAL_COMPACT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Persists only the small components, to state.json. For changes that are not a
 /// captured transaction — an intercept enqueue, a websocket open, a scanner
@@ -4397,7 +4225,7 @@ impl StreamedRecordContext {
             {
                 let mut scan_record = record;
                 scan_record.id = record_id;
-                scan_record_for_session(&self.state, &self.session, scan_record);
+                scan_record_for_session(&self.session, scan_record);
                 forget_persist_context_if_clean(self.session.id(), self.persist_generation);
                 return;
             }

@@ -79,7 +79,7 @@ interval — intercepts appear asynchronously.
 
 ## 4. Where things live
 
-`docs/architecture.md` lists the modules. This is the reverse index: what to open for a
+`README.md` lists the modules. This is the reverse index: what to open for a
 given change, including the parts that are easy to miss.
 
 | Change | Files |
@@ -196,22 +196,19 @@ PATH="$HOME/.cargo/bin:$PATH" ALLOW_ADHOC_RELEASE=1 DMG_ARCH=universal \
 4. Tag `vX.Y.Z` (lightweight, at the released commit), push the tag, and publish
    with `gh release create` attaching `dist/Sniper-X.Y.Z-universal.dmg` and its
    `.sha256`.
-5. The Windows and Linux packages attach themselves. Pushing the tag runs
-   `.github/workflows/windows.yml` and `.github/workflows/linux.yml`, which
-   build their packages and wait up to fifteen minutes for the release to appear
-   before uploading them: the Windows `.zip` and `-setup.exe`, and the Debian
-   `.deb` and `.tar.gz` with the build manifest and the runtime check's
-   `-runtime-PASS.json`, each with its `.sha256`. Create the release in step 4
-   within that window; if a job gives up, download its artifacts from the run
-   and attach them by hand.
+5. The Windows archive attaches itself. Pushing the tag runs
+   `.github/workflows/windows.yml`, which builds the package and waits up to
+   fifteen minutes for the release to appear before uploading the `.zip` and its
+   `.sha256`. Create the release in step 4 within that window; if the job gives
+   up, download `dist/` from the run and attach it by hand.
 6. Update the Homebrew cask. `packaging/homebrew/render-cask.sh` fills the
    version and the DMG's SHA-256 into `packaging/homebrew/sniper.rb`; write it to
    `Casks/sniper.rb` in a clone of `sm1ee/homebrew-tap` and commit it as
    `sniper X.Y.Z`. Until then `brew install --cask sm1ee/tap/sniper` installs the
    previous release, which then updates itself.
 
-Every package ships a `.sha256` in the `<hash>  <filename>` form, so a
-downloader can check any of them with `shasum -a 256 -c`. Releases are ad-hoc signed,
+Both artifacts ship a `.sha256` in the `<hash>  <filename>` form, so a
+downloader can check either with `shasum -a 256 -c`. Releases are ad-hoc signed,
 which makes that checksum the only integrity signal a downloader gets — do not
 drop it.
 

@@ -31,7 +31,7 @@ function fixture() {
     displayRenderResourcesInput: {},
   };
   const globals = {
-    state, els, document, displaySettingsPreviewActive: false, compareLoadGeneration: 0, displaySettingsReturnFocus: null,
+    state, els, document, displaySettingsPreviewActive: false, displaySettingsReturnFocus: null,
     displaySettingsReady: true, pendingDisplaySettingsApply: null, displaySettingsEditedControls: new Set(),
     uiSettingsServerRevision: 0, uiSettingsDirty: false, uiSettingsSaveTimer: null,
     window: { clearTimeout() {} }, WS_COLUMN_RULES: {},

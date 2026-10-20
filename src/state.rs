@@ -95,8 +95,6 @@ pub struct AppState {
     pub certificates: Arc<CertificateAuthority>,
     pub startup: Arc<StartupSettingsStore>,
     pub ui_settings: Arc<AppUiSettingsStore>,
-    /// The Nuclei template library, shared by every session.
-    pub templates: Arc<crate::templates::library::TemplateLibrary>,
     pub sessions: Arc<SessionRegistry>,
     /// Durable receipts for explicitly identified saved-data mutations.
     pub saved_operations: Arc<SavedOperationLedger>,
@@ -186,7 +184,6 @@ impl AppState {
             config.proxy_addr,
         )?);
         let ui_settings = Arc::new(AppUiSettingsStore::load_or_create(&config.data_dir)?);
-        let templates = crate::templates::library::TemplateLibrary::load(&config.data_dir);
         let (sessions, active_session) = SessionRegistry::load_or_create_with_transaction_limit(
             &config.data_dir,
             config.max_entries,
@@ -204,7 +201,6 @@ impl AppState {
             certificates,
             startup,
             ui_settings,
-            templates,
             sessions: Arc::new(sessions),
             saved_operations,
             proxy_online: Arc::new(AtomicBool::new(false)),
@@ -923,32 +919,16 @@ impl AppState {
         if crate::proxy::session_has_live_websocket_relays(id) {
             anyhow::bail!("cannot delete a session while live captures are active");
         }
-        let cached_session = {
-            let contexts = self.session_contexts.lock().await;
-            contexts.get(&id).cloned()
-        };
-        // The Fuzzer stores every exchange, each with a brief tracked scan, so
-        // its attack ends before the session is checked for proxy work.
-        if let Some(session) = cached_session.as_ref() {
-            if session.fuzzer.stop(None).await {
-                crate::proxy::wait_for_session_proxy_work_to_finish(
-                    id,
-                    std::time::Duration::from_secs(2),
-                )
-                .await;
-            }
-        }
         if crate::proxy::session_has_active_proxy_work(id) {
             anyhow::bail!("cannot delete a session while proxy activity is still running");
         }
         if crate::proxy::session_has_pending_persist(id) {
             anyhow::bail!("cannot delete a session while capture persistence is pending");
         }
-        // Before the mutation guard: a scan storing a match persists the
-        // session, which takes it.
-        if let Some(session) = cached_session.as_ref() {
-            session.template_scans.stop(None).await;
-        }
+        let cached_session = {
+            let contexts = self.session_contexts.lock().await;
+            contexts.get(&id).cloned()
+        };
         let mutation_guard = match cached_session.as_ref() {
             Some(session) => Some(session.owned_mutation_guard().await),
             None => None,
@@ -1008,10 +988,9 @@ impl AppState {
         self.sessions.session_storage_path(id)
     }
 
-    /// Stop every cached session's Recon and Template Scan jobs before
-    /// shutdown. A switched-away session may still own a job, so persisting
-    /// only the active one loses it.
-    pub async fn stop_background_jobs(&self) -> Result<()> {
+    /// Stop every cached session's discovery before shutdown. A switched-away
+    /// session may still own a job, so persisting only the active one loses it.
+    pub async fn stop_recon_jobs(&self) -> Result<()> {
         let mut contexts: Vec<_> = self
             .session_contexts
             .lock()
@@ -1026,14 +1005,8 @@ impl AppState {
         for session in contexts {
             let operation_lock = self.session_operation_lock(session.id()).await;
             let _operation_guard = operation_lock.lock_owned().await;
-            // A scan storing a match, or the Fuzzer storing an exchange,
-            // persists the session under the mutation guard, so both stop
-            // before the guard is taken.
-            let scanned = session.template_scans.stop(None).await;
-            let fuzzed = session.fuzzer.stop(None).await;
             let _guard = session.owned_mutation_guard().await;
-            let reconned = session.recon.stop(None).await;
-            if (scanned || fuzzed || reconned) && self.sessions.contains_session(session.id()) {
+            if session.recon.stop(None).await && self.sessions.contains_session(session.id()) {
                 session.persist_state_only().await?;
             }
         }
@@ -1642,7 +1615,7 @@ impl AppState {
     }
 
     async fn prepare_for_self_update_shutdown(&self) -> Result<()> {
-        self.stop_background_jobs().await?;
+        self.stop_recon_jobs().await?;
         self.ws_replay.disconnect_all().await;
         let relay_result = crate::proxy::close_live_websocket_relays(
             self,
@@ -2746,7 +2719,7 @@ fn app_release_http_client(error_context: &'static str) -> Result<reqwest::Clien
     builder.build().context(error_context)
 }
 
-pub(crate) fn release_proxy_env_targets_loopback() -> bool {
+fn release_proxy_env_targets_loopback() -> bool {
     ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
         .iter()
         .filter_map(|key| env::var(key).ok())
@@ -3988,12 +3961,6 @@ mod tests {
         session
             .fuzzer
             .insert(FuzzerAttackRecord {
-                attack_type: Default::default(),
-                url_encode: false,
-                planned: 0,
-                concurrency: 1,
-                running: false,
-                stopped: false,
                 id: uuid::Uuid::new_v4(),
                 started_at: chrono::Utc::now(),
                 completed_at: chrono::Utc::now(),

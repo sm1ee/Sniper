@@ -21,17 +21,14 @@ function copyToClipboard(id) {
   var textarea = $("#"+id);
   var value = textarea.val();
 
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(value);
+  }
+
   return new Promise(function (resolve, reject) {
     try {
-      if (navigator.clipboard && window.isSecureContext) {
-        resolve(navigator.clipboard.writeText(value));
-        return;
-      }
-
       textarea.select();
-      if (!document.execCommand("copy")) {
-        throw new Error("Clipboard copy failed");
-      }
+      document.execCommand("copy");
       resolve();
     } catch (err) {
       reject(err);
@@ -70,29 +67,9 @@ function utf8StringToByteString(value) {
   return CryptoJS.enc.Latin1.stringify(CryptoJS.enc.Utf8.parse(value));
 }
 
-function parseDecoderTime(input) {
-  // Unix output may be negative or fractional; leave all other date syntax alone.
-  var unix = /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(input);
-  if (!unix || unix[0] !== input) {
-    return new Date(input);
-  }
-
-  var seconds = Number(unix[2]);
-  var fraction = unix[3] || "";
-  // Check Date's range before truncating sub-millisecond digits toward zero.
-  if (seconds > 8640000000000 || (seconds === 8640000000000 && /[1-9]/.test(fraction))) {
-    return new Date(NaN);
-  }
-  // Both terms and their sum are exact integers within Date's safe-integer range.
-  // Multiplying decimal seconds directly can turn 1.001 into 1000.9999999999999.
-  var milliseconds = seconds * 1000 + Number((fraction + "000").slice(0, 3));
-  return new Date(unix[1] === "-" ? -milliseconds : milliseconds);
-}
-
 var hasher = {
   ipcalc : new ipCalc(),
   tab : tabs.encode,
-  copyGeneration : 0,
   elements: {
     h1 : {
       id : tabs.hash+"md5",
@@ -537,7 +514,12 @@ var hasher = {
       tab : tabs.time,
       title: "Unixtime",
       calculate: function (input) {
-        var date = parseDecoderTime(input);
+        var date;
+        if (/[^\d]/.test(input)) {
+          date = new Date(input);
+        } else {
+          date = new Date(1000*parseInt(input));
+        }
         if (!isNaN(date.getTime())) {
           return date.getTime()/1000;
         }
@@ -549,7 +531,12 @@ var hasher = {
       tab : tabs.time,
       title: "Local time",
       calculate: function (input) {
-        var date = parseDecoderTime(input);
+        var date;
+        if (/[^\d]/.test(input)) {
+          date = new Date(input);
+        } else {
+          date = new Date(1000*parseInt(input));
+        }
         if (!isNaN(date.getTime())) {
           return date.toLocaleString();
         }
@@ -561,7 +548,12 @@ var hasher = {
       tab : tabs.time,
       title: "DATETIME (local)",
       calculate: function (input) {
-        var ddd = parseDecoderTime(input);
+        var ddd;
+        if (/[^\d]/.test(input)) {
+          ddd = new Date(input);
+        } else {
+          ddd = new Date(1000*parseInt(input));
+        }
         if (!isNaN(ddd.getTime())) {
           var y = ddd.getFullYear();
           var m = ddd.getMonth() + 1;
@@ -586,7 +578,12 @@ var hasher = {
       tab : tabs.time,
       title: "DATETIME (UTC)",
       calculate: function (input) {
-        var ddd = parseDecoderTime(input);
+        var ddd;
+        if (/[^\d]/.test(input)) {
+          ddd = new Date(input);
+        } else {
+          ddd = new Date(1000*parseInt(input));
+        }
         if (!isNaN(ddd.getTime())) {
           var y = ddd.getUTCFullYear();
           var m = ddd.getUTCMonth() + 1;
@@ -611,7 +608,12 @@ var hasher = {
       tab : tabs.time,
       title: "RFC-1123",
       calculate: function (input) {
-        var date = parseDecoderTime(input);
+        var date;
+        if (/[^\d]/.test(input)) {
+          date = new Date(input);
+        } else {
+          date = new Date(1000*parseInt(input));
+        }
         if (!isNaN(date.getTime())) {
           return date.toUTCString();
         }
@@ -623,7 +625,12 @@ var hasher = {
       tab : tabs.time,
       title: "ISO 8601",
       calculate: function (input) {
-        var date = parseDecoderTime(input);
+        var date;
+        if (/[^\d]/.test(input)) {
+          date = new Date(input);
+        } else {
+          date = new Date(1000*parseInt(input));
+        }
         if (!isNaN(date.getTime())) {
           return date.toISOString();
         }
@@ -707,7 +714,7 @@ var hasher = {
       tab : tabs.string,
       title: "Hex to ASCII",
       calculate: function (input) {
-        if (input.length % 2 !== 0 || /[^0-9a-f]/i.test(input)) {
+        if (/[^0-9a-f]/i.test(input)) {
           return "NaN";
         }
         try {
@@ -738,7 +745,7 @@ var hasher = {
       tab : tabs.string,
       title: "Hex to UTF-8",
       calculate: function (input) {
-        if (input.length % 2 !== 0 || /[^0-9a-f]/i.test(input)) {
+        if (/[^0-9a-f]/i.test(input)) {
           return "NaN";
         }
         try {
@@ -769,7 +776,7 @@ var hasher = {
       tab : tabs.string,
       title: "Hex to UTF-16",
       calculate: function (input) {
-        if (input.length % 4 !== 0 || /[^0-9a-f]/i.test(input)) {
+        if (/[^0-9a-f]/i.test(input)) {
           return "NaN";
         }
         try {
@@ -1112,7 +1119,6 @@ var hasher = {
     for (var i in this.elements) {
       if (this.elements[i].tab == this.tab) {
         $("#"+this.elements[i].id+"-value").click(function (event) {
-          var copyGeneration = ++hasher.copyGeneration;
           $("#output .note").hide();
           var id = this.id.toString().replace("-value", "");
           var textarea = $("#"+id)[0];
@@ -1126,10 +1132,8 @@ var hasher = {
 
           if ($("#"+id).val().length > 0) {
             copyToClipboard(id).then(function () {
-              if (copyGeneration !== hasher.copyGeneration) return;
               $("#"+id+"-note").text("copied").show("fast");
             }).catch(function () {
-              if (copyGeneration !== hasher.copyGeneration) return;
               $("#"+id+"-note").text("copy failed").show("fast");
             });
           }
@@ -1143,8 +1147,6 @@ var hasher = {
    * Recalculate
    */
   update : function () {
-    // Clipboard completions belong to the output and click that started them.
-    this.copyGeneration++;
     $("#output .note").hide();
     var input = $("#input-value").val();
     var password = $("#input-password").val();
@@ -1188,7 +1190,6 @@ var hasher = {
    */
 
   render : function () {
-    this.copyGeneration++;
     $("#output").html("");
 
     for (var i in this.elements) {

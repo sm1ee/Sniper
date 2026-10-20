@@ -624,7 +624,6 @@ pub async fn run_sequence(
             step.target.clone(),
             step.source_transaction_id,
             step.http_version.clone(),
-            proxy::SentFrom::Replay,
         )
         .await
         {

@@ -1,9 +1,9 @@
 //! Explicitly scoped, session-owned endpoint discovery. Findings are evidence,
 //! not proxy transactions: archived and static candidates never imply liveness.
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -25,6 +25,12 @@ use crate::{
     session::SessionContext,
     state::AppState,
 };
+
+const MAX_INVENTORY: usize = 5_000;
+const MAX_INVENTORY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_URL_BYTES: usize = 4_096;
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_JOBS: usize = 20;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -82,7 +88,7 @@ struct RunningJob {
 pub struct ReconStore {
     snapshot: Mutex<ReconSnapshot>,
     running: Mutex<Option<RunningJob>>,
-    endpoint_index: Mutex<HashMap<(String, String), usize>>,
+    inventory_bytes: AtomicUsize,
 }
 
 impl ReconStore {
@@ -100,48 +106,17 @@ impl ReconStore {
                 }
             }
         }
-        let endpoint_index = snapshot
-            .endpoints
-            .iter()
-            .enumerate()
-            .map(|(index, endpoint)| ((endpoint.url.clone(), endpoint.method.clone()), index))
-            .collect();
+        let inventory_bytes =
+            serde_json::to_vec(&snapshot.endpoints).map_or(MAX_INVENTORY_BYTES, |v| v.len());
         Self {
             snapshot: Mutex::new(snapshot),
             running: Mutex::new(None),
-            endpoint_index: Mutex::new(endpoint_index),
+            inventory_bytes: AtomicUsize::new(inventory_bytes),
         }
     }
 
     pub fn snapshot(&self) -> ReconSnapshot {
         self.snapshot.lock().unwrap().clone()
-    }
-
-    /// Project only the metadata needed by Target's site map, leaving full raw
-    /// URL spellings and evidence in the session inventory.
-    pub fn site_map_endpoints(&self) -> Vec<crate::target::ReconSiteMapEndpoint> {
-        self.snapshot
-            .lock()
-            .unwrap()
-            .endpoints
-            .iter()
-            .map(|endpoint| {
-                let mut sources: Vec<_> =
-                    endpoint.evidence.iter().map(|e| e.source.clone()).collect();
-                sources.sort_unstable();
-                sources.dedup();
-                let mut kinds: Vec<_> = endpoint.evidence.iter().map(|e| e.kind.clone()).collect();
-                kinds.sort_unstable();
-                kinds.dedup();
-                crate::target::ReconSiteMapEndpoint {
-                    url: endpoint.url.clone(),
-                    method: endpoint.method.clone(),
-                    last_seen: endpoint.last_seen,
-                    sources,
-                    kinds,
-                }
-            })
-            .collect()
     }
 
     pub fn is_running(&self) -> bool {
@@ -167,7 +142,9 @@ impl ReconStore {
         }
     }
 
-    #[cfg(test)]
+    /// `limit` is this job's own: the endpoints it may add, as its Discovery
+    /// limits say. Comparing it with the whole inventory left a later job with
+    /// a smaller limit than what earlier jobs had found unable to add any.
     fn merge(
         &self,
         job: Uuid,
@@ -176,22 +153,8 @@ impl ReconStore {
         findings: Vec<Discovery>,
         limit: usize,
     ) -> (usize, bool) {
-        self.merge_with_cancel(job, scope, source, findings, limit, None)
-    }
-
-    /// An optional budget counts only this job's new endpoints. Zero leaves the
-    /// inventory unbounded, and existing endpoints always retain new evidence.
-    fn merge_with_cancel(
-        &self,
-        job: Uuid,
-        scope: &ReconScope,
-        source: &str,
-        findings: Vec<Discovery>,
-        limit: usize,
-        cancel: Option<&AtomicBool>,
-    ) -> (usize, bool) {
         let mut snapshot = self.snapshot.lock().unwrap();
-        let mut endpoint_index = self.endpoint_index.lock().unwrap();
+        let mut bytes = self.inventory_bytes.load(Ordering::Relaxed);
         let found_before: usize = snapshot
             .jobs
             .iter()
@@ -199,23 +162,21 @@ impl ReconStore {
             .map_or(0, |item| {
                 item.sources.iter().map(|source| source.discovered).sum()
             });
-        let remaining = (limit != 0).then(|| limit.saturating_sub(found_before));
+        let remaining = limit.saturating_sub(found_before);
         let mut added = 0;
         let mut truncated = false;
         for finding in findings {
-            if cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
-                truncated = true;
-                break;
-            }
             let Ok(mut url) = Url::parse(&finding.url) else {
                 continue;
             };
-            if !scope.contains_evidence(&url) {
+            if finding.url.len() > MAX_URL_BYTES || !scope.contains_evidence(&url) {
                 continue;
             }
             url.set_fragment(None);
             let key = url.to_string();
-            let method = if http::Method::from_bytes(finding.method.as_bytes()).is_ok() {
+            let method = if finding.method.len() <= 32
+                && http::Method::from_bytes(finding.method.as_bytes()).is_ok()
+            {
                 finding.method.to_ascii_uppercase()
             } else {
                 "GET".into()
@@ -223,27 +184,44 @@ impl ReconStore {
             let evidence = ReconEvidence {
                 source: source.into(),
                 kind: finding.kind,
-                location: finding.location,
-                timestamp: finding.timestamp,
+                location: finding.location.chars().take(1024).collect(),
+                timestamp: finding.timestamp.map(|s| s.chars().take(64).collect()),
                 status: finding.status,
             };
-            let identity = (key.clone(), method.clone());
-            if let Some(index) = endpoint_index.get(&identity) {
-                let endpoint = &mut snapshot.endpoints[*index];
+            let charge = key.len() + finding.url.len() + evidence.location.len() + 512;
+            if bytes.saturating_add(charge) > MAX_INVENTORY_BYTES {
+                truncated = true;
+                break;
+            }
+            let mut charged = false;
+            if let Some(endpoint) = snapshot
+                .endpoints
+                .iter_mut()
+                .find(|entry| entry.url == key && entry.method == method)
+            {
                 if !endpoint.raw_urls.contains(&finding.url) {
-                    endpoint.raw_urls.push(finding.url);
+                    if endpoint.raw_urls.len() < 8 {
+                        endpoint.raw_urls.push(finding.url);
+                        charged = true;
+                    } else {
+                        truncated = true;
+                    }
                 }
                 if !endpoint.evidence.contains(&evidence) {
-                    endpoint.evidence.push(evidence);
+                    if endpoint.evidence.len() < 16 {
+                        endpoint.evidence.push(evidence);
+                        charged = true;
+                    } else {
+                        truncated = true;
+                    }
                 }
                 endpoint.last_seen = Utc::now();
             } else {
-                if remaining.is_some_and(|remaining| added >= remaining) {
+                if added >= remaining || snapshot.endpoints.len() >= MAX_INVENTORY {
                     truncated = true;
                     continue;
                 }
                 let now = Utc::now();
-                endpoint_index.insert(identity, snapshot.endpoints.len());
                 snapshot.endpoints.push(ReconEndpoint {
                     url: key,
                     method,
@@ -253,8 +231,13 @@ impl ReconStore {
                     last_seen: now,
                 });
                 added += 1;
+                charged = true;
+            }
+            if charged {
+                bytes += charge;
             }
         }
+        self.inventory_bytes.store(bytes, Ordering::Relaxed);
         (added, truncated)
     }
 
@@ -300,7 +283,7 @@ impl ReconStore {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartRecon {
     pub session_id: Uuid,
@@ -308,17 +291,13 @@ pub struct StartRecon {
     #[serde(default)]
     pub include_subdomains: bool,
     pub sources: Vec<String>,
-    /// Optional collection budget; zero (the default) is unbounded.
-    #[serde(default)]
+    #[serde(default = "default_requests")]
     pub max_requests: usize,
-    /// Optional collection budget; zero (the default) is unbounded.
-    #[serde(default)]
+    #[serde(default = "default_depth")]
     pub max_depth: usize,
-    /// Optional collection budget; zero (the default) is unbounded.
-    #[serde(default)]
+    #[serde(default = "default_endpoints")]
     pub max_endpoints: usize,
-    /// Optional collection budget; zero (the default) is unbounded.
-    #[serde(default)]
+    #[serde(default = "default_pages")]
     pub max_pages: usize,
     #[serde(default)]
     pub history_acknowledged: bool,
@@ -327,12 +306,17 @@ pub struct StartRecon {
     #[serde(default)]
     pub scan_visibility: Option<String>,
 }
-impl StartRecon {
-    /// Apply the server's scope and provider-consent checks without network work.
-    /// The CLI uses the same validation before an offline dry-run or confirmation.
-    pub fn validate(&self) -> Result<(), String> {
-        validate(self).map(|_| ())
-    }
+fn default_requests() -> usize {
+    100
+}
+fn default_depth() -> usize {
+    3
+}
+fn default_endpoints() -> usize {
+    5_000
+}
+fn default_pages() -> usize {
+    5
 }
 
 #[derive(Clone)]
@@ -345,7 +329,8 @@ impl ReconScope {
     fn new(target: &str, subdomains: bool) -> Result<Self, String> {
         let url =
             Url::parse(target).map_err(|_| "Enter an absolute http:// or https:// target URL.")?;
-        if !matches!(url.scheme(), "http" | "https")
+        if target.len() > MAX_URL_BYTES
+            || !matches!(url.scheme(), "http" | "https")
             || url.host_str().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
@@ -441,6 +426,13 @@ fn validate(request: &StartRecon) -> Result<ReconScope, String> {
         || request.sources.iter().collect::<HashSet<_>>().len() != request.sources.len()
     {
         return Err("Choose one or more distinct Recon sources.".into());
+    }
+    if !(1..=1_000).contains(&request.max_requests)
+        || request.max_depth > 10
+        || !(1..=MAX_INVENTORY).contains(&request.max_endpoints)
+        || !(1..=20).contains(&request.max_pages)
+    {
+        return Err("Recon limits are outside their supported ranges.".into());
     }
     if request
         .sources
@@ -541,7 +533,7 @@ pub async fn start(
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(15))
-                .user_agent(concat!("Sniper-Recon/", env!("CARGO_PKG_VERSION"))),
+                .user_agent("Sniper-Recon/0.3.1"),
         )
         .and_then(|builder| builder.build().map_err(Into::into))
         .map_err(|_| {
@@ -556,7 +548,7 @@ pub async fn start(
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(20))
-        .user_agent(concat!("Sniper-Recon/", env!("CARGO_PKG_VERSION")))
+        .user_agent("Sniper-Recon/0.3.1")
         .build()
         .map_err(|_| {
             api_error(
@@ -586,6 +578,9 @@ pub async fn start(
     };
     {
         let mut snapshot = session.recon.snapshot.lock().unwrap();
+        if snapshot.jobs.len() >= MAX_JOBS {
+            snapshot.jobs.remove(0);
+        }
         snapshot.jobs.push(job.clone());
     }
     session.schedule_state_persist();
@@ -668,14 +663,10 @@ async fn run(
                 _ => recon_sources::wayback(&provider, &scope.target, request.include_subdomains,
                     request.max_pages, request.max_endpoints, &cancel).await,
             };
-            let (added, truncated) = session.recon.merge_with_cancel(
-                id,
-                &scope,
-                source,
-                findings,
-                request.max_endpoints,
-                Some(&cancel),
-            );
+            let (added, truncated) =
+                session
+                    .recon
+                    .merge(id, &scope, source, findings, request.max_endpoints);
             report.truncated |= truncated;
             session
                 .recon
@@ -698,7 +689,7 @@ async fn run(
             }
             if s.truncated {
                 s.warnings
-                    .push("Collection is partial; more evidence may exist.".into());
+                    .push("Collection was bounded; more evidence may exist.".into());
             }
         });
         session.schedule_state_persist();
@@ -729,6 +720,9 @@ async fn read_body(mut response: reqwest::Response) -> Result<String, &'static s
         .await
         .map_err(|_| "Response body could not be read.")?
     {
+        if bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+            return Err("Response exceeds the 2 MiB extraction limit.");
+        }
         bytes.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -751,40 +745,36 @@ async fn crawl(
             queue.push_back((url, 0, 0));
         }
     }
-    // Deduplicate when scheduling, so repeated links cannot inflate an unlimited queue.
-    let mut scheduled: HashSet<String> = queue.iter().map(|(url, _, _)| url.to_string()).collect();
     let mut seen = HashSet::new();
     let mut successful_responses = 0;
     while let Some((mut url, depth, redirects)) = queue.pop_front() {
         if cancel.load(Ordering::Acquire) {
             break;
         }
+        if report.requests >= request.max_requests {
+            report.truncated = true;
+            break;
+        }
         url.set_fragment(None);
         if !scope.contains(&url) || !seen.insert(url.to_string()) {
             continue;
-        }
-        if request.max_requests != 0 && report.requests >= request.max_requests {
-            report.truncated = true;
-            report
-                .warnings
-                .push("Crawler request budget reached.".into());
-            break;
         }
         report.requests += 1;
         let response = match client.get(url.clone()).send().await {
             Ok(response) => response,
             Err(_) => {
                 report.truncated = true;
-                let warning = "A scoped crawl request failed (network/TLS/timeout).";
-                if !report.warnings.iter().any(|item| item == warning) {
-                    report.warnings.push(warning.into());
+                if report.warnings.len() < 20 {
+                    report
+                        .warnings
+                        .push("A scoped crawl request failed (network/TLS/timeout).".into());
                 }
                 continue;
             }
         };
         successful_responses += 1;
         let status = response.status().as_u16();
-        let (added, truncated) = session.recon.merge_with_cancel(
+        let (added, truncated) = session.recon.merge(
             id,
             scope,
             "crawler",
@@ -797,7 +787,6 @@ async fn crawl(
                 status: Some(status),
             }],
             request.max_endpoints,
-            Some(cancel),
         );
         report.truncated |= truncated;
         session.recon.update_source(id, "crawler", |s| {
@@ -810,17 +799,11 @@ async fn crawl(
                 .get(reqwest::header::LOCATION)
                 .and_then(|h| h.to_str().ok())
             {
-                if let Ok(mut next) = url.join(location) {
-                    next.set_fragment(None);
+                if let Ok(next) = url.join(location) {
                     if scope.contains(&next) && redirects < 5 {
-                        if scheduled.insert(next.to_string()) {
-                            queue.push_front((next, depth, redirects + 1));
-                        }
-                    } else {
-                        let warning = "A redirect was not followed because it left scope or exceeded five hops.";
-                        if !report.warnings.iter().any(|item| item == warning) {
-                            report.warnings.push(warning.into());
-                        }
+                        queue.push_front((next, depth, redirects + 1));
+                    } else if report.warnings.len() < 20 {
+                        report.warnings.push("A redirect was not followed because it left scope or exceeded five hops.".into());
                     }
                 }
             }
@@ -844,54 +827,41 @@ async fn crawl(
             Ok(body) => body,
             Err(error) => {
                 report.truncated = true;
-                if !report.warnings.iter().any(|item| item == error) {
+                if report.warnings.len() < 20 {
                     report.warnings.push(error.into());
                 }
                 continue;
             }
         };
-        let (findings, clipped) =
-            recon_sources::extract_document_cancellable(&url, &content_type, &body, cancel);
+        let (findings, clipped) = recon_sources::extract_document(&url, &content_type, &body);
         if clipped {
             report.truncated = true;
-            let warning = "Static document extraction was partial; more evidence may exist.";
-            if !report.warnings.iter().any(|item| item == warning) {
+            let warning =
+                "A static document extraction limit was reached; more evidence may exist.";
+            if report.warnings.len() < 20 && !report.warnings.iter().any(|item| item == warning) {
                 report.warnings.push(warning.into());
             }
         }
         for finding in &findings {
-            if cancel.load(Ordering::Acquire) {
-                break;
-            }
             if !recon_sources::is_followable(finding) {
                 continue;
             }
-            let Ok(mut next) = Url::parse(&finding.url) else {
+            let Ok(next) = Url::parse(&finding.url) else {
                 continue;
             };
-            next.set_fragment(None);
-            if !scope.contains(&next) || scheduled.contains(next.as_str()) {
+            if !scope.contains(&next) || seen.contains(next.as_str()) {
                 continue;
             }
-            if request.max_depth != 0 && depth >= request.max_depth {
+            if depth >= request.max_depth || queue.len() >= request.max_requests.saturating_mul(4) {
                 report.truncated = true;
-                let warning = "Crawl depth budget reached.";
-                if !report.warnings.iter().any(|item| item == warning) {
-                    report.warnings.push(warning.into());
-                }
             } else {
-                scheduled.insert(next.to_string());
-                queue.push_back((next, depth.saturating_add(1), 0));
+                queue.push_back((next, depth + 1, 0));
             }
         }
-        let (added, truncated) = session.recon.merge_with_cancel(
-            id,
-            scope,
-            "crawler",
-            findings,
-            request.max_endpoints,
-            Some(cancel),
-        );
+        let (added, truncated) =
+            session
+                .recon
+                .merge(id, scope, "crawler", findings, request.max_endpoints);
         report.truncated |= truncated;
         session
             .recon
@@ -939,102 +909,6 @@ mod tests {
         let subdomains = ReconScope::new("https://example.com", true).unwrap();
         assert!(subdomains.contains(&Url::parse("https://api.example.com/").unwrap()));
         assert!(!subdomains.contains(&Url::parse("http://api.example.com/").unwrap()));
-    }
-
-    #[test]
-    fn budgets_default_to_unbounded_and_accept_values_above_the_old_ceilings() {
-        let mut request: StartRecon = serde_json::from_value(serde_json::json!({
-            "session_id": Uuid::new_v4(), "target_url": "https://example.com/",
-            "sources": ["crawler"]
-        }))
-        .unwrap();
-        assert_eq!(
-            (
-                request.max_requests,
-                request.max_depth,
-                request.max_endpoints,
-                request.max_pages
-            ),
-            (0, 0, 0, 0)
-        );
-        assert!(validate(&request).is_ok());
-        request.max_requests = 10_000;
-        request.max_depth = 100;
-        request.max_endpoints = 50_000;
-        request.max_pages = 200;
-        request.target_url = format!("https://example.com/{}", "a".repeat(20_000));
-        assert!(validate(&request).is_ok());
-    }
-
-    #[test]
-    fn inventory_preserves_large_collections_long_urls_and_all_evidence() {
-        let store = ReconStore::from_snapshot(ReconSnapshot::default());
-        let scope = ReconScope::new("https://example.com", false).unwrap();
-        let findings: Vec<_> = (0..5_100)
-            .map(|index| Discovery {
-                url: format!(
-                    "https://example.com/{index}/{}",
-                    "a".repeat(if index == 0 { 20_000 } else { 0 })
-                ),
-                method: "GET".into(),
-                kind: "history".into(),
-                location: "x".repeat(1_800),
-                timestamp: Some("t".repeat(100)),
-                status: None,
-            })
-            .collect();
-        let long_url = findings[0].url.clone();
-        assert_eq!(
-            store.merge(Uuid::new_v4(), &scope, "wayback", findings, 0),
-            (5_100, false)
-        );
-        let variants = (0..30)
-            .map(|index| Discovery {
-                url: format!("{long_url}#fragment-{index}"),
-                method: "GET".into(),
-                kind: "history".into(),
-                location: format!("{index}{}", "x".repeat(2_000)),
-                timestamp: Some("t".repeat(100)),
-                status: None,
-            })
-            .collect();
-        assert_eq!(
-            store.merge(Uuid::new_v4(), &scope, "urlscan", variants, 0),
-            (0, false)
-        );
-        let snapshot = store.snapshot();
-        assert_eq!(snapshot.endpoints.len(), 5_100);
-        assert!(serde_json::to_vec(&snapshot.endpoints).unwrap().len() > 8 * 1024 * 1024);
-        let endpoint = &snapshot.endpoints[0];
-        assert_eq!(endpoint.url, long_url);
-        assert_eq!(endpoint.raw_urls.len(), 31);
-        assert_eq!(endpoint.evidence.len(), 31);
-        assert_eq!(endpoint.evidence[0].location.len(), 1_800);
-        assert_eq!(endpoint.evidence[0].timestamp.as_ref().unwrap().len(), 100);
-        let restored = ReconStore::from_snapshot(snapshot);
-        assert_eq!(restored.site_map_endpoints().len(), 5_100);
-        assert_eq!(
-            restored.site_map_endpoints()[0].sources,
-            vec!["urlscan", "wayback"]
-        );
-        assert_eq!(
-            restored.merge(
-                Uuid::new_v4(),
-                &scope,
-                "wayback",
-                vec![Discovery {
-                    url: long_url,
-                    method: "GET".into(),
-                    kind: "history".into(),
-                    location: "after restart".into(),
-                    timestamp: None,
-                    status: None,
-                }],
-                0
-            ),
-            (0, false)
-        );
-        assert_eq!(restored.snapshot().endpoints[0].evidence.len(), 32);
     }
 
     #[test]
@@ -1105,31 +979,6 @@ mod tests {
             store.merge(Uuid::new_v4(), &scope, "wayback", second, 2),
             (2, true)
         );
-    }
-
-    #[test]
-    fn cancelled_collection_does_not_merge_pending_findings() {
-        let store = ReconStore::from_snapshot(ReconSnapshot::default());
-        let scope = ReconScope::new("https://example.com", false).unwrap();
-        assert_eq!(
-            store.merge_with_cancel(
-                Uuid::new_v4(),
-                &scope,
-                "wayback",
-                vec![Discovery {
-                    url: "https://example.com/pending".into(),
-                    method: "GET".into(),
-                    kind: "history".into(),
-                    location: "fixture".into(),
-                    timestamp: None,
-                    status: None,
-                }],
-                0,
-                Some(&AtomicBool::new(true))
-            ),
-            (0, true)
-        );
-        assert!(store.snapshot().endpoints.is_empty());
     }
 
     #[test]
@@ -1338,7 +1187,7 @@ mod tests {
         let (_, session) = crate::session::SessionRegistry::load_or_create(&dir, 32, 32).unwrap();
         let request: StartRecon = serde_json::from_value(serde_json::json!({
             "session_id": session.id(), "target_url": format!("http://{address}{path}"),
-            "sources": ["crawler"]
+            "sources": ["crawler"], "max_requests": 8
         }))
         .unwrap();
         let scope = validate(&request).unwrap();
@@ -1400,112 +1249,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn crawl_extracts_links_beyond_former_token_and_body_caps() {
-        for body in [
-            format!(
+    async fn crawl_reports_html_token_clipping_without_relaxing_the_bound() {
+        for spans in [4999, 5000] {
+            let body = format!(
                 "{}<a href='/late-link'>link</a>",
-                "<span></span>".repeat(10_001)
-            ),
-            format!(
-                "{}<a href='/late-link'>link</a>",
-                "😀".repeat(2 * 1024 * 1024 / 4 + 1)
-            ),
-        ] {
+                "<span></span>".repeat(spans)
+            );
             let (report, snapshot, paths) = crawl_static_fixture("text/html", &body, "/tags").await;
-            assert!(!report.truncated);
-            assert!(snapshot
-                .endpoints
-                .iter()
-                .any(|endpoint| endpoint.url.ends_with("/late-link")));
-            assert!(paths.contains(&"/late-link".into()));
-            assert_eq!(report.requests, 4);
-            assert!(!report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("extraction limit")));
+            let clipped = spans == 5000;
+            assert_eq!(report.truncated, clipped, "{spans} spans");
+            assert_eq!(
+                snapshot
+                    .endpoints
+                    .iter()
+                    .any(|endpoint| endpoint.url.ends_with("/late-link")),
+                !clipped
+            );
+            assert_eq!(paths.contains(&"/late-link".into()), !clipped);
+            assert_eq!(report.requests, if clipped { 3 } else { 4 });
+            assert_eq!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("extraction limit")),
+                clipped
+            );
         }
-    }
-
-    #[tokio::test]
-    async fn crawl_has_no_default_depth_budget_and_deduplicates_cycles() {
-        use axum::{routing::get, Router};
-        let router = Router::new().fallback(get(|uri: axum::http::Uri| async move {
-            let body = match uri.path().trim_start_matches('/').parse::<usize>() {
-                Ok(depth) if depth < 12 => format!(
-                    "<a href='/{}'>next</a><a href='/0#again'>cycle</a><a href='/{}'>duplicate</a>",
-                    depth + 1,
-                    depth + 1
-                ),
-                _ => String::new(),
-            };
-            ([(axum::http::header::CONTENT_TYPE, "text/html")], body)
-        }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let dir = std::env::temp_dir().join(format!("sniper-recon-depth-{}", Uuid::new_v4()));
-        let (_, session) = crate::session::SessionRegistry::load_or_create(&dir, 32, 32).unwrap();
-        let mut request: StartRecon = serde_json::from_value(serde_json::json!({
-            "session_id": session.id(), "target_url": format!("http://{address}/0"), "sources": ["crawler"]
-        })).unwrap();
-        let scope = validate(&request).unwrap();
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap();
-        let report = crawl(
-            &session,
-            Uuid::new_v4(),
-            &request,
-            &scope,
-            &client,
-            &AtomicBool::new(false),
-        )
-        .await;
-        assert!(!report.truncated);
-        assert_eq!(report.requests, 15);
-        assert!(session
-            .recon
-            .snapshot()
-            .endpoints
-            .iter()
-            .any(|endpoint| endpoint.url.ends_with("/12")));
-        request.max_depth = 1;
-        let report = crawl(
-            &session,
-            Uuid::new_v4(),
-            &request,
-            &scope,
-            &client,
-            &AtomicBool::new(false),
-        )
-        .await;
-        assert!(report.truncated);
-        assert_eq!(report.requests, 4);
-        assert!(report
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("depth budget")));
-        request.max_depth = 0;
-        request.max_requests = 2;
-        let report = crawl(
-            &session,
-            Uuid::new_v4(),
-            &request,
-            &scope,
-            &client,
-            &AtomicBool::new(false),
-        )
-        .await;
-        assert!(report.truncated);
-        assert_eq!(report.requests, 2);
-        assert!(report
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("request budget")));
-        server.abort();
-        let _ = server.await;
     }
 
     #[tokio::test]
@@ -1521,17 +1290,6 @@ mod tests {
         };
         let state = Arc::new(AppState::new(config).unwrap());
         let first = state.session().await;
-        for _ in 0..25 {
-            first.recon.snapshot.lock().unwrap().jobs.push(ReconJob {
-                id: Uuid::new_v4(),
-                target_url: "https://example.com/".into(),
-                status: "completed".into(),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                sources: Vec::new(),
-                error: None,
-            });
-        }
         let second = state
             .sessions
             .create_session(Some("Second".into()))
@@ -1554,7 +1312,6 @@ mod tests {
             .unwrap()
             .unwrap()
             .0;
-        assert_eq!(first.recon.snapshot().jobs.len(), 26);
         let stopping = stop(
             State(state.clone()),
             Path(job.id),
@@ -1562,8 +1319,7 @@ mod tests {
                 session_id: first.id(),
             }),
         );
-        // Whether it was still running is a race; only finishing matters here.
-        let _ = tokio::time::timeout(Duration::from_secs(5), stopping)
+        tokio::time::timeout(Duration::from_secs(5), stopping)
             .await
             .unwrap()
             .unwrap();
@@ -1573,6 +1329,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(state.session().await.recon.snapshot().endpoints.is_empty());
-        state.stop_background_jobs().await.unwrap();
+        state.stop_recon_jobs().await.unwrap();
     }
 }
