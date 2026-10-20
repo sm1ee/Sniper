@@ -141,6 +141,13 @@ need more care:
   send no traffic. A write that conflicts is not retried; read the config again
   before you retry. See
   [the passive scanner CLI contract](passive-scanner.md).
+- **Recon discovery** (`recon start`) crawls an authorized target or consults
+  external history providers. Preview with `--dry-run`, agree on the exact
+  target, sources and positive budgets, then start with `--yes`. Every Recon
+  call needs an explicit session UUID. Provider history and new urlscan scans
+  require separate disclosure acknowledgments; a CLI timeout does not cancel
+  the job, and Stop cannot cancel an accepted remote scan. Read
+  [the Recon CLI contract](recon.md#cli-and-operator-skill) first.
 - **Nuclei templates.** `templates library download` contacts GitHub, so ask
   first. `templates passive set-enabled` sends nothing. `templates scan start`
   sends the selected templates' requests to targets in Scope: run
@@ -159,7 +166,9 @@ need more care:
 `Authorization` header or token in a capture goes into the model's context and
 into whatever transcript or log your Claude Code setup keeps. `findings get`
 returns stored evidence that can hold the same values, and finding metadata and
-event-log messages can be sensitive too. Sniper redacts none of it; the skill
+event-log messages can be sensitive too. `recon list` includes unredacted
+URLs, raw URL spellings and evidence locations, which can expose paths or
+query values even without captured bodies. Sniper redacts none of it; the skill
 only asks the agent to summarise instead of paste. Which captures an agent may
 open is your decision.
 

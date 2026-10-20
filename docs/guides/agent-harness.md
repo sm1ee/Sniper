@@ -128,8 +128,10 @@ host: they need the one-time token Sniper prints at startup.
 - **You only need the LLM calls.** Provider SDKs and gateways already log
   requests and responses with token accounting.
 - **The traffic is not HTTP.** Sniper captures HTTP, HTTPS and WebSocket only.
-- **Nothing drives traffic.** Sniper captures what a client sends. It does not
-  crawl or generate load.
+- **Nothing drives traffic.** Passive capture records what a client sends.
+  [Recon](../integrations/recon.md) can explicitly crawl an authorized target;
+  it is a separate, consented operation, not something an agent should start
+  automatically to fill gaps in captured traffic.
 
 ## Limits
 

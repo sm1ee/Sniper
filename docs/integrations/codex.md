@@ -109,6 +109,13 @@ more care:
   send no traffic. A write that conflicts is not retried; read the config again
   before you retry. See
   [the passive scanner CLI contract](passive-scanner.md).
+- **Recon discovery** (`recon start`) crawls an authorized target or consults
+  external history providers. Preview with `--dry-run`, agree on the exact
+  target, sources and positive budgets, then start with `--yes`. Every Recon
+  call needs an explicit session UUID. Provider history and new urlscan scans
+  require separate disclosure acknowledgments; a CLI timeout does not cancel
+  the job, and Stop cannot cancel an accepted remote scan. Read
+  [the Recon CLI contract](recon.md#cli-and-operator-skill) first.
 - **Nuclei templates.** `templates library download` contacts GitHub, so ask
   first. `templates passive set-enabled` sends nothing. `templates scan start`
   sends the selected templates' requests to targets in Scope: run
@@ -125,7 +132,9 @@ more care:
 A capture is the real traffic. `capture http get` returns headers as sent,
 including `Cookie`, `Authorization` and any token in a body. `findings get`
 returns stored evidence that can hold the same values, and finding metadata and
-event-log messages can be sensitive too. None of it is redacted. What Codex
+event-log messages can be sensitive too. `recon list` includes unredacted
+URLs, raw URL spellings and evidence locations, which can expose paths or
+query values even without captured bodies. None of it is redacted. What Codex
 reads goes to the model provider and can end up in a transcript or a session
 file on disk. The skill tells Codex to summarise sensitive responses instead of
 pasting them, but it still reads them.

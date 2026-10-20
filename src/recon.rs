@@ -300,7 +300,7 @@ impl ReconStore {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartRecon {
     pub session_id: Uuid,
@@ -327,6 +327,14 @@ pub struct StartRecon {
     #[serde(default)]
     pub scan_visibility: Option<String>,
 }
+impl StartRecon {
+    /// Apply the server's scope and provider-consent checks without network work.
+    /// The CLI uses the same validation before an offline dry-run or confirmation.
+    pub fn validate(&self) -> Result<(), String> {
+        validate(self).map(|_| ())
+    }
+}
+
 #[derive(Clone)]
 struct ReconScope {
     target: Url,
