@@ -53,6 +53,9 @@ pub const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 const MAX_TEMPLATES: usize = 30_000;
+/// The largest payload file in a release is about 2 MiB.
+const MAX_HELPER_BYTES: usize = 8 * 1024 * 1024;
+const MAX_HELPERS: usize = 10_000;
 const MAX_CHECKSUMS_BYTES: usize = 64 * 1024;
 /// Passive evaluations that may run at once. A capture burst beyond it skips
 /// template evaluation rather than wait inside a proxy task, which would hold
@@ -117,11 +120,21 @@ pub struct TemplateMeta {
     pub risks: Vec<String>,
 }
 
+/// Where a payload file sits in the bundle.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HelperRow {
+    path: String,
+    offset: u64,
+    len: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct IndexFile {
     engine: u32,
     sha256: String,
     templates: Vec<TemplateMeta>,
+    #[serde(default)]
+    helpers: Vec<HelperRow>,
     #[serde(default)]
     duplicates: usize,
     #[serde(default)]
@@ -174,6 +187,8 @@ pub struct LibraryStatus {
 struct Loaded {
     manifest: Manifest,
     index: Arc<Vec<TemplateMeta>>,
+    /// The release's payload files by path, which scans compile with.
+    helpers: Arc<HashMap<String, String>>,
     by_id: HashMap<String, usize>,
     duplicates: usize,
     skipped: usize,
@@ -282,11 +297,11 @@ impl TemplateLibrary {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Manifest::default(),
             Err(error) => return Err(error).context("reading templates.json"),
         };
-        let (index, duplicates, skipped) = match &manifest.library {
+        let (built, helpers) = match &manifest.library {
             Some(info) => self.read_or_rebuild_index(info)?,
-            None => (Vec::new(), 0, 0),
+            None => (BuiltIndex::default(), HashMap::new()),
         };
-        self.install(manifest, index, duplicates, skipped);
+        self.install(manifest, built, helpers);
         self.rebuild_passive();
         self.remove_orphans();
         Ok(())
@@ -295,50 +310,65 @@ impl TemplateLibrary {
     fn read_or_rebuild_index(
         &self,
         info: &LibraryInfo,
-    ) -> Result<(Vec<TemplateMeta>, usize, usize)> {
+    ) -> Result<(BuiltIndex, HashMap<String, String>)> {
         let path = self.dir.join(index_file_name(&info.sha256));
+        let bundle = self.dir.join(&info.bundle);
         if let Ok(bytes) = fs::read(&path) {
             if let Ok(index) = serde_json::from_slice::<IndexFile>(&bytes) {
                 if index.engine == ENGINE_VERSION && index.sha256 == info.sha256 {
-                    return Ok((index.templates, index.duplicates, index.skipped));
+                    let helpers = read_helpers(&bundle, &index.helpers)?;
+                    let built = BuiltIndex {
+                        templates: index.templates,
+                        helpers: index.helpers,
+                        duplicates: index.duplicates,
+                        skipped: index.skipped,
+                    };
+                    return Ok((built, helpers));
                 }
             }
         }
         // The engine changed, or the index is gone: classify the bundle again.
         let mut entries = Vec::new();
-        let bundle =
-            fs::read(self.dir.join(&info.bundle)).context("reading the template bundle")?;
+        let mut rows = Vec::new();
+        let mut helpers = HashMap::new();
+        let bundle = fs::read(bundle).context("reading the template bundle")?;
         let mut offset = 0u64;
         for line in bundle.split_inclusive(|byte| *byte == b'\n') {
             let length = line.len() as u64;
             let row: BundleRow =
                 serde_json::from_slice(line).context("reading the template bundle")?;
-            entries.push((row.path, row.yaml, offset, length));
+            if row.path.ends_with(".yaml") {
+                entries.push((row.path, row.yaml, offset, length));
+            } else {
+                rows.push(HelperRow {
+                    path: row.path.clone(),
+                    offset,
+                    len: length,
+                });
+                helpers.insert(row.path, row.yaml);
+            }
             offset += length;
         }
-        let built = index_entries(entries);
+        let mut built = index_entries(entries, &helpers);
+        built.helpers = rows;
         write_index(&self.dir, &info.sha256, &built)?;
-        Ok((built.templates, built.duplicates, built.skipped))
+        Ok((built, helpers))
     }
 
-    fn install(
-        &self,
-        manifest: Manifest,
-        index: Vec<TemplateMeta>,
-        duplicates: usize,
-        skipped: usize,
-    ) {
-        let by_id = index
+    fn install(&self, manifest: Manifest, built: BuiltIndex, helpers: HashMap<String, String>) {
+        let by_id = built
+            .templates
             .iter()
             .enumerate()
             .map(|(position, meta)| (meta.id.clone(), position))
             .collect();
         *self.loaded.write().unwrap() = Loaded {
             manifest,
-            index: Arc::new(index),
+            index: Arc::new(built.templates),
+            helpers: Arc::new(helpers),
             by_id,
-            duplicates,
-            skipped,
+            duplicates: built.duplicates,
+            skipped: built.skipped,
         };
     }
 
@@ -523,7 +553,7 @@ impl TemplateLibrary {
         let unpacked = unpack(bytes)?;
         let commit = unpacked.commit.clone();
         let mut offset = 0u64;
-        let mut lines = Vec::with_capacity(unpacked.files.len());
+        let mut lines = Vec::with_capacity(unpacked.files.len() + unpacked.helpers.len());
         let mut entries = Vec::with_capacity(unpacked.files.len());
         for (path, yaml) in unpacked.files {
             let mut line = serde_json::to_vec(&BundleRow {
@@ -535,7 +565,26 @@ impl TemplateLibrary {
             offset += line.len() as u64;
             lines.push(line);
         }
-        let mut built = index_entries(entries);
+        // Payload files follow the templates in the same bundle.
+        let mut rows = Vec::with_capacity(unpacked.helpers.len());
+        let mut helpers = HashMap::with_capacity(unpacked.helpers.len());
+        for (path, text) in unpacked.helpers {
+            let mut line = serde_json::to_vec(&BundleRow {
+                path: path.clone(),
+                yaml: text.clone(),
+            })?;
+            line.push(b'\n');
+            rows.push(HelperRow {
+                path: path.clone(),
+                offset,
+                len: line.len() as u64,
+            });
+            offset += line.len() as u64;
+            lines.push(line);
+            helpers.insert(path, text);
+        }
+        let mut built = index_entries(entries, &helpers);
+        built.helpers = rows;
         built.skipped += unpacked.skipped;
         fs::create_dir_all(&self.dir).context("creating the templates directory")?;
         let bundle = bundle_file_name(&sha256);
@@ -569,7 +618,7 @@ impl TemplateLibrary {
                 .retain(|id| ids.contains(id.as_str()));
             crate::session::write_json(&self.manifest_path(), &manifest)?;
             self.compiled.lock().unwrap().clear();
-            self.install(manifest, built.templates, built.duplicates, built.skipped);
+            self.install(manifest, built, helpers);
         }
         self.rebuild_passive();
         self.remove_orphans();
@@ -692,7 +741,9 @@ impl TemplateLibrary {
         let text = self.read_text(meta)?;
         let parsed = model::parse(&text).map_err(|error| anyhow!("{}", error.code))?;
         let classification = model::classify(&parsed);
-        active::compile_active(&parsed, &classification).map_err(|error| anyhow!("{}", error.0))
+        let helpers = Arc::clone(&self.loaded.read().unwrap().helpers);
+        active::compile_active(&parsed, &classification, &helpers)
+            .map_err(|error| anyhow!("{}", error.0))
     }
 
     /// The installed release as a scan records it: tag and archive hash.
@@ -900,21 +951,49 @@ pub struct TemplateDetail {
     pub yaml: String,
 }
 
+/// One bundle line: a template, or a payload file whose path does not end in
+/// `.yaml`.
 #[derive(Serialize, Deserialize)]
 struct BundleRow {
     path: String,
     yaml: String,
 }
 
+#[derive(Default)]
 struct BuiltIndex {
     templates: Vec<TemplateMeta>,
+    helpers: Vec<HelperRow>,
     duplicates: usize,
     skipped: usize,
 }
 
+/// Reads the payload files an index lists back from the bundle.
+fn read_helpers(bundle: &Path, rows: &[HelperRow]) -> Result<HashMap<String, String>> {
+    let mut helpers = HashMap::with_capacity(rows.len());
+    if rows.is_empty() {
+        return Ok(helpers);
+    }
+    let mut file = fs::File::open(bundle).context("opening the template bundle")?;
+    for row in rows {
+        file.seek(SeekFrom::Start(row.offset))?;
+        let mut line = vec![0; row.len as usize];
+        file.read_exact(&mut line)?;
+        let read: BundleRow =
+            serde_json::from_slice(&line).context("reading the template bundle")?;
+        if read.path != row.path {
+            bail!("the template bundle does not match its index");
+        }
+        helpers.insert(read.path, read.yaml);
+    }
+    Ok(helpers)
+}
+
 /// Classifies every template. The first of a duplicated id wins, as in
 /// Nuclei; files that do not parse are counted, not listed.
-fn index_entries(entries: Vec<(String, String, u64, u64)>) -> BuiltIndex {
+fn index_entries(
+    entries: Vec<(String, String, u64, u64)>,
+    helpers: &HashMap<String, String>,
+) -> BuiltIndex {
     let mut seen = HashSet::new();
     let mut templates = Vec::new();
     let mut duplicates = 0;
@@ -951,7 +1030,7 @@ fn index_entries(entries: Vec<(String, String, u64, u64)>) -> BuiltIndex {
         let mut active_supported = classification.active_supported();
         let mut requests = 0;
         if active_supported {
-            match active::compile_active(&parsed, &classification) {
+            match active::compile_active(&parsed, &classification, helpers) {
                 Ok(template) => requests = template.request_count(),
                 Err(error) => {
                     active_supported = false;
@@ -990,6 +1069,7 @@ fn index_entries(entries: Vec<(String, String, u64, u64)>) -> BuiltIndex {
     }
     BuiltIndex {
         templates,
+        helpers: Vec::new(),
         duplicates,
         skipped,
     }
@@ -1002,6 +1082,7 @@ fn write_index(dir: &Path, sha256: &str, built: &BuiltIndex) -> Result<()> {
             engine: ENGINE_VERSION,
             sha256: sha256.to_string(),
             templates: built.templates.clone(),
+            helpers: built.helpers.clone(),
             duplicates: built.duplicates,
             skipped: built.skipped,
         },
@@ -1031,17 +1112,21 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
 
 struct Unpacked {
     files: Vec<(String, String)>,
+    /// Payload files: the text files under `helpers/`.
+    helpers: Vec<(String, String)>,
     commit: Option<String>,
     skipped: usize,
 }
 
-/// Reads the YAML templates out of a `.tar.gz`, in memory. Each kept path is
-/// relative, made only of plain components, outside dot-directories; the
-/// release's top directory is dropped. Nothing is written as a file.
+/// Reads the YAML templates and the payload files out of a `.tar.gz`, in
+/// memory. Each kept path is relative, made only of plain components,
+/// outside dot-directories; the release's top directory is dropped. Nothing
+/// is written as a file.
 fn unpack(bytes: &[u8]) -> Result<Unpacked> {
     let decoder = flate2::read::GzDecoder::new(bytes).take(MAX_UNPACKED_BYTES);
     let mut archive = tar::Archive::new(decoder);
     let mut files = Vec::new();
+    let mut helpers = Vec::new();
     let mut skipped = 0;
     let mut commit = None;
     for (count, entry) in archive
@@ -1097,22 +1182,37 @@ fn unpack(bytes: &[u8]) -> Result<Unpacked> {
             parts.remove(0);
         }
         let relative = parts.join("/");
-        if !plain || !relative.ends_with(".yaml") || parts.iter().any(|part| part.starts_with('.'))
+        let helper = relative.starts_with("helpers/") && relative.ends_with(".txt");
+        if !plain
+            || !(relative.ends_with(".yaml") || helper)
+            || parts.iter().any(|part| part.starts_with('.'))
         {
             continue;
         }
-        if entry.size() > model::MAX_TEMPLATE_BYTES as u64 {
-            skipped += 1;
+        let limit = if helper {
+            MAX_HELPER_BYTES
+        } else {
+            model::MAX_TEMPLATE_BYTES
+        } as u64;
+        if entry.size() > limit {
+            skipped += usize::from(!helper);
             continue;
         }
         let mut text = String::new();
         if entry
             .by_ref()
-            .take(model::MAX_TEMPLATE_BYTES as u64 + 1)
+            .take(limit + 1)
             .read_to_string(&mut text)
             .is_err()
         {
-            skipped += 1;
+            skipped += usize::from(!helper);
+            continue;
+        }
+        if helper {
+            if helpers.len() >= MAX_HELPERS {
+                bail!("the archive has more than {MAX_HELPERS} payload files");
+            }
+            helpers.push((relative, text));
             continue;
         }
         if files.len() >= MAX_TEMPLATES {
@@ -1125,6 +1225,7 @@ fn unpack(bytes: &[u8]) -> Result<Unpacked> {
     }
     Ok(Unpacked {
         files,
+        helpers,
         commit,
         skipped,
     })
@@ -1425,6 +1526,41 @@ mod tests {
         assert_eq!(second.status().templates, 3);
         assert_eq!(second.status().passive_enabled, 1);
         assert_eq!(second.passive_set().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    const WORDS: &str = "id: example-words\ninfo:\n  name: Example Words\n  severity: info\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/{{word}}']\n    payloads:\n      word: helpers/wordlists/words.txt\n    matchers:\n      - type: status\n        status: [200]\n";
+    const MISSING: &str = "id: example-missing\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/{{word}}']\n    payloads:\n      word: helpers/wordlists/missing.txt\n    matchers:\n      - type: status\n        status: [200]\n";
+
+    #[test]
+    fn payload_files_come_from_the_release() {
+        let dir = std::env::temp_dir().join(format!("sniper-templates-{}", uuid::Uuid::new_v4()));
+        let first = library(&dir);
+        first
+            .import_blocking(
+                &archive(&[
+                    ("nuclei-templates-1.0/http/words.yaml", WORDS.as_bytes()),
+                    ("nuclei-templates-1.0/http/missing.yaml", MISSING.as_bytes()),
+                    (
+                        "nuclei-templates-1.0/helpers/wordlists/words.txt",
+                        b"admin\n\nlogin\r\n",
+                    ),
+                    ("nuclei-templates-1.0/helpers/payloads/key.bin", b"\x00\x01"),
+                ]),
+                Source::Import,
+            )
+            .unwrap();
+        let status = first.status();
+        assert_eq!((status.templates, status.skipped), (2, 0), "{status:?}");
+        let words = first.get("example-words").unwrap().meta;
+        assert!(words.active_supported, "{:?}", words.reasons);
+        assert_eq!(words.requests, 2);
+        let missing = first.get("example-missing").unwrap().meta;
+        assert_eq!(missing.reasons, ["req:payload_file"]);
+        // A reload reads the files back for the scans it compiles.
+        let second = library(&dir);
+        let meta = second.get("example-words").unwrap().meta;
+        assert_eq!(second.compile_active(&meta).unwrap().request_count(), 2);
         let _ = fs::remove_dir_all(dir);
     }
 

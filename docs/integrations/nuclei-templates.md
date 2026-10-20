@@ -47,8 +47,8 @@ A template can be sent when it has one HTTP request block made of:
 
 - a method other than `CONNECT`, and paths that start with `{{BaseURL}}` or
   `{{RootURL}}`, or raw requests;
-- headers, a body, `variables`, `{{randstr}}` and the helper functions,
-  including the random and time ones;
+- headers, a body, `variables`, `payloads`, `{{randstr}}` and the helper
+  functions, including the random and time ones;
 - `redirects`, `host-redirects`, `max-redirects`, `stop-at-first-match` and
   `disable-cookie`.
 
@@ -77,6 +77,14 @@ A template's requests to one target run as one session, as in Nuclei:
 
 `{{7*7}}` and other markers that name no variable or function are sent as
 written.
+
+Payloads run as Nuclei runs them: every request of the template is sent once
+per value of a single set, per index across sets with `attack: pitchfork`, or
+per combination with `attack: clusterbomb`. A set is a list, the lines of a
+string, or a file of the release such as `helpers/wordlists/users.txt`, read
+line by line; the library keeps the release's `helpers/` text files for this.
+A template that would send more than 10,000 requests to one target is listed,
+not sent.
 
 ### Where it sends
 
@@ -144,10 +152,11 @@ Sniper lists every template but never runs the `code`, `javascript`,
 `headless`, `network`, `dns`, `file`, `ssl`, `websocket` or `whois` protocols,
 `flow`, self-contained templates, workflows, or anything else outside the
 supported subset. A template either compiles completely or is listed as
-unsupported with a reason, such as `protocol:dns`, `req:payloads` or
+unsupported with a reason, such as `protocol:dns`, `req:payload_file` or
 `fn:mmh3`.
 
-Not supported yet: `payloads`, more than one request block, `iterate-all`, a
+Not supported yet: fuzzing aggression levels in `payloads`, more than one
+request block, `iterate-all`, a
 request that reads an earlier answer (`{{body_1}}` in a path), out-of-band
 templates (`{{interactsh-url}}`), `unsafe` raw requests, fuzzing, and race and
 pipeline requests. A template whose variable is left for whoever runs it
@@ -177,7 +186,7 @@ body was truncated, a template whose result the missing bytes could change (a
 negated body matcher, a size, an expression that reads the body) skips that
 response.
 
-On release v10.5.0, 2,084 of 11,698 HTTP templates can run passively and 7,820
+On release v10.5.0, 2,084 of 11,698 HTTP templates can run passively and 8,414
 can be sent by Template Scan.
 
 ## The library

@@ -1317,9 +1317,10 @@ mod tests {
             "id: example-steps\ninfo: {}\nhttp:\n  - raw:\n      - |\n        GET /a HTTP/1.1\n      - |\n        GET /b?t={{token}} HTTP/1.1\n    extractors:\n      - type: regex\n        name: token\n        internal: true\n        group: 1\n        regex: ['token=(\\w+)']\n      - type: regex\n        name: shown\n        group: 1\n        regex: ['shown=(\\w+)']\n      - type: regex\n        name: second\n        internal: true\n        part: body_2\n        group: 1\n        regex: ['next=(\\w+)']\n    matchers:\n      - type: dsl\n        dsl:\n          - 'status_code_1 == 200 && contains(body_2, \"welcome\")'\n",
         )
         .unwrap();
-        let template = crate::templates::active::compile_active(&parsed, &classify(&parsed))
-            .unwrap()
-            .template;
+        let template =
+            crate::templates::active::compile_active(&parsed, &classify(&parsed), &HashMap::new())
+                .unwrap()
+                .template;
         let first =
             Arc::new(view(200, &[], "token=abc shown=x next=one").with_history(1, Vec::new()));
         let (results, carried) = template.evaluate_carrying(&first);

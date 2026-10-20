@@ -17,6 +17,10 @@ use super::model::{Classification, ParsedTemplate};
 /// Sniper never follows more.
 pub const MAX_REDIRECTS: usize = 10;
 
+/// A template that would send more to one target than a scan sends by
+/// default is listed, not sent: it would crowd out every other template.
+pub const MAX_TEMPLATE_REQUESTS: usize = 10_000;
+
 /// Nuclei caps a raw request's `@timeout:` at five minutes.
 const MAX_TIMEOUT_SECS: f64 = 300.0;
 
@@ -37,6 +41,23 @@ struct PathSpec {
     rest: Interp,
 }
 
+/// How payload sets combine, as Nuclei's `attack` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Attack {
+    /// One set, one value at a time.
+    BatteringRam,
+    /// Every set's nth value together.
+    Pitchfork,
+    /// Every combination.
+    ClusterBomb,
+}
+
+#[derive(Clone, Debug)]
+struct PayloadSet {
+    name: String,
+    values: Vec<Interp>,
+}
+
 #[derive(Clone, Debug)]
 struct RawSpec {
     text: Interp,
@@ -50,6 +71,8 @@ pub struct ActiveTemplate {
     method: String,
     paths: Vec<PathSpec>,
     raws: Vec<RawSpec>,
+    attack: Attack,
+    payloads: Vec<PayloadSet>,
     headers: Vec<(String, Interp)>,
     body: Option<Interp>,
     variables: Vec<(String, Interp)>,
@@ -75,9 +98,12 @@ pub struct BuiltRequest {
     pub timeout: Option<Duration>,
 }
 
+/// Compiles a template for sending. `files` holds the release's payload
+/// files by path.
 pub fn compile_active(
     template: &ParsedTemplate,
     classification: &Classification,
+    files: &HashMap<String, String>,
 ) -> Result<ActiveTemplate, CompileError> {
     if let Some(first) = classification.active_reasons.first() {
         return Err(CompileError(first.clone()));
@@ -149,6 +175,50 @@ pub fn compile_active(
     if paths.is_empty() && raws.is_empty() {
         return Err(engine::reason("req:path"));
     }
+    let attack = match block
+        .get("attack")
+        .map(engine::text_of)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "batteringram" => Attack::BatteringRam,
+        "pitchfork" => Attack::Pitchfork,
+        "clusterbomb" => Attack::ClusterBomb,
+        _ => return Err(engine::reason("req:attack")),
+    };
+    let payloads = super::model::used_payload_sets(block)
+        .into_iter()
+        .map(|(name, value)| {
+            let values: Vec<String> = match value {
+                Value::Array(items) => items.iter().map(engine::text_of).collect(),
+                Value::String(text) if text.contains('\n') => {
+                    text.split('\n').map(str::to_string).collect()
+                }
+                // Nuclei reads a payload file line by line, skipping blank
+                // lines.
+                Value::String(path) => super::model::helper_path(path)
+                    .and_then(|path| files.get(&path))
+                    .ok_or_else(|| engine::reason("req:payload_file"))?
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => return Err(engine::reason("req:payloads")),
+            };
+            if values.is_empty() {
+                return Err(engine::reason("req:payloads"));
+            }
+            Ok(PayloadSet {
+                name: name.clone(),
+                values: values
+                    .iter()
+                    .map(|value| Interp::compile(value, allow))
+                    .collect::<Result<_, _>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
     let mut headers = Vec::new();
     if let Some(map) = block.get("headers") {
         let map = map
@@ -202,7 +272,7 @@ pub fn compile_active(
             Err(_) => return Err(engine::reason("field:max-redirects")),
         },
     };
-    Ok(ActiveTemplate {
+    let compiled = ActiveTemplate {
         template: CompiledTemplate {
             info: template.info.clone(),
             passive: None,
@@ -212,6 +282,8 @@ pub fn compile_active(
         method,
         paths,
         raws,
+        attack,
+        payloads,
         headers,
         body,
         variables,
@@ -220,7 +292,11 @@ pub fn compile_active(
         max_redirects,
         cookies: !engine::flag(block, "disable-cookie")?,
         history: reads_history(block),
-    })
+    };
+    if compiled.request_count() > MAX_TEMPLATE_REQUESTS {
+        return Err(engine::reason("req:too_many_requests"));
+    }
+    Ok(compiled)
 }
 
 /// Whether matchers or extractors read an earlier answer (`body_1`), as
@@ -252,12 +328,23 @@ fn reads_history(block: &Map<String, Value>) -> bool {
 pub struct RunValues<'a> {
     url: &'a UrlVars,
     values: RefCell<HashMap<String, String>>,
+    /// The current pass's payload values, which come before every other
+    /// value, as in Nuclei.
+    payloads: RefCell<HashMap<String, String>>,
 }
 
 impl RunValues<'_> {
-    /// The variables and random strings made so far, for the matchers.
+    /// The variables, random strings and payload values made so far, for
+    /// the matchers.
     pub fn values(&self) -> HashMap<String, String> {
-        self.values.borrow().clone()
+        let mut values = self.values.borrow().clone();
+        values.extend(
+            self.payloads
+                .borrow()
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        values
     }
 }
 
@@ -270,6 +357,9 @@ fn is_random_name(name: &str) -> bool {
 
 impl Vars for RunValues<'_> {
     fn get(&self, name: &str) -> Option<Val<'_>> {
+        if let Some(value) = self.payloads.borrow().get(name) {
+            return Some(Val::Str(Cow::Owned(value.clone())));
+        }
         if let Some(value) = self.url.get(name) {
             return Some(Val::Str(Cow::Borrowed(value)));
         }
@@ -302,7 +392,51 @@ impl ActiveTemplate {
 
     /// Requests one run sends before any redirect.
     pub fn request_count(&self) -> usize {
+        self.sequence_len().saturating_mul(self.passes())
+    }
+
+    /// The template's requests, which each pass sends in order.
+    pub fn sequence_len(&self) -> usize {
         self.paths.len() + self.raws.len()
+    }
+
+    /// How many times the run sends its requests: once per payload
+    /// combination, or once without payloads.
+    pub fn passes(&self) -> usize {
+        let sizes = self.payloads.iter().map(|set| set.values.len());
+        match self.attack {
+            _ if self.payloads.is_empty() => 1,
+            Attack::BatteringRam => sizes.sum(),
+            Attack::Pitchfork => sizes.min().unwrap_or(0),
+            Attack::ClusterBomb => sizes.fold(1, usize::saturating_mul),
+        }
+    }
+
+    /// Fills the run's payload values for one pass. With a clusterbomb the
+    /// first set changes fastest. A value's own markers are filled first,
+    /// without the pass's payloads, as Nuclei fills them.
+    pub fn load_pass(&self, run: &RunValues<'_>, pass: usize) -> Result<(), EvalError> {
+        run.payloads.borrow_mut().clear();
+        let mut values = HashMap::new();
+        let mut rest = pass;
+        for set in &self.payloads {
+            let index = match self.attack {
+                Attack::ClusterBomb => {
+                    let index = rest % set.values.len().max(1);
+                    rest /= set.values.len().max(1);
+                    index
+                }
+                Attack::BatteringRam | Attack::Pitchfork => pass,
+            };
+            let value = set
+                .values
+                .get(index)
+                .ok_or(EvalError("payload"))?
+                .render(run)?;
+            values.insert(set.name.clone(), value);
+        }
+        *run.payloads.borrow_mut() = values;
+        Ok(())
     }
 
     pub fn method(&self) -> &str {
@@ -315,6 +449,7 @@ impl ActiveTemplate {
         let run = RunValues {
             url,
             values: RefCell::new(HashMap::new()),
+            payloads: RefCell::new(HashMap::new()),
         };
         let mut pending: Vec<&(String, Interp)> = self.variables.iter().collect();
         while !pending.is_empty() {
@@ -620,7 +755,7 @@ mod tests {
     fn compiled(yaml: &str) -> ActiveTemplate {
         let parsed = parse(yaml).unwrap();
         let classification = classify(&parsed);
-        compile_active(&parsed, &classification).unwrap()
+        compile_active(&parsed, &classification, &HashMap::new()).unwrap()
     }
 
     fn target(url: &str) -> (UrlVars, String) {
@@ -766,6 +901,124 @@ mod tests {
         // Text that already has CRLF line ends is sent as written.
         assert_eq!(built[2].body, "kept\n");
         assert_eq!(built[2].headers, [("X-A".to_string(), "b".to_string())]);
+    }
+
+    fn payload_template(
+        attack: Option<&str>,
+        paths: &[&str],
+        sets: serde_json::Value,
+    ) -> ActiveTemplate {
+        let mut block = serde_json::json!({
+            "path": paths,
+            "payloads": sets,
+            "matchers": [{"type": "status", "status": [200]}],
+        });
+        if let Some(attack) = attack {
+            block["attack"] = attack.into();
+        }
+        compiled(
+            &serde_json::json!({"id": "example-words", "info": {}, "http": [block]}).to_string(),
+        )
+    }
+
+    /// Each pass's request targets, and the values the run's matchers see.
+    fn passes(template: &ActiveTemplate) -> Vec<(Vec<String>, HashMap<String, String>)> {
+        let (url, base_path) = target("https://example.com");
+        let run = template.start_run(&url).unwrap();
+        (0..template.passes())
+            .map(|pass| {
+                template.load_pass(&run, pass).unwrap();
+                let targets = (0..template.sequence_len())
+                    .map(|index| template.build(index, &base_path, &run).unwrap().target)
+                    .collect();
+                (targets, run.values())
+            })
+            .collect()
+    }
+
+    fn file_template(path: &str) -> Result<ActiveTemplate, CompileError> {
+        let yaml = serde_json::json!({"id": "example-words", "info": {}, "http": [{
+            "path": ["{{BaseURL}}/{{word}}"],
+            "payloads": {"word": path},
+            "matchers": [{"type": "status", "status": [200]}],
+        }]})
+        .to_string();
+        let parsed = parse(&yaml).unwrap();
+        let files = HashMap::from([(
+            "helpers/wordlists/words.txt".to_string(),
+            "admin\n\nlogin\r\n".to_string(),
+        )]);
+        compile_active(&parsed, &classify(&parsed), &files)
+    }
+
+    #[test]
+    fn payload_files_are_read_line_by_line_from_the_release() {
+        for path in [
+            "helpers/wordlists/words.txt",
+            "./helpers/wordlists/words.txt",
+        ] {
+            let template = file_template(path).unwrap();
+            let targets: Vec<String> = passes(&template)
+                .into_iter()
+                .map(|(targets, _)| targets[0].clone())
+                .collect();
+            // Blank lines are skipped, as Nuclei skips them.
+            assert_eq!(targets, ["/admin", "/login"], "{path}");
+        }
+        for path in ["helpers/wordlists/missing.txt", "helpers/../../words.txt"] {
+            assert_eq!(
+                file_template(path).unwrap_err().0,
+                "req:payload_file",
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_template_that_would_send_too_much_is_not_compiled() {
+        let numbers = |count: usize| (0..count).map(|n| n.to_string()).collect::<Vec<_>>();
+        let yaml = serde_json::json!({"id": "example-many", "info": {}, "http": [{
+            "path": ["{{BaseURL}}/{{a}}/{{b}}"],
+            "attack": "clusterbomb",
+            "payloads": {"a": numbers(101), "b": numbers(100)},
+            "matchers": [{"type": "status", "status": [200]}],
+        }]})
+        .to_string();
+        let parsed = parse(&yaml).unwrap();
+        let error = compile_active(&parsed, &classify(&parsed), &HashMap::new()).unwrap_err();
+        assert_eq!(error.0, "req:too_many_requests");
+    }
+
+    #[test]
+    fn payloads_combine_as_nuclei_attacks_do() {
+        let sets = serde_json::json!({"a": ["1", "2"], "b": ["x", "y", "z"]});
+        let paths = ["{{BaseURL}}/{{a}}-{{b}}", "{{BaseURL}}/second"];
+        let cluster = payload_template(Some("clusterbomb"), &paths, sets.clone());
+        assert_eq!(cluster.request_count(), 12);
+        let run = passes(&cluster);
+        let firsts: Vec<&str> = run.iter().map(|(targets, _)| targets[0].as_str()).collect();
+        // The first set changes fastest.
+        assert_eq!(firsts, ["/1-x", "/2-x", "/1-y", "/2-y", "/1-z", "/2-z"]);
+        assert_eq!(run[0].0[1], "/second");
+        let fork = payload_template(Some("pitchfork"), &paths, sets);
+        let firsts: Vec<String> = passes(&fork)
+            .into_iter()
+            .map(|(targets, _)| targets[0].clone())
+            .collect();
+        assert_eq!(firsts, ["/1-x", "/2-y"]);
+        // One set by default; its values fill their markers but a marker
+        // that names nothing stays as written.
+        let ram = payload_template(
+            None,
+            &["{{BaseURL}}/{{a}}"],
+            serde_json::json!({"a": "1\n{{Hostname}}\n{{7*7}}"}),
+        );
+        assert_eq!(ram.request_count(), 3);
+        let run = passes(&ram);
+        let targets: Vec<&str> = run.iter().map(|(targets, _)| targets[0].as_str()).collect();
+        assert_eq!(targets, ["/1", "/example.com", "/{{7*7}}"]);
+        // Matchers see the pass's values.
+        assert_eq!(run[1].1["a"], "example.com");
     }
 
     #[test]

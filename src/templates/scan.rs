@@ -279,7 +279,7 @@ fn default_concurrency() -> usize {
     4
 }
 fn default_max_requests() -> usize {
-    10_000
+    active::MAX_TEMPLATE_REQUESTS
 }
 
 /// A target as the operator named it: an origin, and optionally a path the
@@ -796,6 +796,21 @@ fn request_text(request: &EditableRequest) -> String {
     text
 }
 
+/// Keeps a request's answer for the run's later matchers. Like Nuclei, a
+/// request number keeps the last answer it got, across payload passes.
+fn remember(
+    history: &mut Vec<Option<Arc<ResponseView>>>,
+    index: usize,
+    answer: Option<Arc<ResponseView>>,
+) {
+    if history.len() <= index {
+        history.resize(index + 1, None);
+    }
+    if answer.is_some() {
+        history[index] = answer;
+    }
+}
+
 /// What one request's answers came to.
 #[derive(Default)]
 struct Judged {
@@ -938,36 +953,45 @@ impl Run {
         let mut jar = Vec::new();
         // The run's answers so far, by request, for matchers that read them.
         let mut history: Vec<Option<Arc<ResponseView>>> = Vec::new();
-        for index in 0..template.request_count() {
-            if self.stopping(&cancel, target_index) {
-                return;
-            }
-            let built = match template.build(index, &target.base_path, &run) {
-                Ok(built) => built,
-                Err(_) => {
-                    self.warn(format!(
-                        "{id} could not build its request {} and did not send it.",
-                        index + 1
-                    ));
-                    history.push(None);
-                    continue;
-                }
-            };
-            let hops = self
-                .send_chain(template, target_index, built, &mut jar, &mut cancel)
-                .await;
-            if hops.is_empty() {
-                history.push(None);
+        for pass in 0..template.passes() {
+            if template.load_pass(&run, pass).is_err() {
+                self.warn(format!(
+                    "{id} could not fill payload {} and did not send it.",
+                    pass + 1
+                ));
                 continue;
             }
-            let values = run.values();
-            let judged = self
-                .judge(template, target, hops, values, history.clone())
-                .await;
-            template.carry(&run, judged.carried);
-            history.push(judged.answer);
-            if judged.matched && template.stop_at_first_match {
-                return;
+            for index in 0..template.sequence_len() {
+                if self.stopping(&cancel, target_index) {
+                    return;
+                }
+                let built = match template.build(index, &target.base_path, &run) {
+                    Ok(built) => built,
+                    Err(_) => {
+                        self.warn(format!(
+                            "{id} could not build its request {} and did not send it.",
+                            index + 1
+                        ));
+                        remember(&mut history, index, None);
+                        continue;
+                    }
+                };
+                let hops = self
+                    .send_chain(template, target_index, built, &mut jar, &mut cancel)
+                    .await;
+                if hops.is_empty() {
+                    remember(&mut history, index, None);
+                    continue;
+                }
+                let values = run.values();
+                let judged = self
+                    .judge(template, target, hops, values, index + 1, history.clone())
+                    .await;
+                template.carry(&run, judged.carried);
+                remember(&mut history, index, judged.answer);
+                if judged.matched && template.stop_at_first_match {
+                    return;
+                }
             }
         }
     }
@@ -1282,11 +1306,11 @@ impl Run {
         target: &ScanTarget,
         hops: Vec<Hop>,
         values: HashMap<String, String>,
+        number: usize,
         history: Vec<Option<Arc<ResponseView>>>,
     ) -> Judged {
         let evaluating = Arc::clone(template);
         let vars = target.vars.clone();
-        let number = history.len() + 1;
         // A matcher may read up to 10 MiB of body; keep that off the async
         // workers.
         let judged = tokio::task::spawn_blocking(move || {
@@ -1717,6 +1741,7 @@ mod tests {
         ("raw-session", "id: example-raw-session\ninfo: {}\nhttp:\n  - raw:\n      - |\n        GET /login HTTP/1.1\n        Host: {{Hostname}}\n      - |\n        GET /home HTTP/1.1\n        Host: {{Hostname}}\n    matchers:\n      - type: word\n        words: ['Welcome back']\n"),
         ("raw-own-cookie", "id: example-raw-own-cookie\ninfo: {}\nhttp:\n  - raw:\n      - |\n        GET /login HTTP/1.1\n        Host: {{Hostname}}\n      - |\n        GET /home HTTP/1.1\n        Host: {{Hostname}}\n        Cookie: theme=dark\n    matchers:\n      - type: word\n        words: ['Welcome back']\n"),
         ("steps", "id: example-steps\ninfo: {}\nhttp:\n  - raw:\n      - |\n        GET /token HTTP/1.1\n        Host: {{Hostname}}\n      - |\n        POST /check HTTP/1.1\n        Host: {{Hostname}}\n\n        t={{tok}}\n    extractors:\n      - type: regex\n        name: tok\n        internal: true\n        group: 1\n        regex: ['token=([a-z0-9]+)']\n    matchers:\n      - type: dsl\n        dsl: ['status_code_1 == 200 && body_2 == \"valid\"']\n"),
+        ("words", "id: example-words\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/echo?q={{word}}']\n    payloads:\n      word: [alpha, beta, gamma]\n    stop-at-first-match: true\n    matchers:\n      - type: word\n        words: ['q=beta']\n"),
         ("no-cookie", "id: example-no-cookie\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/login', '{{BaseURL}}/home']\n    disable-cookie: true\n    matchers:\n      - type: word\n        words: ['Welcome back']\n"),
         ("raw-timeout", "id: example-raw-timeout\ninfo: {}\nhttp:\n  - raw:\n      - |\n        @timeout: 300ms\n        GET /sleep HTTP/1.1\n        Host: {{Hostname}}\n    matchers:\n      - type: status\n        status: [200]\n"),
     ];
@@ -1763,9 +1788,18 @@ mod tests {
                 "example-raw-own-cookie",
                 "example-raw-post",
                 "example-raw-session",
-                "example-steps"
+                "example-steps",
+                "example-words"
             ]
         );
+        // Each payload is its own pass, and the first match ends the run.
+        let echoes = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.path == "/echo")
+            .count();
+        assert_eq!(echoes, 2);
         // A request that outlives its @timeout fails rather than waiting out
         // the default.
         assert_eq!(job.failed, 1, "{job:?}");

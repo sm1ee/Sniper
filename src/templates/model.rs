@@ -211,8 +211,6 @@ const INERT_REQUEST_KEYS: &[&str] = &[
 
 /// Request keys of features planned for later milestones, by reason code.
 const LATER_REQUEST_KEYS: &[(&str, &str)] = &[
-    ("payloads", "req:payloads"),
-    ("attack", "req:payloads"),
     ("iterate-all", "req:iterate_all"),
     ("fuzzing", "req:fuzzing"),
     ("pre-condition", "req:fuzzing"),
@@ -377,6 +375,12 @@ pub fn classify(template: &ParsedTemplate) -> Classification {
                 }
             }
         }
+        // So does each payload set's value, pass by pass.
+        declared.extend(
+            used_payload_sets(block)
+                .into_iter()
+                .map(|(name, _)| name.clone()),
+        );
     }
 
     for (index, block) in blocks.iter().enumerate() {
@@ -459,6 +463,16 @@ fn check_block(out: &mut Classification, block: &Map<String, Value>, declared: &
             "method" => check_method(out, &scalar_text(value)),
             "path" => check_paths(out, value, declared),
             "raw" => check_raw(out, block, value, declared),
+            "payloads" => check_payloads(out, block, value, declared),
+            "attack" => {
+                let attack = scalar_text(value).trim().to_ascii_lowercase();
+                if !matches!(
+                    attack.as_str(),
+                    "batteringram" | "pitchfork" | "clusterbomb"
+                ) {
+                    out.active_reasons.insert("req:attack".into());
+                }
+            }
             "headers" => {
                 out.passive_reasons.insert("req:headers".into());
                 match value.as_object() {
@@ -547,6 +561,103 @@ fn check_raw(
             .any(|(name, value)| name.eq_ignore_ascii_case("host") && *value != "{{Hostname}}")
         {
             out.active_reasons.insert("req:host_header".into());
+        }
+    }
+}
+
+/// The payload sets a request block uses, in the order it lists them.
+/// Nuclei drops a set that no request part or operator names before it
+/// counts them.
+pub(super) fn used_payload_sets(block: &Map<String, Value>) -> Vec<(&String, &Value)> {
+    let Some(Value::Object(sets)) = block.get("payloads") else {
+        return Vec::new();
+    };
+    let named: String = [
+        "headers",
+        "matchers",
+        "extractors",
+        "body",
+        "path",
+        "raw",
+        "fuzzing",
+    ]
+    .iter()
+    .filter_map(|key| block.get(*key))
+    .map(Value::to_string)
+    .collect();
+    sets.iter()
+        .filter(|(name, _)| named.contains(name.as_str()))
+        .collect()
+}
+
+/// A payload file's path inside the release, as templates name them
+/// (`helpers/wordlists/users.txt`): `./` and empty parts dropped. None when it
+/// is absolute or climbs out with `..`.
+pub(super) fn helper_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.starts_with('/') || path.contains('\\') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return None,
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Payload values run as Nuclei combines them, written in the template or
+/// read from a file of the release; a fuzzing aggression level does not yet.
+fn check_payloads(
+    out: &mut Classification,
+    block: &Map<String, Value>,
+    value: &Value,
+    declared: &BTreeSet<String>,
+) {
+    out.passive_reasons.insert("req:payloads".into());
+    if !value.is_object() {
+        out.active_reasons.insert("req:payloads".into());
+        return;
+    }
+    let sets = used_payload_sets(block);
+    let attack = block
+        .get("attack")
+        .map(scalar_text)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    // Nuclei's default attack, batteringram, takes a single set.
+    if sets.len() > 1 && matches!(attack.as_str(), "" | "batteringram") {
+        out.active_reasons.insert("req:payloads".into());
+    }
+    for (_, values) in sets {
+        match values {
+            Value::Array(items) if !items.is_empty() => {
+                for item in items {
+                    check_template_text(out, &scalar_text(item), declared, true);
+                }
+            }
+            Value::String(text) if text.contains('\n') => {
+                for line in text.split('\n') {
+                    check_template_text(out, line, declared, true);
+                }
+            }
+            // A file of the release, which the library looks up; a path
+            // that could leave the release is never read.
+            Value::String(path) => {
+                if helper_path(path).is_none() {
+                    out.active_reasons.insert("req:payload_file".into());
+                }
+            }
+            Value::Object(_) => {
+                out.active_reasons.insert("req:payload_aggression".into());
+            }
+            _ => {
+                out.active_reasons.insert("req:payloads".into());
+            }
         }
     }
 }
@@ -871,10 +982,10 @@ mod tests {
     #[test]
     fn unsupported_constructs_are_named() {
         let classified = classify_text(
-            "id: example-cve\ninfo:\n  tags: cve,intrusive\nhttp:\n  - path: ['{{BaseURL}}/?c={{status_code_1}}']\n    payloads:\n      p: [a]\n    matchers:\n      - type: xpath\n        xpath: ['/a']\n      - type: word\n        part: interactsh_protocol\n        words: [dns]\n      - type: dsl\n        dsl: ['mmh3(body) == 1', 'status_code_2 == 200']\n",
+            "id: example-cve\ninfo:\n  tags: cve,intrusive\nhttp:\n  - path: ['{{BaseURL}}/?c={{status_code_1}}']\n    payloads:\n      p:\n        low: [a]\n    matchers:\n      - type: xpath\n        xpath: ['/a']\n      - type: word\n        part: interactsh_protocol\n        words: [dns]\n      - type: dsl\n        dsl: ['mmh3(body) == 1', 'status_code_2 == 200']\n",
         );
         for reason in [
-            "req:payloads",
+            "req:payload_aggression",
             "matcher:xpath",
             "oast",
             "fn:mmh3",
@@ -1002,6 +1113,72 @@ mod tests {
             all.active_reasons.iter().collect::<Vec<_>>(),
             ["req:iterate_all"]
         );
+    }
+
+    fn payload_reasons(block: serde_json::Value) -> BTreeSet<String> {
+        let mut base = serde_json::json!({
+            "path": ["{{BaseURL}}/{{word}}"],
+            "matchers": [{"type": "word", "words": ["{{word}}"]}],
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(block.as_object().unwrap().clone());
+        let template = serde_json::json!({"id": "example-words", "info": {}, "http": [base]});
+        classify_text(&template.to_string()).active_reasons
+    }
+
+    #[test]
+    fn payloads_run_inline_or_from_the_release_files() {
+        use serde_json::json;
+        // A list, the lines of one string, or a file of the release; the
+        // library checks the file is there.
+        for payloads in [
+            json!({"word": ["a", "{{Hostname}}", 7]}),
+            json!({"word": "a\nb"}),
+            json!({"word": "helpers/wordlists/words.txt"}),
+        ] {
+            let found = payload_reasons(json!({ "payloads": payloads }));
+            assert!(found.is_empty(), "{found:?}");
+        }
+        // Nuclei drops a set no request or matcher names before it counts
+        // them, and takes two sets only with an attack that combines them.
+        let unused = payload_reasons(json!({"payloads": {"word": ["a"], "unused": ["x"]}}));
+        assert!(unused.is_empty(), "{unused:?}");
+        let two = json!({"path": ["{{BaseURL}}/{{word}}?{{n}}"], "payloads": {"word": ["a"], "n": ["1"]}});
+        assert!(payload_reasons(two.clone()).contains("req:payloads"));
+        let mut pitchfork = two.clone();
+        pitchfork["attack"] = " Pitchfork ".into();
+        let found = payload_reasons(pitchfork);
+        assert!(found.is_empty(), "{found:?}");
+        let mut battering = two;
+        battering["attack"] = "batteringram".into();
+        assert!(payload_reasons(battering).contains("req:payloads"));
+        for (block, reason) in [
+            (
+                json!({"payloads": {"word": "../words.txt"}}),
+                "req:payload_file",
+            ),
+            (
+                json!({"payloads": {"word": "/etc/words.txt"}}),
+                "req:payload_file",
+            ),
+            (
+                json!({"payloads": {"word": {"low": ["a"]}}}),
+                "req:payload_aggression",
+            ),
+            (json!({"payloads": {"word": []}}), "req:payloads"),
+            (
+                json!({"payloads": {"word": ["a"]}, "attack": "sniper"}),
+                "req:attack",
+            ),
+            (
+                json!({"payloads": {"word": ["{{nothing}}"]}}),
+                "var:nothing",
+            ),
+        ] {
+            let found = payload_reasons(block.clone());
+            assert!(found.contains(reason), "{block}: {found:?}");
+        }
     }
 
     fn raw_reasons(raws: serde_json::Value, extra: serde_json::Value) -> Classification {
