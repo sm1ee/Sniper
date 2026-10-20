@@ -17,6 +17,7 @@ reading a capture — including an agent — receives them.
 - [Sniper in an agent harness](https://smlee.io/Sniper/guides/agent-harness.md): which part of a harness this is, a worked capture-and-query example, data boundaries, and when you do not need it
 - [Using Sniper from Claude Code](https://smlee.io/Sniper/integrations/claude-code.md): installing the bundled skill, confirming it loaded, what to ask for, and the failure modes
 - [Using Sniper from Codex](https://smlee.io/Sniper/integrations/codex.md): the same for Codex, including where the two skills differ
+- [Recon endpoint discovery](https://smlee.io/Sniper/integrations/recon.md): explicit target scope, provider disclosures, collection budgets, CLI operations and cancellation limits
 - [Saved-data contract](https://smlee.io/Sniper/integrations/saved-data-v1.md): session-pinned reads, pagination, metadata mutations, and uncertain-outcome receipts
 - [Architecture](https://smlee.io/Sniper/architecture.md): why it is built this way
 

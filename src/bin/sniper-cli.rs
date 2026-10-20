@@ -28,6 +28,7 @@ use sniper::{
         BodyEncoding, EditableRequest, EditableResponse, HeaderRecord, RequestTargetOverride,
         TransactionRecord, TransactionSummary, WebSocketSessionRecord, WebSocketSessionSummary,
     },
+    recon::{ReconEndpoint, ReconJob, StartRecon},
     runtime::{
         RuntimeSettingsSnapshot, MAX_OAST_POLLING_INTERVAL_SECS, MIN_OAST_POLLING_INTERVAL_SECS,
     },
@@ -185,6 +186,11 @@ enum Command {
         #[command(subcommand)]
         command: FindingsCommand,
     },
+    /// Discover endpoints with explicit scope and provider consent; list retained evidence.
+    Recon {
+        #[command(subcommand)]
+        command: ReconCommand,
+    },
     /// Manage session-scoped passive regex rules for captured response previews and headers.
     Scanner {
         #[command(subcommand)]
@@ -306,6 +312,100 @@ enum FindingsCommand {
     Get(FindingGetArgs),
     /// Count all findings currently retained in the session.
     Count(SessionReadArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ReconCommand {
+    /// Read this session's complete retained Recon inventory and job statuses.
+    List(ReconSessionArgs),
+    /// Start asynchronous network discovery; requires --dry-run or --yes.
+    Start(ReconStartArgs),
+    /// Cancel local work for this exact job; an accepted urlscan scan cannot be recalled.
+    Stop(ReconStopArgs),
+}
+
+#[derive(Args, Debug)]
+struct ReconSessionArgs {
+    #[arg(long)]
+    session_id: Uuid,
+}
+
+#[derive(Args, Debug)]
+struct ReconStopArgs {
+    #[arg(long)]
+    session_id: Uuid,
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug)]
+struct ReconStartArgs {
+    #[arg(long)]
+    session_id: Uuid,
+    #[arg(long)]
+    target_url: String,
+    #[arg(long)]
+    include_subdomains: bool,
+    /// Repeat to select sources. No provider is enabled implicitly.
+    #[arg(long = "source", required = true, value_parser = ["crawler", "urlscan", "wayback", "urlscan_submit"])]
+    sources: Vec<String>,
+    /// Per-job collection budget; 0 means unbounded, not disabled.
+    #[arg(long, default_value_t = 0)]
+    max_requests: usize,
+    /// Crawl depth budget; 0 means unbounded, not seed-only.
+    #[arg(long, default_value_t = 0)]
+    max_depth: usize,
+    /// New endpoint budget; 0 means unbounded.
+    #[arg(long, default_value_t = 0)]
+    max_endpoints: usize,
+    /// Page budget per history provider; 0 means unbounded.
+    #[arg(long, default_value_t = 0)]
+    max_pages: usize,
+    /// Acknowledge sharing the target hostname with selected history providers.
+    #[arg(long)]
+    history_acknowledged: bool,
+    /// Separately acknowledge submitting the full target URL for a new urlscan scan.
+    #[arg(long)]
+    scan_acknowledged: bool,
+    /// Required for urlscan_submit; unlisted is not private.
+    #[arg(long, value_parser = ["private", "unlisted", "public"])]
+    scan_visibility: Option<String>,
+}
+
+impl ReconStartArgs {
+    fn request(&self) -> StartRecon {
+        StartRecon {
+            session_id: self.session_id,
+            target_url: self.target_url.clone(),
+            include_subdomains: self.include_subdomains,
+            sources: self.sources.clone(),
+            max_requests: self.max_requests,
+            max_depth: self.max_depth,
+            max_endpoints: self.max_endpoints,
+            max_pages: self.max_pages,
+            history_acknowledged: self.history_acknowledged,
+            scan_acknowledged: self.scan_acknowledged,
+            scan_visibility: self.scan_visibility.clone(),
+        }
+    }
+}
+
+impl ReconCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::List(_) => "recon.list",
+            Self::Start(_) => "recon.start",
+            Self::Stop(_) => "recon.stop",
+        }
+    }
+
+    fn session_id(&self) -> Uuid {
+        match self {
+            Self::List(args) => args.session_id,
+            Self::Start(args) => args.session_id,
+            Self::Stop(args) => args.session_id,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -3108,6 +3208,7 @@ impl Command {
             Command::Session { command } => command.operation_name(),
             Command::Capture { command } => command.operation_name(),
             Command::Findings { command } => command.operation_name(),
+            Command::Recon { command } => command.operation_name(),
             Command::Scanner { command } => command.operation_name(),
             Command::Templates { command } => command.operation_name(),
             Command::EventLog { command } => command.operation_name(),
@@ -4244,6 +4345,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         ),
     ];
     operations.extend(service_map_manifest_operations());
+    operations.extend(recon_manifest_operations());
     operations.extend(scanner_manifest_operations());
     operations.extend(saved_manifest_operations());
     operations
@@ -5492,6 +5594,284 @@ fn service_map_manifest_operations() -> Vec<CliOperationSpec> {
     ]
 }
 
+fn recon_manifest_operations() -> Vec<CliOperationSpec> {
+    use CliSideEffect::{Read, Write};
+    let session = "00000000-0000-0000-0000-000000000000";
+    vec![
+        op("recon.list", "recon list --session-id <uuid>", "Read all retained Recon jobs and endpoint evidence from one explicit session without target or provider requests. URLs can contain sensitive data.", Read, false, &["session_id"], vec![json!({"session_id":session})]),
+        op("recon.start", "recon start --session-id <uuid> --target-url <url> --source <source>", "Start asynchronous, explicitly scoped endpoint discovery. Requires target authorization, write confirmation and separate provider-sharing acknowledgments. Zero budgets are unbounded; API timeout does not stop the job.", Write, true, &["session_id","target_url","sources"], vec![
+            json!({"session_id":session,"target_url":"https://example.com/","sources":["crawler"],"max_requests":50,"max_depth":2,"max_endpoints":500}),
+            json!({"session_id":session,"target_url":"https://example.com/","sources":["urlscan","wayback"],"history_acknowledged":true,"max_pages":2,"max_endpoints":500}),
+            json!({"session_id":session,"target_url":"https://example.com/","sources":["urlscan_submit"],"scan_acknowledged":true,"scan_visibility":"private","max_endpoints":500}),
+        ]),
+        op("recon.stop", "recon stop --session-id <uuid> --id <uuid>", "Cancel this exact session-owned job's local work. Cannot cancel a scan already accepted by urlscan; never retry a start automatically.", Write, true, &["session_id","id"], vec![json!({"session_id":session,"id":"22222222-2222-2222-2222-222222222222"})]),
+    ]
+}
+
+fn recon_input_schema(operation: &str) -> Option<Value> {
+    if !matches!(operation, "recon.list" | "recon.start" | "recon.stop") {
+        return None;
+    }
+    let mut schema = json!({"type":"object","additionalProperties":false,"required":["session_id"],"properties":{
+        "session_id":{"type":"string","format":"uuid","description":"Explicit session UUID. Never switches the active session."}
+    }});
+    if operation == "recon.stop" {
+        schema["required"] = json!(["session_id", "id"]);
+        schema["properties"]["id"] = json!({"type":"string","format":"uuid"});
+    } else if operation == "recon.start" {
+        schema["required"] = json!(["session_id", "target_url", "sources"]);
+        let fields = json!({
+            "target_url":{"type":"string","format":"uri","description":"Absolute HTTP(S) URL without credentials, control characters, wildcard hostname or port zero. Scope is hostname, scheme and port, not path. urlscan_submit also rejects any query or fragment; do not submit a confidential path."},
+            "include_subdomains":{"type":"boolean","default":false,"description":"Explicitly expand scope to DNS subdomains; not valid for IP literals."},
+            "sources":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,"items":{"type":"string","enum":["crawler","urlscan","wayback","urlscan_submit"]}},
+            "history_acknowledged":{"type":"boolean","default":false,"description":"Explicit consent to disclose the target hostname to selected history providers, separate from --yes."},
+            "scan_acknowledged":{"type":"boolean","default":false,"description":"Explicit consent to submit the full target URL to urlscan and run its remote browser, separate from --yes."},
+            "scan_visibility":{"type":["string","null"],"enum":["private","unlisted","public",null],"description":"Required non-null for urlscan_submit; no fallback. Unlisted is not private."}
+        });
+        for (key, value) in fields.as_object().unwrap() {
+            schema["properties"][key] = value.clone();
+        }
+        for field in ["max_requests", "max_depth", "max_endpoints", "max_pages"] {
+            schema["properties"][field] = json!({"type":"integer","minimum":0,"maximum":usize::MAX,"default":0,"description":"Optional collection budget; zero means unbounded. max_pages applies per history provider; max_endpoints counts new entries."});
+        }
+        schema["allOf"] = json!([
+            {"if":{"properties":{"sources":{"contains":{"enum":["urlscan","wayback"]}}}},"then":{"required":["history_acknowledged"],"properties":{"history_acknowledged":{"const":true}}}},
+            {"if":{"properties":{"sources":{"contains":{"const":"urlscan_submit"}}}},"then":{"required":["scan_acknowledged","scan_visibility"],"properties":{"scan_acknowledged":{"const":true},"scan_visibility":{"type":"string","enum":["private","unlisted","public"]}}}}
+        ]);
+    }
+    Some(schema)
+}
+
+fn recon_output_schema(operation: &str) -> Option<Value> {
+    if !matches!(operation, "recon.list" | "recon.start" | "recon.stop") {
+        return None;
+    }
+    let uuid = json!({"type":"string","format":"uuid"});
+    if operation == "recon.stop" {
+        return Some(service_map_object(
+            json!({"session_id":uuid,"stopped":{"type":"boolean","enum":[true]}}),
+        ));
+    }
+    let timestamp = json!({"type":"string","format":"date-time"});
+    let string = json!({"type":"string"});
+    let strings = json!({"type":"array","items":string});
+    let count = json!({"type":"integer","minimum":0});
+    let source = service_map_object(json!({
+        "source":string,"status":string,"requests":count,"discovered":count,
+        "truncated":{"type":"boolean"},"warnings":strings
+    }));
+    let job = service_map_object(json!({
+        "id":uuid,"target_url":string,"status":string,"started_at":timestamp,
+        "finished_at":{"type":["string","null"],"format":"date-time"},
+        "sources":{"type":"array","items":source},"error":{"type":["string","null"]}
+    }));
+    if operation == "recon.start" {
+        return Some(job);
+    }
+    let evidence = service_map_object(json!({
+        "source":string,"kind":string,"location":string,"timestamp":{"type":["string","null"]},
+        "status":{"type":["integer","null"],"minimum":0,"maximum":65535}
+    }));
+    let endpoint = service_map_object(json!({
+        "url":string,"method":string,"raw_urls":strings,"evidence":{"type":"array","items":evidence},
+        "first_seen":timestamp,"last_seen":timestamp
+    }));
+    let mut schema = service_map_object(json!({
+        "session_id":uuid,"jobs":{"type":"array","items":job},"endpoints":{"type":"array","items":endpoint}
+    }));
+    schema["description"] = json!("Full retained session inventory, not paginated. Check each source status, truncated and warnings. Completed can still be partial; history/candidate/observed evidence never proves current liveness. URLs and evidence can be sensitive.");
+    Some(schema)
+}
+
+fn recon_command_from_input(operation: &str, input: &Value) -> Result<ReconCommand> {
+    let session_id = call_required(operation, input, "session_id")?;
+    Ok(match operation {
+        "recon.list" => ReconCommand::List(ReconSessionArgs { session_id }),
+        "recon.stop" => ReconCommand::Stop(ReconStopArgs {
+            session_id,
+            id: call_required(operation, input, "id")?,
+        }),
+        "recon.start" => ReconCommand::Start(ReconStartArgs {
+            session_id,
+            target_url: call_required(operation, input, "target_url")?,
+            sources: call_required(operation, input, "sources")?,
+            include_subdomains: call_present(operation, input, "include_subdomains")?
+                .unwrap_or(false),
+            max_requests: call_present(operation, input, "max_requests")?.unwrap_or(0),
+            max_depth: call_present(operation, input, "max_depth")?.unwrap_or(0),
+            max_endpoints: call_present(operation, input, "max_endpoints")?.unwrap_or(0),
+            max_pages: call_present(operation, input, "max_pages")?.unwrap_or(0),
+            history_acknowledged: call_present(operation, input, "history_acknowledged")?
+                .unwrap_or(false),
+            scan_acknowledged: call_present(operation, input, "scan_acknowledged")?
+                .unwrap_or(false),
+            scan_visibility: call_optional(operation, input, "scan_visibility")?,
+        }),
+        _ => bail!("unknown operation `{operation}`"),
+    })
+}
+
+fn recon_input_preview(command: &ReconCommand) -> Value {
+    match command {
+        ReconCommand::List(args) => json!({"session_id":args.session_id}),
+        ReconCommand::Start(args) => json!(args.request()),
+        ReconCommand::Stop(args) => json!({"session_id":args.session_id,"id":args.id}),
+    }
+}
+
+fn recon_api_preview(command: &ReconCommand) -> Value {
+    match command {
+        ReconCommand::List(args) => api_preview(
+            "GET",
+            session_query_path("/api/recon", Some(args.session_id)),
+            None,
+        ),
+        ReconCommand::Start(args) => {
+            api_preview("POST", "/api/recon/jobs", Some(json!(args.request())))
+        }
+        ReconCommand::Stop(args) => api_preview(
+            "POST",
+            format!("/api/recon/jobs/{}/stop", args.id),
+            Some(json!({"session_id":args.session_id})),
+        ),
+    }
+}
+
+async fn discover_recon_api(cli_api: Option<String>) -> Result<ApiClient> {
+    // A redirect or transport retry must never repeat a submission elsewhere.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(CLI_API_TIMEOUT)
+        .build()
+        .context("failed to build Recon API client")?;
+    let base_url = discover_api_base_url(cli_api, &client).await?;
+    Ok(ApiClient {
+        base_url,
+        client: client.clone(),
+        long_client: client,
+        session_metadata_write_errors: false,
+    })
+}
+
+#[derive(Debug)]
+struct ReconCliError {
+    code: &'static str,
+    status: Option<u16>,
+    write: bool,
+}
+
+impl fmt::Display for ReconCliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self.code {
+            "HTTP_STATUS_ERROR" => "Recon API returned a non-success status",
+            "INVALID_RESPONSE" => "Recon API returned an invalid or mismatched response",
+            _ => "Recon API request failed or timed out",
+        })
+    }
+}
+impl std::error::Error for ReconCliError {}
+
+async fn recon_request<T: DeserializeOwned>(
+    api: &ApiClient,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<T> {
+    let write = method == Method::POST;
+    let error = |code, status| ReconCliError {
+        code,
+        status,
+        write,
+    };
+    let mut request = api.client.request(method, api.url(path));
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|_| error("API_REQUEST_FAILED", None))?;
+    if !response.status().is_success() {
+        // Do not echo provider diagnostics or raw URLs in failure envelopes.
+        return Err(error("HTTP_STATUS_ERROR", Some(response.status().as_u16())).into());
+    }
+    response
+        .json()
+        .await
+        .map_err(|_| error("INVALID_RESPONSE", None).into())
+}
+
+#[derive(Deserialize, Serialize)]
+struct ReconInventory {
+    session_id: Uuid,
+    jobs: Vec<ReconJob>,
+    endpoints: Vec<ReconEndpoint>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ReconStopped {
+    session_id: Uuid,
+    stopped: bool,
+}
+
+async fn handle_recon(api: ApiClient, command: ReconCommand) -> Result<()> {
+    let session_id = command.session_id();
+    let invalid = |write| ReconCliError {
+        code: "INVALID_RESPONSE",
+        status: None,
+        write,
+    };
+    match command {
+        ReconCommand::List(_) => {
+            let inventory: ReconInventory = recon_request(
+                &api,
+                Method::GET,
+                &session_query_path("/api/recon", Some(session_id)),
+                None,
+            )
+            .await?;
+            if inventory.session_id != session_id {
+                return Err(invalid(false).into());
+            }
+            print_session_read_json(&inventory, session_id)
+        }
+        ReconCommand::Start(args) => {
+            let job: ReconJob = recon_request(
+                &api,
+                Method::POST,
+                "/api/recon/jobs",
+                Some(json!(args.request())),
+            )
+            .await?;
+            if job.target_url != args.target_url
+                || job
+                    .sources
+                    .iter()
+                    .map(|source| &source.source)
+                    .ne(args.sources.iter())
+            {
+                return Err(invalid(true).into());
+            }
+            print_session_read_json(&job, session_id)
+        }
+        ReconCommand::Stop(args) => {
+            let stopped: ReconStopped = recon_request(
+                &api,
+                Method::POST,
+                &format!("/api/recon/jobs/{}/stop", args.id),
+                Some(json!({"session_id":session_id})),
+            )
+            .await?;
+            if stopped.session_id != session_id || !stopped.stopped {
+                return Err(invalid(true).into());
+            }
+            print_session_read_json(&stopped, session_id)
+        }
+    }
+}
+
 fn scanner_manifest_operations() -> Vec<CliOperationSpec> {
     use CliSideEffect::{Read, Write};
     vec![
@@ -5573,6 +5953,7 @@ fn op(
         output_schema: intercept_rule_update_output_schema(operation)
             .or_else(|| replay_saved_tab_output_schema(operation))
             .or_else(|| service_map_output_schema(operation))
+            .or_else(|| recon_output_schema(operation))
             .or_else(|| scanner_output_schema(operation))
             .or_else(|| upstream_peer_output_schema(operation))
             .or_else(|| history_retention_output_schema(operation))
@@ -5970,6 +6351,9 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
         }
         return schema;
     }
+    if let Some(schema) = recon_input_schema(operation) {
+        return schema;
+    }
     if let Some(schema) = scanner_input_schema(operation, required_fields) {
         return schema;
     }
@@ -6137,6 +6521,21 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "findings.list" | "event_log.list" => &["session_id", "limit"],
         "findings.get" => &["id", "session_id"],
         "findings.count" => &["session_id"],
+        "recon.list" => &["session_id"],
+        "recon.stop" => &["session_id", "id"],
+        "recon.start" => &[
+            "session_id",
+            "target_url",
+            "include_subdomains",
+            "sources",
+            "max_requests",
+            "max_depth",
+            "max_endpoints",
+            "max_pages",
+            "history_acknowledged",
+            "scan_acknowledged",
+            "scan_visibility",
+        ],
         "scanner.config.get" | "scanner.custom.list" => &["session_id"],
         "scanner.config.set_enabled" => &["session_id", "enabled"],
         "scanner.builtin.set_enabled" => &["session_id", "id", "enabled"],
@@ -6439,6 +6838,7 @@ fn command_input_preview(command: &Command) -> Value {
                 BrowserCommand::Prefer(args) => json!({ "browser": args.browser }),
             },
         },
+        Command::Recon { command } => recon_input_preview(command),
         Command::Scanner { command } => scanner_input_preview(command),
         Command::Templates { command } => templates_input_preview(command),
         Command::Findings { command } => match command {
@@ -6864,6 +7264,7 @@ fn command_api_preview(command: &Command) -> Result<Value> {
                 Some(json!({})),
             ),
         },
+        Command::Recon { command } => recon_api_preview(command),
         Command::Scanner { command } => scanner_api_preview(command),
         Command::Templates { command } => templates_api_preview(command),
         Command::Findings { command } => findings_api_preview(command),
@@ -7497,6 +7898,19 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
         }
         notes.push("Off is the default. Keep-newest is a soft total-history target: oldest unprotected rows are removed first, while durable saved HTTP tab source originals and in-progress rows survive. Policy-save success does not mean pending logical or disk cleanup is finished.");
     }
+    if let Command::Recon { command } = command {
+        notes.push("Offline preview only; session existence and current job state are not checked. Explicit session_id never switches the active session.");
+        notes.push("Recon URLs, raw spellings, evidence locations and warnings can contain sensitive paths or query values; summarize rather than paste them.");
+        match command {
+            ReconCommand::Start(_) => {
+                notes.push("Only start against an authorized target. Crawler sends scoped unauthenticated GETs, which can still have side effects. Scope is host/scheme/port, not path; subdomains must be selected explicitly.");
+                notes.push("History sends the target hostname to selected providers. urlscan_submit sends the full URL and triggers a remote browser that may load out-of-scope resources; unlisted is not private. Provider acknowledgments are separate from --yes.");
+                notes.push("Zero budgets mean unbounded collection. Start returns a job immediately; the 60-second API timeout does not cancel it. Read recon list before any deliberate retry after an uncertain result; never resubmit automatically.");
+            }
+            ReconCommand::Stop(_) => notes.push("Stops local work only; an accepted urlscan submission cannot be cancelled. An already finished or unknown job may return not found; reread its state rather than assuming it is running."),
+            ReconCommand::List(_) => notes.push("Reads all retained jobs and endpoints without target/provider requests. Check each source's status, truncated flag and warnings; history and candidate evidence do not prove current liveness."),
+        }
+    }
     if matches!(command, Command::Scanner { .. }) {
         notes.push("Dry-run is offline and validates supplied rule JSON before API discovery. It does not resolve sessions, fetch configuration, apply writes or inspect traffic.");
         notes.push("An omitted session_id is resolved once and pinned; writes also guard expected_active_session_id. Writes fetch a config_token and compare-and-swap once, preserving unrelated fields and custom rule order. Conflicts are not retried.");
@@ -7838,6 +8252,9 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 },
             }
         }
+        operation if operation.starts_with("recon.") => Command::Recon {
+            command: recon_command_from_input(operation, input)?,
+        },
         operation if operation.starts_with("scanner.") => Command::Scanner {
             command: scanner_command_from_input(operation, input)?,
         },
@@ -9394,7 +9811,9 @@ async fn run(cli: Cli) -> Result<()> {
             print_json(&result)
         }
         command => {
-            let api = if matches!(
+            let api = if matches!(command, Command::Recon { .. }) {
+                discover_recon_api(api_override).await?
+            } else if matches!(
                 command.operation_name(),
                 "target.service_map.get"
                     | "target.service_map.evidence.get"
@@ -9432,6 +9851,7 @@ async fn run(cli: Cli) -> Result<()> {
                     CaptureCommand::Oast { command } => handle_oast(api, command).await,
                     CaptureCommand::Browser { command } => handle_browser(api, command).await,
                 },
+                Command::Recon { command } => handle_recon(api, command).await,
                 Command::Scanner { command } => handle_scanner(api, command).await,
                 Command::Templates { command } => handle_templates(api, command).await,
                 Command::Findings { command } => handle_findings(api, command).await,
@@ -9472,6 +9892,21 @@ fn validate_skill_root_selection(
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Recon {
+        command: ReconCommand::Start(args),
+    } = command
+    {
+        args.request()
+            .validate()
+            .map_err(|message| anyhow!("invalid Recon input: {message}"))?;
+        if args
+            .scan_visibility
+            .as_deref()
+            .is_some_and(|visibility| !["private", "unlisted", "public"].contains(&visibility))
+        {
+            bail!("invalid Recon scan_visibility");
+        }
+    }
     match command {
         Command::Capture {
             command:
@@ -17686,6 +18121,25 @@ fn clap_error_payload(error: &clap::Error) -> CliErrorPayload {
 }
 
 fn cli_error_payload(operation: &str, error: &anyhow::Error) -> CliErrorPayload {
+    if let Some(recon) = error.downcast_ref::<ReconCliError>() {
+        return CliErrorPayload {
+            code: recon.code,
+            message: recon.to_string(),
+            hint: Some(if recon.write {
+                "The operation may have applied. Inspect recon list --session-id <the same UUID> before a deliberate retry; never automatically resubmit. Stopping local work cannot recall an accepted urlscan scan."
+            } else {
+                "Inspect the selected API and session deliberately; a failed read is not an empty inventory."
+            }),
+            retryable: false,
+            details: json!({"status":recon.status,"outcome":if recon.write {"unknown"} else {"not_applied"}}),
+            exit_code: if recon.status.is_some_and(|status| status < 500) {
+                5
+            } else {
+                6
+            },
+        };
+    }
+
     if let Some(map) = error.downcast_ref::<ServiceMapCliError>() {
         return CliErrorPayload {
             code: map.code,

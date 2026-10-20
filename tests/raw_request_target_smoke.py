@@ -9,6 +9,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import socket
 import ssl
 import shutil
 import subprocess
@@ -138,8 +139,35 @@ def main():
                 assert result["duplicates"] == ["one", "two"]
                 assert result["proxy_authorization"] is None
 
+            def raw_reference(target, through_proxy):
+                # Establish the expected bytes independently of curl's URL
+                # parser, both directly at the origin and through Sniper.
+                host = f"127.0.0.1:{origins['http']}"
+                address = runtime["proxy_addr"] if through_proxy else host
+                wire_target = f"http://{host}{target}" if through_proxy else target
+                raw_headers = "".join(header["name"] + ": " + header["value"] + "\r\n"
+                                      for header in headers)
+                request = (f"POST {wire_target} HTTP/1.1\r\nHost: {host}\r\n"
+                           + raw_headers + f"Content-Length: {len(body)}\r\n"
+                           + "Connection: close\r\n\r\n" + body).encode("ascii")
+                address_host, address_port = address.rsplit(":", 1)
+                with socket.create_connection((address_host, int(address_port)), timeout=15) as connection:
+                    connection.sendall(request)
+                    response = http.client.HTTPResponse(connection)
+                    try:
+                        response.begin()
+                        assert response.status == (302 if "redirect=1" in target else 200)
+                        check(json.load(response), target, host)
+                    finally:
+                        response.close()
+                if through_proxy:
+                    record = eventually(lambda: next((r for r in api("/api/transactions")
+                        if r["path"] == target and r["host"] == host and r["scheme"] == "http"), None))
+                    assert record["status"] == (302 if "redirect=1" in target else 200)
+
             def exercise(scheme, target, name="127.0.0.1"):
                 host = f"{name}:{origins[scheme]}"
+                previous_ids = {r["id"] for r in api("/api/transactions")}
                 command = [curl, "--silent", "--show-error", "--path-as-is", "--max-time", "15",
                            "--noproxy", "", "--proxy", "http://" + runtime["proxy_addr"],
                            "--cacert", ca, "--data-binary", body]
@@ -147,14 +175,16 @@ def main():
                     command += tls_options
                 for header in headers:
                     command += ["-H", header["name"] + ": " + header["value"]]
-                # curl drops an empty query delimiter while parsing its URL;
-                # explicitly set the wire target to exercise that valid case.
-                if target.endswith("?"):
-                    command += ["--request-target", f"http://{host}{target}" if scheme == "http" else target]
-                response = run_curl(command + [f"{scheme}://{host}{target}"], env)
+                # --path-as-is only protects dot segments. curl 8.21 also
+                # normalizes percent-escape case while parsing origin-form
+                # URLs, and older versions drop an empty query delimiter.
+                # Set every wire target verbatim; use the URL only for routing.
+                command += ["--request-target", f"http://{host}{target}" if scheme == "http" else target]
+                response = run_curl(command + [f"{scheme}://{host}/"], env)
                 check(json.loads(response.stdout), target, host)
                 record = eventually(lambda: next((r for r in api("/api/transactions")
-                    if r["path"] == target and r["host"] == host and r["scheme"] == scheme), None))
+                    if r["id"] not in previous_ids and r["path"] == target
+                    and r["host"] == host and r["scheme"] == scheme), None))
                 assert record["status"] == (302 if "redirect=1" in target else 200)
                 replay = api("/api/replay/send", {"session_id": session_id, "request": {
                     "scheme": scheme, "host": host, "method": "POST", "path": target,
@@ -200,6 +230,10 @@ def main():
                        "/./a/.%2e/b/..;literal/%252e%252e",
                        "//a///b/%2f/%5C?empty=&bare&x=../", "/a/../b?",
                        "/a/../b?redirect=1", "/ordinary?unchanged=yes"]
+            for target in targets:
+                raw_reference(target, through_proxy=False)
+                raw_reference(target, through_proxy=True)
+            print("PASS: raw-socket reference preserves exact targets directly and through the proxy", flush=True)
             for scheme in origins:
                 for target in targets:
                     exercise(scheme, target)

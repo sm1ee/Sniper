@@ -106,6 +106,7 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 | **Browsers** | One click opens a browser already wired to the proxy and CA, and hands an AI agent the way to drive it |
 | **Capture** | HTTP history, WebSocket sessions, intercept queue, match & replace rules, HTML and image responses rendered in a sandbox |
 | **Findings** | Passive scanner: sensitive data, CORS, missing headers, JWT issues, and the management endpoints and backend addresses the Service Map names. Each issue is listed once per host, endpoint or value; **Rescan** applies the current rules to traffic already captured |
+| **Recon** | Session-owned endpoint discovery from a scoped static crawler, urlscan and Wayback, with explicit provider consent and optional budgets |
 | **Scan** | Nuclei community templates: turned-on templates check in-scope captured traffic without sending anything, and Template Scan sends the ones you pick to targets you name |
 | **Replay** | Modify and resend any captured request, override host and port, render the response |
 | **Fuzzer** | Payload lists sent at marked positions, Sniper or Battering ram, in the background with progress and Stop |
@@ -195,6 +196,27 @@ than the origin's owner. See the
 [Service Map contract](docs/integrations/service-map.md) and
 [observed socket peer capture](docs/integrations/observed-socket-peer.md).
 
+## Recon
+
+The **Recon** tool builds a session-owned endpoint inventory from a scoped
+static crawler, existing urlscan results and Wayback history. New urlscan
+scans are a separate, explicit choice. Evidence distinguishes live responses,
+observed references, historical records and unvisited candidates; discoveries
+also appear in Scope's site map without becoming captured transactions.
+
+The Codex and Claude Code operator skills can read, start and stop Recon:
+
+```bash
+sniper-cli recon list --session-id <session-uuid>
+sniper-cli recon start --session-id <session-uuid> --target-url https://example.com/ --source crawler --max-requests 50 --max-depth 2 --max-endpoints 200 --dry-run
+sniper-cli schema input recon.start
+```
+
+Use only an authorized target. Review the dry run before `--yes`; history
+providers and new scans need separate sharing acknowledgments. Budgets default
+to 0 (unbounded), and a CLI timeout does not stop the background job. See
+[Recon's scope, consent and CLI contract](docs/integrations/recon.md).
+
 ## Nuclei templates
 
 The **Scan** tool runs the community templates of
@@ -271,6 +293,7 @@ or save it.
 
 Other CLI contracts:
 
+- [Recon endpoint discovery](docs/integrations/recon.md): read, start and stop session-owned discovery jobs with explicit target and provider consent.
 - [Passive scanner configuration](docs/integrations/passive-scanner.md): turn built-in checks on or off and manage custom rules.
 - [Saved configuration edits](docs/integrations/saved-configuration-edits.md): change a saved intercept rule or a Replay tab's label.
 - [Saved Replay tabs](docs/integrations/saved-replay-tabs.md): close, duplicate and pin saved HTTP Replay tabs.
