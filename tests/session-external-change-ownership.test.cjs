@@ -11,7 +11,7 @@ function setup() {
   f.a = f.tab('stored-a'); f.b = f.tab('stored-b'); f.seed([f.a]);
   f.reloads = []; f.errors = []; f.log = [];
   for (const name of ['handleExternalSessionChanged', 'hasPendingWorkspaceStateSave',
-    'expectedActiveSessionIdForWrite', 'applyWorkspaceState', 'cleanupWsReplayTabsBeforeStateReset',
+    'expectedActiveSessionIdForWrite', 'retireFindingActionProgress', 'applyWorkspaceState', 'cleanupWsReplayTabsBeforeStateReset',
     'createSession', 'activateSessionById', 'loadSessions']) vm.runInContext(source(name), f.context);
   for (const name of ['flushSequenceDraftBeforeExternalSessionReload', 'flushTargetScopeDraft',
     'flushMatchReplaceDraft', 'flushSequenceDraft', 'flushAllPendingAnnotations']) {

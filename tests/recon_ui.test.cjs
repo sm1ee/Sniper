@@ -577,7 +577,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 const appSource = fs.readFileSync(path.join(__dirname, "../web/app.js"), "utf8").replace(/\r\n/g, "\n");
 function loadAppFunctions(names, globals) {
-  const context = vm.createContext({ console, ...globals });
+  const context = vm.createContext({ console, resetFindingsUiState() {},
+    currentSessionId: () => globals.state?.activeSession?.id || null, ...globals });
   for (const name of names) {
     const match = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, "m"));
     assert.ok(match, `Missing frontend function: ${name}`);
@@ -872,7 +873,7 @@ for (const phase of ["fetch", "json", "error body"]) {
       const reachedLegacyReset = new Error("Unrelated reset cleanup boundary");
       const historyFailure = new Error("Synthetic history read failure");
       const forbidden = label => () => assert.fail(`Unexpected ${label}`);
-      const app = loadAppFunctions(["applyWorkspaceState", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "loadWorkspaceState"], {
+      const app = loadAppFunctions(["retireFindingActionProgress", "applyWorkspaceState", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "loadWorkspaceState"], {
         state: { activeSession: { id: "a" }, replayTabs: [], activeTool: "recon" },
         workspaceLoaded: true, sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
         reconController: f.controller, currentSessionId: () => f.session,

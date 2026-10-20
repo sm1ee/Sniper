@@ -61,7 +61,7 @@ function fixture() {
   const context = loadFunctions([
     "createDefaultDisplaySettings", "sanitizeDisplaySettings", "openDisplaySettingsModal", "closeDisplaySettingsModal",
     "displaySettingsFormControls", "hydrateDisplaySettingsForm", "collectDisplaySettingsFormValues", "previewDisplaySettingsFromForm",
-    "saveDisplaySettingsFromForm", "applyDisplaySettingsState", "invalidateFindingNavigation", "applyUiSettingsSnapshot",
+    "saveDisplaySettingsFromForm", "applyDisplaySettingsState", "retireFindingActionProgress", "invalidateFindingNavigation", "applyUiSettingsSnapshot",
     "updateUiSettingsServerRevision", "isModalVisible",
   ], globals);
   const remote = {

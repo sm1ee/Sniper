@@ -1207,14 +1207,18 @@ function resetLayoutTextareas() {
   }
 }
 
-function invalidateFindingNavigation() {
-  state._findingsNavigationGeneration = (state._findingsNavigationGeneration || 0) + 1;
+function retireFindingActionProgress() {
   if (state.activeTool !== "proxy" || state.activeProxyTab !== "findings") return;
   // Retained details can be revisited before their obsolete read settles.
   // Only retire an existing progress owner; loading/closed buttons stay disabled.
   for (const id of ["findingsDetailSendReplay", "findingsDetailSendFuzzer"]) {
     document.getElementById(id)?._buttonProgress?.finish();
   }
+}
+
+function invalidateFindingNavigation() {
+  state._findingsNavigationGeneration = (state._findingsNavigationGeneration || 0) + 1;
+  retireFindingActionProgress();
 }
 
 function setActiveTool(tool, options = {}) {
@@ -2910,7 +2914,9 @@ async function _applySettings(response) {
   if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, state.settings.runtime);
   state.runtime = state.settings.runtime;
   syncHttpCapturePill();
+  const previousActiveSessionId = currentSessionId();
   state.activeSession = state.settings.active_session;
+  if (previousActiveSessionId !== currentSessionId()) resetFindingsUiState();
   if (typeof reconController !== "undefined") reconController?.syncSession();
   state.oastTokenClearPending = false;
   // Sync intercept scope pill with server state
@@ -3161,6 +3167,7 @@ async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwn
   }
   state.sessions = sessions;
   state.activeSession = nextActiveSession;
+  if (previousActiveSessionId !== currentSessionId()) resetFindingsUiState();
   if (typeof reconController !== "undefined") reconController?.syncSession();
   renderDashboard();
 }
@@ -3255,6 +3262,7 @@ function applyWorkspaceState(snapshot) {
     return;
   }
   workspaceStateGeneration += 1;
+  retireFindingActionProgress();
   // Later UI reads can fail before panels render and synchronize this owner.
   if (typeof reconController !== "undefined") reconController?.syncSession();
   for (const tab of state.replayTabs || []) {
@@ -10483,7 +10491,11 @@ async function runFindingAction(kind, recordId, work) {
   const detailGeneration = findingsDetailGeneration;
   const navigationGeneration = state._findingsNavigationGeneration || 0;
   const findingId = selectedFindingId;
-  const action = { kind, recordId };
+  const buttonId = kind === "replay" ? "findingsDetailSendReplay" : "findingsDetailSendFuzzer";
+  const action = { kind, recordId, progress: document.getElementById(buttonId)?._buttonProgress };
+  // A superseded read no longer owns a button, even if it has not settled.
+  // Retire the captured owner so same-button retries keep their newer progress.
+  findingActionPending?.progress?.finish();
   const isCurrent = () => findingActionPending === action
     && sessionId === currentSessionId() && workspaceGeneration === workspaceStateGeneration
     && detailGeneration === findingsDetailGeneration && findingId === selectedFindingId

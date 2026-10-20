@@ -465,8 +465,8 @@ test('global capture/settings information only reports body preview size, never 
   const state = {}, elements = {};
   const els = new Proxy({}, { get: (obj, key) => obj[key] ||= control() });
   const document = { getElementById(id) { return elements[id] ||= control(); }, activeElement: null };
-  const context = loadFunctions(['_applySettings', 'formatSize'], {
-    state, els, document, syncHttpCapturePill() {}, updateProxyStatusIndicator() {}, updateRemoteUiIndicator() {},
+  const context = loadFunctions(['_applySettings', 'currentSessionId', 'formatSize'], {
+    state, els, document, resetFindingsUiState() {}, syncHttpCapturePill() {}, updateProxyStatusIndicator() {}, updateRemoteUiIndicator() {},
     formatTimestamp: () => '-', escapeHtml: String, renderInterceptStatus() {}, renderProxySettings() {}, renderDashboard() {},
   });
   const settings = { body_preview_bytes: 65536, max_transaction_entries: 250000, runtime: {}, active_session: { id: 'session-a' },

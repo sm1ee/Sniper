@@ -27,7 +27,7 @@ function fixture() {
   els.findingsDetailJump.dataset.recordId = "record-a";
   const c = loadFunctions([
     "runFindingAction", "sendFindingToReplay", "sendFindingToFuzzer", "openFuzzerFromRecordLoader",
-    "invalidateFindingNavigation", "setActiveTool", "setActiveProxyTab", "clearFindingDetail", "renderFindingDetailLoading", "setFindingDetailActionsEnabled",
+    "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveTool", "setActiveProxyTab", "clearFindingDetail", "renderFindingDetailLoading", "setFindingDetailActionsEnabled",
     "onClickWithProgress", "withButtonProgress", "requireOkResponse", "readApiErrorMessage",
     "formatStructuredApiErrorMessage",
   ], {
@@ -308,5 +308,106 @@ for (const kind of ["replay", "fuzzer"]) {
       f.reads[0].resolve(response()); await pending; await tick();
       assert.equal(button.disabled, true); assert.deepEqual(f.opens, []);
     });
+  }
+}
+
+
+for (const kinds of [["replay", "fuzzer"], ["fuzzer", "replay"]]) {
+  for (const oldStage of ["fetch", "json"]) {
+    for (const newStage of ["fetch", "json"]) {
+      for (const oldOutcome of ["success", "failure"]) {
+        for (const newOutcome of ["success", "failure"]) {
+          test(`${kinds.join(" then ")} retires old ${oldStage} ${oldOutcome} before new ${newStage} ${newOutcome}`, async () => {
+            const f = fixture();
+            const control = kind => f.buttons[kind === "replay" ? "findingsDetailSendReplay" : "findingsDetailSendFuzzer"];
+            const old = f.begin(kinds[0], "mouse"), oldBody = deferred(), newBody = deferred();
+            let oldRead = f.reads[0];
+            if (oldStage === "json") {
+              oldRead.resolve({ ok: true, json: () => oldBody.promise }); await tick(); oldRead = oldBody;
+            }
+            const newer = f.begin(kinds[1], "mouse");
+            let newRead = f.reads[1];
+            if (newStage === "json") {
+              newRead.resolve({ ok: true, json: () => newBody.promise }); await tick(); newRead = newBody;
+            }
+            assert.equal(control(kinds[0]).disabled, false, "superseded progress must not block a retry");
+            assert.equal(control(kinds[0]).classes.size, 0);
+            assert.equal(control(kinds[1]).disabled, true);
+            assert.equal(control(kinds[1]).classes.has("is-working"), true);
+            if (newOutcome === "failure") newRead.reject(new Error("Current request failed."));
+            else newRead.resolve(newStage === "json" ? { id: "record-a" } : response());
+            if (newOutcome === "failure") await assert.rejects(newer, /Current request failed/);
+            else await newer;
+            await tick();
+            let retry;
+            if (newOutcome === "failure") {
+              retry = f.begin(kinds[0], "mouse"); assert.equal(f.reads.length, 3);
+              assert.equal(control(kinds[0]).disabled, true);
+            }
+            if (oldOutcome === "failure") oldRead.reject(new Error("Obsolete request failed."));
+            else oldRead.resolve(oldStage === "json" ? { id: "record-a" } : response());
+            await old; await tick();
+            if (retry) {
+              assert.equal(control(kinds[0]).disabled, true, "old cleanup cannot finish the retry");
+              assert.equal(control(kinds[0]).classes.has("is-working"), true);
+              f.reads[2].resolve(response()); await retry; await tick();
+            }
+            assert.deepEqual(f.opens, [[newOutcome === "failure" ? kinds[0] : kinds[1], "record-a"]]);
+            assert.deepEqual(f.errors, newOutcome === "failure" ? ["Current request failed."] : []);
+            for (const button of Object.values(f.buttons)) {
+              assert.equal(button.disabled, false); assert.equal(button.classes.size, 0);
+            }
+          });
+        }
+      }
+    }
+  }
+}
+
+test("keyboard Replay retires a mouse Fuzzer owner without creating button progress", async () => {
+  const f = fixture(), old = f.begin("fuzzer", "mouse"), newer = f.begin("replay", "keyboard");
+  assert.equal(f.buttons.findingsDetailSendFuzzer.disabled, false);
+  assert.equal(f.buttons.findingsDetailSendFuzzer.classes.size, 0);
+  assert.equal(f.buttons.findingsDetailSendReplay.disabled, false);
+  f.reads[1].reject(new Error("Current keyboard request failed."));
+  await assert.rejects(newer, /Current keyboard request failed/); await tick();
+  const retry = f.begin("fuzzer", "mouse"); assert.equal(f.reads.length, 3);
+  f.reads[0].resolve(response()); await old; await tick();
+  assert.equal(f.buttons.findingsDetailSendFuzzer.disabled, true);
+  f.reads[2].resolve(response()); await retry; await tick();
+  assert.deepEqual(f.opens, [["fuzzer", "record-a"]]);
+  assert.deepEqual(f.errors, ["Current keyboard request failed."]);
+});
+
+test("a mouse Fuzzer action supersedes keyboard Replay without retiring its own progress", async () => {
+  const f = fixture(), old = f.begin("replay", "keyboard"), newer = f.begin("fuzzer", "mouse");
+  assert.equal(f.buttons.findingsDetailSendFuzzer.disabled, true);
+  assert.equal(f.buttons.findingsDetailSendFuzzer.classes.has("is-working"), true);
+  f.reads[0].reject(new Error("Obsolete keyboard request failed.")); await old; await tick();
+  assert.equal(f.buttons.findingsDetailSendFuzzer.disabled, true);
+  f.reads[1].resolve(response()); await newer; await tick();
+  assert.deepEqual(f.opens, [["fuzzer", "record-a"]]); assert.deepEqual(f.errors, []);
+});
+
+
+for (const kinds of [["replay", "fuzzer", "replay"], ["fuzzer", "replay", "fuzzer"]]) {
+  for (const order of [[0, 1], [1, 0]]) {
+    for (const outcome of ["success", "failure"]) {
+      test(`${kinds.join("/")} keeps the third owner after ${order.join("/")} ${outcome}`, async () => {
+        const f = fixture(), pending = kinds.map(kind => f.begin(kind, "mouse"));
+        assert.equal(f.reads.length, 3);
+        const button = f.buttons[kinds[2] === "replay" ? "findingsDetailSendReplay" : "findingsDetailSendFuzzer"];
+        for (const index of order) {
+          if (outcome === "failure") f.reads[index].reject(new Error("Obsolete request failed."));
+          else f.reads[index].resolve(response());
+          await pending[index]; await tick();
+          assert.equal(button.disabled, true); assert.equal(button.classes.has("is-working"), true);
+          assert.deepEqual(f.opens, []); assert.deepEqual(f.errors, []);
+        }
+        f.reads[2].resolve(response()); await pending[2]; await tick();
+        assert.equal(button.disabled, false); assert.equal(button.classes.size, 0);
+        assert.deepEqual(f.opens, [[kinds[2], "record-a"]]);
+      });
+    }
   }
 }
