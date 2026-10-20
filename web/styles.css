@@ -7746,6 +7746,7 @@ button.utility-button.replay-tab-add {
 .service-map-flow { display: block; overflow: visible; font-size: 12px; --service-map-api-edge: var(--token-url-color); }
 .service-map-flow text { fill: var(--text-soft); }
 .service-map-flow-phase { fill: var(--panel-code); stroke: var(--line); }
+.service-map-flow-heads-backdrop { fill: var(--panel); }
 .service-map-flow-phase-accent { fill: var(--point); opacity: .6; }
 .service-map-flow-phase-title rect { fill: var(--panel-code); }
 .service-map-flow .service-map-flow-kicker { font-size: 10px; font-weight: 700; letter-spacing: .08em; fill: var(--text-dim); }
@@ -7837,6 +7838,8 @@ button.utility-button.replay-tab-add {
 .service-map-scope-dot { position: absolute; right: 9px; top: 10px; width: 5px; height: 5px; border-radius: 50%; background: var(--text-dim); }
 .service-map-scope-dot.in-scope { background: var(--point); }
 .service-map-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 16px; color: var(--text-dim); font-size: var(--font-xs); border-top: 1px solid var(--line); }
+/* What only the shown view does sits with it, at the end of its legend. */
+.service-map-view-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .service-map-line { width: 25px; border-top: 2px solid var(--point); }
 .service-map-kinds { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .service-map-kinds:empty { display: none; }

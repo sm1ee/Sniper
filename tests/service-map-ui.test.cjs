@@ -643,7 +643,8 @@ test('card and relationship selections never move a pinned anchor; Focus selecti
   f.els.panel.dispatch('click', { target: { closest: () => ({ dataset: { serviceOrigin: originB } }) } });
   assert.equal(f.state.anchorOrigin, originA);
   assert.equal(JSON.stringify([...f.state.layoutSlots]), slots);
-  f.els.directRelations.dispatch('click'); assert.equal(f.state.anchorOrigin, originA, 'active mode does not repin');
+  f.els.directRelations.dispatch('click'); assert.equal(f.state.anchorOrigin, null, 'a second press turns it off and never repins');
+  pin(f, originA);
   f.controller.selectOrigin(originB, 0);
   const pending = f.controller.loadEvidence('evidence-one');
   f.requests.at(-1).resolve(response(evidence('evidence-one', originB))); await pending;
@@ -1397,7 +1398,8 @@ test('explicit Show and Clear are local, keep All origins default, and remove on
   const reads = f.requests.length; clickOverlay(f);
   assert.equal(f.state.anchorOrigin, originA);
   assert.equal(f.state.bodyReferenceOverlay.source.evidenceId, 'evidence-one');
-  assert.equal(f.els.allOrigins.attributes['aria-pressed'], 'false');
+  assert.equal(f.els.allOrigins.attributes['aria-pressed'], 'true', 'pinned is still the Origins view');
+  assert.equal(f.els.directRelations.attributes['aria-pressed'], 'true');
   assert.deepEqual(new Set(cardIds(f)), new Set([originA, 'https://assets.example.com']));
   assert.match(f.els.canvas.innerHTML, /data-relationship="body_url_reference"/);
   f.controller.selectOrigin('https://assets.example.com');
@@ -1660,6 +1662,42 @@ test('a flow draws method and status pills, each lane\'s requests and the time s
   // WebKit draws no context-stroke marker, so heads are paths of their own.
   assert.doesNotMatch(markup, /marker-end/);
   assert.match(markup, /class="service-map-flow-head"/);
+});
+
+test('a flow draws its lane headers last, on a backdrop, so they can stay in view', () => {
+  const markup = map.flowMarkup(map.flowLayout(map.normalizeFlow(flowPayload(), 'session-one', originA), []));
+  const heads = markup.indexOf('class="service-map-flow-heads"');
+  assert.ok(heads > markup.lastIndexOf('class="service-map-flow-step'), 'the headers paint over the steps');
+  assert.match(markup.slice(heads), /service-map-flow-heads-backdrop/);
+  assert.match(markup.slice(heads), />Client</);
+  // Scrolled 300px down at half size, the headers move 600 flow units.
+  assert.equal(map.flowHeadsOffset(100, -200, 0.5), 600);
+  assert.equal(map.flowHeadsOffset(100, 140, 1), 0, 'not yet scrolled past');
+});
+
+test('Origins and Flow are the views; Direct relations and Copy Mermaid sit in the view they belong to', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  const toolbar = html.slice(html.indexOf('id="serviceMapViewControls"'), html.indexOf('id="serviceMapZoomControls"'));
+  assert.match(toolbar, /id="serviceMapAllOrigins"[^>]*>Origins</);
+  assert.match(toolbar, /id="serviceMapFlow"/);
+  assert.doesNotMatch(toolbar, /serviceMapDirectRelations|serviceMapFocusSelection|serviceMapFlowMermaid/);
+  const legend = html.slice(html.indexOf('class="service-map-legend"'), html.indexOf('id="serviceMapResizer"'));
+  for (const id of ['serviceMapDirectRelations', 'serviceMapFocusSelection', 'serviceMapFlowMermaid']) assert.match(legend, new RegExp(`id="${id}"`), id);
+  const f = fixture();
+  await f.load(); f.controller.selectOrigin(originA);
+  f.els.directRelations.dispatch('click');
+  assert.equal(f.state.anchorOrigin, originA);
+  f.els.directRelations.dispatch('click');
+  assert.equal(f.state.anchorOrigin, null, 'a second press turns it off');
+  f.els.flow.dispatch('click');
+  f.requests.at(-1).resolve(response(flowPayload()));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.els.allOrigins.attributes['aria-pressed'], 'false');
+  assert.equal(f.els.directRelations.classList.contains('hidden'), true);
+  assert.equal(f.els.flowMermaid.classList.contains('hidden'), false);
+  f.els.allOrigins.dispatch('click');
+  assert.equal(f.els.flowMermaid.classList.contains('hidden'), true);
+  assert.equal(f.els.directRelations.classList.contains('hidden'), false);
 });
 
 test('in Flow the kind toggles count the flow\'s requests and the legend shows Flow lines', async () => {

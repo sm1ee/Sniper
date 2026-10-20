@@ -1303,6 +1303,9 @@
     const lanes = [lane(FLOW.clientX, "Client", requests(total), "Requests as the client sent them"),
       ...layout.lanes.map((origin, index) => lane(layout.laneX.get(origin), hostOf(origin), requests(layout.laneRequests.get(origin)),
         index ? `${origin} · show its flow` : origin, index ? ` data-service-flow-lane="${escape(origin)}" role="button" tabindex="0"` : ' data-selected="true"'))];
+    // The headers come last, over a backdrop, so they can stay in view while
+    // the steps scroll under them.
+    const heads = `<g class="service-map-flow-heads"><rect class="service-map-flow-heads-backdrop" x="0" y="0" width="${layout.width}" height="${FLOW.top + FLOW.header + 6}"></rect>${lanes.join("")}</g>`;
     const cards = layout.bands.map((band) => `<rect class="service-map-flow-phase" x="8" y="${band.y}" width="${layout.width - 16}" height="${band.height}" rx="8"></rect>`
       + `<rect class="service-map-flow-phase-accent" x="8" y="${band.y + 8}" width="3" height="${band.height - 16}" rx="1.5"></rect>`);
     // A card's title sits on a patch of its own colour so the lifelines pass behind it.
@@ -1344,7 +1347,13 @@
         + `${parts.join("")}<line x1="${from}" y1="${y}" x2="${to + back * 8}" y2="${y}"></line><path class="service-map-flow-head" d="${head}"></path></g>`;
     });
     return `<svg class="service-map-flow" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" role="group" aria-label="Requests in time order">`
-      + `${cards.join("")}${lifelines.join("")}${lanes.join("")}${titles.join("")}${arrows.join("")}</svg>`;
+      + `${cards.join("")}${lifelines.join("")}${titles.join("")}${arrows.join("")}${heads}</svg>`;
+  }
+
+  // How far the flow's top has scrolled above the viewport's, in flow units:
+  // where its lane headers go to stay in view.
+  function flowHeadsOffset(viewportTop, flowTop, scale) {
+    return Math.max(0, (viewportTop - flowTop) / (scale || 1));
   }
 
   // Mermaid sequence diagram text; ";" and "#" would end or escape a message.
@@ -1690,6 +1699,16 @@
         els.canvas.style.setProperty("--service-map-scaled-height", `${currentLayout.height * state.zoomScale}px`);
       }
       updateZoomControls();
+      pinFlowHeads();
+    }
+    // An SVG holds no sticky element, so a flow's lane headers follow the
+    // scroll instead.
+    function pinFlowHeads() {
+      const heads = els.canvas?.querySelector?.(".service-map-flow-heads");
+      const flow = heads?.ownerSVGElement;
+      if (!flow || !els.viewport?.getBoundingClientRect) return;
+      const offset = flowHeadsOffset(els.viewport.getBoundingClientRect().top, flow.getBoundingClientRect().top, state.zoomScale);
+      heads.setAttribute("transform", `translate(0 ${offset})`);
     }
     // `anchor` is a point in the viewport, such as the fingers of a pinch, that
     // stays over the same part of the graph; without one it is the center.
@@ -2130,8 +2149,10 @@
     }
     function renderModeButtons(selected) {
       const flow = !!state.flowOrigin;
-      els.allOrigins?.setAttribute("aria-pressed", String(!state.anchorOrigin && !flow));
+      // Origins and Flow are the views; Direct relations narrows Origins.
+      els.allOrigins?.setAttribute("aria-pressed", String(!flow));
       els.directRelations?.setAttribute("aria-pressed", String(!!state.anchorOrigin && !flow));
+      els.directRelations?.classList.toggle("hidden", flow);
       els.flow?.setAttribute("aria-pressed", String(flow));
       if (els.directRelations) els.directRelations.disabled = !state.snapshot || !state.anchorOrigin && !selected;
       if (els.flow) els.flow.disabled = !state.snapshot || !flow && !selected;
@@ -2158,6 +2179,7 @@
       currentLayout = { nodes: layout.lanes, edges: [], width: layout.width, height: layout.height };
       replace(els.canvas, `<div class="service-map-scaled"><div class="service-map-layout">${flowMarkup(layout)}</div></div>`);
       applyGraphScale();
+      pinFlowHeads();
       const steps = flow.phases.reduce((sum, phase) => sum + phase.steps.length, 0);
       els.graphBounds.textContent = [`${shown} / ${steps} steps in ${layout.bands.length} page loads`, `${flow.flowRows} of the newest ${flow.consideredRows} rows`,
         ...flow.stoppedBy.map((reason) => FLOW_STOPS[reason] || `stopped by ${reason}`)].join(" · ");
@@ -3918,6 +3940,7 @@
       return rect && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
         ? { x: event.clientX - rect.left, y: event.clientY - rect.top } : null;
     };
+    listen(els.viewport, "scroll", pinFlowHeads, { passive: true });
     listen(els.viewport, "wheel", (event) => {
       if (!event.ctrlKey || pinchStartScale !== null || !zoomAvailable()) return;
       event.preventDefault();
@@ -3972,7 +3995,7 @@
       return refresh({ force: true, retry: true });
     });
     listen(els.allOrigins, "click", () => setMapMode(false));
-    listen(els.directRelations, "click", () => setMapMode(true));
+    listen(els.directRelations, "click", () => setMapMode(!state.anchorOrigin));
     listen(els.flow, "click", () => setFlowMode(state.selectedOrigin));
     listen(els.flowMermaid, "click", () => {
       if (state.flow) copyText?.(flowMermaid(state.flow, hiddenLinkKinds()), "Copied the flow as a Mermaid sequence diagram");
@@ -4128,5 +4151,5 @@
       getState: () => state,
     };
   }
-  root.SniperServiceMap = { createController, normalizeFlow, flowLayout, flowMarkup, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
+  root.SniperServiceMap = { createController, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
 })(typeof window === "undefined" ? globalThis : window);

@@ -131,10 +131,11 @@ counts those that also allowed credentials. Both are omitted when zero.
 
 ## Direct relations
 
-**Direct relations** shows only the origins and recorded-address nodes one hop
-from an anchor; **Focus selection** makes the selected card the anchor. All
-origins is the default view. The anchor stays visible when search or a filter
-would hide it.
+The map has two views, **Origins** (the default) and **Flow**. In Origins,
+**Direct relations** at the end of the legend shows only the origins and
+recorded-address nodes one hop from an anchor, the selected card; press it
+again to see every origin. **Focus selection** makes the selected card the
+anchor. The anchor stays visible when search or a filter would hide it.
 
 ## Flow
 
@@ -146,7 +147,8 @@ is a dashed arrow back to the client. Each arrow shows the method, path and
 status, and the time since the flow's first request; each lane its request
 count. The request kinds toggled under **Requests** and the Service Map filter
 apply. Click an arrow to open its newest row in HTTP history, or another lane to
-follow that origin. **Copy Mermaid** copies the flow as a Mermaid
+follow that origin. The lane headers stay at the top while the flow scrolls.
+**Copy Mermaid**, at the end of the legend, copies the flow as a Mermaid
 sequence diagram.
 
 The view reads the newest 50,000 rows; the CLI reads 10,000 unless told
