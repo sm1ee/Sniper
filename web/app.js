@@ -929,6 +929,9 @@ const els = {
   fuzzerResultSort: document.getElementById("fuzzerResultSort"),
   fuzzerResultDirection: document.getElementById("fuzzerResultDirection"),
   fuzzerResultFilterCount: document.getElementById("fuzzerResultFilterCount"),
+  fuzzerResultFilterBadge: document.getElementById("fuzzerResultFilterBadge"),
+  fuzzerResultFilterSummary: document.getElementById("fuzzerResultFilterSummary"),
+  fuzzerClearResultFiltersButton: document.getElementById("fuzzerClearResultFiltersButton"),
   fuzzerCompareBaseButton: document.getElementById("fuzzerCompareBaseButton"),
   fuzzerCompareButton: document.getElementById("fuzzerCompareButton"),
   fuzzerSavedRunSelect: document.getElementById("fuzzerSavedRunSelect"),
@@ -1197,6 +1200,7 @@ function setActiveTool(tool, options = {}) {
   const next = sanitizeActiveTool(tool);
   if (next !== state.activeTool) {
     closeScannerSettings(false);
+    state._findingsNavigationGeneration = (state._findingsNavigationGeneration || 0) + 1;
     // Returning to Fuzzer must not revive reads started before navigation.
     state._fuzzerNavigationGeneration = (state._fuzzerNavigationGeneration || 0) + 1;
     state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
@@ -1212,6 +1216,7 @@ function setActiveProxyTab(tab, options = {}) {
   const next = sanitizeActiveProxyTab(tab);
   if (next !== state.activeProxyTab) {
     closeScannerSettings(false);
+    state._findingsNavigationGeneration = (state._findingsNavigationGeneration || 0) + 1;
     state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
   }
   state.activeProxyTab = next;
@@ -9488,6 +9493,7 @@ const BUILTIN_FINDING_CATEGORIES = new Set(Object.keys(BUILTIN_RULE_LABELS));
 
 let selectedFindingId = null;
 let findingsDetailGeneration = 0;
+let findingActionPending = null;
 
 async function loadFindings() {
   const sessionId = currentSessionId();
@@ -10443,14 +10449,46 @@ function focusHistoryRecord(recordId) {
   });
 }
 
-async function sendFindingToReplay(recordId) {
+async function runFindingAction(kind, recordId, work) {
+  if (!recordId || !selectedFindingId || state.activeTool !== "proxy" || state.activeProxyTab !== "findings") return false;
+  // Keyboard shortcuts and mouse clicks share this guard. A duplicate should
+  // not repeat the read, open another tab, or report the same error twice.
+  if (findingActionPending?.kind === kind && findingActionPending.recordId === recordId
+    && findingActionPending.isCurrent()) return false;
   const sessionId = currentSessionId();
-  const response = await fetch(transactionPath(recordId, sessionId));
-  if (currentSessionId() !== sessionId) return;
-  await requireOkResponse(response, "Failed to load finding transaction.");
-  const record = await response.json();
-  if (currentSessionId() !== sessionId) return;
-  openTransactionRecordInReplay(record);
+  const workspaceGeneration = workspaceStateGeneration;
+  const detailGeneration = findingsDetailGeneration;
+  const navigationGeneration = state._findingsNavigationGeneration || 0;
+  const findingId = selectedFindingId;
+  const action = { kind, recordId };
+  const isCurrent = () => findingActionPending === action
+    && sessionId === currentSessionId() && workspaceGeneration === workspaceStateGeneration
+    && detailGeneration === findingsDetailGeneration && findingId === selectedFindingId
+    && navigationGeneration === (state._findingsNavigationGeneration || 0)
+    && state.activeTool === "proxy" && state.activeProxyTab === "findings";
+  action.isCurrent = isCurrent;
+  findingActionPending = action;
+  try {
+    return await work(sessionId, isCurrent);
+  } catch (error) {
+    if (!isCurrent()) return false;
+    throw error;
+  } finally {
+    if (findingActionPending === action) findingActionPending = null;
+  }
+}
+
+async function sendFindingToReplay(recordId) {
+  return runFindingAction("replay", recordId, async (sessionId, isCurrent) => {
+    const response = await fetch(transactionPath(recordId, sessionId));
+    if (!isCurrent()) return false;
+    await requireOkResponse(response, "Failed to load finding transaction.");
+    if (!isCurrent()) return false;
+    const record = await response.json();
+    if (!isCurrent()) return false;
+    openTransactionRecordInReplay(record);
+    return true;
+  });
 }
 
 function openTransactionRecordInReplay(record) {
@@ -10499,12 +10537,14 @@ function isWebSocketUpgradeRecord(record) {
 }
 
 async function sendFindingToFuzzer(recordId) {
-  const sessionId = currentSessionId();
-  return openFuzzerFromRecordLoader(async () => {
-    const response = await fetch(transactionPath(recordId, sessionId));
-    await requireOkResponse(response, "Failed to load finding transaction.");
-    return response.json();
-  });
+  return runFindingAction("fuzzer", recordId, (sessionId, isCurrent) =>
+    openFuzzerFromRecordLoader(async () => {
+      const response = await fetch(transactionPath(recordId, sessionId));
+      if (!isCurrent()) return null;
+      await requireOkResponse(response, "Failed to load finding transaction.");
+      if (!isCurrent()) return null;
+      return response.json();
+    }, isCurrent));
 }
 
 function handleFindingActionError(error) {
@@ -15316,6 +15356,17 @@ function visibleFuzzerResults() {
   return filtered;
 }
 
+function clearFuzzerResultFilters() {
+  const workflow = fuzzerResultsWorkflowState();
+  const restoreFocus = document.activeElement === els.fuzzerClearResultFiltersButton;
+  Object.assign(workflow, { status: "all", minBytes: "", maxBytes: "", minMs: "", maxMs: "", invalidInputs: {} });
+  const shell = fuzzerResultsShell();
+  if (shell) shell.scrollTop = 0;
+  renderFuzzerResultsVirtual();
+  renderFuzzerResultsWorkflow();
+  if (restoreFocus) els.fuzzerResultFilterSummary?.focus({ preventScroll: true });
+}
+
 function initFuzzerResultsWorkflow() {
   const fields = {
     fuzzerResultStatus: "status", fuzzerResultMinBytes: "minBytes", fuzzerResultMaxBytes: "maxBytes",
@@ -15334,6 +15385,7 @@ function initFuzzerResultsWorkflow() {
       renderFuzzerResultsWorkflow();
     });
   }
+  els.fuzzerClearResultFiltersButton?.addEventListener("click", clearFuzzerResultFilters);
   els.fuzzerSavedRunSelect?.addEventListener("change", () => {
     const workflow = fuzzerResultsWorkflowState();
     workflow.selectedRunId = els.fuzzerSavedRunSelect.value;
@@ -15376,6 +15428,13 @@ function renderFuzzerResultsWorkflow() {
       ? `${visibleFuzzerResults().length} of ${jsonArray(state.fuzzerAttackRecord?.results).length} results`
       : `Invalid filters: ${validation.message}`;
   }
+  const activeFilterCount = Number(workflow.status !== "all") + ["minBytes", "maxBytes", "minMs", "maxMs"]
+    .filter((field) => String(workflow[field] || "").trim() || workflow.invalidInputs?.[field]).length;
+  if (els.fuzzerResultFilterBadge) {
+    els.fuzzerResultFilterBadge.textContent = `${activeFilterCount} active`;
+    els.fuzzerResultFilterBadge.classList.toggle("hidden", !activeFilterCount);
+  }
+  els.fuzzerClearResultFiltersButton?.classList.toggle("hidden", !activeFilterCount);
   const transactionId = fuzzerSelectedTransactionId();
   if (els.fuzzerCompareBaseButton) els.fuzzerCompareBaseButton.disabled = !transactionId;
   if (els.fuzzerCompareButton) {
@@ -16534,14 +16593,16 @@ function initFuzzerResizers() {
       const startTemplateW = templateCard.offsetWidth;
       const startPayloadsW = payloadsCard.offsetWidth;
       const totalW = startTemplateW + startPayloadsW;
+      if (totalW <= 0) return;
+      const minTemplateW = Math.min(240, totalW * 0.6);
+      const minPayloadsW = Math.min(160, totalW * 0.4);
       document.body.classList.add("pane-resizing-x");
       colHandle.classList.add("active");
       const onMove = (me) => {
         const delta = me.clientX - startX;
-        const newTemplateW = Math.max(200, Math.min(totalW - 120, startTemplateW + delta));
-        const newPayloadsW = totalW - newTemplateW;
-        templateCard.style.flex = `0 0 ${newTemplateW}px`;
-        payloadsCard.style.flex = `0 0 ${newPayloadsW}px`;
+        const newTemplateW = Math.max(minTemplateW, Math.min(totalW - minPayloadsW, startTemplateW + delta));
+        // Keep the split proportional when the window is resized later.
+        topRow.style.setProperty("--fuzzer-request-share", String(newTemplateW / totalW));
       };
       const onUp = () => {
         document.body.classList.remove("pane-resizing-x");
@@ -16553,8 +16614,7 @@ function initFuzzerResizers() {
       document.addEventListener("mouseup", onUp);
     });
     colHandle.addEventListener("dblclick", () => {
-      templateCard.style.flex = "";
-      payloadsCard.style.flex = "";
+      topRow.style.removeProperty("--fuzzer-request-share");
     });
   }
 
@@ -21899,11 +21959,15 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
     renderResources: snapshot?.display_settings?.render_resources,
   });
   const activeTool = sanitizeActiveTool(snapshot?.active_tool);
+  const activeProxyTab = sanitizeActiveProxyTab(snapshot?.active_proxy_tab);
+  if (activeTool !== state.activeTool || activeProxyTab !== state.activeProxyTab) {
+    state._findingsNavigationGeneration = (state._findingsNavigationGeneration || 0) + 1;
+  }
   if (activeTool !== state.activeTool) {
     state._fuzzerNavigationGeneration = (state._fuzzerNavigationGeneration || 0) + 1;
   }
   state.activeTool = activeTool;
-  state.activeProxyTab = sanitizeActiveProxyTab(snapshot?.active_proxy_tab);
+  state.activeProxyTab = activeProxyTab;
   state.historyColumnWidths = sanitizeHistoryColumnWidths(snapshot?.history_column_widths);
   state.historyColumnOrder = sanitizeHistoryColumnOrder(snapshot?.history_column_order);
   state.query = sanitizeHttpQuery(snapshot?.http_query);

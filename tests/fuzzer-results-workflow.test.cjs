@@ -14,8 +14,9 @@ function node(id) {
   return { id, value: '', innerHTML: '', textContent: '', disabled: false, scrollTop: 0, clientHeight: 90,
     addEventListener(type, fn) { listeners.set(type, fn); },
     dispatch(type, event = {}) { return listeners.get(type)?.({ target: this, preventDefault() {}, ...event }); },
-    classList: { add: x => classes.add(x), remove: x => classes.delete(x), contains: x => classes.has(x) },
-    attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, setCustomValidity(message) { this.validationMessage = message; }, focus() {}, closest: () => null, querySelector: () => null,
+    classList: { add: x => classes.add(x), remove: x => classes.delete(x), contains: x => classes.has(x),
+      toggle(x, force = !classes.has(x)) { if (force) classes.add(x); else classes.delete(x); return force; } },
+    attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, setCustomValidity(message) { this.validationMessage = message; }, focus() { this.focused = true; }, closest: () => null, querySelector: () => null,
   };
 }
 const result = (index, status = 200, bytes = index, duration = index) => ({ index, payload: `synthetic-${index}`,
@@ -27,7 +28,8 @@ const response = (body, status = 200) => ({ ok: status < 400, status, json: asyn
   headers: { get: () => 'text/plain' }, text: async () => 'Synthetic read failure.' });
 function fixture() {
   const ids = ['fuzzerResultStatus', 'fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs',
-    'fuzzerResultSort', 'fuzzerResultDirection', 'fuzzerResultFilterCount', 'fuzzerCompareBaseButton', 'fuzzerCompareButton',
+    'fuzzerResultSort', 'fuzzerResultDirection', 'fuzzerResultFilterCount',
+    'fuzzerResultFilterBadge', 'fuzzerResultFilterSummary', 'fuzzerClearResultFiltersButton', 'fuzzerCompareBaseButton', 'fuzzerCompareButton',
     'fuzzerSavedRunSelect', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton', 'fuzzerSavedRunNotice',
     'fuzzerRequestEditor', 'fuzzerPayloadsEditor', 'fuzzerResultsBody', 'fuzzerDetailPanel', 'fuzzerDetailReqCM',
     'fuzzerDetailResCM', 'fuzzerDetailResponseMeta', 'fuzzerMeta', 'startFuzzerButton', 'resetFuzzerButton',
@@ -407,4 +409,67 @@ test('same-tool settings snapshot preserves an intentional pending Reuse', async
   const pending = f.reuse(); f.c.applyUiSettingsSnapshot({ active_tool: 'fuzzer' });
   f.requests.at(-1).resolve(response(run('run-b'))); await pending;
   assert.equal(f.confirmations.length, 1);
+});
+
+test('active filters remain visible when collapsed and clear without touching draft, results, or sort', () => {
+  const f = fixture();
+  assert.equal(f.els.fuzzerResultFilterBadge.classList.contains('hidden'), true);
+  assert.equal(f.els.fuzzerClearResultFiltersButton.classList.contains('hidden'), true);
+  const saved = f.state.fuzzerAttackRecord, before = draft(f.state);
+  f.setFilter('fuzzerResultStatus', '2xx');
+  f.setFilter('fuzzerResultMinBytes', '0');
+  f.setFilter('fuzzerResultSort', 'duration'); f.setFilter('fuzzerResultDirection', 'desc');
+  assert.equal(f.els.fuzzerResultFilterBadge.textContent, '2 active');
+  assert.equal(f.els.fuzzerResultFilterBadge.classList.contains('hidden'), false);
+  assert.equal(f.els.fuzzerClearResultFiltersButton.classList.contains('hidden'), false);
+  f.state._selectedFuzzerResultKey = 'tx:tx-1';
+  f.c.document.activeElement = f.els.fuzzerClearResultFiltersButton;
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.equal(draft(f.state), before); assert.equal(f.state.fuzzerAttackRecord, saved);
+  assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-1');
+  assert.equal(f.c.fuzzerResultsWorkflowState().sort, 'duration');
+  assert.equal(f.c.fuzzerResultsWorkflowState().direction, 'desc');
+  assert.equal(f.els.fuzzerResultFilterBadge.classList.contains('hidden'), true);
+  assert.equal(f.els.fuzzerClearResultFiltersButton.classList.contains('hidden'), true);
+  assert.equal(f.els.fuzzerResultFilterSummary.focused, true);
+  assert.equal(f.requests.length, 0); assert.equal(f.saves, 0);
+});
+
+test('clear filters recovers a later run hidden by retained status filters', () => {
+  const f = fixture();
+  f.c.setFuzzerAttackRecord(run('earlier', [result(0, 500)]));
+  f.setFilter('fuzzerResultStatus', '5xx');
+  f.c.setFuzzerAttackRecord(run('later', [result(0, 200), result(1, 204)])); f.c.renderFuzzer();
+  assert.equal(f.c.visibleFuzzerResults().length, 0);
+  assert.equal(f.els.fuzzerClearResultFiltersButton.classList.contains('hidden'), false);
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.deepEqual(indexes(f), [0, 1]);
+  assert.equal(f.els.fuzzerResultFilterCount.textContent, '2 of 2 results');
+  assert.equal(f.requests.length, 0);
+});
+
+test('clear filters clears invalid empty numeric input and repeated clicks do not steal unrelated focus', () => {
+  const f = fixture();
+  f.els.fuzzerResultMinBytes.validity = { badInput: true };
+  f.setFilter('fuzzerResultMinBytes', '');
+  assert.equal(f.els.fuzzerResultFilterBadge.textContent, '1 active');
+  f.c.document.activeElement = f.els.fuzzerPayloadsEditor;
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.equal(f.c.fuzzerResultFilterValidation().valid, true);
+  assert.equal(f.c.visibleFuzzerResults().length, 2);
+  assert.notEqual(f.els.fuzzerResultFilterSummary.focused, true);
+  assert.equal(f.requests.length, 0); assert.equal(f.saves, 0);
+});
+
+test('clearing filters does not resurrect a filtered-away selection or its pending read', async () => {
+  const f = fixture(), pending = f.select(0);
+  f.setFilter('fuzzerResultStatus', '5xx');
+  assert.equal(f.state._selectedFuzzerResultKey, null);
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  pending.resolve(response({ id: 'tx-0' })); await tick();
+  assert.equal(f.state._selectedFuzzerResultKey, null);
+  assert.equal(f.state._fuzzerDetailRecord, null);
+  assert.equal(f.els.fuzzerDetailPanel.classList.contains('hidden'), true);
+  assert.equal(f.c.visibleFuzzerResults().length, 2);
 });

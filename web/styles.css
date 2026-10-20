@@ -2937,12 +2937,11 @@ body.pane-resizing-y {
   gap: 0;
 }
 .fuzzer-template-card {
-  flex: 1 1 60%;
+  flex: var(--fuzzer-request-share, 0.72) 1 0px;
   min-width: 240px;
 }
 .fuzzer-payloads-card {
-  flex: 0 0 auto;
-  width: 28%;
+  flex: calc(1 - var(--fuzzer-request-share, 0.72)) 1 0px;
   min-width: 160px;
 }
 
@@ -3482,9 +3481,30 @@ body.pane-resizing-y {
   gap: 8px;
 }
 
-.fuzzer-shell .fuzzer-filter-count {
+.fuzzer-result-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   flex: 0 0 auto;
+  gap: 4px 10px;
   padding: 4px 10px;
+}
+
+.fuzzer-result-status > .fuzzer-filter-count {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fuzzer-result-status > .secondary-action {
+  min-height: var(--control-h);
+  padding: 4px 10px;
+  font-size: var(--font-xs);
+}
+
+.fuzzer-filter-badge {
+  margin-left: 5px;
+  color: var(--point);
+  font-weight: 600;
 }
 
 .target-tree {
@@ -6055,7 +6075,8 @@ button.utility-button.replay-tab-add {
     height: auto !important;
     min-height: 0;
   }
-  .fuzzer-col-resizer {
+  .fuzzer-col-resizer,
+  .fuzzer-row-resizer {
     display: none;
   }
   .fuzzer-template-card,

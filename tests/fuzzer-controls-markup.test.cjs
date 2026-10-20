@@ -112,3 +112,13 @@ test('common value and file actions are immediate while advanced options and exp
   assert.doesNotMatch(fuzzer, /Send a captured request to Fuzzer, mark positions, load payloads/);
   assert.match(fuzzer, /placeholder="Paste payloads, one per line"/);
 });
+
+test('active-filter indication remains in summary and one-click clearing is outside closed details', () => {
+  assert.equal(byId('fuzzerResultFilterSummary').tag, 'summary');
+  assert.equal(byId('fuzzerResultFilterBadge').tag, 'span');
+  assert.match(byId('fuzzerResultFilterBadge').attrs.class, /\bhidden\b/);
+  assert.equal(byId('fuzzerClearResultFiltersButton').tag, 'button');
+  assert.equal(byId('fuzzerClearResultFiltersButton').attrs.type, 'button');
+  assert.equal(disclosureDepthAt('fuzzerClearResultFiltersButton'), 0);
+  assert.match(byId('fuzzerClearResultFiltersButton').attrs.class, /\bhidden\b/);
+});
