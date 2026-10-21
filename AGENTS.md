@@ -104,6 +104,10 @@ Changes that must land in more than one place:
   them.
 - **Scope semantics** are shared by the history filter, intercept, and the site
   map. Change `src/scope.rs` and all three follow.
+- **A new workspace section** must also be adopted in `adoptExternalWorkspace`
+  (`web/app.js`). The app saves the whole workspace at the revision it last
+  adopted, so a section it does not adopt puts back what another writer, such
+  as `sniper-cli`, just saved there.
 
 ## 5. Persistence invariants
 
