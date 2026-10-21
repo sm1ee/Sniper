@@ -955,6 +955,7 @@ const els = {
   fuzzerResultFilterBadge: document.getElementById("fuzzerResultFilterBadge"),
   fuzzerResultFilterSummary: document.getElementById("fuzzerResultFilterSummary"),
   fuzzerClearResultFiltersButton: document.getElementById("fuzzerClearResultFiltersButton"),
+  fuzzerResultStatusRow: document.getElementById("fuzzerResultStatusRow"),
   fuzzerCompareBaseButton: document.getElementById("fuzzerCompareBaseButton"),
   fuzzerCompareButton: document.getElementById("fuzzerCompareButton"),
   fuzzerSavedRunSelect: document.getElementById("fuzzerSavedRunSelect"),
@@ -15552,6 +15553,8 @@ function renderFuzzerResultsWorkflow() {
     els.fuzzerResultFilterBadge.classList.toggle("hidden", !activeFilterCount);
   }
   els.fuzzerClearResultFiltersButton?.classList.toggle("hidden", !activeFilterCount);
+  // Their row goes too while neither shows, so it leaves no gap.
+  els.fuzzerResultStatusRow?.classList.toggle("hidden", resultCount === 0 && !activeFilterCount);
   const transactionId = fuzzerSelectedTransactionId();
   if (els.fuzzerCompareBaseButton) els.fuzzerCompareBaseButton.disabled = !transactionId;
   if (els.fuzzerCompareButton) {

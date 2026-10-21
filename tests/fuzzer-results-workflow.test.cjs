@@ -29,7 +29,7 @@ const response = (body, status = 200) => ({ ok: status < 400, status, json: asyn
 function fixture() {
   const ids = ['fuzzerResultStatus', 'fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs',
     'fuzzerResultSort', 'fuzzerResultDirection', 'fuzzerResultFilterCount',
-    'fuzzerResultFilterBadge', 'fuzzerResultFilterSummary', 'fuzzerClearResultFiltersButton', 'fuzzerCompareBaseButton', 'fuzzerCompareButton',
+    'fuzzerResultFilterBadge', 'fuzzerResultFilterSummary', 'fuzzerClearResultFiltersButton', 'fuzzerResultStatusRow', 'fuzzerCompareBaseButton', 'fuzzerCompareButton',
     'fuzzerSavedRunSelect', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton', 'fuzzerSavedRunNotice',
     'fuzzerRequestEditor', 'fuzzerPayloadsEditor', 'fuzzerResultsBody', 'fuzzerDetailPanel', 'fuzzerDetailReqCM',
     'fuzzerDetailResCM', 'fuzzerDetailResponseMeta', 'fuzzerMeta', 'startFuzzerButton', 'resetFuzzerButton',
@@ -153,6 +153,12 @@ test('with no results there is nothing to compare or count, and one empty messag
   }
   assert.equal(f.els.fuzzerMeta.textContent, '');
   assert.match(f.els.fuzzerResultsBody.innerHTML, /Results appear here after running\./);
+  // The row that holds the count and Clear filters leaves no gap until
+  // one of them has something to show.
+  assert.equal(f.els.fuzzerResultStatusRow.classList.contains('hidden'), true);
+  f.setFilter('fuzzerResultMinBytes', '1');
+  assert.equal(f.els.fuzzerResultStatusRow.classList.contains('hidden'), false);
+  assert.equal(f.els.fuzzerClearResultFiltersButton.classList.contains('hidden'), false);
 });
 
 test('comparison requires a selected fetched transaction and uses existing pinned transaction reads', async () => {
