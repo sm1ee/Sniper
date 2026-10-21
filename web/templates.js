@@ -204,7 +204,7 @@
       "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
       "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
       "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanConsent", "ScanConsentText", "ScanStart",
-      "ScanNotice", "ScanJobs", "AutoState", "AutoSummary", "AutoHosts", "AutoRate", "AutoConsent", "AutoToggle",
+      "ScanNotice", "ScanJobs", "AutoState", "AutoSummary", "AutoHosts", "AutoRate", "AutoConsent", "AutoConsentRow", "AutoToggle",
       "AutoSave", "AutoNotice"];
     const els = Object.fromEntries(ids.map((id) => [id, shell.querySelector(`#templates${id}`)]));
     const listeners = [];
@@ -668,6 +668,8 @@
         els.AutoRate.value = String(auto.rate || 10);
       }
       els.AutoToggle.textContent = on ? "Turn off" : "Turn on";
+      // Consent goes with turning it on or saving a change, not with being on.
+      els.AutoConsentRow.classList.toggle("hidden", on && !autoDraft);
       els.AutoToggle.disabled = autoBusy || !auto;
       els.AutoSave.disabled = autoBusy || !auto || !autoDraft;
     }

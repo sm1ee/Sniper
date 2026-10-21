@@ -301,6 +301,11 @@ test("an On box turns a scan template on for the auto scan, and turning it on ne
     body: { session_id: "s-1", enabled: true, hosts: ["*.example.com"], rate: 5, acknowledged: true },
   });
   assert.equal(f.els.get("#templatesAutoToggle").textContent, "Turn off");
+  const consent = f.els.get("#templatesAutoConsentRow");
+  assert.equal(consent.classList.contains("hidden"), true, "on, with nothing to save, it asks for nothing");
+  f.els.get("#templatesAutoHosts").value = "*.example.com\nexample.org";
+  f.els.get("#templatesAutoHosts").dispatch("input", {});
+  assert.equal(consent.classList.contains("hidden"), false, "a change to save asks again");
   f.controller.dispose();
 });
 
