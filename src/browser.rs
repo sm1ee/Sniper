@@ -3534,7 +3534,11 @@ mod tests {
                 .unwrap();
             assert_ne!(a.profile_dir, b.profile_dir);
 
-            for _ in 0..100 {
+            // A thread deletes each profile once its browser exits, and one that
+            // ran for HANDOVER_MIN_LIFETIME first waits out a handover; under a
+            // loaded test run that outlasts two seconds, so allow what
+            // wait_for_profile_release does.
+            for _ in 0..500 {
                 if !Path::new(&a.profile_dir).exists() && !Path::new(&b.profile_dir).exists() {
                     return;
                 }
