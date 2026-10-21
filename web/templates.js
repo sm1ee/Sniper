@@ -661,8 +661,10 @@
       const on = !!auto?.enabled;
       els.AutoState.textContent = auto ? (on ? "On" : "Off") : "";
       els.AutoState.classList.toggle("recon-badge-warning", on);
+      const nowhere = auto && !(auto.hosts || []).length && (options.getScopeIncludeCount?.() || 0) === 0;
       els.AutoSummary.textContent = autoLine(auto) + (auto && !auto.templates
-        ? " Turn on Scan templates in the On column to give it something to send." : "");
+        ? " Turn on Scan templates in the On column to give it something to send." : "")
+        + (nowhere ? " Scope is empty and no hosts are listed here, so it has nowhere to send." : "");
       if (auto && !autoDraft) {
         els.AutoHosts.value = (auto.hosts || []).join("\n");
         els.AutoRate.value = String(auto.rate || 10);

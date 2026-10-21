@@ -224,7 +224,7 @@ function inside(element) {
 
 const settle = async () => { for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-async function listFixture(items, arrowStep, { sessionId = null, auto = null } = {}) {
+async function listFixture(items, arrowStep, { sessionId = null, auto = null, scopeCount = 1 } = {}) {
   const els = new Map();
   const sent = [];
   const doc = fakeDocument((tag) => Object.assign(listeningElement(), { tag }));
@@ -235,7 +235,7 @@ async function listFixture(items, arrowStep, { sessionId = null, auto = null } =
   const status = { state: "idle", library: { source: "import", verified: false }, templates: items.length, passive_supported: 0, passive_enabled: 0 };
   const urls = [];
   const controller = templates.createController({
-    root: shell, getSessionId: () => sessionId, getScopeIncludeCount: () => 1, arrowStep,
+    root: shell, getSessionId: () => sessionId, getScopeIncludeCount: () => scopeCount, arrowStep,
     fetch: async (url, init = {}) => {
       urls.push(String(url));
       if (init.method === "POST") sent.push({ url: String(url), body: JSON.parse(init.body) });
@@ -307,6 +307,17 @@ test("an On box turns a scan template on for the auto scan, and turning it on ne
   f.els.get("#templatesAutoHosts").dispatch("input", {});
   assert.equal(consent.classList.contains("hidden"), false, "a change to save asks again");
   f.controller.dispose();
+});
+
+test("the auto scan says when it has nowhere to send", async () => {
+  const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
+  const auto = { session_id: "s-1", enabled: true, hosts: [], rate: 10, templates: 1, scanned: 0, queued: 0 };
+  const scopeless = await listFixture(items, () => 0, { sessionId: "s-1", auto, scopeCount: 0 });
+  assert.match(scopeless.els.get("#templatesAutoSummary").textContent, /Scope is empty and no hosts are listed/);
+  scopeless.controller.dispose();
+  const listed = await listFixture(items, () => 0, { sessionId: "s-1", auto: { ...auto, hosts: ["*.example.com"] }, scopeCount: 0 });
+  assert.doesNotMatch(listed.els.get("#templatesAutoSummary").textContent, /Scope is empty/);
+  listed.controller.dispose();
 });
 
 test("a list sorted by a column asks the server for that order", () => {
