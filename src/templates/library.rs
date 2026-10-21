@@ -156,6 +156,8 @@ struct Task {
     state: TaskState,
     error: Option<String>,
     received_bytes: Option<u64>,
+    /// While importing: templates checked so far, out of how many.
+    checked: Option<(u64, u64)>,
     latest: Option<String>,
 }
 
@@ -177,6 +179,10 @@ pub struct LibraryStatus {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub received_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest: Option<String>,
     pub repository: &'static str,
@@ -249,6 +255,7 @@ impl TemplateLibrary {
                 state: TaskState::Loading,
                 error: None,
                 received_bytes: None,
+                checked: None,
                 latest: None,
             }),
             writer: Mutex::new(()),
@@ -263,6 +270,9 @@ impl TemplateLibrary {
         task.error = error;
         if state != TaskState::Downloading {
             task.received_bytes = None;
+        }
+        if state != TaskState::Importing {
+            task.checked = None;
         }
     }
 
@@ -349,7 +359,7 @@ impl TemplateLibrary {
             }
             offset += length;
         }
-        let mut built = index_entries(entries, &helpers);
+        let mut built = index_entries(entries, &helpers, &|_, _| {});
         built.helpers = rows;
         write_index(&self.dir, &info.sha256, &built)?;
         Ok((built, helpers))
@@ -415,6 +425,8 @@ impl TemplateLibrary {
             skipped: loaded.skipped,
             error: task.error,
             received_bytes: task.received_bytes,
+            checked: task.checked.map(|(done, _)| done),
+            check_total: task.checked.map(|(_, total)| total),
             latest: task.latest,
             repository: REPOSITORY,
             license: LICENSE,
@@ -583,7 +595,9 @@ impl TemplateLibrary {
             lines.push(line);
             helpers.insert(path, text);
         }
-        let mut built = index_entries(entries, &helpers);
+        let mut built = index_entries(entries, &helpers, &|done, total| {
+            self.task.lock().unwrap().checked = Some((done as u64, total as u64));
+        });
         built.helpers = rows;
         built.skipped += unpacked.skipped;
         fs::create_dir_all(&self.dir).context("creating the templates directory")?;
@@ -645,7 +659,7 @@ impl TemplateLibrary {
             .as_deref()
             .map(str::to_ascii_lowercase)
             .filter(|s| !s.is_empty());
-        let matching: Vec<&TemplateMeta> = loaded
+        let mut matching: Vec<&TemplateMeta> = loaded
             .index
             .iter()
             .filter(|meta| severities.is_empty() || severities.contains(&meta.severity))
@@ -681,6 +695,9 @@ impl TemplateLibrary {
                 })
             })
             .collect();
+        // Templates Sniper can run come first, so a list of everything does not
+        // open on a page of code and flow templates it cannot.
+        matching.sort_by_key(|meta| !(meta.passive_supported || meta.active_supported));
         let total = matching.len();
         let offset = query.offset.unwrap_or(0);
         let limit = query.limit.unwrap_or(200).min(MAX_LIST_LIMIT);
@@ -806,6 +823,7 @@ impl TemplateLibrary {
         task.state = state;
         task.error = None;
         task.received_bytes = None;
+        task.checked = None;
         true
     }
 
@@ -989,16 +1007,22 @@ fn read_helpers(bundle: &Path, rows: &[HelperRow]) -> Result<HashMap<String, Str
 }
 
 /// Classifies every template. The first of a duplicated id wins, as in
-/// Nuclei; files that do not parse are counted, not listed.
+/// Nuclei; files that do not parse are counted, not listed. `progress` hears
+/// how many are checked, out of how many, every so often and at the end.
 fn index_entries(
     entries: Vec<(String, String, u64, u64)>,
     helpers: &HashMap<String, String>,
+    progress: &dyn Fn(usize, usize),
 ) -> BuiltIndex {
     let mut seen = HashSet::new();
     let mut templates = Vec::new();
     let mut duplicates = 0;
     let mut skipped = 0;
-    for (path, yaml, offset, len) in entries {
+    let total = entries.len();
+    for (checked, (path, yaml, offset, len)) in entries.into_iter().enumerate() {
+        if checked % 250 == 0 {
+            progress(checked, total);
+        }
         let Ok(parsed) = std::panic::catch_unwind(|| model::parse(&yaml)).unwrap_or_else(|_| {
             Err(model::ParseError {
                 code: "panic",
@@ -1067,6 +1091,7 @@ fn index_entries(
             risks: classification.risks.into_iter().collect(),
         });
     }
+    progress(total, total);
     BuiltIndex {
         templates,
         helpers: Vec::new(),
@@ -1529,6 +1554,25 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn templates_sniper_can_run_are_listed_first() {
+        let dir = std::env::temp_dir().join(format!("sniper-templates-{}", uuid::Uuid::new_v4()));
+        let library = library(&dir);
+        let release = archive(&[
+            ("nuclei-templates-1.0/dns/dns.yaml", DNS.as_bytes()),
+            ("nuclei-templates-1.0/http/exposure.yaml", ACTIVE.as_bytes()),
+        ]);
+        library.import_blocking(&release, Source::Import).unwrap();
+        let ids: Vec<String> = library
+            .list(&ListQuery::default())
+            .items
+            .into_iter()
+            .map(|item| item.meta.id)
+            .collect();
+        assert_eq!(ids, ["example-exposure", "example-dns"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
     const WORDS: &str = "id: example-words\ninfo:\n  name: Example Words\n  severity: info\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/{{word}}']\n    payloads:\n      word: helpers/wordlists/words.txt\n    matchers:\n      - type: status\n        status: [200]\n";
     const MISSING: &str = "id: example-missing\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/{{word}}']\n    payloads:\n      word: helpers/wordlists/missing.txt\n    matchers:\n      - type: status\n        status: [200]\n";
 
@@ -1617,6 +1661,19 @@ mod tests {
         assert!(info.verified);
         assert_eq!(info.tag, "v1.0.0");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn checking_a_release_reports_how_far_it_got() {
+        let entries = vec![
+            ("http/a.yaml".to_string(), ACTIVE.to_string(), 0, 1),
+            ("http/b.yaml".to_string(), PASSIVE.to_string(), 1, 1),
+        ];
+        let seen = std::cell::RefCell::new(Vec::new());
+        index_entries(entries, &HashMap::new(), &|done, total| {
+            seen.borrow_mut().push((done, total))
+        });
+        assert_eq!(seen.borrow().last(), Some(&(2, 2)));
     }
 
     #[test]

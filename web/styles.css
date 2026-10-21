@@ -8205,6 +8205,22 @@ button.utility-button.replay-tab-add {
    column like the form's controls, the search box shrinks to nothing. */
 .templates-shell .recon-search-controls select { width: auto; min-width: 130px; }
 .templates-status { white-space: pre-line; }
+.templates-progress {
+  width: 100%; height: 6px; border: 0; border-radius: 3px;
+  -webkit-appearance: none; appearance: none; background: var(--panel-code); overflow: hidden;
+}
+.templates-progress::-webkit-progress-bar { background: var(--panel-code); border-radius: 3px; }
+.templates-progress::-webkit-progress-value { background: var(--point); border-radius: 3px; }
+.templates-progress::-moz-progress-bar { background: var(--point); }
+/* Before the total is known the bar moves without measuring. */
+.templates-progress:indeterminate {
+  background: linear-gradient(90deg, transparent, var(--point), transparent) no-repeat var(--panel-code);
+  background-size: 40% 100%;
+  animation: templates-progress-slide 1.2s ease-in-out infinite;
+}
+.templates-progress:indeterminate::-webkit-progress-bar { background: transparent; }
+@keyframes templates-progress-slide { from { background-position: -60% 0; } to { background-position: 160% 0; } }
+@media (prefers-reduced-motion: reduce) { .templates-progress:indeterminate { animation: none; } }
 .templates-shell input:focus-visible, .templates-shell select:focus-visible, .templates-shell button:focus-visible,
 .templates-shell textarea:focus-visible, .templates-shell summary:focus-visible {
   outline: 2px solid var(--info); outline-offset: 2px;
@@ -8213,6 +8229,10 @@ button.utility-button.replay-tab-add {
 .templates-table th:nth-child(2) { width: 76px; }
 .templates-table th:nth-child(4) { width: 130px; }
 .templates-table th:nth-child(5) { width: 26%; }
+/* One line per value keeps rows level; the detail beside shows the rest. */
+.templates-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.templates-table .recon-endpoint-button,
+.templates-table .recon-help { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .templates-yaml {
   margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 5px;
   background: var(--panel-code); font-family: var(--mono); font-size: var(--font-sm);

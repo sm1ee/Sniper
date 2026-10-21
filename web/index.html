@@ -1658,6 +1658,7 @@
             <div class="recon-form">
               <p class="recon-help templates-status" id="templatesStatus">Loading the template library…</p>
               <p class="recon-notice hidden" id="templatesProgress" role="status"></p>
+              <progress class="templates-progress hidden" id="templatesProgressBar" aria-labelledby="templatesProgress"></progress>
               <label class="recon-check recon-history-consent"><input id="templatesConsent" type="checkbox" /> <span>Download from github.com/projectdiscovery/nuclei-templates (MIT). GitHub sees this computer's address.</span></label>
               <div class="templates-actions">
                 <button class="primary-action" id="templatesDownload" type="button" disabled>Download latest</button>
@@ -1731,9 +1732,9 @@
                   <option value="info">Info</option>
                 </select>
                 <select id="templatesSupport" aria-label="What Sniper can run">
-                  <option value="passive" selected>Passive</option>
+                  <option value="" selected>All</option>
+                  <option value="passive">Passive</option>
                   <option value="active">Scan</option>
-                  <option value="">All</option>
                   <option value="unsupported">Unsupported</option>
                 </select>
               </div>
@@ -1746,7 +1747,7 @@
             </header>
             <div class="recon-results">
               <div class="recon-table-scroll">
-                <table class="recon-table templates-table">
+                <table class="mini-table recon-table templates-table">
                   <thead><tr><th>On</th><th>Severity</th><th>Template</th><th>Mode</th><th>Tags</th></tr></thead>
                   <tbody id="templatesRows"></tbody>
                 </table>

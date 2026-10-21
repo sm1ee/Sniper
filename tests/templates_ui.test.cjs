@@ -34,6 +34,58 @@ test("the library line says where templates came from and whether they were veri
   assert.match(templates.libraryLine({ library: { source: "import", verified: false }, templates: 1, passive_supported: 0, passive_enabled: 0 }), /Imported archive · not checksum-verified/);
 });
 
+test("the progress bar counts the templates checked once the total is known", () => {
+  assert.equal(templates.progressOf({ state: "idle" }), null);
+  assert.deepEqual(templates.progressOf({ state: "downloading" }), { label: "Contacting GitHub…", value: null, max: null });
+  assert.deepEqual(templates.progressOf({ state: "downloading", received_bytes: 3355443 }),
+    { label: "Downloading… 3.2 MiB", value: null, max: null });
+  assert.deepEqual(templates.progressOf({ state: "importing" }), { label: "Reading the archive…", value: null, max: null });
+  assert.deepEqual(templates.progressOf({ state: "importing", checked: 6200, check_total: 14035 }),
+    { label: "Checking templates… 6,200 of 14,035", value: 6200, max: 14035 });
+  assert.deepEqual(templates.progressOf({ state: "failed", error: "boom" }), { label: "The last download or import failed: boom", error: true });
+});
+
+test("every template is listed by default, and the list reads like Findings", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  const support = html.match(/<select id="templatesSupport"[^]*?<\/select>/)[0];
+  assert.match(support, /<option value="" selected>All<\/option>/);
+  assert.match(html, /<table class="mini-table recon-table templates-table">/);
+  // Every row one line high: long names and tag lists end in an ellipsis.
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /\.templates-table td[^{]*\{[^}]*white-space: nowrap;[^}]*text-overflow: ellipsis;/);
+});
+
+test("rows show severity as Findings do, and a box only where a template can run passively", async () => {
+  const els = new Map();
+  const shell = {
+    ownerDocument: { createElement: (tag) => Object.assign(fakeElement(), { tag }) },
+    querySelector(selector) { const element = fakeElement(); els.set(selector, element); return element; },
+  };
+  const status = { state: "idle", library: { source: "import", verified: false }, templates: 2, passive_supported: 1, passive_enabled: 0 };
+  const items = [
+    { id: "example-active", name: "Example Active", severity: "high", tags: [], passive_supported: false, active_supported: true },
+    { id: "example-passive", name: "Example Passive", severity: "unknown", tags: [], passive_supported: true, passive: "global" },
+  ];
+  const controller = templates.createController({
+    root: shell, getSessionId: () => null, getScopeIncludeCount: () => 1,
+    fetch: async (url) => ({ ok: true, json: async () => (String(url).includes("/library") ? status : { items, total: 2 }) }),
+    setTimeout: () => 0, clearTimeout() {},
+  });
+  controller.setVisible(true);
+  for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  const [active, passive] = els.get("#templatesRows").children;
+  const badge = active.children[1].children[0];
+  assert.equal(badge.className, "severity-badge severity-high");
+  assert.equal(badge.textContent, "high");
+  assert.equal(passive.children[1].children[0].className, "severity-badge severity-info");
+  assert.equal(active.children[0].children.length, 0, "nothing to turn on");
+  assert.equal(passive.children[0].children[0].type, "checkbox");
+  // Turning on what the list shows applies to passive templates, so it is
+  // offered only while the list shows those.
+  assert.equal(els.get("#templatesEnableShown").classList.contains("hidden"), true);
+  controller.dispose();
+});
+
 test("the mode says passive, scan or the first reason a template cannot run", () => {
   assert.equal(templates.supportLabel({ passive_supported: true, passive: "global" }), "Passive");
   assert.equal(templates.supportLabel({ passive_supported: true, passive: "base_url_get" }), "Passive");
@@ -103,7 +155,7 @@ test("the Scan tool is registered where the UI and the server keep their tool li
   assert.match(html, /<script src="\/templates\.js" defer><\/script>/);
   assert.match(app, /const IMPLEMENTED_TOOLS = new Set\(\[[^\]]*"templates"/);
   assert.match(settings, /const ACTIVE_TOOL_OPTIONS: &\[&str\] = &\[[^\]]*"templates"/);
-  for (const id of ["Status", "Progress", "Consent", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
+  for (const id of ["Status", "Progress", "ProgressBar", "Consent", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
     "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Rows", "Detail",
     "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
     "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanConsent", "ScanConsentText", "ScanStart", "ScanNotice",

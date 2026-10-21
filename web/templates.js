@@ -42,6 +42,28 @@
     return `${parts.join(" · ")}\n${count(status.templates)} templates · ${count(status.passive_supported)} passive, ${count(status.passive_enabled)} on · ${count(status.active_supported)} scannable`;
   }
 
+  // What the library is doing, for the bar under its status: a value out of
+  // a total once the total is known.
+  function progressOf(status) {
+    if (status?.state === "downloading") {
+      const label = status.received_bytes ? `Downloading… ${(status.received_bytes / 1048576).toFixed(1)} MiB` : "Contacting GitHub…";
+      return { label, value: null, max: null };
+    }
+    if (status?.state === "importing") {
+      const total = Number(status.check_total) || 0;
+      if (!total) return { label: "Reading the archive…", value: null, max: null };
+      const done = Number(status.checked) || 0;
+      return { label: `Checking templates… ${count(done)} of ${count(total)}`, value: done, max: total };
+    }
+    if (status?.state === "failed" && status.error) return { label: `The last download or import failed: ${status.error}`, error: true };
+    return null;
+  }
+
+  // The classes Findings badges a severity with.
+  function severityClass(severity) {
+    return ["critical", "high", "medium", "low"].includes(severity) ? `severity-${severity}` : "severity-info";
+  }
+
   function supportLabel(meta) {
     const ways = [];
     if (meta.passive_supported) ways.push("Passive");
@@ -127,7 +149,7 @@
     const fetcher = options.fetch || root.fetch.bind(root);
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
-    const ids = ["Status", "Progress", "Consent", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
+    const ids = ["Status", "Progress", "ProgressBar", "Consent", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
       "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Rows", "Detail",
       "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
       "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanConsent", "ScanConsentText", "ScanStart",
@@ -174,17 +196,18 @@
     function renderStatus() {
       const working = status && BUSY_STATES.has(status.state);
       els.Status.textContent = libraryLine(status);
-      let progress = "";
-      if (status?.state === "downloading") {
-        progress = status.received_bytes ? `Downloading… ${(status.received_bytes / 1048576).toFixed(1)} MiB` : "Contacting GitHub…";
-      } else if (status?.state === "importing") {
-        progress = "Reading and checking templates…";
-      } else if (status?.state === "failed" && status.error) {
-        progress = `The last download or import failed: ${status.error}`;
-      }
-      els.Progress.textContent = progress;
+      const progress = progressOf(status);
+      els.Progress.textContent = progress?.label || "";
       els.Progress.classList.toggle("hidden", !progress);
-      els.Progress.classList.toggle("recon-error", status?.state === "failed");
+      els.Progress.classList.toggle("recon-error", !!progress?.error);
+      els.ProgressBar.classList.toggle("hidden", !progress || !!progress.error);
+      // Without a value the bar moves without saying how far it got.
+      if (progress?.value == null) {
+        els.ProgressBar.removeAttribute("value");
+      } else {
+        els.ProgressBar.max = progress.max;
+        els.ProgressBar.value = progress.value;
+      }
       els.Download.disabled = !!working || busy || !els.Consent.checked;
       els.Import.disabled = !!working || busy;
       els.Check.disabled = !!working || busy;
@@ -193,8 +216,10 @@
       // Bulk changes act on passive-capable templates only, so they are offered
       // only while the list shows exactly those.
       const bulk = !!status?.library && els.Support.value === "passive";
-      els.EnableShown.disabled = !bulk || busy;
-      els.DisableShown.disabled = !bulk || busy;
+      for (const button of [els.EnableShown, els.DisableShown]) {
+        button.classList.toggle("hidden", !bulk);
+        button.disabled = busy;
+      }
       // Preview waits for a library, which may arrive after the scan form
       // was first drawn.
       renderScan();
@@ -211,20 +236,24 @@
       }
       for (const meta of items) {
         const row = element("tr", meta.id === selected?.id ? "recon-selected" : "");
-        const toggle = element("input");
-        toggle.type = "checkbox";
-        toggle.checked = !!meta.enabled;
-        toggle.disabled = !meta.passive_supported || busy;
-        toggle.dataset.templateToggle = meta.id;
-        toggle.setAttribute("aria-label", `Run ${meta.name || meta.id} on captured traffic`);
         const toggleCell = element("td");
-        toggleCell.append(toggle);
+        if (meta.passive_supported) {
+          const toggle = element("input");
+          toggle.type = "checkbox";
+          toggle.checked = !!meta.enabled;
+          toggle.disabled = busy;
+          toggle.dataset.templateToggle = meta.id;
+          toggle.setAttribute("aria-label", `Run ${meta.name || meta.id} on captured traffic`);
+          toggleCell.append(toggle);
+        }
+        const severityCell = element("td");
+        severityCell.append(element("span", `severity-badge ${severityClass(meta.severity)}`, meta.severity || "unknown"));
         const name = element("button", "recon-endpoint-button", meta.name || meta.id);
         name.type = "button";
         name.dataset.templateId = meta.id;
         const nameCell = element("td");
         nameCell.append(name, element("div", "recon-help", meta.id));
-        row.append(toggleCell, element("td", "", meta.severity), nameCell, element("td", "", supportLabel(meta)),
+        row.append(toggleCell, severityCell, nameCell, element("td", "", supportLabel(meta)),
           element("td", "", (meta.tags || []).slice(0, 6).join(", ")));
         els.Rows.append(row);
       }
@@ -638,7 +667,7 @@
     };
   }
 
-  const api = { createController, listQuery, passiveRequest, libraryLine, supportLabel, scanRequest, parseTargets,
+  const api = { createController, listQuery, passiveRequest, libraryLine, progressOf, supportLabel, scanRequest, parseTargets,
     previewLine, jobLine, RISKS, PAGE_SIZE };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperTemplates = api;
