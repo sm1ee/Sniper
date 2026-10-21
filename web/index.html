@@ -1674,6 +1674,25 @@
               <p class="recon-notice hidden" id="templatesNotice" role="status"></p>
             </div>
           </section>
+          <section class="panel-card templates-auto" aria-labelledby="templatesAutoTitle">
+            <header class="panel-toolbar">
+              <div><p class="placeholder-kicker">Auto scan</p><h2 id="templatesAutoTitle">Send to new hosts</h2></div>
+              <span class="recon-badge" id="templatesAutoState"></span>
+            </header>
+            <div class="recon-form">
+              <p class="recon-help" id="templatesAutoSummary">Loading the auto scan…</p>
+              <label class="recon-field" for="templatesAutoHosts">Also these hosts, besides Scope's
+                <textarea id="templatesAutoHosts" rows="2" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
+              </label>
+              <label class="recon-field" for="templatesAutoRate">Requests a second<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
+              <label class="recon-check recon-history-consent"><input id="templatesAutoConsent" type="checkbox" /> <span>Send the Scan templates turned on in the list to each new host the proxy captures in Scope or listed here, once a host. Only hosts you may test.</span></label>
+              <div class="templates-actions">
+                <button class="primary-action" id="templatesAutoToggle" type="button" disabled>Turn on</button>
+                <button class="secondary-action" id="templatesAutoSave" type="button" disabled>Save</button>
+              </div>
+              <p class="recon-notice hidden" id="templatesAutoNotice" role="status" aria-live="polite"></p>
+            </div>
+          </section>
           <section class="panel-card templates-scan" aria-labelledby="templatesScanTitle">
             <header class="panel-toolbar">
               <div><p class="placeholder-kicker">Template Scan</p><h2 id="templatesScanTitle">Send templates</h2></div>
@@ -1752,7 +1771,7 @@
             <div class="recon-results">
               <div class="recon-table-scroll" tabindex="0" aria-label="Templates">
                 <table class="mini-table recon-table templates-table">
-                  <thead id="templatesHead"><tr><th class="table-sortable" data-sort="on" aria-sort="none">On <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="severity" aria-sort="none">Severity <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="name" aria-sort="none">Template <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="mode" aria-sort="none">Mode <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="tags" aria-sort="none">Tags <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
+                  <thead id="templatesHead"><tr><th class="table-sortable" data-sort="on" aria-sort="none" title="On: a template that can judge captured traffic checks it; one that must send its requests goes to each new host while the auto scan is on.">On <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="severity" aria-sort="none">Severity <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="name" aria-sort="none">Template <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="mode" aria-sort="none">Mode <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="tags" aria-sort="none">Tags <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
                   <tbody id="templatesRows"></tbody>
                 </table>
               </div>

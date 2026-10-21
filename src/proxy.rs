@@ -3747,6 +3747,9 @@ async fn store_record_and_scan(
     if !session.runtime.http_capture_enabled().await {
         return;
     }
+    // The auto scan hears of each host the proxy captures; replays and its own
+    // requests take the unconditional path and never reach it.
+    crate::templates::scan::observe(state, session, &record.scheme, &record.host).await;
     store_record_and_scan_unconditionally(state, session, record).await;
 }
 
@@ -4397,6 +4400,15 @@ impl StreamedRecordContext {
             {
                 let mut scan_record = record;
                 scan_record.id = record_id;
+                // A streamed response finishes a record stored when it began,
+                // so it tells the auto scan here, as store_record_and_scan does.
+                crate::templates::scan::observe(
+                    &self.state,
+                    &self.session,
+                    &scan_record.scheme,
+                    &scan_record.host,
+                )
+                .await;
                 scan_record_for_session(&self.state, &self.session, scan_record);
                 forget_persist_context_if_clean(self.session.id(), self.persist_generation);
                 return;

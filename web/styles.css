@@ -8289,6 +8289,7 @@ button.utility-button.replay-tab-add {
 .templates-table th[data-sort="tags"] { width: 26%; }
 /* One line per value keeps rows level; the detail beside shows the rest. */
 .templates-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.templates-table .templates-off { color: var(--text-dim); }
 .templates-table .templates-name,
 .templates-table .recon-help { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .templates-yaml {

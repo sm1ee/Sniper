@@ -55,7 +55,7 @@ test("every template is listed by default, and the list reads like Findings", ()
   assert.match(css, /\.templates-table td[^{]*\{[^}]*white-space: nowrap;[^}]*text-overflow: ellipsis;/);
 });
 
-test("rows show severity as Findings do, and a box only where a template can run passively", async () => {
+test("rows show severity as Findings do, and a box wherever a template can run", async () => {
   const els = new Map();
   const shell = {
     ownerDocument: fakeDocument((tag) => Object.assign(fakeElement(), { tag })),
@@ -65,6 +65,7 @@ test("rows show severity as Findings do, and a box only where a template can run
   const items = [
     { id: "example-active", name: "Example Active", severity: "high", tags: [], passive_supported: false, active_supported: true },
     { id: "example-passive", name: "Example Passive", severity: "unknown", tags: [], passive_supported: true, passive: "global" },
+    { id: "example-dns", name: "Example DNS", severity: "info", tags: [], reasons: ["protocol:dns"] },
   ];
   const controller = templates.createController({
     root: shell, getSessionId: () => null, getScopeIncludeCount: () => 1,
@@ -73,13 +74,18 @@ test("rows show severity as Findings do, and a box only where a template can run
   });
   controller.setVisible(true);
   for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
-  const [active, passive] = els.get("#templatesRows").children;
+  const [active, passive, dns] = els.get("#templatesRows").children;
   const badge = active.children[1].children[0];
   assert.equal(badge.className, "severity-badge severity-high");
   assert.equal(badge.textContent, "high");
   assert.equal(passive.children[1].children[0].className, "severity-badge severity-info");
-  assert.equal(active.children[0].children.length, 0, "nothing to turn on");
+  // One that must send its requests is on for the auto scan; one that can
+  // judge captured traffic is on for that; one Sniper cannot run says so.
+  assert.equal(active.children[0].children[0].type, "checkbox");
+  assert.equal(active.children[0].children[0].dataset.templateAuto, "example-active");
   assert.equal(passive.children[0].children[0].type, "checkbox");
+  assert.equal(passive.children[0].children[0].dataset.templateToggle, "example-passive");
+  assert.equal(dns.children[0].children[0].textContent, "—");
   // Turning on what the list shows applies to passive templates, so it is
   // offered only while the list shows those.
   assert.equal(els.get("#templatesEnableShown").classList.contains("hidden"), true);
@@ -218,8 +224,9 @@ function inside(element) {
 
 const settle = async () => { for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-async function listFixture(items, arrowStep) {
+async function listFixture(items, arrowStep, { sessionId = null, auto = null } = {}) {
   const els = new Map();
+  const sent = [];
   const doc = fakeDocument((tag) => Object.assign(listeningElement(), { tag }));
   const shell = {
     ownerDocument: doc,
@@ -228,21 +235,74 @@ async function listFixture(items, arrowStep) {
   const status = { state: "idle", library: { source: "import", verified: false }, templates: items.length, passive_supported: 0, passive_enabled: 0 };
   const urls = [];
   const controller = templates.createController({
-    root: shell, getSessionId: () => null, getScopeIncludeCount: () => 1, arrowStep,
-    fetch: async (url) => {
+    root: shell, getSessionId: () => sessionId, getScopeIncludeCount: () => 1, arrowStep,
+    fetch: async (url, init = {}) => {
       urls.push(String(url));
+      if (init.method === "POST") sent.push({ url: String(url), body: JSON.parse(init.body) });
       const id = String(url).match(/^\/api\/templates\/([^?/]+)$/)?.[1];
       const body = String(url).includes("/library") ? status
-        : id ? { ...items.find((meta) => meta.id === decodeURIComponent(id)), yaml: "" }
-          : { items, total: items.length };
+        : String(url).startsWith("/api/templates/auto/templates") ? { auto_enabled: 1, ignored: 0 }
+          : String(url).startsWith("/api/templates/auto") ? Object.assign(auto, init.method === "POST" ? JSON.parse(init.body) : {})
+            : String(url).startsWith("/api/templates/scans") ? { session_id: sessionId, jobs: [] }
+              : id ? { ...items.find((meta) => meta.id === decodeURIComponent(id)), yaml: "" }
+                : { items, total: items.length };
       return { ok: true, json: async () => body };
     },
     setTimeout: () => 0, clearTimeout() {},
   });
   controller.setVisible(true);
   await settle();
-  return { controller, els, doc, urls, rows: () => els.get("#templatesRows").children };
+  return { controller, els, doc, urls, sent, rows: () => els.get("#templatesRows").children };
 }
+
+test("the auto scan request carries its hosts and pace, and consent to turn it on", () => {
+  const values = { hosts: " *.example.com\napi.example.com:8443 ", rate: "5", consent: true };
+  assert.deepEqual(templates.autoRequest(values, "s-1", true), {
+    session_id: "s-1", enabled: true, hosts: ["*.example.com", "api.example.com:8443"], rate: 5, acknowledged: true,
+  });
+  assert.deepEqual(templates.autoRequest({ ...values, consent: false }, "s-1", false), {
+    session_id: "s-1", enabled: false, hosts: ["*.example.com", "api.example.com:8443"], rate: 5,
+  });
+  assert.throws(() => templates.autoRequest({ ...values, consent: false }, "s-1", true), /Confirm/);
+  assert.throws(() => templates.autoRequest({ ...values, hosts: "https://app.example.com/" }, "s-1", true), /as Scope takes it/);
+  assert.throws(() => templates.autoRequest({ ...values, rate: "0" }, "s-1", true), /from 1 to 50/);
+  assert.throws(() => templates.autoRequest(values, null, true), /session/);
+  assert.match(templates.autoLine({ enabled: false, templates: 0 }), /^Off · 0 templates on for it\./);
+  assert.equal(
+    templates.autoLine({ enabled: true, templates: 12, scanned: 1, queued: 3 }),
+    "On · 12 templates on for it · 1 host sent to · 3 waiting.",
+  );
+});
+
+test("an On box turns a scan template on for the auto scan, and turning it on needs consent", async () => {
+  const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
+  const auto = { session_id: "s-1", enabled: false, hosts: [], rate: 10, templates: 0, scanned: 0, queued: 0 };
+  const f = await listFixture(items, () => 0, { sessionId: "s-1", auto });
+  const box = f.rows()[0].children[0].children[0];
+  box.checked = true;
+  f.els.get("#templatesRows").dispatch("click", { target: inside(box) });
+  await settle();
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/auto/templates", body: { ids: ["example-active"], enabled: true } });
+
+  // Typed, so a refresh leaves them.
+  f.els.get("#templatesAutoHosts").value = "*.example.com";
+  f.els.get("#templatesAutoHosts").dispatch("input", {});
+  f.els.get("#templatesAutoRate").value = "5";
+  f.els.get("#templatesAutoRate").dispatch("input", {});
+  f.els.get("#templatesAutoToggle").dispatch("click", {});
+  await settle();
+  assert.equal(f.sent.length, 1, "nothing is turned on before consent");
+  assert.match(f.els.get("#templatesAutoNotice").textContent, /Confirm/);
+  f.els.get("#templatesAutoConsent").checked = true;
+  f.els.get("#templatesAutoToggle").dispatch("click", {});
+  await settle();
+  assert.deepEqual(f.sent.at(-1), {
+    url: "/api/templates/auto",
+    body: { session_id: "s-1", enabled: true, hosts: ["*.example.com"], rate: 5, acknowledged: true },
+  });
+  assert.equal(f.els.get("#templatesAutoToggle").textContent, "Turn off");
+  f.controller.dispose();
+});
 
 test("a list sorted by a column asks the server for that order", () => {
   assert.equal(

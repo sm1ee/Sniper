@@ -86,6 +86,24 @@ struct Manifest {
     library: Option<LibraryInfo>,
     #[serde(default)]
     passive_enabled: Vec<String>,
+    /// Templates that must send requests, turned on for the auto scan.
+    #[serde(default)]
+    auto_enabled: Vec<String>,
+}
+
+impl Manifest {
+    /// Whether a template is turned on: to check captured traffic when it
+    /// can, else for the auto scan to send.
+    fn is_on(&self, id: &str) -> bool {
+        self.passive_enabled.iter().any(|on| on == id)
+            || self.auto_enabled.iter().any(|on| on == id)
+    }
+}
+
+/// What the auto scan sends: a template that cannot judge captured traffic
+/// and must send its own requests.
+fn auto_capable(meta: &TemplateMeta) -> bool {
+    meta.active_supported && !meta.passive_supported
 }
 
 /// One template in the index: enough to list and filter it. Its text stays
@@ -173,6 +191,7 @@ pub struct LibraryStatus {
     pub passive_supported: usize,
     pub active_supported: usize,
     pub passive_enabled: usize,
+    pub auto_enabled: usize,
     /// Responses whose template evaluation was skipped under load; Rescan
     /// covers them.
     pub passive_skipped_under_load: u64,
@@ -423,6 +442,7 @@ impl TemplateLibrary {
             passive_supported: index.iter().filter(|meta| meta.passive_supported).count(),
             active_supported: index.iter().filter(|meta| meta.active_supported).count(),
             passive_enabled: loaded.manifest.passive_enabled.len(),
+            auto_enabled: loaded.manifest.auto_enabled.len(),
             passive_skipped_under_load: self.skipped_under_load.load(Ordering::Relaxed),
             duplicates: loaded.duplicates,
             skipped: loaded.skipped,
@@ -514,18 +534,61 @@ impl TemplateLibrary {
     /// Turns passive templates on or off. Ids that are not passive-capable
     /// are ignored and counted. Returns how many are enabled afterwards.
     pub fn set_passive(&self, ids: &[String], enabled: bool) -> Result<(usize, usize)> {
+        let outcome = self.set_on(
+            ids,
+            enabled,
+            |meta| meta.passive_supported,
+            |manifest| &mut manifest.passive_enabled,
+        )?;
+        self.rebuild_passive();
+        Ok(outcome)
+    }
+
+    /// Turns templates on or off for the auto scan; ids it would not send
+    /// are ignored and counted. Returns how many are on afterwards.
+    pub fn set_auto(&self, ids: &[String], enabled: bool) -> Result<(usize, usize)> {
+        self.set_on(ids, enabled, auto_capable, |manifest| {
+            &mut manifest.auto_enabled
+        })
+    }
+
+    /// The templates the auto scan sends, in the order they were turned on.
+    pub fn auto_selection(&self) -> Vec<TemplateMeta> {
+        let loaded = self.loaded.read().unwrap();
+        loaded
+            .manifest
+            .auto_enabled
+            .iter()
+            .filter_map(|id| {
+                loaded
+                    .by_id
+                    .get(id)
+                    .map(|position| &loaded.index[*position])
+            })
+            .filter(|meta| auto_capable(meta))
+            .cloned()
+            .collect()
+    }
+
+    fn set_on(
+        &self,
+        ids: &[String],
+        enabled: bool,
+        capable: fn(&TemplateMeta) -> bool,
+        list: fn(&mut Manifest) -> &mut Vec<String>,
+    ) -> Result<(usize, usize)> {
         let _writer = self.writer.lock().unwrap();
         let (mut manifest, ignored) = {
             let loaded = self.loaded.read().unwrap();
             let mut manifest = loaded.manifest.clone();
-            let mut current: Vec<String> = manifest.passive_enabled.clone();
+            let current = list(&mut manifest);
             let mut ignored = 0;
             for id in ids {
-                let capable = loaded
+                let able = loaded
                     .by_id
                     .get(id)
-                    .is_some_and(|position| loaded.index[*position].passive_supported);
-                if !capable {
+                    .is_some_and(|position| capable(&loaded.index[*position]));
+                if !able {
                     ignored += 1;
                     continue;
                 }
@@ -538,13 +601,11 @@ impl TemplateLibrary {
                 }
             }
             current.sort();
-            manifest.passive_enabled = current;
             (manifest, ignored)
         };
         crate::session::write_json(&self.manifest_path(), &manifest)?;
-        let count = manifest.passive_enabled.len();
+        let count = list(&mut manifest).len();
         self.loaded.write().unwrap().manifest = std::mem::take(&mut manifest);
-        self.rebuild_passive();
         Ok((count, ignored))
     }
 
@@ -648,6 +709,7 @@ impl TemplateLibrary {
             .manifest
             .passive_enabled
             .iter()
+            .chain(&loaded.manifest.auto_enabled)
             .map(String::as_str)
             .collect();
         let search = query
@@ -825,7 +887,7 @@ impl TemplateLibrary {
         let (meta, enabled) = {
             let loaded = self.loaded.read().unwrap();
             let meta = loaded.index.get(*loaded.by_id.get(id)?)?.clone();
-            let enabled = loaded.manifest.passive_enabled.contains(&meta.id);
+            let enabled = loaded.manifest.is_on(&meta.id);
             (meta, enabled)
         };
         let yaml = self.read_text(&meta).ok()?;
@@ -1515,21 +1577,50 @@ pub async fn set_passive(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PassiveRequest>,
 ) -> Response {
+    turn_on(
+        &state,
+        request,
+        TemplateLibrary::set_passive,
+        "passive_enabled",
+    )
+    .await
+}
+
+/// Turns templates on or off for the auto scan, which then starts on hosts
+/// that waited for something to send.
+pub async fn set_auto(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<PassiveRequest>,
+) -> Response {
+    let response = turn_on(&state, request, TemplateLibrary::set_auto, "auto_enabled").await;
+    let session = state.session().await;
+    tokio::spawn(crate::templates::scan::pump(Arc::clone(&state), session));
+    response
+}
+
+async fn turn_on(
+    state: &Arc<AppState>,
+    request: PassiveRequest,
+    set: fn(&TemplateLibrary, &[String], bool) -> Result<(usize, usize)>,
+    count_field: &'static str,
+) -> Response {
     let library = Arc::clone(&state.templates);
     let outcome = tokio::task::spawn_blocking(move || {
         let ids = match &request.filter {
             Some(filter) => library.select_ids(filter),
             None => request.ids.clone(),
         };
-        library.set_passive(&ids, request.enabled)
+        set(&library, &ids, request.enabled)
     })
     .await;
     match outcome {
         Ok(Ok((enabled, ignored))) => {
-            Json(json!({ "passive_enabled": enabled, "ignored": ignored })).into_response()
+            let mut body = json!({ "ignored": ignored });
+            body[count_field] = json!(enabled);
+            Json(body).into_response()
         }
         Ok(Err(error)) => {
-            tracing::warn!(%error, "saving passive templates failed");
+            tracing::warn!(%error, "saving the templates turned on failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1643,6 +1734,51 @@ mod tests {
             .map(|item| item.meta.id)
             .collect();
         assert_eq!(ids, ["example-exposure", "example-dns"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scan_templates_turn_on_for_the_auto_scan_and_list_as_on() {
+        let dir = std::env::temp_dir().join(format!("sniper-templates-{}", uuid::Uuid::new_v4()));
+        let first = library(&dir);
+        first.import_blocking(&release(), Source::Import).unwrap();
+        // A passive-capable template checks captured traffic instead, and an
+        // unknown id is nothing to send.
+        assert_eq!(
+            first
+                .set_auto(
+                    &[
+                        "example-exposure".into(),
+                        "example-detect".into(),
+                        "example-nope".into()
+                    ],
+                    true
+                )
+                .unwrap(),
+            (1, 2)
+        );
+        let ids = |library: &TemplateLibrary| -> Vec<String> {
+            library
+                .auto_selection()
+                .into_iter()
+                .map(|meta| meta.id)
+                .collect()
+        };
+        assert_eq!(ids(&first), ["example-exposure"]);
+        assert_eq!(first.status().auto_enabled, 1);
+        let on = first.list(&ListQuery {
+            enabled: Some(true),
+            ..ListQuery::default()
+        });
+        assert_eq!(on.total, 1);
+        assert!(on.items[0].enabled);
+
+        let second = library(&dir);
+        assert_eq!(ids(&second), ["example-exposure"]);
+        second
+            .set_auto(&["example-exposure".into()], false)
+            .unwrap();
+        assert!(ids(&second).is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 

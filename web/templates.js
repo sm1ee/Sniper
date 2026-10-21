@@ -143,6 +143,41 @@
 
   function count(value) { return Number(value || 0).toLocaleString(); }
 
+  // ---- Auto scan ----
+
+  // The auto scan's settings as the server takes them; turning it on carries
+  // the operator's consent.
+  function autoRequest(values, sessionId, enabled) {
+    if (!sessionId) throw new Error("Wait for the session to finish loading.");
+    const hosts = String(values.hosts || "").split(/[\s,]+/).filter(Boolean);
+    if (hosts.length > 50) throw new Error("List at most 50 hosts.");
+    for (const host of hosts) {
+      if (host.includes("/") || host.length > 253) {
+        throw new Error(`${host}: list a host as Scope takes it, such as *.example.com or example.com:8443.`);
+      }
+    }
+    const body = { session_id: sessionId, enabled: !!enabled, hosts, rate: boundedInteger(values.rate, 1, 50, "Requests a second") };
+    if (enabled) {
+      if (!values.consent) throw new Error("Confirm that the auto scan may send to these hosts first.");
+      body.acknowledged = true;
+    }
+    return body;
+  }
+
+  // Turning scan templates on in bulk follows the list filter, as the
+  // passive bulk change does.
+  function autoTemplatesRequest(filters, enabled) {
+    return { ...passiveRequest(filters, enabled), filter: { ...passiveRequest(filters, enabled).filter, support: "active" } };
+  }
+
+  function autoLine(auto) {
+    if (!auto) return "Loading the auto scan…";
+    const plural = (n, word) => `${count(n)} ${word}${Number(n) === 1 ? "" : "s"}`;
+    const templates = `${plural(auto.templates, "template")} on for it`;
+    if (!auto.enabled) return `Off · ${templates}.`;
+    return `On · ${templates} · ${plural(auto.scanned, "host")} sent to · ${count(auto.queued)} waiting.`;
+  }
+
   function previewLine(preview) {
     const risks = Object.entries(preview.excluded_by_risk || {}).map(([risk, n]) => `${risk} ${count(n)}`).join(", ");
     const plural = (n, word) => `${count(n)} ${word}${Number(n) === 1 ? "" : "s"}`;
@@ -169,7 +204,8 @@
       "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
       "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
       "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanConsent", "ScanConsentText", "ScanStart",
-      "ScanNotice", "ScanJobs"];
+      "ScanNotice", "ScanJobs", "AutoState", "AutoSummary", "AutoHosts", "AutoRate", "AutoConsent", "AutoToggle",
+      "AutoSave", "AutoNotice"];
     const els = Object.fromEntries(ids.map((id) => [id, shell.querySelector(`#templates${id}`)]));
     const listeners = [];
     let visible = false;
@@ -248,7 +284,7 @@
       els.ScopeNote.classList.toggle("hidden", !(scopeless && status?.passive_enabled > 0));
       // Bulk changes act on passive-capable templates only, so they are offered
       // only while the list shows exactly those.
-      const bulk = !!status?.library && els.Support.value === "passive";
+      const bulk = !!status?.library && (els.Support.value === "passive" || els.Support.value === "active");
       for (const button of [els.EnableShown, els.DisableShown]) {
         button.classList.toggle("hidden", !bulk);
         button.disabled = busy;
@@ -271,14 +307,27 @@
         const row = element("tr", meta.id === (pendingId ?? selected?.id) ? "recon-selected" : "");
         row.dataset.templateId = meta.id;
         const toggleCell = element("td");
-        if (meta.passive_supported) {
+        if (meta.passive_supported || meta.active_supported) {
+          // One that can judge captured traffic does so; one that must send
+          // its own requests goes out with the auto scan.
           const toggle = element("input");
           toggle.type = "checkbox";
           toggle.checked = !!meta.enabled;
           toggle.disabled = busy;
-          toggle.dataset.templateToggle = meta.id;
-          toggle.setAttribute("aria-label", `Run ${meta.name || meta.id} on captured traffic`);
+          if (meta.passive_supported) {
+            toggle.dataset.templateToggle = meta.id;
+            toggle.title = "Checks captured traffic while Passive Scan is on";
+            toggle.setAttribute("aria-label", `Run ${meta.name || meta.id} on captured traffic`);
+          } else {
+            toggle.dataset.templateAuto = meta.id;
+            toggle.title = "Sent to each new host while the auto scan is on";
+            toggle.setAttribute("aria-label", `Send ${meta.name || meta.id} with the auto scan`);
+          }
           toggleCell.append(toggle);
+        } else {
+          const none = element("span", "templates-off", "—");
+          none.title = "Sniper cannot run this template";
+          toggleCell.append(none);
         }
         const severityCell = element("td");
         severityCell.append(element("span", `severity-badge ${severityClass(meta.severity)}`, meta.severity || "unknown"));
@@ -447,8 +496,9 @@
       for (const job of scanJobs) {
         const card = element("article", "recon-job");
         const header = element("div", "recon-job-header");
-        header.append(element("strong", "recon-job-target", (job.targets || []).join(", ") || "Template Scan"),
-          element("span", `recon-badge${job.status === "running" ? "" : job.status === "completed" ? "" : " recon-badge-warning"}`, job.status));
+        header.append(element("strong", "recon-job-target", (job.targets || []).join(", ") || "Template Scan"));
+        if (job.auto) header.append(element("span", "recon-badge", "Auto"));
+        header.append(element("span", `recon-badge${job.status === "running" ? "" : job.status === "completed" ? "" : " recon-badge-warning"}`, job.status));
         const results = element("button", "secondary-action", "Results");
         results.type = "button";
         results.dataset.openScan = job.id;
@@ -470,7 +520,7 @@
 
     function renderJobDetail() {
       const job = openJob;
-      els.Detail.append(element("h3", "", `Template Scan · ${job.status}`));
+      els.Detail.append(element("h3", "", `${job.auto ? "Auto scan" : "Template Scan"} · ${job.status}`));
       const fields = element("dl", "recon-detail-fields");
       field(fields, "Targets", job.targets);
       field(fields, "Library", job.library);
@@ -514,8 +564,11 @@
         scanJobs = [];
         openJob = null;
         showingJob = false;
+        auto = null;
+        autoDraft = false;
         invalidatePreview();
         renderDetail();
+        renderAuto();
       }
       if (!visible || !sessionId) return;
       try {
@@ -533,7 +586,9 @@
         scanNotice(error.message, true);
       }
       renderScan();
-      if (visible && scanJobs.some((job) => job.status === "running")) scanTimer = schedule(refreshScans, 2000);
+      await refreshAuto();
+      // An auto job can start at any moment while the auto scan is on.
+      if (visible && (scanJobs.some((job) => job.status === "running") || auto?.enabled)) scanTimer = schedule(refreshScans, 2000);
     }
 
     async function scanAct(work) {
@@ -576,6 +631,85 @@
       });
     }
 
+    function setAuto(body, describe) {
+      return act(async () => {
+        const result = await json(await fetcher("/api/templates/auto/templates", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        }), "Could not save the templates for the auto scan");
+        const on = Number(result.auto_enabled) || 0;
+        notice(`${describe} ${on.toLocaleString()} ${on === 1 ? "template is" : "templates are"} on for the auto scan.`);
+        await refreshAuto();
+      });
+    }
+
+    // ---- Auto scan ----
+
+    let auto = null;
+    let autoBusy = false;
+    // The operator is editing the host list or pace: a refresh leaves it.
+    let autoDraft = false;
+
+    function autoNotice(message, error = false) {
+      els.AutoNotice.textContent = message;
+      els.AutoNotice.classList.toggle("hidden", !message);
+      els.AutoNotice.classList.toggle("recon-error", error);
+    }
+    function autoValues() {
+      return { hosts: els.AutoHosts.value, rate: els.AutoRate.value, consent: els.AutoConsent.checked };
+    }
+    function renderAuto() {
+      const on = !!auto?.enabled;
+      els.AutoState.textContent = auto ? (on ? "On" : "Off") : "";
+      els.AutoState.classList.toggle("recon-badge-warning", on);
+      els.AutoSummary.textContent = autoLine(auto) + (auto && !auto.templates
+        ? " Turn on Scan templates in the On column to give it something to send." : "");
+      if (auto && !autoDraft) {
+        els.AutoHosts.value = (auto.hosts || []).join("\n");
+        els.AutoRate.value = String(auto.rate || 10);
+      }
+      els.AutoToggle.textContent = on ? "Turn off" : "Turn on";
+      els.AutoToggle.disabled = autoBusy || !auto;
+      els.AutoSave.disabled = autoBusy || !auto || !autoDraft;
+    }
+    async function refreshAuto() {
+      const sessionId = options.getSessionId?.() || null;
+      if (!visible || !sessionId) return;
+      try {
+        const read = await json(await fetcher(`/api/templates/auto?session_id=${encodeURIComponent(sessionId)}`), "Could not read the auto scan");
+        if (read.session_id !== (options.getSessionId?.() || null)) return;
+        auto = read;
+      } catch (error) {
+        autoNotice(error.message, true);
+      }
+      renderAuto();
+    }
+    async function saveAuto(enabled, describe) {
+      if (autoBusy) return;
+      autoBusy = true;
+      renderAuto();
+      try {
+        const body = autoRequest(autoValues(), options.getSessionId?.(), enabled);
+        auto = await json(await fetcher("/api/templates/auto", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        }), "Could not save the auto scan");
+        autoDraft = false;
+        els.AutoConsent.checked = false;
+        autoNotice(describe);
+      } catch (error) {
+        autoNotice(error.message || "The request failed.", true);
+      } finally {
+        autoBusy = false;
+        renderAuto();
+        await refreshScans();
+      }
+    }
+
+    on(els.AutoToggle, "click", () => (auto?.enabled
+      ? saveAuto(false, "The auto scan is off; hosts that waited were dropped.")
+      : saveAuto(true, "The auto scan is on. New hosts the proxy captures get the templates turned on for it.")));
+    on(els.AutoSave, "click", () => saveAuto(!!auto?.enabled, "Saved."));
+    for (const control of [els.AutoHosts, els.AutoRate]) on(control, "input", () => { autoDraft = true; renderAuto(); });
+
     on(els.Consent, "change", renderStatus);
     on(els.Download, "click", () => act(async () => {
       if (!els.Consent.checked) throw new Error("Confirm the download first.");
@@ -611,8 +745,12 @@
     }
     on(els.Previous, "click", () => { page = Math.max(0, page - 1); void loadList(); });
     on(els.Next, "click", () => { page += 1; void loadList(); });
-    on(els.EnableShown, "click", () => setPassive(passiveRequest(filters(), true), "Turned on the passive templates the filter shows."));
-    on(els.DisableShown, "click", () => setPassive(passiveRequest(filters(), false), "Turned off the passive templates the filter shows."));
+    on(els.EnableShown, "click", () => (els.Support.value === "active"
+      ? setAuto(autoTemplatesRequest(filters(), true), "Turned on the scan templates the filter shows.")
+      : setPassive(passiveRequest(filters(), true), "Turned on the passive templates the filter shows.")));
+    on(els.DisableShown, "click", () => (els.Support.value === "active"
+      ? setAuto(autoTemplatesRequest(filters(), false), "Turned off the scan templates the filter shows.")
+      : setPassive(passiveRequest(filters(), false), "Turned off the passive templates the filter shows.")));
     on(els.ScanPreview, "click", () => scanAct(async () => {
       const body = scanRequest(scanValues(), filters(), selected?.id, options.getSessionId?.(), true);
       const preview = await json(await fetcher("/api/templates/scans", {
@@ -679,6 +817,11 @@
         void setPassive({ ids: [toggle.dataset.templateToggle], enabled: toggle.checked }, toggle.checked ? "Turned it on." : "Turned it off.");
         return;
       }
+      const autoBox = event.target.closest("[data-template-auto]");
+      if (autoBox) {
+        void setAuto({ ids: [autoBox.dataset.templateAuto], enabled: autoBox.checked }, autoBox.checked ? "Turned it on." : "Turned it off.");
+        return;
+      }
       const row = event.target.closest("[data-template-id]");
       if (row) void open(row.dataset.templateId);
     });
@@ -735,7 +878,7 @@
   }
 
   const api = { createController, listQuery, nextSort, passiveRequest, libraryLine, progressOf, supportLabel, scanRequest, parseTargets,
-    previewLine, jobLine, RISKS, PAGE_SIZE };
+    previewLine, jobLine, autoRequest, autoLine, RISKS, PAGE_SIZE };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperTemplates = api;
 })(typeof window !== "undefined" ? window : globalThis);

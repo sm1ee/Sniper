@@ -602,6 +602,55 @@ enum TemplatesCommand {
         #[command(subcommand)]
         command: TemplatesScanCommand,
     },
+    /// Send the templates turned on for it to each new host the proxy
+    /// captures in Scope or on its list: the auto scan.
+    Auto {
+        #[command(subcommand)]
+        command: TemplatesAutoCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TemplatesAutoCommand {
+    /// Whether the auto scan is on, its host list and pace, and how many hosts
+    /// it sent to and has waiting.
+    Get(TemplatesScanSessionArgs),
+    /// Turn the auto scan on or off, or change its host list and pace.
+    Set(TemplatesAutoArgs),
+    /// Turn templates on or off for the auto scan, by id or by a filter.
+    SetTemplates(TemplatesAutoTemplatesArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct TemplatesAutoArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+    /// A host pattern, as Scope takes them, to send to besides Scope's hosts;
+    /// repeat for several. Replaces the list.
+    #[arg(long = "host")]
+    hosts: Vec<String>,
+    /// Empty the host list.
+    #[arg(long, conflicts_with = "hosts")]
+    clear_hosts: bool,
+    /// Requests a second.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=50))]
+    rate: Option<u64>,
+    /// Templates in flight at once.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=8))]
+    concurrency: Option<u64>,
+}
+
+#[derive(Args, Debug)]
+struct TemplatesAutoTemplatesArgs {
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+    /// A template id; repeat for several. Not with a filter.
+    #[arg(long = "id")]
+    ids: Vec<String>,
+    #[command(flatten)]
+    filter: TemplatesFilterArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -770,6 +819,11 @@ impl TemplatesCommand {
                 TemplatesScanCommand::Get(_) => "templates.scan.get",
                 TemplatesScanCommand::Stop(_) => "templates.scan.stop",
             },
+            Self::Auto { command } => match command {
+                TemplatesAutoCommand::Get(_) => "templates.auto.get",
+                TemplatesAutoCommand::Set(_) => "templates.auto.set",
+                TemplatesAutoCommand::SetTemplates(_) => "templates.auto.set_templates",
+            },
         }
     }
 }
@@ -842,6 +896,45 @@ fn templates_passive_body(args: &TemplatesPassiveArgs) -> Result<Value> {
     })
 }
 
+/// The auto scan's settings as the server takes them. Turning it on carries
+/// the operator's acknowledgment, which `--yes` gave.
+fn templates_auto_body(args: &TemplatesAutoArgs, session_id: Option<Uuid>) -> Value {
+    let mut body = json!({
+        "session_id": session_id,
+        "enabled": args.enabled,
+        "acknowledged": args.enabled,
+    });
+    if !args.hosts.is_empty() || args.clear_hosts {
+        body["hosts"] = json!(args.hosts);
+    }
+    if let Some(rate) = args.rate {
+        body["rate"] = json!(rate);
+    }
+    if let Some(concurrency) = args.concurrency {
+        body["concurrency"] = json!(concurrency);
+    }
+    body
+}
+
+/// Templates to turn on or off for the auto scan: ids or a filter, exactly
+/// one; a filter selects those that can be sent.
+fn templates_auto_templates_body(args: &TemplatesAutoTemplatesArgs) -> Result<Value> {
+    let filter = templates_filter_json(&args.filter);
+    if args.ids.is_empty() == filter.is_empty() {
+        bail!("give template ids or a filter (--search, --severity, --tag); exactly one");
+    }
+    if let Some(id) = args.ids.iter().find(|id| !valid_template_id(id)) {
+        bail!("`{id}` is not a template id");
+    }
+    Ok(if args.ids.is_empty() {
+        let mut filter = filter;
+        filter.insert("support".into(), json!("active"));
+        json!({"filter": filter, "enabled": args.enabled})
+    } else {
+        json!({"ids": args.ids, "enabled": args.enabled})
+    })
+}
+
 /// A scan request: exactly one of ids or a filter, as the server takes it.
 /// A preview sends nothing; a start carries the operator's acknowledgment,
 /// which `--yes` gave.
@@ -903,6 +996,8 @@ fn templates_input_preview(command: &TemplatesCommand) -> Value {
             input.insert("protocol".into(), json!(args.protocol));
             input.insert("support".into(), json!(args.support));
             input.insert("enabled".into(), json!(args.enabled));
+            input.insert("sort".into(), json!(args.sort));
+            input.insert("direction".into(), json!(args.direction));
             input.insert("limit".into(), json!(args.limit));
             input.insert("offset".into(), json!(args.offset));
             Value::Object(input)
@@ -924,6 +1019,23 @@ fn templates_input_preview(command: &TemplatesCommand) -> Value {
             TemplatesScanCommand::List(args) => json!({ "session_id": args.session_id }),
             TemplatesScanCommand::Get(args) | TemplatesScanCommand::Stop(args) => {
                 json!({ "session_id": args.session_id, "id": args.id })
+            }
+        },
+        TemplatesCommand::Auto { command } => match command {
+            TemplatesAutoCommand::Get(args) => json!({ "session_id": args.session_id }),
+            TemplatesAutoCommand::Set(args) => json!({
+                "session_id": args.session_id,
+                "enabled": args.enabled,
+                "hosts": args.hosts,
+                "clear_hosts": args.clear_hosts,
+                "rate": args.rate,
+                "concurrency": args.concurrency,
+            }),
+            TemplatesAutoCommand::SetTemplates(args) => {
+                let mut input = templates_filter_json(&args.filter);
+                input.insert("enabled".into(), json!(args.enabled));
+                input.insert("ids".into(), json!(args.ids));
+                Value::Object(input)
             }
         },
     }
@@ -986,6 +1098,23 @@ fn templates_api_preview(command: &TemplatesCommand) -> Value {
                 "POST",
                 format!("/api/templates/scans/{}/stop", args.id),
                 Some(json!({ "session_id": args.session_id })),
+            ),
+        },
+        TemplatesCommand::Auto { command } => match command {
+            TemplatesAutoCommand::Get(args) => api_preview(
+                "GET",
+                session_query_path("/api/templates/auto", args.session_id),
+                None,
+            ),
+            TemplatesAutoCommand::Set(args) => api_preview(
+                "POST",
+                "/api/templates/auto",
+                Some(templates_auto_body(args, args.session_id)),
+            ),
+            TemplatesAutoCommand::SetTemplates(args) => api_preview(
+                "POST",
+                "/api/templates/auto/templates",
+                templates_auto_templates_body(args).ok(),
             ),
         },
     }
@@ -3792,6 +3921,33 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"id":"22222222-2222-2222-2222-222222222222"})],
         ),
         op(
+            "templates.auto.get",
+            "templates auto get",
+            "Read the session's auto scan: whether it is on, its own host list, its pace, how many templates are turned on for it, and how many hosts it sent to and has waiting.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "templates.auto.set",
+            "templates auto set --enabled <true|false>",
+            "Turn the session's auto scan on or off, or change its host list (patterns as Scope takes them) and pace. While on, each new origin the proxy captures in a non-empty Scope or on the list, and not excluded by Scope, gets the templates turned on for it once, one host at a time; templates with risk tags are left out and a scan you start comes first. Turning it off stops its running job and drops the hosts waiting.",
+            Write,
+            true,
+            &["enabled"],
+            vec![json!({"enabled":true,"hosts":["*.example.com"],"rate":5}), json!({"enabled":false})],
+        ),
+        op(
+            "templates.auto.set_templates",
+            "templates auto set-templates --enabled <true|false>",
+            "Turn templates on or off for the auto scan, by ids or by a filter. Only templates that must send their own requests count; one that can judge captured traffic is turned on with templates passive set-enabled instead.",
+            Write,
+            true,
+            &["enabled"],
+            vec![json!({"ids":["git-config"],"enabled":true}), json!({"tag":"cve","severity":"critical","enabled":true})],
+        ),
+        op(
             "capture.http.list",
             "capture http list",
             "List captured HTTP transactions.",
@@ -6041,6 +6197,27 @@ fn templates_input_schema(operation: &str) -> Option<Value> {
                 "id":legacy_uuid_input_schema(false, "Scan id.")
             }
         }),
+        "templates.auto.get" => json!({
+            "type":"object","additionalProperties":false,"required":[],
+            "properties":{"session_id":legacy_uuid_input_schema(true, "Omitted or null selects the active session.")}
+        }),
+        "templates.auto.set" => json!({
+            "type":"object","additionalProperties":false,"required":["enabled"],
+            "properties":{
+                "session_id":legacy_uuid_input_schema(true, "Omitted or null selects the active session."),
+                "enabled":{"type":"boolean","description":"Turn the auto scan on (true) or off (false)."},
+                "hosts":{"type":["array","null"],"items":{"type":"string","minLength":1,"maxLength":253},"maxItems":50,"description":"Host patterns, as Scope takes them, sent to besides Scope's hosts. Replaces the list; omitted or null keeps it."},
+                "clear_hosts":{"type":["boolean","null"],"default":false,"description":"Empty the host list."},
+                "rate":{"type":["integer","null"],"minimum":1,"maximum":50,"description":"Requests a second. Omitted or null keeps the pace, 10 at first."},
+                "concurrency":{"type":["integer","null"],"minimum":1,"maximum":8,"description":"Templates in flight at once. Omitted or null keeps it, 4 at first."}
+            }
+        }),
+        "templates.auto.set_templates" => {
+            let mut properties = filter;
+            properties["enabled"] = json!({"type":"boolean","description":"Turn the selected templates on (true) or off (false) for the auto scan."});
+            properties["ids"] = json!({"type":["array","null"],"items":{"type":"string","pattern":"^([a-zA-Z0-9]+[-_])*[a-zA-Z0-9]+$"},"maxItems":30000,"description":"Template ids. Exactly one of ids or a filter (search, severity, tag)."});
+            json!({"type":"object","additionalProperties":false,"required":["enabled"],"properties":properties})
+        }
         "templates.passive.set_enabled" => {
             let mut properties = filter;
             properties["enabled"] = json!({"type":"boolean","description":"Turn the selected templates on (true) or off (false)."});
@@ -6622,6 +6799,16 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "apply_match_replace",
         ],
         "templates.scan.list" => &["session_id"],
+        "templates.auto.get" => &["session_id"],
+        "templates.auto.set" => &[
+            "session_id",
+            "enabled",
+            "hosts",
+            "clear_hosts",
+            "rate",
+            "concurrency",
+        ],
+        "templates.auto.set_templates" => &["enabled", "ids", "search", "severity", "tag"],
         "templates.scan.get" | "templates.scan.stop" => &["session_id", "id"],
         "capture.browser.list" => &[],
         "capture.browser.open" => &["browser", "url", "fresh", "agent"],
@@ -7958,6 +8145,7 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
         "templates.library.check" | "templates.library.download" => notes.push("Contacts GitHub through the environment's proxy: the latest-release API, then for a download the release's checksums file and source .tar.gz. A download that does not match the published SHA-256 is not installed. Dry-run contacts nothing."),
         "templates.library.import" => notes.push("Reads the local .tar.gz and uploads it to the running Sniper, which installs it; nothing contacts GitHub. Dry-run reads nothing."),
         "templates.passive.set_enabled" => notes.push("Enabled passive templates judge captured responses whose host is in a non-empty Scope include list while Passive Scan is on, and never send requests. Run findings rescan to apply a change to stored history."),
+        "templates.auto.set" => notes.push("While on, the auto scan sends requests to every new host the proxy captures in Scope or on its list. Dry-run contacts nothing."),
         "templates.scan.start" => notes.push("Sends the templates' requests to the targets once it runs. Dry-run contacts nothing; templates scan preview asks Sniper what would be sent and still sends nothing to a target."),
         _ => {}
     }
@@ -8386,6 +8574,51 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             };
             Command::Templates {
                 command: TemplatesCommand::Scan { command },
+            }
+        }
+        "templates.auto.get" => Command::Templates {
+            command: TemplatesCommand::Auto {
+                command: TemplatesAutoCommand::Get(TemplatesScanSessionArgs {
+                    session_id: call_optional(operation, input, "session_id")?,
+                }),
+            },
+        },
+        "templates.auto.set" => {
+            let bounded = |field: &str, max: u64| -> Result<Option<u64>> {
+                let value = call_optional::<u64>(operation, input, field)?;
+                if value.is_some_and(|value| !(1..=max).contains(&value)) {
+                    bail!("invalid field `{field}` for `{operation}`; expected 1 to {max}");
+                }
+                Ok(value)
+            };
+            let args = TemplatesAutoArgs {
+                session_id: call_optional(operation, input, "session_id")?,
+                enabled: call_required(operation, input, "enabled")?,
+                hosts: call_optional(operation, input, "hosts")?.unwrap_or_default(),
+                clear_hosts: call_bool(operation, input, "clear_hosts")?,
+                rate: bounded("rate", 50)?,
+                concurrency: bounded("concurrency", 8)?,
+            };
+            if args.clear_hosts && !args.hosts.is_empty() {
+                bail!("give hosts or clear_hosts for `{operation}`, not both");
+            }
+            Command::Templates {
+                command: TemplatesCommand::Auto {
+                    command: TemplatesAutoCommand::Set(args),
+                },
+            }
+        }
+        "templates.auto.set_templates" => {
+            let args = TemplatesAutoTemplatesArgs {
+                enabled: call_required(operation, input, "enabled")?,
+                ids: call_optional(operation, input, "ids")?.unwrap_or_default(),
+                filter: call_templates_filter(operation, input)?,
+            };
+            templates_auto_templates_body(&args)?;
+            Command::Templates {
+                command: TemplatesCommand::Auto {
+                    command: TemplatesAutoCommand::SetTemplates(args),
+                },
             }
         }
         "templates.scan.list" => Command::Templates {
@@ -10236,6 +10469,35 @@ async fn handle_templates(api: ApiClient, command: TemplatesCommand) -> Result<(
                     api.post_json(
                         &format!("/api/templates/scans/{}/stop", args.id),
                         &json!({ "session_id": session_id }),
+                    )
+                    .await?
+                }
+            };
+            print_json(&result)
+        }
+        TemplatesCommand::Auto { command } => {
+            let result: Value = match command {
+                TemplatesAutoCommand::Get(args) => {
+                    let session_id = resolve_session_id_arg(&api, args.session_id)
+                        .await?
+                        .ok_or_else(|| anyhow!("no session; pass --session-id"))?;
+                    api.get_json(&session_query_path("/api/templates/auto", Some(session_id)))
+                        .await?
+                }
+                TemplatesAutoCommand::Set(args) => {
+                    let session_id = resolve_session_id_arg(&api, args.session_id)
+                        .await?
+                        .ok_or_else(|| anyhow!("no session; pass --session-id"))?;
+                    api.post_json(
+                        "/api/templates/auto",
+                        &templates_auto_body(&args, Some(session_id)),
+                    )
+                    .await?
+                }
+                TemplatesAutoCommand::SetTemplates(args) => {
+                    api.post_json(
+                        "/api/templates/auto/templates",
+                        &templates_auto_templates_body(&args)?,
                     )
                     .await?
                 }
@@ -21264,6 +21526,64 @@ mod tests {
         assert!(super::dry_run_notes(&download)
             .iter()
             .any(|note| note.contains("Contacts GitHub")));
+        let sorted = command_from_operation_input(
+            "templates.list",
+            &json!({"sort":"severity","direction":"desc"}),
+        )
+        .unwrap();
+        assert_eq!(
+            super::command_api_preview(&sorted).unwrap()["path"],
+            "/api/templates?sort=severity&direction=desc&limit=200&offset=0"
+        );
+        assert!(command_from_operation_input("templates.list", &json!({"sort":"size"})).is_err());
+    }
+
+    #[test]
+    fn the_auto_scan_commands_carry_consent_and_take_ids_or_a_filter() {
+        let set = |input: Value| command_from_operation_input("templates.auto.set", &input);
+        let on = set(json!({"enabled":true,"hosts":["*.example.com"],"rate":5})).unwrap();
+        assert!(on.requires_confirmation());
+        // Turning it on carries the consent --yes gave; a pace not given is kept.
+        assert_eq!(
+            super::command_api_preview(&on).unwrap()["body"],
+            json!({"session_id":null,"enabled":true,"acknowledged":true,"hosts":["*.example.com"],"rate":5})
+        );
+        let off = set(json!({"enabled":false})).unwrap();
+        assert_eq!(
+            super::command_api_preview(&off).unwrap()["body"],
+            json!({"session_id":null,"enabled":false,"acknowledged":false})
+        );
+        let cleared = set(json!({"enabled":true,"clear_hosts":true})).unwrap();
+        assert_eq!(
+            super::command_api_preview(&cleared).unwrap()["body"]["hosts"],
+            json!([])
+        );
+        assert!(set(json!({"enabled":true,"hosts":["a.example.com"],"clear_hosts":true})).is_err());
+        assert!(set(json!({"enabled":true,"rate":51})).is_err());
+        let templates =
+            |input: Value| command_from_operation_input("templates.auto.set_templates", &input);
+        assert!(templates(json!({"enabled":true})).is_err());
+        assert!(templates(json!({"enabled":true,"ids":["git-config"],"tag":"cve"})).is_err());
+        let by_tag = templates(json!({"enabled":true,"tag":"cve"})).unwrap();
+        assert_eq!(
+            super::command_api_preview(&by_tag).unwrap()["body"],
+            json!({"filter":{"tag":"cve","support":"active"},"enabled":true})
+        );
+        assert!(super::dry_run_notes(&on)
+            .iter()
+            .any(|note| note.contains("every new host")));
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "templates",
+            "auto",
+            "set",
+            "--enabled",
+            "true",
+            "--host",
+            "a.example.com",
+            "--clear-hosts"
+        ])
+        .is_err());
     }
 
     // A scan names its targets and exactly one selection; starting one is a

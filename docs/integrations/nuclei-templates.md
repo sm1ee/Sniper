@@ -177,7 +177,31 @@ tagged `dos` are never sent.
   `nuclei:<template-id>` or `nuclei:<template-id>:<matcher>`, once per
   template, matcher and endpoint. **Rescan** keeps them.
 - The session keeps at most ten scans, each with up to 1,000 results, its
-  counts and its warnings.
+  counts and its warnings. Auto scan jobs give way first.
+
+### Auto scan
+
+The auto scan sends templates without a target list: each new origin the
+proxy captures gets the templates turned on for it, once. Burp's live audit
+does the same with proxied traffic. Turn it on in **Scan ▸ Active Scan ▸
+Auto scan**, after turning templates on in the list's On column.
+
+- **On** means *use automatically*. A template that can judge captured
+  traffic checks it, as a passive template. One that must send its own
+  requests goes out with the auto scan.
+- An origin is sent to when it is in a non-empty Scope or on the auto scan's
+  own host list (patterns as Scope takes them), and never when Scope excludes
+  it or it is Sniper itself. Its `{{BaseURL}}` is the origin.
+- One host goes at a time, at the auto scan's pace, as a scan of its own
+  marked Auto. Templates with risk tags are left out, and those that need
+  Interactsh are left out where the session has none. A scan you start comes
+  first: the auto job stops and its host waits its turn again. Stopping an auto
+  job skips its host.
+- Only traffic the proxy captures counts, not replays or the scans' own
+  requests, and only from when the auto scan is on. Hosts it sent to are
+  remembered (the latest 2,000), so a host is sent to once.
+- Turning it off stops its job and drops the hosts waiting. The setting, the
+  host list and the hosts sent to survive a restart.
 
 ## What never runs
 
@@ -270,6 +294,9 @@ id repeats, the first file wins.
 | `GET /api/templates/scans?session_id=` | The session's scans, newest first, without results or request logs. |
 | `GET /api/templates/scans/:id?session_id=` | One scan with its results (each naming the matched history record) and its latest requests. |
 | `POST /api/templates/scans/:id/stop` | Body `{"session_id"}`. Stops the running scan. |
+| `GET /api/templates/auto?session_id=` | The auto scan: `enabled`, `hosts`, `rate`, `concurrency`, `templates` turned on for it, hosts `scanned` and `queued`. |
+| `POST /api/templates/auto` | Body `session_id`, `enabled`, and optionally `hosts`, `rate`, `concurrency`; turning it on needs `"acknowledged": true`. Turning it off stops its job and drops the hosts waiting. |
+| `POST /api/templates/auto/templates` | Body as `/api/templates/passive`. Templates that cannot judge captured traffic but can be sent are turned on or off for the auto scan; others are ignored and counted. |
 
 ## CLI
 
@@ -290,6 +317,10 @@ sniper-cli templates scan start --target https://app.example.com --id git-config
 sniper-cli templates scan list
 sniper-cli templates scan get --id <scan-id>
 sniper-cli templates scan stop --id <scan-id> --yes
+sniper-cli templates auto set-templates --enabled true --tag cve --severity critical --yes
+sniper-cli templates auto set --enabled true --host '*.example.com' --rate 5 --yes
+sniper-cli templates auto get
+sniper-cli templates auto set --enabled false --yes
 ```
 
 `download` and `import` wait until the release is installed and print the final

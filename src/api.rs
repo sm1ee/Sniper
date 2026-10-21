@@ -387,6 +387,14 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/templates/passive",
             post(crate::templates::library::set_passive),
         )
+        .route(
+            "/api/templates/auto",
+            get(crate::templates::scan::auto_status).post(crate::templates::scan::set_auto_scan),
+        )
+        .route(
+            "/api/templates/auto/templates",
+            post(crate::templates::library::set_auto),
+        )
         .route("/api/templates", get(crate::templates::library::list))
         .route(
             "/api/templates/scans",

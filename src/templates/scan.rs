@@ -6,6 +6,8 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -76,11 +78,47 @@ const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     ")"
 );
+/// Origins the auto scan remembers sending to; the oldest is forgotten first
+/// and sent to again if seen again.
+const MAX_AUTO_SCANNED: usize = 2_000;
+/// Origins waiting at once; one seen beyond that waits for its next sighting.
+const MAX_AUTO_QUEUED: usize = 200;
+const MAX_AUTO_HOSTS: usize = 50;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TemplateScanSnapshot {
     pub jobs: Vec<ScanJob>,
+    pub auto: AutoScan,
+}
+
+/// The session's auto scan: the templates turned on for it go once to each
+/// new origin captured in Scope or on its own host list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoScan {
+    pub enabled: bool,
+    /// Host patterns, as Scope takes them, sent to besides Scope's.
+    pub hosts: Vec<String>,
+    pub rate: u32,
+    pub concurrency: usize,
+    /// Origins sent to, oldest first.
+    pub scanned: VecDeque<String>,
+    /// Origins waiting their turn, oldest first.
+    pub queued: VecDeque<String>,
+}
+
+impl Default for AutoScan {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hosts: Vec::new(),
+            rate: default_rate(),
+            concurrency: default_concurrency(),
+            scanned: VecDeque::new(),
+            queued: VecDeque::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -89,6 +127,8 @@ pub struct ScanJob {
     pub id: Uuid,
     /// `running`, `completed`, `cancelled` or `interrupted`.
     pub status: String,
+    /// Started by the auto scan rather than the operator.
+    pub auto: bool,
     pub started_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
@@ -184,6 +224,9 @@ struct RunningScan {
 pub struct TemplateScanStore {
     snapshot: Mutex<TemplateScanSnapshot>,
     running: Mutex<Option<RunningScan>>,
+    /// Held while the auto scan starts its next origin, so two starts do not
+    /// race for the one slot.
+    pump: tokio::sync::Mutex<()>,
 }
 
 impl TemplateScanStore {
@@ -198,6 +241,7 @@ impl TemplateScanStore {
         Self {
             snapshot: Mutex::new(snapshot),
             running: Mutex::new(None),
+            pump: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -212,6 +256,24 @@ impl TemplateScanStore {
             .jobs
             .iter()
             .any(|job| job.status == "running")
+    }
+
+    /// The running auto scan job and the origin it sends to, if one runs.
+    fn running_auto(&self) -> Option<(Uuid, String)> {
+        let snapshot = self.snapshot.lock().unwrap();
+        let job = snapshot
+            .jobs
+            .iter()
+            .find(|job| job.auto && job.status == "running")?;
+        Some((job.id, job.targets.first()?.clone()))
+    }
+
+    /// Puts an origin back at the head of the auto scan's queue.
+    fn requeue(&self, origin: String) {
+        let mut snapshot = self.snapshot.lock().unwrap();
+        if !snapshot.auto.queued.contains(&origin) {
+            snapshot.auto.queued.push_front(origin);
+        }
     }
 
     fn update(&self, id: Uuid, change: impl FnOnce(&mut ScanJob)) {
@@ -511,29 +573,13 @@ pub async fn start(
             ))
         }
     };
-    let (mut metas, excluded_by_risk) = apply_risks(metas, &allowed);
+    let (metas, excluded_by_risk) = apply_risks(metas, &allowed);
 
     let session = state
         .session_context_for_id(request.session_id)
         .await
         .map_err(session_load_error)?;
-    // An OAST template's callback goes to the session's Interactsh server;
-    // with none registered nothing would hear it, so it is not sent.
-    let oast = session
-        .oast
-        .get_registration_info()
-        .await
-        .map(|(correlation_id, domain)| active::OastUrls {
-            correlation_id,
-            domain,
-        });
-    let oast_unavailable = if oast.is_none() {
-        let before = metas.len();
-        metas.retain(|meta| !meta.oast);
-        before - metas.len()
-    } else {
-        0
-    };
+    let (oast, metas, oast_unavailable) = with_oast(&session, metas).await;
     let planned = metas.iter().map(|meta| meta.requests).sum::<usize>() * targets.len();
     let (include, exclude) = session.runtime.scope_lists().await;
     if include.is_empty() {
@@ -554,8 +600,8 @@ pub async fn start(
             )));
         }
     }
-    let labels: Vec<String> = targets.iter().map(|target| target.label.clone()).collect();
     if request.preview {
+        let labels: Vec<String> = targets.iter().map(|target| target.label.clone()).collect();
         return Ok(Json(serde_json::json!({
             "preview": true,
             "session_id": session.id(),
@@ -589,7 +635,97 @@ pub async fn start(
             request.max_requests
         )));
     }
+    // A scan the operator starts comes first; the auto scan's host waits its
+    // turn again.
+    if let Some((id, origin)) = session.template_scans.running_auto() {
+        session.template_scans.stop(Some(id)).await;
+        session.template_scans.requeue(origin);
+    }
+    let mut allow_risks: Vec<String> = allowed.into_iter().collect();
+    allow_risks.sort();
+    let job = launch(
+        &state,
+        &session,
+        Plan {
+            targets,
+            metas,
+            oast,
+            oast_unavailable,
+            allow_risks,
+            rate: request.rate,
+            concurrency: request.concurrency,
+            max_requests: request.max_requests,
+            apply_match_replace: request.apply_match_replace,
+            auto_hosts: None,
+            warnings: Vec::new(),
+        },
+    )
+    .await?;
+    Ok(Json(
+        serde_json::to_value(job.summary()).unwrap_or_default(),
+    ))
+}
 
+/// The session's Interactsh server, and the templates left once those that
+/// need one are dropped when it has none: nothing would hear their callbacks.
+async fn with_oast(
+    session: &SessionContext,
+    mut metas: Vec<TemplateMeta>,
+) -> (Option<active::OastUrls>, Vec<TemplateMeta>, usize) {
+    let oast = session
+        .oast
+        .get_registration_info()
+        .await
+        .map(|(correlation_id, domain)| active::OastUrls {
+            correlation_id,
+            domain,
+        });
+    let unavailable = if oast.is_none() {
+        let before = metas.len();
+        metas.retain(|meta| !meta.oast);
+        before - metas.len()
+    } else {
+        0
+    };
+    (oast, metas, unavailable)
+}
+
+/// What a scan sends, settled before it starts.
+struct Plan {
+    targets: Vec<ScanTarget>,
+    metas: Vec<TemplateMeta>,
+    oast: Option<active::OastUrls>,
+    oast_unavailable: usize,
+    allow_risks: Vec<String>,
+    rate: u32,
+    concurrency: usize,
+    max_requests: usize,
+    apply_match_replace: bool,
+    /// For a job the auto scan starts, its own host list, which its requests
+    /// may also go to; None for one the operator started.
+    auto_hosts: Option<Vec<String>>,
+    warnings: Vec<String>,
+}
+
+/// Compiles a plan's templates, records its job and starts sending.
+async fn launch(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    plan: Plan,
+) -> Result<ScanJob, ApiError> {
+    let Plan {
+        targets,
+        metas,
+        oast,
+        oast_unavailable,
+        allow_risks,
+        rate,
+        concurrency,
+        max_requests,
+        apply_match_replace,
+        auto_hosts,
+        warnings,
+    } = plan;
     // Compiled before the job exists, from the release the list came from.
     let library = Arc::clone(&state.templates);
     let (templates, unreadable) = tokio::task::spawn_blocking(move || {
@@ -626,7 +762,7 @@ pub async fn start(
     let operation_lock = state.session_operation_lock(session.id()).await;
     let _operation_guard = operation_lock.lock_owned().await;
     if !state.sessions.contains_session(session.id())
-        || !state.is_current_session_context(&session).await
+        || !state.is_current_session_context(session).await
     {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -640,8 +776,6 @@ pub async fn start(
             "A Template Scan is already running in this session.",
         ));
     }
-    let mut allow_risks: Vec<String> = allowed.into_iter().collect();
-    allow_risks.sort();
     let planned = templates
         .iter()
         .map(|template| template.request_count())
@@ -650,18 +784,22 @@ pub async fn start(
     let mut job = ScanJob {
         id: Uuid::new_v4(),
         status: "running".into(),
+        auto: auto_hosts.is_some(),
         started_at: Utc::now(),
-        targets: labels,
+        targets: targets.iter().map(|target| target.label.clone()).collect(),
         library: release.clone(),
         templates: templates.len(),
         planned,
-        rate: request.rate,
-        concurrency: request.concurrency,
-        max_requests: request.max_requests,
+        rate,
+        concurrency,
+        max_requests,
         allow_risks,
-        apply_match_replace: request.apply_match_replace,
+        apply_match_replace,
         ..ScanJob::default()
     };
+    for warning in warnings {
+        job.warn(warning);
+    }
     if unreadable > 0 {
         job.warn(format!(
             "{unreadable} templates could not be read from the library and were not sent."
@@ -675,7 +813,10 @@ pub async fn start(
     {
         let mut snapshot = session.template_scans.snapshot.lock().unwrap();
         if snapshot.jobs.len() >= MAX_JOBS {
-            snapshot.jobs.remove(0);
+            // Auto jobs give way first, so the scans the operator ran stay
+            // listed.
+            let oldest = snapshot.jobs.iter().position(|job| job.auto).unwrap_or(0);
+            snapshot.jobs.remove(oldest);
         }
         snapshot.jobs.push(job.clone());
     }
@@ -685,7 +826,11 @@ pub async fn start(
         .push(
             EventLevel::Info,
             "templates",
-            "Template Scan started",
+            if job.auto {
+                "Auto scan started on a host"
+            } else {
+                "Template Scan started"
+            },
             format!(
                 "{} templates, {} targets, {} requests planned",
                 job.templates,
@@ -702,8 +847,8 @@ pub async fn start(
             pending: Mutex::default(),
         });
     let run = Arc::new(Run {
-        state: Arc::clone(&state),
-        session: Arc::clone(&session),
+        state: Arc::clone(state),
+        session: Arc::clone(session),
         job: job.id,
         library: release,
         oast,
@@ -711,11 +856,12 @@ pub async fn start(
         skipped: targets.iter().map(|_| AtomicBool::new(false)).collect(),
         templates,
         targets,
+        extra_hosts: auto_hosts.unwrap_or_default(),
         client,
-        apply_match_replace: request.apply_match_replace,
-        max_requests: request.max_requests,
-        concurrency: request.concurrency,
-        gap: Duration::from_secs(1) / request.rate,
+        apply_match_replace,
+        max_requests,
+        concurrency,
+        gap: Duration::from_secs(1) / rate,
         next_slot: tokio::sync::Mutex::new(Instant::now()),
         sent: AtomicUsize::new(0),
         limit_reached: AtomicBool::new(false),
@@ -726,9 +872,278 @@ pub async fn start(
         cancel,
         task,
     });
-    Ok(Json(
-        serde_json::to_value(job.summary()).unwrap_or_default(),
-    ))
+    Ok(job)
+}
+
+/// Whether a scan may send to a host: one in a non-empty Scope or, for an auto
+/// scan, on its own host list; never one Scope excludes.
+async fn reaches(session: &SessionContext, authority: &str, hosts: &[String]) -> bool {
+    let (include, exclude) = session.runtime.scope_lists().await;
+    let within = |patterns: &[String]| {
+        !patterns.is_empty() && crate::scope::is_host_in_scope(authority, patterns, &exclude)
+    };
+    within(&include) || within(hosts)
+}
+
+/// Queues a captured request's origin for the auto scan the first time the
+/// session sees it, when the auto scan is on and may send there, and starts
+/// sending if no scan runs.
+pub async fn observe(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    scheme: &str,
+    host: &str,
+) {
+    let Some(hosts) = ({
+        let snapshot = session.template_scans.snapshot.lock().unwrap();
+        snapshot.auto.enabled.then(|| snapshot.auto.hosts.clone())
+    }) else {
+        return;
+    };
+    let Ok(target) = parse_target(&format!("{scheme}://{host}")) else {
+        return;
+    };
+    let fresh = |auto: &AutoScan| {
+        auto.enabled
+            && auto.queued.len() < MAX_AUTO_QUEUED
+            && !auto.scanned.contains(&target.label)
+            && !auto.queued.contains(&target.label)
+    };
+    if !fresh(&session.template_scans.snapshot.lock().unwrap().auto)
+        || !reaches(session, &target.authority, &hosts).await
+        || crate::proxy::targets_own_listener(state, session, &target.scheme, &target.authority)
+            .await
+    {
+        return;
+    }
+    {
+        let mut snapshot = session.template_scans.snapshot.lock().unwrap();
+        if !fresh(&snapshot.auto) {
+            return;
+        }
+        snapshot.auto.queued.push_back(target.label.clone());
+    }
+    session.schedule_state_persist();
+    tokio::spawn(pump(Arc::clone(state), Arc::clone(session)));
+}
+
+/// Starts the auto scan on the next waiting origin, when it is on, templates
+/// are on for it and no scan runs in the session.
+pub fn pump(
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    // Boxed: a scan's end starts the next scan, so an unboxed future's type
+    // would contain itself.
+    Box::pin(async move {
+        // Waits rather than gives up: a pump about to return may already
+        // have looked at the queue this host just joined.
+        let _pumping = session.template_scans.pump.lock().await;
+        loop {
+            let metas = state.templates.auto_selection();
+            let (origin, hosts, rate, concurrency) = {
+                let mut snapshot = session.template_scans.snapshot.lock().unwrap();
+                if metas.is_empty()
+                    || !snapshot.auto.enabled
+                    || snapshot.jobs.iter().any(|job| job.status == "running")
+                {
+                    return;
+                }
+                let Some(origin) = snapshot.auto.queued.pop_front() else {
+                    return;
+                };
+                let auto = &mut snapshot.auto;
+                if !auto.scanned.contains(&origin) {
+                    auto.scanned.push_back(origin.clone());
+                    if auto.scanned.len() > MAX_AUTO_SCANNED {
+                        auto.scanned.pop_front();
+                    }
+                }
+                (origin, auto.hosts.clone(), auto.rate, auto.concurrency)
+            };
+            session.schedule_state_persist();
+            let Ok(target) = parse_target(&origin) else {
+                continue;
+            };
+            // It sends what a scan sends by default: a risky template stays out.
+            let (metas, excluded) = apply_risks(metas, &HashSet::new());
+            let (oast, metas, oast_unavailable) = with_oast(&session, metas).await;
+            if metas.is_empty() {
+                continue;
+            }
+            let mut warnings = Vec::new();
+            if !excluded.is_empty() {
+                let risks: Vec<String> = excluded
+                    .iter()
+                    .map(|(risk, count)| format!("{risk} {count}"))
+                    .collect();
+                warnings.push(format!(
+                    "Templates turned on but tagged risky were not sent: {}.",
+                    risks.join(", ")
+                ));
+            }
+            let planned = metas.iter().map(|meta| meta.requests).sum::<usize>();
+            let plan = Plan {
+                targets: vec![target],
+                metas,
+                oast,
+                oast_unavailable,
+                allow_risks: Vec::new(),
+                rate,
+                concurrency,
+                max_requests: planned.clamp(1, MAX_MAX_REQUESTS),
+                apply_match_replace: false,
+                auto_hosts: Some(hosts),
+                warnings,
+            };
+            match launch(&state, &session, plan).await {
+                Ok(_) => return,
+                // A scan the operator started got in first; the host waits
+                // for it to end, as one it takes over from does.
+                Err(_) if session.template_scans.is_running() => {
+                    session.template_scans.requeue(origin);
+                    return;
+                }
+                Err((_, Json(error))) => {
+                    session
+                        .event_log
+                        .push(
+                            EventLevel::Warn,
+                            "templates",
+                            "Auto scan skipped a host",
+                            error["error"].as_str().unwrap_or_default().to_string(),
+                        )
+                        .await;
+                }
+            }
+        }
+    })
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetAutoScan {
+    pub session_id: Uuid,
+    pub enabled: bool,
+    /// Host patterns, as Scope takes them, sent to besides Scope's; omitted
+    /// keeps the list.
+    #[serde(default)]
+    pub hosts: Option<Vec<String>>,
+    #[serde(default)]
+    pub rate: Option<u32>,
+    #[serde(default)]
+    pub concurrency: Option<usize>,
+    #[serde(default)]
+    pub acknowledged: bool,
+}
+
+fn auto_view(state: &AppState, session: &SessionContext) -> serde_json::Value {
+    let auto = session.template_scans.snapshot().auto;
+    serde_json::json!({
+        "session_id": session.id(),
+        "enabled": auto.enabled,
+        "hosts": auto.hosts,
+        "rate": auto.rate,
+        "concurrency": auto.concurrency,
+        "scanned": auto.scanned.len(),
+        "queued": auto.queued.len(),
+        "templates": state.templates.auto_selection().len(),
+    })
+}
+
+pub async fn auto_status(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session = state
+        .read_session_context_for_id(query.session_id)
+        .await
+        .map_err(session_load_error)?;
+    Ok(Json(auto_view(&state, &session)))
+}
+
+pub async fn set_auto_scan(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SetAutoScan>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if request.rate.is_some_and(|rate| !(1..=50).contains(&rate))
+        || request
+            .concurrency
+            .is_some_and(|concurrency| !(1..=8).contains(&concurrency))
+    {
+        return Err(bad_request(
+            "Limits: rate 1–50 requests a second, concurrency 1–8.",
+        ));
+    }
+    let hosts = request.hosts.map(|hosts| {
+        hosts
+            .into_iter()
+            .map(|host| host.trim().to_ascii_lowercase())
+            .filter(|host| !host.is_empty())
+            .collect::<Vec<_>>()
+    });
+    if hosts.as_ref().is_some_and(|hosts| {
+        hosts.len() > MAX_AUTO_HOSTS
+            || hosts.iter().any(|host| {
+                host.len() > 253 || host.contains('/') || host.chars().any(char::is_whitespace)
+            })
+    }) {
+        return Err(bad_request(format!(
+            "Name at most {MAX_AUTO_HOSTS} hosts as Scope takes them: example.com, *.example.com, example.com:8443."
+        )));
+    }
+    if request.enabled && !request.acknowledged {
+        return Err(bad_request(
+            "Confirm the auto scan: it sends the templates turned on for it to each new host captured in Scope or on its list.",
+        ));
+    }
+    let session = state
+        .session_context_for_id(request.session_id)
+        .await
+        .map_err(session_load_error)?;
+    let running = {
+        let mut snapshot = session.template_scans.snapshot.lock().unwrap();
+        let auto = &mut snapshot.auto;
+        auto.enabled = request.enabled;
+        if let Some(hosts) = hosts {
+            auto.hosts = hosts;
+        }
+        if let Some(rate) = request.rate {
+            auto.rate = rate;
+        }
+        if let Some(concurrency) = request.concurrency {
+            auto.concurrency = concurrency;
+        }
+        if !request.enabled {
+            auto.queued.clear();
+        }
+        snapshot
+            .jobs
+            .iter()
+            .find(|job| job.auto && job.status == "running")
+            .map(|job| job.id)
+    };
+    if let Some(id) = running.filter(|_| !request.enabled) {
+        session.template_scans.stop(Some(id)).await;
+    }
+    session.schedule_state_persist();
+    session
+        .event_log
+        .push(
+            EventLevel::Info,
+            "templates",
+            if request.enabled {
+                "Auto scan turned on"
+            } else {
+                "Auto scan turned off"
+            },
+            String::new(),
+        )
+        .await;
+    if request.enabled {
+        tokio::spawn(pump(Arc::clone(&state), Arc::clone(&session)));
+    }
+    Ok(Json(auto_view(&state, &session)))
 }
 
 pub async fn stop(
@@ -759,6 +1174,8 @@ pub async fn stop(
         ));
     }
     session.schedule_state_persist();
+    // A stopped auto job skips its host; the auto scan goes on with the next.
+    tokio::spawn(pump(Arc::clone(&state), Arc::clone(&session)));
     Ok(Json(
         serde_json::json!({"stopped": true, "session_id": session.id()}),
     ))
@@ -774,6 +1191,8 @@ struct Run {
     oast: Option<OastWatch>,
     templates: Vec<Arc<ActiveTemplate>>,
     targets: Vec<ScanTarget>,
+    /// Hosts an auto scan's requests may go to besides Scope's.
+    extra_hosts: Vec<String>,
     client: reqwest::Client,
     apply_match_replace: bool,
     max_requests: usize,
@@ -1108,6 +1527,10 @@ impl Run {
                 ),
             )
             .await;
+        // The auto scan goes on with its next host once a scan finishes.
+        if !cancelled {
+            tokio::spawn(pump(Arc::clone(&self.state), Arc::clone(&self.session)));
+        }
     }
 
     async fn template_on_target(
@@ -1264,10 +1687,7 @@ impl Run {
         loop {
             if hops.is_empty() {
                 // Scope may have narrowed since the scan started.
-                let (include, exclude) = self.session.runtime.scope_lists().await;
-                if include.is_empty()
-                    || !crate::scope::is_host_in_scope(&authority, &include, &exclude)
-                {
+                if !reaches(&self.session, &authority, &self.extra_hosts).await {
                     if !self.skipped[target_index].swap(true, Ordering::Relaxed) {
                         self.update(|job| {
                             job.blocked += 1;
@@ -1514,9 +1934,7 @@ impl Run {
         if follow == Follow::SameHost && !next_authority.eq_ignore_ascii_case(&target.authority) {
             return None;
         }
-        let (include, exclude) = self.session.runtime.scope_lists().await;
-        if include.is_empty()
-            || !crate::scope::is_host_in_scope(&next_authority, &include, &exclude)
+        if !reaches(&self.session, &next_authority, &self.extra_hosts).await
             || crate::special_host::is_special_host(&next_authority)
             || crate::proxy::targets_own_listener(
                 &self.state,
@@ -2312,6 +2730,360 @@ mod tests {
         }
     }
 
+    const AUTO_TEMPLATES: &[(&str, &str)] = &[
+        ("auto-config", "id: example-auto-config\ninfo:\n  severity: high\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/.git/config']\n    matchers:\n      - type: word\n        words: ['[core]']\n"),
+        // One that can judge captured traffic is never sent by the auto scan.
+        ("auto-passive", "id: example-auto-passive\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}']\n    matchers:\n      - type: word\n        words: ['Who are you']\n"),
+        ("auto-off", "id: example-auto-off\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/off']\n    matchers:\n      - type: status\n        status: [404]\n"),
+    ];
+
+    fn auto_request(session: Uuid, value: serde_json::Value) -> SetAutoScan {
+        let mut body = serde_json::json!({"session_id": session});
+        body.as_object_mut()
+            .unwrap()
+            .extend(value.as_object().unwrap().clone());
+        serde_json::from_value(body).unwrap()
+    }
+
+    async fn turn_auto(state: &Arc<AppState>, value: serde_json::Value) -> serde_json::Value {
+        let session = state.session().await.id();
+        set_auto_scan(State(state.clone()), Json(auto_request(session, value)))
+            .await
+            .unwrap()
+            .0
+    }
+
+    fn auto_jobs(session: &SessionContext) -> Vec<ScanJob> {
+        let mut jobs = session.template_scans.snapshot().jobs;
+        jobs.retain(|job| job.auto);
+        jobs
+    }
+
+    /// The auto jobs once nothing waits or runs.
+    async fn auto_settled(session: &SessionContext) -> Vec<ScanJob> {
+        for _ in 0..1_000 {
+            let snapshot = session.template_scans.snapshot();
+            if snapshot.auto.queued.is_empty()
+                && snapshot.jobs.iter().all(|job| job.status != "running")
+            {
+                return auto_jobs(session);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the auto scan did not settle");
+    }
+
+    async fn wait_for(what: &str, check: impl Fn() -> bool) {
+        for _ in 0..1_000 {
+            if check() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[tokio::test]
+    async fn the_auto_scan_sends_what_is_on_to_each_new_host_in_scope_once() {
+        let (address, log, server) = site(1, false).await;
+        let state = scan_state_with("auto", &["127.0.0.1"], AUTO_TEMPLATES).await;
+        state
+            .templates
+            .set_auto(&["example-auto-config".into()], true)
+            .unwrap();
+        let session = state.session().await;
+        // Turning it on is consent to send.
+        let refused = set_auto_scan(
+            State(state.clone()),
+            Json(auto_request(
+                session.id(),
+                serde_json::json!({"enabled": true}),
+            )),
+        )
+        .await;
+        assert_eq!(refused.unwrap_err().0, StatusCode::BAD_REQUEST);
+        turn_auto(
+            &state,
+            serde_json::json!({"enabled": true, "acknowledged": true, "rate": 50}),
+        )
+        .await;
+        let host = address.to_string();
+        observe(&state, &session, "http", &host).await;
+        observe(&state, &session, "http", &host).await;
+        observe(&state, &session, "https", "outside.example.com").await;
+        let jobs = auto_settled(&session).await;
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        assert_eq!(jobs[0].targets, [format!("http://{address}")]);
+        assert_eq!(jobs[0].templates, 1);
+        assert_eq!(jobs[0].matched, 1, "{jobs:?}");
+        // A host is sent to once.
+        observe(&state, &session, "http", &host).await;
+        assert_eq!(auto_settled(&session).await.len(), 1);
+        server.abort();
+        let seen = log.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter()
+                .filter(|seen| seen.path == "/.git/config")
+                .count(),
+            1
+        );
+        assert!(seen.iter().all(|seen| seen.path != "/off"));
+        let status = auto_status(
+            State(state.clone()),
+            Query(SessionQuery {
+                session_id: session.id(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(status["scanned"], 1, "{status}");
+        assert_eq!(status["templates"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_host_that_arrives_while_the_pump_finishes_is_still_sent_to() {
+        let (address, _log, server) = site(1, false).await;
+        let state = scan_state_with("auto-busy", &["127.0.0.1"], AUTO_TEMPLATES).await;
+        state
+            .templates
+            .set_auto(&["example-auto-config".into()], true)
+            .unwrap();
+        let session = state.session().await;
+        turn_auto(
+            &state,
+            serde_json::json!({"enabled": true, "acknowledged": true, "rate": 50}),
+        )
+        .await;
+        // A pump that found nothing to do still holds its lock for a moment.
+        let finishing = session.template_scans.pump.lock().await;
+        observe(&state, &session, "http", &address.to_string()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(finishing);
+        assert_eq!(auto_settled(&session).await.len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_host_the_proxy_captures_goes_to_the_auto_scan() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (address, _, server) = site(1, false).await;
+        let state = scan_state_with("auto-proxy", &["127.0.0.1"], AUTO_TEMPLATES).await;
+        state
+            .templates
+            .set_auto(&["example-auto-config".into()], true)
+            .unwrap();
+        turn_auto(
+            &state,
+            serde_json::json!({"enabled": true, "acknowledged": true, "rate": 50}),
+        )
+        .await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let proxy = tokio::spawn(crate::proxy::serve_proxy(listener, Arc::clone(&state)));
+        let mut stream = tokio::net::TcpStream::connect(proxy_address).await.unwrap();
+        stream
+            .write_all(
+                format!("GET http://{address}/home HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let session = state.session().await;
+        wait_for("an auto job", || !auto_jobs(&session).is_empty()).await;
+        let jobs = auto_settled(&session).await;
+        assert_eq!(jobs[0].targets, [format!("http://{address}")]);
+        assert_eq!(jobs[0].matched, 1, "{jobs:?}");
+        proxy.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_auto_scan_reaches_its_own_hosts_but_never_excluded_ones() {
+        let (address, _, server) = site(1, false).await;
+        let state = scan_state_with("auto-hosts", &["scope.example.com"], AUTO_TEMPLATES).await;
+        state
+            .templates
+            .set_auto(&["example-auto-config".into()], true)
+            .unwrap();
+        let session = state.session().await;
+        turn_auto(
+            &state,
+            serde_json::json!({"enabled": true, "acknowledged": true, "rate": 50, "hosts": ["127.0.0.1"]}),
+        )
+        .await;
+        observe(&state, &session, "http", &address.to_string()).await;
+        let jobs = auto_settled(&session).await;
+        assert_eq!(jobs.len(), 1);
+        // Its requests went out although the host is not in Scope.
+        assert_eq!(jobs[0].matched, 1, "{jobs:?}");
+        session
+            .runtime
+            .update(crate::runtime::RuntimeSettingsUpdate {
+                excluded_scope_patterns: Some(vec!["127.0.0.1".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (other, _, other_server) = site(1, false).await;
+        observe(&state, &session, "http", &other.to_string()).await;
+        assert_eq!(auto_settled(&session).await.len(), 1);
+        server.abort();
+        other_server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_scan_the_operator_starts_takes_over_from_the_auto_scan() {
+        let (slow, _, slow_server) = site(1, true).await;
+        let (address, _, server) = site(1, false).await;
+        let state = scan_state_with("auto-manual", &["127.0.0.1"], AUTO_TEMPLATES).await;
+        state
+            .templates
+            .set_auto(&["example-auto-config".into()], true)
+            .unwrap();
+        let session = state.session().await;
+        turn_auto(
+            &state,
+            serde_json::json!({"enabled": true, "acknowledged": true}),
+        )
+        .await;
+        observe(&state, &session, "http", &slow.to_string()).await;
+        wait_for("the auto job", || {
+            auto_jobs(&session)
+                .iter()
+                .any(|job| job.status == "running")
+        })
+        .await;
+        let started = start(
+            State(state.clone()),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [format!("http://{address}")],
+                    "ids": ["example-auto-off"],
+                    "acknowledged": true,
+                    "rate": 50,
+                }),
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        assert_eq!(finished(&state, id).await.status, "completed");
+        // The host the auto scan was on waited its turn and is sent to again.
+        wait_for("the auto scan to resume", || {
+            let jobs = auto_jobs(&session);
+            jobs.len() == 2 && jobs[0].status == "cancelled" && jobs[1].targets == jobs[0].targets
+        })
+        .await;
+        turn_auto(&state, serde_json::json!({"enabled": false})).await;
+        slow_server.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_host_the_operator_beats_to_a_start_waits_its_turn() {
+        let (address, _, server) = site(1, false).await;
+        let state = scan_state_with("auto-race", &["127.0.0.1"], AUTO_TEMPLATES).await;
+        state
+            .templates
+            .set_auto(&["example-auto-config".into()], true)
+            .unwrap();
+        let session = state.session().await;
+        turn_auto(
+            &state,
+            serde_json::json!({"enabled": true, "acknowledged": true, "rate": 50}),
+        )
+        .await;
+        // Both wait for the session; the operator's scan asked first, after
+        // the auto scan had seen nothing running.
+        let held = state
+            .session_operation_lock(session.id())
+            .await
+            .lock_owned()
+            .await;
+        let manual = tokio::spawn(start(
+            State(state.clone()),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [format!("http://{address}")],
+                    "ids": ["example-auto-off"],
+                    "acknowledged": true,
+                    "rate": 50,
+                }),
+            )),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        observe(&state, &session, "http", &address.to_string()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(held);
+        let started = manual.await.unwrap().unwrap().0;
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        assert_eq!(finished(&state, id).await.status, "completed");
+        wait_for("the host to be sent to", || auto_jobs(&session).len() == 1).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn turning_the_auto_scan_off_stops_it_and_forgets_what_waits() {
+        let (slow, _, slow_server) = site(1, true).await;
+        let state = scan_state_with("auto-off", &["127.0.0.1", "localhost"], AUTO_TEMPLATES).await;
+        state
+            .templates
+            .set_auto(&["example-auto-config".into()], true)
+            .unwrap();
+        let session = state.session().await;
+        turn_auto(
+            &state,
+            serde_json::json!({"enabled": true, "acknowledged": true}),
+        )
+        .await;
+        observe(&state, &session, "http", &slow.to_string()).await;
+        observe(&state, &session, "http", "localhost:9").await;
+        wait_for("the auto job", || {
+            auto_jobs(&session)
+                .iter()
+                .any(|job| job.status == "running")
+        })
+        .await;
+        let status = turn_auto(&state, serde_json::json!({"enabled": false})).await;
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["queued"], 0, "{status}");
+        assert_eq!(auto_jobs(&session)[0].status, "cancelled");
+        observe(&state, &session, "http", "localhost:10").await;
+        assert_eq!(session.template_scans.snapshot().auto.queued.len(), 0);
+        slow_server.abort();
+    }
+
+    #[test]
+    fn the_auto_scan_survives_a_restart_and_its_job_reads_as_interrupted() {
+        let mut snapshot = TemplateScanSnapshot::default();
+        snapshot.auto.enabled = true;
+        snapshot
+            .auto
+            .queued
+            .push_back("https://app.example.com".into());
+        snapshot.jobs.push(ScanJob {
+            status: "running".into(),
+            auto: true,
+            ..ScanJob::default()
+        });
+        let text = serde_json::to_string(&snapshot).unwrap();
+        let store = TemplateScanStore::from_snapshot(serde_json::from_str(&text).unwrap());
+        let restored = store.snapshot();
+        assert!(restored.auto.enabled);
+        assert_eq!(restored.auto.queued, ["https://app.example.com"]);
+        assert_eq!(restored.jobs[0].status, "interrupted");
+        // An older state without it reads as off.
+        let old: TemplateScanSnapshot = serde_json::from_str(r#"{"jobs":[]}"#).unwrap();
+        assert!(!old.auto.enabled);
+        assert_eq!(old.auto.rate, 10);
+    }
+
     const OAST_TEMPLATES: &[(&str, &str)] = &[
         ("oast-hit", "id: example-oast-hit\ninfo:\n  severity: critical\nhttp:\n  - path: ['{{BaseURL}}/.git/config']\n    headers:\n      X-Test: 'http://{{interactsh-url}}/x'\n    matchers-condition: and\n    matchers:\n      - type: word\n        part: interactsh_protocol\n        words: [http]\n      - type: word\n        words: ['[core]']\n"),
         ("oast-quiet", "id: example-oast-quiet\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/.git/config']\n    headers:\n      X-Test: 'quiet-{{interactsh-url}}'\n    matchers:\n      - type: word\n        part: interactsh_protocol\n        words: [http]\n"),
@@ -2549,6 +3321,7 @@ mod tests {
                     ..ScanJob::default()
                 },
             ],
+            ..TemplateScanSnapshot::default()
         });
         let statuses: Vec<String> = store
             .snapshot()
