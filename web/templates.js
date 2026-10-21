@@ -15,9 +15,20 @@
     if (filters.severity) params.set("severity", filters.severity);
     if (filters.support) params.set("support", filters.support);
     if (filters.enabledOnly) params.set("enabled", "true");
+    if (filters.sort) {
+      params.set("sort", filters.sort);
+      params.set("direction", filters.direction === "desc" ? "desc" : "asc");
+    }
     params.set("limit", String(PAGE_SIZE));
     params.set("offset", String(Math.max(0, page) * PAGE_SIZE));
     return `/api/templates?${params}`;
+  }
+
+  // A header click sorts by its column, and a second click reverses it, as in
+  // Findings.
+  function nextSort(current, key) {
+    if (current.key === key) return { key, direction: current.direction === "asc" ? "desc" : "asc" };
+    return { key, direction: "asc" };
   }
 
   // Turning templates on in bulk follows the list filter, restricted to the
@@ -155,7 +166,7 @@
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
     const ids = ["Status", "Progress", "ProgressBar", "Consent", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
-      "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Rows", "Detail",
+      "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
       "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
       "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanConsent", "ScanConsentText", "ScanStart",
       "ScanNotice", "ScanJobs"];
@@ -166,7 +177,11 @@
     let items = [];
     let total = 0;
     let page = 0;
+    let sort = { key: "", direction: "asc" };
     let selected = null;
+    // The template being opened, shown as selected before its detail arrives.
+    let pendingId = null;
+    let openRequest = 0;
     let timer = null;
     let searchTimer = null;
     let busy = false;
@@ -195,7 +210,20 @@
       return response.json();
     }
     function filters() {
-      return { search: els.Search.value, severity: els.Severity.value, support: els.Support.value, enabledOnly: els.EnabledOnly.checked };
+      return {
+        search: els.Search.value, severity: els.Severity.value, support: els.Support.value, enabledOnly: els.EnabledOnly.checked,
+        sort: sort.key, direction: sort.direction,
+      };
+    }
+
+    function renderSortHeaders() {
+      for (const header of els.Head.querySelectorAll("[data-sort]")) {
+        const active = header.dataset.sort === sort.key;
+        header.classList.toggle("active", active);
+        header.setAttribute("aria-sort", active ? (sort.direction === "asc" ? "ascending" : "descending") : "none");
+        const indicator = header.querySelector(".table-sort-indicator");
+        if (indicator) indicator.textContent = active ? (sort.direction === "asc" ? "↑" : "↓") : "↕";
+      }
     }
 
     function renderStatus() {
@@ -240,7 +268,8 @@
         els.Rows.append(row);
       }
       for (const meta of items) {
-        const row = element("tr", meta.id === selected?.id ? "recon-selected" : "");
+        const row = element("tr", meta.id === (pendingId ?? selected?.id) ? "recon-selected" : "");
+        row.dataset.templateId = meta.id;
         const toggleCell = element("td");
         if (meta.passive_supported) {
           const toggle = element("input");
@@ -253,11 +282,8 @@
         }
         const severityCell = element("td");
         severityCell.append(element("span", `severity-badge ${severityClass(meta.severity)}`, meta.severity || "unknown"));
-        const name = element("button", "recon-endpoint-button", meta.name || meta.id);
-        name.type = "button";
-        name.dataset.templateId = meta.id;
         const nameCell = element("td");
-        nameCell.append(name, element("div", "recon-help", meta.id));
+        nameCell.append(element("div", "templates-name", meta.name || meta.id), element("div", "recon-help", meta.id));
         row.append(toggleCell, severityCell, nameCell, element("td", "", supportLabel(meta)),
           element("td", "", (meta.tags || []).slice(0, 6).join(", ")));
         els.Rows.append(row);
@@ -347,13 +373,26 @@
       }
     }
 
-    async function open(id) {
+    // Shows the row selected at once and its detail when it arrives; an older
+    // request still on its way, as ↑/↓ leave behind, is dropped.
+    async function open(id, { reveal = false } = {}) {
+      const request = ++openRequest;
+      pendingId = id;
+      renderList();
+      if (reveal) Array.from(els.Rows.children).find((row) => row.dataset.templateId === id)?.scrollIntoView?.({ block: "nearest" });
+      let detail;
       try {
-        selected = await json(await fetcher(`/api/templates/${encodeURIComponent(id)}`), "Could not open the template");
+        detail = await json(await fetcher(`/api/templates/${encodeURIComponent(id)}`), "Could not open the template");
       } catch (error) {
+        if (request !== openRequest) return;
+        pendingId = null;
         notice(error.message, true);
+        renderList();
         return;
       }
+      if (request !== openRequest) return;
+      pendingId = null;
+      selected = detail;
       showingJob = false;
       if (els.ScanSelection.value === "selected") invalidatePreview();
       renderList();
@@ -640,8 +679,29 @@
         void setPassive({ ids: [toggle.dataset.templateToggle], enabled: toggle.checked }, toggle.checked ? "Turned it on." : "Turned it off.");
         return;
       }
-      const name = event.target.closest("[data-template-id]");
-      if (name) void open(name.dataset.templateId);
+      const row = event.target.closest("[data-template-id]");
+      if (row) void open(row.dataset.templateId);
+    });
+    on(els.Head, "click", (event) => {
+      if (event.target.closest(".table-col-resize")) return;
+      const header = event.target.closest("[data-sort]");
+      if (!header) return;
+      sort = nextSort(sort, header.dataset.sort);
+      renderSortHeaders();
+      page = 0;
+      void loadList();
+    });
+    // ↑/↓ move through the page, as in Findings; the app says when they are
+    // free, not while a field has focus or a modal is open.
+    on(doc, "keydown", (event) => {
+      if (!visible || !items.length) return;
+      const step = options.arrowStep?.(event) || 0;
+      if (!step) return;
+      const current = items.findIndex((meta) => meta.id === (pendingId ?? selected?.id));
+      const next = current < 0 ? (step > 0 ? 0 : items.length - 1) : current + step;
+      if (next < 0 || next >= items.length) return;
+      event.preventDefault();
+      void open(items[next].id, { reveal: true });
     });
 
     function setVisible(next) {
@@ -674,7 +734,7 @@
     };
   }
 
-  const api = { createController, listQuery, passiveRequest, libraryLine, progressOf, supportLabel, scanRequest, parseTargets,
+  const api = { createController, listQuery, nextSort, passiveRequest, libraryLine, progressOf, supportLabel, scanRequest, parseTargets,
     previewLine, jobLine, RISKS, PAGE_SIZE };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperTemplates = api;

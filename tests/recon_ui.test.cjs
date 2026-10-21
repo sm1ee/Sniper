@@ -145,15 +145,16 @@ class NodeFixture {
   append(...children) { for (const child of children) { if (child.tagName === "FRAGMENT") this.append(...child.childNodes); else this.childNodes.push(child); } }
   replaceChildren(...children) { this.childNodes = []; this._text = ""; this.append(...children); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  querySelectorAll() { return []; }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
   removeEventListener(name) { this.listeners.delete(name); }
   emit(name, event = {}) { this.listeners.get(name)?.({ target: this, preventDefault() {}, ...event }); }
-  closest(selector) { return selector === "[data-stop-job]" && this.dataset.stopJob || selector === "[data-endpoint-key]" && this.dataset.endpointKey ? this : null; }
+  closest(selector) { return selector === "[data-stop-job]" && this.dataset.stopJob || selector === "[data-endpoint-key]" && this.dataset.endpointKey || selector === "[data-sort]" && this.dataset.sort ? this : null; }
 }
 
 function controllerFixture() {
   const nodes = new Map();
-  const document = { createElement: tag => new NodeFixture(tag), createDocumentFragment: () => new NodeFixture("fragment") };
+  const document = Object.assign(new NodeFixture("document"), { createElement: tag => new NodeFixture(tag), createDocumentFragment: () => new NodeFixture("fragment") });
   const root = new NodeFixture(); root.ownerDocument = document;
   root.querySelector = selector => { if (!nodes.has(selector)) nodes.set(selector, new NodeFixture()); return nodes.get(selector); };
   const node = suffix => root.querySelector(`#recon${suffix}`);
@@ -167,7 +168,7 @@ function controllerFixture() {
     a: { session_id: "a", jobs: [], endpoints: Array.from({ length: 111 }, (_, i) => endpoint(`api/${i}`)) },
     b: { session_id: "b", jobs: [], endpoints: [endpoint("session-b-only")] },
   };
-  const fixture = { node, snapshots, session: "a", generation: 0, calls: [], hold: null, held: null, timers: new Map(), nextTimer: 0 };
+  const fixture = { node, document, step: 0, snapshots, session: "a", generation: 0, calls: [], hold: null, held: null, timers: new Map(), nextTimer: 0 };
   const response = payload => ({ ok: true, json: async () => JSON.parse(JSON.stringify(payload)) });
   const fetcher = async (path, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
@@ -198,7 +199,7 @@ function controllerFixture() {
     }
     return response(snapshot);
   };
-  fixture.controller = recon.createController({ root, getSessionId: () => fixture.session, getSessionGeneration: () => fixture.generation, fetch: fetcher,
+  fixture.controller = recon.createController({ root, getSessionId: () => fixture.session, getSessionGeneration: () => fixture.generation, fetch: fetcher, arrowStep: () => fixture.step,
     setTimeout(callback, delay) { fixture.timers.set(++fixture.nextTimer, { callback, delay }); return fixture.nextTimer; }, clearTimeout(id) { fixture.timers.delete(id); } });
   fixture.switchTo = session => { fixture.controller.reset(); fixture.session = session; fixture.generation += 1; fixture.controller.syncSession(); };
   fixture.controller.setVisible(true);
@@ -465,6 +466,46 @@ test("controller renders bounded pages, search and text-only provenance", async 
   f.controller.dispose();
 });
 
+test("endpoints sort by a column, ties keeping the order they came in", () => {
+  const list = [
+    { method: "POST", url: "https://example.com/b", evidence: [{ source: "wayback", kind: "history" }] },
+    { method: "GET", url: "https://example.com/c", evidence: [{ source: "crawler", kind: "live" }] },
+    { method: "GET", url: "https://example.com/a", evidence: [{ source: "crawler", kind: "candidate" }] },
+  ];
+  const order = sort => recon.sortEndpoints(list, sort).map(endpoint => endpoint.url.slice(-1)).join("");
+  assert.equal(order({ key: "", direction: "asc" }), "bca");
+  assert.equal(order({ key: "url", direction: "asc" }), "abc");
+  assert.equal(order({ key: "url", direction: "desc" }), "cba");
+  assert.equal(order({ key: "method", direction: "asc" }), "cab");
+  assert.equal(order({ key: "evidence", direction: "asc" }), "abc");
+  assert.equal(order({ key: "sources", direction: "desc" }), "bca");
+  assert.equal(recon.sortEndpoints(list, { key: "url", direction: "asc" })[0], list[2], "sorting copies, never reorders the inventory");
+  assert.equal(list[0].url, "https://example.com/b");
+});
+
+test("a header sorts the endpoints, and a click anywhere on a row or ↑/↓ selects", async () => {
+  const f = controllerFixture(); await settled();
+  const rows = () => f.node("Endpoints").childNodes;
+  f.node("Endpoints").emit("click", { target: rows()[2] });
+  assert.equal(rows()[2].className, "recon-selected");
+  // The app decides when the arrows belong to the list.
+  f.step = 1; f.document.emit("keydown", { key: "ArrowDown" });
+  assert.equal(rows()[3].className, "recon-selected");
+  f.step = -1; f.document.emit("keydown", { key: "ArrowUp" });
+  assert.equal(rows()[2].className, "recon-selected");
+  f.step = 0; f.document.emit("keydown", { key: "ArrowUp" });
+  assert.equal(rows()[2].className, "recon-selected");
+  const header = new NodeFixture("th"); header.dataset.sort = "url";
+  f.node("Head").emit("click", { target: header });
+  f.node("Head").emit("click", { target: header });
+  const urls = rows().map(row => row.dataset.endpointKey.split("\n")[1]);
+  assert.deepEqual(urls, [...urls].sort().reverse());
+  assert.equal(urls[0], "https://example.com/api/99");
+  f.controller.setVisible(false);
+  f.step = 1; f.document.emit("keydown", { key: "ArrowDown" });
+  f.controller.dispose();
+});
+
 test("controller keeps and searches endpoints beyond the old 5,000 display cap", async () => {
   const f = controllerFixture(); await settled();
   f.snapshots.a.endpoints = Array.from({ length: 5_101 }, (_, i) => ({
@@ -711,9 +752,9 @@ for (const hasController of [false, true]) {
 // synchronous, so a pending inventory read must resolve the latest selection.
 function selectEndpoint(f, endpoint) {
   const key = recon.endpointKey(endpoint);
-  const button = descendants(f.node("Endpoints")).find(item => item.dataset.endpointKey === key);
-  assert.ok(button, `Expected a visible endpoint button for ${key}`);
-  f.node("Endpoints").emit("click", { target: button });
+  const row = descendants(f.node("Endpoints")).find(item => item.dataset.endpointKey === key);
+  assert.ok(row, `Expected a visible endpoint row for ${key}`);
+  f.node("Endpoints").emit("click", { target: row });
 }
 
 function detailFields(f) {
@@ -727,7 +768,7 @@ function detailFields(f) {
 function assertSelectedEndpoint(f, endpoint, visible = true) {
   assert.equal(detailFields(f)?.Method, endpoint.method);
   assert.equal(detailFields(f)?.["Normalized URL"], endpoint.url);
-  const selected = descendants(f.node("Endpoints")).filter(item => item.attributes["aria-pressed"] === "true");
+  const selected = descendants(f.node("Endpoints")).filter(item => item.attributes["aria-selected"] === "true");
   assert.deepEqual(selected.map(item => item.dataset.endpointKey), visible ? [recon.endpointKey(endpoint)] : []);
 }
 

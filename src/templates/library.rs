@@ -701,6 +701,37 @@ impl TemplateLibrary {
         // Templates Sniper can run come first, so a list of everything does not
         // open on a page of code and flow templates it cannot.
         matching.sort_by_key(|meta| !(meta.passive_supported || meta.active_supported));
+        if let Some(key) = query.sort.as_deref() {
+            let descending = query.direction.as_deref() == Some("desc");
+            let name = |meta: &TemplateMeta| {
+                if meta.name.is_empty() {
+                    &meta.id
+                } else {
+                    &meta.name
+                }
+                .to_lowercase()
+            };
+            let mode = |meta: &TemplateMeta| (!meta.passive_supported, !meta.active_supported);
+            let tags = |meta: &TemplateMeta| meta.tags.join(", ").to_lowercase();
+            // Stable, so templates that tie keep the default order.
+            matching.sort_by(|a, b| {
+                let order = match key {
+                    "on" => enabled
+                        .contains(b.id.as_str())
+                        .cmp(&enabled.contains(a.id.as_str())),
+                    "severity" => severity_rank(&a.severity).cmp(&severity_rank(&b.severity)),
+                    "name" => name(a).cmp(&name(b)),
+                    "mode" => mode(a).cmp(&mode(b)),
+                    "tags" => tags(a).cmp(&tags(b)),
+                    _ => std::cmp::Ordering::Equal,
+                };
+                if descending {
+                    order.reverse()
+                } else {
+                    order
+                }
+            });
+        }
         let total = matching.len();
         let offset = query.offset.unwrap_or(0);
         let limit = query.limit.unwrap_or(200).min(MAX_LIST_LIMIT);
@@ -946,6 +977,41 @@ pub struct ListQuery {
     pub enabled: Option<bool>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    /// The column to sort by, one of [`SORT_KEYS`]. Without one, the
+    /// templates Sniper can run come first.
+    pub sort: Option<String>,
+    /// `asc`, the default, or `desc`.
+    pub direction: Option<String>,
+}
+
+pub const SORT_KEYS: &[&str] = &["on", "severity", "name", "mode", "tags"];
+
+/// Why a list query's sort is not one the list offers, if it is not.
+pub fn sort_error(query: &ListQuery) -> Option<String> {
+    if let Some(sort) = query.sort.as_deref().filter(|sort| !sort.is_empty()) {
+        if !SORT_KEYS.contains(&sort) {
+            return Some(format!(
+                "unknown sort `{sort}`; use one of {}",
+                SORT_KEYS.join(", ")
+            ));
+        }
+    }
+    match query.direction.as_deref() {
+        None | Some("" | "asc" | "desc") => None,
+        Some(other) => Some(format!("unknown direction `{other}`; use asc or desc")),
+    }
+}
+
+/// Severities in the order Findings sorts them, the most severe first.
+fn severity_rank(severity: &str) -> u8 {
+    match severity {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        "info" => 4,
+        _ => 5,
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1420,6 +1486,9 @@ pub async fn start_import(State(state): State<Arc<AppState>>, body: Bytes) -> Re
 }
 
 pub async fn list(State(state): State<Arc<AppState>>, Query(query): Query<ListQuery>) -> Response {
+    if let Some(error) = sort_error(&query) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
     Json(state.templates.list(&query)).into_response()
 }
 
@@ -1574,6 +1643,64 @@ mod tests {
             .map(|item| item.meta.id)
             .collect();
         assert_eq!(ids, ["example-exposure", "example-dns"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lists_sort_by_a_column_and_keep_the_default_order_for_ties() {
+        let dir = std::env::temp_dir().join(format!("sniper-templates-{}", uuid::Uuid::new_v4()));
+        let library = library(&dir);
+        library.import_blocking(&release(), Source::Import).unwrap();
+        library
+            .set_passive(&["example-detect".into()], true)
+            .unwrap();
+        let ids = |sort: &str, direction: &str| -> Vec<String> {
+            let query = ListQuery {
+                sort: Some(sort.into()),
+                direction: Some(direction.into()),
+                ..ListQuery::default()
+            };
+            assert_eq!(sort_error(&query), None);
+            library
+                .list(&query)
+                .items
+                .into_iter()
+                .map(|item| item.meta.id)
+                .collect()
+        };
+        // The most severe first, as Findings sorts.
+        assert_eq!(
+            ids("severity", "asc"),
+            ["example-exposure", "example-detect", "example-dns"]
+        );
+        assert_eq!(
+            ids("severity", "desc"),
+            ["example-detect", "example-dns", "example-exposure"]
+        );
+        assert_eq!(
+            ids("name", "asc"),
+            ["example-detect", "example-dns", "example-exposure"]
+        );
+        assert_eq!(
+            ids("on", "asc"),
+            ["example-detect", "example-exposure", "example-dns"]
+        );
+        assert_eq!(
+            ids("mode", "desc"),
+            ["example-dns", "example-exposure", "example-detect"]
+        );
+        assert_eq!(
+            ids("tags", "asc"),
+            ["example-dns", "example-exposure", "example-detect"]
+        );
+        for (sort, direction) in [("size", "asc"), ("name", "up")] {
+            let query = ListQuery {
+                sort: Some(sort.into()),
+                direction: Some(direction.into()),
+                ..ListQuery::default()
+            };
+            assert!(sort_error(&query).is_some(), "{sort} {direction}");
+        }
         let _ = fs::remove_dir_all(dir);
     }
 

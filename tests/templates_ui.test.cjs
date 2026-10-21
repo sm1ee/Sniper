@@ -58,7 +58,7 @@ test("every template is listed by default, and the list reads like Findings", ()
 test("rows show severity as Findings do, and a box only where a template can run passively", async () => {
   const els = new Map();
   const shell = {
-    ownerDocument: { createElement: (tag) => Object.assign(fakeElement(), { tag }) },
+    ownerDocument: fakeDocument((tag) => Object.assign(fakeElement(), { tag })),
     querySelector(selector) { const element = fakeElement(); els.set(selector, element); return element; },
   };
   const status = { state: "idle", library: { source: "import", verified: false }, templates: 2, passive_supported: 1, passive_enabled: 0 };
@@ -190,10 +190,109 @@ function fakeElement() {
   };
 }
 
+// The document the controller listens on for ↑/↓.
+function fakeDocument(createElement) {
+  return Object.assign(listeningElement(), { createElement });
+}
+
+function listeningElement() {
+  const element = fakeElement();
+  const listeners = {};
+  element.addEventListener = (type, callback) => { (listeners[type] ||= []).push(callback); };
+  element.removeEventListener = (type, callback) => { listeners[type] = (listeners[type] || []).filter((fn) => fn !== callback); };
+  element.dispatch = (type, event) => (listeners[type] || []).forEach((callback) => callback({ preventDefault() {}, ...event }));
+  return element;
+}
+
+// An event target inside `element`, whose `closest` finds it by the data
+// attribute a selector names, as the browser's would.
+function inside(element) {
+  return {
+    closest(selector) {
+      const name = selector.match(/^\[data-([a-z-]+)\]$/)?.[1];
+      const key = name?.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      return key && element.dataset[key] !== undefined ? element : null;
+    },
+  };
+}
+
+const settle = async () => { for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+async function listFixture(items, arrowStep) {
+  const els = new Map();
+  const doc = fakeDocument((tag) => Object.assign(listeningElement(), { tag }));
+  const shell = {
+    ownerDocument: doc,
+    querySelector(selector) { if (!els.has(selector)) els.set(selector, listeningElement()); return els.get(selector); },
+  };
+  const status = { state: "idle", library: { source: "import", verified: false }, templates: items.length, passive_supported: 0, passive_enabled: 0 };
+  const urls = [];
+  const controller = templates.createController({
+    root: shell, getSessionId: () => null, getScopeIncludeCount: () => 1, arrowStep,
+    fetch: async (url) => {
+      urls.push(String(url));
+      const id = String(url).match(/^\/api\/templates\/([^?/]+)$/)?.[1];
+      const body = String(url).includes("/library") ? status
+        : id ? { ...items.find((meta) => meta.id === decodeURIComponent(id)), yaml: "" }
+          : { items, total: items.length };
+      return { ok: true, json: async () => body };
+    },
+    setTimeout: () => 0, clearTimeout() {},
+  });
+  controller.setVisible(true);
+  await settle();
+  return { controller, els, doc, urls, rows: () => els.get("#templatesRows").children };
+}
+
+test("a list sorted by a column asks the server for that order", () => {
+  assert.equal(
+    templates.listQuery({ search: "", sort: "severity", direction: "desc" }, 0),
+    "/api/templates?sort=severity&direction=desc&limit=100&offset=0",
+  );
+  assert.deepEqual(templates.nextSort({ key: "", direction: "asc" }, "name"), { key: "name", direction: "asc" });
+  assert.deepEqual(templates.nextSort({ key: "name", direction: "asc" }, "name"), { key: "name", direction: "desc" });
+  assert.deepEqual(templates.nextSort({ key: "name", direction: "desc" }, "severity"), { key: "severity", direction: "asc" });
+});
+
+test("a header sorts the list, and a click anywhere on a row or ↑/↓ selects", async () => {
+  const items = ["example-a", "example-b", "example-c"].map((id) => ({ id, name: id, severity: "info", tags: [], active_supported: true }));
+  let step = 0;
+  const f = await listFixture(items, () => step);
+  const severity = Object.assign(fakeElement(), { dataset: { sort: "severity" } });
+  f.els.get("#templatesHead").dispatch("click", { target: inside(severity) });
+  await settle();
+  assert.match(f.urls.at(-1), /sort=severity&direction=asc/);
+  f.els.get("#templatesHead").dispatch("click", { target: inside(severity) });
+  await settle();
+  assert.match(f.urls.at(-1), /sort=severity&direction=desc/);
+
+  f.els.get("#templatesRows").dispatch("click", { target: inside(f.rows()[1]) });
+  await settle();
+  assert.equal(f.urls.at(-1), "/api/templates/example-b");
+  // The app decides when the arrows belong to the list: not while typing,
+  // not under a modal.
+  step = 1;
+  f.doc.dispatch("keydown", { key: "ArrowDown", target: {} });
+  await settle();
+  assert.equal(f.urls.at(-1), "/api/templates/example-c");
+  assert.equal(f.rows()[2].className, "recon-selected");
+  step = 0;
+  const sent = f.urls.length;
+  f.doc.dispatch("keydown", { key: "ArrowUp", target: {} });
+  await settle();
+  assert.equal(f.urls.length, sent);
+  f.controller.setVisible(false);
+  step = -1;
+  f.doc.dispatch("keydown", { key: "ArrowUp", target: {} });
+  await settle();
+  assert.equal(f.urls.length, sent, "a hidden list keeps its hands off the arrows");
+  f.controller.dispose();
+});
+
 test("opening Scan rereads the scope, and its warning follows the scope it is told about", async () => {
   const els = new Map();
   const shell = {
-    ownerDocument: { createElement: () => fakeElement() },
+    ownerDocument: fakeDocument(() => fakeElement()),
     querySelector(selector) { const element = fakeElement(); els.set(selector, element); return element; },
   };
   const status = { state: "idle", library: { source: "import", verified: false }, templates: 1, passive_supported: 1, passive_enabled: 1 };
@@ -219,7 +318,7 @@ test("opening Scan rereads the scope, and its warning follows the scope it is to
 test("Preview can be pressed once the library has loaded", async () => {
   const els = new Map();
   const shell = {
-    ownerDocument: { createElement: () => fakeElement() },
+    ownerDocument: fakeDocument(() => fakeElement()),
     querySelector(selector) { const element = fakeElement(); els.set(selector, element); return element; },
   };
   const status = { state: "idle", library: { source: "import", verified: false }, templates: 1, passive_supported: 0, passive_enabled: 0 };

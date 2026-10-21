@@ -4835,26 +4835,31 @@ button.utility-button.replay-tab-add {
   background: rgba(248, 113, 113, 0.1) !important;
 }
 
-.findings-sortable {
+.findings-sortable,
+.table-sortable {
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
 }
 
-.findings-sortable:hover {
+.findings-sortable:hover,
+.table-sortable:hover {
   color: var(--text-primary);
 }
 
-.findings-sortable.active {
+.findings-sortable.active,
+.table-sortable.active {
   color: var(--point);
 }
 
-.findings-sort-indicator {
+.findings-sort-indicator,
+.table-sort-indicator {
   font-size: 10px;
   opacity: 0.5;
 }
 
-.findings-sortable.active .findings-sort-indicator {
+.findings-sortable.active .findings-sort-indicator,
+.table-sortable.active .table-sort-indicator {
   opacity: 1;
 }
 
@@ -4889,14 +4894,16 @@ button.utility-button.replay-tab-add {
 .findings-col-path { width: var(--fc-path); }
 .findings-col-time { width: var(--fc-time); }
 
-.findings-col-resize {
+.findings-col-resize,
+.table-col-resize {
   position: absolute;
   top: 0; right: -7px; bottom: 0;
   width: 14px;
   cursor: col-resize;
   z-index: 3;
 }
-.findings-col-resize::after {
+.findings-col-resize::after,
+.table-col-resize::after {
   content: "";
   position: absolute;
   top: 7px; bottom: 7px; left: 50%;
@@ -4906,7 +4913,9 @@ button.utility-button.replay-tab-add {
   transition: background 160ms ease, width 160ms ease;
 }
 .findings-col-resize:hover::after,
-.findings-col-resize.active::after {
+.findings-col-resize.active::after,
+.table-col-resize:hover::after,
+.table-col-resize.active::after {
   width: 2px;
   background: rgba(169, 186, 205, 0.7);
 }
@@ -8178,18 +8187,25 @@ button.utility-button.replay-tab-add {
 .recon-search-controls { display: flex; gap: 8px; flex: 1 1 320px; }
 .recon-search-controls input { flex: 1 1 160px; }
 .recon-search-controls select { flex: 0 0 auto; width: auto; min-width: 130px; }
-.recon-results { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 34%); flex: 1; min-height: 0; overflow: hidden; }
+/* The divider between list and detail sets --list-detail-width. */
+.recon-results { display: grid; grid-template-columns: minmax(0, 1fr) 10px var(--list-detail-width, minmax(230px, 34%)); flex: 1; min-height: 0; overflow: hidden; }
 .recon-table-scroll { min-width: 0; overflow: auto; }
+.recon-table-scroll:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; }
 .recon-table { width: 100%; table-layout: fixed; }
-.recon-table th:first-child { width: 76px; }
-.recon-table th:nth-child(3) { width: 110px; }
-.recon-table th:nth-child(4) { width: 125px; }
+.recon-table th[data-sort="method"] { width: 76px; }
+.recon-table th[data-sort="evidence"] { width: 110px; }
+.recon-table th[data-sort="sources"] { width: 125px; }
+.recon-table tbody tr[data-endpoint-key], .recon-table tbody tr[data-template-id] { cursor: pointer; }
+.recon-table tbody tr:hover td { background: rgba(255, 255, 255, 0.03); }
 .recon-table td { vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
 .recon-table thead th { position: sticky; top: 0; z-index: 1; background: var(--panel-elevated); }
+/* A sticky header cell stacks on its own, so the next one would cover a
+   handle that crossed the edge; this one stays inside its cell. */
+.recon-table .table-col-resize { right: 0; width: 10px; }
+.recon-table .table-col-resize::after { left: auto; right: 0; transform: none; }
 .recon-table .recon-selected { background: var(--selection); }
 .recon-method { font-family: var(--mono); }
-.recon-endpoint-button { width: 100%; padding: 0; border: 0; background: none; color: var(--text); text-align: left; cursor: pointer; font-family: var(--mono); overflow-wrap: anywhere; white-space: normal; }
-.recon-endpoint-button:hover { color: var(--info); }
+.recon-url-cell { font-family: var(--mono); }
 .recon-empty { padding: 14px; margin: 0; color: var(--text-dim); }
 .recon-detail { overflow: auto; border-left: 1px solid var(--line); padding: 12px; background: var(--panel-code-alt); user-select: text; -webkit-user-select: text; }
 .recon-detail h3 { margin: 0 0 12px; font-size: var(--font-md); }
@@ -8205,6 +8221,7 @@ button.utility-button.replay-tab-add {
   .recon-shell { grid-template-columns: minmax(255px, 290px) minmax(0, 1fr); }
   .recon-results { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(150px, 1fr) minmax(120px, 35%); }
   .recon-detail { border-left: 0; border-top: 1px solid var(--line); }
+  .list-detail-resizer { display: none; }
 }
 @media (max-width: 760px) {
   .recon-shell { display: flex; flex-direction: column; overflow: auto; }
@@ -8266,13 +8283,13 @@ button.utility-button.replay-tab-add {
 .templates-shell textarea:focus-visible, .templates-shell summary:focus-visible {
   outline: 2px solid var(--info); outline-offset: 2px;
 }
-.templates-table th:first-child { width: 44px; }
-.templates-table th:nth-child(2) { width: 76px; }
-.templates-table th:nth-child(4) { width: 130px; }
-.templates-table th:nth-child(5) { width: 26%; }
+.templates-table th[data-sort="on"] { width: 52px; }
+.templates-table th[data-sort="severity"] { width: 96px; }
+.templates-table th[data-sort="mode"] { width: 130px; }
+.templates-table th[data-sort="tags"] { width: 26%; }
 /* One line per value keeps rows level; the detail beside shows the rest. */
 .templates-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
-.templates-table .recon-endpoint-button,
+.templates-table .templates-name,
 .templates-table .recon-help { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .templates-yaml {
   margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 5px;

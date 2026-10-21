@@ -1272,6 +1272,7 @@ function bindEvents() {
       root: els.reconShell,
       getSessionId: currentSessionId,
       getSessionGeneration: () => workspaceStateGeneration,
+      arrowStep: tableArrowStep,
     });
   }
   if (window.SniperTemplates && els.templatesShell) {
@@ -1281,8 +1282,11 @@ function bindEvents() {
       onShow: () => loadRuntimeSettings().catch((error) => console.error(error)),
       getSessionId: currentSessionId,
       openRecord: jumpToTransaction,
+      arrowStep: tableArrowStep,
     });
   }
+  document.querySelectorAll(".recon-table").forEach(bindTableColumnResizers);
+  document.querySelectorAll(".list-detail-resizer").forEach(bindListDetailResizer);
   window.addEventListener("resize", resetLayoutTextareas);
   document.addEventListener("visibilitychange", flushWorkspaceStateBeforeHidden);
   window.addEventListener("pagehide", flushWorkspaceStateOnUnload);
@@ -22504,6 +22508,88 @@ function applyServiceMapDetailWidth() {
   if (!content) return;
   if (state.serviceMapDetailWidth > 0) content.style.setProperty("--service-map-detail-width", `${state.serviceMapDetailWidth}px`);
   else content.style.removeProperty("--service-map-detail-width");
+}
+
+// ↑/↓ for a list table's selection, read as Findings reads them: free unless
+// a modal is open, a field or editor has focus, or a modifier is held.
+function tableArrowStep(event) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return 0;
+  if (event.defaultPrevented || getActiveModalAction()) return 0;
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return 0;
+  if (isEditableTarget(event.target)) return 0;
+  return event.key === "ArrowDown" ? 1 : -1;
+}
+
+// Dragging a header's right edge sets its column's width, as in Findings. A
+// fixed-layout table grows past its box once its columns need the room.
+function bindTableColumnResizers(table) {
+  if (!table) return;
+  let finishResize = null;
+  table.addEventListener("mousedown", (event) => {
+    const handle = event.target.closest(".table-col-resize");
+    const header = handle?.closest("th");
+    if (!header) return;
+    finishResize?.();
+    event.preventDefault();
+    event.stopPropagation();
+    const startWidth = header.getBoundingClientRect().width;
+    document.body.classList.add("pane-resizing-x");
+    handle.classList.add("active");
+    const onMove = (moveEvent) => {
+      if (moveEvent.buttons === 0) {
+        onUp();
+        return;
+      }
+      header.style.width = `${clamp(Math.round(startWidth + moveEvent.clientX - event.clientX), 44, 1000)}px`;
+    };
+    const onUp = () => {
+      if (finishResize !== onUp) return;
+      finishResize = null;
+      document.body.classList.remove("pane-resizing-x");
+      handle.classList.remove("active");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
+    };
+    finishResize = onUp;
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onUp);
+  });
+}
+
+// The divider between a list and its detail, as in the Map: drag it, or focus
+// it and press ←/→; a double-click puts it back.
+function bindListDetailResizer(handle) {
+  const results = handle?.parentElement;
+  const detail = handle?.nextElementSibling;
+  if (!results || !detail) return;
+  const setWidth = (width) => {
+    // The list keeps room for its narrowest columns.
+    const room = results.getBoundingClientRect().width - 320;
+    results.style.setProperty("--list-detail-width", `${clamp(Math.round(width), 230, Math.max(230, room))}px`);
+  };
+  handle.addEventListener("dblclick", () => results.style.removeProperty("--list-detail-width"));
+  handle.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    setWidth(detail.getBoundingClientRect().width + (event.key === "ArrowLeft" ? 24 : -24));
+  });
+  handle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    const startX = event.clientX, startWidth = detail.getBoundingClientRect().width;
+    document.body.classList.add("pane-resizing-x");
+    handle.classList.add("active");
+    const onMove = (moveEvent) => setWidth(startWidth - (moveEvent.clientX - startX));
+    const onUp = () => {
+      document.body.classList.remove("pane-resizing-x");
+      handle.classList.remove("active");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
 }
 
 function bindServiceMapResizer(handle) {

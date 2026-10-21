@@ -712,6 +712,12 @@ struct TemplatesListArgs {
     /// Only passive templates that are on (true) or off (false).
     #[arg(long)]
     enabled: Option<bool>,
+    /// The column to sort by; without one, templates Sniper can run come first.
+    #[arg(long, value_parser = ["on", "severity", "name", "mode", "tags"])]
+    sort: Option<String>,
+    /// asc (the default; the most severe first for severity) or desc.
+    #[arg(long, value_parser = ["asc", "desc"], requires = "sort")]
+    direction: Option<String>,
     #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u64).range(1..=30_000))]
     limit: u64,
     #[arg(long, default_value_t = 0)]
@@ -804,6 +810,12 @@ fn templates_list_path(args: &TemplatesListArgs) -> String {
     }
     if let Some(enabled) = args.enabled {
         params.push(("enabled".into(), enabled.to_string()));
+    }
+    if let Some(sort) = &args.sort {
+        params.push(("sort".into(), sort.clone()));
+    }
+    if let Some(direction) = &args.direction {
+        params.push(("direction".into(), direction.clone()));
     }
     params.push(("limit".into(), args.limit.to_string()));
     params.push(("offset".into(), args.offset.to_string()));
@@ -5993,6 +6005,8 @@ fn templates_input_schema(operation: &str) -> Option<Value> {
             properties["protocol"] = json!({"type":["string","null"],"maxLength":200,"description":"Comma-separated protocols: http, dns, network, code and the rest."});
             properties["support"] = json!({"type":["string","null"],"enum":["passive","active","unsupported",null],"description":"Templates Sniper can run passively or actively, or neither. Omitted or null lists all."});
             properties["enabled"] = json!({"type":["boolean","null"],"description":"Only passive templates that are on (true) or off (false)."});
+            properties["sort"] = json!({"type":["string","null"],"enum":["on","severity","name","mode","tags",null],"description":"The column to sort by. Omitted or null lists templates Sniper can run first."});
+            properties["direction"] = json!({"type":["string","null"],"enum":["asc","desc",null],"description":"asc (the default; the most severe first for severity) or desc."});
             properties["limit"] = json!({"type":["integer","null"],"minimum":1,"maximum":30000,"default":200,"description":"Page size. Null uses 200."});
             properties["offset"] = json!({"type":["integer","null"],"minimum":0,"default":0,"description":"Templates to skip. Null uses 0."});
             json!({"type":"object","additionalProperties":false,"required":[],"properties":properties})
@@ -6581,7 +6595,16 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         }
         "templates.library.import" => &["file"],
         "templates.list" => &[
-            "search", "severity", "tag", "protocol", "support", "enabled", "limit", "offset",
+            "search",
+            "severity",
+            "tag",
+            "protocol",
+            "support",
+            "enabled",
+            "sort",
+            "direction",
+            "limit",
+            "offset",
         ],
         "templates.get" => &["id"],
         "templates.passive.set_enabled" => &["enabled", "ids", "search", "severity", "tag", "all"],
@@ -8296,6 +8319,18 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                         &["passive", "active", "unsupported"],
                     )?,
                     enabled: call_optional(operation, input, "enabled")?,
+                    sort: call_optional_enum_string(
+                        operation,
+                        input,
+                        "sort",
+                        &["on", "severity", "name", "mode", "tags"],
+                    )?,
+                    direction: call_optional_enum_string(
+                        operation,
+                        input,
+                        "direction",
+                        &["asc", "desc"],
+                    )?,
                     limit,
                     offset: call_optional(operation, input, "offset")?.unwrap_or(0),
                 }),

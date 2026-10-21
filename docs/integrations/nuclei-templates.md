@@ -263,7 +263,7 @@ id repeats, the first file wins.
 | `POST /api/templates/library/check` | Ask GitHub for the newest tag; returns `latest`, `current`, `update_available`. |
 | `POST /api/templates/library/download` | Body `{"acknowledged": true}`. Starts a download; 202, or 409 while busy. |
 | `POST /api/templates/library/import` | Body: the `.tar.gz` (`application/gzip`). Starts an import; 202, or 409 while busy. |
-| `GET /api/templates` | List; query `search`, `severity` (comma-separated), `protocol`, `support` (`passive`, `active`, `unsupported`), `tag`, `enabled`, `limit` (at most 30,000), `offset`. Each template's `requests` is the most one scan sends a target before redirects; a flow can stop sooner. |
+| `GET /api/templates` | List; query `search`, `severity` (comma-separated), `protocol`, `support` (`passive`, `active`, `unsupported`), `tag`, `enabled`, `sort` (`on`, `severity`, `name`, `mode`, `tags`) with `direction` (`asc`, the most severe first for severity, or `desc`), `limit` (at most 30,000), `offset`. Each template's `requests` is the most one scan sends a target before redirects; a flow can stop sooner. |
 | `GET /api/templates/:id` | One template with its description, references and YAML. |
 | `POST /api/templates/passive` | Body `{"ids": [...], "enabled": bool}` or `{"filter": {...list query...}, "enabled": bool}`. Ids that cannot run passively are ignored and counted. |
 | `POST /api/templates/scans` | Body: `session_id`, `targets`, `ids` or `filter` (a list query), `allow_risks`, `rate`, `concurrency`, `max_requests`, `apply_match_replace`, plus `"preview": true` to count or `"acknowledged": true` to start. A start returns the scan; 409 while one runs. |

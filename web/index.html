@@ -1636,12 +1636,13 @@
             </header>
             <p id="reconLoadStatus" class="recon-notice hidden" role="status" aria-live="polite"></p>
             <div class="recon-results">
-              <div class="recon-table-scroll">
+              <div class="recon-table-scroll" tabindex="0" aria-label="Endpoints">
                 <table class="mini-table recon-table">
-                  <thead><tr><th>Method</th><th>URL</th><th>Evidence</th><th>Sources</th></tr></thead>
+                  <thead id="reconHead"><tr><th class="table-sortable" data-sort="method" aria-sort="none">Method <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="url" aria-sort="none">URL <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="evidence" aria-sort="none">Evidence <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="sources" aria-sort="none">Sources <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
                   <tbody id="reconEndpoints"></tbody>
                 </table>
               </div>
+              <div class="pane-resizer list-detail-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the list and its details" tabindex="0" title="Drag to resize; double-click to reset"></div>
               <aside class="recon-detail" id="reconDetail" aria-labelledby="reconDetailTitle"><h3 id="reconDetailTitle">Endpoint details</h3><p class="recon-help">Select an endpoint to inspect its raw URLs and provenance.</p></aside>
             </div>
             <footer class="recon-pagination">
@@ -1749,12 +1750,13 @@
               <span class="recon-help" id="templatesMeta"></span>
             </header>
             <div class="recon-results">
-              <div class="recon-table-scroll">
+              <div class="recon-table-scroll" tabindex="0" aria-label="Templates">
                 <table class="mini-table recon-table templates-table">
-                  <thead><tr><th>On</th><th>Severity</th><th>Template</th><th>Mode</th><th>Tags</th></tr></thead>
+                  <thead id="templatesHead"><tr><th class="table-sortable" data-sort="on" aria-sort="none">On <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="severity" aria-sort="none">Severity <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="name" aria-sort="none">Template <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="mode" aria-sort="none">Mode <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="tags" aria-sort="none">Tags <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
                   <tbody id="templatesRows"></tbody>
                 </table>
               </div>
+              <div class="pane-resizer list-detail-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the list and its details" tabindex="0" title="Drag to resize; double-click to reset"></div>
               <aside class="recon-detail" id="templatesDetail" aria-label="Template details"></aside>
             </div>
             <footer class="recon-pagination">
