@@ -1331,6 +1331,37 @@ async fn handle_connect(
         )
         .await;
     }
+    // A passthrough tunnel carries whatever the client sends, so the UI is
+    // refused to another machine here as well as per request.
+    if !peer_addr.ip().to_canonical().is_loopback() {
+        let ui_addr = state.get_active_ui_addr().await;
+        let tunnel = Uri::builder()
+            .scheme("http")
+            .authority(target.as_str())
+            .path_and_query("/")
+            .build();
+        let reaches_ui = match &tunnel {
+            Ok(uri) => {
+                remote_client_targets_ui(peer_addr.ip(), uri, ui_addr)
+                    || name_resolves_to_own_listener(&session, uri, ui_addr).await
+            }
+            Err(_) => false,
+        };
+        if reaches_ui {
+            return record_connect_rejection(
+                &state,
+                &session,
+                request.uri(),
+                request.headers(),
+                started_at,
+                started,
+                StatusCode::FORBIDDEN,
+                "Sniper's UI is not reachable through the proxy from another machine; open it at its own address.".to_string(),
+                request_http_version,
+            )
+            .await;
+        }
+    }
     let request_capture = MessageRecord::from_headers_and_body(
         request.headers(),
         &[],
@@ -1574,6 +1605,26 @@ async fn handle_forwardable_request(
             .await
         }
     };
+    let ui_addr = state.get_active_ui_addr().await;
+    if remote_client_targets_ui(peer_addr.ip(), &absolute_uri, ui_addr)
+        || (!peer_addr.ip().to_canonical().is_loopback()
+            && name_resolves_to_own_listener(&session, &absolute_uri, ui_addr).await)
+    {
+        return record_http_rejection(
+            &state,
+            &session,
+            RejectedRequestIdentity::from_absolute_uri(&parts.method, &absolute_uri),
+            &parts.headers,
+            &[],
+            Some(parts.version),
+            started_at,
+            started,
+            StatusCode::FORBIDDEN,
+            "Sniper's UI is not reachable through the proxy from another machine; open it at its own address.".to_string(),
+            "remote ui guard",
+        )
+        .await;
+    }
     let proxy_addr = state.get_active_proxy_addr().await;
     if request_targets_own_listener(&absolute_uri, proxy_addr)
         || name_resolves_to_own_listener(&session, &absolute_uri, proxy_addr).await
@@ -1859,6 +1910,15 @@ fn target_port(uri: &Uri) -> Option<u16> {
 /// the proxy forward the request to itself and spin in a tight loop until the
 /// process exhausts sockets. Port must match the listener; only then is the
 /// (potentially costly) host check performed.
+/// The UI trusts a connection from this machine, and the proxy's own outbound
+/// one is such a connection, so a client on another machine (a phone using a
+/// proxy bound beyond loopback) would otherwise reach the UI's API through the
+/// proxy past `remote_ui_auth_guard`. A client on this machine reaches the UI
+/// directly anyway.
+fn remote_client_targets_ui(client: IpAddr, uri: &Uri, ui_addr: SocketAddr) -> bool {
+    !client.to_canonical().is_loopback() && request_targets_own_listener(uri, ui_addr)
+}
+
 pub(crate) fn request_targets_own_listener(uri: &Uri, proxy_addr: SocketAddr) -> bool {
     uri.authority().is_some_and(|authority| {
         target_port(uri) == Some(proxy_addr.port())
@@ -9095,6 +9155,28 @@ mod tests {
             assert!(allowed(active).is_none(), "{active}");
         }
         assert!(render_resource_content_type(&HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn a_client_on_another_machine_cannot_reach_the_ui_through_the_proxy() {
+        let ui: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let mapped: IpAddr = "::ffff:192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        for target in [
+            "http://127.0.0.1:8081/api/runtime",
+            "http://localhost:8081/",
+            "http://127.1:8081/",
+        ] {
+            let uri: Uri = target.parse().unwrap();
+            assert!(remote_client_targets_ui(remote, &uri, ui), "{target}");
+            assert!(remote_client_targets_ui(mapped, &uri, ui), "{target}");
+            // A browser on this machine, Sniper's own among them, opens the UI
+            // through the proxy; that machine reaches the UI directly anyway.
+            assert!(!remote_client_targets_ui(local, &uri, ui), "{target}");
+        }
+        let elsewhere: Uri = "http://127.0.0.1:3000/".parse().unwrap();
+        assert!(!remote_client_targets_ui(remote, &elsewhere, ui));
     }
 
     #[test]

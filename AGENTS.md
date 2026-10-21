@@ -177,6 +177,9 @@ seriously.
   carrying the session cookie. Nothing validates the bind address itself, so that
   guard is the only thing standing between a remote listener and someone else's
   captured traffic. Do not remove it, and do not add a path that bypasses it.
+  The proxy is one when it listens beyond loopback, since its own connection to
+  the UI comes from this host; it refuses another machine's requests and tunnels
+  to the UI (`remote_client_targets_ui` in `src/proxy.rs`).
 - **Never log captured traffic content** — bodies, headers, cookies, or tokens —
   into event logs, error messages, or temp files.
 - **Never put a real hostname in a test fixture, UI placeholder, or example.**
