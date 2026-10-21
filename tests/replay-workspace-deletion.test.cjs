@@ -182,21 +182,21 @@ test("normal save still commits and updates the baseline", async () => {
 });
 
 test("newer accepted fetch wins over a late older fetch, even if its payload claims a newer revision", async () => {
-  const f = selectedFixture(), first = f.context.adoptExternalReplayTabs(), second = f.context.adoptExternalReplayTabs();
+  const f = selectedFixture(), first = f.context.adoptExternalWorkspace(), second = f.context.adoptExternalWorkspace();
   f.succeed(1, f.remote([f.b], 12)); await second;
   f.succeed(0, f.remote([f.a, f.b], 13)); await first;
   assert.equal(f.state.workspaceRevision, 12); assert.equal(f.state.replayTabs.some(tab => tab.id === f.a.id), false);
 });
 
 test("an older revision fetched after a save is ignored", async () => {
-  const f = selectedFixture(), reading = f.context.adoptExternalReplayTabs(), saving = f.context.saveWorkspaceState();
+  const f = selectedFixture(), reading = f.context.adoptExternalWorkspace(), saving = f.context.saveWorkspaceState();
   f.succeed(1, { session_id: "session-a", revision: 12 }); await saving;
   f.succeed(0, f.remote([], 11)); await reading;
   assert.equal(f.state.workspaceRevision, 12); assert.equal(f.state.replayTabs.length, 2);
 });
 
 test("A to B to A workspace generation rejects stale adoption and save acknowledgement", async () => {
-  const f = selectedFixture(), reading = f.context.adoptExternalReplayTabs(), saving = f.context.saveWorkspaceState();
+  const f = selectedFixture(), reading = f.context.adoptExternalWorkspace(), saving = f.context.saveWorkspaceState();
   const resetStart = appSource.indexOf("function resetSessionScopedUiState() {");
   const resetEnd = appSource.indexOf("  clearReplaySendInFlight();", resetStart);
   assert.ok(resetEnd > resetStart);
@@ -298,7 +298,7 @@ test("a dirty inactive deletion preserves every current editor and leaves clean 
   f.els.renameInput = { value: "still typing" };
   const baseline = plain(f.context.workspaceSaveCommittedSnapshot);
   const added = f.tab("new-remote");
-  const reading = f.context.adoptExternalReplayTabs(), concurrent = f.context.adoptExternalReplayTabs();
+  const reading = f.context.adoptExternalWorkspace(), concurrent = f.context.adoptExternalWorkspace();
   f.succeed(0, f.remote([f.b, added], 11)); await reading;
   f.succeed(1, f.remote([added], 12)); await concurrent;
   assert.equal(f.context.workspaceSaveConflictPending, true);
@@ -341,7 +341,7 @@ for (const closeLocally of [false, true]) {
 
 test("external adoption fetch is pinned to its initiating session in the query", async () => {
   const f = selectedFixture(); f.state.activeSession.id = "session with/slash";
-  const reading = f.context.adoptExternalReplayTabs();
+  const reading = f.context.adoptExternalWorkspace();
   assert.equal(f.requests[0].url, "/api/workspace-state?session_id=session%20with%2Fslash");
   f.succeed(0, f.remote([f.b])); await reading;
   assert.equal(f.state.workspaceRevision, 11);

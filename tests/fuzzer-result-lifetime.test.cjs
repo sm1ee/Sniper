@@ -56,7 +56,7 @@ function fixture() {
     'renderFuzzer', 'fuzzerSelectionKeyForResult', 'fuzzerSelectedResultIndex', 'fuzzerResultsShell',
     'renderEmptyFuzzerResults', 'renderFuzzerResultsVirtual', 'scrollFuzzerResultToIndex', 'selectFuzzerResultIndex',
     'selectFuzzerRow', 'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord',
-    'fuzzerWorkspaceAttackRecordId', 'hydrateFuzzerAttackRecordById', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
+    'fuzzerWorkspaceAttackRecordId', 'applyFuzzerWorkspace', 'hydrateFuzzerAttackRecordById', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
     'clearFuzzerResponsePane', 'syncFuzzerResponsePreview', 'syncFuzzerDetailTabs', 'renderFuzzerDetailPanes',
     'buildRawRequest', 'buildRawResponse', 'buildRawRequestHead', 'buildRawResponseHead', 'normalizedHeaders',
     'mergeHeaders', 'headerNameEquals', 'renderBody', 'binaryBodyPlaceholder', 'prettyFormat', 'prettyJsonText',
@@ -91,10 +91,10 @@ function fixture() {
   assert.ok(resetBinding); vm.runInContext(resetBinding, c);
   // This is only the saved-result display initialization branch. No snapshot
   // serialization, revision, save, or persistence code is loaded.
-  const initStart = appSource.indexOf('  const legacyFuzzerAttackRecord = normalizeFuzzerAttackRecord(fuzzerWS.attack_record);');
-  const initEnd = appSource.indexOf('  workspaceSaveCommittedSnapshot =', initStart);
-  assert.ok(initStart >= 0 && initEnd > initStart);
-  vm.runInContext(`function restoreSavedJob(snapshot) { const fuzzerWS = snapshot.fuzzer; ${appSource.slice(initStart, initEnd)} renderFuzzer(); }`, c);
+  vm.runInContext(`function restoreSavedJob(snapshot) {
+    applyFuzzerWorkspace({ fuzzerAttackRecordId: fuzzerWorkspaceAttackRecordId(snapshot.fuzzer), legacyAttackRecord: null }, snapshot.session_id);
+    renderFuzzer();
+  }`, c);
   const resetStart = appSource.indexOf('  state.fuzzerRunToken =', appSource.indexOf('function resetSessionScopedUiState()'));
   const resetEnd = appSource.indexOf('  state.sequenceDefinitions =', resetStart);
   assert.ok(resetStart >= 0 && resetEnd > resetStart);

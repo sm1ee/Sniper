@@ -3320,38 +3320,59 @@ function applyWorkspaceState(snapshot) {
     : tabs[0]?.id ?? null;
   state.replayRenamingTabId = null;
 
-  const fuzzerWS = snapshot?.fuzzer || {};
-  state.fuzzerBaseRequest = fuzzerWS.base_request ? cloneEditableRequest(fuzzerWS.base_request) : null;
-  state.fuzzerSourceTransactionId = fuzzerWS.source_transaction_id || null;
-  state.fuzzerTarget = normalizeFuzzerTargetOverride(fuzzerWS.target);
-  const savedFuzzerTargetAuthority = fuzzerWS.target_request_authority;
-  state.fuzzerTargetRequestText = state.fuzzerTarget ? normalizeFuzzerTargetAuthority(savedFuzzerTargetAuthority) : null;
-  if (state.fuzzerTarget && !state.fuzzerTargetRequestText && !String(savedFuzzerTargetAuthority || "").trim()) {
-    state.fuzzerTargetRequestText =
-      fuzzerTargetAuthorityFromRequestText(fuzzerWS.request_text || "", state.fuzzerBaseRequest)
-      || fuzzerTargetAuthorityFromEditableRequest(state.fuzzerBaseRequest);
-  }
-  if (state.fuzzerTarget && !state.fuzzerTargetRequestText) {
-    state.fuzzerTarget = null;
-  }
-  state.fuzzerNotice = fuzzerWS.notice || "";
-  state.fuzzerRequestText = fuzzerWS.request_text || "";
-  state.fuzzerPayloadsText = fuzzerWS.payloads_text || "";
-  const legacyFuzzerAttackRecord = normalizeFuzzerAttackRecord(fuzzerWS.attack_record);
-  setFuzzerAttackRecord(legacyFuzzerAttackRecord);
-  state.fuzzerAttackRecordId = fuzzerWorkspaceAttackRecordId(fuzzerWS, legacyFuzzerAttackRecord);
-  if (legacyFuzzerAttackRecord) {
-    scheduleWorkspaceStateSave();
-  } else if (state.fuzzerAttackRecordId) {
-    state.fuzzerNotice = state.fuzzerNotice || "Loading saved fuzzer run...";
-    hydrateFuzzerAttackRecordById(state.fuzzerAttackRecordId, snapshot?.session_id || currentSessionId());
-  }
+  applyFuzzerWorkspace(readFuzzerWorkspace(snapshot?.fuzzer || {}), snapshot?.session_id || currentSessionId());
   workspaceSaveCommittedSnapshot = cloneWorkspaceSnapshotForBaseline(snapshotWorkspaceState());
 }
 
-// Reconcile saved HTTP tab deletions before following another writer's revision.
-// A full save at that revision would otherwise put a CLI-closed tab back.
-async function adoptExternalReplayTabs() {
+// The Fuzzer half of a saved workspace, read into the fields `state` keeps it in.
+function readFuzzerWorkspace(fuzzerWS) {
+  const baseRequest = fuzzerWS.base_request ? cloneEditableRequest(fuzzerWS.base_request) : null;
+  let target = normalizeFuzzerTargetOverride(fuzzerWS.target);
+  const savedTargetAuthority = fuzzerWS.target_request_authority;
+  let targetRequestText = target ? normalizeFuzzerTargetAuthority(savedTargetAuthority) : null;
+  if (target && !targetRequestText && !String(savedTargetAuthority || "").trim()) {
+    targetRequestText = fuzzerTargetAuthorityFromRequestText(fuzzerWS.request_text || "", baseRequest)
+      || fuzzerTargetAuthorityFromEditableRequest(baseRequest);
+  }
+  if (target && !targetRequestText) target = null;
+  const legacyAttackRecord = normalizeFuzzerAttackRecord(fuzzerWS.attack_record);
+  return {
+    fuzzerBaseRequest: baseRequest,
+    fuzzerSourceTransactionId: fuzzerWS.source_transaction_id || null,
+    fuzzerTarget: target,
+    fuzzerTargetRequestText: targetRequestText,
+    fuzzerNotice: fuzzerWS.notice || "",
+    fuzzerRequestText: fuzzerWS.request_text || "",
+    fuzzerPayloadsText: fuzzerWS.payloads_text || "",
+    fuzzerAttackRecordId: fuzzerWorkspaceAttackRecordId(fuzzerWS, legacyAttackRecord),
+    legacyAttackRecord,
+  };
+}
+
+// `keepShownRun` leaves a run already on screen in place rather than loading it again.
+function applyFuzzerWorkspace(fields, sessionId, { keepShownRun = false } = {}) {
+  const { legacyAttackRecord, fuzzerAttackRecordId, ...rest } = fields;
+  Object.assign(state, rest);
+  if (keepShownRun && !legacyAttackRecord && fuzzerAttackRecordId === (state.fuzzerAttackRecordId || null)) return;
+  setFuzzerAttackRecord(legacyAttackRecord);
+  state.fuzzerAttackRecordId = fuzzerAttackRecordId;
+  if (legacyAttackRecord) {
+    scheduleWorkspaceStateSave();
+  } else if (fuzzerAttackRecordId) {
+    state.fuzzerNotice = state.fuzzerNotice || "Loading saved fuzzer run...";
+    hydrateFuzzerAttackRecordById(fuzzerAttackRecordId, sessionId);
+  }
+}
+
+// A notice is status, not an edit: loading a saved run rewrites it unsaved.
+function fuzzerWorkspaceChanged(left, right) {
+  return workspaceSnapshotValueChanged(left && { ...left, notice: "" }, right && { ...right, notice: "" });
+}
+
+// Reconcile saved HTTP tab deletions and the Fuzzer before following another
+// writer's revision. A full save at that revision would otherwise put a
+// CLI-closed tab, or the Fuzzer as it was before the CLI changed it, back.
+async function adoptExternalWorkspace() {
   if (!workspaceLoaded || workspaceSaveConflictPending) return;
   const sessionId = currentSessionId();
   if (!sessionId) return;
@@ -3369,6 +3390,24 @@ async function adoptExternalReplayTabs() {
     || !Number.isSafeInteger(snapshot?.revision) || snapshot.revision <= state.workspaceRevision
   ) return;
   workspaceExternalAppliedGeneration = loadGeneration;
+
+  const incomingFuzzer = readFuzzerWorkspace(snapshot.fuzzer || {});
+  const incomingFuzzerSnapshot = snapshotFuzzerWorkspace(incomingFuzzer);
+  const fuzzerBaseline = workspaceSaveCommittedSnapshot?.fuzzer;
+  const fuzzerChanged = fuzzerWorkspaceChanged(incomingFuzzerSnapshot, fuzzerBaseline);
+  if (fuzzerChanged && fuzzerWorkspaceChanged(snapshotFuzzerWorkspace(state), incomingFuzzerSnapshot)
+    && (state.fuzzerRunning || fuzzerWorkspaceChanged(snapshotFuzzerWorkspace(state), fuzzerBaseline))) {
+    workspaceSaveConflictPending = true;
+    workspaceSaveConflictLatest = snapshot;
+    workspaceSaveDirty = true;
+    window.clearTimeout(workspaceSaveTimer);
+    workspaceSaveTimer = null;
+    showToast(
+      "The Fuzzer was changed elsewhere. Local edits are unsaved; copy them before reloading the workspace to reconcile.",
+      "error", 6000,
+    );
+    return;
+  }
 
   const incoming = Array.isArray(snapshot?.replay?.tabs) ? snapshot.replay.tabs : [];
   const incomingById = workspaceReplayTabsById(snapshot);
@@ -3456,6 +3495,13 @@ async function adoptExternalReplayTabs() {
   if (workspaceSaveCommittedSnapshot?.replay) {
     workspaceSaveCommittedSnapshot.replay.tabs = workspaceSaveCommittedSnapshot.replay.tabs
       .filter((tab) => !removed.has(tab.id));
+  }
+  if (fuzzerChanged) {
+    applyFuzzerWorkspace(incomingFuzzer, sessionId, { keepShownRun: true });
+    if (workspaceSaveCommittedSnapshot) {
+      workspaceSaveCommittedSnapshot.fuzzer = cloneWorkspaceSnapshotForBaseline(incomingFuzzerSnapshot);
+    }
+    renderFuzzer();
   }
   state.workspaceRevision = snapshot.revision;
   // An unload must not reuse a pre-adoption in-flight full snapshot.
@@ -3935,16 +3981,21 @@ function snapshotWorkspaceState(options = {}) {
       active_tab_id: state.activeReplayTabId,
       tab_sequence: state.replayTabSequence,
     },
-    fuzzer: {
-      base_request: state.fuzzerBaseRequest ? cloneEditableRequest(state.fuzzerBaseRequest) : null,
-      source_transaction_id: state.fuzzerSourceTransactionId || null,
-      target: normalizeFuzzerTargetOverride(state.fuzzerTarget),
-      target_request_authority: state.fuzzerTarget ? normalizeFuzzerTargetAuthority(state.fuzzerTargetRequestText) : null,
-      notice: state.fuzzerNotice || "",
-      request_text: state.fuzzerRequestText || "",
-      payloads_text: state.fuzzerPayloadsText || "",
-      attack_record_id: state.fuzzerAttackRecordId || state.fuzzerAttackRecord?.id || null,
-    },
+    fuzzer: snapshotFuzzerWorkspace(state),
+  };
+}
+
+// The Fuzzer half as it is saved, from `state` or from readFuzzerWorkspace's fields.
+function snapshotFuzzerWorkspace(source) {
+  return {
+    base_request: source.fuzzerBaseRequest ? cloneEditableRequest(source.fuzzerBaseRequest) : null,
+    source_transaction_id: source.fuzzerSourceTransactionId || null,
+    target: normalizeFuzzerTargetOverride(source.fuzzerTarget),
+    target_request_authority: source.fuzzerTarget ? normalizeFuzzerTargetAuthority(source.fuzzerTargetRequestText) : null,
+    notice: source.fuzzerNotice || "",
+    request_text: source.fuzzerRequestText || "",
+    payloads_text: source.fuzzerPayloadsText || "",
+    attack_record_id: source.fuzzerAttackRecordId || source.fuzzerAttackRecord?.id || null,
   };
 }
 
@@ -8194,7 +8245,7 @@ function connectEvents() {
     // Skip the echo of our own save; only another client's write is news.
     if (!payload || payload.client_id === workspaceClientId
       || (payload.session_id && payload.session_id !== eventSessionId)) return;
-    adoptExternalReplayTabs().catch((error) => console.error(error));
+    adoptExternalWorkspace().catch((error) => console.error(error));
   });
 
   eventSource.onerror = () => {

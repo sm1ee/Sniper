@@ -951,7 +951,7 @@ for (const phase of ["fetch", "json", "error body"]) {
       const reachedLegacyReset = new Error("Unrelated reset cleanup boundary");
       const historyFailure = new Error("Synthetic history read failure");
       const forbidden = label => () => assert.fail(`Unexpected ${label}`);
-      const app = loadAppFunctions(["retireFindingActionProgress", "applyWorkspaceState", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "loadWorkspaceState"], {
+      const app = loadAppFunctions(["retireFindingActionProgress", "applyWorkspaceState", "readFuzzerWorkspace", "applyFuzzerWorkspace", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "loadWorkspaceState"], {
         state: { activeSession: { id: "a" }, replayTabs: [], activeTool: "recon" },
         workspaceLoaded: true, sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
         reconController: f.controller, currentSessionId: () => f.session,
