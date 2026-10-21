@@ -13359,7 +13359,7 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
     match command {
         FuzzerCommand::SetTemplate(args) => {
             let mut workspace = load_workspace_state(&api, args.session_id).await?;
-            let (base_request, source_transaction_id, request_text) = resolve_request_source(
+            let (mut base_request, source_transaction_id, request_text) = resolve_request_source(
                 &api,
                 workspace.session_id,
                 args.transaction_id,
@@ -13367,6 +13367,15 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
                 args.stdin,
             )
             .await?;
+            // As replay open does: a raw request takes --scheme as its own, which
+            // as an override would be refused for an IP address host.
+            let normalized =
+                normalize_target_inputs(args.scheme.clone(), None, None, base_request.as_ref())?;
+            adopt_target_scheme_for_uncaptured_request(
+                base_request.as_mut(),
+                source_transaction_id,
+                &normalized.scheme,
+            );
             let target = build_optional_target_override(
                 args.scheme,
                 args.host,
