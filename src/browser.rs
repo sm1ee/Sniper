@@ -1113,6 +1113,10 @@ async fn launch_at(
     } else {
         driver.control(port, server_name.as_deref())
     };
+    let ports: Vec<u16> = own_port.into_iter().chain(port).collect();
+    if !ended && !ports.is_empty() {
+        remember_driver_ports(&profile, ports);
+    }
     let hint = if ended {
         Some("the browser ended at once, so there is nothing to drive; see warnings".to_string())
     } else if let Some(hint) = driver.shared_instance_hint() {
@@ -1336,6 +1340,7 @@ fn watch_browser(
                 if live.get(&profile).is_some_and(|owner| owner.pid == pid) {
                     live.remove(&profile);
                     let _ = fs::remove_file(profile.join(OWNER_FILE));
+                    forget_driver_ports(&profile);
                 }
             }
             if fresh {
@@ -1684,6 +1689,43 @@ fn process_runs_as(pid: u32, expected: &Path) -> bool {
 fn live_profiles() -> &'static Mutex<HashMap<PathBuf, Owner>> {
     static LIVE: OnceLock<Mutex<HashMap<PathBuf, Owner>>> = OnceLock::new();
     LIVE.get_or_init(Default::default)
+}
+
+/// The loopback ports a browser Sniper opened is driven through, by profile: its
+/// DevTools or MCP port, and the daemon its driver calls. Each hands over the
+/// browser's logged-in sessions, so while the browser runs the proxy refuses them
+/// to a client on another machine. A launch refuses to open one while the proxy
+/// listens beyond loopback, but the proxy can be moved there afterwards.
+fn driver_ports_by_profile() -> &'static Mutex<HashMap<PathBuf, Vec<u16>>> {
+    static PORTS: OnceLock<Mutex<HashMap<PathBuf, Vec<u16>>>> = OnceLock::new();
+    PORTS.get_or_init(Default::default)
+}
+
+pub fn driver_ports() -> Vec<u16> {
+    let mut ports: Vec<u16> = driver_ports_by_profile()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+pub(crate) fn remember_driver_ports(profile: &Path, ports: Vec<u16>) {
+    driver_ports_by_profile()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(profile.to_path_buf(), ports);
+}
+
+pub(crate) fn forget_driver_ports(profile: &Path) {
+    driver_ports_by_profile()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(profile);
 }
 
 #[cfg(test)]
@@ -3591,6 +3633,46 @@ mod tests {
             .unwrap();
             assert!(launched.control.is_none());
             assert_eq!(launched.warnings.len(), 1);
+        }
+
+        // The proxy refuses these to another machine for as long as the browser runs.
+        #[tokio::test]
+        async fn the_ports_a_launched_browser_is_driven_through_are_known_while_it_runs() {
+            let fixture = Fixture::new();
+            let reports = fixture.open_browser(
+                "for a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${a#--user-data-dir=}\";; esac; done\n\
+                 printf '47123\\n/devtools/browser/x\\n' > \"$d/DevToolsActivePort\"",
+            );
+            let with_port = LaunchRequest {
+                agent: true,
+                ..Default::default()
+            };
+            let launched = launch_at(&fixture.ctx(), BrowserKind::Chromium, &reports, with_port)
+                .await
+                .unwrap();
+            assert!(launched.control.is_some(), "{:?}", launched.warnings);
+            // Aside's extension calls the daemon every Aside on the machine shares.
+            let aside = fixture.open_browser("");
+            launch_at(
+                &fixture.ctx(),
+                BrowserKind::Aside,
+                &aside,
+                LaunchRequest::default(),
+            )
+            .await
+            .unwrap();
+            let ports = driver_ports();
+            assert!(ports.contains(&47123), "{ports:?}");
+            assert!(ports.contains(&21420), "{ports:?}");
+
+            drop(fixture);
+            for _ in 0..500 {
+                if !driver_ports().contains(&47123) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("the port of a browser that exited is still listed");
         }
 
         // Neo writes the port down before its server starts, and the server can fail to
