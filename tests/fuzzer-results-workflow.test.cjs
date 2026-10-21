@@ -16,7 +16,7 @@ function node(id) {
     dispatch(type, event = {}) { return listeners.get(type)?.({ target: this, preventDefault() {}, ...event }); },
     classList: { add: x => classes.add(x), remove: x => classes.delete(x), contains: x => classes.has(x),
       toggle(x, force = !classes.has(x)) { if (force) classes.add(x); else classes.delete(x); return force; } },
-    attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, setCustomValidity(message) { this.validationMessage = message; }, focus() { this.focused = true; }, closest: () => null, querySelector: () => null,
+    attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, setCustomValidity(message) { this.validationMessage = message; }, focus() { this.focused = true; }, closest: () => null, querySelector: () => null, querySelectorAll: () => [],
   };
 }
 const result = (index, status = 200, bytes = index, duration = index) => ({ index, payload: `synthetic-${index}`,
@@ -28,7 +28,7 @@ const response = (body, status = 200) => ({ ok: status < 400, status, json: asyn
   headers: { get: () => 'text/plain' }, text: async () => 'Synthetic read failure.' });
 function fixture() {
   const ids = ['fuzzerResultStatus', 'fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs',
-    'fuzzerResultSort', 'fuzzerResultDirection', 'fuzzerResultFilterCount',
+    'fuzzerResultSort', 'fuzzerResultDirection', 'fuzzerResultFilterCount', 'fuzzerResultsHead',
     'fuzzerResultFilterBadge', 'fuzzerResultFilterSummary', 'fuzzerClearResultFiltersButton', 'fuzzerResultStatusRow', 'fuzzerCompareBaseButton', 'fuzzerCompareButton',
     'fuzzerSavedRunSelect', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton', 'fuzzerSavedRunNotice',
     'fuzzerRequestEditor', 'fuzzerPayloadsEditor', 'fuzzerResultsBody', 'fuzzerDetailPanel', 'fuzzerDetailReqCM',
@@ -114,6 +114,52 @@ for (const [sort, values] of [['status', [200, 404]], ['bytes', [10, 20]], ['dur
     assert.deepEqual(indexes(f), [0, 3, 2, 1]);
   });
 }
+// The results table's headers, as the markup gives them: one per sortable column.
+function sortHeaders(f) {
+  const headers = ['index', 'payload', 'status', 'duration', 'bytes'].map(key => {
+    const header = node(`head-${key}`), indicator = { textContent: '↕' };
+    header.dataset = { sort: key };
+    header.indicator = indicator;
+    header.querySelector = selector => (selector === '.table-sort-indicator' ? indicator : null);
+    header.closest = selector => (selector === '[data-sort]' ? header : null);
+    return header;
+  });
+  f.els.fuzzerResultsHead.querySelectorAll = () => headers;
+  return Object.fromEntries(headers.map(header => [header.dataset.sort, header]));
+}
+test('a header sorts the results by its column, a second click reverses it, and the headers say which', () => {
+  const f = fixture(), headers = sortHeaders(f);
+  f.c.setFuzzerAttackRecord(run('run-a', [result(0, 404), result(1, 200), result(2, 500)]));
+  f.els.fuzzerResultsHead.dispatch('click', { target: headers.status });
+  assert.deepEqual(indexes(f), [1, 0, 2]);
+  assert.equal(f.els.fuzzerResultSort.value, 'status');
+  assert.equal(f.els.fuzzerResultDirection.value, 'asc');
+  assert.equal(headers.status.attributes['aria-sort'], 'ascending');
+  assert.equal(headers.status.indicator.textContent, '↑');
+  assert.equal(headers.index.attributes['aria-sort'], 'none');
+  assert.equal(headers.index.indicator.textContent, '↕');
+  f.els.fuzzerResultsHead.dispatch('click', { target: headers.status });
+  assert.deepEqual(indexes(f), [2, 0, 1]);
+  assert.equal(headers.status.attributes['aria-sort'], 'descending');
+  assert.equal(headers.status.indicator.textContent, '↓');
+  // Dragging a header's edge sizes the column; it does not sort.
+  const edge = { closest: selector => (selector === '.table-col-resize' ? edge : headers.payload) };
+  f.els.fuzzerResultsHead.dispatch('click', { target: edge });
+  assert.equal(f.els.fuzzerResultSort.value, 'status');
+  // The Sort by field and the headers stay one setting.
+  f.setFilter('fuzzerResultSort', 'duration');
+  assert.equal(headers.duration.attributes['aria-sort'], 'descending');
+  assert.equal(headers.status.attributes['aria-sort'], 'none');
+});
+test('payloads sort in natural order', () => {
+  const f = fixture(), rows = [result(0), result(1), result(2)];
+  [rows[0].payload, rows[1].payload, rows[2].payload] = ['p10', 'p2', 'P1'];
+  f.c.setFuzzerAttackRecord(run('run-a', rows));
+  f.setFilter('fuzzerResultSort', 'payload');
+  assert.deepEqual(indexes(f), [2, 1, 0]);
+  f.setFilter('fuzzerResultDirection', 'desc');
+  assert.deepEqual(indexes(f), [0, 1, 2]);
+});
 test('error rows with duplicate legacy indexes keep underlying identity after sort and keyboard navigation', () => {
   const f = fixture(); f.c.setFuzzerAttackRecord(run('run-a', [
     { index: 0, payload: 'first', duration_ms: 5, note: 'First error.' },

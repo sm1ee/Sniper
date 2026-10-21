@@ -8201,8 +8201,8 @@ button.utility-button.replay-tab-add {
 .recon-table thead th { position: sticky; top: 0; z-index: 1; background: var(--panel-elevated); }
 /* A sticky header cell stacks on its own, so the next one would cover a
    handle that crossed the edge; this one stays inside its cell. */
-.recon-table .table-col-resize { right: 0; width: 10px; }
-.recon-table .table-col-resize::after { left: auto; right: 0; transform: none; }
+.mini-table .table-col-resize { right: 0; width: 10px; }
+.mini-table .table-col-resize::after { left: auto; right: 0; transform: none; }
 .recon-table .recon-selected { background: var(--selection); }
 .recon-method { font-family: var(--mono); }
 .recon-url-cell { font-family: var(--mono); }

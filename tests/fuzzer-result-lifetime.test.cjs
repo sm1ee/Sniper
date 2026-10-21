@@ -22,7 +22,7 @@ function element(id, initialClasses = '') {
       } },
     addEventListener(type, handler) { handlers.set(type, handler); },
     dispatch(type, event = {}) { return handlers.get(type)?.({ target: this, preventDefault() {}, ...event }); },
-    setAttribute() {}, focus() {}, querySelector: () => null, closest: () => null,
+    setAttribute() {}, focus() {}, querySelector: () => null, querySelectorAll: () => [], closest: () => null,
   };
 }
 const job = (id = 'saved-job-a', status = 'completed') => ({ id, status, payload_count: 3, marker_count: 1,

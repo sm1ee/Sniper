@@ -72,7 +72,7 @@ test('preflight names the two ways payloads fill positions, and a running attack
 
 test('result filters, comparison and saved run controls match JS contracts', () => {
   assert.deepEqual(values('fuzzerResultStatus'), ['all', 'error', '2xx', '3xx', '4xx', '5xx']);
-  assert.deepEqual(values('fuzzerResultSort'), ['index', 'status', 'bytes', 'duration']);
+  assert.deepEqual(values('fuzzerResultSort'), ['index', 'payload', 'status', 'bytes', 'duration']);
   assert.deepEqual(values('fuzzerResultDirection'), ['asc', 'desc']);
   for (const id of ['fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs']) {
     assert.equal(byId(id).attrs.type, 'number');

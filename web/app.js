@@ -964,6 +964,7 @@ const els = {
   fuzzerReuseRunButton: document.getElementById("fuzzerReuseRunButton"),
   fuzzerSavedRunNotice: document.getElementById("fuzzerSavedRunNotice"),
   fuzzerResultsBody: document.getElementById("fuzzerResultsBody"),
+  fuzzerResultsHead: document.getElementById("fuzzerResultsHead"),
   fuzzerDetailPanel: document.getElementById("fuzzerDetailPanel"),
   fuzzerDetailReqCM: document.getElementById("fuzzerDetailReqCM"),
   fuzzerDetailResCM: document.getElementById("fuzzerDetailResCM"),
@@ -1285,7 +1286,7 @@ function bindEvents() {
       arrowStep: tableArrowStep,
     });
   }
-  document.querySelectorAll(".recon-table").forEach(bindTableColumnResizers);
+  document.querySelectorAll(".recon-table, .fuzzer-results-table").forEach(bindTableColumnResizers);
   document.querySelectorAll(".list-detail-resizer").forEach(bindListDetailResizer);
   window.addEventListener("resize", resetLayoutTextareas);
   document.addEventListener("visibilitychange", flushWorkspaceStateBeforeHidden);
@@ -15510,6 +15511,7 @@ function visibleFuzzerResults() {
       && inRange(fuzzerResultMetric(result.duration_ms), minMs, maxMs);
   });
   const valueFor = ({ result, sourceIndex }) => {
+    if (view.sort === "payload") return String(result.payload ?? "");
     if (view.sort === "status") return fuzzerResultMetric(result.status);
     if (view.sort === "bytes") return fuzzerResultMetric(result.response_bytes);
     if (view.sort === "duration") return fuzzerResultMetric(result.duration_ms);
@@ -15519,7 +15521,9 @@ function visibleFuzzerResults() {
     const left = valueFor(a), right = valueFor(b);
     // Unknown metrics remain at the end in either direction; ties keep run order.
     if (left == null || right == null) return left == right ? a.sourceIndex - b.sourceIndex : left == null ? 1 : -1;
-    return (left - right) * (view.direction === "desc" ? -1 : 1) || a.sourceIndex - b.sourceIndex;
+    // Payloads read as people number them: p2 before p10.
+    const order = typeof left === "string" ? left.localeCompare(right, undefined, { numeric: true }) : left - right;
+    return order * (view.direction === "desc" ? -1 : 1) || a.sourceIndex - b.sourceIndex;
   });
   return filtered;
 }
@@ -15554,6 +15558,19 @@ function initFuzzerResultsWorkflow() {
     });
   }
   els.fuzzerClearResultFiltersButton?.addEventListener("click", clearFuzzerResultFilters);
+  // A header sorts as Sort by does, and a second click reverses it.
+  els.fuzzerResultsHead?.addEventListener("click", (event) => {
+    if (event.target.closest(".table-col-resize")) return;
+    const header = event.target.closest("[data-sort]");
+    if (!header) return;
+    const workflow = fuzzerResultsWorkflowState();
+    workflow.direction = workflow.sort === header.dataset.sort && workflow.direction === "asc" ? "desc" : "asc";
+    workflow.sort = header.dataset.sort;
+    const shell = fuzzerResultsShell();
+    if (shell) shell.scrollTop = 0;
+    renderFuzzerResultsVirtual();
+    renderFuzzerResultsWorkflow();
+  });
   els.fuzzerSavedRunSelect?.addEventListener("change", () => {
     const workflow = fuzzerResultsWorkflowState();
     workflow.selectedRunId = els.fuzzerSavedRunSelect.value;
@@ -15590,6 +15607,13 @@ function renderFuzzerResultsWorkflow() {
       input.setAttribute("aria-invalid", validation.errors[field] ? "true" : "false");
       input.setCustomValidity?.(validation.errors[field] || "");
     }
+  }
+  for (const header of els.fuzzerResultsHead?.querySelectorAll("[data-sort]") || []) {
+    const active = header.dataset.sort === workflow.sort;
+    header.classList.toggle("active", active);
+    header.setAttribute("aria-sort", active ? (workflow.direction === "desc" ? "descending" : "ascending") : "none");
+    const indicator = header.querySelector(".table-sort-indicator");
+    if (indicator) indicator.textContent = active ? (workflow.direction === "desc" ? "↓" : "↑") : "↕";
   }
   const resultCount = jsonArray(state.fuzzerAttackRecord?.results).length;
   if (els.fuzzerResultFilterCount) {

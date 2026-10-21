@@ -1336,6 +1336,7 @@
                         <span>Sort by</span>
                         <select id="fuzzerResultSort">
                           <option value="index">Request order</option>
+                          <option value="payload">Payload</option>
                           <option value="status">Status</option>
                           <option value="bytes">Response bytes</option>
                           <option value="duration">Duration</option>
@@ -1370,14 +1371,14 @@
                 <button class="secondary-action hidden" id="fuzzerClearResultFiltersButton" type="button">Clear filters</button>
               </div>
               <div class="history-table-shell" style="flex:1;min-height:0;overflow:auto">
-                <table class="mini-table">
-                  <thead>
+                <table class="mini-table fuzzer-results-table">
+                  <thead id="fuzzerResultsHead">
                     <tr>
-                      <th>#</th>
-                      <th>Payload</th>
-                      <th>Status</th>
-                      <th>Duration</th>
-                      <th>Response</th>
+                      <th class="table-sortable active" data-sort="index" aria-sort="ascending"># <span class="table-sort-indicator" aria-hidden="true">↑</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                      <th class="table-sortable" data-sort="payload" aria-sort="none">Payload <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                      <th class="table-sortable" data-sort="status" aria-sort="none">Status <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                      <th class="table-sortable" data-sort="duration" aria-sort="none">Duration <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                      <th class="table-sortable" data-sort="bytes" aria-sort="none">Response <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
                       <th>Transaction</th>
                     </tr>
                   </thead>
