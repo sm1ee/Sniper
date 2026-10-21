@@ -3716,7 +3716,7 @@ async fn maybe_intercept_response(
         )
         .await;
 
-    let editable = EditableResponse::from_status_headers_body(status.as_u16(), headers, body);
+    let editable = editable_response_from_parts(status, headers, body);
     let resolution = session
         .response_intercepts
         .enqueue(ResponseInterceptRecord {
@@ -5054,6 +5054,36 @@ fn editable_request_from_parts(
         body_encoding,
         preview_truncated: false,
     }
+}
+
+/// A held response, framed the way the editor shows it. As with held requests,
+/// the body is already de-chunked, so a chunked response is described by its
+/// length instead — the editor refuses to forward a message that says chunked.
+/// An empty body gets no length: a HEAD answer's Content-Length describes the
+/// representation, and the proxy frames whatever it sends anyway.
+fn editable_response_from_parts(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> EditableResponse {
+    let mut editable = EditableResponse::from_status_headers_body(status.as_u16(), headers, body);
+    let plain_chunked_transfer = transfer_encoding_tokens(headers)
+        .map(|codings| codings.len() == 1 && codings[0].eq_ignore_ascii_case("chunked"))
+        .unwrap_or(false);
+    if plain_chunked_transfer {
+        editable.headers.retain(|header| {
+            !header.name.eq_ignore_ascii_case(TRANSFER_ENCODING.as_str())
+                && !header.name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str())
+        });
+        let len = editable.body_bytes().len();
+        if len > 0 {
+            editable.headers.push(HeaderRecord {
+                name: CONTENT_LENGTH.as_str().to_string(),
+                value: len.to_string(),
+            });
+        }
+    }
+    editable
 }
 
 fn is_raw_request_body_utf8(body: &[u8]) -> bool {
@@ -8965,6 +8995,30 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(content_lengths.len(), 1);
         assert_eq!(content_lengths[0].value, "5");
+    }
+
+    #[test]
+    fn held_chunked_response_is_described_by_its_length() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        let framing = |response: &EditableResponse| {
+            response
+                .headers
+                .iter()
+                .filter(|header| {
+                    header.name.eq_ignore_ascii_case("transfer-encoding")
+                        || header.name.eq_ignore_ascii_case("content-length")
+                })
+                .map(|header| format!("{}: {}", header.name, header.value))
+                .collect::<Vec<_>>()
+        };
+
+        let held = editable_response_from_parts(StatusCode::OK, &headers, b"hello");
+        assert_eq!(framing(&held), ["content-length: 5"]);
+        // A HEAD answer arrives chunked with no body; its length is not zero.
+        let empty = editable_response_from_parts(StatusCode::OK, &headers, b"");
+        assert!(framing(&empty).is_empty());
     }
 
     #[test]
