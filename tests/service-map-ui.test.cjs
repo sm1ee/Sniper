@@ -463,7 +463,7 @@ for (const hidden of [false, true]) test(`a scope-rule save fences old map data 
   if (hidden) f.controller.setVisible(false);
   const runtime = deferred();
   const appState = { runtime: { scope_patterns: ['*.example.com'], excluded_scope_patterns: [] }, targetScopeEditorSessionId: 'session-one', targetScopeDraft: 'api.example.com', targetScopeExcludeDraft: '', targetScopeDraftVersion: 0, targetScopeSaveToken: 0 };
-  const ctx = loadFunctions(['saveTargetScope', 'formatScopePatternsText'], {
+  const ctx = loadFunctions(['saveTargetScope', 'postRuntimeSettings', 'formatScopePatternsText'], {
     state: appState, els: { targetScopeEditor: { value: 'api.example.com' }, targetScopeExcludeEditor: { value: '' } },
     currentSessionId: () => 'session-one', workspaceStateGeneration: 1, targetServiceMapController: f.controller,
     expectedActiveSessionIdForWrite: id => id, fetch: () => runtime.promise, showToast() {}, renderInterceptStatus() {}, renderProxySettings() {}, invalidateVisibleEntriesCache() {}, scheduleRefresh() {},

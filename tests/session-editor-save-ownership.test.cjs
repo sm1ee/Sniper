@@ -20,7 +20,7 @@ function fixture(kind) {
     matchReplaceScope: input('request'), matchReplaceTarget: input('any'), matchReplaceSearch: input(''),
     matchReplaceReplace: input(''), matchReplaceRegex: { checked: false }, matchReplaceCaseSensitive: { checked: false } };
   const context = loadFunctions(['currentSessionId', 'expectedActiveSessionIdForWrite', 'sessionWritePath',
-    'sessionQueryPath', 'saveTargetScope', 'saveMatchReplaceRules', 'formatScopePatternsText', 'jsonArray',
+    'sessionQueryPath', 'saveTargetScope', 'postRuntimeSettings', 'saveMatchReplaceRules', 'formatScopePatternsText', 'jsonArray',
     'syncMatchReplaceEditor', 'getSelectedMatchReplaceRule', 'flushTargetScopeDraft', 'flushMatchReplaceDraft',
     'loadTargetSiteMap', 'syncTargetScopeDraft', 'deleteSelectedMatchReplaceRule', 'canLeaveSessionAfterDraftPreflight',
     'preserveActiveHttpReplayDraftBeforeSessionChange', 'getRenderedHttpReplayDraftOwner'], {

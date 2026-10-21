@@ -602,7 +602,7 @@ for (const operation of ['create', 'activate']) {
 }
 
 function useActualScopePreflight(f) {
-  for (const name of ['flushTargetScopeDraft', 'saveTargetScope', 'formatScopePatternsText']) {
+  for (const name of ['flushTargetScopeDraft', 'saveTargetScope', 'postRuntimeSettings', 'formatScopePatternsText']) {
     vm.runInContext(source(name), f.context);
   }
   Object.assign(f.context, { renderInterceptStatus() {}, renderProxySettings() {}, scheduleRefresh() {} });

@@ -126,7 +126,7 @@ const HTTP_HISTORY_BACKFILL_DELAY_MS = 80;
 const HTTP_HISTORY_SCROLL_PREFETCH_ROWS = 120;
 const HTTP_HISTORY_POLL_FALLBACK_MS = 30000;
 // Scope changed from the CLI reaches an open Scan tool within this.
-const SCAN_SCOPE_POLL_MS = 5000;
+const RUNTIME_POLL_MS = 5000;
 const WEBSOCKET_POLL_FALLBACK_MS = 30000;
 const WEBSOCKET_PAGE_SIZE = 500;
 const WEBSOCKET_MAX_LOADED_SESSIONS = 5000;
@@ -618,7 +618,7 @@ let _websocketFilteredReloadTimer = 0;
 let _websocketFilteredReloadDueAt = 0;
 let _websocketSearchReloadTimer = 0;
 let _lastHttpHistoryFallbackPoll = Date.now();
-let _lastScanScopePoll = 0;
+let _lastRuntimePoll = 0;
 let _lastWebsocketFallbackPoll = Date.now();
 let _lastWebsocketPageRefreshAt = 0;
 let _interceptToggleRequestSeq = 0;
@@ -1631,11 +1631,7 @@ function bindEvents() {
     const sessionId = currentSessionId();
     const next = !state.runtime?.http_capture_enabled;
     try {
-      const response = await fetch(sessionWritePath("/api/runtime", sessionId), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ http_capture_enabled: next }),
-      });
+      const response = await postRuntimeSettings(sessionWritePath("/api/runtime", sessionId), { http_capture_enabled: next });
       await requireOkResponse(response, "Failed to change capture.");
       const runtime = await response.json();
       if (sessionId !== currentSessionId()) return;
@@ -1689,14 +1685,10 @@ function bindEvents() {
     state.interceptInScopeOnly = nextScopeOnly;
     try {
       await applyInterceptScopeFilterLocally();
-      const response = await fetch("/api/runtime", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          expected_active_session_id: expectedActiveSessionIdForWrite(sessionId),
-          intercept_scope_only: nextScopeOnly,
-        }),
+      const response = await postRuntimeSettings("/api/runtime", {
+        session_id: sessionId,
+        expected_active_session_id: expectedActiveSessionIdForWrite(sessionId),
+        intercept_scope_only: nextScopeOnly,
       });
       await requireOkResponse(response, "Failed to update intercept scope.");
       const runtime = await response.json();
@@ -5575,12 +5567,28 @@ async function activateSessionById(id, { force = false } = {}) {
   await reloadSessionWorkspace({ cleanupBeforeReset: false });
 }
 
+// Every runtime settings write from this client. A read in flight across one
+// may carry the value from before it, so readers drop what they read then.
+async function postRuntimeSettings(path, body) {
+  state._runtimeWrites = (state._runtimeWrites || 0) + 1;
+  try {
+    return await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } finally {
+    state._runtimeWrites += 1;
+  }
+}
+
 async function loadRuntimeSettings() {
   const sessionId = currentSessionId();
+  const writes = state._runtimeWrites || 0;
   const response = await fetch(sessionQueryPath("/api/runtime", sessionId));
   await requireOkResponse(response, "Failed to load runtime settings.");
   const runtime = await response.json();
-  if (sessionId !== currentSessionId()) {
+  if (sessionId !== currentSessionId() || writes !== (state._runtimeWrites || 0)) {
     return;
   }
   if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
@@ -7835,6 +7843,7 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
   // The legacy Paths projection is unbounded and carries raw paths. Load it only
   // for Scope, where it is shown, never for the Map tool.
   const loadPaths = state.activeTool === "target";
+  const writes = state._runtimeWrites || 0;
   const [runtimeResponse, siteMapResponse] = await Promise.all([
     fetch(sessionQueryPath("/api/runtime", sessionId)),
     loadPaths ? fetch(sessionQueryPath("/api/target/site-map", sessionId)) : null,
@@ -7844,6 +7853,7 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
   const runtime = await runtimeResponse.json();
   const siteMap = siteMapResponse ? jsonArray(await siteMapResponse.json()) : null;
   if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return false;
+  if (writes !== (state._runtimeWrites || 0)) return false;
   // A save's follow-up read must not overwrite a newer editor before the
   // waiting save caller gets its chance to check ownership again.
   if (saveContext && (saveContext.sessionId !== sessionId
@@ -7907,8 +7917,12 @@ async function pollAuxiliaryData() {
 
   if (state.activeTool === "target") tasks.push(loadTargetSiteMap());
 
-  if (state.activeTool === "templates" && now - _lastScanScopePoll >= SCAN_SCOPE_POLL_MS) {
-    _lastScanScopePoll = now;
+  // sniper-cli and agents change runtime settings too. Read them again where
+  // they are shown, but not while this client is sending an intercept toggle.
+  const runtimeShown = state.activeTool === "templates"
+    || (state.activeTool === "proxy" && state.activeProxyTab === "intercept");
+  if (runtimeShown && !_interceptToggleInFlight && now - _lastRuntimePoll >= RUNTIME_POLL_MS) {
+    _lastRuntimePoll = now;
     tasks.push(loadRuntimeSettings());
   }
 
@@ -16302,17 +16316,11 @@ async function saveTargetScope(options = {}) {
     .filter(Boolean);
   const scopePatterns = toPatterns(scopeText);
   const excludedScopePatterns = toPatterns(excludeText);
-  const response = await fetch("/api/runtime", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      session_id: sessionId,
-      expected_active_session_id: expectedActiveSessionIdForWrite(sessionId, options),
-      scope_patterns: scopePatterns,
-      excluded_scope_patterns: excludedScopePatterns,
-    }),
+  const response = await postRuntimeSettings("/api/runtime", {
+    session_id: sessionId,
+    expected_active_session_id: expectedActiveSessionIdForWrite(sessionId, options),
+    scope_patterns: scopePatterns,
+    excluded_scope_patterns: excludedScopePatterns,
   });
   if (!response.ok) {
     throw new Error(`saveTargetScope failed: ${response.status}`);
@@ -17843,14 +17851,10 @@ async function toggleIntercept() {
   renderInterceptStatus();
 
   try {
-    const runtimeResponse = await fetch("/api/runtime", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        session_id: sessionId,
-        expected_active_session_id: expectedActiveSessionIdForWrite(sessionId),
-        intercept_enabled: desiredInterceptEnabled,
-      }),
+    const runtimeResponse = await postRuntimeSettings("/api/runtime", {
+      session_id: sessionId,
+      expected_active_session_id: expectedActiveSessionIdForWrite(sessionId),
+      intercept_enabled: desiredInterceptEnabled,
     });
     await requireOkResponse(runtimeResponse, "Failed to update intercept mode.");
     const runtime = await runtimeResponse.json();
@@ -18008,13 +18012,7 @@ async function saveProxySettings() {
     startupResult = await startupResponse.json();
   }
 
-  const runtimeResponse = await fetch("/api/runtime", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(runtimeUpdate),
-  });
+  const runtimeResponse = await postRuntimeSettings("/api/runtime", runtimeUpdate);
 
   if (!runtimeResponse.ok) {
     const message = await runtimeResponse.text();
