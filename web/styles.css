@@ -3274,10 +3274,19 @@ body.pane-resizing-y {
   margin-top: 3px;
 }
 
+/* Status and next step on one line; the preview, once there is one, below. */
 .fuzzer-preflight {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 12px;
   min-width: 0;
   padding-top: 7px;
   border-top: 1px solid var(--line);
+}
+
+.fuzzer-preflight > .fuzzer-preview-disclosure {
+  flex-basis: 100%;
 }
 
 .fuzzer-preflight-summary {
@@ -3289,7 +3298,6 @@ body.pane-resizing-y {
 }
 
 .fuzzer-shell #fuzzerPreflightNotice:not(:empty) {
-  margin-top: 4px;
   color: var(--warning);
 }
 

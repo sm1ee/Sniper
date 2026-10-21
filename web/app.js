@@ -15307,7 +15307,7 @@ function renderFuzzer() {
     state.fuzzerAttackRecordId = attackRecord.id;
   }
   if (!attackRecord) {
-    els.fuzzerMeta.textContent = state.fuzzerNotice || "No results yet.";
+    els.fuzzerMeta.textContent = state.fuzzerNotice || "";
     renderEmptyFuzzerResults(state.fuzzerNotice || "Results appear here after running.");
     return;
   }
@@ -15448,10 +15448,15 @@ function renderFuzzerResultsWorkflow() {
       input.setCustomValidity?.(validation.errors[field] || "");
     }
   }
+  const resultCount = jsonArray(state.fuzzerAttackRecord?.results).length;
   if (els.fuzzerResultFilterCount) {
     els.fuzzerResultFilterCount.textContent = validation.valid
-      ? `${visibleFuzzerResults().length} of ${jsonArray(state.fuzzerAttackRecord?.results).length} results`
+      ? `${visibleFuzzerResults().length} of ${resultCount} results`
       : `Invalid filters: ${validation.message}`;
+  }
+  // Counting and comparing wait for results; the table says there are none.
+  for (const node of [els.fuzzerResultFilterCount, els.fuzzerCompareBaseButton, els.fuzzerCompareButton]) {
+    node?.classList.toggle("hidden", resultCount === 0);
   }
   const transactionId = fuzzerSelectedTransactionId();
   if (els.fuzzerCompareBaseButton) els.fuzzerCompareBaseButton.disabled = !transactionId;
@@ -16271,8 +16276,11 @@ function renderFuzzerSetup() {
   } catch (failure) {
     error = failure?.message || "Review the request template.";
   }
+  // Nothing to choose from, or nothing yet to preview, is not shown at all.
+  fuzzerSetupNode("fuzzerValueRow")?.classList?.toggle("hidden", candidates.length === 0);
+  fuzzerSetupNode("fuzzerPreviewDisclosure")?.classList?.toggle("hidden", !raw.trim());
   if (select && select._fuzzerCandidateKey !== candidateKey) {
-    select.innerHTML = `<option value="">${candidates.length ? "Choose a value" : "Select text in the request"}</option>` + candidates.map((candidate, index) =>
+    select.innerHTML = `<option value="">Choose a value</option>` + candidates.map((candidate, index) =>
       `<option value="${index}">${escapeHtml(candidate.label)}</option>`).join("");
     select._fuzzerCandidateKey = candidateKey;
     select._fuzzerRaw = raw;

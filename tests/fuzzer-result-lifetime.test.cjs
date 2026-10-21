@@ -213,7 +213,7 @@ test('Reset abandons a saved-job load without a request or late error notice', a
   const f = fixture(), read = f.restore(); f.reset();
   read.reject(new Error('Abandoned job error')); await tick();
   assert.equal(f.requests.length, 1); assert.equal(f.state.fuzzerNotice, '');
-  assert.equal(f.els.fuzzerMeta.textContent, 'No results yet.');
+  assert.equal(f.els.fuzzerMeta.textContent, '');
 });
 
 for (const stage of ['fetch', 'json']) for (const outcome of ['success', 'failure']) {

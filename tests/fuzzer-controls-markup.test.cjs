@@ -65,6 +65,9 @@ test('preflight names the two ways payloads fill positions, and a running attack
   assert.equal(byId('fuzzerPreviewSamples').tag, 'div');
   assert.match(fuzzer, /<details[^>]*fuzzer-preview-disclosure[^>]*>\s*<summary>Preview &amp; details<\/summary>[\s\S]*?<div id="fuzzerPreviewSamples"/);
   assert.doesNotMatch(fuzzer, /<progress\b/i);
+  // Status and next step share one line; what there is not yet to show waits.
+  assert.match(css, /\.fuzzer-preflight \{[^}]*display: flex;[^}]*flex-wrap: wrap;/);
+  for (const id of ['fuzzerValueRow', 'fuzzerPreviewDisclosure']) assert.match(byId(id).attrs.class, /\bhidden\b/);
 });
 
 test('result filters, comparison and saved run controls match JS contracts', () => {

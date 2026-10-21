@@ -1203,7 +1203,7 @@
             <section class="fuzzer-preflight" aria-label="Review before running">
               <div id="fuzzerPreflightSummary" class="fuzzer-preflight-summary" role="status" aria-live="polite">No request selected.</div>
               <p id="fuzzerPreflightNotice" class="fuzzer-help" role="status" aria-live="polite"></p>
-              <details class="fuzzer-disclosure fuzzer-preview-disclosure">
+              <details class="fuzzer-disclosure fuzzer-preview-disclosure hidden" id="fuzzerPreviewDisclosure">
                 <summary>Preview &amp; details</summary>
                 <div class="fuzzer-disclosure-body">
                   <p class="fuzzer-help">A position is a value marked as <code>§value§</code> (or <code>$payload$</code>). Sniper puts each payload in one position at a time; Battering ram puts it in every position at once.</p>
@@ -1225,7 +1225,7 @@
                     <button class="secondary-action" id="fuzzerUndoMarkerButton" type="button" disabled>Undo marker</button>
                   </div>
                 </header>
-                <div class="fuzzer-control-row fuzzer-quick-controls">
+                <div class="fuzzer-control-row fuzzer-quick-controls hidden" id="fuzzerValueRow">
                   <label class="compact-field fuzzer-field-grow" for="fuzzerCandidateSelect">
                     <span>Value</span>
                     <select id="fuzzerCandidateSelect" disabled><option value="">Select text in the request</option></select>

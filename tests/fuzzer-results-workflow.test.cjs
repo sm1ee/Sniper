@@ -14,7 +14,8 @@ function node(id) {
   return { id, value: '', innerHTML: '', textContent: '', disabled: false, scrollTop: 0, clientHeight: 90,
     addEventListener(type, fn) { listeners.set(type, fn); },
     dispatch(type, event = {}) { return listeners.get(type)?.({ target: this, preventDefault() {}, ...event }); },
-    classList: { add: x => classes.add(x), remove: x => classes.delete(x), contains: x => classes.has(x) },
+    classList: { add: x => classes.add(x), remove: x => classes.delete(x), contains: x => classes.has(x),
+      toggle: (x, on = !classes.has(x)) => (on ? classes.add(x) : classes.delete(x), on) },
     attributes: {}, setAttribute(name, value) { this.attributes[name] = value; }, setCustomValidity(message) { this.validationMessage = message; }, focus() {}, closest: () => null, querySelector: () => null,
   };
 }
@@ -139,6 +140,20 @@ test('virtualized arrow navigation follows the filtered sorted projection beyond
   assert.ok((f.els.fuzzerResultsBody.innerHTML.match(/class="fuzzer-result-row/g) || []).length < 10);
   f.key('ArrowUp'); assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-501');
 });
+test('with no results there is nothing to compare or count, and one empty message', () => {
+  const f = fixture();
+  for (const id of ['fuzzerCompareBaseButton', 'fuzzerCompareButton', 'fuzzerResultFilterCount']) {
+    assert.equal(f.els[id].classList.contains('hidden'), false, id);
+  }
+  f.state.fuzzerNotice = '';
+  f.c.clearFuzzerAttackRecord(); f.c.renderFuzzer();
+  for (const id of ['fuzzerCompareBaseButton', 'fuzzerCompareButton', 'fuzzerResultFilterCount']) {
+    assert.equal(f.els[id].classList.contains('hidden'), true, id);
+  }
+  assert.equal(f.els.fuzzerMeta.textContent, '');
+  assert.match(f.els.fuzzerResultsBody.innerHTML, /Results appear here after running\./);
+});
+
 test('comparison requires a selected fetched transaction and uses existing pinned transaction reads', async () => {
   const f = fixture(); assert.equal(f.els.fuzzerCompareBaseButton.disabled, true);
   f.select(0).resolve(response({ id: 'tx-0' })); await tick();

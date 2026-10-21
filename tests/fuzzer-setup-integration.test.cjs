@@ -253,6 +253,19 @@ test('empty setup gives one actionable next step; running state remains honest',
   f.state.fuzzerAttackRecord = { running: true, planned: 4, results: [{}, {}] }; f.c.renderFuzzerSetup();
   assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Sending… 2 of 4');
 });
+test('the value row and the preview wait until there is something to show', () => {
+  const f = fixture(), nodes = setupNodes(f);
+  for (const id of ['fuzzerValueRow', 'fuzzerPreviewDisclosure']) {
+    const classes = new Set();
+    nodes[id] = { classList: { contains: x => classes.has(x), toggle: (x, on) => (on ? classes.add(x) : classes.delete(x), on) } };
+  }
+  f.state.fuzzerRequestText = ''; f.c.renderFuzzerSetup();
+  assert.equal(nodes.fuzzerValueRow.classList.contains('hidden'), true);
+  assert.equal(nodes.fuzzerPreviewDisclosure.classList.contains('hidden'), true);
+  f.state.fuzzerRequestText = raw; f.c.renderFuzzerSetup();
+  assert.equal(nodes.fuzzerValueRow.classList.contains('hidden'), false);
+  assert.equal(nodes.fuzzerPreviewDisclosure.classList.contains('hidden'), false);
+});
 test('value action waits for a chosen value and is disabled again while running', () => {
   const f = fixture(), nodes = setupNodes(f);
   f.c.initFuzzerSetupControls(); f.c.renderFuzzerSetup();
