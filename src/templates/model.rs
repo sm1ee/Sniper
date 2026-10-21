@@ -1006,12 +1006,12 @@ mod tests {
     #[test]
     fn unsupported_constructs_are_named() {
         let classified = classify_text(
-            "id: example-cve\ninfo:\n  tags: cve,intrusive\nhttp:\n  - path: ['{{BaseURL}}/?c={{status_code_1}}']\n    payloads:\n      p:\n        low: [a]\n    matchers:\n      - type: xpath\n        xpath: ['/a']\n      - type: word\n        part: interactsh_protocol\n        words: [dns]\n      - type: dsl\n        dsl: ['mmh3(body) == 1', 'status_code_2 == 200']\n",
+            "id: example-cve\ninfo:\n  tags: cve,intrusive\nhttp:\n  - path: ['{{BaseURL}}/?c={{status_code_1}}']\n    payloads:\n      p:\n        low: [a]\n    matchers:\n      - type: xpath\n        xpath: ['/a']\n      - type: word\n        part: interactsh_protocol\n        words: [dns]\n      - type: dsl\n        dsl: ['generate_java_gadget(body) == 1', 'status_code_2 == 200']\n",
         );
         for reason in [
             "req:payload_aggression",
             "matcher:xpath",
-            "fn:mmh3",
+            "fn:generate_java_gadget",
             "multi_request",
         ] {
             assert!(classified.active_reasons.contains(reason), "{reason}");

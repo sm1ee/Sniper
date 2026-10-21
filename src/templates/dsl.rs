@@ -6,7 +6,10 @@
 
 use std::{borrow::Cow, sync::Arc};
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use regex::Regex;
 
 /// A lexical token. Numbers and strings keep their source spelling until the
@@ -248,6 +251,11 @@ pub fn format_number(number: f64) -> String {
 /// empty, which would turn `!contains(server, …)` true on a missing header.
 pub trait Vars {
     fn get(&self, name: &str) -> Option<Val<'_>>;
+
+    /// A value's bytes, where its text would lose some: a binary body.
+    fn bytes(&self, _name: &str) -> Option<Cow<'_, [u8]>> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,7 +292,14 @@ pub enum FuncKind {
 enum Func {
     Base64,
     Base64Decode,
+    Base64Py,
     CompareVersions,
+    DateTime,
+    GenerateJwt,
+    Mmh3,
+    Padding,
+    Repeat,
+    Substr,
     Concat,
     Contains,
     ContainsAll,
@@ -382,17 +397,22 @@ const fn with_pattern(
 
 /// The helpers Sniper implements, by Nuclei's documented signatures. Sorted
 /// by name. HTML escaping is left out: Go's entity table is not worth
-/// approximating for the one template that uses it.
+/// approximating for the one template that uses it. Like Nuclei, each is
+/// also known by its name without underscores (`tolower`).
 const FUNCTIONS: &[FuncSpec] = &[
     pure("base64", Func::Base64, 1, 1),
     pure("base64_decode", Func::Base64Decode, 1, 1),
+    pure("base64_py", Func::Base64Py, 1, 1),
     pure("compare_versions", Func::CompareVersions, 2, VARIADIC),
     pure("concat", Func::Concat, 1, VARIADIC),
     pure("contains", Func::Contains, 2, 2),
     pure("contains_all", Func::ContainsAll, 2, VARIADIC),
     pure("contains_any", Func::ContainsAny, 2, VARIADIC),
+    random("date_time", Func::DateTime, 1, 2),
     pure("ends_with", Func::EndsWith, 2, VARIADIC),
     pure("equals_any", Func::EqualsAny, 2, VARIADIC),
+    // Not the fourth argument, a lifetime counted from now.
+    pure("generate_jwt", Func::GenerateJwt, 2, 3),
     pure("hex_decode", Func::HexDecode, 1, 1),
     pure("hex_encode", Func::HexEncode, 1, 1),
     pure("join", Func::Join, 2, VARIADIC),
@@ -400,6 +420,8 @@ const FUNCTIONS: &[FuncSpec] = &[
     pure("line_ends_with", Func::LineEndsWith, 2, VARIADIC),
     pure("line_starts_with", Func::LineStartsWith, 2, VARIADIC),
     pure("md5", Func::Md5, 1, 1),
+    pure("mmh3", Func::Mmh3, 1, 1),
+    pure("padding", Func::Padding, 4, 4),
     random("rand_base", Func::RandBase, 1, 2),
     random("rand_char", Func::RandChar, 0, 1),
     random("rand_int", Func::RandInt, 0, 2),
@@ -409,18 +431,18 @@ const FUNCTIONS: &[FuncSpec] = &[
     with_pattern("regex", Func::Regex, 2, 2, 0),
     with_pattern("regex_all", Func::RegexAll, 2, VARIADIC, 0),
     with_pattern("regex_any", Func::RegexAny, 2, VARIADIC, 0),
+    pure("repeat", Func::Repeat, 2, 2),
     pure("replace", Func::Replace, 3, 3),
     with_pattern("replace_regex", Func::ReplaceRegex, 3, 3, 1),
     pure("reverse", Func::Reverse, 1, 1),
     pure("sha1", Func::Sha1, 1, 1),
     pure("sha256", Func::Sha256, 1, 1),
     pure("starts_with", Func::StartsWith, 2, VARIADIC),
+    pure("substr", Func::Substr, 2, 3),
     pure("to_lower", Func::ToLower, 1, 1),
     pure("to_number", Func::ToNumber, 1, 1),
     pure("to_string", Func::ToString, 1, 1),
     pure("to_upper", Func::ToUpper, 1, 1),
-    pure("tolower", Func::ToLower, 1, 1),
-    pure("toupper", Func::ToUpper, 1, 1),
     pure("trim", Func::Trim, 2, 2),
     pure("trim_left", Func::TrimLeft, 2, 2),
     pure("trim_prefix", Func::TrimPrefix, 2, 2),
@@ -433,7 +455,9 @@ const FUNCTIONS: &[FuncSpec] = &[
 ];
 
 fn spec(name: &str) -> Option<&'static FuncSpec> {
-    FUNCTIONS.iter().find(|spec| spec.name == name)
+    FUNCTIONS
+        .iter()
+        .find(|spec| spec.name == name || spec.name.chars().filter(|c| *c != '_').eq(name.chars()))
 }
 
 /// Whether Sniper implements a helper, and whether it is deterministic.
@@ -797,6 +821,15 @@ fn eval<'v>(node: &Node, vars: &'v dyn Vars) -> Result<Val<'v>, EvalError> {
             args,
             pattern,
         } => {
+            // A hash or an encoding of the body reads its bytes, which its
+            // text may have lost: a favicon's `mmh3(base64_py(body))`.
+            if let [Node::Var(name)] = args.as_slice() {
+                if reads_bytes(*func) {
+                    if let Some(bytes) = vars.bytes(name) {
+                        return call_on_bytes(*func, &bytes);
+                    }
+                }
+            }
             let values = args
                 .iter()
                 .map(|arg| eval(arg, vars))
@@ -917,6 +950,152 @@ fn without(charset: &str, excluded: &str) -> String {
     charset.chars().filter(|c| !excluded.contains(*c)).collect()
 }
 
+/// The helpers that work on bytes: given text, its UTF-8.
+fn reads_bytes(func: Func) -> bool {
+    matches!(
+        func,
+        Func::Base64
+            | Func::Base64Py
+            | Func::HexEncode
+            | Func::Len
+            | Func::Md5
+            | Func::Mmh3
+            | Func::Sha1
+            | Func::Sha256
+    )
+}
+
+fn call_on_bytes<'v>(func: Func, bytes: &[u8]) -> Result<Val<'v>, EvalError> {
+    use md5::Digest as _;
+    match func {
+        Func::Base64 => owned_text(STANDARD.encode(bytes)),
+        Func::Base64Py => owned_text(base64_py(bytes)),
+        Func::HexEncode => owned_text(hex_lower(bytes)),
+        Func::Len => Ok(Val::Num(bytes.len() as f64)),
+        Func::Md5 => owned_text(hex_lower(&md5::Md5::digest(bytes))),
+        // Signed, as Nuclei prints it and Shodan lists favicon hashes.
+        Func::Mmh3 => owned_text((murmur3(bytes) as i32).to_string()),
+        Func::Sha1 => owned_text(hex_lower(&sha1::Sha1::digest(bytes))),
+        Func::Sha256 => owned_text(hex_lower(&rsa::sha2::Sha256::digest(bytes))),
+        _ => Err(EvalError("bytes")),
+    }
+}
+
+/// Python's `base64.encodebytes`, as Nuclei writes it: a line break after
+/// every 76 characters and at the end.
+fn base64_py(bytes: &[u8]) -> String {
+    let encoded = STANDARD.encode(bytes);
+    let mut out = String::with_capacity(encoded.len() + encoded.len() / 76 + 1);
+    for line in encoded.as_bytes().chunks(76) {
+        out.push_str(std::str::from_utf8(line).unwrap_or_default());
+        out.push('\n');
+    }
+    if out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// MurmurHash3, x86 32-bit, seed 0.
+fn murmur3(data: &[u8]) -> u32 {
+    const C1: u32 = 0xcc9e_2d51;
+    const C2: u32 = 0x1b87_3593;
+    let scramble = |k: u32| k.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+    let mut hash = 0u32;
+    let mut blocks = data.chunks_exact(4);
+    for block in &mut blocks {
+        hash ^= scramble(u32::from_le_bytes([block[0], block[1], block[2], block[3]]));
+        hash = hash
+            .rotate_left(13)
+            .wrapping_mul(5)
+            .wrapping_add(0xe654_6b64);
+    }
+    let tail = blocks.remainder();
+    if !tail.is_empty() {
+        let k = tail.iter().enumerate().fold(0u32, |k, (index, byte)| {
+            k ^ (u32::from(*byte) << (8 * index))
+        });
+        hash ^= scramble(k);
+    }
+    hash ^= data.len() as u32;
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x85eb_ca6b);
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(0xc2b2_ae35);
+    hash ^ (hash >> 16)
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
+    use rsa::sha2::{Digest as _, Sha256};
+    let mut block = [0u8; 64];
+    if key.len() > block.len() {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let pad = |with: u8| block.iter().map(|byte| byte ^ with).collect::<Vec<u8>>();
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(message)
+        .finalize();
+    Sha256::new()
+        .chain_update(pad(0x5c))
+        .chain_update(inner)
+        .finalize()
+        .to_vec()
+}
+
+/// Nuclei's `generate_jwt` for the HS256 tokens templates sign: the claims
+/// in key order, as Go writes a map.
+fn generate_jwt(claims: &str, algorithm: &str, key: &str) -> Result<String, EvalError> {
+    let Ok(serde_json::Value::Object(claims)) = serde_json::from_str(claims) else {
+        return Err(EvalError("jwt_claims"));
+    };
+    if !algorithm.eq_ignore_ascii_case("HS256") {
+        return Err(EvalError("jwt_algorithm"));
+    }
+    let claims: std::collections::BTreeMap<String, serde_json::Value> =
+        claims.into_iter().collect();
+    let payload = serde_json::to_vec(&claims).map_err(|_| EvalError("jwt_claims"))?;
+    let signing = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#),
+        URL_SAFE_NO_PAD.encode(payload)
+    );
+    let signature = URL_SAFE_NO_PAD.encode(hmac_sha256(key.as_bytes(), signing.as_bytes()));
+    Ok(format!("{signing}.{signature}"))
+}
+
+/// Nuclei's `date_time` with `%` fields: `%Y` year, `%M` month, `%D` day,
+/// `%H` hour, `%m` minute and `%S` second, the year's, day's, hour's and
+/// second's in either case, each at least two digits. A format without them
+/// is a Go layout, which Sniper does not write.
+fn format_date_time(format: &str, at: chrono::NaiveDateTime) -> Result<String, EvalError> {
+    use chrono::{Datelike as _, Timelike as _};
+    let fields: Vec<char> = format
+        .split('%')
+        .skip(1)
+        .filter_map(|rest| rest.chars().next().filter(char::is_ascii_alphabetic))
+        .collect();
+    if fields.is_empty() {
+        return Err(EvalError("date_layout"));
+    }
+    let mut out = format.to_string();
+    for field in fields {
+        let value = match field {
+            'Y' | 'y' => at.year(),
+            'M' => at.month() as i32,
+            'D' | 'd' => at.day() as i32,
+            'H' | 'h' => at.hour() as i32,
+            'm' => at.minute() as i32,
+            'S' | 's' => at.second() as i32,
+            _ => return Err(EvalError("date_field")),
+        };
+        out = out.replace(&format!("%{field}"), &format!("{value:02}"));
+    }
+    Ok(out)
+}
+
 fn call<'v>(func: Func, args: Vec<Val<'v>>, pattern: Option<&Regex>) -> Result<Val<'v>, EvalError> {
     let text = |index: usize| args[index].text();
     let rest_texts = |from: usize| -> Vec<String> {
@@ -925,15 +1104,94 @@ fn call<'v>(func: Func, args: Vec<Val<'v>>, pattern: Option<&Regex>) -> Result<V
             .map(|arg| arg.text().into_owned())
             .collect()
     };
-    let digest = |bytes: &[u8], func: Func| -> String {
-        use md5::Digest as _;
-        match func {
-            Func::Md5 => hex_lower(&md5::Md5::digest(bytes)),
-            Func::Sha1 => hex_lower(&sha1::Sha1::digest(bytes)),
-            _ => hex_lower(&rsa::sha2::Sha256::digest(bytes)),
-        }
-    };
     let value = match func {
+        Func::Base64
+        | Func::Base64Py
+        | Func::HexEncode
+        | Func::Len
+        | Func::Md5
+        | Func::Mmh3
+        | Func::Sha1
+        | Func::Sha256 => return call_on_bytes(func, text(0).as_bytes()),
+        Func::Repeat => {
+            let piece = text(0);
+            let count: usize = text(1).parse().map_err(|_| EvalError("repeat"))?;
+            if piece.len().saturating_mul(count) > MAX_TEXT {
+                return Err(EvalError("too_large"));
+            }
+            return owned_text(piece.repeat(count));
+        }
+        // Byte offsets into the text, as Go slices a string.
+        Func::Substr => {
+            let input = text(0);
+            let bytes = input.as_bytes();
+            let start: usize = text(1).parse().map_err(|_| EvalError("substr"))?;
+            let end: usize = match args.get(2) {
+                Some(end) => end.text().parse().map_err(|_| EvalError("substr"))?,
+                None => bytes.len(),
+            };
+            if bytes.is_empty() || start > end || end > bytes.len() {
+                return Err(EvalError("substr"));
+            }
+            return owned_text(String::from_utf8_lossy(&bytes[start..end]).into_owned());
+        }
+        Func::Padding => {
+            let length = match &args[2] {
+                Val::Num(number) => *number,
+                other => other
+                    .text()
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| EvalError("padding"))?,
+            } as i64;
+            let (data, fill) = (text(0), text(1));
+            if length == 0 || fill.is_empty() {
+                return Err(EvalError("padding"));
+            }
+            // A longer value is left as it is, not cut.
+            if data.len() as i64 >= length {
+                return owned_text(data.into_owned());
+            }
+            if length as usize > MAX_TEXT {
+                return Err(EvalError("too_large"));
+            }
+            let fill: Vec<u8> = fill
+                .bytes()
+                .cycle()
+                .take(length as usize - data.len())
+                .collect();
+            let padded = match &args[3] {
+                Val::Str(mode) if mode == "prefix" => [fill.as_slice(), data.as_bytes()].concat(),
+                Val::Str(mode) if mode == "suffix" => [data.as_bytes(), fill.as_slice()].concat(),
+                _ => return Err(EvalError("padding")),
+            };
+            return owned_text(String::from_utf8_lossy(&padded).into_owned());
+        }
+        Func::GenerateJwt => {
+            let key = args
+                .get(2)
+                .map(|key| key.text().into_owned())
+                .unwrap_or_default();
+            return owned_text(generate_jwt(&text(0), &text(1), &key)?);
+        }
+        // The local time, or the Unix time given, as Nuclei's.
+        Func::DateTime => {
+            use chrono::TimeZone as _;
+            let at = match args.get(1) {
+                None => chrono::Local::now(),
+                Some(value) => {
+                    let seconds = match value {
+                        Val::Num(number) => *number as i64,
+                        other => other.text().trim().parse().map_err(|_| EvalError("time"))?,
+                    };
+                    chrono::Local
+                        .timestamp_opt(seconds, 0)
+                        .single()
+                        .ok_or(EvalError("time"))?
+                }
+            };
+            return owned_text(format_date_time(&text(0), at.naive_local())?);
+        }
         Func::Contains => Val::Bool(text(0).contains(text(1).as_ref())),
         Func::ContainsAll => {
             let haystack = text(0);
@@ -998,7 +1256,6 @@ fn call<'v>(func: Func, args: Vec<Val<'v>>, pattern: Option<&Regex>) -> Result<V
             let pattern = pattern.ok_or(EvalError("pattern"))?;
             Val::Bool(rest_texts(1).iter().any(|input| pattern.is_match(input)))
         }
-        Func::Len => Val::Num(text(0).len() as f64),
         Func::ToLower => return owned_text(text(0).to_lowercase()),
         Func::ToUpper => return owned_text(text(0).to_uppercase()),
         Func::Trim => {
@@ -1057,7 +1314,6 @@ fn call<'v>(func: Func, args: Vec<Val<'v>>, pattern: Option<&Regex>) -> Result<V
                     .ok_or(EvalError("version"))?,
             )
         }
-        Func::Base64 => return owned_text(STANDARD.encode(text(0).as_bytes())),
         Func::Base64Decode => {
             let bytes = STANDARD
                 .decode(text(0).trim().as_bytes())
@@ -1066,13 +1322,9 @@ fn call<'v>(func: Func, args: Vec<Val<'v>>, pattern: Option<&Regex>) -> Result<V
         }
         Func::UrlEncode => return owned_text(query_escape(&text(0))),
         Func::UrlDecode => return owned_text(query_unescape(&text(0)).ok_or(EvalError("url"))?),
-        Func::HexEncode => return owned_text(hex_lower(text(0).as_bytes())),
         Func::HexDecode => {
             let bytes = hex_decode(text(0).trim()).ok_or(EvalError("hex"))?;
             return owned_text(String::from_utf8_lossy(&bytes).into_owned());
-        }
-        Func::Md5 | Func::Sha1 | Func::Sha256 => {
-            return owned_text(digest(text(0).as_bytes(), func));
         }
         Func::Reverse => return owned_text(text(0).chars().rev().collect()),
         Func::RandBase => {
@@ -1606,9 +1858,91 @@ mod tests {
     }
 
     #[test]
+    fn helpers_templates_use_beyond_the_documented_examples() {
+        for (source, expected) in [
+            ("base64_py('hello')", "aGVsbG8=\n"),
+            ("mmh3('hello')", "613153351"),
+            ("mmh3('example')", "-266500539"),
+            ("repeat('ab', 3)", "ababab"),
+            ("substr('Hello', 1)", "ello"),
+            ("substr('Hello', 1, 3)", "el"),
+            ("padding('abc', 'xy', 6, 'prefix')", "xyxabc"),
+            ("padding('abc', 'x', 5, 'suffix')", "abcxx"),
+            ("padding('abcdef', 'x', 3, 'suffix')", "abcdef"),
+            (
+                "generate_jwt('{\"sub\":\"1\",\"admin\":true}', 'HS256', 'secret')",
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhZG1pbiI6dHJ1ZSwic3ViIjoiMSJ9.28jsumXSIeJju7qPBrqP6YZoKMf_eee2VaCHfNbvmhE",
+            ),
+            // Nuclei registers every helper without its underscores too.
+            ("trimprefix('aaHello', 'aa')", "Hello"),
+            ("startswith('Hello', 'He')", "true"),
+        ] {
+            assert_eq!(eval_text(source).unwrap(), expected, "{source}");
+        }
+        // Python's base64: a line break every 76 characters and at the end.
+        assert_eq!(
+            eval_text(&format!("base64_py('{}')", "x".repeat(60))).unwrap(),
+            "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4\neHh4\n"
+        );
+        assert!(eval_text("substr('Hello', 4, 2)").is_err());
+        assert!(eval_text("padding('a', 'x', 3, 'middle')").is_err());
+        assert!(eval_text("generate_jwt('{}', 'RS256')").is_err());
+    }
+
+    /// A response whose body is bytes, not text.
+    struct Raw(Vec<u8>);
+
+    impl Vars for Raw {
+        fn get(&self, name: &str) -> Option<Val<'_>> {
+            (name == "body").then(|| Val::Str(String::from_utf8_lossy(&self.0)))
+        }
+
+        fn bytes(&self, name: &str) -> Option<Cow<'_, [u8]>> {
+            (name == "body").then(|| Cow::Borrowed(self.0.as_slice()))
+        }
+    }
+
+    #[test]
+    fn hashes_and_encodings_of_the_body_read_its_bytes() {
+        // A favicon is binary: as text it would lose bytes, and its hash with
+        // them.
+        let raw = Raw(vec![0x00, 0xff, 0x10, 0x89, 0x50]);
+        let eval = |source: &str| {
+            Expr::compile(source, Allow::default())
+                .unwrap()
+                .eval(&raw)
+                .unwrap()
+                .text()
+                .into_owned()
+        };
+        assert_eq!(eval("mmh3(base64_py(body))"), "-96116520");
+        assert_eq!(eval("md5(body)"), "68c74b24d9ac904125812084458b6935");
+        assert_eq!(eval("len(body)"), "5");
+    }
+
+    #[test]
+    fn date_time_fills_nucleis_percent_fields() {
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 3, 7)
+            .unwrap()
+            .and_hms_opt(4, 5, 9)
+            .unwrap();
+        assert_eq!(
+            format_date_time("%Y-%M-%DT%H:%m:%sZ", at).unwrap(),
+            "2026-03-07T04:05:09Z"
+        );
+        assert_eq!(format_date_time("%Y/%M", at).unwrap(), "2026/03");
+        // A Go layout is not something Sniper formats.
+        assert!(format_date_time("2006-01-02", at).is_err());
+        assert!(Expr::compile("date_time('%Y')", Allow { random: true }).is_ok());
+    }
+
+    #[test]
     fn refuses_what_it_cannot_run() {
         let error = |source: &str| Expr::compile(source, Allow::default()).unwrap_err().0;
-        assert_eq!(error("mmh3(body)"), "fn:mmh3");
+        assert_eq!(
+            error("generate_java_gadget('dns', 'x')"),
+            "fn:generate_java_gadget"
+        );
         assert_eq!(error("rand_base(5)"), "randomness");
         assert_eq!(error("contains(body)"), "dsl:arity:contains");
         assert_eq!(error("regex(pattern, body)"), "dsl:regex_computed");

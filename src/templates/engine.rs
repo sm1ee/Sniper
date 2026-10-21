@@ -754,6 +754,11 @@ impl Vars for Scope<'_> {
         }
         self.view.var(name)
     }
+
+    fn bytes(&self, name: &str) -> Option<Cow<'_, [u8]>> {
+        (name == "body" && !self.dynamic.contains_key(name))
+            .then(|| Cow::Borrowed(self.view.body.as_slice()))
+    }
 }
 
 impl CompiledTemplate {
@@ -1319,6 +1324,34 @@ mod tests {
             scheme: "https".into(),
         };
         ResponseView::from_message(status, None, &message, 120, url, MAX_PASSIVE_BODY_BYTES)
+    }
+
+    #[test]
+    fn a_favicon_hash_is_taken_over_the_bytes_the_server_sent() {
+        let template = compiled(
+            "id: example-favicon\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}']\n    matchers:\n      - type: dsl\n        dsl: ['mmh3(base64_py(body)) == \"-96116520\"']\n",
+        );
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let icon = [0x00, 0xff, 0x10, 0x89, 0x50];
+        let message = MessageRecord {
+            headers: Vec::new(),
+            body_preview: STANDARD.encode(icon),
+            body_encoding: BodyEncoding::Base64,
+            body_size: icon.len(),
+            decoded_body_size: None,
+            preview_truncated: false,
+            content_type: Some("image/x-icon".into()),
+            content_decoded: false,
+        };
+        let answer = ResponseView::from_message(
+            200,
+            None,
+            &message,
+            1,
+            UrlVars::default(),
+            MAX_PASSIVE_BODY_BYTES,
+        );
+        assert_eq!(template.evaluate(&answer).len(), 1);
     }
 
     #[test]

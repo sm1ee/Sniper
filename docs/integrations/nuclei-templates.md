@@ -196,7 +196,13 @@ requests, fuzzing, and race and pipeline requests. A template whose variable is 
 - The expression language and the helper functions community templates use,
   including `compare_versions`. Expressions follow govaluate's typing, versions
   go-version's rules, and regular expressions Go's: `\d`, `\w`, `\s` and `\b`
-  are ASCII.
+  are ASCII. As in Nuclei, every helper also answers to its name without
+  underscores (`trimprefix`).
+- A hash or an encoding of `body` (`md5`, `mmh3(base64_py(body))` for
+  favicons, `base64`, `len`) reads the bytes the server sent, not their text.
+- `generate_jwt` signs HS256 tokens, without the fourth argument (a lifetime);
+  `date_time` writes the `%Y`, `%M`, `%D`, `%H`, `%m` and `%s` fields, not a Go
+  layout. `generate_java_gadget` is not supported.
 - `header` holds the status line and Go-canonical header names, and header
   values are available by lower snake name (`content_type`). Matchers see the
   response the server sent, even when a Match & Replace rule rewrote it.
@@ -208,8 +214,8 @@ body was truncated, a template whose result the missing bytes could change (a
 negated body matcher, a size, an expression that reads the body) skips that
 response.
 
-On release v10.5.0, 2,084 of 11,698 HTTP templates can run passively and 8,756
-can be sent by Template Scan, 341 of them out-of-band.
+On release v10.5.0, 2,086 of 11,698 HTTP templates can run passively and 8,823
+can be sent by Template Scan, 348 of them out-of-band.
 
 ## The library
 
