@@ -467,6 +467,31 @@ impl UrlVars {
     }
 }
 
+/// An out-of-band callback a request caused, as Nuclei hands it to
+/// matchers: `interactsh_protocol`, `interactsh_request`, `interactsh_ip`.
+#[derive(Clone, Debug, Default)]
+pub struct Interaction {
+    protocol: String,
+    request: String,
+    ip: String,
+}
+
+impl Interaction {
+    pub fn new(protocol: &str, request: &str, ip: &str) -> Self {
+        // Nuclei lowers a DNS question, whose case a resolver may change.
+        let request = if protocol.eq_ignore_ascii_case("dns") {
+            request.to_lowercase()
+        } else {
+            request.to_string()
+        };
+        Self {
+            protocol: protocol.to_string(),
+            request,
+            ip: ip.to_string(),
+        }
+    }
+}
+
 /// A response as Nuclei presents it to matchers: Go-canonical header names,
 /// the status line first, the decoded body.
 pub struct ResponseView {
@@ -491,6 +516,7 @@ pub struct ResponseView {
     /// earlier requests were answered, for names such as `body_1`.
     number: usize,
     history: Vec<Option<Arc<ResponseView>>>,
+    interaction: Option<Interaction>,
 }
 
 impl ResponseView {
@@ -600,7 +626,15 @@ impl ResponseView {
             url,
             number: 1,
             history: Vec::new(),
+            interaction: None,
         }
+    }
+
+    /// The answer with the callback its request caused, which matchers read
+    /// as the `interactsh_*` parts.
+    pub fn with_interaction(mut self, interaction: Interaction) -> Self {
+        self.interaction = Some(interaction);
+        self
     }
 
     /// The request this response answers, for an active template's matchers.
@@ -654,6 +688,14 @@ impl ResponseView {
             "header" | "all_headers" => text(&self.header_text),
             "response" | "raw" | "all" => text(&self.all_text),
             "request" => text(self.request_text.as_deref()?),
+            "interactsh_protocol" => text(&self.interaction.as_ref()?.protocol),
+            "interactsh_request" => text(&self.interaction.as_ref()?.request),
+            "interactsh_ip" => text(&self.interaction.as_ref()?.ip),
+            // Sniper does not keep what the OAST server answered.
+            "interactsh_response" => {
+                self.interaction.as_ref()?;
+                text("")
+            }
             _ => {
                 if let Some(value) = self.url.get(name) {
                     return text(value);
@@ -1277,6 +1319,28 @@ mod tests {
             scheme: "https".into(),
         };
         ResponseView::from_message(status, None, &message, 120, url, MAX_PASSIVE_BODY_BYTES)
+    }
+
+    #[test]
+    fn a_callback_is_read_as_the_interactsh_parts() {
+        let parsed = parse(
+            "id: example-oast\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/?u={{interactsh-url}}']\n    matchers-condition: and\n    matchers:\n      - type: word\n        part: interactsh_protocol\n        words: [dns]\n      - type: word\n        part: interactsh_request\n        words: ['example.com']\n      - type: status\n        status: [200]\n",
+        )
+        .unwrap();
+        let template =
+            crate::templates::active::compile_active(&parsed, &classify(&parsed), &HashMap::new())
+                .unwrap()
+                .template;
+        let answer = || view(200, &[], "ok");
+        assert!(template.evaluate(&answer()).is_empty(), "no callback yet");
+        // Nuclei reads a DNS question in lower case.
+        let callback = Interaction::new("dns", "EXAMPLE.COM. IN A", "192.0.2.1");
+        assert_eq!(
+            template
+                .evaluate(&answer().with_interaction(callback))
+                .len(),
+            1
+        );
     }
 
     #[test]

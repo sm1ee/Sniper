@@ -118,6 +118,9 @@ pub struct TemplateMeta {
     /// the active ones otherwise.
     pub reasons: Vec<String>,
     pub risks: Vec<String>,
+    /// A scan sends it only where the session has an Interactsh server.
+    #[serde(default)]
+    pub oast: bool,
 }
 
 /// Where a payload file sits in the bundle.
@@ -1089,6 +1092,7 @@ fn index_entries(
             requests,
             reasons,
             risks: classification.risks.into_iter().collect(),
+            oast: classification.oast,
         });
     }
     progress(total, total);

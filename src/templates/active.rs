@@ -84,6 +84,11 @@ pub struct ActiveTemplate {
     pub cookies: bool,
     /// The run keeps each answer for later matchers that read it (`body_1`).
     pub history: bool,
+    /// Its requests carry `{{interactsh-url}}`.
+    pub oast: bool,
+    /// Its matchers read a callback (`interactsh_protocol`), so an answer
+    /// waits for one before it is judged with it.
+    pub reads_interaction: bool,
 }
 
 /// One request, ready to send to the target it was built for.
@@ -292,6 +297,8 @@ pub fn compile_active(
         max_redirects,
         cookies: !engine::flag(block, "disable-cookie")?,
         history: reads_history(block),
+        oast: classification.oast,
+        reads_interaction: reads_interaction(block),
     };
     if compiled.request_count() > MAX_TEMPLATE_REQUESTS {
         return Err(engine::reason("req:too_many_requests"));
@@ -321,6 +328,34 @@ fn reads_history(block: &Map<String, Value>) -> bool {
         })
 }
 
+/// The session's Interactsh server, which a run's `{{interactsh-url}}`
+/// markers point at.
+#[derive(Clone, Debug)]
+pub struct OastUrls {
+    pub correlation_id: String,
+    pub domain: String,
+}
+
+/// Whether matchers or extractors read a callback, as Nuclei decides it: an
+/// `interactsh` part, or the word in an expression.
+fn reads_interaction(block: &Map<String, Value>) -> bool {
+    let mentions = |value: &Value| match value {
+        Value::Array(items) => items
+            .iter()
+            .any(|item| engine::text_of(item).contains("interactsh")),
+        value => engine::text_of(value).contains("interactsh"),
+    };
+    ["matchers", "extractors"]
+        .iter()
+        .filter_map(|key| block.get(*key).and_then(Value::as_array))
+        .flatten()
+        .any(|item| {
+            item.get("part")
+                .is_some_and(|part| engine::text_of(part).starts_with("interactsh"))
+                || item.get("dsl").is_some_and(mentions)
+        })
+}
+
 /// What a template's markers read while one run on one target builds its
 /// requests: the target, the template's variables, and random strings made
 /// on first use and kept for the run, so a matcher looking for a reflected
@@ -331,6 +366,11 @@ pub struct RunValues<'a> {
     /// The current pass's payload values, which come before every other
     /// value, as in Nuclei.
     payloads: RefCell<HashMap<String, String>>,
+    oast: Option<&'a OastUrls>,
+    /// The id of each OAST URL handed out, and the last URL, which matchers
+    /// read as `interactsh-url`.
+    oast_ids: RefCell<Vec<String>>,
+    oast_url: RefCell<Option<String>>,
 }
 
 impl RunValues<'_> {
@@ -344,7 +384,28 @@ impl RunValues<'_> {
                 .iter()
                 .map(|(name, value)| (name.clone(), value.clone())),
         );
+        if let Some(url) = self.oast_url.borrow().as_ref() {
+            values.insert("interactsh-url".into(), url.clone());
+        }
         values
+    }
+
+    /// The ids of the OAST URLs `built` carries, wherever in the run they
+    /// were handed out: a callback filed under one answers this request.
+    pub fn oast_ids_in(&self, built: &BuiltRequest) -> Vec<String> {
+        self.oast_ids
+            .borrow()
+            .iter()
+            .filter(|id| {
+                built.target.contains(id.as_str())
+                    || built.body.contains(id.as_str())
+                    || built
+                        .headers
+                        .iter()
+                        .any(|(_, value)| value.contains(id.as_str()))
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -365,6 +426,24 @@ impl Vars for RunValues<'_> {
         }
         if let Some(value) = self.values.borrow().get(name) {
             return Some(Val::Str(Cow::Owned(value.clone())));
+        }
+        match name {
+            // Each marker is a URL of its own, as Nuclei hands them out, so a
+            // callback says which request caused it.
+            "interactsh-url" => {
+                let oast = self.oast?;
+                let url = crate::oast::interactsh_payload(&oast.correlation_id, &oast.domain);
+                let id = url.split('.').next().unwrap_or_default().to_string();
+                self.oast_ids.borrow_mut().push(id);
+                *self.oast_url.borrow_mut() = Some(url.clone());
+                return Some(Val::Str(Cow::Owned(url)));
+            }
+            "interactsh-server" => {
+                return self
+                    .oast
+                    .map(|oast| Val::Str(Cow::Owned(oast.domain.clone())))
+            }
+            _ => {}
         }
         if !is_random_name(name) {
             return None;
@@ -445,11 +524,20 @@ impl ActiveTemplate {
 
     /// Starts a run on one target: the template's variables are worked out
     /// once, each after the ones it names, whatever order the file lists them.
-    pub fn start_run<'a>(&self, url: &'a UrlVars) -> Result<RunValues<'a>, EvalError> {
+    /// `oast` is the server its OAST markers point at; without one they do
+    /// not resolve.
+    pub fn start_run<'a>(
+        &self,
+        url: &'a UrlVars,
+        oast: Option<&'a OastUrls>,
+    ) -> Result<RunValues<'a>, EvalError> {
         let run = RunValues {
             url,
             values: RefCell::new(HashMap::new()),
             payloads: RefCell::new(HashMap::new()),
+            oast,
+            oast_ids: RefCell::new(Vec::new()),
+            oast_url: RefCell::new(None),
         };
         let mut pending: Vec<&(String, Interp)> = self.variables.iter().collect();
         while !pending.is_empty() {
@@ -765,6 +853,34 @@ mod tests {
     }
 
     #[test]
+    fn each_oast_marker_gets_its_own_url_under_the_sessions_server() {
+        let template = compiled(
+            "id: example-oast\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/?a=http://{{interactsh-url}}&b={{interactsh-url}}']\n    headers:\n      X-Server: '{{interactsh-server}}'\n    matchers:\n      - type: word\n        part: interactsh_protocol\n        words: [http]\n",
+        );
+        let (url, base_path) = target("https://example.com/");
+        let oast = OastUrls {
+            correlation_id: "c".repeat(20),
+            domain: "oast.example.com".into(),
+        };
+        let run = template.start_run(&url, Some(&oast)).unwrap();
+        let built = template.build(0, &base_path, &run).unwrap();
+        let ids = run.oast_ids_in(&built);
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        for id in &ids {
+            assert_eq!(id.len(), 33);
+            assert!(id.starts_with(&oast.correlation_id));
+            assert!(built.target.contains(&format!("{id}.oast.example.com")));
+        }
+        assert_eq!(built.headers[0].1, "oast.example.com");
+        // Matchers may look for the URL the request carried.
+        assert!(run.values()["interactsh-url"].ends_with(".oast.example.com"));
+        // With no server to hear a callback the request is not built.
+        let bare = template.start_run(&url, None).unwrap();
+        assert!(template.build(0, &base_path, &bare).is_err());
+    }
+
+    #[test]
     fn paths_extend_the_target_and_never_leave_it() {
         let template = compiled(
             "id: example-paths\ninfo: {}\nhttp:\n  - method: post\n    path:\n      - '{{BaseURL}}/.git/config'\n      - '{{RootURL}}/admin?q=<b> c#frag'\n      - '{{BaseURL}}@example.net'\n      - '{{BaseURL}}?next={{BaseURL}}/x'\n    headers:\n      Host: '{{Hostname}}'\n      X-Probe: '{{Host}}:{{Port}}'\n    body: 'a={{Path}}'\n    matchers:\n      - type: status\n        status: [200]\n",
@@ -772,7 +888,7 @@ mod tests {
         let (url, base_path) = target("https://example.com:8443/app/");
         assert_eq!(url.hostname, "example.com:8443");
         assert_eq!(url.base_url, "https://example.com:8443/app");
-        let run = template.start_run(&url).unwrap();
+        let run = template.start_run(&url, None).unwrap();
         let built: Vec<BuiltRequest> = (0..template.request_count())
             .map(|index| template.build(index, &base_path, &run).unwrap())
             .collect();
@@ -788,7 +904,7 @@ mod tests {
         );
         let (root, root_path) = target("http://example.com");
         assert_eq!(root.hostname, "example.com");
-        let run = template.start_run(&root).unwrap();
+        let run = template.start_run(&root, None).unwrap();
         assert_eq!(
             template.build(0, &root_path, &run).unwrap().target,
             "/.git/config"
@@ -805,7 +921,7 @@ mod tests {
             "id: example-vars\ninfo: {}\nvariables:\n  a_digest: '{{md5(z_token)}}'\n  z_token: '{{randstr}}'\nhttp:\n  - method: GET\n    path:\n      - '{{BaseURL}}/?t={{z_token}}&d={{a_digest}}&r={{randstr}}'\n    matchers:\n      - type: word\n        words: ['{{z_token}}']\n",
         );
         let (url, base_path) = target("https://example.com");
-        let run = template.start_run(&url).unwrap();
+        let run = template.start_run(&url, None).unwrap();
         let built = template.build(0, &base_path, &run).unwrap();
         let values = run.values();
         let token = &values["z_token"];
@@ -816,7 +932,7 @@ mod tests {
             format!("/?t={token}&d={}&r={token}", values["a_digest"])
         );
         // Each run makes its own.
-        let other = template.start_run(&url).unwrap();
+        let other = template.start_run(&url, None).unwrap();
         assert_ne!(other.values()["z_token"], *token);
     }
 
@@ -831,7 +947,7 @@ mod tests {
 
     fn built_all(template: &ActiveTemplate, url: &str) -> (Vec<BuiltRequest>, String) {
         let (url, base_path) = target(url);
-        let run = template.start_run(&url).unwrap();
+        let run = template.start_run(&url, None).unwrap();
         let built = (0..template.request_count())
             .map(|index| template.build(index, &base_path, &run).unwrap())
             .collect();
@@ -924,7 +1040,7 @@ mod tests {
     /// Each pass's request targets, and the values the run's matchers see.
     fn passes(template: &ActiveTemplate) -> Vec<(Vec<String>, HashMap<String, String>)> {
         let (url, base_path) = target("https://example.com");
-        let run = template.start_run(&url).unwrap();
+        let run = template.start_run(&url, None).unwrap();
         (0..template.passes())
             .map(|pass| {
                 template.load_pass(&run, pass).unwrap();
@@ -1074,7 +1190,7 @@ mod tests {
             "id: example-bad\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/{{base64_decode(\"%%%\")}}']\n    matchers:\n      - type: status\n        status: [200]\n",
         );
         let (url, base_path) = target("https://example.com");
-        let run = template.start_run(&url).unwrap();
+        let run = template.start_run(&url, None).unwrap();
         assert!(template.build(0, &base_path, &run).is_err());
     }
 }

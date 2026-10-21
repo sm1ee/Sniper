@@ -92,6 +92,7 @@ test("the mode says passive, scan or the first reason a template cannot run", ()
   assert.equal(templates.supportLabel({ passive_supported: false, reasons: ["protocol:dns", "x"] }), "No: protocol:dns");
   assert.equal(templates.supportLabel({ passive_supported: true, passive: "base_url_get", active_supported: true }), "Passive · Scan");
   assert.equal(templates.supportLabel({ active_supported: true, reasons: ["randomness"] }), "Scan");
+  assert.equal(templates.supportLabel({ active_supported: true, oast: true }), "Scan · OAST");
 });
 
 test("the list filters keep their own width beside the search box", () => {
@@ -133,6 +134,10 @@ test("previews and jobs read as what was or will be sent", () => {
   assert.equal(
     templates.previewLine({ requests: 1200, templates: 300, targets: ["https://app.example.com"], max_requests: 10000, excluded_by_risk: { intrusive: 4 } }),
     "Send 1,200 requests from 300 templates to https://app.example.com, at most 10,000 counting redirects. Left out by risk: intrusive 4.",
+  );
+  assert.match(
+    templates.previewLine({ requests: 3, templates: 1, targets: ["https://app.example.com"], max_requests: 10, oast_unavailable: 2 }),
+    /Left out: 2 OAST templates, which need an Interactsh server \(Capture ▸ OAST\)\.$/,
   );
   assert.equal(
     templates.jobLine({ status: "running", sent: 10, planned: 20, matched: 1, failed: 2, blocked: 0 }),

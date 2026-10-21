@@ -68,6 +68,8 @@
     const ways = [];
     if (meta.passive_supported) ways.push("Passive");
     if (meta.active_supported) ways.push("Scan");
+    // A scan sends it only where the session has an Interactsh server.
+    if (meta.active_supported && meta.oast) ways.push("OAST");
     if (ways.length) return ways.join(" · ");
     const reason = (meta.reasons || [])[0];
     return reason ? `No: ${reason}` : "No";
@@ -133,7 +135,10 @@
   function previewLine(preview) {
     const risks = Object.entries(preview.excluded_by_risk || {}).map(([risk, n]) => `${risk} ${count(n)}`).join(", ");
     const plural = (n, word) => `${count(n)} ${word}${Number(n) === 1 ? "" : "s"}`;
-    return `Send ${plural(preview.requests, "request")} from ${plural(preview.templates, "template")} to ${(preview.targets || []).join(", ")}, at most ${count(preview.max_requests)} counting redirects.${risks ? ` Left out by risk: ${risks}.` : ""}`;
+    const oast = preview.oast_unavailable
+      ? ` Left out: ${plural(preview.oast_unavailable, "OAST template")}, which need an Interactsh server (Capture ▸ OAST).`
+      : "";
+    return `Send ${plural(preview.requests, "request")} from ${plural(preview.templates, "template")} to ${(preview.targets || []).join(", ")}, at most ${count(preview.max_requests)} counting redirects.${risks ? ` Left out by risk: ${risks}.` : ""}${oast}`;
   }
 
   function jobLine(job) {
@@ -286,7 +291,7 @@
       field(fields, "Severity", selected.severity);
       field(fields, "Protocol", selected.protocol);
       field(fields, "Passive", selected.passive_supported ? `${PASSIVE_KINDS[selected.passive] || "Yes"}${selected.enabled ? " · on" : ""}` : "Cannot run passively");
-      field(fields, "Template Scan", selected.active_supported ? `Sends ${count(selected.requests)} ${selected.requests === 1 ? "request" : "requests"} a target, redirects aside` : "Cannot be sent");
+      field(fields, "Template Scan", selected.active_supported ? `Sends ${count(selected.requests)} ${selected.requests === 1 ? "request" : "requests"} a target, redirects aside${selected.oast ? ", and listens for the callback on the session's Interactsh server" : ""}` : "Cannot be sent");
       field(fields, "Why not", selected.reasons);
       field(fields, "Risk tags", selected.risks);
       field(fields, "Tags", selected.tags);
@@ -576,7 +581,9 @@
       }), "Could not preview the scan");
       invalidatePreview();
       if (!preview.templates) {
-        scanNotice("No template that can be sent matches. Change the list filter, the selection or the allowed risks.", true);
+        scanNotice(preview.oast_unavailable
+          ? "These templates need an Interactsh server to hear their callbacks. Set one up in Capture ▸ OAST."
+          : "No template that can be sent matches. Change the list filter, the selection or the allowed risks.", true);
         return;
       }
       previewed = JSON.stringify(startBody());

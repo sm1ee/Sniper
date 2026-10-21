@@ -86,6 +86,28 @@ line by line; the library keeps the release's `helpers/` text files for this.
 A template that would send more than 10,000 requests to one target is listed,
 not sent.
 
+### Out-of-band callbacks
+
+A template that sends `{{interactsh-url}}` matches when the target calls that
+URL back, as a blind SSRF, injection or XXE does. The URLs come from the
+session's Interactsh server, set up in **Capture ▸ OAST**:
+
+- Each `{{interactsh-url}}` in a request is a URL of its own, so a callback
+  names the request that caused it. `{{interactsh-server}}` is the server's
+  domain.
+- When a callback comes, the answer to its request is judged again with it:
+  `interactsh_protocol` (`http`, `dns`, …), `interactsh_request` (lower case
+  for DNS, as in Nuclei) and `interactsh_ip`. Sniper does not keep the
+  server's reply, so `interactsh_response` is empty.
+- An answer waits up to 60 seconds for its callback, and the scan waits two
+  polls of the server after its last request. While the scan's session is not
+  the active one, the scan polls the server itself.
+- Without a registered Interactsh server, the BOAST and Custom providers
+  included, OAST templates are left out: the preview counts them as
+  `oast_unavailable` and the scan warns.
+- The matched exchange and its finding name the callback's protocol and
+  address.
+
 ### Where it sends
 
 - A target is an `http://` or `https://` origin, optionally with the path the
@@ -157,9 +179,9 @@ unsupported with a reason, such as `protocol:dns`, `req:payload_file` or
 
 Not supported yet: fuzzing aggression levels in `payloads`, more than one
 request block, `iterate-all`, a
-request that reads an earlier answer (`{{body_1}}` in a path), out-of-band
-templates (`{{interactsh-url}}`), `unsafe` raw requests, fuzzing, and race and
-pipeline requests. A template whose variable is left for whoever runs it
+request that reads an earlier answer (`{{body_1}}` in a path), a matcher that
+reads an earlier request's callback (`interactsh_protocol_2`), `unsafe` raw
+requests, fuzzing, and race and pipeline requests. A template whose variable is left for whoever runs it
 (`username: '{{username}}'`) is not sent.
 
 ## Supported subset
@@ -186,8 +208,8 @@ body was truncated, a template whose result the missing bytes could change (a
 negated body matcher, a size, an expression that reads the body) skips that
 response.
 
-On release v10.5.0, 2,084 of 11,698 HTTP templates can run passively and 8,414
-can be sent by Template Scan.
+On release v10.5.0, 2,084 of 11,698 HTTP templates can run passively and 8,756
+can be sent by Template Scan, 341 of them out-of-band.
 
 ## The library
 

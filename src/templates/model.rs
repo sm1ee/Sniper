@@ -166,7 +166,21 @@ pub struct Classification {
     pub active_reasons: BTreeSet<String>,
     pub functions: BTreeSet<String>,
     pub risks: BTreeSet<String>,
+    /// Its requests carry `{{interactsh-url}}`: a scan sends it only where
+    /// the session has an Interactsh server to hear the callback.
+    pub oast: bool,
 }
+
+/// What a callback said, as Nuclei names it for matchers.
+pub(super) const INTERACTION_PARTS: &[&str] = &[
+    "interactsh_protocol",
+    "interactsh_request",
+    "interactsh_response",
+    "interactsh_ip",
+];
+
+/// Markers a scan fills from the session's OAST server.
+const OAST_MARKERS: &[&str] = &["interactsh-url", "interactsh-server"];
 
 impl Classification {
     pub fn passive_supported(&self) -> bool {
@@ -694,9 +708,15 @@ fn check_template_text(
             out.passive_reasons.insert("randomness".into());
             continue;
         }
-        if marker == "interactsh-url" || marker.starts_with("interactsh") {
+        if marker.starts_with("interactsh") {
+            // A captured response never carries a callback; a scan can ask
+            // for one.
             out.passive_reasons.insert("oast".into());
-            out.active_reasons.insert("oast".into());
+            if !OAST_MARKERS.contains(&marker) {
+                out.active_reasons.insert("oast".into());
+            } else if request && marker == "interactsh-url" {
+                out.oast = true;
+            }
             continue;
         }
         if marker.contains("{{") {
@@ -742,7 +762,9 @@ fn check_expression(
     for variable in variables {
         if variable.starts_with("interactsh") {
             out.passive_reasons.insert("oast".into());
-            out.active_reasons.insert("oast".into());
+            if !INTERACTION_PARTS.contains(&variable.as_str()) {
+                out.active_reasons.insert("oast".into());
+            }
         } else if variable
             .rsplit_once('_')
             .is_some_and(|(_, suffix)| is_digits(suffix))
@@ -778,7 +800,9 @@ fn check_part(out: &mut Classification, part: Option<&Value>) {
         }
         p if p.starts_with("interactsh") => {
             out.passive_reasons.insert("oast".into());
-            out.active_reasons.insert("oast".into());
+            if !INTERACTION_PARTS.contains(&p) {
+                out.active_reasons.insert("oast".into());
+            }
         }
         p if p
             .rsplit_once('_')
@@ -987,7 +1011,6 @@ mod tests {
         for reason in [
             "req:payload_aggression",
             "matcher:xpath",
-            "oast",
             "fn:mmh3",
             "multi_request",
         ] {
@@ -1000,6 +1023,29 @@ mod tests {
         let flow =
             classify_text("id: a\ninfo: {}\nflow: http(1)\nhttp:\n  - path: ['{{BaseURL}}']\n");
         assert!(flow.active_reasons.contains("flow"));
+    }
+
+    #[test]
+    fn oast_templates_are_sent_but_never_run_on_captured_traffic() {
+        let classified = classify_text(
+            "id: example-oast\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/?u=http://{{interactsh-url}}']\n    matchers-condition: and\n    matchers:\n      - type: word\n        part: interactsh_protocol\n        words: [http]\n      - type: dsl\n        dsl: ['contains(interactsh_request, \"example\")', 'len(interactsh_ip) > 0']\n",
+        );
+        assert!(
+            classified.active_supported(),
+            "{:?}",
+            classified.active_reasons
+        );
+        assert!(classified.oast);
+        assert!(!classified.passive_supported());
+        let global = classify_text(
+            "id: example-oast-global\ninfo: {}\nhttp:\n  - global-matchers: true\n    matchers:\n      - type: word\n        part: interactsh_protocol\n        words: [dns]\n",
+        );
+        assert!(global.passive_reasons.contains("oast"));
+        // What an earlier request's callback said is not kept.
+        let numbered = classify_text(
+            "id: example-oast-2\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/{{interactsh-url}}']\n    matchers:\n      - type: dsl\n        dsl: ['interactsh_protocol_2 == \"dns\"']\n",
+        );
+        assert!(numbered.active_reasons.contains("oast"));
     }
 
     #[test]

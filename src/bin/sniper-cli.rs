@@ -3737,7 +3737,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.scan.preview",
             "templates scan preview --target <url>",
-            "Count what a Template Scan would send: the templates selected by ids or a filter that can run actively, the requests they make before any redirect, and the templates left out by risk. Checks every target is an http(s) origin in a non-empty Scope include list and not Sniper itself. Sends nothing.",
+            "Count what a Template Scan would send: the templates selected by ids or a filter that can run actively, the requests they make before any redirect, the templates left out by risk, and the out-of-band templates left out because the session has no Interactsh server (oast_unavailable). Checks every target is an http(s) origin in a non-empty Scope include list and not Sniper itself. Sends nothing.",
             Read,
             false,
             &["targets"],
@@ -3746,7 +3746,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.scan.start",
             "templates scan start --target <url>",
-            "Send each selected template's requests to each target, paced and bounded, and keep in HTTP history only the exchanges a template matched; their findings appear under category nuclei as nuclei:<template-id>. Redirects are followed only while they stay in Scope. Templates with risk tags or PUT, DELETE or PATCH are left out unless allowed; dos never runs. Returns once the scan starts; read it with templates scan get.",
+            "Send each selected template's requests to each target, paced and bounded, and keep in HTTP history only the exchanges a template matched; their findings appear under category nuclei as nuclei:<template-id>. Redirects are followed only while they stay in Scope. Templates with risk tags or PUT, DELETE or PATCH are left out unless allowed; dos never runs. Out-of-band templates ({{interactsh-url}}) are sent only where the session has an Interactsh server (capture oast) and match when the target calls back. Returns once the scan starts; read it with templates scan get.",
             Write,
             true,
             &["targets"],

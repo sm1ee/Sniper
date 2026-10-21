@@ -21,19 +21,24 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::watch, task::JoinHandle, time::Instant};
+use tokio::{
+    sync::{broadcast, watch},
+    task::JoinHandle,
+    time::Instant,
+};
 use url::Url;
 use uuid::Uuid;
 
 use super::{
     active::{self, ActiveTemplate, Follow},
-    engine::{ResponseView, TemplateMatch, UrlVars, MAX_ACTIVE_BODY_BYTES},
+    engine::{Interaction, ResponseView, TemplateMatch, UrlVars, MAX_ACTIVE_BODY_BYTES},
     library::{ListQuery, TemplateMeta},
     model::RISK_TAGS,
 };
 use crate::{
     event_log::EventLevel,
     model::{BodyEncoding, EditableRequest, HeaderRecord, TransactionRecord},
+    oast::OastCallback,
     proxy::TemplateScanSendError,
     session::SessionContext,
     state::AppState,
@@ -51,6 +56,16 @@ const MAX_CONSECUTIVE_FAILURES: usize = 20;
 /// How long a stop waits for requests in flight before cutting them off.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const MAX_MAX_REQUESTS: usize = 50_000;
+const OAST_UNAVAILABLE: &str =
+    "they need an Interactsh server to hear their callbacks; set one up in Capture ▸ OAST.";
+/// How long an answer waits for its request's callback, as Nuclei's
+/// eviction; and how many wait at once, the oldest giving way.
+const OAST_WAIT: Duration = Duration::from_secs(60);
+// ponytail: a count cap like Nuclei's 5,000-entry cache, so held answers can
+// add up to that many bodies; bound bytes instead if large pages make it hurt.
+const MAX_OAST_WAITING: usize = 5_000;
+/// Callbacks kept for a request whose answer has not come back yet.
+const MAX_EARLY_CALLBACKS: usize = 8;
 /// Risks an operator may allow one by one. `dos` is never sent.
 const METHOD_RISKS: &[&str] = &["method:put", "method:delete", "method:patch"];
 /// Sent unless a template names its own: a browser-like agent that still
@@ -495,13 +510,30 @@ pub async fn start(
             ))
         }
     };
-    let (metas, excluded_by_risk) = apply_risks(metas, &allowed);
-    let planned = metas.iter().map(|meta| meta.requests).sum::<usize>() * targets.len();
+    let (mut metas, excluded_by_risk) = apply_risks(metas, &allowed);
 
     let session = state
         .session_context_for_id(request.session_id)
         .await
         .map_err(session_load_error)?;
+    // An OAST template's callback goes to the session's Interactsh server;
+    // with none registered nothing would hear it, so it is not sent.
+    let oast = session
+        .oast
+        .get_registration_info()
+        .await
+        .map(|(correlation_id, domain)| active::OastUrls {
+            correlation_id,
+            domain,
+        });
+    let oast_unavailable = if oast.is_none() {
+        let before = metas.len();
+        metas.retain(|meta| !meta.oast);
+        before - metas.len()
+    } else {
+        0
+    };
+    let planned = metas.iter().map(|meta| meta.requests).sum::<usize>() * targets.len();
     let (include, exclude) = session.runtime.scope_lists().await;
     if include.is_empty() {
         return Err(bad_request(
@@ -532,12 +564,18 @@ pub async fn start(
             "max_requests": request.max_requests,
             "ignored_ids": ignored,
             "excluded_by_risk": excluded_by_risk,
+            "oast_unavailable": oast_unavailable,
         })));
     }
     if !request.acknowledged {
         return Err(bad_request(
             "Confirm the scan: it sends the templates' requests to the targets.",
         ));
+    }
+    if metas.is_empty() && oast_unavailable > 0 {
+        return Err(bad_request(format!(
+            "The selected templates cannot be sent: {OAST_UNAVAILABLE}"
+        )));
     }
     if metas.is_empty() {
         return Err(bad_request(
@@ -628,6 +666,11 @@ pub async fn start(
             "{unreadable} templates could not be read from the library and were not sent."
         ));
     }
+    if oast_unavailable > 0 {
+        job.warn(format!(
+            "{oast_unavailable} templates were not sent: {OAST_UNAVAILABLE}"
+        ));
+    }
     {
         let mut snapshot = session.template_scans.snapshot.lock().unwrap();
         if snapshot.jobs.len() >= MAX_JOBS {
@@ -651,11 +694,18 @@ pub async fn start(
         )
         .await;
     let (cancel, cancelled) = watch::channel(false);
+    let oast = oast
+        .filter(|_| templates.iter().any(|template| template.oast))
+        .map(|urls| OastWatch {
+            urls,
+            pending: Mutex::default(),
+        });
     let run = Arc::new(Run {
         state: Arc::clone(&state),
         session: Arc::clone(&session),
         job: job.id,
         library: release,
+        oast,
         failures: targets.iter().map(|_| AtomicUsize::new(0)).collect(),
         skipped: targets.iter().map(|_| AtomicBool::new(false)).collect(),
         templates,
@@ -719,6 +769,8 @@ struct Run {
     session: Arc<SessionContext>,
     job: Uuid,
     library: String,
+    /// Set when the scan sends OAST templates.
+    oast: Option<OastWatch>,
     templates: Vec<Arc<ActiveTemplate>>,
     targets: Vec<ScanTarget>,
     client: reqwest::Client,
@@ -735,7 +787,107 @@ struct Run {
     skipped: Vec<AtomicBool>,
 }
 
+/// The session's Interactsh server a scan's OAST markers point at, and the
+/// answers waiting to hear a callback, by the id of the URL they sent.
+struct OastWatch {
+    urls: active::OastUrls,
+    pending: Mutex<HashMap<String, Pending>>,
+}
+
+enum Pending {
+    /// Callbacks that came before the answer to their request did.
+    Early(Instant, Vec<OastCallback>),
+    Answered(Instant, Arc<Waiting>),
+}
+
+impl Pending {
+    fn since(&self) -> Instant {
+        match self {
+            Pending::Early(since, _) | Pending::Answered(since, _) => *since,
+        }
+    }
+}
+
+/// An answer judged again when its request's callback comes.
+struct Waiting {
+    template: Arc<ActiveTemplate>,
+    target: usize,
+    hop: Hop,
+    values: HashMap<String, String>,
+    number: usize,
+    history: Vec<Option<Arc<ResponseView>>>,
+    reported: AtomicBool,
+}
+
+impl OastWatch {
+    /// Notes the ids a request is about to send, so a callback that beats
+    /// its answer is kept for it.
+    fn expect(&self, ids: &[String]) {
+        let mut pending = self.pending.lock().unwrap();
+        pending.retain(|_, entry| entry.since().elapsed() < OAST_WAIT);
+        for id in ids {
+            while pending.len() >= MAX_OAST_WAITING {
+                let Some(oldest) = pending
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.since())
+                    .map(|(id, _)| id.clone())
+                else {
+                    break;
+                };
+                pending.remove(&oldest);
+            }
+            pending
+                .entry(id.clone())
+                .or_insert_with(|| Pending::Early(Instant::now(), Vec::new()));
+        }
+    }
+
+    /// Stops waiting for ids whose request got no answer, or matched
+    /// without a callback.
+    fn forget(&self, ids: &[String]) {
+        let mut pending = self.pending.lock().unwrap();
+        for id in ids {
+            pending.remove(id);
+        }
+    }
+
+    /// The answer is in: later callbacks are judged with it. Returns the
+    /// ones that came first.
+    fn answered(&self, ids: &[String], waiting: &Arc<Waiting>) -> Vec<OastCallback> {
+        let mut pending = self.pending.lock().unwrap();
+        let mut early = Vec::new();
+        for id in ids {
+            let answered = Pending::Answered(Instant::now(), Arc::clone(waiting));
+            if let Some(Pending::Early(_, callbacks)) = pending.insert(id.clone(), answered) {
+                early.extend(callbacks);
+            }
+        }
+        early
+    }
+
+    /// The answer a callback is for, once it is in; a callback that beats
+    /// its answer is kept until then.
+    fn heard(&self, callback: OastCallback) -> Option<(Arc<Waiting>, OastCallback)> {
+        let id = callback.correlation_id.trim().to_ascii_lowercase();
+        let mut pending = self.pending.lock().unwrap();
+        match pending.get_mut(&id)? {
+            Pending::Early(_, callbacks) => {
+                if callbacks.len() < MAX_EARLY_CALLBACKS {
+                    callbacks.push(callback);
+                }
+                None
+            }
+            Pending::Answered(_, waiting) => Some((Arc::clone(waiting), callback)),
+        }
+    }
+
+    fn waiting(&self) -> bool {
+        !self.pending.lock().unwrap().is_empty()
+    }
+}
+
 /// One request of a chain and its answer.
+#[derive(Clone)]
 struct Hop {
     request: EditableRequest,
     record: TransactionRecord,
@@ -898,6 +1050,12 @@ impl Run {
     }
 
     async fn execute(self: Arc<Self>, cancel: watch::Receiver<bool>) {
+        // Callbacks are heard from before the first request goes out.
+        let (enough, listening) = watch::channel(false);
+        let listener = self.oast.is_some().then(|| {
+            let heard = self.session.oast.subscribe();
+            tokio::spawn(Arc::clone(&self).listen(heard, listening))
+        });
         let pairs: Vec<(usize, usize)> = (0..self.templates.len())
             .flat_map(|template| (0..self.targets.len()).map(move |target| (template, target)))
             .collect();
@@ -906,6 +1064,20 @@ impl Run {
                 self.template_on_target(template, target, cancel.clone())
             })
             .await;
+        if let Some(listener) = listener {
+            // As Nuclei does, the last requests' callbacks get time to come:
+            // two polls of the session's server.
+            if self.oast.as_ref().is_some_and(OastWatch::waiting) && !*cancel.borrow() {
+                let interval = self.session.oast.get_config().await.polling_interval_secs;
+                let mut cancel = cancel.clone();
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(interval.max(1) * 2)) => {}
+                    _ = cancel.wait_for(|stop| *stop) => {}
+                }
+            }
+            let _ = enough.send(true);
+            let _ = listener.await;
+        }
         let cancelled = *cancel.borrow();
         let mut counts = (0, 0, 0);
         self.update(|job| {
@@ -943,7 +1115,8 @@ impl Run {
         let template = &self.templates[template_index];
         let target = &self.targets[target_index];
         let id = &template.template.info.id;
-        let Ok(run) = template.start_run(&target.vars) else {
+        let oast = self.oast.as_ref().map(|watch| &watch.urls);
+        let Ok(run) = template.start_run(&target.vars, oast) else {
             self.warn(format!(
                 "{id} could not work out its variables and was not sent."
             ));
@@ -976,17 +1149,49 @@ impl Run {
                         continue;
                     }
                 };
+                // The OAST URLs this request carries, when its matchers wait
+                // to hear them called.
+                let oast_ids = match &self.oast {
+                    Some(watch) if template.reads_interaction => {
+                        let ids = run.oast_ids_in(&built);
+                        watch.expect(&ids);
+                        ids
+                    }
+                    _ => Vec::new(),
+                };
                 let hops = self
                     .send_chain(template, target_index, built, &mut jar, &mut cancel)
                     .await;
                 if hops.is_empty() {
+                    if let Some(watch) = &self.oast {
+                        watch.forget(&oast_ids);
+                    }
                     remember(&mut history, index, None);
                     continue;
                 }
                 let values = run.values();
+                let waiting = (!oast_ids.is_empty()).then(|| (hops[0].clone(), values.clone()));
                 let judged = self
                     .judge(template, target, hops, values, index + 1, history.clone())
                     .await;
+                if let (Some(watch), Some((hop, values))) = (&self.oast, waiting) {
+                    if judged.matched {
+                        watch.forget(&oast_ids);
+                    } else {
+                        let waiting = Arc::new(Waiting {
+                            template: Arc::clone(template),
+                            target: target_index,
+                            hop,
+                            values,
+                            number: index + 1,
+                            history: history.clone(),
+                            reported: AtomicBool::new(false),
+                        });
+                        for callback in watch.answered(&oast_ids, &waiting) {
+                            self.judge_callback(&waiting, callback).await;
+                        }
+                    }
+                }
                 template.carry(&run, judged.carried);
                 remember(&mut history, index, judged.answer);
                 if judged.matched && template.stop_at_first_match {
@@ -1367,7 +1572,7 @@ impl Run {
             });
             if found {
                 matched = true;
-                self.keep(template, hop, results).await;
+                self.keep(template, hop, results, None).await;
             }
         }
         Judged {
@@ -1377,14 +1582,118 @@ impl Run {
         }
     }
 
-    /// Stores a matched exchange in the history and files its findings.
-    async fn keep(&self, template: &ActiveTemplate, hop: Hop, results: Vec<TemplateMatch>) {
+    /// Hears the session's callbacks until the scan has waited long enough.
+    /// The shared poller polls only the active session, so while another
+    /// one is active this polls the scan's own server.
+    async fn listen(
+        self: Arc<Self>,
+        mut heard: broadcast::Receiver<crate::oast::OastCallbackSummary>,
+        mut enough: watch::Receiver<bool>,
+    ) {
+        let client = reqwest::Client::builder()
+            .use_rustls_tls()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut next_poll = Instant::now();
+        loop {
+            tokio::select! {
+                received = heard.recv() => match received {
+                    Ok(summary) => {
+                        let Some(callback) = self.session.oast.get(summary.id).await else {
+                            continue;
+                        };
+                        let Some((waiting, callback)) =
+                            self.oast.as_ref().and_then(|watch| watch.heard(callback))
+                        else {
+                            continue;
+                        };
+                        self.judge_callback(&waiting, callback).await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
+                _ = tick.tick() => {
+                    if Instant::now() >= next_poll
+                        && self.state.session().await.id() != self.session.id()
+                    {
+                        crate::oast::poll_session_interactsh(&self.session, &client).await;
+                        let interval = self.session.oast.get_config().await.polling_interval_secs;
+                        next_poll = Instant::now() + Duration::from_secs(interval.max(1));
+                    }
+                }
+                _ = enough.changed() => return,
+            }
+        }
+    }
+
+    /// Judges a waiting answer again with the callback its request caused,
+    /// and keeps it the first time that matches.
+    async fn judge_callback(&self, waiting: &Arc<Waiting>, callback: OastCallback) {
+        if waiting.reported.load(Ordering::Relaxed) {
+            return;
+        }
+        let judging = Arc::clone(waiting);
+        let vars = self.targets[waiting.target].vars.clone();
+        let interaction = Interaction::new(
+            &callback.protocol,
+            &callback.raw_data,
+            &callback.remote_addr,
+        );
+        let results = tokio::task::spawn_blocking(move || {
+            let view = ResponseView::from_record(&judging.hop.record, vars, MAX_ACTIVE_BODY_BYTES)?
+                .with_request(request_text(&judging.hop.request), judging.values.clone())
+                .with_history(judging.number, judging.history.clone())
+                .with_interaction(interaction);
+            Some(judging.template.template.evaluate(&view))
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        if results.is_empty() || waiting.reported.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let hop = waiting.hop.clone();
+        self.update(|job| {
+            job.log(ScanLogEntry {
+                at: Utc::now(),
+                template_id: waiting.template.template.info.id.clone(),
+                method: hop.request.method.clone(),
+                url: hop.url(),
+                status: hop.record.status,
+                ms: hop.record.duration_ms,
+                matched: true,
+                error: None,
+            })
+        });
+        self.keep(&waiting.template, hop, results, Some(&callback))
+            .await;
+    }
+
+    /// Stores a matched exchange in the history and files its findings,
+    /// with the callback that made it match, if one did.
+    async fn keep(
+        &self,
+        template: &ActiveTemplate,
+        hop: Hop,
+        results: Vec<TemplateMatch>,
+        callback: Option<&OastCallback>,
+    ) {
         let url = hop.url();
         let mut record = hop.record;
         record.notes.push(format!(
             "Template {}, job {}.",
             template.template.info.id, self.job
         ));
+        let heard = callback.map(|callback| {
+            format!(
+                "OAST: {} callback from {}.",
+                callback.protocol, callback.remote_addr
+            )
+        });
+        record.notes.extend(heard.clone());
         crate::proxy::store_record_and_scan_unconditionally(
             &self.state,
             &self.session,
@@ -1393,8 +1702,12 @@ impl Run {
         .await;
         let info = &template.template.info;
         for result in &results {
-            let finding =
+            let mut finding =
                 super::active_finding(&template.template, result, &record, self.job, &self.library);
+            if let Some(heard) = &heard {
+                finding.detail.push('\n');
+                finding.detail.push_str(heard);
+            }
             let evidence = finding.evidence.clone();
             self.session.scanner.push(finding).await;
             self.update(|job| {
@@ -1808,6 +2121,117 @@ mod tests {
         assert_eq!(post.method, "POST");
         assert_eq!(post.body.len(), "a=".len() + 27);
         assert!(seen.iter().all(|seen| seen.host == address.to_string()));
+    }
+
+    const OAST_TEMPLATES: &[(&str, &str)] = &[
+        ("oast-hit", "id: example-oast-hit\ninfo:\n  severity: critical\nhttp:\n  - path: ['{{BaseURL}}/.git/config']\n    headers:\n      X-Test: 'http://{{interactsh-url}}/x'\n    matchers-condition: and\n    matchers:\n      - type: word\n        part: interactsh_protocol\n        words: [http]\n      - type: word\n        words: ['[core]']\n"),
+        ("oast-quiet", "id: example-oast-quiet\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/.git/config']\n    headers:\n      X-Test: 'quiet-{{interactsh-url}}'\n    matchers:\n      - type: word\n        part: interactsh_protocol\n        words: [http]\n"),
+        ("plain", "id: example-plain\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/.git/config']\n    matchers:\n      - type: word\n        words: ['[core]']\n"),
+    ];
+
+    #[tokio::test]
+    async fn oast_templates_match_when_their_request_calls_back() {
+        let (address, log, server) = site(1, false).await;
+        let state = scan_state_with("oast", &["127.0.0.1"], OAST_TEMPLATES).await;
+        let session = state.session().await;
+        let body = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "targets": [format!("http://{address}")],
+                "filter": {"search": "example-"},
+                "acknowledged": true,
+                "rate": 50,
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            request(session.id(), body)
+        };
+
+        // With no Interactsh server to hear them, OAST templates are left
+        // out, and the preview says so.
+        let preview = start(
+            State(state.clone()),
+            Json(body(serde_json::json!({"preview": true}))),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(preview["templates"], 1);
+        assert_eq!(preview["oast_unavailable"], 2);
+
+        session
+            .oast
+            .pretend_interactsh("https://oast.example.com", &"c".repeat(20))
+            .await;
+        // The OAST server hears what the target fetches: only the URL sent
+        // as `http://…`.
+        let heard = Arc::clone(&session.oast);
+        let seen = Arc::clone(&log);
+        let callbacks = tokio::spawn(async move {
+            let mut answered = HashSet::new();
+            loop {
+                let headers: Vec<String> = seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|seen| seen.header.clone())
+                    .collect();
+                for header in headers {
+                    let Some(id) = header
+                        .strip_prefix("http://")
+                        .and_then(|rest| rest.split('.').next())
+                    else {
+                        continue;
+                    };
+                    if answered.insert(id.to_string()) {
+                        heard
+                            .push(crate::oast::OastCallback {
+                                id: Uuid::new_v4(),
+                                received_at: Utc::now(),
+                                protocol: "http".into(),
+                                remote_addr: "192.0.2.10".into(),
+                                raw_data: format!(
+                                    "GET /x HTTP/1.1\r\nHost: {id}.oast.example.com\r\n\r\n"
+                                ),
+                                correlation_id: id.to_string(),
+                            })
+                            .await;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let started = start(State(state.clone()), Json(body(serde_json::json!({}))))
+            .await
+            .unwrap()
+            .0;
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        let job = finished(&state, id).await;
+        callbacks.abort();
+        server.abort();
+
+        assert_eq!(job.status, "completed", "{job:?}");
+        let mut matched: Vec<&str> = job
+            .results
+            .iter()
+            .map(|result| result.template_id.as_str())
+            .collect();
+        matched.sort_unstable();
+        assert_eq!(matched, ["example-oast-hit", "example-plain"]);
+        let finding = session
+            .scanner
+            .snapshot(None)
+            .await
+            .into_iter()
+            .find(|finding| finding.rule_id.contains("example-oast-hit"))
+            .unwrap();
+        assert!(
+            finding
+                .detail
+                .contains("OAST: http callback from 192.0.2.10"),
+            "{}",
+            finding.detail
+        );
     }
 
     #[tokio::test]

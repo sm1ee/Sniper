@@ -227,7 +227,10 @@ pattern, without sending anything; with no Scope includes they check nothing.
 **Template Scan** sends the templates you pick to targets in Scope after a
 preview and your confirmation. Templates tagged intrusive, default-login,
 bruteforce and the like, or that send PUT, DELETE or PATCH, run only if you
-allow each risk, and `dos` templates never run. Findings appear under `nuclei`.
+allow each risk, and `dos` templates never run. Out-of-band templates
+(`{{interactsh-url}}`) are sent where the session has an Interactsh server
+(**Capture ▸ OAST**) and match when the target calls back. Findings appear
+under `nuclei`.
 
 ```bash
 sniper-cli templates library status

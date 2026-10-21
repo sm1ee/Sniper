@@ -1117,7 +1117,12 @@ fn decrypt_interactsh_entry_with_key(
 /// Build an Interactsh-style subdomain payload.
 /// Format: `{correlation_id}{nonce}.{domain}` where nonce is 13 random hex chars.
 fn build_interactsh_payload(correlation_id: &str, server_url: &str) -> String {
-    let domain = extract_domain(server_url);
+    interactsh_payload(correlation_id, &extract_domain(server_url))
+}
+
+/// A fresh payload on `domain`; its first label is the id the server files
+/// the callback under.
+pub(crate) fn interactsh_payload(correlation_id: &str, domain: &str) -> String {
     let nonce = random_hex(13);
     format!("{correlation_id}{nonce}.{domain}")
 }
@@ -1720,6 +1725,55 @@ fn oast_poll_target_still_current(latest: &OastConfig, polled: &OastConfig) -> b
         && latest.provider == polled.provider
         && latest.server_url == polled.server_url
         && latest.token == polled.token
+}
+
+/// Polls a session's own Interactsh registration once and files what came
+/// in its store. The shared poller polls only the active session; a Template
+/// Scan still waiting on callbacks in another one calls this itself.
+pub(crate) async fn poll_session_interactsh(
+    session: &Arc<SessionContext>,
+    client: &reqwest::Client,
+) {
+    let config = session.oast.get_config().await;
+    if !config.enabled || config.provider != OastProvider::Interactsh {
+        return;
+    }
+    let generation = session.oast.clear_generation();
+    let callbacks = poll_interactsh_from_store(&session.oast, &config, client).await;
+    if callbacks.is_empty() {
+        return;
+    }
+    let _mutation_guard = session.mutation_guard().await;
+    let mut inserted = false;
+    for callback in callbacks {
+        inserted |= session.oast.push_if_generation(callback, generation).await;
+    }
+    if inserted {
+        session.schedule_state_persist();
+    }
+}
+
+#[cfg(test)]
+impl OastStore {
+    /// Answers as a store registered with an Interactsh server would.
+    pub(crate) async fn pretend_interactsh(&self, server_url: &str, correlation_id: &str) {
+        self.update_config(OastConfig {
+            enabled: true,
+            server_url: server_url.to_string(),
+            token: String::new(),
+            polling_interval_secs: 1,
+            provider: OastProvider::Interactsh,
+        })
+        .await;
+        self.set_registration(RegistrationState::Interactsh {
+            server_url: server_url.to_string(),
+            token: String::new(),
+            correlation_id: correlation_id.to_string(),
+            secret_key: "secret".to_string(),
+            private_key: rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 1024).unwrap(),
+        })
+        .await;
+    }
 }
 
 /// Poll Interactsh using the registration state stored in OastStore.
