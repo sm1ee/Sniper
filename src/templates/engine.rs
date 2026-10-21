@@ -835,6 +835,18 @@ impl CompiledTemplate {
         }
     }
 
+    /// Whether an answer makes a flow's call of this block true, as Nuclei
+    /// decides it: the matchers matched, or there are none and an extractor
+    /// found something, or there are no operators at all.
+    pub fn answers_call(&self, verdict: &Verdict) -> bool {
+        let operators = &self.operators;
+        verdict.matched
+            || operators.matchers.is_empty()
+                && (operators.extractors.is_empty()
+                    || !verdict.results.is_empty()
+                    || !verdict.carried.is_empty())
+    }
+
     /// The matchers' verdict on one answer, given what the extractors found.
     fn match_view(
         &self,

@@ -32,6 +32,7 @@ use uuid::Uuid;
 use super::{
     active::{self, ActiveTemplate, Follow},
     engine::{Interaction, ResponseView, TemplateMatch, UrlVars, Verdict, MAX_ACTIVE_BODY_BYTES},
+    flow::Step,
     library::{ListQuery, TemplateMeta},
     model::RISK_TAGS,
 };
@@ -968,6 +969,8 @@ fn remember(
 #[derive(Default)]
 struct Judged {
     matched: bool,
+    /// The answers make a flow's call of the block true.
+    answered: bool,
     /// Values its internal extractors hand to the run's later requests.
     carried: Vec<(String, String)>,
     /// The answer later matchers read as this request's (`body_1`), kept
@@ -1125,91 +1128,111 @@ impl Run {
         };
         // Nuclei keeps one cookie jar for a template's run on a target.
         let mut jar = Vec::new();
-        for (block_index, block) in template.blocks.iter().enumerate() {
-            // The block's answers so far, by request, for matchers that read
-            // them.
-            let mut history: Vec<Option<Arc<ResponseView>>> = Vec::new();
-            'block: for pass in 0..block.passes() {
-                if block.load_pass(&run, pass).is_err() {
-                    self.warn(format!(
-                        "{id} could not fill payload {} and did not send it.",
-                        pass + 1
-                    ));
+        // Whether the blocks the flow last called matched, which decides its
+        // `&&` and `||`.
+        let mut status = false;
+        let mut step = 0;
+        while let Some(current) = template.steps.get(step) {
+            step += 1;
+            let called = match current {
+                Step::SkipIf(when, to) => {
+                    if status == *when {
+                        step = *to;
+                    }
                     continue;
                 }
-                for index in 0..block.sequence_len() {
-                    if self.stopping(&cancel, target_index) {
-                        return;
+                Step::Run(blocks) => blocks,
+            };
+            status = false;
+            for &block_index in called {
+                let block = &template.blocks[block_index];
+                // The block's answers so far, by request, for matchers that
+                // read them.
+                let mut history: Vec<Option<Arc<ResponseView>>> = Vec::new();
+                'block: for pass in 0..block.passes() {
+                    if block.load_pass(&run, pass).is_err() {
+                        self.warn(format!(
+                            "{id} could not fill payload {} and did not send it.",
+                            pass + 1
+                        ));
+                        continue;
                     }
-                    let built = match block.build(index, &target.base_path, &run) {
-                        Ok(built) => built,
-                        Err(_) => {
-                            self.warn(format!(
-                                "{id} could not build its request {} and did not send it.",
-                                index + 1
-                            ));
+                    for index in 0..block.sequence_len() {
+                        if self.stopping(&cancel, target_index) {
+                            return;
+                        }
+                        let built = match block.build(index, &target.base_path, &run) {
+                            Ok(built) => built,
+                            Err(_) => {
+                                self.warn(format!(
+                                    "{id} could not build its request {} and did not send it.",
+                                    index + 1
+                                ));
+                                remember(&mut history, index, None);
+                                continue;
+                            }
+                        };
+                        // The OAST URLs this request carries, when its matchers
+                        // wait to hear them called.
+                        let oast_ids = match &self.oast {
+                            Some(watch) if block.reads_interaction => {
+                                let ids = run.oast_ids_in(&built);
+                                watch.expect(&ids);
+                                ids
+                            }
+                            _ => Vec::new(),
+                        };
+                        let hops = self
+                            .send_chain(block, target_index, built, &mut jar, &mut cancel)
+                            .await;
+                        if hops.is_empty() {
+                            if let Some(watch) = &self.oast {
+                                watch.forget(&oast_ids);
+                            }
                             remember(&mut history, index, None);
                             continue;
                         }
-                    };
-                    // The OAST URLs this request carries, when its matchers
-                    // wait to hear them called.
-                    let oast_ids = match &self.oast {
-                        Some(watch) if block.reads_interaction => {
-                            let ids = run.oast_ids_in(&built);
-                            watch.expect(&ids);
-                            ids
-                        }
-                        _ => Vec::new(),
-                    };
-                    let hops = self
-                        .send_chain(block, target_index, built, &mut jar, &mut cancel)
-                        .await;
-                    if hops.is_empty() {
-                        if let Some(watch) = &self.oast {
-                            watch.forget(&oast_ids);
-                        }
-                        remember(&mut history, index, None);
-                        continue;
-                    }
-                    let values = run.values();
-                    let waiting = (!oast_ids.is_empty()).then(|| (hops[0].clone(), values.clone()));
-                    let judged = self
-                        .judge(
-                            template,
-                            block_index,
-                            target,
-                            hops,
-                            values,
-                            index + 1,
-                            history.clone(),
-                        )
-                        .await;
-                    if let (Some(watch), Some((hop, values))) = (&self.oast, waiting) {
-                        if judged.matched {
-                            watch.forget(&oast_ids);
-                        } else {
-                            let waiting = Arc::new(Waiting {
-                                template: Arc::clone(template),
-                                block: block_index,
-                                target: target_index,
-                                hop,
+                        let values = run.values();
+                        let waiting =
+                            (!oast_ids.is_empty()).then(|| (hops[0].clone(), values.clone()));
+                        let judged = self
+                            .judge(
+                                template,
+                                block_index,
+                                target,
+                                hops,
                                 values,
-                                number: index + 1,
-                                history: history.clone(),
-                                reported: AtomicBool::new(false),
-                            });
-                            for callback in watch.answered(&oast_ids, &waiting) {
-                                self.judge_callback(&waiting, callback).await;
+                                index + 1,
+                                history.clone(),
+                            )
+                            .await;
+                        status |= judged.answered;
+                        if let (Some(watch), Some((hop, values))) = (&self.oast, waiting) {
+                            if judged.matched {
+                                watch.forget(&oast_ids);
+                            } else {
+                                let waiting = Arc::new(Waiting {
+                                    template: Arc::clone(template),
+                                    block: block_index,
+                                    target: target_index,
+                                    hop,
+                                    values,
+                                    number: index + 1,
+                                    history: history.clone(),
+                                    reported: AtomicBool::new(false),
+                                });
+                                for callback in watch.answered(&oast_ids, &waiting) {
+                                    self.judge_callback(&waiting, callback).await;
+                                }
                             }
                         }
-                    }
-                    // What it extracts is there for the rest of the run, the
-                    // later blocks included.
-                    template.carry(&run, judged.carried);
-                    remember(&mut history, index, judged.answer);
-                    if judged.matched && block.stop_at_first_match {
-                        break 'block;
+                        // What it extracts is there for the rest of the run, the
+                        // later blocks included.
+                        template.carry(&run, judged.carried);
+                        remember(&mut history, index, judged.answer);
+                        if judged.matched && block.stop_at_first_match {
+                            break 'block;
+                        }
                     }
                 }
             }
@@ -1567,9 +1590,11 @@ impl Run {
             return Judged::default();
         };
         let mut matched = false;
+        let mut answered = false;
         // The earliest answer's value comes first, as Nuclei merges a chain's.
         let mut carried: Vec<(String, String)> = Vec::new();
         for (hop, verdict) in hops.into_iter().zip(verdicts) {
+            answered |= template.blocks[block].template.answers_call(&verdict);
             for (name, value) in verdict.carried {
                 if !carried.iter().any(|(seen, _)| *seen == name) {
                     carried.push((name, value));
@@ -1599,6 +1624,7 @@ impl Run {
         }
         Judged {
             matched,
+            answered,
             carried,
             answer,
         }
@@ -2199,24 +2225,8 @@ mod tests {
         server.abort();
 
         assert_eq!(job.status, "completed", "{job:?}");
-        let mut matched: Vec<String> = job
-            .results
-            .iter()
-            .map(|result| {
-                format!(
-                    "{}{}",
-                    result.template_id,
-                    result
-                        .matcher
-                        .as_ref()
-                        .map(|matcher| format!(":{matcher}"))
-                        .unwrap_or_default()
-                )
-            })
-            .collect();
-        matched.sort_unstable();
         assert_eq!(
-            matched,
+            matched_names(&job),
             [
                 "example-blocks-cookie",
                 "example-blocks-own:config",
@@ -2228,6 +2238,78 @@ mod tests {
         let check = seen.iter().find(|seen| seen.path == "/check").unwrap();
         assert_eq!(check.body, "t=abc123");
         assert!(!seen.iter().any(|seen| seen.path == "/never"));
+    }
+
+    /// `template[:matcher]` of each result, sorted.
+    fn matched_names(job: &ScanJob) -> Vec<String> {
+        let mut names: Vec<String> = job
+            .results
+            .iter()
+            .map(|result| match &result.matcher {
+                Some(matcher) => format!("{}:{matcher}", result.template_id),
+                None => result.template_id.clone(),
+            })
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    const FLOW_TEMPLATES: &[(&str, &str)] = &[
+        // The second block runs when the first matched, quietly or not...
+        ("flow-and", "id: example-flow-and\ninfo: {}\nflow: http(1) && http(2)\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/.git/config']\n    matchers:\n      - type: word\n        internal: true\n        words: ['[core]']\n  - method: GET\n    path: ['{{BaseURL}}/home']\n    matchers:\n      - type: word\n        words: ['Who are you']\n"),
+        // ...and is not sent when it did not.
+        ("flow-skip", "id: example-flow-skip\ninfo: {}\nflow: http(1) && http(2)\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/flow-first']\n    matchers:\n      - type: word\n        words: ['[core]']\n  - method: GET\n    path: ['{{BaseURL}}/flow-skipped']\n    matchers:\n      - type: status\n        status: [404]\n"),
+        // `||` stops at the first block that matched, and blocks run in the
+        // flow's order, named by id or position.
+        ("flow-or", "id: example-flow-or\ninfo: {}\nflow: (http(\"config\") || http(1)) && http(3)\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/flow-unasked']\n    matchers:\n      - type: status\n        status: [404]\n  - id: config\n    method: GET\n    path: ['{{BaseURL}}/.git/config']\n    matchers:\n      - type: word\n        name: config\n        words: ['[core]']\n  - method: GET\n    path: ['{{BaseURL}}/token']\n    matchers:\n      - type: word\n        name: token\n        words: ['token=']\n"),
+        // A block with only an internal extractor is true once it found
+        // something, which the next block sends.
+        ("flow-extract", "id: example-flow-extract\ninfo: {}\nflow: http(1) && http(2)\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/token']\n    extractors:\n      - type: regex\n        name: tok\n        internal: true\n        group: 1\n        regex: ['token=([a-z0-9]+)']\n  - raw:\n      - |\n        POST /check HTTP/1.1\n        Host: {{Hostname}}\n\n        t={{tok}}\n    matchers-condition: and\n    matchers:\n      - type: word\n        name: checked\n        words: ['valid']\n      - type: word\n        negative: true\n        words: ['invalid']\n"),
+        // Any other flow is a script, which never runs.
+        ("flow-script", "id: example-flow-script\ninfo: {}\nflow: |\n  http(1)\n  set('a', 1)\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/flow-script']\n    matchers:\n      - type: status\n        status: [200]\n"),
+    ];
+
+    #[tokio::test]
+    async fn flows_run_the_blocks_their_calls_reach() {
+        let (address, log, server) = site(1, false).await;
+        let state = scan_state_with("flows", &["127.0.0.1"], FLOW_TEMPLATES).await;
+        let session = state.session().await;
+        let started = start(
+            State(state.clone()),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [format!("http://{address}")],
+                    "filter": {"search": "example-flow"},
+                    "acknowledged": true,
+                    "rate": 50,
+                }),
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(started["templates"], 4, "{started}");
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        let job = finished(&state, id).await;
+        server.abort();
+
+        assert_eq!(job.status, "completed", "{job:?}");
+        assert_eq!(
+            matched_names(&job),
+            [
+                "example-flow-and",
+                "example-flow-extract",
+                "example-flow-or:config",
+                "example-flow-or:token"
+            ]
+        );
+        let seen = log.lock().unwrap().clone();
+        let sent = |path: &str| seen.iter().any(|seen| seen.path == path);
+        assert!(sent("/flow-first"));
+        for path in ["/flow-skipped", "/flow-unasked", "/flow-script"] {
+            assert!(!sent(path), "{path} was sent");
+        }
     }
 
     const OAST_TEMPLATES: &[(&str, &str)] = &[

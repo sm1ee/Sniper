@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 
 use super::dsl::{self, Allow, CompileError, EvalError, Interp, Val, Vars};
 use super::engine::{self, CompiledTemplate, UrlVars};
+use super::flow::{self, Step};
 use super::model::{Classification, ParsedTemplate};
 
 /// Nuclei follows ten redirects unless a template asks for another number;
@@ -71,6 +72,8 @@ struct RawSpec {
 #[derive(Clone, Debug)]
 pub struct ActiveTemplate {
     pub blocks: Vec<Block>,
+    /// The order the blocks run in: the flow's, or each once as listed.
+    pub steps: Vec<Step>,
     variables: Vec<(String, Interp)>,
     /// Its requests carry `{{interactsh-url}}`.
     pub oast: bool,
@@ -122,13 +125,14 @@ pub fn compile_active(
     if let Some(first) = classification.active_reasons.first() {
         return Err(CompileError(first.clone()));
     }
-    let blocks = template
+    let listed = template
         .root
         .get("http")
         .or_else(|| template.root.get("requests"))
         .and_then(Value::as_array)
         .filter(|blocks| !blocks.is_empty())
-        .ok_or_else(|| engine::reason("http:empty"))?
+        .ok_or_else(|| engine::reason("http:empty"))?;
+    let blocks = listed
         .iter()
         .map(|block| {
             let block = block
@@ -146,6 +150,16 @@ pub fn compile_active(
     {
         return Err(engine::reason("operators:empty"));
     }
+    let steps = match template.root.get("flow") {
+        Some(source) => {
+            let ids: Vec<Option<String>> = listed
+                .iter()
+                .map(|block| block.get("id").map(engine::text_of))
+                .collect();
+            flow::compile(&engine::text_of(source), &ids)?
+        }
+        None => vec![Step::Run((0..blocks.len()).collect())],
+    };
     let variables = match template.root.get("variables") {
         Some(Value::Object(map)) => map
             .iter()
@@ -160,6 +174,7 @@ pub fn compile_active(
     };
     let compiled = ActiveTemplate {
         blocks,
+        steps,
         variables,
         oast: classification.oast,
     };
@@ -504,11 +519,17 @@ impl ActiveTemplate {
         }
     }
 
-    /// Requests one run sends before any redirect, every block's.
+    /// Requests one run sends before any redirect: those of every block a
+    /// step calls, which is the most a flow can send.
     pub fn request_count(&self) -> usize {
-        self.blocks
+        self.steps
             .iter()
-            .map(Block::request_count)
+            .filter_map(|step| match step {
+                Step::Run(blocks) => Some(blocks),
+                Step::SkipIf(..) => None,
+            })
+            .flatten()
+            .map(|&block| self.blocks[block].request_count())
             .fold(0, usize::saturating_add)
     }
 

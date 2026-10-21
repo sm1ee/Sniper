@@ -323,7 +323,12 @@ pub fn classify(template: &ParsedTemplate) -> Classification {
             continue;
         }
         let reason = match key.as_str() {
-            "flow" => "flow".to_string(),
+            // Captured traffic never runs a flow; Template Scan sends one
+            // that joins block calls, checked once the blocks are known.
+            "flow" => {
+                out.passive_reasons.insert("flow".into());
+                continue;
+            }
             "self-contained" => "self_contained".to_string(),
             other => format!("root:{other}"),
         };
@@ -403,6 +408,15 @@ pub fn classify(template: &ParsedTemplate) -> Classification {
             out.passive = passive_shape(block, blocks.len());
         }
         check_block(&mut out, block, &declared);
+    }
+    if let Some(flow) = root.get("flow") {
+        let ids: Vec<Option<String>> = blocks
+            .iter()
+            .map(|block| block.get("id").map(scalar_text))
+            .collect();
+        if super::flow::compile(&scalar_text(flow), &ids).is_err() {
+            out.active_reasons.insert("flow".into());
+        }
     }
     if out.passive.is_none() {
         out.passive_reasons.clear();
@@ -1018,9 +1032,25 @@ mod tests {
         let other = classify_text("id: example-dns\ninfo: {}\ndns:\n  - name: '{{FQDN}}'\n");
         assert_eq!(other.protocol, "dns");
         assert!(other.active_reasons.contains("protocol:dns"));
-        let flow =
-            classify_text("id: a\ninfo: {}\nflow: http(1)\nhttp:\n  - path: ['{{BaseURL}}']\n");
-        assert!(flow.active_reasons.contains("flow"));
+        // A flow that only joins block calls is sent, but never runs on
+        // captured traffic; any other flow is a script, which never runs.
+        let flow = classify_text(
+            "id: a\ninfo: {}\nflow: http(1) && http(2)\nhttp:\n  - path: ['{{BaseURL}}']\n  - path: ['{{BaseURL}}/b']\n",
+        );
+        assert!(
+            !flow.active_reasons.contains("flow"),
+            "{:?}",
+            flow.active_reasons
+        );
+        let one = classify_text(
+            "id: a\ninfo: {}\nflow: http(1)\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}']\n    matchers: [{type: status, status: [200]}]\n",
+        );
+        assert!(one.active_supported(), "{:?}", one.active_reasons);
+        assert!(!one.passive_supported());
+        let script = classify_text(
+            "id: a\ninfo: {}\nflow: |\n  http(1)\n  set('a', 1)\nhttp:\n  - path: ['{{BaseURL}}']\n",
+        );
+        assert!(script.active_reasons.contains("flow"));
     }
 
     #[test]

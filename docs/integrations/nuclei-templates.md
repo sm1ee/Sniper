@@ -71,7 +71,13 @@ A template's requests to one target run as one session, as in Nuclei:
 - Request blocks run in the order written, and each judges its own answers.
   `stop-at-first-match` ends only its own block. A block without matchers or
   extractors only prepares the next, as a login does; a template where no
-  block has any is not sent.
+  block has any is not sent. A match that only `internal: true` matchers made
+  is not reported, as in Nuclei: such a block is a precondition.
+- A `flow` that joins block calls with `&&`, `||` and parentheses
+  (`http(1) && http(2)`, `http("login")`) decides which blocks run. A call is
+  true when its block matched, reported or not, or, for a block without
+  matchers, when it extracted something. Blocks the flow does not reach are
+  not sent. Any other flow is a script, and its template is not sent.
 - A cookie a response sets goes with the later requests to the same host,
   unless their block sets `disable-cookie: true`.
 - A named `internal` extractor's first value fills the later requests that use
@@ -177,8 +183,8 @@ tagged `dos` are never sent.
 
 Sniper lists every template but never runs the `code`, `javascript`,
 `headless`, `network`, `dns`, `file`, `ssl`, `websocket` or `whois` protocols,
-`flow`, self-contained templates, workflows, or anything else outside the
-supported subset. A template either compiles completely or is listed as
+a `flow` that does more than call blocks, self-contained templates,
+workflows, or anything else outside the supported subset. A template either compiles completely or is listed as
 unsupported with a reason, such as `protocol:dns`, `req:payload_file` or
 `extractor:xpath`.
 
@@ -223,8 +229,8 @@ body was truncated, a template whose result the missing bytes could change (a
 negated body matcher, a size, an expression that reads the body) skips that
 response.
 
-On release v10.5.0, 2,086 of 11,698 HTTP templates can run passively and 8,973
-can be sent by Template Scan, 353 of them out-of-band.
+On release v10.5.0, 2,086 of 11,698 HTTP templates can run passively and 9,784
+can be sent by Template Scan, 446 of them out-of-band.
 
 ## The library
 
@@ -257,7 +263,7 @@ id repeats, the first file wins.
 | `POST /api/templates/library/check` | Ask GitHub for the newest tag; returns `latest`, `current`, `update_available`. |
 | `POST /api/templates/library/download` | Body `{"acknowledged": true}`. Starts a download; 202, or 409 while busy. |
 | `POST /api/templates/library/import` | Body: the `.tar.gz` (`application/gzip`). Starts an import; 202, or 409 while busy. |
-| `GET /api/templates` | List; query `search`, `severity` (comma-separated), `protocol`, `support` (`passive`, `active`, `unsupported`), `tag`, `enabled`, `limit` (at most 30,000), `offset`. Each template's `requests` is what one scan sends a target. |
+| `GET /api/templates` | List; query `search`, `severity` (comma-separated), `protocol`, `support` (`passive`, `active`, `unsupported`), `tag`, `enabled`, `limit` (at most 30,000), `offset`. Each template's `requests` is the most one scan sends a target before redirects; a flow can stop sooner. |
 | `GET /api/templates/:id` | One template with its description, references and YAML. |
 | `POST /api/templates/passive` | Body `{"ids": [...], "enabled": bool}` or `{"filter": {...list query...}, "enabled": bool}`. Ids that cannot run passively are ignored and counted. |
 | `POST /api/templates/scans` | Body: `session_id`, `targets`, `ids` or `filter` (a list query), `allow_risks`, `rate`, `concurrency`, `max_requests`, `apply_match_replace`, plus `"preview": true` to count or `"acknowledged": true` to start. A start returns the scan; 409 while one runs. |
