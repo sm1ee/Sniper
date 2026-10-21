@@ -8174,6 +8174,9 @@ button.utility-button.replay-tab-add {
 }
 .recon-scan-options { display: grid; gap: 10px; padding: 10px; border: 1px solid var(--point-border); background: var(--point-soft); border-radius: 5px; }
 .recon-scan-options .recon-check { overflow-wrap: anywhere; }
+/* Recon and Active Scan share the Scan tab: its own tabs, then whichever is open. */
+.scan-shell { height: 100%; min-height: 0; display: flex; flex-direction: column; background: var(--shell); }
+.scan-shell > .recon-shell, .scan-shell > .templates-shell { flex: 1 1 auto; height: auto; }
 /* Templates reuses Recon's form, table and detail styles; only its layout is its own. */
 .templates-shell {
   height: 100%;

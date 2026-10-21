@@ -178,3 +178,14 @@ test("Preview can be pressed once the library has loaded", async () => {
   assert.equal(preview.disabled, false);
   controller.dispose();
 });
+
+test("Recon and Active Scan are the Scan tab's own tabs", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  assert.doesNotMatch(html, /class="main-tab" data-tool="recon"/);
+  const scan = html.slice(html.indexOf('id="scanShell"'));
+  assert.match(scan, /data-scan-tool="recon"[^>]*>Recon</);
+  assert.match(scan, /data-scan-tool="templates"[^>]*>Active Scan</);
+  assert.ok(scan.indexOf('id="reconShell"') > 0 && scan.indexOf('id="templatesShell"') > 0, "both open inside it");
+  const app = fs.readFileSync(path.join(__dirname, "../web/app.js"), "utf8");
+  assert.match(app, /scanShell: document\.getElementById\("scanShell"\)/);
+});

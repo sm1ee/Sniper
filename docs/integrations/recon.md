@@ -1,6 +1,6 @@
 # Recon endpoint discovery
 
-Recon builds one endpoint inventory per session from three sources: a static crawler of the target, existing urlscan results, and the Wayback CDX index. Open the **Recon** tab, enter an absolute target URL, choose sources and optional budgets, then start. Each source reports its status, request count, discoveries, partial results and warnings. **Stop** cancels the job's local work. Jobs stay with their session when you switch sessions; deleting the session or shutting Sniper down cancels them. After a restart, unfinished jobs are marked interrupted and do not resume.
+Recon builds one endpoint inventory per session from three sources: a static crawler of the target, existing urlscan results, and the Wayback CDX index. Open **Scan ▸ Recon**, enter an absolute target URL, choose sources and optional budgets, then start. Each source reports its status, request count, discoveries, partial results and warnings. **Stop** cancels the job's local work. Jobs stay with their session when you switch sessions; deleting the session or shutting Sniper down cancels them. After a restart, unfinished jobs are marked interrupted and do not resume.
 
 ## Scope and consent
 

@@ -106,8 +106,8 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 | **Browsers** | One click opens a browser already wired to the proxy and CA, and hands an AI agent the way to drive it |
 | **Capture** | HTTP history, WebSocket sessions, intercept queue, match & replace rules, HTML and image responses rendered in a sandbox |
 | **Findings** | Passive scanner: sensitive data, CORS, missing headers, JWT issues, and the management endpoints and backend addresses the Service Map names. Each issue is listed once per host, endpoint or value; **Rescan** applies the current rules to traffic already captured |
-| **Recon** | Session-owned endpoint discovery from a scoped static crawler, urlscan and Wayback, with explicit provider consent and optional budgets |
-| **Scan** | Nuclei community templates: turned-on templates check in-scope captured traffic without sending anything, and Template Scan sends the ones you pick to targets you name |
+| **Scan ▸ Recon** | Session-owned endpoint discovery from a scoped static crawler, urlscan and Wayback, with explicit provider consent and optional budgets |
+| **Scan ▸ Active Scan** | Nuclei community templates: turned-on templates check in-scope captured traffic without sending anything, and Template Scan sends the ones you pick to targets you name |
 | **Replay** | Modify and resend any captured request, override host and port, render the response |
 | **Fuzzer** | Payload lists sent at marked positions, Sniper or Battering ram, in the background with progress and Stop |
 | **Tools** | Decode, encode, hash, JWT inspector, data transformations |
@@ -198,7 +198,7 @@ than the origin's owner. See the
 
 ## Recon
 
-The **Recon** tool builds a session-owned endpoint inventory from a scoped
+**Scan ▸ Recon** builds a session-owned endpoint inventory from a scoped
 static crawler, existing urlscan results and Wayback history. New urlscan
 scans are a separate, explicit choice. Evidence distinguishes live responses,
 observed references, historical records and unvisited candidates; discoveries
@@ -219,7 +219,7 @@ to 0 (unbounded), and a CLI timeout does not stop the background job. See
 
 ## Nuclei templates
 
-The **Scan** tool runs the community templates of
+**Scan ▸ Active Scan** runs the community templates of
 [projectdiscovery/nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)
 (MIT license) without the `nuclei` program. While Passive Scan is on, the
 templates you turn on check responses from hosts that match a Scope include

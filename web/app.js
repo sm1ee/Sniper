@@ -614,6 +614,8 @@ let _interceptToggleRequestSeq = 0;
 let _interceptToggleInFlight = false;
 
 const els = {
+  scanShell: document.getElementById("scanShell"),
+  scanTabs: Array.from(document.querySelectorAll("[data-scan-tool]")),
   reconShell: document.getElementById("reconShell"),
   templatesShell: document.getElementById("templatesShell"),
   dashboardShell: document.getElementById("dashboardShell"),
@@ -1259,9 +1261,16 @@ function bindEvents() {
   window.addEventListener("pagehide", flushAnnotationsOnUnload);
   window.addEventListener("beforeunload", flushAnnotationsOnUnload);
 
+  // Scan opens whichever of its tabs was open last.
+  (els.scanTabs || []).forEach((tab) => {
+    tab.addEventListener("click", () => {
+      setActiveTool(tab.dataset.scanTool);
+      renderToolPanels();
+    });
+  });
   mainTabs.forEach((tab) => {
     tab.addEventListener("click", () => {
-      setActiveTool(tab.dataset.tool);
+      setActiveTool(tab.dataset.tool === "templates" ? state.scanTool || "templates" : tab.dataset.tool);
       renderToolPanels();
       if (state.activeTool === "dashboard") {
         loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError);
@@ -8960,9 +8969,16 @@ function renderToolPanels() {
   }
   state.activeTool = sanitizeActiveTool(state.activeTool);
 
+  // Recon and Active Scan are the Scan tab's own tabs.
+  const scanTool = ["recon", "templates"].includes(state.activeTool) ? state.activeTool : null;
+  if (scanTool) state.scanTool = scanTool;
   mainTabs.forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.tool === state.activeTool);
+    tab.classList.toggle("active", tab.dataset.tool === (scanTool ? "templates" : state.activeTool));
   });
+  (els.scanTabs || []).forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.scanTool === scanTool);
+  });
+  els.scanShell?.classList.toggle("hidden", !scanTool);
 
   const dashboardVisible = state.activeTool === "dashboard";
   const proxyVisible = state.activeTool === "proxy";

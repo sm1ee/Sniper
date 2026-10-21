@@ -3,7 +3,7 @@
 Sniper runs the community templates of
 [projectdiscovery/nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)
 (MIT license) with its own engine, which implements a subset of the template
-language. It does not need the `nuclei` program. In the **Scan** tool,
+language. It does not need the `nuclei` program. In **Scan ▸ Active Scan**,
 download the latest release or import a release archive, then use templates in
 two ways:
 

@@ -16,7 +16,6 @@
           <button class="main-tab" data-tool="target">Scope</button>
           <button class="main-tab active" data-tool="proxy">Capture</button>
           <button class="main-tab" data-tool="map">Map</button>
-          <button class="main-tab" data-tool="recon">Recon</button>
           <button class="main-tab" data-tool="templates">Scan</button>
           <button class="main-tab" data-tool="replay">Replay</button>
           <button class="main-tab" data-tool="fuzzer">Fuzzer</button>
@@ -1573,6 +1572,11 @@
           </section>
         </section>
 
+        <section class="scan-shell hidden" id="scanShell" aria-label="Scan">
+          <nav class="sub-tabs" aria-label="Scan tools">
+            <button class="sub-tab" data-scan-tool="recon" type="button">Recon</button>
+            <button class="sub-tab" data-scan-tool="templates" type="button">Active Scan</button>
+          </nav>
         <section class="recon-shell hidden" id="reconShell" aria-labelledby="reconTitle">
           <section class="panel-card recon-setup">
             <header class="panel-toolbar">
@@ -1754,6 +1758,7 @@
               <div class="toolbar-actions"><button class="secondary-action" id="templatesPrevious" type="button" disabled>Previous</button><button class="secondary-action" id="templatesNext" type="button" disabled>Next</button></div>
             </footer>
           </section>
+        </section>
         </section>
 
         <section class="logger-shell hidden" id="loggerShell">
