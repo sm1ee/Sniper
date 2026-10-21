@@ -123,6 +123,12 @@ several files under the session's storage directory:
 | `transactions.meta.ndjson` | The same records without bodies — the load path |
 | `transactions.journal`, `websockets.journal` | Append-only, compacted on size |
 
+A change to the small components (settings, rules, the event log) is saved
+with `AppState::persist_session_state_mutation_locked`, which writes
+`state.json` alone. The full save rewrites `transactions.ndjson` and is for
+journal compaction, session switches, shutdown and purging deleted traffic; on
+a large session it takes seconds, so a settings change must not go through it.
+
 The invariants:
 
 1. **Bodies live on disk and are read back by byte offset.** A record in memory

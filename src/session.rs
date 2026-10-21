@@ -1109,6 +1109,52 @@ impl SessionContext {
         .context("session state writer failed")?
     }
 
+    /// What an API change to the small components needs: runtime settings,
+    /// rules, the event log, OAST callbacks, sequence runs. They are all in
+    /// state.json, and the session list's counts are refreshed with them. The
+    /// full save copied the whole of transactions.ndjson for each, gigabytes on
+    /// a large session for one intercept toggle; captured traffic is durable
+    /// through its journal, and a full save still compacts that once it grows
+    /// (TRANSACTION_JOURNAL_COMPACT_BYTES).
+    pub async fn persist_state_mutation_locked(&self) -> Result<SessionMetadata> {
+        let persist_guard = self.owned_persist_guard().await;
+        // A request queued behind session deletion must not recreate its root.
+        ensure_existing_private_session_dir(&self.storage_dir)?;
+        let state = self
+            .build_state_snapshot(self.workspace.snapshot().await)
+            .await;
+        let mut metadata = self
+            .metadata
+            .read()
+            .expect("session metadata lock poisoned")
+            .clone();
+        // The request and websocket counts are the full save's to keep: these
+        // changes leave captured traffic as it is.
+        metadata.updated_at = Utc::now();
+        metadata.event_count = state.event_log.len();
+        metadata.fuzzer_count = state.fuzzer_attacks.len();
+        metadata.rule_count = state.match_replace_rules.len();
+        let storage_dir = self.storage_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let _persist_guard = persist_guard;
+            ensure_existing_private_session_dir(&storage_dir)?;
+            write_json(&state_path(&storage_dir), &state)
+        })
+        .await
+        .context("session state writer failed")??;
+        // Registry-owned fields may have moved meanwhile, as in a full save.
+        let mut current = self
+            .metadata
+            .write()
+            .expect("session metadata lock poisoned");
+        metadata.name.clone_from(&current.name);
+        metadata.created_at = current.created_at;
+        metadata.last_opened_at = current.last_opened_at;
+        metadata.updated_at = metadata.updated_at.max(current.updated_at);
+        *current = metadata.clone();
+        Ok(metadata)
+    }
+
     async fn persist_with_workspace_snapshot_locked(
         &self,
         workspace: WorkspaceStateSnapshot,

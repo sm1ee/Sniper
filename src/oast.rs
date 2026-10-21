@@ -1485,9 +1485,7 @@ pub async fn run_oast_poller_for_state(state: Arc<AppState>) {
                         pending_interactsh_deregistration(store, &prev_url).await;
                     let _mutation_guard = session.mutation_guard().await;
                     store.clear_registration().await;
-                    if let Err(error) = state
-                        .persist_session_context_mutation_locked(&session)
-                        .await
+                    if let Err(error) = state.persist_session_state_mutation_locked(&session).await
                     {
                         warn!(?error, session_id = %session.id(), "failed to persist OAST registration clear");
                     }
@@ -1622,10 +1620,7 @@ pub async fn run_oast_poller_for_state(state: Arc<AppState>) {
 
             if registration_changed {
                 let _mutation_guard = session.mutation_guard().await;
-                if let Err(error) = state
-                    .persist_session_context_mutation_locked(&session)
-                    .await
-                {
+                if let Err(error) = state.persist_session_state_mutation_locked(&session).await {
                     warn!(?error, session_id = %session.id(), "failed to persist OAST registration");
                 }
             }
@@ -1695,10 +1690,7 @@ pub async fn run_oast_poller_for_state(state: Arc<AppState>) {
                 tokio::time::sleep(interval).await;
                 continue;
             }
-            if let Err(error) = state
-                .persist_session_context_mutation_locked(&session)
-                .await
-            {
+            if let Err(error) = state.persist_session_state_mutation_locked(&session).await {
                 warn!(?error, session_id = %session.id(), "failed to persist OAST callbacks");
             }
         }

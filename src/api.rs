@@ -4481,7 +4481,7 @@ async fn update_startup_settings(
                         .push(level, "config", title, message)
                         .await;
                     if let Err(error) = state
-                        .persist_session_context_mutation_locked(&event_session)
+                        .persist_session_state_mutation_locked(&event_session)
                         .await
                     {
                         event_session.event_log.replace_all(previous_events).await;
@@ -9341,7 +9341,7 @@ async fn persist_session_mutation_locked_result(
     session: &Arc<SessionContext>,
 ) -> std::result::Result<(), String> {
     state
-        .persist_session_context_mutation_locked(session)
+        .persist_session_state_mutation_locked(session)
         .await
         .map(|_| ())
         .map_err(|error| {
@@ -9378,12 +9378,12 @@ async fn persist_rolled_back_session_snapshot(
     session: &Arc<SessionContext>,
     action: &'static str,
 ) -> bool {
-    if let Err(error) = state.persist_session_context_mutation_locked(session).await {
+    if let Err(error) = state.persist_session_state_mutation_locked(session).await {
         tracing::warn!(
             %error,
             action,
             session_id = %session.id(),
-            "failed to fully persist rolled back session state"
+            "failed to persist rolled back session state"
         );
         return false;
     }
@@ -9984,6 +9984,65 @@ mod tests {
             Some(expected_owner_session_id.as_str())
         );
         assert!(payload.get("session_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_settings_change_is_saved_without_rewriting_the_captured_traffic() {
+        let (state, data_dir) = test_state("sniper-api-state-only-save");
+        let session = state.session().await;
+        session
+            .store
+            .insert(test_replay_response_record("/captured", 200))
+            .await;
+        state.persist_active_session().await.unwrap();
+        let traffic = session.storage_dir().join("transactions.ndjson");
+        let saved = std::fs::metadata(&traffic).unwrap().modified().unwrap();
+
+        // An intercept toggle or a scope edit: a change made many times a session.
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/runtime",
+            serde_json::json!({
+                "session_id": session.id(),
+                "expected_active_session_id": session.id(),
+                "intercept_enabled": true,
+                "scope_patterns": ["example.com"],
+            }),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert_eq!(
+            std::fs::metadata(&traffic).unwrap().modified().unwrap(),
+            saved,
+            "a settings change rewrote the captured traffic"
+        );
+
+        // It is on disk all the same, with the traffic beside it.
+        let reloaded = state.sessions.load_context_read_only(session.id()).unwrap();
+        let runtime = reloaded.runtime.snapshot().await;
+        assert!(runtime.intercept_enabled);
+        assert_eq!(runtime.scope_patterns, vec!["example.com".to_string()]);
+        assert_eq!(reloaded.store.len().await, 1);
+
+        // The session list still counts what such a change touches.
+        session
+            .event_log
+            .push(EventLevel::Info, "config", "Example", "example event")
+            .await;
+        state
+            .persist_session_state_mutation_locked(&session)
+            .await
+            .unwrap();
+        let listed = state
+            .sessions
+            .summaries()
+            .into_iter()
+            .find(|summary| summary.id == session.id())
+            .unwrap();
+        assert_eq!(listed.event_count, session.event_log.len().await);
+        assert_eq!(listed.request_count, 1);
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]

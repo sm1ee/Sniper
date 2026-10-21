@@ -1060,7 +1060,11 @@ impl AppState {
         self.finalize_session_persist(session, metadata)
     }
 
-    pub async fn persist_session_context_mutation_locked(
+    /// Saves a change to the small components (runtime settings, rules, the
+    /// event log and the like) without rewriting captured traffic; see
+    /// `SessionContext::persist_state_mutation_locked`. Deleting traffic is
+    /// `purge_deleted_transactions_mutation_locked`.
+    pub async fn persist_session_state_mutation_locked(
         &self,
         session: &Arc<SessionContext>,
     ) -> Result<SessionSummary> {
@@ -1071,7 +1075,7 @@ impl AppState {
         if !self.sessions.contains_session(session.id()) {
             anyhow::bail!("session {} was deleted", session.id());
         }
-        let metadata = session.persist_mutation_locked().await?;
+        let metadata = session.persist_state_mutation_locked().await?;
         self.finalize_session_persist(session, metadata)
     }
 
