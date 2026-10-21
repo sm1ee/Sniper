@@ -116,6 +116,19 @@ pub struct TemplateMatch {
     pub snippets: Vec<String>,
 }
 
+/// What a template made of one response.
+#[derive(Clone, Debug, Default)]
+pub struct Verdict {
+    /// The results to report.
+    pub results: Vec<TemplateMatch>,
+    /// The matchers matched, whether or not that is reported: what
+    /// `stop-at-first-match` reads.
+    pub matched: bool,
+    /// The first value of each named internal extractor, which Nuclei hands
+    /// to the run's later requests.
+    pub carried: Vec<(String, String)>,
+}
+
 pub(super) fn reason(code: impl Into<String>) -> CompileError {
     CompileError(code.into())
 }
@@ -779,18 +792,15 @@ impl CompiledTemplate {
     /// The template's results on one response. Empty when it does not match,
     /// or when a truncated body could have changed the answer.
     pub fn evaluate(&self, view: &ResponseView) -> Vec<TemplateMatch> {
-        self.evaluate_carrying(view).0
+        self.verdict(view).results
     }
 
-    /// The results, and the first value of each named internal extractor,
-    /// which Nuclei hands to the run's later requests. An extractor that
-    /// reads one request's answer (`part: body_2`) hands on only from it.
-    pub fn evaluate_carrying(
-        &self,
-        view: &ResponseView,
-    ) -> (Vec<TemplateMatch>, Vec<(String, String)>) {
+    /// The results, whether the matchers matched, and the values handed on.
+    /// An extractor that reads one request's answer (`part: body_2`) hands
+    /// on only from it.
+    pub fn verdict(&self, view: &ResponseView) -> Verdict {
         if view.truncated && self.body_sensitive {
-            return (Vec::new(), Vec::new());
+            return Verdict::default();
         }
         let operators = &self.operators;
         let mut dynamic: HashMap<String, String> = HashMap::new();
@@ -812,7 +822,17 @@ impl CompiledTemplate {
                 }
             }
         }
-        (self.match_view(view, &dynamic, extracted), carried)
+        let results = self.match_view(view, &dynamic, extracted);
+        let matchers = &operators.matchers;
+        let matched = !matchers.is_empty() && !results.is_empty();
+        // Nuclei prints nothing for a match only internal matchers made: such
+        // a block is a precondition for the ones after it.
+        let quiet = matched && matchers.iter().all(|matcher| matcher.internal);
+        Verdict {
+            results: if quiet { Vec::new() } else { results },
+            matched,
+            carried,
+        }
     }
 
     /// The matchers' verdict on one answer, given what the extractors found.
@@ -1451,6 +1471,19 @@ mod tests {
     }
 
     #[test]
+    fn a_match_made_only_by_internal_matchers_is_not_reported() {
+        let quiet = compiled(
+            "id: example-quiet\ninfo: {}\nhttp:\n  - global-matchers: true\n    matchers-condition: and\n    matchers:\n      - type: word\n        internal: true\n        words: ['zzz']\n      - type: status\n        internal: true\n        status: [200]\n",
+        );
+        // Nuclei prints nothing for it: such a block is a precondition for
+        // the blocks after it.
+        let answer = view(200, &[], "zzz");
+        assert!(quiet.evaluate(&answer).is_empty());
+        assert!(quiet.verdict(&answer).matched);
+        assert!(!quiet.verdict(&view(404, &[], "zzz")).matched);
+    }
+
+    #[test]
     fn a_run_reads_earlier_answers_and_hands_on_internal_values() {
         let parsed = parse(
             "id: example-steps\ninfo: {}\nhttp:\n  - raw:\n      - |\n        GET /a HTTP/1.1\n      - |\n        GET /b?t={{token}} HTTP/1.1\n    extractors:\n      - type: regex\n        name: token\n        internal: true\n        group: 1\n        regex: ['token=(\\w+)']\n      - type: regex\n        name: shown\n        group: 1\n        regex: ['shown=(\\w+)']\n      - type: regex\n        name: second\n        internal: true\n        part: body_2\n        group: 1\n        regex: ['next=(\\w+)']\n    matchers:\n      - type: dsl\n        dsl:\n          - 'status_code_1 == 200 && contains(body_2, \"welcome\")'\n",
@@ -1464,16 +1497,16 @@ mod tests {
                 .template;
         let first =
             Arc::new(view(200, &[], "token=abc shown=x next=one").with_history(1, Vec::new()));
-        let (results, carried) = template.evaluate_carrying(&first);
+        let verdict = template.verdict(&first);
         // The first answer alone: body_2 is not there yet.
-        assert!(results.is_empty());
+        assert!(verdict.results.is_empty());
         // Only named internal extractors hand values on, and one reading
         // body_2 only from the second request.
-        assert_eq!(carried, [("token".to_string(), "abc".to_string())]);
+        assert_eq!(verdict.carried, [("token".to_string(), "abc".to_string())]);
         let second = view(200, &[], "welcome next=two").with_history(2, vec![Some(first)]);
-        let (results, carried) = template.evaluate_carrying(&second);
-        assert_eq!(results.len(), 1);
-        assert_eq!(carried, [("second".to_string(), "two".to_string())]);
+        let verdict = template.verdict(&second);
+        assert_eq!(verdict.results.len(), 1);
+        assert_eq!(verdict.carried, [("second".to_string(), "two".to_string())]);
         assert_eq!(
             second.var("body_1").unwrap().text(),
             "token=abc shown=x next=one"

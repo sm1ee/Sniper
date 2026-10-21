@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use super::{
     active::{self, ActiveTemplate, Follow},
-    engine::{Interaction, ResponseView, TemplateMatch, UrlVars, MAX_ACTIVE_BODY_BYTES},
+    engine::{Interaction, ResponseView, TemplateMatch, UrlVars, Verdict, MAX_ACTIVE_BODY_BYTES},
     library::{ListQuery, TemplateMeta},
     model::RISK_TAGS,
 };
@@ -1537,8 +1537,7 @@ impl Run {
         // A matcher may read up to 10 MiB of body; keep that off the async
         // workers.
         let judged = tokio::task::spawn_blocking(move || {
-            let mut verdicts: Vec<Vec<TemplateMatch>> = vec![Vec::new(); hops.len()];
-            let mut carried: Vec<Vec<(String, String)>> = vec![Vec::new(); hops.len()];
+            let mut verdicts = vec![Verdict::default(); hops.len()];
             let mut answer = None;
             for (index, hop) in hops.iter().enumerate().rev() {
                 let Some(view) =
@@ -1550,32 +1549,36 @@ impl Run {
                     .with_request(request_text(&hop.request), values.clone())
                     .with_history(number, history.clone());
                 let judging = &evaluating.blocks[block];
-                (verdicts[index], carried[index]) = judging.template.evaluate_carrying(&view);
+                verdicts[index] = judging.template.verdict(&view);
                 // Nuclei remembers the last answer of the chain it read, the
                 // first one unless a match stopped it sooner.
                 if judging.history {
                     answer = Some(Arc::new(view));
                 }
-                if !verdicts[index].is_empty() && judging.stop_at_first_match {
+                let verdict = &verdicts[index];
+                if (verdict.matched || !verdict.results.is_empty()) && judging.stop_at_first_match {
                     break;
                 }
             }
-            // The earliest answer's value comes first, as Nuclei merges a
-            // chain's.
-            let mut handed: Vec<(String, String)> = Vec::new();
-            for (name, value) in carried.into_iter().flatten() {
-                if !handed.iter().any(|(seen, _)| *seen == name) {
-                    handed.push((name, value));
-                }
-            }
-            (hops, verdicts, handed, answer)
+            (hops, verdicts, answer)
         })
         .await;
-        let Ok((hops, verdicts, carried, answer)) = judged else {
+        let Ok((hops, verdicts, answer)) = judged else {
             return Judged::default();
         };
         let mut matched = false;
-        for (hop, results) in hops.into_iter().zip(verdicts) {
+        // The earliest answer's value comes first, as Nuclei merges a chain's.
+        let mut carried: Vec<(String, String)> = Vec::new();
+        for (hop, verdict) in hops.into_iter().zip(verdicts) {
+            for (name, value) in verdict.carried {
+                if !carried.iter().any(|(seen, _)| *seen == name) {
+                    carried.push((name, value));
+                }
+            }
+            // A match only internal matchers made is not reported, yet it
+            // stops the block as any other does.
+            matched |= verdict.matched;
+            let results = verdict.results;
             let found = !results.is_empty();
             self.update(|job| {
                 job.log(ScanLogEntry {
@@ -2163,6 +2166,9 @@ mod tests {
         // that turns them off.
         ("blocks-cookie", "id: example-blocks-cookie\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/login']\n  - method: GET\n    path: ['{{BaseURL}}/home']\n    matchers:\n      - type: word\n        words: ['Welcome back']\n"),
         ("blocks-no-cookie", "id: example-blocks-no-cookie\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/login']\n  - method: GET\n    path: ['{{BaseURL}}/home']\n    disable-cookie: true\n    matchers:\n      - type: word\n        words: ['Welcome back']\n"),
+        // A block whose matchers are all internal reports nothing, as in
+        // Nuclei, yet its match still stops it.
+        ("blocks-quiet", "id: example-blocks-quiet\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/.git/config', '{{BaseURL}}/never']\n    stop-at-first-match: true\n    matchers:\n      - type: word\n        internal: true\n        words: ['[core]']\n  - method: GET\n    path: ['{{BaseURL}}/home']\n    matchers:\n      - type: word\n        name: second\n        words: ['Who are you']\n"),
         // Each block judges its own answers.
         ("blocks-own", "id: example-blocks-own\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/.git/config']\n    matchers:\n      - type: word\n        name: config\n        words: ['[core]']\n  - method: GET\n    path: ['{{BaseURL}}/nothing']\n    matchers:\n      - type: word\n        name: nothing\n        words: ['[core]']\n"),
     ];
@@ -2187,7 +2193,7 @@ mod tests {
         .await
         .unwrap()
         .0;
-        assert_eq!(started["templates"], 4, "{started}");
+        assert_eq!(started["templates"], 5, "{started}");
         let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
         let job = finished(&state, id).await;
         server.abort();
@@ -2214,12 +2220,14 @@ mod tests {
             [
                 "example-blocks-cookie",
                 "example-blocks-own:config",
+                "example-blocks-quiet:second",
                 "example-blocks-token"
             ]
         );
         let seen = log.lock().unwrap().clone();
         let check = seen.iter().find(|seen| seen.path == "/check").unwrap();
         assert_eq!(check.body, "t=abc123");
+        assert!(!seen.iter().any(|seen| seen.path == "/never"));
     }
 
     const OAST_TEMPLATES: &[(&str, &str)] = &[
