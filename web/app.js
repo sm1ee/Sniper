@@ -15935,7 +15935,7 @@ function fuzzerWorkspaceAttackRecordId(fuzzerWS, legacyRecord = null) {
 async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
   if (!recordId) return;
   // IDs alone cannot distinguish an earlier visit to the same saved run.
-  const generation = ++_fuzzerAttackLoadGeneration;
+  let generation = ++_fuzzerAttackLoadGeneration;
   const expectedSessionId = sessionId || currentSessionId();
   const ownsLoad = () => generation === _fuzzerAttackLoadGeneration
     && state.fuzzerAttackRecordId === recordId && currentSessionId() === expectedSessionId;
@@ -15959,6 +15959,9 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
       return;
     }
     const attackRecord = setFuzzerAttackRecord(detail);
+    // Showing the record starts a load generation of its own; this load owns
+    // it, or following a run still sending gave up at its first read.
+    generation = _fuzzerAttackLoadGeneration;
     if (!attackRecord) {
       return;
     }
