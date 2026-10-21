@@ -3106,6 +3106,7 @@ fn prepare_transactions_file_streaming(
     let mut locators = HashMap::with_capacity(entries.len());
     let mut metadata = Vec::with_capacity(entries.len());
     let mut offset = 0u64;
+    let mut kept_aside = false;
     {
         let mut file = create_private_file(&tmp_path)
             .with_context(|| format!("failed to write {}", tmp_path.display()))?;
@@ -3123,28 +3124,47 @@ fn prepare_transactions_file_streaming(
                         .seek(std::io::SeekFrom::Start(locator.offset))
                         .and_then(|_| reader.read_exact(&mut line))
                         .context("failed to copy stored transaction bodies for snapshot")?;
-                    let mut full: TransactionRecord = serde_json::from_slice(&line)
-                        .context("stored transaction line is invalid")?;
-                    if full.id != record.id {
-                        bail!("stored transaction locator does not match its record");
-                    }
-                    // An annotation changes without materializing the body. Its
-                    // durable line must still carry the snapshot's annotations:
-                    // the optional metadata cache cannot be their sole copy.
-                    if full.notes != record.notes
-                        || full.color_tag != record.color_tag
-                        || full.user_note != record.user_note
-                        || full.annotation_revision != record.annotation_revision
-                        || full.annotation_client_versions != record.annotation_client_versions
-                    {
-                        full.notes.clone_from(&record.notes);
-                        full.color_tag.clone_from(&record.color_tag);
-                        full.user_note.clone_from(&record.user_note);
-                        full.annotation_revision = record.annotation_revision;
-                        full.annotation_client_versions
-                            .clone_from(&record.annotation_client_versions);
-                        line = serde_json::to_vec(&full)
-                            .context("failed to serialize annotated transaction record")?;
+                    if let Ok(mut full) = serde_json::from_slice::<TransactionRecord>(&line) {
+                        // A whole line of another record means stale offsets,
+                        // not damage: emptying the row would drop a body that
+                        // is still in the file.
+                        if full.id != record.id {
+                            bail!("stored transaction locator does not match its record");
+                        }
+                        // An annotation changes without materializing the body. Its
+                        // durable line must still carry the snapshot's annotations:
+                        // the optional metadata cache cannot be their sole copy.
+                        if full.notes != record.notes
+                            || full.color_tag != record.color_tag
+                            || full.user_note != record.user_note
+                            || full.annotation_revision != record.annotation_revision
+                            || full.annotation_client_versions != record.annotation_client_versions
+                        {
+                            full.notes.clone_from(&record.notes);
+                            full.color_tag.clone_from(&record.color_tag);
+                            full.user_note.clone_from(&record.user_note);
+                            full.annotation_revision = record.annotation_revision;
+                            full.annotation_client_versions
+                                .clone_from(&record.annotation_client_versions);
+                            line = serde_json::to_vec(&full)
+                                .context("failed to serialize annotated transaction record")?;
+                        }
+                    } else {
+                        // A torn write after power loss. Refusing would refuse
+                        // every later save and load, so the row keeps its
+                        // metadata without bodies, and the file as it was goes
+                        // aside first: nothing this rewrite drops is lost.
+                        if !kept_aside {
+                            keep_damaged_transactions_file_aside(source);
+                            kept_aside = true;
+                        }
+                        warn!(
+                            record_id = %record.id,
+                            offset = locator.offset,
+                            "stored transaction line is damaged; keeping the record without bodies"
+                        );
+                        line = serde_json::to_vec(record)
+                            .context("failed to serialize transaction record")?;
                     }
                 } else {
                     line = serde_json::to_vec(record)
@@ -3674,6 +3694,25 @@ fn move_corrupt_session_file_aside(parent_dir: &Path, path: &Path, label: &str) 
     }
 }
 
+/// Keeps the transactions file as it was before a rewrite drops a damaged line
+/// from it. A hard link costs no space until the rewrite replaces the file; a
+/// copy stands in where links are unsupported.
+fn keep_damaged_transactions_file_aside(source: &Path) {
+    let Some(parent_dir) = source.parent() else {
+        return;
+    };
+    let aside = parent_dir.join(format!(".transactions.ndjson.corrupt-{}", Uuid::new_v4()));
+    if let Err(error) =
+        fs::hard_link(source, &aside).or_else(|_| fs::copy(source, &aside).map(drop))
+    {
+        warn!(
+            ?error,
+            path = %aside.display(),
+            "failed to keep the damaged transactions file aside"
+        );
+    }
+}
+
 fn repeated_transaction_ids(records: &[TransactionRecord]) -> bool {
     let mut ids = HashSet::with_capacity(records.len());
     records.iter().any(|record| !ids.insert(record.id))
@@ -3825,11 +3864,14 @@ fn replay_transaction_journal(
         let Some(locator) = snapshot.transaction_locators.remove(id) else {
             continue;
         };
-        let mut full = read_transaction_at(storage_dir, locator)
-            .filter(|full| full.id == *id)
-            .ok_or_else(|| {
-                anyhow!("failed to read stored transaction while replaying annotations")
-            })?;
+        let Some(mut full) =
+            read_transaction_at(storage_dir, locator).filter(|full| full.id == *id)
+        else {
+            // The record keeps its replayed annotations, and the rewrite this
+            // replay leads to judges the line as it judges any other.
+            snapshot.transaction_locators.insert(*id, locator);
+            continue;
+        };
         full.notes = std::mem::take(&mut record.notes);
         full.color_tag = record.color_tag.take();
         full.user_note = record.user_note.take();
@@ -12203,6 +12245,99 @@ mod tests {
         drop(registry);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn a_damaged_body_line_keeps_its_row_without_bodies_and_the_old_file_aside() {
+        // A torn write after power loss leaves the file its size; the damaged
+        // line is read when a journal replay rewrites the file on load, when
+        // the next save does, or when a replayed annotation needs its body.
+        // A whole line of another record still aborts the save: see
+        // snapshot_missing_or_mismatched_source_fails_without_publishing_empty_bodies.
+        for damage in ["torn-on-load", "torn-on-save", "torn-annotated"] {
+            let (root, registry, session) = snapshot_correction_fixture().await;
+            let mut ids = Vec::new();
+            for sequence in 1..=3 {
+                let record = deletion_test_record(sequence);
+                ids.push(record.id);
+                session.store.insert(record).await;
+            }
+            session.persist().await.unwrap();
+            match damage {
+                "torn-on-load" => {
+                    session.store.insert(deletion_test_record(4)).await;
+                }
+                "torn-annotated" => {
+                    session
+                        .store
+                        .update_annotations_durable_with_client(
+                            ids[1],
+                            None,
+                            Some(Some("kept note".into())),
+                            Some("client".into()),
+                            Some(1),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let session_id = session.id();
+            let storage = session.storage_dir().to_path_buf();
+            drop(session);
+            let path = super::transactions_path(&storage);
+            let meta = super::read_transactions_meta(&storage).unwrap();
+            let locator = meta.iter().find(|(row, _)| row.id == ids[1]).unwrap().1;
+            let mut before = std::fs::read(&path).unwrap();
+            let start = locator.offset as usize;
+            before[start..start + 8].copy_from_slice(&[0; 8]);
+            std::fs::write(&path, &before).unwrap();
+
+            let session = registry.load_context(session_id).unwrap();
+            if damage.ends_with("-on-save") {
+                session.persist().await.unwrap();
+            }
+            let aside: Vec<Vec<u8>> = std::fs::read_dir(&storage)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".transactions.ndjson.corrupt-")
+                })
+                .map(|entry| std::fs::read(entry.path()).unwrap())
+                .collect();
+            assert_eq!(aside, vec![before], "{damage}");
+            drop(session);
+            drop(registry);
+
+            let (registry, session) = SessionRegistry::load_or_create(&root, 32, 32).unwrap();
+            let kept = session.store.get(ids[1]).await.unwrap();
+            assert_eq!(kept.path, "/2", "{damage}");
+            assert!(kept.request.body_preview.is_empty(), "{damage}");
+            if damage == "torn-annotated" {
+                assert_eq!(kept.user_note.as_deref(), Some("kept note"));
+            }
+            for (index, sequence) in [(0, 1), (2, 3)] {
+                assert_eq!(
+                    session
+                        .store
+                        .get(ids[index])
+                        .await
+                        .unwrap()
+                        .request
+                        .body_preview,
+                    format!("fixture request body {sequence}"),
+                    "{damage}"
+                );
+            }
+            drop(session);
+            drop(registry);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn snapshot_ambiguous_duplicate_preflight_preserves_all_session_files() {
         fn files(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
