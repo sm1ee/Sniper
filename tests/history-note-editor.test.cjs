@@ -85,7 +85,7 @@ function fixture({ joinAnnotations = false } = {}) {
     "truncateUtf8", "truncateUtf8Preview", "utf8ByteLength",
     "isHttpHistoryVisible", "isModalVisible", "restoreModalFocus",
     "openDisplaySettingsModal", "closeDisplaySettingsModal", "openFilterModal", "closeFilterModal",
-    "setActiveTool", "setActiveProxyTab", "sanitizeActiveTool", "sanitizeActiveProxyTab",
+    "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveTool", "setActiveProxyTab", "sanitizeActiveTool", "sanitizeActiveProxyTab",
     "openContextMenu", "closeContextMenu", "positionContextMenu", "renderContextMenuNotes",
     "createTransactionRecordMenuTarget", "getHistoryItem",
   ];

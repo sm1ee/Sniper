@@ -71,7 +71,7 @@ function fixture(surface, { cached = false, fallbackResult = true } = {}) {
   // the exact pre-fix revision, through its original production callbacks.
   const additions = ["createRecordClipboardOwner", "copyMenuTargetRecord"]
     .filter(name => appSource.includes(`function ${name}(`));
-  const context = loadFunctions([...functions, ...additions], {
+  const context = loadFunctions(["retireFindingActionProgress", ...functions, ...additions], {
     state, els, document, URL, TextEncoder,
     workspaceStateGeneration: 0, workspaceLoaded: true, clearReplaySendInFlight() {},
     window: { innerWidth: 800, innerHeight: 600 },

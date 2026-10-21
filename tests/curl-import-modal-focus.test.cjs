@@ -73,7 +73,7 @@ function fixture() {
   const state = { activeTool: 'replay', replayTabs: [], activeReplayTabId: null };
   const context = loadFunctions([
     'openCurlImportModal', 'closeCurlImportModal', 'getActiveModalAction', 'isModalVisible', 'trapModalFocus', 'restoreModalFocus',
-    'showConfirmDialog', 'isEditableTarget', 'setActiveTool',
+    'showConfirmDialog', 'isEditableTarget', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool',
   ], {
     document, els, Element, HTMLElement: Element, state, mainTabs: [mainTab],
     window: { getComputedStyle: node => ({ visibility: node.visibility }), getSelection: () => null },

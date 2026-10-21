@@ -21,7 +21,7 @@ function setup() {
     'dashboardCurrentSessionFuzzer', 'dashboardCurrentSessionRules', 'dashboardCurrentSessionCreated',
     'dashboardCurrentSessionOpened', 'dashboardSessionsBody']) f.els[key] = { querySelectorAll: () => [] };
   Object.assign(f.context, {
-    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
+    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
     requireOkResponse: async response => { if (!response.ok) throw new Error('Synthetic session read failed'); },
     flushTargetScopeDraft: async () => true, flushMatchReplaceDraft: async () => true,
     flushSequenceDraft: async () => true, flushAllPendingAnnotations: async () => {},
@@ -222,7 +222,7 @@ for (const operation of ['create', 'activate']) {
 }
 
 function installWorkspaceReload(f) {
-  for (const name of ['reloadSessionWorkspace', 'loadSettings', 'loadWorkspaceState', 'applyWorkspaceState']) {
+  for (const name of ['reloadSessionWorkspace', 'loadSettings', 'loadWorkspaceState', 'retireFindingActionProgress', 'applyWorkspaceState']) {
     vm.runInContext(appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'))[0], f.context);
   }
   vm.runInContext(appSource.match(/^class WorkspaceSessionMismatchError[^]*?^\}/m)[0], f.context);

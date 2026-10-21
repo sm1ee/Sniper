@@ -12,7 +12,7 @@ function fixture() {
   const errors = [], rendered = [];
   const context = loadFunctions(["loadSessions", "jsonArray"], {
     state, currentSessionId: () => state.activeSession?.id,
-    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
+    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
     fetch: async () => response([]),
     requireOkResponse: async res => { if (!res.ok) throw new Error("Failed to load sessions."); },
     renderDashboard: () => rendered.push([...state.sessions]),

@@ -123,7 +123,7 @@ function fixture() {
   const names = [
     "createDefaultDisplaySettings", "sanitizeDisplaySettings", "openDisplaySettingsModal", "closeDisplaySettingsModal",
     "hydrateDisplaySettingsForm", "collectDisplaySettingsFormValues", "previewDisplaySettingsFromForm",
-    "saveDisplaySettingsFromForm", "applyDisplaySettingsState", "applyUiSettingsSnapshot", "loadUiSettings",
+    "saveDisplaySettingsFromForm", "applyDisplaySettingsState", "retireFindingActionProgress", "invalidateFindingNavigation", "applyUiSettingsSnapshot", "loadUiSettings",
     "updateUiSettingsServerRevision", "isModalVisible", "getActiveModalAction", "persistUiSettings",
     "snapshotUiSettings", "nextUiSettingsSnapshot", "scheduleUiSettingsSave", "scheduleUiSettingsRetry",
   ];

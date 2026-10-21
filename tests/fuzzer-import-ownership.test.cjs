@@ -17,8 +17,9 @@ function fixture() {
    fuzzerDraftVersion:3,fuzzerRunToken:7,fuzzerRunning:false,fuzzerAttackRecord:{id:'old-run'},fuzzerAttackRecordId:'old-run'};
  const reads=[],posts=[],effects=[];
  const els={fuzzerPayloadsEditor:{value:state.fuzzerPayloadsText}};
- const c=loadFunctions(['openFuzzerFromRecordLoader','sendFindingToFuzzer','openFuzzerFromSelection','openFuzzerFromRecord','loadSelectedTransactionRecord','loadTransactionRecordById','createTransactionRecordMenuTarget','loadMenuTargetRecord','updateFuzzerRequestText','updateFuzzerPayloadsText','markFuzzerDraftChanged','invalidateFuzzerRun','isCurrentFuzzerRun','runFuzzerAttack','currentSessionId','transactionPath','sessionQueryPath','editableRequestFromRecord','buildEditableRawRequest','normalizedHeaders','headerNameEquals','mergeHeaders','isRequestPreviewTruncated','setActiveTool','setActiveProxyTab'],{
-  state,els,TextEncoder,workspaceStateGeneration:0,
+ const c=loadFunctions(['runFindingAction','openFuzzerFromRecordLoader','sendFindingToFuzzer','openFuzzerFromSelection','openFuzzerFromRecord','loadSelectedTransactionRecord','loadTransactionRecordById','createTransactionRecordMenuTarget','loadMenuTargetRecord','updateFuzzerRequestText','updateFuzzerPayloadsText','markFuzzerDraftChanged','invalidateFuzzerRun','isCurrentFuzzerRun','runFuzzerAttack','currentSessionId','transactionPath','sessionQueryPath','editableRequestFromRecord','buildEditableRawRequest','normalizedHeaders','headerNameEquals','mergeHeaders','isRequestPreviewTruncated','retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool','setActiveProxyTab'],{
+  state,els,TextEncoder,workspaceStateGeneration:0,document:{getElementById:()=>null},
+  selectedFindingId:'finding-a',findingsDetailGeneration:0,findingActionPending:null,
   sanitizeActiveTool:value=>value,sanitizeActiveProxyTab:value=>value,closeScannerSettings(){},scheduleUiSettingsSave(){},
   fetch(url,options){assert.match(url,/^\/api\/(transactions\/[^?]+\?session_id=|fuzzer\/attacks$)/);const item={url,options,...deferred()};(options?posts:reads).push(item);return item.promise;},
   requireOkResponse:async r=>{assert.equal(r.ok,true);},

@@ -98,7 +98,7 @@ function fixture() {
   const context = loadFunctions([
     "openCompareModal", "closeCompareModal", "getActiveModalAction", "isModalVisible", "restoreModalFocus", "trapModalFocus", "isEditableTarget",
     "openDisplaySettingsModal", "closeDisplaySettingsModal", "closeCertificateModal", "openFilterModal", "closeFilterModal", "showConfirmDialog",
-    "openCurlImportModal", "closeCurlImportModal", "openScannerSettings", "closeScannerSettings", "renderProxyPanels", "setActiveTool", "setActiveProxyTab", "renderToolPanels",
+    "openCurlImportModal", "closeCurlImportModal", "openScannerSettings", "closeScannerSettings", "renderProxyPanels", "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveTool", "setActiveProxyTab", "renderToolPanels",
     "resetScannerConfigUiState", "scannerConfigContextIsCurrent", "onClickWithProgress", "withButtonProgress",
   ], {
     setTimeout: () => 1, clearTimeout() {}, BUTTON_PROGRESS_DELAY_MS: 10,

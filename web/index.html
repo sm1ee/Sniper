@@ -1314,7 +1314,7 @@
               </header>
               <div class="fuzzer-result-tools">
                 <details class="fuzzer-disclosure fuzzer-result-filters">
-                  <summary>Filter and sort results</summary>
+                  <summary id="fuzzerResultFilterSummary">Filter and sort results <span id="fuzzerResultFilterBadge" class="fuzzer-filter-badge hidden"></span></summary>
                   <div class="fuzzer-disclosure-body">
                     <div class="fuzzer-filter-grid">
                       <label class="compact-field" for="fuzzerResultStatus">
@@ -1365,7 +1365,10 @@
                   </div>
                 </details>
               </div>
-              <p class="fuzzer-help fuzzer-filter-count" id="fuzzerResultFilterCount" role="status" aria-live="polite">No results to filter.</p>
+              <div class="fuzzer-result-status">
+                <p class="fuzzer-help fuzzer-filter-count" id="fuzzerResultFilterCount" role="status" aria-live="polite">No results to filter.</p>
+                <button class="secondary-action hidden" id="fuzzerClearResultFiltersButton" type="button">Clear filters</button>
+              </div>
               <div class="history-table-shell" style="flex:1;min-height:0;overflow:auto">
                 <table class="mini-table">
                   <thead>

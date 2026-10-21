@@ -16,7 +16,7 @@ function setup({ rendered = true } = {}) {
     configurable: true, set(value) { this.innerText = value; },
   });
   for (const name of [
-    'renderReplay', 'applyWorkspaceState', 'createSession', 'activateSessionById',
+    'renderReplay', 'retireFindingActionProgress', 'applyWorkspaceState', 'createSession', 'activateSessionById',
     'reloadSessionWorkspace', 'resetSessionScopedUiState', 'renderReplayClearedState',
     'renderReplayRequestHighlight', 'renderToolPanels', 'applyReplayTargetFields',
     'setReplayTargetInputValidity', 'startHexByteEdit', 'syncReplayRequestTextFromEditor',

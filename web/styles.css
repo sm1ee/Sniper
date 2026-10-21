@@ -2937,12 +2937,11 @@ body.pane-resizing-y {
   gap: 0;
 }
 .fuzzer-template-card {
-  flex: 1 1 60%;
+  flex: var(--fuzzer-request-share, 0.72) 1 0px;
   min-width: 240px;
 }
 .fuzzer-payloads-card {
-  flex: 0 0 auto;
-  width: 28%;
+  flex: calc(1 - var(--fuzzer-request-share, 0.72)) 1 0px;
   min-width: 160px;
 }
 
@@ -3519,9 +3518,30 @@ body.pane-resizing-y {
   gap: 8px;
 }
 
-.fuzzer-shell .fuzzer-filter-count {
+.fuzzer-result-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   flex: 0 0 auto;
+  gap: 4px 10px;
   padding: 4px 10px;
+}
+
+.fuzzer-result-status > .fuzzer-filter-count {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fuzzer-result-status > .secondary-action {
+  min-height: var(--control-h);
+  padding: 4px 10px;
+  font-size: var(--font-xs);
+}
+
+.fuzzer-filter-badge {
+  margin-left: 5px;
+  color: var(--point);
+  font-weight: 600;
 }
 
 .target-tree {
@@ -4570,9 +4590,11 @@ button.utility-button.replay-tab-add {
 
 .findings-toolbar {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
@@ -4580,9 +4602,12 @@ button.utility-button.replay-tab-add {
 
 .findings-filter-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .findings-filter-select {
@@ -4595,6 +4620,8 @@ button.utility-button.replay-tab-add {
   font-size: var(--font-xs);
   font-family: inherit;
   outline: none;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .findings-filter-select:focus {
@@ -4611,7 +4638,8 @@ button.utility-button.replay-tab-add {
   font-size: var(--font-xs);
   font-family: inherit;
   outline: none;
-  min-width: 120px;
+  flex: 1 1 160px;
+  min-width: 0;
   max-width: 220px;
 }
 
@@ -4621,9 +4649,13 @@ button.utility-button.replay-tab-add {
 
 .findings-toolbar-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
 }
 
 .scanner-quick-toggle {
@@ -6111,7 +6143,8 @@ button.utility-button.replay-tab-add {
     height: auto !important;
     min-height: 0;
   }
-  .fuzzer-col-resizer {
+  .fuzzer-col-resizer,
+  .fuzzer-row-resizer {
     display: none;
   }
   .fuzzer-template-card,

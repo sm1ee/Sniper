@@ -80,7 +80,7 @@ function tabFixture() {
   document.activeElement = els.openDisplaySettingsButton;
   const state = { activeProxyTab: "websockets-history", historyDirty: false };
   const context = loadFunctions([
-    "setActiveProxyTab", "sanitizeActiveProxyTab", "renderProxyPanels", "selectSettingsTab",
+    "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveProxyTab", "sanitizeActiveProxyTab", "renderProxyPanels", "selectSettingsTab",
     "openDisplaySettingsModal", "closeDisplaySettingsModal", "isModalVisible", "restoreModalFocus",
   ], {
     closeScannerSettings() {},

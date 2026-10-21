@@ -65,7 +65,7 @@ function fixture() {
   const context = loadFunctions([
     "createDefaultFilterSettings", "openFilterModal", "closeFilterModal", "isModalVisible", "restoreModalFocus", "trapModalFocus", "getActiveModalAction",
     "hydrateFilterForm", "applyFilterSettings", "syncColorTagFilterUI", "truncateUiSettingsText", "sanitizeHttpFilterSettings", "sanitizeHttpBooleanMap", "sanitizeHttpColorTags", "serializeHttpFilterSettings",
-    "isUiSettingsLoadSnapshot", "loadUiSettings", "applyUiSettingsSnapshot", "updateUiSettingsServerRevision", "snapshotUiSettings", "nextUiSettingsSnapshot", "scheduleUiSettingsSave", "scheduleUiSettingsRetry", "persistUiSettings",
+    "isUiSettingsLoadSnapshot", "loadUiSettings", "retireFindingActionProgress", "invalidateFindingNavigation", "applyUiSettingsSnapshot", "updateUiSettingsServerRevision", "snapshotUiSettings", "nextUiSettingsSnapshot", "scheduleUiSettingsSave", "scheduleUiSettingsRetry", "persistUiSettings",
     "serviceMapFilterApplied", "serviceMapFilterQuery", "serviceMapFilterSummary", "selectedMimeTypes", "selectedStatusClasses",
   ], {
     targetServiceMapController: { filterChanged: () => mapFilterChanges.push(true) },

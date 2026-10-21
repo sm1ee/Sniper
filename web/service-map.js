@@ -1590,6 +1590,7 @@
     // request. Enforce this for every map/inspector read, preserving its signal.
     const request = (path, options) => sendRequest(path, { ...options, redirect: "error" });
     const productFilterContainer = els.productFilters || els.panel.querySelector?.("#serviceMapProductFilters");
+    const productFilterDisclosure = productFilterContainer?.parentElement;
     const state = {
       sessionId: null, snapshot: null, order: [], selectedOrigin: null, selectedClient: null, selectedSite: null, selectionInitialized: false,
       query: "", scopeOnly: false, view: "service-map", detailTab: "apis", endpointIndex: null, endpointSelection: null,
@@ -1628,6 +1629,22 @@
       const owned = (...args) => { if (!destroyed) return handler(...args); };
       element?.addEventListener?.(type, owned, options);
       eventDisposers.push(() => element?.removeEventListener?.(type, owned, options));
+    }
+    function closeProductFilters(returnFocus = false) {
+      if (!productFilterDisclosure?.open) return false;
+      const restore = returnFocus && productFilterDisclosure.contains(doc?.activeElement);
+      productFilterDisclosure.open = false;
+      if (restore) productFilterDisclosure.querySelector("summary")?.focus({ preventScroll: true });
+      return true;
+    }
+    if (productFilterDisclosure) {
+      listen(doc, "pointerdown", (event) => {
+        if (visible && !productFilterDisclosure.contains(event.target)) closeProductFilters();
+      }, true);
+      listen(doc, "keydown", (event) => {
+        if (!visible || event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+        if (closeProductFilters(true)) event.preventDefault();
+      });
     }
     const canRefresh = () => visible && !destroyed && !pageHidden && doc?.hidden !== true;
     function clearRefreshTimer() {
@@ -4065,6 +4082,7 @@
       },
       setVisible(value, view = state.view) {
         if (destroyed) return;
+        if (!value || view !== state.view) closeProductFilters();
         if (!value || view !== state.view) suspendRefresh();
         if (!value || view !== state.view) replayActionId += 1;
         if (!value) cancelParameters();
@@ -4086,6 +4104,7 @@
         if (destroyed) return;
         destroyed = true;
         visible = false;
+        closeProductFilters();
         suspendRefresh();
         replayActionId += 1;
         closeApiDocs(false);
