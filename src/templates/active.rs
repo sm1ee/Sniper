@@ -64,9 +64,21 @@ struct RawSpec {
     timeout: Option<Duration>,
 }
 
-/// A template compiled for sending.
+/// A template compiled for sending: its request blocks, which a run sends
+/// one after another to a target, sharing the template's variables, the
+/// cookies and the values earlier blocks extract, as Nuclei's template
+/// context shares them.
 #[derive(Clone, Debug)]
 pub struct ActiveTemplate {
+    pub blocks: Vec<Block>,
+    variables: Vec<(String, Interp)>,
+    /// Its requests carry `{{interactsh-url}}`.
+    pub oast: bool,
+}
+
+/// One request block: its requests and the matchers that judge their answers.
+#[derive(Clone, Debug)]
+pub struct Block {
     pub template: CompiledTemplate,
     method: String,
     paths: Vec<PathSpec>,
@@ -75,7 +87,6 @@ pub struct ActiveTemplate {
     payloads: Vec<PayloadSet>,
     headers: Vec<(String, Interp)>,
     body: Option<Interp>,
-    variables: Vec<(String, Interp)>,
     pub stop_at_first_match: bool,
     pub follow: Follow,
     pub max_redirects: usize,
@@ -84,8 +95,6 @@ pub struct ActiveTemplate {
     pub cookies: bool,
     /// The run keeps each answer for later matchers that read it (`body_1`).
     pub history: bool,
-    /// Its requests carry `{{interactsh-url}}`.
-    pub oast: bool,
     /// Its matchers read a callback (`interactsh_protocol`), so an answer
     /// waits for one before it is judged with it.
     pub reads_interaction: bool,
@@ -113,14 +122,58 @@ pub fn compile_active(
     if let Some(first) = classification.active_reasons.first() {
         return Err(CompileError(first.clone()));
     }
-    let block = template
+    let blocks = template
         .root
         .get("http")
         .or_else(|| template.root.get("requests"))
         .and_then(Value::as_array)
-        .and_then(|blocks| blocks.first())
-        .and_then(Value::as_object)
-        .ok_or_else(|| engine::reason("http:empty"))?;
+        .filter(|blocks| !blocks.is_empty())
+        .ok_or_else(|| engine::reason("http:empty"))?
+        .iter()
+        .map(|block| {
+            let block = block
+                .as_object()
+                .ok_or_else(|| engine::reason("http:block_not_a_mapping"))?;
+            compile_block(template, block, files)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // A block without matchers only sets up a later one, as a login does,
+    // and Nuclei sends it all the same; a template that judges nothing is
+    // not worth sending.
+    if blocks
+        .iter()
+        .all(|block| block.template.operators.is_empty())
+    {
+        return Err(engine::reason("operators:empty"));
+    }
+    let variables = match template.root.get("variables") {
+        Some(Value::Object(map)) => map
+            .iter()
+            .map(|(name, value)| {
+                Ok((
+                    name.clone(),
+                    Interp::compile(&engine::text_of(value), Allow { random: true })?,
+                ))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?,
+        _ => Vec::new(),
+    };
+    let compiled = ActiveTemplate {
+        blocks,
+        variables,
+        oast: classification.oast,
+    };
+    if compiled.request_count() > MAX_TEMPLATE_REQUESTS {
+        return Err(engine::reason("req:too_many_requests"));
+    }
+    Ok(compiled)
+}
+
+fn compile_block(
+    template: &ParsedTemplate,
+    block: &Map<String, Value>,
+    files: &HashMap<String, String>,
+) -> Result<Block, CompileError> {
     let allow = Allow { random: true };
     // The request is known when its answer is judged, so matchers may read it.
     let operators = engine::compile_operators(block, allow, true)?;
@@ -248,18 +301,6 @@ pub fn compile_active(
         .get("body")
         .map(|body| Interp::compile(&crlf(&engine::text_of(body)), allow))
         .transpose()?;
-    let variables = match template.root.get("variables") {
-        Some(Value::Object(map)) => map
-            .iter()
-            .map(|(name, value)| {
-                Ok((
-                    name.clone(),
-                    Interp::compile(&engine::text_of(value), allow)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, CompileError>>()?,
-        _ => Vec::new(),
-    };
     // Nuclei applies host-redirects over redirects when both are set.
     let follow = if engine::flag(block, "host-redirects")? {
         Follow::SameHost
@@ -277,7 +318,7 @@ pub fn compile_active(
             Err(_) => return Err(engine::reason("field:max-redirects")),
         },
     };
-    let compiled = ActiveTemplate {
+    Ok(Block {
         template: CompiledTemplate {
             info: template.info.clone(),
             passive: None,
@@ -291,19 +332,13 @@ pub fn compile_active(
         payloads,
         headers,
         body,
-        variables,
         stop_at_first_match: engine::flag(block, "stop-at-first-match")?,
         follow,
         max_redirects,
         cookies: !engine::flag(block, "disable-cookie")?,
         history: reads_history(block),
-        oast: classification.oast,
         reads_interaction: reads_interaction(block),
-    };
-    if compiled.request_count() > MAX_TEMPLATE_REQUESTS {
-        return Err(engine::reason("req:too_many_requests"));
-    }
-    Ok(compiled)
+    })
 }
 
 /// Whether matchers or extractors read an earlier answer (`body_1`), as
@@ -469,12 +504,60 @@ impl ActiveTemplate {
         }
     }
 
+    /// Requests one run sends before any redirect, every block's.
+    pub fn request_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(Block::request_count)
+            .fold(0, usize::saturating_add)
+    }
+
+    /// Starts a run on one target: the template's variables are worked out
+    /// once, each after the ones it names, whatever order the file lists them.
+    /// `oast` is the server its OAST markers point at; without one they do
+    /// not resolve.
+    pub fn start_run<'a>(
+        &self,
+        url: &'a UrlVars,
+        oast: Option<&'a OastUrls>,
+    ) -> Result<RunValues<'a>, EvalError> {
+        let run = RunValues {
+            url,
+            values: RefCell::new(HashMap::new()),
+            payloads: RefCell::new(HashMap::new()),
+            oast,
+            oast_ids: RefCell::new(Vec::new()),
+            oast_url: RefCell::new(None),
+        };
+        let mut pending: Vec<&(String, Interp)> = self.variables.iter().collect();
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut last_error = EvalError("unresolved");
+            pending.retain(|(name, value)| match value.render(&run) {
+                Ok(text) => {
+                    run.values.borrow_mut().insert(name.clone(), text);
+                    false
+                }
+                Err(error) => {
+                    last_error = error;
+                    true
+                }
+            });
+            if pending.len() == before {
+                return Err(last_error);
+            }
+        }
+        Ok(run)
+    }
+}
+
+impl Block {
     /// Requests one run sends before any redirect.
     pub fn request_count(&self) -> usize {
         self.sequence_len().saturating_mul(self.passes())
     }
 
-    /// The template's requests, which each pass sends in order.
+    /// The block's requests, which each pass sends in order.
     pub fn sequence_len(&self) -> usize {
         self.paths.len() + self.raws.len()
     }
@@ -520,44 +603,6 @@ impl ActiveTemplate {
 
     pub fn method(&self) -> &str {
         &self.method
-    }
-
-    /// Starts a run on one target: the template's variables are worked out
-    /// once, each after the ones it names, whatever order the file lists them.
-    /// `oast` is the server its OAST markers point at; without one they do
-    /// not resolve.
-    pub fn start_run<'a>(
-        &self,
-        url: &'a UrlVars,
-        oast: Option<&'a OastUrls>,
-    ) -> Result<RunValues<'a>, EvalError> {
-        let run = RunValues {
-            url,
-            values: RefCell::new(HashMap::new()),
-            payloads: RefCell::new(HashMap::new()),
-            oast,
-            oast_ids: RefCell::new(Vec::new()),
-            oast_url: RefCell::new(None),
-        };
-        let mut pending: Vec<&(String, Interp)> = self.variables.iter().collect();
-        while !pending.is_empty() {
-            let before = pending.len();
-            let mut last_error = EvalError("unresolved");
-            pending.retain(|(name, value)| match value.render(&run) {
-                Ok(text) => {
-                    run.values.borrow_mut().insert(name.clone(), text);
-                    false
-                }
-                Err(error) => {
-                    last_error = error;
-                    true
-                }
-            });
-            if pending.len() == before {
-                return Err(last_error);
-            }
-        }
-        Ok(run)
     }
 
     /// The `index`th request of a run. `base_path` is the target's own path
@@ -863,7 +908,7 @@ mod tests {
             domain: "oast.example.com".into(),
         };
         let run = template.start_run(&url, Some(&oast)).unwrap();
-        let built = template.build(0, &base_path, &run).unwrap();
+        let built = template.blocks[0].build(0, &base_path, &run).unwrap();
         let ids = run.oast_ids_in(&built);
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1]);
@@ -877,7 +922,7 @@ mod tests {
         assert!(run.values()["interactsh-url"].ends_with(".oast.example.com"));
         // With no server to hear a callback the request is not built.
         let bare = template.start_run(&url, None).unwrap();
-        assert!(template.build(0, &base_path, &bare).is_err());
+        assert!(template.blocks[0].build(0, &base_path, &bare).is_err());
     }
 
     #[test]
@@ -890,7 +935,7 @@ mod tests {
         assert_eq!(url.base_url, "https://example.com:8443/app");
         let run = template.start_run(&url, None).unwrap();
         let built: Vec<BuiltRequest> = (0..template.request_count())
-            .map(|index| template.build(index, &base_path, &run).unwrap())
+            .map(|index| template.blocks[0].build(index, &base_path, &run).unwrap())
             .collect();
         assert_eq!(built[0].method, "POST");
         assert_eq!(built[0].target, "/app/.git/config");
@@ -906,11 +951,17 @@ mod tests {
         assert_eq!(root.hostname, "example.com");
         let run = template.start_run(&root, None).unwrap();
         assert_eq!(
-            template.build(0, &root_path, &run).unwrap().target,
+            template.blocks[0]
+                .build(0, &root_path, &run)
+                .unwrap()
+                .target,
             "/.git/config"
         );
         assert_eq!(
-            template.build(2, &root_path, &run).unwrap().target,
+            template.blocks[0]
+                .build(2, &root_path, &run)
+                .unwrap()
+                .target,
             "/@example.net"
         );
     }
@@ -922,7 +973,7 @@ mod tests {
         );
         let (url, base_path) = target("https://example.com");
         let run = template.start_run(&url, None).unwrap();
-        let built = template.build(0, &base_path, &run).unwrap();
+        let built = template.blocks[0].build(0, &base_path, &run).unwrap();
         let values = run.values();
         let token = &values["z_token"];
         assert_eq!(token.len(), 27);
@@ -949,7 +1000,7 @@ mod tests {
         let (url, base_path) = target(url);
         let run = template.start_run(&url, None).unwrap();
         let built = (0..template.request_count())
-            .map(|index| template.build(index, &base_path, &run).unwrap())
+            .map(|index| template.blocks[0].build(index, &base_path, &run).unwrap())
             .collect();
         let token = run.values().get("randstr").cloned().unwrap_or_default();
         (built, token)
@@ -1041,11 +1092,16 @@ mod tests {
     fn passes(template: &ActiveTemplate) -> Vec<(Vec<String>, HashMap<String, String>)> {
         let (url, base_path) = target("https://example.com");
         let run = template.start_run(&url, None).unwrap();
-        (0..template.passes())
+        (0..template.blocks[0].passes())
             .map(|pass| {
-                template.load_pass(&run, pass).unwrap();
-                let targets = (0..template.sequence_len())
-                    .map(|index| template.build(index, &base_path, &run).unwrap().target)
+                template.blocks[0].load_pass(&run, pass).unwrap();
+                let targets = (0..template.blocks[0].sequence_len())
+                    .map(|index| {
+                        template.blocks[0]
+                            .build(index, &base_path, &run)
+                            .unwrap()
+                            .target
+                    })
                     .collect();
                 (targets, run.values())
             })
@@ -1144,11 +1200,11 @@ mod tests {
         );
         let (built, _) = built_all(&template, "https://example.com");
         assert_eq!(built[0].body, "a\r\nb\r\n");
-        assert!(template.cookies);
+        assert!(template.blocks[0].cookies);
         let template = compiled(
             "id: example-no-cookie\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}/x']\n    disable-cookie: true\n    matchers:\n      - type: status\n        status: [200]\n",
         );
-        assert!(!template.cookies);
+        assert!(!template.blocks[0].cookies);
     }
 
     #[test]
@@ -1156,16 +1212,23 @@ mod tests {
         let none = compiled(
             "id: a\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}']\n    matchers:\n      - type: status\n        status: [200]\n",
         );
-        assert_eq!(none.follow, Follow::None);
+        assert_eq!(none.blocks[0].follow, Follow::None);
         let all = compiled(
             "id: b\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}']\n    redirects: true\n    max-redirects: 3\n    matchers:\n      - type: status\n        status: [200]\n",
         );
-        assert_eq!((all.follow, all.max_redirects), (Follow::All, 3));
+        assert_eq!(
+            (all.blocks[0].follow, all.blocks[0].max_redirects),
+            (Follow::All, 3)
+        );
         let host = compiled(
             "id: c\ninfo: {}\nhttp:\n  - path: ['{{BaseURL}}']\n    redirects: true\n    host-redirects: true\n    max-redirects: 40\n    stop-at-first-match: true\n    matchers:\n      - type: status\n        status: [200]\n",
         );
         assert_eq!(
-            (host.follow, host.max_redirects, host.stop_at_first_match),
+            (
+                host.blocks[0].follow,
+                host.blocks[0].max_redirects,
+                host.blocks[0].stop_at_first_match,
+            ),
             (Follow::SameHost, MAX_REDIRECTS, true)
         );
     }
@@ -1191,6 +1254,6 @@ mod tests {
         );
         let (url, base_path) = target("https://example.com");
         let run = template.start_run(&url, None).unwrap();
-        assert!(template.build(0, &base_path, &run).is_err());
+        assert!(template.blocks[0].build(0, &base_path, &run).is_err());
     }
 }

@@ -345,10 +345,6 @@ pub fn classify(template: &ParsedTemplate) -> Classification {
         both(&mut out, "http:empty".into());
         return out;
     }
-    if blocks.len() > 1 {
-        out.active_reasons.insert("req:multiple_blocks".into());
-    }
-
     let declared: BTreeSet<String> = match root.get("variables") {
         Some(Value::Object(variables)) => variables.keys().cloned().collect(),
         Some(_) => {

@@ -87,6 +87,13 @@ pub(super) struct Operators {
     extractors: Vec<Extractor>,
 }
 
+impl Operators {
+    /// Neither matchers nor extractors: answers are never judged.
+    pub(super) fn is_empty(&self) -> bool {
+        self.matchers.is_empty() && self.extractors.is_empty()
+    }
+}
+
 /// A template compiled for judging responses.
 #[derive(Clone, Debug)]
 pub struct CompiledTemplate {
@@ -134,6 +141,9 @@ pub fn compile_passive(
         .and_then(Value::as_object)
         .ok_or_else(|| reason("http:empty"))?;
     let operators = compile_operators(block, Allow::default(), false)?;
+    if operators.is_empty() {
+        return Err(reason("operators:empty"));
+    }
     let body_sensitive = body_sensitive(&operators);
     Ok(CompiledTemplate {
         info: template.info.clone(),
@@ -172,9 +182,6 @@ pub(super) fn compile_operators(
             .as_object()
             .ok_or_else(|| reason("extractor:not_a_mapping"))?;
         extractors.push(compile_extractor(map, allow, request_part)?);
-    }
-    if matchers.is_empty() && extractors.is_empty() {
-        return Err(reason("operators:empty"));
     }
     Ok(Operators {
         and,
@@ -1396,6 +1403,8 @@ mod tests {
         let template =
             crate::templates::active::compile_active(&parsed, &classify(&parsed), &HashMap::new())
                 .unwrap()
+                .blocks
+                .remove(0)
                 .template;
         let answer = || view(200, &[], "ok");
         assert!(template.evaluate(&answer()).is_empty(), "no callback yet");
@@ -1450,6 +1459,8 @@ mod tests {
         let template =
             crate::templates::active::compile_active(&parsed, &classify(&parsed), &HashMap::new())
                 .unwrap()
+                .blocks
+                .remove(0)
                 .template;
         let first =
             Arc::new(view(200, &[], "token=abc shown=x next=one").with_history(1, Vec::new()));

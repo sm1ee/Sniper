@@ -811,6 +811,7 @@ impl Pending {
 /// An answer judged again when its request's callback comes.
 struct Waiting {
     template: Arc<ActiveTemplate>,
+    block: usize,
     target: usize,
     hop: Hop,
     values: HashMap<String, String>,
@@ -1114,7 +1115,7 @@ impl Run {
     ) {
         let template = &self.templates[template_index];
         let target = &self.targets[target_index];
-        let id = &template.template.info.id;
+        let id = &template.blocks[0].template.info.id;
         let oast = self.oast.as_ref().map(|watch| &watch.urls);
         let Ok(run) = template.start_run(&target.vars, oast) else {
             self.warn(format!(
@@ -1124,78 +1125,92 @@ impl Run {
         };
         // Nuclei keeps one cookie jar for a template's run on a target.
         let mut jar = Vec::new();
-        // The run's answers so far, by request, for matchers that read them.
-        let mut history: Vec<Option<Arc<ResponseView>>> = Vec::new();
-        for pass in 0..template.passes() {
-            if template.load_pass(&run, pass).is_err() {
-                self.warn(format!(
-                    "{id} could not fill payload {} and did not send it.",
-                    pass + 1
-                ));
-                continue;
-            }
-            for index in 0..template.sequence_len() {
-                if self.stopping(&cancel, target_index) {
-                    return;
+        for (block_index, block) in template.blocks.iter().enumerate() {
+            // The block's answers so far, by request, for matchers that read
+            // them.
+            let mut history: Vec<Option<Arc<ResponseView>>> = Vec::new();
+            'block: for pass in 0..block.passes() {
+                if block.load_pass(&run, pass).is_err() {
+                    self.warn(format!(
+                        "{id} could not fill payload {} and did not send it.",
+                        pass + 1
+                    ));
+                    continue;
                 }
-                let built = match template.build(index, &target.base_path, &run) {
-                    Ok(built) => built,
-                    Err(_) => {
-                        self.warn(format!(
-                            "{id} could not build its request {} and did not send it.",
-                            index + 1
-                        ));
+                for index in 0..block.sequence_len() {
+                    if self.stopping(&cancel, target_index) {
+                        return;
+                    }
+                    let built = match block.build(index, &target.base_path, &run) {
+                        Ok(built) => built,
+                        Err(_) => {
+                            self.warn(format!(
+                                "{id} could not build its request {} and did not send it.",
+                                index + 1
+                            ));
+                            remember(&mut history, index, None);
+                            continue;
+                        }
+                    };
+                    // The OAST URLs this request carries, when its matchers
+                    // wait to hear them called.
+                    let oast_ids = match &self.oast {
+                        Some(watch) if block.reads_interaction => {
+                            let ids = run.oast_ids_in(&built);
+                            watch.expect(&ids);
+                            ids
+                        }
+                        _ => Vec::new(),
+                    };
+                    let hops = self
+                        .send_chain(block, target_index, built, &mut jar, &mut cancel)
+                        .await;
+                    if hops.is_empty() {
+                        if let Some(watch) = &self.oast {
+                            watch.forget(&oast_ids);
+                        }
                         remember(&mut history, index, None);
                         continue;
                     }
-                };
-                // The OAST URLs this request carries, when its matchers wait
-                // to hear them called.
-                let oast_ids = match &self.oast {
-                    Some(watch) if template.reads_interaction => {
-                        let ids = run.oast_ids_in(&built);
-                        watch.expect(&ids);
-                        ids
-                    }
-                    _ => Vec::new(),
-                };
-                let hops = self
-                    .send_chain(template, target_index, built, &mut jar, &mut cancel)
-                    .await;
-                if hops.is_empty() {
-                    if let Some(watch) = &self.oast {
-                        watch.forget(&oast_ids);
-                    }
-                    remember(&mut history, index, None);
-                    continue;
-                }
-                let values = run.values();
-                let waiting = (!oast_ids.is_empty()).then(|| (hops[0].clone(), values.clone()));
-                let judged = self
-                    .judge(template, target, hops, values, index + 1, history.clone())
-                    .await;
-                if let (Some(watch), Some((hop, values))) = (&self.oast, waiting) {
-                    if judged.matched {
-                        watch.forget(&oast_ids);
-                    } else {
-                        let waiting = Arc::new(Waiting {
-                            template: Arc::clone(template),
-                            target: target_index,
-                            hop,
+                    let values = run.values();
+                    let waiting = (!oast_ids.is_empty()).then(|| (hops[0].clone(), values.clone()));
+                    let judged = self
+                        .judge(
+                            template,
+                            block_index,
+                            target,
+                            hops,
                             values,
-                            number: index + 1,
-                            history: history.clone(),
-                            reported: AtomicBool::new(false),
-                        });
-                        for callback in watch.answered(&oast_ids, &waiting) {
-                            self.judge_callback(&waiting, callback).await;
+                            index + 1,
+                            history.clone(),
+                        )
+                        .await;
+                    if let (Some(watch), Some((hop, values))) = (&self.oast, waiting) {
+                        if judged.matched {
+                            watch.forget(&oast_ids);
+                        } else {
+                            let waiting = Arc::new(Waiting {
+                                template: Arc::clone(template),
+                                block: block_index,
+                                target: target_index,
+                                hop,
+                                values,
+                                number: index + 1,
+                                history: history.clone(),
+                                reported: AtomicBool::new(false),
+                            });
+                            for callback in watch.answered(&oast_ids, &waiting) {
+                                self.judge_callback(&waiting, callback).await;
+                            }
                         }
                     }
-                }
-                template.carry(&run, judged.carried);
-                remember(&mut history, index, judged.answer);
-                if judged.matched && template.stop_at_first_match {
-                    return;
+                    // What it extracts is there for the rest of the run, the
+                    // later blocks included.
+                    template.carry(&run, judged.carried);
+                    remember(&mut history, index, judged.answer);
+                    if judged.matched && block.stop_at_first_match {
+                        break 'block;
+                    }
                 }
             }
         }
@@ -1205,14 +1220,14 @@ impl Run {
     /// received, in order; an empty list when none came.
     async fn send_chain(
         &self,
-        template: &ActiveTemplate,
+        block: &active::Block,
         target_index: usize,
         built: active::BuiltRequest,
         jar: &mut Vec<(String, String, String)>,
         cancel: &mut watch::Receiver<bool>,
     ) -> Vec<Hop> {
         let target = &self.targets[target_index];
-        let id = &template.template.info.id;
+        let id = &block.template.info.id;
         let mut hops: Vec<Hop> = Vec::new();
         let mut scheme = target.scheme.clone();
         let mut authority = target.authority.clone();
@@ -1243,6 +1258,8 @@ impl Run {
                     break;
                 }
             }
+            // A block that turns cookies off neither sends nor keeps them,
+            // though earlier blocks filled the run's jar.
             let request = self.request(
                 target,
                 &scheme,
@@ -1252,7 +1269,7 @@ impl Run {
                 &body,
                 body_dropped,
                 &built.headers,
-                jar,
+                if block.cookies { jar } else { &[] },
             );
             if *cancel.borrow() || !self.take_budget() {
                 break;
@@ -1324,9 +1341,9 @@ impl Run {
             };
             self.failures[target_index].store(0, Ordering::Relaxed);
             self.update(|job| job.sent += 1);
-            let next = if template.follow != Follow::None && hops.len() < template.max_redirects {
+            let next = if block.follow != Follow::None && hops.len() < block.max_redirects {
                 self.next_hop(
-                    template.follow,
+                    block.follow,
                     target,
                     &scheme,
                     &authority,
@@ -1338,7 +1355,7 @@ impl Run {
             } else {
                 None
             };
-            if template.cookies {
+            if block.cookies {
                 remember_cookies(jar, &host_of(&authority), &record);
             }
             hops.push(Hop { request, record });
@@ -1508,6 +1525,7 @@ impl Run {
     async fn judge(
         &self,
         template: &Arc<ActiveTemplate>,
+        block: usize,
         target: &ScanTarget,
         hops: Vec<Hop>,
         values: HashMap<String, String>,
@@ -1531,13 +1549,14 @@ impl Run {
                 let view = view
                     .with_request(request_text(&hop.request), values.clone())
                     .with_history(number, history.clone());
-                (verdicts[index], carried[index]) = evaluating.template.evaluate_carrying(&view);
+                let judging = &evaluating.blocks[block];
+                (verdicts[index], carried[index]) = judging.template.evaluate_carrying(&view);
                 // Nuclei remembers the last answer of the chain it read, the
                 // first one unless a match stopped it sooner.
-                if evaluating.history {
+                if judging.history {
                     answer = Some(Arc::new(view));
                 }
-                if !verdicts[index].is_empty() && evaluating.stop_at_first_match {
+                if !verdicts[index].is_empty() && judging.stop_at_first_match {
                     break;
                 }
             }
@@ -1561,7 +1580,7 @@ impl Run {
             self.update(|job| {
                 job.log(ScanLogEntry {
                     at: Utc::now(),
-                    template_id: template.template.info.id.clone(),
+                    template_id: template.blocks[block].template.info.id.clone(),
                     method: hop.request.method.clone(),
                     url: hop.url(),
                     status: hop.record.status,
@@ -1572,7 +1591,7 @@ impl Run {
             });
             if found {
                 matched = true;
-                self.keep(template, hop, results, None).await;
+                self.keep(&template.blocks[block], hop, results, None).await;
             }
         }
         Judged {
@@ -1646,7 +1665,11 @@ impl Run {
                 .with_request(request_text(&judging.hop.request), judging.values.clone())
                 .with_history(judging.number, judging.history.clone())
                 .with_interaction(interaction);
-            Some(judging.template.template.evaluate(&view))
+            Some(
+                judging.template.blocks[judging.block]
+                    .template
+                    .evaluate(&view),
+            )
         })
         .await
         .ok()
@@ -1659,7 +1682,11 @@ impl Run {
         self.update(|job| {
             job.log(ScanLogEntry {
                 at: Utc::now(),
-                template_id: waiting.template.template.info.id.clone(),
+                template_id: waiting.template.blocks[waiting.block]
+                    .template
+                    .info
+                    .id
+                    .clone(),
                 method: hop.request.method.clone(),
                 url: hop.url(),
                 status: hop.record.status,
@@ -1668,15 +1695,20 @@ impl Run {
                 error: None,
             })
         });
-        self.keep(&waiting.template, hop, results, Some(&callback))
-            .await;
+        self.keep(
+            &waiting.template.blocks[waiting.block],
+            hop,
+            results,
+            Some(&callback),
+        )
+        .await;
     }
 
     /// Stores a matched exchange in the history and files its findings,
     /// with the callback that made it match, if one did.
     async fn keep(
         &self,
-        template: &ActiveTemplate,
+        block: &active::Block,
         hop: Hop,
         results: Vec<TemplateMatch>,
         callback: Option<&OastCallback>,
@@ -1685,7 +1717,7 @@ impl Run {
         let mut record = hop.record;
         record.notes.push(format!(
             "Template {}, job {}.",
-            template.template.info.id, self.job
+            block.template.info.id, self.job
         ));
         let heard = callback.map(|callback| {
             format!(
@@ -1700,10 +1732,10 @@ impl Run {
             record.clone(),
         )
         .await;
-        let info = &template.template.info;
+        let info = &block.template.info;
         for result in &results {
             let mut finding =
-                super::active_finding(&template.template, result, &record, self.job, &self.library);
+                super::active_finding(&block.template, result, &record, self.job, &self.library);
             if let Some(heard) = &heard {
                 finding.detail.push('\n');
                 finding.detail.push_str(heard);
@@ -2121,6 +2153,73 @@ mod tests {
         assert_eq!(post.method, "POST");
         assert_eq!(post.body.len(), "a=".len() + 27);
         assert!(seen.iter().all(|seen| seen.host == address.to_string()));
+    }
+
+    const BLOCK_TEMPLATES: &[(&str, &str)] = &[
+        // The second block sends what the first one extracted, as Nuclei's
+        // template context hands it on.
+        ("blocks-token", "id: example-blocks-token\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/token']\n    extractors:\n      - type: regex\n        name: tok\n        internal: true\n        group: 1\n        regex: ['token=([a-z0-9]+)']\n  - raw:\n      - |\n        POST /check HTTP/1.1\n        Host: {{Hostname}}\n\n        t={{tok}}\n    matchers:\n      - type: word\n        words: ['valid']\n        condition: and\n      - type: word\n        negative: true\n        words: ['invalid']\n    matchers-condition: and\n"),
+        // Cookies carry from one block to the next, but not into a block
+        // that turns them off.
+        ("blocks-cookie", "id: example-blocks-cookie\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/login']\n  - method: GET\n    path: ['{{BaseURL}}/home']\n    matchers:\n      - type: word\n        words: ['Welcome back']\n"),
+        ("blocks-no-cookie", "id: example-blocks-no-cookie\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/login']\n  - method: GET\n    path: ['{{BaseURL}}/home']\n    disable-cookie: true\n    matchers:\n      - type: word\n        words: ['Welcome back']\n"),
+        // Each block judges its own answers.
+        ("blocks-own", "id: example-blocks-own\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/.git/config']\n    matchers:\n      - type: word\n        name: config\n        words: ['[core]']\n  - method: GET\n    path: ['{{BaseURL}}/nothing']\n    matchers:\n      - type: word\n        name: nothing\n        words: ['[core]']\n"),
+    ];
+
+    #[tokio::test]
+    async fn request_blocks_run_in_order_and_share_what_they_learn() {
+        let (address, log, server) = site(1, false).await;
+        let state = scan_state_with("blocks", &["127.0.0.1"], BLOCK_TEMPLATES).await;
+        let session = state.session().await;
+        let started = start(
+            State(state.clone()),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [format!("http://{address}")],
+                    "filter": {"search": "example-blocks"},
+                    "acknowledged": true,
+                    "rate": 50,
+                }),
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(started["templates"], 4, "{started}");
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        let job = finished(&state, id).await;
+        server.abort();
+
+        assert_eq!(job.status, "completed", "{job:?}");
+        let mut matched: Vec<String> = job
+            .results
+            .iter()
+            .map(|result| {
+                format!(
+                    "{}{}",
+                    result.template_id,
+                    result
+                        .matcher
+                        .as_ref()
+                        .map(|matcher| format!(":{matcher}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect();
+        matched.sort_unstable();
+        assert_eq!(
+            matched,
+            [
+                "example-blocks-cookie",
+                "example-blocks-own:config",
+                "example-blocks-token"
+            ]
+        );
+        let seen = log.lock().unwrap().clone();
+        let check = seen.iter().find(|seen| seen.path == "/check").unwrap();
+        assert_eq!(check.body, "t=abc123");
     }
 
     const OAST_TEMPLATES: &[(&str, &str)] = &[

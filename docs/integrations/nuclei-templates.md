@@ -43,7 +43,7 @@ that skips them rather than slow capture, and the library status counts it as
 
 ### What it sends
 
-A template can be sent when it has one HTTP request block made of:
+A template can be sent when each of its HTTP request blocks is made of:
 
 - a method other than `CONNECT`, and paths that start with `{{BaseURL}}` or
   `{{RootURL}}`, or raw requests;
@@ -68,12 +68,17 @@ CRLF, as Nuclei sends them.
 
 A template's requests to one target run as one session, as in Nuclei:
 
+- Request blocks run in the order written, and each judges its own answers.
+  `stop-at-first-match` ends only its own block. A block without matchers or
+  extractors only prepares the next, as a login does; a template where no
+  block has any is not sent.
 - A cookie a response sets goes with the later requests to the same host,
-  unless the template sets `disable-cookie: true`.
+  unless their block sets `disable-cookie: true`.
 - A named `internal` extractor's first value fills the later requests that use
-  its name (`{{csrf}}`).
-- Matchers and extractors can read earlier answers by request number:
-  `status_code_1`, `body_2`, `part: header_1`.
+  its name (`{{csrf}}`), in its own block and the blocks after it. A template
+  variable of the same name keeps its own value.
+- Matchers and extractors can read earlier answers of their block by request
+  number: `status_code_1`, `body_2`, `part: header_1`.
 
 `{{7*7}}` and other markers that name no variable or function are sent as
 written.
@@ -175,14 +180,13 @@ Sniper lists every template but never runs the `code`, `javascript`,
 `flow`, self-contained templates, workflows, or anything else outside the
 supported subset. A template either compiles completely or is listed as
 unsupported with a reason, such as `protocol:dns`, `req:payload_file` or
-`fn:mmh3`.
+`extractor:xpath`.
 
-Not supported yet: fuzzing aggression levels in `payloads`, more than one
-request block, `iterate-all`, a
+Not supported yet: fuzzing aggression levels in `payloads`, `iterate-all`, a
 request that reads an earlier answer (`{{body_1}}` in a path), a matcher that
 reads an earlier request's callback (`interactsh_protocol_2`), `unsafe` raw
-requests, fuzzing, and race and pipeline requests. A template whose variable is left for whoever runs it
-(`username: '{{username}}'`) is not sent.
+requests, fuzzing, and race and pipeline requests. A template whose variable
+is left for whoever runs it (`username: '{{username}}'`) is not sent.
 
 ## Supported subset
 
@@ -219,8 +223,8 @@ body was truncated, a template whose result the missing bytes could change (a
 negated body matcher, a size, an expression that reads the body) skips that
 response.
 
-On release v10.5.0, 2,086 of 11,698 HTTP templates can run passively and 8,906
-can be sent by Template Scan, 349 of them out-of-band.
+On release v10.5.0, 2,086 of 11,698 HTTP templates can run passively and 8,973
+can be sent by Template Scan, 353 of them out-of-band.
 
 ## The library
 
