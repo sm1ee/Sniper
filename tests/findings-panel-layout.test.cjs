@@ -139,3 +139,12 @@ test("split limits and chosen detail height survive repeated drags", () => {
   assert.equal(f.detail.style.flex, chosen);
   assert.deepEqual(f.geometry(), { table: 60, detail: 540, unused: 0 });
 });
+
+test("a long URL in a toolbar kicker cannot push the card's buttons out of view", () => {
+  // Held responses show their URL above Drop and Forward. A path with nothing
+  // to break at used to widen the card's grid track past the card itself.
+  assert.match(css, /\.panel-card \{[^}]*grid-template-columns: minmax\(0, 1fr\);/);
+  assert.match(css, /\.panel-toolbar \.placeholder-kicker \{[^}]*overflow-wrap: anywhere;/);
+  // Squeezed by a long URL, Drop and Forward used to stack.
+  assert.match(css, /#interceptRequestActions,\s*#responseInterceptActions \{[^}]*flex: none;/);
+});

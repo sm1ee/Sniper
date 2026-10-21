@@ -3956,6 +3956,9 @@ body.pane-resizing-y {
 .panel-card {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  /* An auto track grows to its widest unbreakable line and the card clips
+     whatever then lies past its edge — toolbar buttons included. */
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
@@ -4110,6 +4113,16 @@ body.pane-resizing-y {
 .inline-copy {
   margin: 4px 0 0;
   color: var(--text-soft);
+}
+
+/* A kicker can hold a URL with nothing to break at; held responses show
+   theirs above Drop and Forward. Two lines are enough to place it. */
+.panel-toolbar .placeholder-kicker {
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .replay-tab-strip {
@@ -5833,6 +5846,12 @@ button.utility-button.replay-tab-add {
 .intercept-left-panel {
   display: flex;
   flex-direction: column;
+}
+
+/* Two buttons: the held URL beside them gives way instead. */
+#interceptRequestActions,
+#responseInterceptActions {
+  flex: none;
 }
 
 .intercept-queue-tabs {
