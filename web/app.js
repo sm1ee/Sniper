@@ -14324,6 +14324,7 @@ function renderProxySettings() {
 
   const startup = state.settings.startup;
   const chain = state.runtime.upstream_proxy || {};
+  state.proxySettingsShown = proxySettingsFromRuntime(state.runtime);
   document.getElementById("proxyChainEnabled").checked = Boolean(chain.enabled);
   for (const [id, key] of [["proxyChainUrl", "url"], ["proxyChainUsername", "username"], ["proxyChainPassword", "password"]]) {
     const input = document.getElementById(id);
@@ -14370,6 +14371,31 @@ function renderProxySettings() {
           ? `Saved ${startup.proxy_addr} for the next launch. Restart Sniper to replace the active listener ${startup.active_proxy_addr}.`
           : `Proxy listener is running on ${startup.active_proxy_addr}.`
     : "Changes are saved for the next app start.";
+}
+
+// The runtime settings as the Settings form shows them, in the shape
+// saveProxySettings reads the form in, so a field left alone compares equal.
+function proxySettingsFromRuntime(runtime) {
+  const chain = runtime?.upstream_proxy || {};
+  const list = (values) => (values || []).map((value) => String(value).trim()).filter(Boolean);
+  return {
+    intercept_enabled: Boolean(runtime?.intercept_enabled),
+    websocket_capture_enabled: Boolean(runtime?.websocket_capture_enabled),
+    upstream_insecure: runtime?.upstream_insecure !== false,
+    upstream_proxy: {
+      enabled: Boolean(chain.enabled),
+      url: String(chain.url || "").trim(),
+      username: chain.username || "",
+      password: chain.password || "",
+    },
+    scope_patterns: list(runtime?.scope_patterns),
+    passthrough_hosts: list(runtime?.passthrough_hosts),
+    upstream_bypass_hosts: list(runtime?.upstream_bypass_hosts),
+    oast_enabled: Boolean(runtime?.oast_enabled),
+    oast_provider: runtime?.oast_provider || "custom",
+    oast_server_url: runtime?.oast_server_url || "",
+    oast_polling_interval_secs: Number(runtime?.oast_polling_interval_secs) || 5,
+  };
 }
 
 function renderOastSettingsControls(options = {}) {
@@ -17977,6 +18003,12 @@ async function saveProxySettings() {
     oast_server_url: oastServerUrl,
     oast_polling_interval_secs: oastInterval,
   };
+  // Only what was changed in this form: a setting another client changed since
+  // it was filled, sniper-cli turning intercept on or an agent's scope edit,
+  // would otherwise be put back by a save of something else.
+  for (const [key, shown] of Object.entries(state.proxySettingsShown || {})) {
+    if (JSON.stringify(runtimeUpdate[key]) === JSON.stringify(shown)) delete runtimeUpdate[key];
+  }
   if (
     state.oastTokenClearPending ||
     oastProvider === "boast" ||
