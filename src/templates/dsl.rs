@@ -1214,12 +1214,21 @@ fn go_pattern(pattern: &str) -> String {
     let mut in_class = false;
     // Just after `[` or `[^`, where `]` is a literal.
     let mut class_start = false;
+    // Where the open class began, and whether it holds \S or \D. Such a class
+    // already holds every case variant of what else it lists, so folding
+    // cannot change it; the regex crate still folds it code point by code
+    // point, about 10 ms a pattern, so it is kept out of (?i).
+    let mut class_open = 0;
+    let mut class_caseless = false;
     while let Some(c) = chars.next() {
         if c == '\\' {
             let Some(next) = chars.next() else {
                 out.push('\\');
                 break;
             };
+            if in_class && matches!(next, 'S' | 'D') {
+                class_caseless = true;
+            }
             let replacement = match (next, in_class) {
                 ('d', false) => Some("[0-9]"),
                 ('D', false) => Some("[^0-9]"),
@@ -1258,6 +1267,8 @@ fn go_pattern(pattern: &str) -> String {
             if c == '[' {
                 in_class = true;
                 class_start = true;
+                class_open = out.len() - 1;
+                class_caseless = false;
                 if chars.peek() == Some(&'^') {
                     out.push('^');
                     chars.next();
@@ -1269,6 +1280,10 @@ fn go_pattern(pattern: &str) -> String {
             ']' if !class_start => {
                 in_class = false;
                 out.push(']');
+                if class_caseless {
+                    out.insert_str(class_open, "(?-i:");
+                    out.push(')');
+                }
             }
             // A POSIX class such as [:alpha:] means the same in both.
             '[' if chars.peek() == Some(&':') => {
@@ -1627,6 +1642,23 @@ mod tests {
             .unwrap()
             .is_match("function(e) {if"));
         assert!(go_regex(r"a{2}b{1,}c{1,3}").unwrap().is_match("aabbc"));
+    }
+
+    #[test]
+    fn classes_holding_s_or_d_are_not_case_folded() {
+        // Folding cannot change such a class, but the regex crate folds it
+        // code point by code point: 13 s for one template's 689 patterns.
+        assert_eq!(
+            go_pattern(r"(?i)a[^\S\r\n]*b"),
+            r"(?i)a(?-i:[^[^\t\n\f\r ]\r\n])*b"
+        );
+        assert_eq!(go_pattern(r"(?i)[\Da]"), r"(?i)(?-i:[[^0-9]a])");
+        let spaced = go_regex(r"(?i)key[^\S\r\n]*=").unwrap();
+        assert!(spaced.is_match("KEY \t="));
+        assert!(!spaced.is_match("KEY\n="));
+        let not_digit = go_regex(r"(?i)^[\Dk]$").unwrap();
+        assert!(not_digit.is_match("K") && not_digit.is_match("\u{212A}"));
+        assert!(!not_digit.is_match("7"));
     }
 
     #[test]
