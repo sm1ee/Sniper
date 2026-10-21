@@ -69,6 +69,7 @@ enum ExtractorKind {
     },
     Kval(Vec<String>),
     Dsl(Vec<Expr>),
+    Json(Vec<super::jq::Query>),
 }
 
 #[derive(Clone, Debug)]
@@ -363,6 +364,12 @@ fn compile_extractor(
             strings(map, "dsl")?
                 .iter()
                 .map(|expression| Expr::compile(expression, allow))
+                .collect::<Result<_, _>>()?,
+        ),
+        Some("json") => ExtractorKind::Json(
+            strings(map, "json")?
+                .iter()
+                .map(|query| super::jq::Query::compile(query))
                 .collect::<Result<_, _>>()?,
         ),
         Some(other) => return Err(reason(format!("extractor:{other}"))),
@@ -1044,6 +1051,16 @@ fn run_extractor(
                 }
             }
         }
+        ExtractorKind::Json(queries) => {
+            let document = view
+                .part_text(&extractor.part)
+                .and_then(|corpus| serde_json::from_str::<serde_json::Value>(&corpus).ok());
+            for query in queries {
+                for value in document.iter().flat_map(|document| query.extract(document)) {
+                    push(value);
+                }
+            }
+        }
     }
     values
 }
@@ -1324,6 +1341,22 @@ mod tests {
             scheme: "https".into(),
         };
         ResponseView::from_message(status, None, &message, 120, url, MAX_PASSIVE_BODY_BYTES)
+    }
+
+    #[test]
+    fn json_extractors_read_the_body_with_jq() {
+        let template = compiled(
+            "id: example-json\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}']\n    extractors:\n      - type: json\n        json:\n          - '.version'\n          - '.plugins[] | select(.active) | .name'\n",
+        );
+        let found = template.evaluate(&view(
+            200,
+            &[("Content-Type", "application/json")],
+            r#"{"version":"1.2.3","plugins":[{"name":"a","active":true},{"name":"b","active":false}]}"#,
+        ));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].extracted, ["1.2.3", "a"]);
+        // A body that is not JSON gives nothing.
+        assert!(template.evaluate(&view(200, &[], "<html>")).is_empty());
     }
 
     #[test]

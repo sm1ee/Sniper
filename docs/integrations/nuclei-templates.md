@@ -190,9 +190,14 @@ requests, fuzzing, and race and pipeline requests. A template whose variable is 
   `condition`, `negative`, `internal`, `name`, `case-insensitive`,
   `encoding: hex`, `match-all` and `matchers-condition`. A scan's matchers can
   also read the request (`part: request`) and the values it was built with.
-- Extractors: `regex` (with `group`), `kval` (response headers and cookies) and
-  `dsl`. They run before the matchers, which can use a named extractor's first
-  value.
+- Extractors: `regex` (with `group`), `kval` (response headers and cookies),
+  `dsl` and `json`. They run before the matchers, which can use a named
+  extractor's first value.
+- A `json` extractor's queries are the part of jq templates use: paths
+  (`.a.b`, `."a-b"`, `.[0]`, `.[-1]`, `.[]`, `?`), `|`, `,`, `//`, `and`,
+  `or`, comparisons, `+`, `-`, `select`, `contains`, `has`, `first`,
+  `tostring`, `length`, `keys`, `not` and `empty`. A query using anything
+  else lists its template as unsupported.
 - The expression language and the helper functions community templates use,
   including `compare_versions`. Expressions follow govaluate's typing, versions
   go-version's rules, and regular expressions Go's: `\d`, `\w`, `\s` and `\b`
@@ -214,8 +219,8 @@ body was truncated, a template whose result the missing bytes could change (a
 negated body matcher, a size, an expression that reads the body) skips that
 response.
 
-On release v10.5.0, 2,086 of 11,698 HTTP templates can run passively and 8,823
-can be sent by Template Scan, 348 of them out-of-band.
+On release v10.5.0, 2,086 of 11,698 HTTP templates can run passively and 8,906
+can be sent by Template Scan, 349 of them out-of-band.
 
 ## The library
 

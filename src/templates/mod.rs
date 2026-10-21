@@ -10,6 +10,7 @@
 pub mod active;
 pub mod dsl;
 pub mod engine;
+pub mod jq;
 pub mod library;
 pub mod model;
 pub mod scan;
@@ -24,7 +25,7 @@ use engine::{CompiledTemplate, PassiveSet, ResponseView, TemplateMatch, UrlVars}
 
 /// Bumped whenever classification or compilation changes, so an index built
 /// by an older engine is rebuilt instead of trusted.
-pub const ENGINE_VERSION: u32 = 6;
+pub const ENGINE_VERSION: u32 = 7;
 
 /// Rule ids of findings from passive templates; the rest of the id is the
 /// template id and, for a named matcher, `:<matcher>`.

@@ -265,6 +265,7 @@ const EXTRACTOR_KEYS: &[&str] = &[
     "regex",
     "group",
     "kval",
+    "json",
     "dsl",
     "internal",
     "case-insensitive",
@@ -902,7 +903,8 @@ fn check_extractors(out: &mut Classification, value: &Value) {
             }
         }
         match extractor.get("type").map(scalar_text).as_deref() {
-            Some("regex" | "kval") => {}
+            // A json query is checked when the template compiles.
+            Some("regex" | "kval" | "json") => {}
             Some("dsl") => {
                 for expression in extractor
                     .get("dsl")
