@@ -354,6 +354,7 @@ body[data-theme="dusk"] {
 }
 
 body[data-theme="white"] {
+  --tab-active: var(--text);
   --toggle-on: #18728c;
   --toggle-run: #25763e;
   --toggle-warn: #8a6111;
@@ -406,6 +407,7 @@ body[data-theme="white"] {
 }
 
 body[data-theme="paper"] {
+  --tab-active: var(--text);
   --toggle-on: #18728c;
   --toggle-run: #25763e;
   --toggle-warn: #8a6111;
@@ -457,6 +459,7 @@ body[data-theme="paper"] {
 }
 
 body[data-theme="snow"] {
+  --tab-active: var(--text);
   --toggle-on: #18728c;
   --toggle-run: #25763e;
   --toggle-warn: #8a6111;
@@ -509,6 +512,7 @@ body[data-theme="snow"] {
 }
 
 body[data-theme="ivory"] {
+  --tab-active: var(--text);
   --toggle-on: #18728c;
   --toggle-run: #25763e;
   --toggle-warn: #8a6111;
@@ -561,6 +565,7 @@ body[data-theme="ivory"] {
 }
 
 body[data-theme="frost"] {
+  --tab-active: var(--text);
   --toggle-on: #18728c;
   --toggle-run: #25763e;
   --toggle-warn: #8a6111;
@@ -1005,10 +1010,25 @@ code {
   background: rgba(255, 255, 255, 0.04);
 }
 
+/* The active tab is gold text over a thin gold line on the strip's edge: one
+   mark, where a filled pill with a bar under it read as heavy. The light themes
+   set --tab-active to their text colour: their gold is a mid-tone that reads
+   dimmer than the tabs beside it. */
 .main-tab.active,
 .sub-tab.active {
-  color: var(--point);
-  background: var(--point-soft);
+  color: var(--tab-active, var(--point));
+}
+
+.main-tab.active::after,
+.sub-tab.active::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: 0;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--point);
 }
 
 .workspace {
@@ -7561,10 +7581,10 @@ button.utility-button.replay-tab-add {
   margin-bottom: -1px;
 }
 
-/* One highlight that slides between tabs, rather than a pill that blinks from
-   one to the next. The active tab keeps its text colour and hands its background
-   to the indicator, which is the same shape in the same place — so a strip that
-   is not moving looks exactly as it did. */
+/* One line that slides between tabs, rather than one that blinks from tab to
+   tab. The active tab keeps its text colour and hands its line to the
+   indicator, which draws it in the same place — so a strip that is not moving
+   looks exactly as it did. */
 .has-tab-indicator {
   position: relative;
 }
@@ -7575,9 +7595,9 @@ button.utility-button.replay-tab-add {
   z-index: 1;
 }
 
-.has-tab-indicator .main-tab.active,
-.has-tab-indicator .sub-tab.active {
-  background: transparent;
+.has-tab-indicator .main-tab.active::after,
+.has-tab-indicator .sub-tab.active::after {
+  content: none;
 }
 
 .tab-indicator {
@@ -7587,10 +7607,20 @@ button.utility-button.replay-tab-add {
   z-index: 0;
   width: 0;
   height: 0;
-  border-radius: var(--radius-md);
-  background: var(--point-soft);
+  background: transparent;
   pointer-events: none;
   transition: left 0.2s cubic-bezier(0.2, 0, 0, 1), width 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.tab-indicator::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: 0;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--point);
 }
 
 @media (prefers-reduced-motion: reduce) {
