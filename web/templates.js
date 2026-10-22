@@ -545,6 +545,7 @@
       els.Previous.disabled = page === 0;
       els.Next.disabled = (page + 1) * PAGE_SIZE >= total;
       els.Meta.textContent = status?.library ? `${total.toLocaleString()} ${total === 1 ? "template" : "templates"}` : "";
+      renderViews();
     }
 
     function field(list, label, value) {
@@ -776,7 +777,9 @@
         button.classList.toggle("active", active);
         button.setAttribute("aria-selected", active ? "true" : "false");
       }
-      for (const node of [els.Table, els.ListControls, els.ListActions, els.Meta, els.Pagination]) node.classList.toggle("hidden", results);
+      for (const node of [els.Table, els.ListControls, els.ListActions, els.Meta]) node.classList.toggle("hidden", results);
+      // One page holds the whole list: the count above says it all.
+      els.Pagination.classList.toggle("hidden", results || (page === 0 && total <= PAGE_SIZE));
       for (const node of [els.ResultsTable, els.ResultsTitle]) node.classList.toggle("hidden", !results);
     }
     function resultRows() {
@@ -1061,9 +1064,7 @@
         els.AutoHosts.value = (auto.hosts || []).join("\n");
         els.AutoRate.value = String(auto.rate || 10);
       }
-      els.AutoToggle.textContent = on ? "On" : "Off";
-      els.AutoToggle.classList.toggle("online", on);
-      els.AutoToggle.setAttribute("aria-pressed", on ? "true" : "false");
+      els.AutoToggle.setAttribute("aria-checked", on ? "true" : "false");
       els.AutoToggle.disabled = autoBusy || !auto;
     }
     async function refreshAuto() {

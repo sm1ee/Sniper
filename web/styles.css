@@ -1729,6 +1729,47 @@ code {
   cursor: not-allowed;
 }
 
+/* On or off, as a settings switch reads. The state is aria-checked, so what
+   it shows and what it announces cannot disagree. */
+.switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line-strong);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform 0.15s;
+}
+
+.switch[aria-checked="true"] {
+  background: var(--point);
+}
+
+.switch[aria-checked="true"]::after {
+  transform: translateX(14px);
+}
+
+.switch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .traffic-region {
   grid-row: 3;
   min-height: 0;
@@ -8239,6 +8280,14 @@ button.utility-button.replay-tab-add {
   min-height: var(--control-h); padding: 4px 14px; font-size: var(--font-xs); border-radius: 6px;
 }
 .scan-shell > .recon-shell, .scan-shell > .templates-shell { flex: 1 1 auto; height: auto; }
+/* An arrow shows where it means something: the column sorted by, and the one
+   pointed at. On every header at once they were noise. */
+.scan-shell .table-sort-indicator { opacity: 0; }
+.scan-shell .table-sortable:hover .table-sort-indicator { opacity: 0.5; }
+.scan-shell .table-sortable.active .table-sort-indicator { opacity: 1; }
+/* Beside the detail the list is about 600px wide in a 1440px window; at the
+   640px every table keeps elsewhere, its last column sat out of sight. */
+.scan-shell .mini-table { min-width: 520px; }
 /* Templates reuses Recon's form, table and detail styles; only its layout is its own. */
 .templates-shell {
   height: 100%;
@@ -8251,9 +8300,18 @@ button.utility-button.replay-tab-add {
   background: var(--shell);
 }
 .templates-shell .panel-card { min-width: 0; min-height: 0; }
-/* The library and the scan form share the left column, which scrolls as one. */
-.templates-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; overflow: auto; }
-.templates-side .panel-card { flex: 0 0 auto; }
+/* The library, the auto scan and the manual scan are parts of one panel that
+   scrolls as one, divided by hairlines: a box apiece read as clutter. */
+.templates-side {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto;
+  border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel);
+}
+.templates-side .panel-card { flex: 0 0 auto; border: 0; border-radius: 0; background: none; overflow: visible; }
+.templates-side .panel-card + .panel-card { border-top: 1px solid var(--line); }
+.templates-side .panel-toolbar { padding: 14px 16px 0; border-bottom: 0; background: none; }
+.templates-side .panel-toolbar h2 { font-size: var(--font-md); }
+/* Its header actions stay quiet until pointed at. */
+.templates-side .panel-toolbar .secondary-action:not(:hover) { border-color: transparent; background: none; color: var(--text-soft); }
 /* The card is taller than its form; keep the rows at their own height. */
 .templates-library .recon-form { align-content: start; }
 .templates-actions { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -8267,7 +8325,7 @@ button.utility-button.replay-tab-add {
    column like the form's controls, the search box shrinks to nothing. */
 .templates-shell .recon-search-controls select { width: auto; min-width: 130px; }
 .templates-shell .panel-toolbar { align-items: center; }
-.templates-shell .recon-form { gap: 10px; padding: 12px 14px; }
+.templates-shell .recon-form { gap: 10px; padding: 8px 16px 16px; }
 .templates-shell .recon-field { gap: 4px; color: var(--text-dim); font-size: var(--font-xs); }
 .scan-shell input[type="checkbox"] { accent-color: var(--point); }
 .templates-shell .recon-check { align-items: center; }
@@ -8291,7 +8349,7 @@ button.utility-button.replay-tab-add {
 .templates-chip-toggle input:checked + span { color: var(--point); border-color: var(--point-border); background: var(--point-soft); }
 .templates-chip-toggle input:focus-visible + span { outline: 2px solid var(--info); outline-offset: 1px; }
 .templates-tag { margin-right: 4px; }
-.templates-scan .recon-job { padding: 8px 14px; border-top: 1px solid var(--line); border-bottom: 0; }
+.templates-scan .recon-job { padding: 10px 16px; border-top: 1px solid var(--line); border-bottom: 0; }
 .templates-scan .recon-job-header { gap: 6px; margin-bottom: 2px; }
 .templates-scan .recon-job-target { font-size: var(--font-xs); }
 .templates-detail-badges { display: flex; align-items: center; gap: 8px; margin: -4px 0 10px; }

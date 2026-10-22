@@ -282,13 +282,16 @@ test("the Scan tool is registered where the UI and the server keep their tool li
 // An inert stand-in for each element the controller looks up by id.
 function fakeElement() {
   const classes = new Set();
+  const attributes = new Map();
   return {
     textContent: "", value: "", checked: false, disabled: false, dataset: {}, children: [], style: {},
     classList: {
       toggle(name, on) { if (on === undefined ? !classes.has(name) : on) classes.add(name); else classes.delete(name); },
       contains: (name) => classes.has(name), add: (name) => classes.add(name), remove: (name) => classes.delete(name),
     },
-    addEventListener() {}, removeEventListener() {}, setAttribute() {}, removeAttribute() {},
+    addEventListener() {}, removeEventListener() {},
+    setAttribute: (name, value) => attributes.set(name, String(value)), removeAttribute: (name) => attributes.delete(name),
+    getAttribute: (name) => attributes.get(name) ?? null,
     replaceChildren(...nodes) { this.children = nodes; }, append(...nodes) { this.children.push(...nodes); },
     querySelector: () => null, querySelectorAll: () => [], closest: () => null,
   };
@@ -324,7 +327,7 @@ const settle = async () => { for (let tick = 0; tick < 5; tick += 1) await new P
 
 async function listFixture(items, arrowStep, {
   sessionId = null, auto = null, scopeCount = 1, library = { source: "import", verified: false }, jobs = [], openRecord,
-  scanError = null, check = null, records = {},
+  scanError = null, check = null, records = {}, total = items.length,
 } = {}) {
   const els = new Map();
   const sent = [];
@@ -360,7 +363,7 @@ async function listFixture(items, arrowStep, {
             : String(url).startsWith("/api/templates/scans/") ? jobs.find((job) => String(url).includes(job.id))
               : String(url).startsWith("/api/templates/scans") ? { session_id: sessionId, jobs }
               : id ? { yaml: "", ...items.find((meta) => meta.id === decodeURIComponent(id)) }
-                : { items, total: items.length };
+                : { items, total };
       return { ok: true, json: async () => body };
     },
     setTimeout: (callback) => timers.push({ callback, live: true }), clearTimeout(handle) { if (timers[handle - 1]) timers[handle - 1].live = false; },
@@ -410,16 +413,35 @@ test("an On box turns a scan template on for the auto scan, and its switch turns
   f.els.get("#templatesAutoRate").value = "5";
   f.els.get("#templatesAutoRate").dispatch("input", {});
   const toggle = f.els.get("#templatesAutoToggle");
-  assert.equal(toggle.textContent, "Off");
+  assert.equal(toggle.getAttribute("aria-checked"), "false");
   toggle.dispatch("click", {});
   await settle();
   assert.deepEqual(f.sent.at(-1), {
     url: "/api/templates/auto",
     body: { session_id: "s-1", enabled: true, hosts: ["*.example.com"], rate: 5, acknowledged: true },
   });
-  assert.equal(toggle.textContent, "On");
-  assert.equal(toggle.classList.contains("online"), true);
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
   f.controller.dispose();
+});
+
+// The auto scan is on or off, so it is a switch: what it shows and what it
+// announces are the one attribute, and there is no label to read.
+test("the auto scan's toggle is a switch", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  assert.match(html, /<button class="switch" id="templatesAutoToggle" type="button" role="switch" aria-checked="false" aria-label="Auto scan" disabled><\/button>/);
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /\.switch\[aria-checked="true"\]::after \{[^}]*transform: translateX/);
+});
+
+// A pager with no other page to turn to is noise beside the count.
+test("the pager shows only once the list runs past a page", async () => {
+  const items = [{ id: "example-one", name: "Example One", severity: "info", tags: [] }];
+  const one = await listFixture(items, () => 0);
+  assert.equal(one.els.get("#templatesPagination").classList.contains("hidden"), true);
+  one.controller.dispose();
+  const many = await listFixture(items, () => 0, { total: templates.PAGE_SIZE + 1 });
+  assert.equal(many.els.get("#templatesPagination").classList.contains("hidden"), false);
+  many.controller.dispose();
 });
 
 test("the auto scan's hosts and pace save when the field is left", async () => {
@@ -435,7 +457,7 @@ test("the auto scan's hosts and pace save when the field is left", async () => {
     url: "/api/templates/auto",
     body: { session_id: "s-1", enabled: false, hosts: ["*.example.com"], rate: 10 },
   });
-  assert.equal(f.els.get("#templatesAutoToggle").textContent, "Off");
+  assert.equal(f.els.get("#templatesAutoToggle").getAttribute("aria-checked"), "false");
   f.controller.dispose();
 });
 
