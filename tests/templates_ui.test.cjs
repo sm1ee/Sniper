@@ -139,11 +139,11 @@ test("a scan request names its targets, its selection and whether it only counts
 test("previews and jobs read as what was or will be sent", () => {
   assert.equal(
     templates.previewLine({ requests: 1200, templates: 300, targets: ["https://app.example.com"], max_requests: 10000, excluded_by_risk: { intrusive: 4 } }),
-    "Send 1,200 requests from 300 templates to https://app.example.com, at most 10,000 counting redirects. Left out by risk: intrusive 4.",
+    "Sends 1,200 requests from 300 templates to https://app.example.com. Left out: intrusive 4.",
   );
-  assert.match(
+  assert.equal(
     templates.previewLine({ requests: 3, templates: 1, targets: ["https://app.example.com"], max_requests: 10, oast_unavailable: 2 }),
-    /Left out: 2 OAST templates, which need an Interactsh server \(Capture ▸ OAST\)\.$/,
+    "Sends 3 requests from 1 template to https://app.example.com. Left out: 2 OAST templates (no Interactsh server).",
   );
   assert.equal(
     templates.jobLine({ status: "running", sent: 10, planned: 20, matched: 1, failed: 2, blocked: 0 }),
@@ -166,13 +166,16 @@ test("the Scan tool is registered where the UI and the server keep their tool li
   assert.match(html, /<script src="\/templates\.js" defer><\/script>/);
   assert.match(app, /const IMPLEMENTED_TOOLS = new Set\(\[[^\]]*"templates"/);
   assert.match(settings, /const ACTIVE_TOOL_OPTIONS: &\[&str\] = &\[[^\]]*"templates"/);
-  for (const id of ["Status", "Progress", "ProgressBar", "Consent", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
+  for (const id of ["Status", "Progress", "ProgressBar", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
     "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Rows", "Detail",
     "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
-    "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanConsent", "ScanConsentText", "ScanStart", "ScanNotice",
+    "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanPlan", "ScanStart", "ScanNotice",
     "ScanJobs"]) {
     assert.match(html, new RegExp(`id="templates${id}"`), id);
   }
+  // A button is the consent; the screen asks for no box to be ticked first.
+  const shell = html.slice(html.indexOf('id="templatesShell"'), html.indexOf('id="templatesRows"'));
+  assert.doesNotMatch(shell, /Consent/);
   // Each risk the server allows has its box, and dos has none.
   const boxes = [...html.matchAll(/data-risk="([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(boxes, templates.RISKS);
@@ -243,6 +246,10 @@ async function listFixture(items, arrowStep, { sessionId = null, auto = null, sc
       const body = String(url).includes("/library") ? status
         : String(url).startsWith("/api/templates/auto/templates") ? { auto_enabled: 1, ignored: 0 }
           : String(url).startsWith("/api/templates/auto") ? Object.assign(auto, init.method === "POST" ? JSON.parse(init.body) : {})
+            : String(url).startsWith("/api/templates/scans") && init.method === "POST"
+              ? (JSON.parse(init.body).preview
+                ? { requests: 3, templates: 1, targets: JSON.parse(init.body).targets, max_requests: 10000 }
+                : { id: "example-job", session_id: sessionId, status: "running", targets: JSON.parse(init.body).targets })
             : String(url).startsWith("/api/templates/scans") ? { session_id: sessionId, jobs: [] }
               : id ? { ...items.find((meta) => meta.id === decodeURIComponent(id)), yaml: "" }
                 : { items, total: items.length };
@@ -255,26 +262,26 @@ async function listFixture(items, arrowStep, { sessionId = null, auto = null, sc
   return { controller, els, doc, urls, sent, rows: () => els.get("#templatesRows").children };
 }
 
-test("the auto scan request carries its hosts and pace, and consent to turn it on", () => {
-  const values = { hosts: " *.example.com\napi.example.com:8443 ", rate: "5", consent: true };
+test("the auto scan request carries its hosts and pace, and turning it on is the consent", () => {
+  const values = { hosts: " *.example.com\napi.example.com:8443 ", rate: "5" };
   assert.deepEqual(templates.autoRequest(values, "s-1", true), {
     session_id: "s-1", enabled: true, hosts: ["*.example.com", "api.example.com:8443"], rate: 5, acknowledged: true,
   });
-  assert.deepEqual(templates.autoRequest({ ...values, consent: false }, "s-1", false), {
+  assert.deepEqual(templates.autoRequest(values, "s-1", false), {
     session_id: "s-1", enabled: false, hosts: ["*.example.com", "api.example.com:8443"], rate: 5,
   });
-  assert.throws(() => templates.autoRequest({ ...values, consent: false }, "s-1", true), /Confirm/);
   assert.throws(() => templates.autoRequest({ ...values, hosts: "https://app.example.com/" }, "s-1", true), /as Scope takes it/);
   assert.throws(() => templates.autoRequest({ ...values, rate: "0" }, "s-1", true), /from 1 to 50/);
   assert.throws(() => templates.autoRequest(values, null, true), /session/);
-  assert.match(templates.autoLine({ enabled: false, templates: 0 }), /^Off · 0 templates on for it\./);
+  // The card's badge says On or Off.
+  assert.equal(templates.autoLine({ enabled: false, templates: 0 }), "0 templates");
   assert.equal(
     templates.autoLine({ enabled: true, templates: 12, scanned: 1, queued: 3 }),
-    "On · 12 templates on for it · 1 host sent to · 3 waiting.",
+    "12 templates · 1 host scanned · 3 waiting",
   );
 });
 
-test("an On box turns a scan template on for the auto scan, and turning it on needs consent", async () => {
+test("an On box turns a scan template on for the auto scan, and Turn on turns it on", async () => {
   const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
   const auto = { session_id: "s-1", enabled: false, hosts: [], rate: 10, templates: 0, scanned: 0, queued: 0 };
   const f = await listFixture(items, () => 0, { sessionId: "s-1", auto });
@@ -291,21 +298,47 @@ test("an On box turns a scan template on for the auto scan, and turning it on ne
   f.els.get("#templatesAutoRate").dispatch("input", {});
   f.els.get("#templatesAutoToggle").dispatch("click", {});
   await settle();
-  assert.equal(f.sent.length, 1, "nothing is turned on before consent");
-  assert.match(f.els.get("#templatesAutoNotice").textContent, /Confirm/);
-  f.els.get("#templatesAutoConsent").checked = true;
-  f.els.get("#templatesAutoToggle").dispatch("click", {});
-  await settle();
   assert.deepEqual(f.sent.at(-1), {
     url: "/api/templates/auto",
     body: { session_id: "s-1", enabled: true, hosts: ["*.example.com"], rate: 5, acknowledged: true },
   });
   assert.equal(f.els.get("#templatesAutoToggle").textContent, "Turn off");
-  const consent = f.els.get("#templatesAutoConsentRow");
-  assert.equal(consent.classList.contains("hidden"), true, "on, with nothing to save, it asks for nothing");
-  f.els.get("#templatesAutoHosts").value = "*.example.com\nexample.org";
-  f.els.get("#templatesAutoHosts").dispatch("input", {});
-  assert.equal(consent.classList.contains("hidden"), false, "a change to save asks again");
+  f.controller.dispose();
+});
+
+test("Download latest asks for nothing more and says it consents", async () => {
+  const f = await listFixture([], () => 0, { sessionId: "s-1" });
+  const download = f.els.get("#templatesDownload");
+  assert.equal(download.disabled, false);
+  download.dispatch("click", {});
+  await settle();
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true } });
+  f.controller.dispose();
+});
+
+test("a previewed scan starts with one click, and only the scan previewed", async () => {
+  const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
+  const f = await listFixture(items, () => 0, { sessionId: "s-1" });
+  const start = f.els.get("#templatesScanStart");
+  // The form's own defaults.
+  f.els.get("#templatesScanSelection").value = "filter";
+  f.els.get("#templatesScanRate").value = "10";
+  f.els.get("#templatesScanConcurrency").value = "4";
+  f.els.get("#templatesScanMaxRequests").value = "10000";
+  f.els.get("#templatesScanTargets").value = "https://app.example.com";
+  f.els.get("#templatesScanTargets").dispatch("input", {});
+  assert.equal(start.disabled, true, "nothing to start before a preview");
+  f.els.get("#templatesScanPreview").dispatch("click", {});
+  await settle();
+  assert.equal(f.els.get("#templatesScanPlan").textContent, "Sends 3 requests from 1 template to https://app.example.com.");
+  assert.equal(start.disabled, false);
+  start.dispatch("click", {});
+  await settle();
+  const sent = f.sent.at(-1);
+  assert.equal(sent.url, "/api/templates/scans");
+  assert.equal(sent.body.acknowledged, true);
+  assert.equal(sent.body.preview, undefined);
+  assert.deepEqual(sent.body.targets, ["https://app.example.com"]);
   f.controller.dispose();
 });
 

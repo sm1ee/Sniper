@@ -145,8 +145,8 @@
 
   // ---- Auto scan ----
 
-  // The auto scan's settings as the server takes them; turning it on carries
-  // the operator's consent.
+  // The auto scan's settings as the server takes them; Turn on is the
+  // operator's consent.
   function autoRequest(values, sessionId, enabled) {
     if (!sessionId) throw new Error("Wait for the session to finish loading.");
     const hosts = String(values.hosts || "").split(/[\s,]+/).filter(Boolean);
@@ -157,10 +157,7 @@
       }
     }
     const body = { session_id: sessionId, enabled: !!enabled, hosts, rate: boundedInteger(values.rate, 1, 50, "Requests a second") };
-    if (enabled) {
-      if (!values.consent) throw new Error("Confirm that the auto scan may send to these hosts first.");
-      body.acknowledged = true;
-    }
+    if (enabled) body.acknowledged = true;
     return body;
   }
 
@@ -170,21 +167,20 @@
     return { ...passiveRequest(filters, enabled), filter: { ...passiveRequest(filters, enabled).filter, support: "active" } };
   }
 
+  // The card's badge says whether it is on.
   function autoLine(auto) {
-    if (!auto) return "Loading the auto scan…";
+    if (!auto) return "Loading…";
     const plural = (n, word) => `${count(n)} ${word}${Number(n) === 1 ? "" : "s"}`;
-    const templates = `${plural(auto.templates, "template")} on for it`;
-    if (!auto.enabled) return `Off · ${templates}.`;
-    return `On · ${templates} · ${plural(auto.scanned, "host")} sent to · ${count(auto.queued)} waiting.`;
+    const templates = plural(auto.templates, "template");
+    if (!auto.enabled) return templates;
+    return `${templates} · ${plural(auto.scanned, "host")} scanned · ${count(auto.queued)} waiting`;
   }
 
   function previewLine(preview) {
-    const risks = Object.entries(preview.excluded_by_risk || {}).map(([risk, n]) => `${risk} ${count(n)}`).join(", ");
     const plural = (n, word) => `${count(n)} ${word}${Number(n) === 1 ? "" : "s"}`;
-    const oast = preview.oast_unavailable
-      ? ` Left out: ${plural(preview.oast_unavailable, "OAST template")}, which need an Interactsh server (Capture ▸ OAST).`
-      : "";
-    return `Send ${plural(preview.requests, "request")} from ${plural(preview.templates, "template")} to ${(preview.targets || []).join(", ")}, at most ${count(preview.max_requests)} counting redirects.${risks ? ` Left out by risk: ${risks}.` : ""}${oast}`;
+    const left = Object.entries(preview.excluded_by_risk || {}).map(([risk, n]) => `${risk} ${count(n)}`);
+    if (preview.oast_unavailable) left.push(`${plural(preview.oast_unavailable, "OAST template")} (no Interactsh server)`);
+    return `Sends ${plural(preview.requests, "request")} from ${plural(preview.templates, "template")} to ${(preview.targets || []).join(", ")}.${left.length ? ` Left out: ${left.join("; ")}.` : ""}`;
   }
 
   function jobLine(job) {
@@ -200,11 +196,11 @@
     const fetcher = options.fetch || root.fetch.bind(root);
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
-    const ids = ["Status", "Progress", "ProgressBar", "Consent", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
+    const ids = ["Status", "Progress", "ProgressBar", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
       "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
       "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
-      "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanConsent", "ScanConsentText", "ScanStart",
-      "ScanNotice", "ScanJobs", "AutoState", "AutoSummary", "AutoHosts", "AutoRate", "AutoConsent", "AutoConsentRow", "AutoToggle",
+      "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanPlan", "ScanStart",
+      "ScanNotice", "ScanJobs", "AutoState", "AutoSummary", "AutoHosts", "AutoRate", "AutoToggle",
       "AutoSave", "AutoNotice"];
     const els = Object.fromEntries(ids.map((id) => [id, shell.querySelector(`#templates${id}`)]));
     const listeners = [];
@@ -277,7 +273,7 @@
         els.ProgressBar.max = progress.max;
         els.ProgressBar.value = progress.value;
       }
-      els.Download.disabled = !!working || busy || !els.Consent.checked;
+      els.Download.disabled = !!working || busy;
       els.Import.disabled = !!working || busy;
       els.Check.disabled = !!working || busy;
       const scopeless = (options.getScopeIncludeCount?.() || 0) === 0;
@@ -480,8 +476,7 @@
     }
     function invalidatePreview() {
       previewed = null;
-      els.ScanConsent.checked = false;
-      els.ScanConsentText.textContent = "Preview the scan to see what it sends.";
+      els.ScanPlan.textContent = "Preview to see what it sends.";
       renderScan();
     }
     function clearScanTimer() { if (scanTimer !== null) unschedule(scanTimer); scanTimer = null; }
@@ -489,8 +484,8 @@
     function renderScan() {
       const running = scanJobs.some((job) => job.status === "running");
       els.ScanPreview.disabled = scanBusy || !status?.library;
-      els.ScanConsent.disabled = !previewed || scanBusy;
-      els.ScanStart.disabled = scanBusy || running || !previewed || !els.ScanConsent.checked;
+      // Start sends what the preview showed; the click is the consent.
+      els.ScanStart.disabled = scanBusy || running || !previewed;
       els.ScanStart.textContent = running ? "A scan is running" : "Start scan";
       const nodes = [];
       for (const job of scanJobs) {
@@ -655,23 +650,21 @@
       els.AutoNotice.classList.toggle("recon-error", error);
     }
     function autoValues() {
-      return { hosts: els.AutoHosts.value, rate: els.AutoRate.value, consent: els.AutoConsent.checked };
+      return { hosts: els.AutoHosts.value, rate: els.AutoRate.value };
     }
     function renderAuto() {
       const on = !!auto?.enabled;
       els.AutoState.textContent = auto ? (on ? "On" : "Off") : "";
       els.AutoState.classList.toggle("recon-badge-warning", on);
       const nowhere = auto && !(auto.hosts || []).length && (options.getScopeIncludeCount?.() || 0) === 0;
-      els.AutoSummary.textContent = autoLine(auto) + (auto && !auto.templates
-        ? " Turn on Scan templates in the On column to give it something to send." : "")
-        + (nowhere ? " Scope is empty and no hosts are listed here, so it has nowhere to send." : "");
+      els.AutoSummary.textContent = autoLine(auto)
+        + (auto && !auto.templates ? ". Turn on Scan templates in the list." : "")
+        + (nowhere ? `${auto.templates ? "." : ""} Scope is empty and no hosts are listed.` : "");
       if (auto && !autoDraft) {
         els.AutoHosts.value = (auto.hosts || []).join("\n");
         els.AutoRate.value = String(auto.rate || 10);
       }
       els.AutoToggle.textContent = on ? "Turn off" : "Turn on";
-      // Consent goes with turning it on or saving a change, not with being on.
-      els.AutoConsentRow.classList.toggle("hidden", on && !autoDraft);
       els.AutoToggle.disabled = autoBusy || !auto;
       els.AutoSave.disabled = autoBusy || !auto || !autoDraft;
     }
@@ -697,7 +690,6 @@
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         }), "Could not save the auto scan");
         autoDraft = false;
-        els.AutoConsent.checked = false;
         autoNotice(describe);
       } catch (error) {
         autoNotice(error.message || "The request failed.", true);
@@ -709,14 +701,12 @@
     }
 
     on(els.AutoToggle, "click", () => (auto?.enabled
-      ? saveAuto(false, "The auto scan is off; hosts that waited were dropped.")
-      : saveAuto(true, "The auto scan is on. New hosts the proxy captures get the templates turned on for it.")));
+      ? saveAuto(false, "Off. Waiting hosts were dropped.")
+      : saveAuto(true, "On. New hosts the proxy captures get the turned-on templates.")));
     on(els.AutoSave, "click", () => saveAuto(!!auto?.enabled, "Saved."));
     for (const control of [els.AutoHosts, els.AutoRate]) on(control, "input", () => { autoDraft = true; renderAuto(); });
 
-    on(els.Consent, "change", renderStatus);
     on(els.Download, "click", () => act(async () => {
-      if (!els.Consent.checked) throw new Error("Confirm the download first.");
       await json(await fetcher("/api/templates/library/download", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledged: true }),
       }), "Could not start the download");
@@ -768,12 +758,12 @@
         return;
       }
       previewed = JSON.stringify(startBody());
-      els.ScanConsentText.textContent = previewLine(preview);
+      els.ScanPlan.textContent = previewLine(preview);
       scanNotice("");
     }));
     on(els.ScanStart, "click", () => scanAct(async () => {
       const body = startBody();
-      if (JSON.stringify(body) !== previewed || !els.ScanConsent.checked) {
+      if (JSON.stringify(body) !== previewed) {
         invalidatePreview();
         throw new Error("The form changed since the preview. Preview the scan again.");
       }
@@ -784,9 +774,8 @@
       openJob = job;
       showingJob = true;
       renderDetail();
-      scanNotice("The scan started. Matches appear here and in Capture ▸ Findings under nuclei.");
+      scanNotice("Started. Matches show here and in Findings.");
     }));
-    on(els.ScanConsent, "change", renderScan);
     for (const control of [els.ScanTargets, els.ScanRate, els.ScanConcurrency, els.ScanMaxRequests]) on(control, "input", invalidatePreview);
     for (const control of [els.ScanSelection, els.ScanMatchReplace, els.ScanRisks]) on(control, "change", invalidatePreview);
     // The filter selects what a scan sends.
