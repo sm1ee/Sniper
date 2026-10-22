@@ -152,7 +152,8 @@ test("a scan request names its targets, its selection and whether it only counts
   assert.deepEqual(one.ids, ["git-config"]);
   assert.equal(one.acknowledged, true);
   assert.equal(one.filter, undefined);
-  assert.throws(() => templates.scanRequest({ ...values, selection: "selected" }, {}, null, "s-1", true), /Select a template/);
+  // Its On box does not select a template; clicking its row does.
+  assert.throws(() => templates.scanRequest({ ...values, selection: "selected" }, {}, null, "s-1", true), /Click a template's row/);
   assert.throws(() => templates.scanRequest(values, {}, null, null, true), /session/);
   assert.throws(() => templates.scanRequest({ ...values, rate: "51" }, {}, null, "s-1", true), /from 1 to 50/);
   for (const bad of ["", "app.example.com", "https://app.example.com/?q=1", "https://user:pw@app.example.com", "ftp://app.example.com"]) {
@@ -299,7 +300,7 @@ function inside(element) {
 
 const settle = async () => { for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-async function listFixture(items, arrowStep, { sessionId = null, auto = null, scopeCount = 1, library = { source: "import", verified: false }, jobs = [], openRecord } = {}) {
+async function listFixture(items, arrowStep, { sessionId = null, auto = null, scopeCount = 1, library = { source: "import", verified: false }, jobs = [], openRecord, scanError = null } = {}) {
   const els = new Map();
   const sent = [];
   const doc = fakeDocument((tag) => Object.assign(listeningElement(), { tag }));
@@ -315,6 +316,9 @@ async function listFixture(items, arrowStep, { sessionId = null, auto = null, sc
     fetch: async (url, init = {}) => {
       urls.push(String(url));
       if (init.method === "POST") sent.push({ url: String(url), body: JSON.parse(init.body) });
+      if (scanError && String(url) === "/api/templates/scans" && init.method === "POST") {
+        return { ok: false, status: 400, text: async () => JSON.stringify({ error: scanError }) };
+      }
       const id = String(url).match(/^\/api\/templates\/([^?/]+)$/)?.[1];
       const body = String(url).includes("/library") ? status
         : String(url).startsWith("/api/templates/auto/templates") ? { auto_enabled: 1, ignored: 0 }
@@ -450,6 +454,8 @@ test("Start scan is ready at once and sends the form as it stands, and the plan 
 
   f.els.get("#templatesScanTargets").value = "https://app.example.com";
   f.els.get("#templatesScanTargets").dispatch("input", {});
+  // The form changed, so the last refusal no longer applies.
+  assert.equal(f.els.get("#templatesScanNotice").textContent, "");
   await f.runTimers();
   assert.equal(f.sent.at(-1).body.preview, true);
   assert.equal(f.els.get("#templatesScanPlan").textContent, "Sends 3 requests from 1 template to https://app.example.com.");
@@ -497,6 +503,24 @@ test("a scan's matches open their exchange, and its requests read as status, req
   ]);
   assert.equal(requests[0].title, "GET https://app.example.com/.git/config");
   assert.equal(requests[0].className, "templates-matched");
+  f.controller.dispose();
+});
+
+test("a refusal reads as what the server said, not as its JSON", async () => {
+  const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
+  const refusal = "https://app.example.com is not in Scope. Template Scan sends only to hosts in Scope; add app.example.com there.";
+  const f = await listFixture(items, () => 0, { sessionId: "s-1", scanError: refusal });
+  f.els.get("#templatesScanSelection").value = "filter";
+  f.els.get("#templatesScanRate").value = "10";
+  f.els.get("#templatesScanConcurrency").value = "4";
+  f.els.get("#templatesScanMaxRequests").value = "10000";
+  f.els.get("#templatesScanTargets").value = "https://app.example.com";
+  f.els.get("#templatesScanTargets").dispatch("input", {});
+  await f.runTimers();
+  assert.equal(f.els.get("#templatesScanPlan").textContent, refusal);
+  f.els.get("#templatesScanStart").dispatch("click", {});
+  await settle();
+  assert.equal(f.els.get("#templatesScanNotice").textContent, refusal);
   f.controller.dispose();
 });
 

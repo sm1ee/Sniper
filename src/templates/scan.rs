@@ -589,7 +589,19 @@ pub async fn start(
     }
     for target in &targets {
         if !crate::scope::is_host_in_scope(&target.authority, &include, &exclude) {
-            return Err(bad_request(format!("{} is not in Scope.", target.label)));
+            // Say what to change: an exclusion is undone differently from a
+            // missing include.
+            return Err(bad_request(
+                if crate::scope::is_host_in_scope(&target.authority, &include, &[]) {
+                    format!("{} is excluded from Scope.", target.label)
+                } else {
+                    format!(
+                        "{} is not in Scope. Template Scan sends only to hosts in Scope; add {} there.",
+                        target.label,
+                        host_of(&target.authority)
+                    )
+                },
+            ));
         }
         if crate::proxy::targets_own_listener(&state, &session, &target.scheme, &target.authority)
             .await
@@ -3222,9 +3234,30 @@ mod tests {
             })
             .await
             .unwrap();
+        // The refusal says what to add, so the operator need not work it out.
+        assert!(refused(state.clone(), body.clone()).await.ends_with(
+            "is not in Scope. Template Scan sends only to hosts in Scope; add 127.0.0.1 there."
+        ));
+        session
+            .runtime
+            .update(crate::runtime::RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["127.0.0.1".into()]),
+                excluded_scope_patterns: Some(vec!["127.0.0.1".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert!(refused(state.clone(), body.clone())
             .await
-            .contains("not in Scope"));
+            .ends_with("is excluded from Scope."));
+        session
+            .runtime
+            .update(crate::runtime::RuntimeSettingsUpdate {
+                excluded_scope_patterns: Some(Vec::new()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         session
             .runtime
             .update(crate::runtime::RuntimeSettingsUpdate {

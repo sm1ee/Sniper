@@ -258,7 +258,7 @@
       apply_match_replace: !!values.applyMatchReplace,
     };
     if (values.selection === "selected") {
-      if (!selectedId) throw new Error("Select a template in the list first.");
+      if (!selectedId) throw new Error("Click a template's row in the list first; its On box does not select it.");
       body.ids = [selectedId];
     } else {
       const filter = {};
@@ -368,10 +368,17 @@
       els.Notice.classList.toggle("hidden", !message);
       els.Notice.classList.toggle("recon-error", error);
     }
+    // A refusal is `{"error": "…"}` from some endpoints and plain text from
+    // others; either way the operator reads the sentence.
     async function json(response, fallback) {
       if (!response.ok) {
         const text = (await response.text()).slice(0, 1000);
-        throw new Error(text || `${fallback} (HTTP ${response.status})`);
+        let message = text;
+        try {
+          const parsed = JSON.parse(text);
+          if (typeof parsed?.error === "string") message = parsed.error;
+        } catch (_) {}
+        throw new Error(message || `${fallback} (HTTP ${response.status})`);
       }
       return response.json();
     }
@@ -659,6 +666,8 @@
       }
     }
     function schedulePlan() {
+      // The form changed, so the last refusal no longer applies.
+      scanNotice("");
       if (planTimer !== null) unschedule(planTimer);
       planTimer = schedule(() => { planTimer = null; void plan(); }, 400);
     }
