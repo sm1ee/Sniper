@@ -70,7 +70,7 @@ function fixture() {
   els.findingsDetailJump.dataset.recordId = record.id;
   els.findingsBody.querySelector = selector =>
     selector === ".history-row.selected" && selectedRow.classes.has("selected") ? selectedRow : null;
-  for (const name of ["proxyAddr", "uiAddr", "captureMode", "settingsSpecialHostHttp",
+  for (const name of ["proxyAddr", "uiAddr", "settingsSpecialHostHttp",
     "certificateName", "certificateExpiry", "certificatePemPath", "certificateDerPath",
     "specialHostHttps", "dataDir", "certificateNote"]) els[name] = element();
   const interceptPill = element();
@@ -200,7 +200,7 @@ function assertCleared(f) {
   for (const name of ["findingsReqView", "findingsResView"]) assert.equal(f.els[name].innerHTML, "", name);
   for (const side of ["Req", "Res"]) {
     assert.equal(f.els[`findings${side}SearchInput`].value, "");
-    assert.match(f.els[`findings${side}SearchMeta`].innerHTML, /No highlights · 0 lines/);
+    assert.equal(f.els[`findings${side}SearchMeta`].innerHTML, "0 lines");
   }
   assert.equal(f.els.findingsBadge.classes.has("hidden"), true);
   for (const button of [f.els.findingsDetailJump, ...Object.values(f.buttons)]) {

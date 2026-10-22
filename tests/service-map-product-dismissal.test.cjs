@@ -95,7 +95,7 @@ function fixture() {
   const product = () => products.children.find(item => item.dataset.serviceProductFilter === 'product');
   const version = () => products.children.find(item => item.dataset.serviceProductFilter === 'version');
   const clear = () => products.children.find(item => item.dataset.serviceProductFilterClear);
-  const appEls = Object.fromEntries(['dashboardShell', 'proxyShell', 'replayShell', 'toolsShell', 'fuzzerShell', 'sequenceShell', 'targetShell', 'mapShell', 'loggerShell', 'footerMode'].map(key => [key, node()]));
+  const appEls = Object.fromEntries(['dashboardShell', 'proxyShell', 'replayShell', 'toolsShell', 'fuzzerShell', 'sequenceShell', 'targetShell', 'mapShell', 'loggerShell'].map(key => [key, node()]));
   const app = loadFunctions(['renderToolPanels'], { state: { activeTool: 'map', activeTargetView: 'service-map' }, els: appEls,
     targetServiceMapController: controller, mainTabs: [], sanitizeActiveTool: value => value, renderProxyPanels() {} });
   return { controller, state: controller.getState(), els, document, popover, summary, products, product, version, clear, outside, requests,

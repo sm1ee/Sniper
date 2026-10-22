@@ -122,7 +122,7 @@ function fixture() {
   for (const name of ['displaySettingsModal', 'filterModal', 'curlImportModal', 'scannerSettingsBackdrop', 'compareModal']) {
     els[name] = document.getElementById(name); els[name].classList.add('hidden');
   }
-  for (const name of ['dashboardShell', 'proxyShell', 'replayShell', 'toolsShell', 'fuzzerShell', 'sequenceShell', 'targetShell', 'mapShell', 'loggerShell', 'reconShell', 'footerMode']) els[name] = new Element();
+  for (const name of ['dashboardShell', 'proxyShell', 'replayShell', 'toolsShell', 'fuzzerShell', 'sequenceShell', 'targetShell', 'mapShell', 'loggerShell', 'reconShell']) els[name] = new Element();
   els.mapShell.append(panel);
   document.activeElement = opener;
   const state = { activeTool: 'map', activeTargetView: 'service-map' };

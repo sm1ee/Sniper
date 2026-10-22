@@ -23,7 +23,7 @@ function tabFixture() {
   const els = Object.fromEntries([
     "proxyShell", "colorTagFilter", "filterBar", "trafficRegion", "historyWorkbenchResizer",
     "lowerWorkbench", "interceptPanel", "websocketPanel", "matchReplacePanel", "findingsPanel",
-    "oastPanel", "proxySettingsPanel", "proxySubPlaceholder", "footerMode", "proxySubPath",
+    "oastPanel", "proxySettingsPanel", "proxySubPlaceholder", "proxySubPath",
     "proxySubTitle", "proxySubDescription",
   ].map(key => [key, element()]));
   let loads = 0;

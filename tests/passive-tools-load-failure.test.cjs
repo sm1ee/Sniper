@@ -49,7 +49,7 @@ function fixture({ missingGlobals = false, partialFailure = false } = {}) {
   }
   const els = Object.fromEntries([
     "dashboardShell", "proxyShell", "replayShell", "toolsShell", "fuzzerShell",
-    "sequenceShell", "targetShell", "loggerShell", "footerMode", "toolsActiveToolTitle",
+    "sequenceShell", "targetShell", "loggerShell", "toolsActiveToolTitle",
   ].map(name => [name, element()]));
   els.toolsLoadError = element(["hidden"]);
   els.toolsLoadError.textContent = noticeMarkup?.[2] || "";
@@ -192,7 +192,6 @@ test("a late load failure stays silent on another tab and appears on the next To
   assert.equal(f.els.toolsShell.classList.contains("hidden"), true);
   assert.equal(f.els.toolsLoadError.classList.contains("hidden"), true);
   assert.equal(f.els.toolsLoadError.classWrites, 0);
-  assert.equal(f.els.footerMode.textContent, "Session active");
   f.assertUnchangedFocusAndDraft();
   f.render("tools"); await nextTurn();
   assertGuidance(f);

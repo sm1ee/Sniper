@@ -583,7 +583,7 @@
               <!-- Filter controls -->
               <div class="findings-filter-bar">
                 <select id="findingsFilterSeverity" class="findings-filter-select">
-                  <option value="">All Severity</option>
+                  <option value="">All severities</option>
                   <option value="critical">Critical</option>
                   <option value="high">High+</option>
                   <option value="medium">Medium+</option>
@@ -591,7 +591,7 @@
                   <option value="info">Info+</option>
                 </select>
                 <select id="findingsFilterCategory" class="findings-filter-select">
-                  <option value="">All Categories</option>
+                  <option value="">All categories</option>
                   <option value="jwt">JWT</option>
                   <option value="header">Headers</option>
                   <option value="cookie">Cookie</option>
@@ -603,12 +603,12 @@
                   <option value="info">Information</option>
                   <option value="auth">Authentication</option>
                 </select>
-                <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search..." />
+                <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search" />
               </div>
               <div class="findings-toolbar-actions">
                 <label class="scanner-quick-toggle" title="Show only in-scope findings">
                   <input id="findingsInScopeOnly" type="checkbox" />
-                  <span class="scanner-quick-toggle-label">In Scope</span>
+                  <span class="scanner-quick-toggle-label">In scope</span>
                 </label>
                 <label class="scanner-quick-toggle" title="Toggle Passive Scan">
                   <input id="scannerQuickToggle" type="checkbox" checked />
@@ -1430,7 +1430,7 @@
               <p class="inline-copy">Chain requests with variable extraction. Use <code>{{variable}}</code> in subsequent steps.</p>
             </div>
             <div class="toolbar-actions">
-              <button class="secondary-action" id="newSequenceButton" type="button">New Sequence</button>
+              <button class="secondary-action" id="newSequenceButton" type="button">New sequence</button>
             </div>
           </header>
 
@@ -1847,10 +1847,6 @@
         <div class="status-left">
           <button class="status-link" id="openEventLogButton" type="button">Event log</button>
           <span id="eventLogStatus">0 entries</span>
-          <span id="footerMode">HTTP active</span>
-        </div>
-        <div class="status-right">
-          <span id="captureMode">Preview capture only</span>
         </div>
       </footer>
     </div>

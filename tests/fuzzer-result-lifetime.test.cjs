@@ -163,7 +163,7 @@ for (const boundary of ['reset', 'no-transaction', 'empty-results', 'hide-detail
 });
 for (const status of ['completed', 'failed']) test(`saved ${status} job keeps its terminal status and enabled controls`, () => {
   const f = fixture(); f.c.setFuzzerAttackRecord(job('saved-job-a', status)); f.c.renderFuzzer();
-  assert.equal(f.els.fuzzerMeta.textContent, `3 payload(s) · 1 position(s) · ${status}`);
+  assert.equal(f.els.fuzzerMeta.textContent, `3 payloads · 1 position · ${status}`);
   assert.equal(f.els.startFuzzerButton.disabled, false); assert.equal(f.els.resetFuzzerButton.disabled, false);
   assert.equal(f.requests.length, 0);
 });

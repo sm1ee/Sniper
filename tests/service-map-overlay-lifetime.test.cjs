@@ -232,7 +232,7 @@ test('body priority keeps separate metadata omissions and partial coverage visib
   assert.match(f.els.graphDiagnostics.textContent, /Metadata arrows: 0 \/ 25 shown · 25 outside displayed cards · 0 omitted by arrow cap/);
   assert.match(f.els.overlayStatus.innerHTML, /Partial retained-preview scan/);
   assert.match(f.els.overlayStatus.innerHTML, /Origin output limit reached/);
-  assert.match(f.els.overlayStatus.innerHTML, /3 reference occurrence\(s\) omitted/);
+  assert.match(f.els.overlayStatus.innerHTML, /3 reference occurrences omitted/);
   assert.equal(f.state.snapshot.origins.length, 2);
 });
 

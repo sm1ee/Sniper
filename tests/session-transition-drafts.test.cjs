@@ -79,7 +79,6 @@ function setup({ rendered = true } = {}) {
     'dashboardShell', 'proxyShell', 'replayShell', 'toolsShell',
     'fuzzerShell', 'sequenceShell', 'targetShell', 'loggerShell',
   ]) f.els[name] = { classList: { toggle: (key, value) => { f.els[name][key] = value; } } };
-  f.els.footerMode = {};
   for (const name of ['sendReplayButton', 'cancelReplayButton', 'replayBackButton', 'replayForwardButton']) {
     f.els[name] = {};
   }

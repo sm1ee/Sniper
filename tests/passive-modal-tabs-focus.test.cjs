@@ -61,7 +61,7 @@ function tabFixture() {
   for (const name of [
     "colorTagFilter", "filterBar", "trafficRegion", "historyWorkbenchResizer", "lowerWorkbench",
     "interceptPanel", "websocketPanel", "matchReplacePanel", "findingsPanel", "oastPanel",
-    "proxySettingsPanel", "proxySubPlaceholder", "footerMode", "closeDisplaySettingsButton", "openDisplaySettingsButton",
+    "proxySettingsPanel", "proxySubPlaceholder", "closeDisplaySettingsButton", "openDisplaySettingsButton",
   ]) els[name] = node();
   els.displaySettingsModal = node({}, "hidden");
   els.displaySettingsModal.querySelectorAll = selector => {

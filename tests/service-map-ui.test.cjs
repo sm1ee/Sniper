@@ -1142,7 +1142,7 @@ test('partial output exposes truncation, omissions, long origins and full indepe
   assert.equal(f.state.bodyReferences.references.length, 100);
   assert.match(f.els.detail.innerHTML, /100 referenced origins · 700 literal URL occurrences/);
   assert.match(f.els.detail.innerHTML, /Partial retained-preview scan/);
-  assert.match(f.els.detail.innerHTML, /30 reference occurrence\(s\) omitted/);
+  assert.match(f.els.detail.innerHTML, /30 reference occurrences omitted/);
   assert.match(f.els.detail.innerHTML, /Scan: 262,144 bytes · Serialized row read: 2,097,152 bytes · Origins: 100 · URL candidates: 4,096 · Candidate: 4,096 bytes · Offsets per origin: 5/);
   assert.ok(f.els.detail.innerHTML.includes(longOrigin));
   assert.equal((f.els.detail.innerHTML.match(/class="service-map-body-reference-origin"/g) || []).length, 100);

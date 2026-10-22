@@ -79,7 +79,7 @@ function fixture() {
   new Element("trafficRegion", "SECTION", nodes.proxyShell).tabIndex = 0;
   new Element("findingsSettingsButton", "BUTTON", nodes.proxyShell);
   for (const id of ["colorTagFilter", "filterBar", "historyWorkbenchResizer", "lowerWorkbench", "interceptPanel", "websocketPanel",
-    "matchReplacePanel", "findingsPanel", "oastPanel", "proxySettingsPanel", "proxySubPlaceholder", "footerMode"]) new Element(id, "DIV", document.body);
+    "matchReplacePanel", "findingsPanel", "oastPanel", "proxySettingsPanel", "proxySubPlaceholder"]) new Element(id, "DIV", document.body);
   for (const [id, parent] of [
     ["closeDisplaySettingsButton", "displaySettingsModal"], ["closeFilterModalButton", "filterModal"],
     ["scannerSettingsClose", "scannerSettingsBackdrop"], ["scannerSettingsCancel", "scannerSettingsBackdrop"],

@@ -117,7 +117,7 @@ for (const query of ["[a.*]", "\\", "<img src=x onerror='fixture'>", "&lt;", "İ
     f.type("");
     assert.deepEqual(f.snapshot(), { query: "", count: 0, ranges: [] });
     assert.equal(f.cv.nextSearchMatch(), -1);
-    assert.match(f.els.wsHandshakeSearchMeta.innerHTML, /^No highlights/);
+    assert.doesNotMatch(f.els.wsHandshakeSearchMeta.innerHTML, /highlight/);
     f.requestButton.dispatch("click");
     f.c.renderWebsocketSessions();
     assert.deepEqual(f.snapshot(), { query: "", count: 0, ranges: [] });

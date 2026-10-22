@@ -441,7 +441,7 @@ test("a real candidate autosave acknowledgement keeps the composing editor conne
   assert.equal(f.state._itemsVersion, 1);
   assert.equal(f.state.historyPaging.annotationMutationGeneration, 1);
   assert.equal(f.state._historyEntries[0].item, f.item);
-  assert.match(f.context.els.historyMeta.textContent, /1 loaded item\(s\) visible/);
+  assert.match(f.context.els.historyMeta.textContent, /1 loaded item visible/);
   input.dispatch("compositionend");
   runTimers(f);
   assert.equal(annotationRequests(f).length, 1, "ending the same candidate must not duplicate the save");
@@ -565,7 +565,7 @@ test("an unrelated record acknowledgement preserves the open note while updating
   assert.equal(f.cell.isConnected, true);
   assert.equal(input.value, "아직");
   assert.equal(f.historyWrites.length, 0);
-  assert.match(f.context.els.historyMeta.textContent, /2 loaded item\(s\) visible/);
+  assert.match(f.context.els.historyMeta.textContent, /2 loaded items visible/);
   input.dispatch("compositionend");
   input.dispatch("keydown", "Escape");
   assert.equal(f.historyWrites.length, 1);
@@ -587,7 +587,7 @@ test("an acknowledgement can remove a filtered row without interrupting its edit
   assert.equal(f.state.historyPaging.filteredTotal, 0);
   assert.equal(f.state.historyPaging.total, 1);
   assert.equal(f.state._historyEntries.length, 0);
-  assert.match(f.context.els.historyMeta.textContent, /0 loaded item\(s\) visible.*notes only/);
+  assert.match(f.context.els.historyMeta.textContent, /0 loaded items visible.*notes only/);
   assert.equal(f.historyWrites.length, 0, "even an empty-list acknowledgement must defer tbody replacement");
   assert.equal(f.cell.isConnected, true);
   input.dispatch("compositionend");
@@ -628,7 +628,7 @@ for (const composing of [false, true]) {
       assert.equal(f.state.selectedRecord, null);
       assert.equal(f.state._itemById.get(f.item.id), f.state.items[0]);
       assert.equal(f.state._itemIndexById.get(f.item.id), 0);
-      assert.match(f.context.els.historyMeta.textContent, /1 loaded item\(s\) visible/);
+      assert.match(f.context.els.historyMeta.textContent, /1 loaded item visible/);
       assert.equal(f.cell.querySelector(), input);
       assert.equal(f.historyWrites.length, 0);
       if (composing) { input.dispatch("compositionend"); runTimers(f); }

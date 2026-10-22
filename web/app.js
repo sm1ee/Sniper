@@ -782,8 +782,6 @@ const els = {
   inspectorContent: document.getElementById("inspectorContent"),
   notesPanel: document.getElementById("notesPanel"),
   notesCard: document.getElementById("notesCard"),
-  captureMode: document.getElementById("captureMode"),
-  footerMode: document.getElementById("footerMode"),
   openEventLogButton: document.getElementById("openEventLogButton"),
   eventLogStatus: document.getElementById("eventLogStatus"),
   displaySettingsModal: document.getElementById("displaySettingsModal"),
@@ -2957,7 +2955,6 @@ async function _applySettings(response) {
 
   els.proxyAddr.textContent = state.settings.proxy_addr;
   els.uiAddr.textContent = state.settings.ui_addr;
-  els.captureMode.textContent = `${formatSize(state.settings.body_preview_bytes)} body preview cap`;
   els.settingsSpecialHostHttp.textContent = state.settings.certificate.special_host_http;
 
   updateProxyStatusIndicator(state.settings.proxy_online);
@@ -9115,7 +9112,6 @@ function renderToolPanels() {
 
   if (dashboardVisible) {
     renderDashboard();
-    els.footerMode.textContent = "Session active";
     return;
   }
 
@@ -9126,7 +9122,6 @@ function renderToolPanels() {
 
   if (replayVisible) {
     renderReplay();
-    els.footerMode.textContent = "Replay active";
     return;
   }
 
@@ -9138,47 +9133,26 @@ function renderToolPanels() {
         els.toolsLoadError.classList.remove("hidden");
       }
     });
-    els.footerMode.textContent = "Tools active";
     return;
   }
 
   if (fuzzerVisible) {
     renderFuzzer();
-    els.footerMode.textContent = "Fuzzer active";
     return;
   }
 
   if (sequenceVisible) {
     renderSequencePanel();
-    els.footerMode.textContent = "Sequence active";
     return;
   }
 
   if (targetVisible) {
     renderTarget();
-    els.footerMode.textContent = "Scope active";
-    return;
-  }
-
-  if (mapVisible) {
-    els.footerMode.textContent = "Map active";
-    return;
-  }
-
-  if (reconVisible) {
-    els.footerMode.textContent = "Recon active";
-    return;
-  }
-
-  if (templatesVisible) {
-    els.footerMode.textContent = "Scan active";
     return;
   }
 
   if (loggerVisible) {
     renderEventLog();
-    els.footerMode.textContent = "Event log active";
-    return;
   }
 }
 
@@ -9906,7 +9880,7 @@ function resetFindingsSearchUi(options = {}) {
     const cv = getCMView(key);
     if (cv) cv.applySearch("");
     else if (legacyView) clearSearchHighlights(legacyView);
-    if (meta) meta.innerHTML = buildSearchMeta(lineCount, "raw", 0);
+    if (meta) meta.innerHTML = buildSearchMeta(lineCount, 0);
   }
 }
 
@@ -10116,7 +10090,7 @@ function renderFindingsVirtual() {
       const selected = f.id === selectedFindingId ? " selected" : "";
       rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
         <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
-        <td class="findings-col-category"><span class="detail-chip">${escapeHtml(f.category)}</span></td>
+        <td class="findings-col-category">${escapeHtml(f.category)}</td>
         <td class="findings-col-title">${escapeHtml(f.title)}</td>
         <td class="findings-col-host">${escapeHtml(f.host)}</td>
         <td class="findings-col-path">${escapeHtml(f.path)}</td>
@@ -10270,7 +10244,7 @@ function updateFindingsCodePaneCM(key, container, text, evidence, finding, searc
     result = updateCodePaneCM(key, container, text, { mode: "http" });
   }
   if (searchInput) searchInput.value = "";
-  if (searchMeta) searchMeta.innerHTML = buildSearchMeta(result.lineCount, "raw", result.matchCount);
+  if (searchMeta) searchMeta.innerHTML = buildSearchMeta(result.lineCount, result.matchCount);
   const cv = getCMView(key);
   const firstMatchLine = cv && result.matchPositions?.length
     ? cv.view.state.doc.lineAt(result.matchPositions[0]).number
@@ -10364,7 +10338,7 @@ function renderFindingsCodePane(viewEl, lineEl, text, evidence, target, finding)
   const searchInput = isReq ? els.findingsReqSearchInput : els.findingsResSearchInput;
   const searchMeta = isReq ? els.findingsReqSearchMeta : els.findingsResSearchMeta;
   if (searchInput) searchInput.value = "";
-  if (searchMeta) searchMeta.innerHTML = buildSearchMeta(countLines(text), "raw", 0);
+  if (searchMeta) searchMeta.innerHTML = buildSearchMeta(countLines(text), 0);
 
   // Scroll sync
   viewEl.addEventListener("scroll", () => { lineEl.scrollTop = viewEl.scrollTop; });
@@ -11425,14 +11399,14 @@ function bindFindingsEvents() {
       if (cv) {
         const result = cv.applySearch(query);
         const lineCount = cv.view.state.doc.lines;
-        els.findingsReqSearchMeta.innerHTML = buildSearchMeta(lineCount, "raw", result.matchCount);
+        els.findingsReqSearchMeta.innerHTML = buildSearchMeta(lineCount, result.matchCount);
         return;
       }
       // Legacy fallback
       if (!els.findingsReqView) return;
       const { count } = applyCodeSearch(els.findingsReqView, query);
       const lines = els.findingsReqView.querySelectorAll(".code-line").length;
-      els.findingsReqSearchMeta.innerHTML = buildSearchMeta(lines, "raw", count);
+      els.findingsReqSearchMeta.innerHTML = buildSearchMeta(lines, count);
     });
   }
   if (els.findingsResSearchInput) {
@@ -11443,14 +11417,14 @@ function bindFindingsEvents() {
       if (cv) {
         const result = cv.applySearch(query);
         const lineCount = cv.view.state.doc.lines;
-        els.findingsResSearchMeta.innerHTML = buildSearchMeta(lineCount, "raw", result.matchCount);
+        els.findingsResSearchMeta.innerHTML = buildSearchMeta(lineCount, result.matchCount);
         return;
       }
       // Legacy fallback
       if (!els.findingsResView) return;
       const { count } = applyCodeSearch(els.findingsResView, query);
       const lines = els.findingsResView.querySelectorAll(".code-line").length;
-      els.findingsResSearchMeta.innerHTML = buildSearchMeta(lines, "raw", count);
+      els.findingsResSearchMeta.innerHTML = buildSearchMeta(lines, count);
     });
   }
   initSearchHitNavigation(els.findingsReqSearchMeta, () => els.findingsReqView);
@@ -11643,55 +11617,15 @@ function renderProxyPanels() {
   els.proxySettingsPanel.classList.toggle("hidden", !showProxySettings);
   els.proxySubPlaceholder.classList.toggle("hidden", !showPlaceholder);
 
-  // Startup renders these panels whichever tool was left open; only Capture in
-  // front may name its tab in the status bar.
-  const footer = (text) => {
-    if (state.activeTool === "proxy") els.footerMode.textContent = text;
-  };
-
-  if (showHistory) {
-    footer("HTTP active");
-    return;
-  }
-
-  if (showIntercept) {
-    footer("Intercept active");
-    return;
-  }
-
-  if (showWebsockets) {
-    applySavedWebsocketPaneWidth();
-    footer("Web Socket active");
-    return;
-  }
-
-  if (showMatchReplace) {
-    renderMatchReplaceRules();
-    footer("Replace active");
-    return;
-  }
-
-  if (showFindings) {
-    loadFindings();
-    footer("Findings active");
-    return;
-  }
-
-  if (showOast) {
-    footer("OAST active");
-    return;
-  }
-
-  if (showProxySettings) {
-    footer("Settings active");
-    return;
-  }
+  if (showWebsockets) applySavedWebsocketPaneWidth();
+  if (showMatchReplace) renderMatchReplaceRules();
+  if (showFindings) loadFindings();
+  if (!showPlaceholder) return;
 
   const label = humanizeProxyTab(state.activeProxyTab);
   els.proxySubPath.textContent = `Proxy / ${label}`;
   els.proxySubTitle.textContent = `${label} is planned next`;
   els.proxySubDescription.textContent = `${label} will plug into the same capture store and message workbench.`;
-  footer(`${label} placeholder active`);
 }
 
 // Set by a rail-tab click so the next render scrolls to that section once.
@@ -11781,8 +11715,8 @@ function renderHistory(options = {}) {
   const hiddenConnectExact = isKnownCount(paging.hiddenConnectTotal);
   const summary = [];
   const totalCount = visibleEntries.length;
-  summary.push(`${totalCount} loaded item(s) visible`);
-  if (hiddenConnectCount) summary.push(`${hiddenConnectCount}${hiddenConnectExact || paging.fullyLoaded ? "" : " loaded"} CONNECT tunnel(s) hidden`);
+  summary.push(`${totalCount} loaded item${totalCount === 1 ? "" : "s"} visible`);
+  if (hiddenConnectCount) summary.push(`${hiddenConnectCount}${hiddenConnectExact || paging.fullyLoaded ? "" : " loaded"} CONNECT tunnel${hiddenConnectCount === 1 ? "" : "s"} hidden`);
   if (isKnownCount(paging.filteredTotal)) {
     summary.push(`${state.items.length}/${paging.filteredTotal} server-matched summaries loaded`);
   }
@@ -12657,11 +12591,11 @@ function renderMessagePanes() {
     els.responseSearchInput.value = state.messageSearch.response;
   }
   els.requestSearchMeta.innerHTML = requestPane
-    ? buildSearchMeta(requestPane.lineCount, state.messageViews.request, requestPane.matchCount)
-    : buildSearchMeta(0, state.messageViews.request, 0);
+    ? buildSearchMeta(requestPane.lineCount, requestPane.matchCount)
+    : buildSearchMeta(0, 0);
   els.responseSearchMeta.innerHTML = responsePane
-    ? buildSearchMeta(responsePane.lineCount, state.messageViews.response, responsePane.matchCount)
-    : buildSearchMeta(0, state.messageViews.response, 0);
+    ? buildSearchMeta(responsePane.lineCount, responsePane.matchCount)
+    : buildSearchMeta(0, 0);
   renderResponsePreview(
     {
       view: els.responseRenderView,
@@ -13031,19 +12965,19 @@ function updateMessagePaneSearch(target) {
   if (cmView) {
     const result = cmView.applySearch(query);
     if (meta) {
-      meta.innerHTML = buildSearchMeta(cmView.view.state.doc.lines, mode, result.matchCount);
+      meta.innerHTML = buildSearchMeta(cmView.view.state.doc.lines, result.matchCount);
     }
     return;
   }
 
   const viewElement = target === "response" ? els.responseView : els.requestView;
   if (!viewElement) {
-    if (meta) meta.innerHTML = buildSearchMeta(0, mode, 0);
+    if (meta) meta.innerHTML = buildSearchMeta(0, 0);
     return;
   }
   const result = applyCodeSearch(viewElement, query);
   if (meta) {
-    meta.innerHTML = buildSearchMeta(countLines(viewElement.textContent || ""), mode, result.count);
+    meta.innerHTML = buildSearchMeta(countLines(viewElement.textContent || ""), result.count);
   }
 }
 
@@ -13470,7 +13404,7 @@ function renderWebsocketFrameTable(options = {}) {
     ? `
           <tr class="ws-frame-window-row">
             <td colspan="5">
-              Showing ${frames.length} loaded frame(s) (${olderFrameNotice}).
+              Showing ${frames.length} loaded frame${frames.length === 1 ? "" : "s"} (${olderFrameNotice}).
               ${canLoadOlderFrames
                 ? `<button type="button" class="link-button${olderFramesLoading ? " disabled" : ""}" data-ws-load-older-frames ${olderFramesLoading ? "disabled" : ""}>${olderFramesLoading ? "Loading..." : "Load older frames"}</button>`
                 : ""}
@@ -13545,8 +13479,8 @@ function selectWebsocketFrameRow(row) {
 
 function buildWebsocketFilterSummary(visibleCount, renderedCount, loadedCount, totalCount, filteredCount, hasMore, capReached, query) {
   const visibleLabel = renderedCount < visibleCount
-    ? `${renderedCount}/${visibleCount} session(s) shown`
-    : `${visibleCount} session(s) visible`;
+    ? `${renderedCount}/${visibleCount} session${visibleCount === 1 ? "" : "s"} shown`
+    : `${visibleCount} session${visibleCount === 1 ? "" : "s"} visible`;
   const parts = [visibleLabel];
   const filters = [];
   if (state.websocketInScopeOnly) filters.push("in scope");
@@ -13759,6 +13693,7 @@ function updateWebsocketSortIndicators() {
   document.querySelectorAll(".ws-sort").forEach((btn) => {
     const key = btn.dataset.wsSortKey;
     const active = key === state.websocketSortKey;
+    btn.classList.toggle("active", active);
     const indicator = btn.querySelector(".sort-indicator");
     if (indicator) {
       indicator.textContent = active ? (state.websocketSortDirection === "asc" ? "↑" : "↓") : "↕";
@@ -14987,7 +14922,7 @@ function updateReplaySearchPane(target, text, options = {}) {
     if (cv) {
       const result = cv.applySearch(query || "", { scrollToFirst });
       const mode = state.replayMessageViews[target] || "pretty";
-      meta.innerHTML = buildSearchMeta(cv.view.state.doc.lines, mode, result.matchCount);
+      meta.innerHTML = buildSearchMeta(cv.view.state.doc.lines, result.matchCount);
       return;
     }
   }
@@ -14995,7 +14930,7 @@ function updateReplaySearchPane(target, text, options = {}) {
   if (!isRequest && _replayResponseCMView) {
     const result = _replayResponseCMView.applySearch(query || "", { scrollToFirst });
     const mode = state.replayMessageViews[target] || "pretty";
-    meta.innerHTML = buildSearchMeta(_replayResponseCMView.view.state.doc.lines, mode, result.matchCount);
+    meta.innerHTML = buildSearchMeta(_replayResponseCMView.view.state.doc.lines, result.matchCount);
     return;
   }
 
@@ -15004,7 +14939,7 @@ function updateReplaySearchPane(target, text, options = {}) {
 
   const searchResult = applyCodeSearch(view, query);
   const mode = state.replayMessageViews[target] || "pretty";
-  meta.innerHTML = buildSearchMeta(countLines(text), mode, searchResult.count);
+  meta.innerHTML = buildSearchMeta(countLines(text), searchResult.count);
 }
 
 function syncReplayToolbar(tab, { force = false } = {}) {
@@ -15368,7 +15303,7 @@ function renderTarget() {
               >
                 <div class="target-host-copy">
                   <div class="target-host-title">${escapeHtml(hostName)}</div>
-                  <div class="target-path-meta">${requestCount} captured request(s) · ${paths.length} path(s) · ${escapeHtml(schemes.join(", ") || "http")}</div>
+                  <div class="target-path-meta">${requestCount} captured request${requestCount === 1 ? "" : "s"} · ${paths.length} path${paths.length === 1 ? "" : "s"} · ${escapeHtml(schemes.join(", ") || "http")}</div>
                 </div>
                 <div class="target-host-actions">
                   <span class="detail-chip ${host.in_scope ? "ok" : "none"}">${host.in_scope ? "In scope" : "Out of scope"}</span>
@@ -15389,7 +15324,7 @@ function renderTarget() {
                     <div class="target-path-item">
                       <div class="target-path-title">${escapeHtml(path.path || "/")}</div>
                       <div class="target-path-meta">
-                        ${escapeHtml(provenance)} · ${escapeHtml(methods.join(", "))}${captured ? ` · ${escapeHtml(formatStatus(path.status))}` : ""} · ${captured ? "Last captured" : "Last discovered"}: ${escapeHtml(formatTimestamp(path.last_seen))}${path.is_websocket ? " · websocket" : ""}${noteCount ? ` · ${noteCount} note(s)` : ""}
+                        ${escapeHtml(provenance)} · ${escapeHtml(methods.join(", "))}${captured ? ` · ${escapeHtml(formatStatus(path.status))}` : ""} · ${captured ? "Last captured" : "Last discovered"}: ${escapeHtml(formatTimestamp(path.last_seen))}${path.is_websocket ? " · websocket" : ""}${noteCount ? ` · ${noteCount} note${noteCount === 1 ? "" : "s"}` : ""}
                       </div>
                       ${discovered ? `<div class="target-path-meta">Recon: ${escapeHtml(reconSources.join(", ") || "unknown source")}${reconKinds.length ? ` · ${escapeHtml(reconKinds.join(", "))}` : ""}</div>` : ""}
                     </div>
@@ -15492,8 +15427,8 @@ function renderFuzzer() {
   els.fuzzerMeta.textContent = [
     attackRecord.running ? `Sending… ${sent} of ${planned} requests`
       : attackRecord.stopped ? `Stopped after ${sent} of ${planned} requests`
-        : `${attackRecord.payload_count ?? sent} payload(s)`,
-    `${attackRecord.marker_count ?? 0} position(s)`,
+        : `${attackRecord.payload_count ?? sent} payload${(attackRecord.payload_count ?? sent) === 1 ? "" : "s"}`,
+    `${attackRecord.marker_count ?? 0} position${attackRecord.marker_count === 1 ? "" : "s"}`,
     ...(attackRecord.running || attackRecord.stopped ? [] : [attackRecord.status || "completed"]),
   ].join(" · ");
   renderFuzzerResultsVirtual();
@@ -15686,7 +15621,7 @@ function renderFuzzerResultsWorkflow() {
   if (els.fuzzerSavedRunSelect) {
     const options = '<option value="">Choose a retained run</option>' + workflow.runs.map((run) => {
       const state = run.running ? "running" : run.stopped ? "stopped" : run.status || "completed";
-      const label = `${run.started_at || "Saved run"} · ${run.host || ""}${run.path || ""} · ${run.payload_count ?? run.result_count ?? 0} payload(s) · ${state}`;
+      const label = `${run.started_at || "Saved run"} · ${run.host || ""}${run.path || ""} · ${run.payload_count ?? run.result_count ?? 0} payload${(run.payload_count ?? run.result_count) === 1 ? "" : "s"} · ${state}`;
       return `<option value="${escapeHtml(run.id)}">${escapeHtml(label)}</option>`;
     }).join("");
     if (els.fuzzerSavedRunSelect.innerHTML !== options) els.fuzzerSavedRunSelect.innerHTML = options;
@@ -15769,7 +15704,7 @@ async function refreshFuzzerSavedRuns() {
       workflow.readBusy = false;
     }
     workflow.notice = workflow.runs.length
-      ? `${workflow.runs.length} retained run(s). View keeps the current draft; Reuse asks before replacing it.`
+      ? `${workflow.runs.length} retained run${workflow.runs.length === 1 ? "" : "s"}. View keeps the current draft; Reuse asks before replacing it.`
       : "No retained fuzzer runs are available in this session.";
   } catch (error) {
     if (ownsRead()) workflow.notice = error?.message || "Failed to list saved fuzzer runs.";
@@ -17383,7 +17318,7 @@ async function createNewSequence() {
   const sessionId = currentSequenceSessionId();
   const def = {
     id: generateUuid(),
-    name: "New Sequence",
+    name: "New sequence",
     steps: [],
   };
   const response = await fetch("/api/sequences", {
@@ -18814,12 +18749,12 @@ function updateInterceptSearch() {
   if (!els.interceptSearchMeta) return;
   const cv = getCMView(activeInterceptCMKey());
   if (!cv) {
-    els.interceptSearchMeta.innerHTML = buildSearchMeta(0, "raw", 0);
+    els.interceptSearchMeta.innerHTML = buildSearchMeta(0, 0);
     return;
   }
   const query = els.interceptSearchInput ? els.interceptSearchInput.value.trim() : "";
   const result = cv.applySearch(query);
-  els.interceptSearchMeta.innerHTML = buildSearchMeta(cv.view.state.doc.lines, "raw", result.matchCount);
+  els.interceptSearchMeta.innerHTML = buildSearchMeta(cv.view.state.doc.lines, result.matchCount);
 }
 
 // Set an intercept editor's content with the active search applied in the same
@@ -18828,7 +18763,7 @@ function setInterceptPaneContent(key, container, text, options = {}) {
   const query = els.interceptSearchInput ? els.interceptSearchInput.value.trim() : "";
   const result = updateCodePaneCM(key, container, text, { ...options, search: query });
   if (els.interceptSearchMeta && activeInterceptCMKey() === key) {
-    els.interceptSearchMeta.innerHTML = buildSearchMeta(result.lineCount, "raw", result.matchCount);
+    els.interceptSearchMeta.innerHTML = buildSearchMeta(result.lineCount, result.matchCount);
   }
   return result;
 }
@@ -24884,11 +24819,13 @@ function clearSearchHighlights(viewElement) {
   });
 }
 
-function buildSearchMeta(lineCount, mode, matchCount) {
-  const searchCopy = matchCount
-    ? `<span class="search-hit-count">${matchCount} highlight${matchCount === 1 ? "" : "s"}</span>`
-    : "No highlights";
-  return `${searchCopy} · ${lineCount} lines · ${titleCase(mode)} view`;
+// Lines always, highlights once a search finds some. The view's tab already
+// says which view it is.
+function buildSearchMeta(lineCount, matchCount) {
+  const lines = `${lineCount} line${lineCount === 1 ? "" : "s"}`;
+  return matchCount
+    ? `<span class="search-hit-count">${matchCount} highlight${matchCount === 1 ? "" : "s"}</span> · ${lines}`
+    : lines;
 }
 
 function initSearchHitNavigation(metaElement, getViewFn) {
@@ -25359,7 +25296,7 @@ function updateWsHandshakeSearch() {
     const result = cv.applySearch(query);
     const lineCount = cv.view.state.doc.lines;
     if (els.wsHandshakeSearchMeta) {
-      els.wsHandshakeSearchMeta.innerHTML = buildSearchMeta(lineCount, "pretty", result.matchCount);
+      els.wsHandshakeSearchMeta.innerHTML = buildSearchMeta(lineCount, result.matchCount);
     }
     return;
   }
@@ -25371,7 +25308,7 @@ function updateWsHandshakeSearch() {
   const result = applyCodeSearch(activeView, query);
   const lineCount = activeView.querySelectorAll(".code-line").length || 1;
   if (els.wsHandshakeSearchMeta) {
-    els.wsHandshakeSearchMeta.innerHTML = buildSearchMeta(lineCount, "pretty", result.count);
+    els.wsHandshakeSearchMeta.innerHTML = buildSearchMeta(lineCount, result.count);
   }
 }
 

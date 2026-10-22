@@ -658,7 +658,6 @@ function panelsFixture(extra = {}) {
   const names = ["dashboard", "proxy", "replay", "tools", "fuzzer", "sequence", "target", "logger"];
   const state = { activeTool: "dashboard" };
   const els = Object.fromEntries(names.map(name => [`${name}Shell`, new NodeFixture()]));
-  els.footerMode = new NodeFixture();
   return loadAppFunctions(["renderToolPanels"], { state, els, mainTabs: [], sanitizeActiveTool: tool => tool,
     renderDashboard() {}, renderProxyPanels() {}, renderReplay() {}, renderFuzzer() {}, renderSequencePanel() {}, renderTarget() {}, renderEventLog() {},
     ensureDecoderWorkbench: async () => {}, ...extra });
@@ -684,14 +683,13 @@ test("Recon navigation still toggles its mounted shell and initialized controlle
   context.renderToolPanels();
   assert.equal(context.els.reconShell.classList.contains("hidden"), false);
   assert.equal(context.els.dashboardShell.classList.contains("hidden"), true);
-  assert.equal(context.els.footerMode.textContent, "Recon active");
   context.state.activeTool = "dashboard";
   context.renderToolPanels();
   assert.equal(context.els.reconShell.classList.contains("hidden"), true);
   assert.deepEqual(calls, [true, false]);
 });
 
-test("Scan navigation names Scan in the status bar, not the tool left behind", () => {
+test("Scan navigation shows the Scan shell, not the tool left behind", () => {
   const context = panelsFixture({ templatesController: { setVisible() {} } });
   context.els.templatesShell = new NodeFixture();
   context.state.activeTool = "fuzzer";
@@ -699,7 +697,7 @@ test("Scan navigation names Scan in the status bar, not the tool left behind", (
   context.state.activeTool = "templates";
   context.renderToolPanels();
   assert.equal(context.els.templatesShell.classList.contains("hidden"), false);
-  assert.equal(context.els.footerMode.textContent, "Scan active");
+  assert.equal(context.els.fuzzerShell.classList.contains("hidden"), true);
 });
 
 for (const hasController of [false, true]) {
@@ -720,7 +718,7 @@ for (const hasController of [false, true]) {
   test(`settings hydration ${hasController ? "syncs the new Recon session" : "works without a Recon binding"}`, async () => {
     const state = { activeSession: { id: "old" } };
     const calls = [];
-    const els = Object.fromEntries(["proxyAddr", "uiAddr", "captureMode", "settingsSpecialHostHttp", "certificateName", "certificateExpiry", "certificatePemPath", "certificateDerPath", "specialHostHttps", "dataDir", "certificateNote"].map(id => [id, new NodeFixture()]));
+    const els = Object.fromEntries(["proxyAddr", "uiAddr", "settingsSpecialHostHttp", "certificateName", "certificateExpiry", "certificatePemPath", "certificateDerPath", "specialHostHttps", "dataDir", "certificateNote"].map(id => [id, new NodeFixture()]));
     const context = loadAppFunctions(["_applySettings"], { state, els, document: { getElementById: () => null },
       syncHttpCapturePill() {}, formatSize: value => String(value), formatTimestamp: value => value, escapeHtml: value => value,
       updateProxyStatusIndicator() {}, updateRemoteUiIndicator() {}, renderInterceptStatus() {}, renderProxySettings() {}, renderDashboard() {},
@@ -729,7 +727,6 @@ for (const hasController of [false, true]) {
     await context._applySettings({ json: async () => ({ active_session: { id: "new" }, runtime: {}, body_preview_bytes: 1024, certificate: {} }) });
     assert.equal(state.activeSession.id, "new");
     assert.deepEqual(calls, hasController ? ["new"] : []);
-    assert.match(els.captureMode.textContent, /1024 body preview cap/);
   });
 
   test(`session reset ${hasController ? "invalidates Recon after advancing generation" : "does not require a Recon binding"}`, () => {

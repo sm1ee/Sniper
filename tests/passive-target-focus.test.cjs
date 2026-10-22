@@ -386,7 +386,7 @@ test("Recon discoveries show provenance without implying captured traffic or a l
     recon_sources: ["wayback", "<script>"], recon_kinds: ["history", "candidate"],
   }];
   f.render();
-  assert.match(f.tree.innerHTML, /0 captured request\(s\)/);
+  assert.match(f.tree.innerHTML, /0 captured requests/);
   assert.match(f.tree.innerHTML, /Recon discovery · not captured/);
   assert.match(f.tree.innerHTML, /Last discovered: discovery-time/);
   assert.match(f.tree.innerHTML, /Recon: wayback, &lt;script&gt; · history, candidate/);

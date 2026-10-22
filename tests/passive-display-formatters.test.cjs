@@ -144,3 +144,33 @@ for (const duration_ms of [null, 0, 1250]) {
     assert.doesNotMatch(body.innerHTML, /undefined|NaN|Infinity|Invalid Date/);
   });
 }
+
+test("an editor's status line counts lines, and highlights only once there are some", () => {
+  const c = loadFunctions(["buildSearchMeta"]);
+  assert.equal(c.buildSearchMeta(1, 0), "1 line");
+  assert.equal(c.buildSearchMeta(7, 0), "7 lines");
+  assert.equal(c.buildSearchMeta(7, 1), '<span class="search-hit-count">1 highlight</span> · 7 lines');
+  assert.equal(c.buildSearchMeta(7, 3), '<span class="search-hit-count">3 highlights</span> · 7 lines');
+});
+
+// Sort arrows show only on a sorted header, which the WebSocket table must mark
+// as the history's does.
+test("the WebSocket table marks its sorted header active", () => {
+  const button = (key) => {
+    const classes = new Set();
+    const indicator = { textContent: "↕" };
+    return {
+      dataset: { wsSortKey: key }, indicator,
+      classList: { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); }, contains: (name) => classes.has(name) },
+      querySelector: () => indicator, closest: () => ({ setAttribute() {} }),
+    };
+  };
+  const buttons = [button("index"), button("host")];
+  const c = loadFunctions(["updateWebsocketSortIndicators"], {
+    document: { querySelectorAll: () => buttons },
+    state: { websocketSortKey: "host", websocketSortDirection: "asc" },
+  });
+  c.updateWebsocketSortIndicators();
+  assert.deepEqual(buttons.map((b) => b.classList.contains("active")), [false, true]);
+  assert.deepEqual(buttons.map((b) => b.indicator.textContent), ["↕", "↑"]);
+});

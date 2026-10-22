@@ -472,7 +472,6 @@ test('global capture/settings information only reports body preview size, never 
   const settings = { body_preview_bytes: 65536, max_transaction_entries: 250000, runtime: {}, active_session: { id: 'session-a' },
     certificate: { special_host_http: 'http://example.com', special_host_https: 'https://example.com' } };
   await context._applySettings(response(settings));
-  assert.equal(els.captureMode.textContent, '64 KB body preview cap');
   // Execute the actual label assignment from the independent runtime panel.
   const assignment = appSource.match(/^  els\.proxySettingsCaptureCap\.textContent = .*;$/m)[0];
   require('node:vm').runInContext(assignment, context);

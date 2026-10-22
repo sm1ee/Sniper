@@ -41,7 +41,7 @@ function fixture() {
     origins: [{ origin, request_count: 1, endpoints: [], technology_clues: [], redirects: [], header_links: [] }],
     unavailable: [], deferred: [], warnings: [] });
   const state = { activeTool: 'map', activeTargetView: 'service-map', replayTabs: [] };
-  const els = Object.fromEntries(['dashboardShell', 'proxyShell', 'replayShell', 'toolsShell', 'fuzzerShell', 'sequenceShell', 'targetShell', 'mapShell', 'loggerShell', 'reconShell', 'footerMode'].map(name => [name, node()]));
+  const els = Object.fromEntries(['dashboardShell', 'proxyShell', 'replayShell', 'toolsShell', 'fuzzerShell', 'sequenceShell', 'targetShell', 'mapShell', 'loggerShell', 'reconShell'].map(name => [name, node()]));
   const context = loadFunctions(['initializeTargetWorkspace', 'setActiveTargetView', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',
     'loadTransactionRecordById', 'openTransactionRecordInReplay'], {
     window, document, URL, URLSearchParams, AbortController, state, els, mainTabs: [],

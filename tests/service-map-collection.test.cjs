@@ -138,9 +138,9 @@ test('body, Link, metadata and peer evidence coexist across sources with indepen
 test('same typed edge keeps independent source provenance when one inspection is removed', async () => {
   const f = fixture(), value = sourceSnapshot(); value.origins[0].endpoints[0].evidence.push(B); await f.load(value);
   assert.equal(await showBody(f, TOKEN, SOURCE, [MATCH]), true); assert.equal(await showBody(f, B, SOURCE, [MATCH]), true);
-  assert.equal(paths(f).filter(path => path.includes('body_url_reference')).length, 1); assert.match(f.els.canvas.innerHTML, /2 inspected source\(s\)/);
+  assert.equal(paths(f).filter(path => path.includes('body_url_reference')).length, 1); assert.match(f.els.canvas.innerHTML, /2 inspected sources/);
   const count = f.requests.length, first = f.state.relationLayers[0], second = f.state.relationLayers[1]; remove(f, first);
-  assert.equal(paths(f).filter(path => path.includes('body_url_reference')).length, 1); assert.match(f.els.canvas.innerHTML, /1 inspected source\(s\)/);
+  assert.equal(paths(f).filter(path => path.includes('body_url_reference')).length, 1); assert.match(f.els.canvas.innerHTML, /1 inspected source(?!s)/);
   assert.equal(f.state.relationLayers[0], second); assert.equal(f.requests.length, count); assert.doesNotMatch(f.els.overlayStatus.innerHTML, new RegExp(TOKEN.replaceAll('.', '\\.')));
 });
 
