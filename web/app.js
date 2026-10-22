@@ -1284,6 +1284,9 @@ function bindEvents() {
       getSessionId: currentSessionId,
       openRecord: jumpToTransaction,
       arrowStep: tableArrowStep,
+      // A scan's request reads as HTTP history and Fuzzer show one.
+      transactionPath: (id) => transactionPath(id),
+      rawExchange: (record) => ({ request: buildRawRequest(record), response: buildRawResponse(record) }),
     });
   }
   document.querySelectorAll(".recon-table, .fuzzer-results-table").forEach(bindTableColumnResizers);

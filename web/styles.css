@@ -8303,24 +8303,37 @@ button.utility-button.replay-tab-add {
 .templates-facts dd { margin: 0; line-height: 18px; overflow-wrap: anywhere; }
 .templates-facts dd .templates-tag { margin-bottom: 4px; }
 .templates-yaml-comment { color: var(--text-dim); font-style: italic; }
-.templates-matches,
-.templates-requests { margin: 0; padding: 0; list-style: none; display: grid; }
-.templates-matches { gap: 8px; }
-.templates-match-open {
-  display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none;
-  color: var(--text); font: inherit; text-align: left; cursor: pointer;
-}
-.templates-match-open:hover { color: var(--point); }
-.templates-match-where { margin-top: 2px; color: var(--text-dim); font-family: var(--mono); font-size: var(--font-xs); overflow-wrap: anywhere; }
-/* One request a line: status, request, then how long and which template. */
-.templates-requests { gap: 3px; font-size: var(--font-xs); }
-.templates-requests li { display: grid; grid-template-columns: 36px minmax(0, 1fr) minmax(0, max-content); gap: 8px; align-items: baseline; }
-.templates-requests li > .recon-help { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.templates-request-status { color: var(--text-soft); font-family: var(--mono); }
+/* "⋯": what is seldom needed waits here. */
+.templates-more { position: relative; }
+.templates-more > summary { list-style: none; cursor: pointer; }
+.templates-more > summary::-webkit-details-marker { display: none; }
+.templates-more .templates-more-menu { position: absolute; top: calc(100% + 4px); right: 0; width: max-content; min-width: 210px; padding: 6px; }
+/* Templates | Results, there only once a scan has results to show. */
+.templates-views { display: flex; gap: 4px; }
+.templates-results-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.templates-shell .secondary-action.active { color: var(--point); border-color: var(--point-border); background: var(--point-soft); }
+.templates-results-table th[data-result-sort="status"] { width: 64px; }
+.templates-results-table th[data-result-sort="method"] { width: 72px; }
+.templates-results-table th[data-result-sort="template"] { width: 26%; }
+.templates-results-table th[data-result-sort="ms"] { width: 88px; }
+.templates-results-table th[data-result-sort="matched"] { width: 44px; }
+.templates-results-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.templates-results-table tbody tr[data-result-key] { cursor: pointer; }
+.templates-request-url { font-family: var(--mono); }
 .templates-request-error { color: var(--danger); }
-.templates-request-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
-.templates-requests .templates-matched .templates-request-url,
-.templates-requests .templates-matched .templates-request-status { color: var(--point); }
+.templates-results-table .templates-matched td { color: var(--point); }
+.templates-match-mark { text-align: center; }
+/* A scan's card is the way to its results. */
+.templates-job { cursor: pointer; }
+.templates-job:hover { background: rgba(255, 255, 255, 0.03); }
+.templates-job.recon-selected { background: var(--point-soft); }
+.templates-exchange {
+  margin: 0 0 4px; padding: 10px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--panel-code); color: var(--token-plain-color); font-family: var(--mono); font-size: var(--font-sm); line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; user-select: text; -webkit-user-select: text;
+}
+.templates-exchange::first-line { color: var(--text); font-weight: 600; }
+.recon-detail > .secondary-action { margin: 2px 0 6px; }
 .templates-progress {
   width: 100%; height: 6px; border: 0; border-radius: 3px;
   -webkit-appearance: none; appearance: none; background: var(--panel-code); overflow: hidden;

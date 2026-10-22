@@ -31,14 +31,22 @@
     return { key, direction: "asc" };
   }
 
-  // Turning templates on in bulk follows the list filter, restricted to the
-  // ones that can run passively; the server ignores the rest.
-  function passiveRequest(filters, enabled) {
-    const filter = { support: "passive" };
+  // Turning on what the list shows sends the list's own filter to the passive
+  // and the auto scan switches alike; each takes the templates it can run.
+  function bulkRequest(filters, enabled) {
+    const filter = {};
     const search = String(filters.search || "").trim();
     if (search) filter.search = search;
     if (filters.severity) filter.severity = filters.severity;
+    if (filters.support) filter.support = filters.support;
+    if (filters.enabledOnly) filter.enabled = true;
     return { filter, enabled: !!enabled };
+  }
+
+  // Whether the list shows less than the whole library: only then is turning
+  // on all it shows offered.
+  function narrowed(filters) {
+    return !!(String(filters.search || "").trim() || filters.severity || filters.support || filters.enabledOnly);
   }
 
   function plural(n, word) { return `${count(n)} ${word}${Number(n) === 1 ? "" : "s"}`; }
@@ -260,6 +268,8 @@
     if (values.selection === "selected") {
       if (!selectedId) throw new Error("Click a template's row in the list first; its On box does not select it.");
       body.ids = [selectedId];
+    } else if (values.selection === "on") {
+      body.filter = { enabled: true };
     } else {
       const filter = {};
       const search = String(filters.search || "").trim();
@@ -267,6 +277,7 @@
       if (filters.severity) filter.severity = filters.severity;
       body.filter = filter;
     }
+    body.history = values.keepAll === false ? "matched" : "all";
     body[preview ? "preview" : "acknowledged"] = true;
     return body;
   }
@@ -289,12 +300,6 @@
     const body = { session_id: sessionId, enabled: !!enabled, hosts, rate: boundedInteger(values.rate, 1, 50, "Requests a second") };
     if (enabled) body.acknowledged = true;
     return body;
-  }
-
-  // Turning scan templates on in bulk follows the list filter, as the
-  // passive bulk change does.
-  function autoTemplatesRequest(filters, enabled) {
-    return { ...passiveRequest(filters, enabled), filter: { ...passiveRequest(filters, enabled).filter, support: "active" } };
   }
 
   // The card's badge says whether it is on.
@@ -322,16 +327,41 @@
     return `${job.status} · ${jobCounts(job)}`;
   }
 
+  // A scan with one target says its origin once; its rows show the path.
+  function originOf(job) {
+    return (job?.targets || []).length === 1 ? String(job.targets[0]).replace(/^(https?:\/\/[^/]+).*$/, "$1") : null;
+  }
+  function shortUrl(url, origin) {
+    const text = String(url || "");
+    if (origin && text === origin) return "/";
+    return origin && text.startsWith(`${origin}/`) ? text.slice(origin.length) : text;
+  }
+  // Stable while the log rolls: the same request keeps its row.
+  function resultKey(entry) {
+    return [entry.at, entry.template_id, entry.method, entry.url].join("|");
+  }
+  const RESULT_ORDER = {
+    status: (entry) => (entry.error ? 1000 : Number(entry.status) || 0),
+    method: (entry) => entry.method || "",
+    path: (entry) => entry.url || "",
+    template: (entry) => entry.template_id || "",
+    ms: (entry) => Number(entry.ms) || 0,
+    matched: (entry) => (entry.matched ? 1 : 0),
+  };
+
   function createController(options) {
     const shell = options.root;
     const doc = shell.ownerDocument;
     const fetcher = options.fetch || root.fetch.bind(root);
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
-    const ids = ["Version", "Status", "Progress", "ProgressBar", "Channel", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
-      "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
+    const ids = ["Version", "Status", "Progress", "ProgressBar", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
+      "More", "Switch", "ImportMenu",
+      "Search", "Severity", "Support", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
+      "Views", "ListControls", "ListActions", "Table", "ResultsTable", "ResultsHead", "ResultsRows", "ResultsTitle",
+      "ResultsMatched", "ResultsStop", "Pagination",
       "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
-      "ScanMaxRequests", "ScanMatchReplace", "ScanPlan", "ScanStart",
+      "ScanMaxRequests", "ScanMatchReplace", "ScanKeepAll", "ScanPlan", "ScanStart",
       "ScanNotice", "ScanJobs", "AutoSummary", "AutoHosts", "AutoRate", "AutoToggle", "AutoNotice"];
     const els = Object.fromEntries(ids.map((id) => [id, shell.querySelector(`#templates${id}`)]));
     const listeners = [];
@@ -348,10 +378,13 @@
     let timer = null;
     let searchTimer = null;
     let busy = false;
-    // Until one is picked, Download follows the installed library, so updating
-    // a library taken from main does not fall back to the release.
-    let channelPicked = false;
+    // What the last update check found, for the library it checked.
+    let lastCheck = null;
     let listRequest = 0;
+    // The list of templates, or the open scan's requests.
+    let view = "templates";
+    // The box ticked last, where a Shift-click range starts.
+    let rangeAnchor = null;
 
     function on(element, event, callback) {
       element.addEventListener(event, callback);
@@ -382,9 +415,12 @@
       }
       return response.json();
     }
+    // "Turned on" is one of the list's views; the server reads it as
+    // `enabled`, apart from what Sniper can run.
     function filters() {
+      const show = els.Support.value;
       return {
-        search: els.Search.value, severity: els.Severity.value, support: els.Support.value, enabledOnly: els.EnabledOnly.checked,
+        search: els.Search.value, severity: els.Severity.value, support: show === "on" ? "" : show, enabledOnly: show === "on",
         sort: sort.key, direction: sort.direction,
       };
     }
@@ -419,24 +455,44 @@
         els.ProgressBar.max = progress.max;
         els.ProgressBar.value = progress.value;
       }
-      if (!channelPicked && status?.library) els.Channel.value = status.library.tag === "main" ? "main" : "release";
-      els.Download.title = DOWNLOAD_TITLES[channel()];
-      els.Channel.disabled = !!working || busy;
-      els.Download.disabled = !!working || busy;
-      els.Import.disabled = !!working || busy;
-      els.Check.disabled = !!working || busy;
+      // Only what there is to do: with nothing installed, Download or Import;
+      // once installed, Update when a check found one. Changing channel and
+      // importing wait in the menu.
+      const library = status?.library || null;
+      if (lastCheck && lastCheck.sha256 !== library?.sha256) lastCheck = null;
+      const installed = installedChannel();
+      const idle = !working && !busy;
+      els.Check.classList.toggle("hidden", !library || !!working);
+      els.Check.disabled = !idle;
+      els.Download.classList.toggle("hidden", !!working || !(!library || lastCheck?.update_available));
+      els.Download.textContent = library ? "Update" : "Download";
+      els.Download.title = DOWNLOAD_TITLES[installed];
+      els.Download.disabled = !idle;
+      els.Import.classList.toggle("hidden", !!library || !!working);
+      els.Import.disabled = !idle;
+      els.More.classList.toggle("hidden", !!working);
+      const other = installed === "main" ? "release" : "main";
+      els.Switch.textContent = !library ? "Download main (unreleased)"
+        : other === "main" ? "Switch to main (unreleased)" : "Switch to latest release";
+      els.Switch.title = DOWNLOAD_TITLES[other];
+      els.Switch.disabled = !idle;
+      els.ImportMenu.classList.toggle("hidden", !library);
+      els.ImportMenu.disabled = !idle;
       const scopeless = (options.getScopeIncludeCount?.() || 0) === 0;
       els.ScopeNote.classList.toggle("hidden", !(scopeless && status?.passive_enabled > 0));
-      // Bulk changes act on passive-capable templates only, so they are offered
-      // only while the list shows exactly those.
-      const bulk = !!status?.library && (els.Support.value === "passive" || els.Support.value === "active");
+      renderBulk();
+      // Start waits for a library, which may arrive after the scan form was
+      // first drawn.
+      renderScan();
+    }
+
+    // Turning on all the list shows is offered once it shows less than all.
+    function renderBulk() {
+      const bulk = !!status?.library && view === "templates" && narrowed(filters());
       for (const button of [els.EnableShown, els.DisableShown]) {
         button.classList.toggle("hidden", !bulk);
         button.disabled = busy;
       }
-      // Start waits for a library, which may arrive after the scan form was
-      // first drawn.
-      renderScan();
     }
 
     function renderList() {
@@ -508,8 +564,8 @@
 
     function renderDetail() {
       els.Detail.replaceChildren();
-      if (showingJob && openJob) {
-        renderJobDetail();
+      if (view === "results" && openJob) {
+        renderResultDetail();
         return;
       }
       if (!selected) {
@@ -603,7 +659,6 @@
       if (request !== openRequest) return;
       pendingId = null;
       selected = detail;
-      showingJob = false;
       if (els.ScanSelection.value === "selected") schedulePlan();
       renderList();
       renderDetail();
@@ -614,8 +669,13 @@
     let scanSession = null;
     let scanJobs = [];
     let openJob = null;
-    let showingJob = false;
     let scanBusy = false;
+    let resultSort = { key: "", direction: "asc" };
+    let openResult = null;
+    let matchedOnly = false;
+    // The exchange of the open request, read from HTTP history.
+    let exchange = null;
+    let exchangeRequest = 0;
     let scanTimer = null;
     let planTimer = null;
     let planRequest = 0;
@@ -634,6 +694,7 @@
         concurrency: els.ScanConcurrency.value,
         maxRequests: els.ScanMaxRequests.value,
         applyMatchReplace: els.ScanMatchReplace.checked,
+        keepAll: els.ScanKeepAll.checked,
       };
     }
     function startBody() {
@@ -660,7 +721,8 @@
         }), "Could not count the scan");
         if (request !== planRequest) return;
         if (preview.templates) showPlan(previewLine(preview));
-        else showPlan(preview.oast_unavailable ? "These templates need an Interactsh server: Capture ▸ OAST." : "No template that can be sent matches.", true);
+        else if (preview.oast_unavailable) showPlan("These templates need an Interactsh server: Capture ▸ OAST.", true);
+        else showPlan(els.ScanSelection.value === "on" ? "No template is turned on. Tick On in the list." : "No template that can be sent matches.", true);
       } catch (error) {
         if (request === planRequest) showPlan(error.message, true);
       }
@@ -680,16 +742,14 @@
       els.ScanStart.textContent = running ? "A scan is running" : "Start scan";
       const nodes = [];
       for (const job of scanJobs) {
-        const card = element("article", "recon-job");
+        const open = view === "results" && openJob?.id === job.id;
+        const card = element("article", `recon-job templates-job${open ? " recon-selected" : ""}`);
+        card.dataset.openScan = job.id;
         card.title = `Started ${new Date(job.started_at).toLocaleString()} · ${plural(job.templates, "template")}`;
         const header = element("div", "recon-job-header");
         header.append(element("strong", "recon-job-target", (job.targets || []).join(", ") || "Manual scan"));
         if (job.auto) header.append(element("span", "detail-chip", "auto"));
         header.append(element("span", `detail-chip ${job.status === "running" ? "info" : job.status === "completed" ? "ok" : "warn"}`, job.status));
-        const results = element("button", "secondary-action", "Results");
-        results.type = "button";
-        results.dataset.openScan = job.id;
-        header.append(results);
         if (job.status === "running") {
           const stop = element("button", "secondary-action", "Stop");
           stop.type = "button";
@@ -702,6 +762,153 @@
         nodes.push(card);
       }
       els.ScanJobs.replaceChildren(...nodes);
+      renderViews();
+      renderResults();
+    }
+
+    // ---- Results: the open scan's requests ----
+
+    function renderViews() {
+      const results = view === "results" && !!openJob;
+      els.Views.classList.toggle("hidden", !openJob && !scanJobs.length);
+      for (const button of els.Views.querySelectorAll("[data-templates-view]")) {
+        const active = button.dataset.templatesView === (results ? "results" : "templates");
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+      }
+      for (const node of [els.Table, els.ListControls, els.ListActions, els.Meta, els.Pagination]) node.classList.toggle("hidden", results);
+      for (const node of [els.ResultsTable, els.ResultsTitle]) node.classList.toggle("hidden", !results);
+    }
+    function resultRows() {
+      let rows = (openJob?.recent || []).slice().reverse();
+      if (matchedOnly) rows = rows.filter((entry) => entry.matched);
+      const order = RESULT_ORDER[resultSort.key];
+      if (order) {
+        const sign = resultSort.direction === "desc" ? -1 : 1;
+        rows = rows.map((entry, index) => ({ entry, index })).sort((a, b) => {
+          const left = order(a.entry);
+          const right = order(b.entry);
+          return (left < right ? -1 : left > right ? 1 : a.index - b.index) * sign;
+        }).map(({ entry }) => entry);
+      }
+      return rows;
+    }
+    function currentResult() {
+      return (openJob?.recent || []).find((entry) => resultKey(entry) === openResult) || null;
+    }
+    function renderResults() {
+      const results = view === "results" && !!openJob;
+      const job = openJob;
+      if (!job?.matched) matchedOnly = false;
+      els.ResultsTitle.textContent = job ? `${(job.targets || []).join(", ") || "Manual scan"} · ${jobLine(job)}` : "";
+      els.ResultsMatched.classList.toggle("hidden", !results || !job?.matched);
+      els.ResultsMatched.classList.toggle("active", matchedOnly);
+      els.ResultsMatched.setAttribute("aria-pressed", matchedOnly ? "true" : "false");
+      els.ResultsStop.classList.toggle("hidden", !results || job?.status !== "running");
+      els.ResultsStop.disabled = scanBusy;
+      for (const header of els.ResultsHead.querySelectorAll("[data-result-sort]")) {
+        const active = header.dataset.resultSort === resultSort.key;
+        header.classList.toggle("active", active);
+        header.setAttribute("aria-sort", active ? (resultSort.direction === "asc" ? "ascending" : "descending") : "none");
+        const indicator = header.querySelector(".table-sort-indicator");
+        if (indicator) indicator.textContent = active ? (resultSort.direction === "asc" ? "↑" : "↓") : "↕";
+      }
+      const origin = originOf(job);
+      const rows = [];
+      for (const entry of resultRows()) {
+        const key = resultKey(entry);
+        const row = element("tr", [entry.matched ? "templates-matched" : "", key === openResult ? "recon-selected" : ""].filter(Boolean).join(" "));
+        row.dataset.resultKey = key;
+        row.title = `${entry.method} ${entry.url}`;
+        row.append(
+          element("td", entry.error ? "templates-request-error" : "", entry.error ? "error" : String(entry.status ?? "—")),
+          element("td", "", entry.method),
+          element("td", "templates-request-url", shortUrl(entry.url, origin)),
+          element("td", "", entry.template_id),
+          element("td", "", `${count(entry.ms)} ms`),
+          element("td", "templates-match-mark", entry.matched ? "✓" : ""),
+        );
+        rows.push(row);
+      }
+      if (!rows.length) {
+        const row = element("tr");
+        const cell = element("td", "recon-empty", job?.status === "running" ? "No requests yet." : "No requests.");
+        cell.colSpan = 6;
+        row.append(cell);
+        rows.push(row);
+      }
+      els.ResultsRows.replaceChildren(...rows);
+    }
+    function showResults(job) {
+      if (job && job.id !== openJob?.id) {
+        openResult = null;
+        exchange = null;
+        matchedOnly = false;
+      }
+      openJob = job || openJob;
+      view = openJob ? "results" : "templates";
+      renderStatus();
+      renderDetail();
+    }
+    function selectResult(key, reveal = false) {
+      openResult = key;
+      renderResults();
+      if (reveal) Array.from(els.ResultsRows.children).find((row) => row.dataset.resultKey === key)?.scrollIntoView?.({ block: "nearest" });
+      const entry = currentResult();
+      if (entry?.record_id && exchange?.key !== key) void loadExchange(entry);
+      renderDetail();
+    }
+    async function loadExchange(entry) {
+      const request = ++exchangeRequest;
+      const key = resultKey(entry);
+      exchange = { key, loading: true };
+      try {
+        const path = options.transactionPath
+          ? options.transactionPath(entry.record_id)
+          : `/api/transactions/${encodeURIComponent(entry.record_id)}?session_id=${encodeURIComponent(scanSession || "")}`;
+        const record = await json(await fetcher(path), "Could not read the exchange");
+        if (request !== exchangeRequest) return;
+        exchange = { key, record };
+      } catch (error) {
+        if (request !== exchangeRequest) return;
+        exchange = { key, error: error.message };
+      }
+      if (openResult === key) renderDetail();
+    }
+    // The app writes a record the way HTTP history shows it; alone, the
+    // request line and the status are enough.
+    function rawExchange(record) {
+      if (options.rawExchange) return options.rawExchange(record);
+      return { request: `${record.method || ""} ${record.path || ""}`.trim(), response: String(record.status ?? "") };
+    }
+    function renderResultDetail() {
+      const entry = currentResult();
+      if (!entry) {
+        renderJobDetail();
+        return;
+      }
+      els.Detail.append(element("h3", "", `${entry.method} ${shortUrl(entry.url, originOf(openJob))}`));
+      els.Detail.append(element("p", "recon-help", [entry.error ? "error" : entry.status ?? "—", `${count(entry.ms)} ms`, entry.template_id,
+        entry.matched ? "matched" : ""].filter(Boolean).join(" · ")));
+      if (!entry.record_id) {
+        els.Detail.append(element("p", "recon-empty", entry.error
+          || "Not in HTTP history: this scan kept only the matched exchanges."));
+        return;
+      }
+      if (exchange?.key !== openResult || exchange.loading) {
+        els.Detail.append(element("p", "recon-empty", "Loading…"));
+        return;
+      }
+      if (exchange.error) {
+        els.Detail.append(element("p", "recon-warning", exchange.error));
+        return;
+      }
+      const history = element("button", "secondary-action", "Open in HTTP history");
+      history.type = "button";
+      history.dataset.recordId = entry.record_id;
+      const raw = rawExchange(exchange.record);
+      els.Detail.append(history, element("h4", "", "Request"), element("pre", "templates-exchange", raw.request),
+        element("h4", "", "Response"), element("pre", "templates-exchange", raw.response));
     }
 
     function renderJobDetail() {
@@ -716,39 +923,10 @@
       field(fields, "Allowed risks", job.allow_risks);
       field(fields, "Pace", `${count(job.rate)} a second · ${count(job.concurrency)} templates at once · limit ${count(job.max_requests)}`);
       if (job.apply_match_replace) field(fields, "Match & Replace", "Applied");
+      field(fields, "History", job.history === "all" ? "Every request" : "Matched requests");
       els.Detail.append(fields);
       for (const warning of job.warnings || []) els.Detail.append(element("p", "recon-warning", warning));
-      els.Detail.append(element("h4", "", `Matches (${count(job.matched)})`));
-      const results = element("ul", "templates-matches");
-      for (const result of job.results || []) {
-        const item = element("li");
-        const open = element("button", "templates-match-open");
-        open.type = "button";
-        open.dataset.recordId = result.record_id;
-        open.setAttribute("aria-label", `Open the matched exchange for ${result.template_id} in HTTP history`);
-        open.append(element("span", `severity-badge ${severityClass(result.severity)}`, result.severity || "unknown"),
-          element("span", "", `${result.name || result.template_id}${result.matcher ? ` [${result.matcher}]` : ""}`));
-        item.append(open, element("div", "templates-match-where", `${result.method} ${result.url}${result.evidence ? ` — ${result.evidence}` : ""}`));
-        results.append(item);
-      }
-      if (!results.children.length) results.append(element("li", "recon-help", job.status === "running" ? "Nothing matched yet." : "Nothing matched."));
-      els.Detail.append(results);
-      const recent = (job.recent || []).slice(-50).reverse();
-      els.Detail.append(element("h4", "", "Latest requests"));
-      const log = element("ul", "templates-requests");
-      // With one target the origin says nothing; the path is what differs.
-      const origin = (job.targets || []).length === 1 ? String(job.targets[0]).replace(/^(https?:\/\/[^/]+).*$/, "$1") : null;
-      for (const entry of recent) {
-        const item = element("li", entry.matched ? "templates-matched" : "");
-        const url = origin && String(entry.url).startsWith(`${origin}/`) ? String(entry.url).slice(origin.length) : entry.url;
-        item.title = `${entry.method} ${entry.url}`;
-        item.append(element("span", `templates-request-status${entry.error ? " templates-request-error" : ""}`, entry.error ? "error" : String(entry.status ?? "—")),
-          element("span", "templates-request-url", `${entry.method} ${url}`),
-          element("span", "recon-help", `${entry.error || `${count(entry.ms)} ms`} · ${entry.template_id}`));
-        log.append(item);
-      }
-      if (!log.children.length) log.append(element("li", "recon-help", "No requests yet."));
-      els.Detail.append(log);
+      els.Detail.append(element("p", "recon-empty", "Select a request to see what was sent and what came back."));
     }
 
     async function refreshScans() {
@@ -758,7 +936,9 @@
         scanSession = sessionId;
         scanJobs = [];
         openJob = null;
-        showingJob = false;
+        openResult = null;
+        exchange = null;
+        view = "templates";
         auto = null;
         autoDraft = false;
         showPlan("");
@@ -775,8 +955,9 @@
         if (openJob) {
           const job = await json(await fetcher(`/api/templates/scans/${encodeURIComponent(openJob.id)}?${query}`), "Could not read the scan");
           if (sessionId !== scanSession) return;
-          openJob = job;
-          if (showingJob) renderDetail();
+          // A read that missed leaves the scan as it was shown.
+          if (job?.id === openJob.id) openJob = job;
+          if (view === "results") renderDetail();
         }
       } catch (error) {
         scanNotice(error.message, true);
@@ -833,6 +1014,21 @@
         await json(await fetcher("/api/templates/auto/templates", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         }), "Could not save the templates for the auto scan");
+        notice("");
+        await refreshAuto();
+      });
+    }
+
+    // On for many at once: each template takes its own kind of On, passive
+    // where it can judge captured traffic, the auto scan's where it cannot.
+    function setMany(passive, auto) {
+      return act(async () => {
+        for (const [path, body] of [["/api/templates/passive", passive], ["/api/templates/auto/templates", auto]]) {
+          if (!body) continue;
+          await json(await fetcher(path, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+          }), "Could not turn the templates on or off");
+        }
         notice("");
         await refreshAuto();
       });
@@ -909,22 +1105,39 @@
       on(control, "change", () => { if (autoDraft) void saveAuto(!!auto?.enabled); });
     }
 
-    function channel() {
-      return els.Channel.value === "main" ? "main" : "release";
+    // What the installed library follows: main, or the releases (an imported
+    // archive is checked against the latest release).
+    function installedChannel() {
+      const library = status?.library;
+      return library?.source === "github" && library.tag === "main" ? "main" : "release";
+    }
+    function download(channel) {
+      if (els.More) els.More.open = false;
+      return act(async () => {
+        await json(await fetcher("/api/templates/library/download", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledged: true, channel }),
+        }), "Could not start the download");
+        lastCheck = null;
+        notice("");
+      });
     }
 
-    on(els.Channel, "change", () => { channelPicked = true; renderStatus(); });
-    on(els.Download, "click", () => act(async () => {
-      await json(await fetcher("/api/templates/library/download", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledged: true, channel: channel() }),
-      }), "Could not start the download");
-      notice("");
-    }));
+    on(els.Download, "click", () => download(installedChannel()));
+    on(els.Switch, "click", () => download(status?.library ? (installedChannel() === "main" ? "release" : "main") : "main"));
     on(els.Check, "click", () => act(async () => {
       const result = await json(await fetcher("/api/templates/library/check", { method: "POST" }), "Could not reach GitHub");
+      lastCheck = { ...result, sha256: status?.library?.sha256 };
       notice(checkLine(result));
     }));
     on(els.Import, "click", () => els.ImportFile.click());
+    on(els.ImportMenu, "click", () => {
+      els.More.open = false;
+      els.ImportFile.click();
+    });
+    // The menu closes when the click lands elsewhere.
+    on(doc, "click", (event) => {
+      if (els.More?.open && !els.More.contains?.(event.target)) els.More.open = false;
+    });
     on(els.ImportFile, "change", () => {
       const file = els.ImportFile.files?.[0];
       els.ImportFile.value = "";
@@ -937,66 +1150,100 @@
       });
     });
     on(els.Search, "input", () => {
+      renderBulk();
       if (searchTimer !== null) unschedule(searchTimer);
       searchTimer = schedule(() => { searchTimer = null; page = 0; void loadList(); }, 250);
     });
-    for (const control of [els.Severity, els.Support, els.EnabledOnly]) {
+    for (const control of [els.Severity, els.Support]) {
       on(control, "change", () => { page = 0; renderStatus(); void loadList(); });
     }
     on(els.Previous, "click", () => { page = Math.max(0, page - 1); void loadList(); });
     on(els.Next, "click", () => { page += 1; void loadList(); });
-    on(els.EnableShown, "click", () => (els.Support.value === "active"
-      ? setAuto(autoTemplatesRequest(filters(), true))
-      : setPassive(passiveRequest(filters(), true))));
-    on(els.DisableShown, "click", () => (els.Support.value === "active"
-      ? setAuto(autoTemplatesRequest(filters(), false))
-      : setPassive(passiveRequest(filters(), false))));
+    on(els.EnableShown, "click", () => setMany(bulkRequest(filters(), true), bulkRequest(filters(), true)));
+    on(els.DisableShown, "click", () => setMany(bulkRequest(filters(), false), bulkRequest(filters(), false)));
     on(els.ScanStart, "click", () => scanAct(async () => {
       const job = await json(await fetcher("/api/templates/scans", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(startBody()),
       }), "Could not start the scan");
-      openJob = job;
-      showingJob = true;
-      renderDetail();
+      // What was just started is what to watch.
+      showResults(job);
       scanNotice("");
     }));
     for (const control of [els.ScanTargets, els.ScanRate, els.ScanConcurrency, els.ScanMaxRequests]) on(control, "input", schedulePlan);
-    for (const control of [els.ScanSelection, els.ScanMatchReplace, els.ScanRisks]) on(control, "change", schedulePlan);
+    for (const control of [els.ScanSelection, els.ScanMatchReplace, els.ScanRisks, els.ScanKeepAll]) on(control, "change", schedulePlan);
     // The search and severity choose what a scan sends.
     on(els.Search, "input", () => { if (els.ScanSelection.value === "filter") schedulePlan(); });
     on(els.Severity, "change", () => { if (els.ScanSelection.value === "filter") schedulePlan(); });
+    function stopScan(id) {
+      return scanAct(async () => {
+        await json(await fetcher(`/api/templates/scans/${encodeURIComponent(id)}/stop`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: scanSession }),
+        }), "Could not stop the scan");
+      });
+    }
     on(els.ScanJobs, "click", (event) => {
       const stop = event.target.closest("[data-stop-scan]");
       if (stop) {
-        void scanAct(async () => {
-          await json(await fetcher(`/api/templates/scans/${encodeURIComponent(stop.dataset.stopScan)}/stop`, {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: scanSession }),
-          }), "Could not stop the scan");
-          scanNotice("Stopped. Matches found so far are kept.");
-        });
+        void stopScan(stop.dataset.stopScan);
         return;
       }
-      const results = event.target.closest("[data-open-scan]");
-      if (results) {
-        openJob = scanJobs.find((job) => job.id === results.dataset.openScan) || null;
-        showingJob = !!openJob;
-        renderDetail();
+      const card = event.target.closest("[data-open-scan]");
+      if (card) {
+        showResults(scanJobs.find((job) => job.id === card.dataset.openScan) || null);
         void refreshScans();
       }
     });
+    on(els.Views, "click", (event) => {
+      const button = event.target.closest("[data-templates-view]");
+      if (!button) return;
+      if (button.dataset.templatesView === "results") {
+        showResults(openJob || scanJobs[0] || null);
+        void refreshScans();
+      } else {
+        view = "templates";
+        renderStatus();
+        renderList();
+        renderDetail();
+      }
+    });
+    on(els.ResultsRows, "click", (event) => {
+      const row = event.target.closest("[data-result-key]");
+      if (row) selectResult(row.dataset.resultKey);
+    });
+    on(els.ResultsHead, "click", (event) => {
+      if (event.target.closest(".table-col-resize")) return;
+      const header = event.target.closest("[data-result-sort]");
+      if (!header) return;
+      resultSort = nextSort(resultSort, header.dataset.resultSort);
+      renderResults();
+    });
+    on(els.ResultsMatched, "click", () => {
+      matchedOnly = !matchedOnly;
+      renderResults();
+    });
+    on(els.ResultsStop, "click", () => { if (openJob) void stopScan(openJob.id); });
     on(els.Detail, "click", (event) => {
       const record = event.target.closest("[data-record-id]");
       if (record) options.openRecord?.(record.dataset.recordId);
     });
     on(els.Rows, "click", (event) => {
-      const toggle = event.target.closest("[data-template-toggle]");
-      if (toggle) {
-        void setPassive({ ids: [toggle.dataset.templateToggle], enabled: toggle.checked });
-        return;
-      }
-      const autoBox = event.target.closest("[data-template-auto]");
-      if (autoBox) {
-        void setAuto({ ids: [autoBox.dataset.templateAuto], enabled: autoBox.checked });
+      const box = event.target.closest("[data-template-toggle]") || event.target.closest("[data-template-auto]");
+      if (box) {
+        const id = box.dataset.templateToggle || box.dataset.templateAuto;
+        const from = items.findIndex((meta) => meta.id === rangeAnchor);
+        const to = items.findIndex((meta) => meta.id === id);
+        rangeAnchor = id;
+        if (event.shiftKey && from >= 0 && to >= 0) {
+          const range = items.slice(Math.min(from, to), Math.max(from, to) + 1);
+          const passive = range.filter((meta) => meta.passive_supported).map((meta) => meta.id);
+          const autoIds = range.filter((meta) => !meta.passive_supported && meta.active_supported).map((meta) => meta.id);
+          void setMany(passive.length ? { ids: passive, enabled: box.checked } : null,
+            autoIds.length ? { ids: autoIds, enabled: box.checked } : null);
+          return;
+        }
+        void (box.dataset.templateToggle
+          ? setPassive({ ids: [id], enabled: box.checked })
+          : setAuto({ ids: [id], enabled: box.checked }));
         return;
       }
       const row = event.target.closest("[data-template-id]");
@@ -1014,9 +1261,20 @@
     // ↑/↓ move through the page, as in Findings; the app says when they are
     // free, not while a field has focus or a modal is open.
     on(doc, "keydown", (event) => {
-      if (!visible || !items.length) return;
+      if (!visible) return;
       const step = options.arrowStep?.(event) || 0;
       if (!step) return;
+      if (view === "results" && openJob) {
+        const rows = resultRows();
+        if (!rows.length) return;
+        const current = rows.findIndex((entry) => resultKey(entry) === openResult);
+        const next = current < 0 ? (step > 0 ? 0 : rows.length - 1) : current + step;
+        if (next < 0 || next >= rows.length) return;
+        event.preventDefault();
+        selectResult(resultKey(rows[next]), true);
+        return;
+      }
+      if (!items.length) return;
       const current = items.findIndex((meta) => meta.id === (pendingId ?? selected?.id));
       const next = current < 0 ? (step > 0 ? 0 : items.length - 1) : current + step;
       if (next < 0 || next >= items.length) return;
@@ -1049,7 +1307,7 @@
       // The app calls this when it has reread Scope.
       scopeChanged: renderStatus,
       // Another session's scans are not this one's.
-      syncSession() { void refreshScans(); },
+      syncSession() { return refreshScans(); },
       dispose() {
         clearTimer();
         clearScanTimer();
@@ -1059,7 +1317,7 @@
     };
   }
 
-  const api = { createController, listQuery, nextSort, passiveRequest, librarySummary, checkLine, progressOf, supportLabel, scanRequest, parseTargets,
+  const api = { createController, listQuery, nextSort, bulkRequest, narrowed, librarySummary, checkLine, progressOf, supportLabel, scanRequest, parseTargets,
     previewLine, jobLine, autoRequest, autoLine, yamlLines, RISKS, PAGE_SIZE };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperTemplates = api;

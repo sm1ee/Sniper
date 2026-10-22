@@ -1658,7 +1658,16 @@
           <section class="panel-card templates-library" aria-labelledby="templatesTitle">
             <header class="panel-toolbar">
               <h2 id="templatesTitle">Templates</h2>
-              <div class="toolbar-actions"><button class="secondary-action" id="templatesCheck" type="button">Check for updates</button></div>
+              <div class="toolbar-actions">
+                <button class="secondary-action hidden" id="templatesCheck" type="button">Check for updates</button>
+                <details class="templates-more" id="templatesMore">
+                  <summary class="secondary-action" aria-label="More">⋯</summary>
+                  <div class="context-menu templates-more-menu" role="menu">
+                    <button class="context-menu-item" id="templatesSwitch" type="button" role="menuitem">Download main (unreleased)</button>
+                    <button class="context-menu-item" id="templatesImportMenu" type="button" role="menuitem">Import archive…</button>
+                  </div>
+                </details>
+              </div>
             </header>
             <div class="recon-form">
               <div class="templates-version" id="templatesVersion"><strong>Loading…</strong></div>
@@ -1666,12 +1675,8 @@
               <p class="recon-notice hidden" id="templatesProgress" role="status"></p>
               <progress class="templates-progress hidden" id="templatesProgressBar" aria-labelledby="templatesProgress"></progress>
               <div class="templates-actions">
-                <select id="templatesChannel" aria-label="What to download">
-                  <option value="release">Latest release</option>
-                  <option value="main">Main (unreleased)</option>
-                </select>
-                <button class="primary-action" id="templatesDownload" type="button" disabled>Download</button>
-                <button class="secondary-action" id="templatesImport" type="button" title="Import a release .tar.gz">Import…</button>
+                <button class="primary-action hidden" id="templatesDownload" type="button">Download</button>
+                <button class="secondary-action hidden" id="templatesImport" type="button" title="Import a release .tar.gz">Import…</button>
                 <input class="hidden" id="templatesImportFile" type="file" accept=".gz,.tgz,application/gzip" />
               </div>
               <p class="recon-notice recon-warning hidden" id="templatesScopeNote">Scope is empty, so the templates turned on check nothing.</p>
@@ -1685,12 +1690,15 @@
             </header>
             <div class="recon-form">
               <p class="recon-help" id="templatesAutoSummary">Loading…</p>
-              <div class="templates-auto-fields">
-                <label class="recon-field" for="templatesAutoHosts">Extra hosts
-                  <textarea id="templatesAutoHosts" rows="1" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
-                </label>
-                <label class="recon-field" for="templatesAutoRate">Requests/s<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
-              </div>
+              <details class="recon-limits templates-options" id="templatesAutoOptions">
+                <summary>Options</summary>
+                <div class="templates-auto-fields">
+                  <label class="recon-field" for="templatesAutoHosts">Extra hosts
+                    <textarea id="templatesAutoHosts" rows="1" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
+                  </label>
+                  <label class="recon-field" for="templatesAutoRate">Requests/s<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
+                </div>
+              </details>
               <p class="recon-notice hidden" id="templatesAutoNotice" role="status" aria-live="polite"></p>
             </div>
           </section>
@@ -1704,6 +1712,7 @@
               </label>
               <label class="recon-field" for="templatesScanSelection">Templates
                 <select id="templatesScanSelection">
+                  <option value="on" selected>Turned on</option>
                   <option value="filter">Search results</option>
                   <option value="selected">Selected template</option>
                 </select>
@@ -1731,6 +1740,7 @@
                   <label class="recon-field" for="templatesScanMaxRequests">Max requests<input id="templatesScanMaxRequests" type="number" min="1" max="50000" value="10000" /></label>
                 </div>
                 <label class="recon-check"><input id="templatesScanMatchReplace" type="checkbox" /> Apply Match &amp; Replace</label>
+                <label class="recon-check"><input id="templatesScanKeepAll" type="checkbox" checked /> Keep every request in HTTP history</label>
               </details>
               <p class="recon-help" id="templatesScanPlan" aria-live="polite"></p>
               <div class="templates-actions"><button class="primary-action" id="templatesScanStart" type="button" disabled>Start scan</button></div>
@@ -1741,7 +1751,11 @@
           </div>
           <section class="panel-card recon-inventory templates-list">
             <header class="panel-toolbar recon-inventory-toolbar">
-              <div class="recon-search-controls">
+              <div class="templates-views hidden" id="templatesViews" role="tablist" aria-label="List or results">
+                <button class="sub-tab active" type="button" role="tab" data-templates-view="templates">Templates</button>
+                <button class="sub-tab" type="button" role="tab" data-templates-view="results">Results</button>
+              </div>
+              <div class="recon-search-controls" id="templatesListControls">
                 <input id="templatesSearch" type="search" placeholder="Search id, name, tag, CVE or reference" aria-label="Search templates" />
                 <select id="templatesSeverity" aria-label="Severity">
                   <option value="">All severities</option>
@@ -1751,31 +1765,40 @@
                   <option value="low">Low</option>
                   <option value="info">Info</option>
                 </select>
-                <select id="templatesSupport" aria-label="What Sniper can run">
+                <select id="templatesSupport" aria-label="Show">
                   <option value="" selected>All</option>
+                  <option value="on">Turned on</option>
                   <option value="passive">Passive</option>
                   <option value="active">Scan</option>
                   <option value="unsupported">Unsupported</option>
                 </select>
               </div>
-              <label class="recon-check"><input id="templatesEnabledOnly" type="checkbox" /> On only</label>
-              <div class="toolbar-actions">
-                <button class="secondary-action" id="templatesEnableShown" type="button">Turn on shown</button>
-                <button class="secondary-action" id="templatesDisableShown" type="button">Turn off shown</button>
+              <div class="toolbar-actions" id="templatesListActions">
+                <button class="secondary-action hidden" id="templatesEnableShown" type="button">Turn on all</button>
+                <button class="secondary-action hidden" id="templatesDisableShown" type="button">Turn off all</button>
               </div>
               <span class="recon-help" id="templatesMeta"></span>
+              <span class="recon-help templates-results-title hidden" id="templatesResultsTitle"></span>
+              <div class="toolbar-actions">
+                <button class="secondary-action hidden" id="templatesResultsMatched" type="button" aria-pressed="false">Matched only</button>
+                <button class="secondary-action hidden" id="templatesResultsStop" type="button">Stop</button>
+              </div>
             </header>
             <div class="recon-results">
               <div class="recon-table-scroll" tabindex="0" aria-label="Templates">
-                <table class="mini-table recon-table templates-table">
+                <table class="mini-table recon-table templates-table" id="templatesTable">
                   <thead id="templatesHead"><tr><th class="table-sortable" data-sort="on" aria-sort="none" title="On: a template that can judge captured traffic checks it; one that must send its requests goes to each new host while the auto scan is on.">On <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="severity" aria-sort="none">Severity <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="name" aria-sort="none">Template <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="mode" aria-sort="none">Mode <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="tags" aria-sort="none">Tags <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
                   <tbody id="templatesRows"></tbody>
+                </table>
+                <table class="mini-table recon-table templates-results-table hidden" id="templatesResultsTable">
+                  <thead id="templatesResultsHead"><tr><th class="table-sortable" data-result-sort="status" aria-sort="none">Status <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="method" aria-sort="none">Method <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="path" aria-sort="none">Request <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="template" aria-sort="none">Template <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="ms" aria-sort="none">Time <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="matched" aria-sort="none" title="Matched">✓ <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
+                  <tbody id="templatesResultsRows"></tbody>
                 </table>
               </div>
               <div class="pane-resizer list-detail-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the list and its details" tabindex="0" title="Drag to resize; double-click to reset"></div>
               <aside class="recon-detail" id="templatesDetail" aria-label="Template details"></aside>
             </div>
-            <footer class="recon-pagination">
+            <footer class="recon-pagination" id="templatesPagination">
               <span id="templatesPageMeta"></span>
               <div class="toolbar-actions"><button class="secondary-action" id="templatesPrevious" type="button" disabled>Previous</button><button class="secondary-action" id="templatesNext" type="button" disabled>Next</button></div>
             </footer>

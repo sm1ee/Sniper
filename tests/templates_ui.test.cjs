@@ -12,14 +12,20 @@ test("list queries page by the page size and drop empty filters", () => {
   assert.equal(templates.listQuery({ search: " ", severity: "", support: "" }, -1), "/api/templates?limit=100&offset=0");
 });
 
-test("bulk changes only ever select passive-capable templates", () => {
-  assert.deepEqual(templates.passiveRequest({ search: "waf", severity: "", enabledOnly: true }, true), {
-    filter: { support: "passive", search: "waf" },
+test("turning on what the list shows carries the list's own filter", () => {
+  assert.deepEqual(templates.bulkRequest({ search: " waf ", severity: "", support: "", enabledOnly: true }, true), {
+    filter: { search: "waf", enabled: true },
     enabled: true,
   });
-  assert.deepEqual(templates.passiveRequest({}, 0), { filter: { support: "passive" }, enabled: false });
+  assert.deepEqual(templates.bulkRequest({ support: "active", severity: "high" }, 0), {
+    filter: { severity: "high", support: "active" },
+    enabled: false,
+  });
+  // Nothing narrowed: no bulk change is offered for the whole library.
+  assert.equal(templates.narrowed({ search: " ", severity: "", support: "", enabledOnly: false }), false);
+  assert.equal(templates.narrowed({ search: "php" }), true);
+  assert.equal(templates.narrowed({ enabledOnly: true }), true);
 });
-
 test("the library summary names what is installed, says whether it was verified, and counts", () => {
   assert.deepEqual(templates.librarySummary(null), { name: "Loading…", badge: null, detail: "", counts: "", title: "" });
   assert.deepEqual(templates.librarySummary({ library: null }),
@@ -72,7 +78,7 @@ test("every template is listed by default, and the list reads like Findings", ()
   const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
   const support = html.match(/<select id="templatesSupport"[^]*?<\/select>/)[0];
   assert.match(support, /<option value="" selected>All<\/option>/);
-  assert.match(html, /<table class="mini-table recon-table templates-table">/);
+  assert.match(html, /<table class="mini-table recon-table templates-table" id="templatesTable">/);
   // Every row one line high: long names and tag lists end in an ellipsis.
   const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
   assert.match(css, /\.templates-table td[^{]*\{[^}]*white-space: nowrap;[^}]*text-overflow: ellipsis;/);
@@ -146,8 +152,12 @@ test("a scan request names its targets, its selection and whether it only counts
     allow_risks: ["intrusive"],
     rate: 5, concurrency: 2, max_requests: 500, apply_match_replace: false,
     filter: { search: "wordpress", severity: "high" },
+    history: "all",
     preview: true,
   });
+  const on = templates.scanRequest({ ...values, selection: "on", keepAll: false }, { search: "x" }, null, "s-1", false);
+  assert.deepEqual(on.filter, { enabled: true });
+  assert.equal(on.history, "matched");
   const one = templates.scanRequest({ ...values, selection: "selected" }, {}, "git-config", "s-1", false);
   assert.deepEqual(one.ids, ["git-config"]);
   assert.equal(one.acknowledged, true);
@@ -236,8 +246,10 @@ test("the Scan tool is registered where the UI and the server keep their tool li
   assert.match(html, /<script src="\/templates\.js" defer><\/script>/);
   assert.match(app, /const IMPLEMENTED_TOOLS = new Set\(\[[^\]]*"templates"/);
   assert.match(settings, /const ACTIVE_TOOL_OPTIONS: &\[&str\] = &\[[^\]]*"templates"/);
-  for (const id of ["Status", "Progress", "ProgressBar", "Channel", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
-    "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Rows", "Detail",
+  for (const id of ["Status", "Progress", "ProgressBar", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
+    "More", "Switch", "ImportMenu", "Views", "ResultsHead", "ResultsRows", "ResultsTitle", "ResultsMatched", "ResultsStop",
+    "ScanKeepAll", "AutoOptions",
+    "Search", "Severity", "Support", "EnableShown", "DisableShown", "Meta", "Rows", "Detail",
     "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
     "ScanMaxRequests", "ScanMatchReplace", "ScanPlan", "ScanStart", "ScanNotice",
     "ScanJobs", "Version", "AutoToggle", "AutoSummary", "AutoHosts", "AutoRate"]) {
@@ -248,7 +260,14 @@ test("the Scan tool is registered where the UI and the server keep their tool li
   assert.doesNotMatch(html, />Template scan</);
   // One switch says whether the auto scan is on and turns it on; a scan
   // starts without a preview step.
-  for (const gone of ["AutoState", "AutoSave", "ScanPreview"]) assert.doesNotMatch(html, new RegExp(`id="templates${gone}"`), gone);
+  for (const gone of ["AutoState", "AutoSave", "ScanPreview", "Channel", "EnabledOnly"]) {
+    assert.doesNotMatch(html, new RegExp(`id="templates${gone}"`), gone);
+  }
+  // What a manual scan sends starts as the templates turned on; "On only" is
+  // one of the list's views, not a box of its own.
+  assert.match(html, /<select id="templatesScanSelection">\s*<option value="on" selected>Turned on<\/option>/);
+  assert.match(html, /<select id="templatesSupport"[^]*?<option value="on">Turned on<\/option>/);
+  assert.match(html, /<input id="templatesScanKeepAll" type="checkbox" checked \/>/);
   // A button is the consent; the screen asks for no box to be ticked first.
   const shell = html.slice(html.indexOf('id="templatesShell"'), html.indexOf('id="templatesRows"'));
   assert.doesNotMatch(shell, /Consent/);
@@ -303,7 +322,10 @@ function inside(element) {
 
 const settle = async () => { for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-async function listFixture(items, arrowStep, { sessionId = null, auto = null, scopeCount = 1, library = { source: "import", verified: false }, jobs = [], openRecord, scanError = null } = {}) {
+async function listFixture(items, arrowStep, {
+  sessionId = null, auto = null, scopeCount = 1, library = { source: "import", verified: false }, jobs = [], openRecord,
+  scanError = null, check = null, records = {},
+} = {}) {
   const els = new Map();
   const sent = [];
   const doc = fakeDocument((tag) => Object.assign(listeningElement(), { tag }));
@@ -316,14 +338,19 @@ async function listFixture(items, arrowStep, { sessionId = null, auto = null, sc
   const timers = [];
   const controller = templates.createController({
     root: shell, getSessionId: () => sessionId, getScopeIncludeCount: () => scopeCount, arrowStep, openRecord,
+    transactionPath: (id) => `/api/transactions/${id}?session_id=${sessionId}`,
+    rawExchange: (record) => ({ request: `REQ ${record.id}`, response: `RES ${record.id}` }),
     fetch: async (url, init = {}) => {
       urls.push(String(url));
-      if (init.method === "POST") sent.push({ url: String(url), body: JSON.parse(init.body) });
+      if (init.method === "POST") sent.push({ url: String(url), body: init.body === undefined ? undefined : JSON.parse(init.body) });
       if (scanError && String(url) === "/api/templates/scans" && init.method === "POST") {
         return { ok: false, status: 400, text: async () => JSON.stringify({ error: scanError }) };
       }
       const id = String(url).match(/^\/api\/templates\/([^?/]+)$/)?.[1];
-      const body = String(url).includes("/library") ? status
+      const record = String(url).match(/^\/api\/transactions\/([^?/]+)/)?.[1];
+      const body = record ? records[record]
+        : check && String(url) === "/api/templates/library/check" ? check
+        : String(url).includes("/library") ? status
         : String(url).startsWith("/api/templates/auto/templates") ? { auto_enabled: 1, ignored: 0 }
           : String(url).startsWith("/api/templates/auto") ? Object.assign(auto, init.method === "POST" ? JSON.parse(init.body) : {})
             : String(url).startsWith("/api/templates/scans") && init.method === "POST"
@@ -345,7 +372,7 @@ async function listFixture(items, arrowStep, { sessionId = null, auto = null, sc
     for (const timer of timers.splice(0)) if (timer.live) timer.callback();
     await settle();
   };
-  return { controller, els, doc, urls, sent, runTimers, rows: () => els.get("#templatesRows").children };
+  return { controller, els, doc, urls, sent, runTimers, jobs, rows: () => els.get("#templatesRows").children };
 }
 
 test("the auto scan request carries its hosts and pace, and turning it on is the consent", () => {
@@ -412,34 +439,61 @@ test("the auto scan's hosts and pace save when the field is left", async () => {
   f.controller.dispose();
 });
 
-test("Download takes the latest release unless main is picked, and says it consents", async () => {
-  const f = await listFixture([], () => 0, { sessionId: "s-1" });
+// Nothing installed: Download and Import are what there is to do; main,
+// unreleased, waits in the menu.
+test("with no templates, Download and Import are the actions, and main is in the menu", async () => {
+  const f = await listFixture([], () => 0, { sessionId: "s-1", library: null });
   const download = f.els.get("#templatesDownload");
-  assert.equal(download.disabled, false);
+  assert.equal(download.classList.contains("hidden"), false);
+  assert.equal(download.textContent, "Download");
+  assert.equal(f.els.get("#templatesImport").classList.contains("hidden"), false);
+  assert.equal(f.els.get("#templatesCheck").classList.contains("hidden"), true, "nothing to check yet");
   download.dispatch("click", {});
   await settle();
   assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "release" } });
-  const channel = f.els.get("#templatesChannel");
-  channel.value = "main";
-  channel.dispatch("change", {});
-  assert.match(download.title, /no checksum/);
+  const main = f.els.get("#templatesSwitch");
+  assert.equal(main.textContent, "Download main (unreleased)");
+  main.dispatch("click", {});
+  await settle();
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "main" } });
+  f.controller.dispose();
+});
+
+// Installed and current, there is nothing to download; a check that finds a
+// newer release offers it as Update.
+test("with templates installed, only an update found offers Update", async () => {
+  const library = { source: "github", tag: "v10.5.0", verified: true };
+  const check = { channel: "release", latest: "v10.5.1", current: "v10.5.0", update_available: true };
+  const f = await listFixture([], () => 0, { sessionId: "s-1", library, check });
+  const download = f.els.get("#templatesDownload");
+  assert.equal(download.classList.contains("hidden"), true);
+  assert.equal(f.els.get("#templatesImport").classList.contains("hidden"), true, "Import moved to the menu");
+  assert.equal(f.els.get("#templatesSwitch").textContent, "Switch to main (unreleased)");
+  f.els.get("#templatesCheck").dispatch("click", {});
+  await settle();
+  assert.equal(download.classList.contains("hidden"), false);
+  assert.equal(download.textContent, "Update");
   download.dispatch("click", {});
   await settle();
-  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "main" } });
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "release" } });
   f.controller.dispose();
 });
 
-// Updating a library taken from main must not fall back to the release.
-test("Download starts on main when main is what is installed", async () => {
+test("a current library keeps Download hidden, and the menu switches channel", async () => {
   const library = { source: "github", tag: "main", verified: false, commit: "50852f5ce7".repeat(4) };
-  const f = await listFixture([], () => 0, { sessionId: "s-1", library });
-  assert.equal(f.els.get("#templatesChannel").value, "main");
-  f.els.get("#templatesDownload").dispatch("click", {});
+  const check = { channel: "main", latest: "50852f5ce7".repeat(4), current: "50852f5ce7".repeat(4), update_available: false };
+  const f = await listFixture([], () => 0, { sessionId: "s-1", library, check });
+  f.els.get("#templatesCheck").dispatch("click", {});
   await settle();
-  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "main" } });
+  assert.equal(f.els.get("#templatesDownload").classList.contains("hidden"), true);
+  assert.equal(f.els.get("#templatesNotice").textContent, "Main is installed and current.");
+  const other = f.els.get("#templatesSwitch");
+  assert.equal(other.textContent, "Switch to latest release");
+  other.dispatch("click", {});
+  await settle();
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "release" } });
   f.controller.dispose();
 });
-
 test("Start scan is ready at once and sends the form as it stands, and the plan follows the form", async () => {
   const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
   const f = await listFixture(items, () => 0, { sessionId: "s-1" });
@@ -472,44 +526,146 @@ test("Start scan is ready at once and sends the form as it stands, and the plan 
   f.controller.dispose();
 });
 
-test("a scan's matches open their exchange, and its requests read as status, request and template", async () => {
+// A started scan opens its results in place of the list: each request a row,
+// newest first, and a row opens what was sent and what came back.
+test("a started scan opens its results, and a row opens its exchange", async () => {
+  const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
   const job = {
-    id: "example-job", session_id: "s-1", status: "completed", targets: ["https://app.example.com"], sent: 2, planned: 2, matched: 1,
-    templates: 1, started_at: "2026-10-22T01:00:00Z",
+    id: "example-job", session_id: "s-1", status: "completed", targets: ["https://app.example.com"], sent: 3, planned: 3, matched: 1,
+    templates: 1, started_at: "2026-10-22T01:00:00Z", history: "all",
     results: [{ record_id: "r-1", severity: "medium", name: "Git Configuration - Detect", template_id: "git-config", method: "GET",
       url: "https://app.example.com/.git/config", evidence: "[core]" }],
     recent: [
-      { method: "GET", url: "https://app.example.com/x", error: "timeout", template_id: "git-config" },
-      { method: "GET", url: "https://app.example.com/.git/config", status: 200, ms: 3, matched: true, template_id: "git-config" },
+      { method: "GET", url: "https://app.example.com/x", error: "timeout", ms: 15000, template_id: "git-config" },
+      { method: "GET", url: "https://app.example.com/", status: 200, ms: 42, template_id: "php-version", record_id: "r-2" },
+      { method: "GET", url: "https://app.example.com/.git/config", status: 200, ms: 3, matched: true, template_id: "git-config", record_id: "r-1" },
     ],
   };
   const opened = [];
-  const f = await listFixture([], () => 0, { sessionId: "s-1", jobs: [job], openRecord: (id) => opened.push(id) });
-  const card = f.els.get("#templatesScanJobs").children[0];
-  const open = card.children[0].children.find((node) => node.dataset.openScan === "example-job");
-  f.els.get("#templatesScanJobs").dispatch("click", { target: inside(open) });
+  const records = { "r-1": { id: "r-1" }, "r-2": { id: "r-2" } };
+  const f = await listFixture(items, () => 0, { sessionId: "s-1", jobs: [], records, openRecord: (id) => opened.push(id) });
+  assert.equal(f.els.get("#templatesViews").classList.contains("hidden"), true, "no results yet");
+  f.els.get("#templatesScanSelection").value = "filter";
+  f.els.get("#templatesScanRate").value = "10";
+  f.els.get("#templatesScanConcurrency").value = "4";
+  f.els.get("#templatesScanMaxRequests").value = "10000";
+  f.els.get("#templatesScanKeepAll").checked = true;
+  f.els.get("#templatesScanTargets").value = "https://app.example.com";
+  f.els.get("#templatesScanStart").dispatch("click", {});
+  // The scan the server started; its full record comes with its results.
   await settle();
-  const nodes = [];
-  const walk = (node) => { nodes.push(node); for (const child of node.children || []) walk(child); };
-  walk(f.els.get("#templatesDetail"));
-  assert.equal(nodes.find((node) => node.tag === "h3").textContent, "Manual scan · completed");
-  const match = nodes.find((node) => node.className === "templates-match-open");
-  assert.equal(match.dataset.recordId, "r-1");
-  assert.deepEqual(match.children.map((part) => part.textContent), ["medium", "Git Configuration - Detect"]);
-  f.els.get("#templatesDetail").dispatch("click", { target: inside(match) });
-  assert.deepEqual(opened, ["r-1"]);
-  // Newest first.
-  const requests = nodes.find((node) => node.className === "templates-requests").children;
-  // One target, so the path is what each line shows; the whole URL is its tooltip.
-  assert.deepEqual(requests.map((row) => row.children.map((part) => part.textContent)), [
-    ["200", "GET /.git/config", "3 ms · git-config"],
-    ["error", "GET /x", "timeout · git-config"],
+  f.jobs.push(job);
+  await f.controller.syncSession();
+  await settle();
+  assert.equal(f.sent.at(-1).body.history, "all");
+  assert.equal(f.els.get("#templatesViews").classList.contains("hidden"), false);
+  assert.equal(f.els.get("#templatesResultsTable").classList.contains("hidden"), false);
+  assert.equal(f.els.get("#templatesTable").classList.contains("hidden"), true);
+  const rows = () => f.els.get("#templatesResultsRows").children;
+  assert.deepEqual(rows().map((row) => row.children.map((cell) => cell.textContent)), [
+    ["200", "GET", "/.git/config", "git-config", "3 ms", "✓"],
+    ["200", "GET", "/", "php-version", "42 ms", ""],
+    ["error", "GET", "/x", "git-config", "15,000 ms", ""],
   ]);
-  assert.equal(requests[0].title, "GET https://app.example.com/.git/config");
-  assert.equal(requests[0].className, "templates-matched");
+
+  const nodes = () => {
+    const all = [];
+    const walk = (node) => { all.push(node); for (const child of node.children || []) walk(child); };
+    walk(f.els.get("#templatesDetail"));
+    return all;
+  };
+  f.els.get("#templatesResultsRows").dispatch("click", { target: inside(rows()[1]) });
+  await settle();
+  assert.deepEqual(nodes().filter((node) => node.className === "templates-exchange").map((node) => node.textContent), ["REQ r-2", "RES r-2"]);
+  const open = nodes().find((node) => node.dataset?.recordId === "r-2");
+  f.els.get("#templatesDetail").dispatch("click", { target: inside(open) });
+  assert.deepEqual(opened, ["r-2"]);
+
+  f.els.get("#templatesResultsRows").dispatch("click", { target: inside(rows()[2]) });
+  await settle();
+  assert.match(nodes().map((node) => node.textContent).join(" "), /timeout/);
+
+  const matchedOnly = f.els.get("#templatesResultsMatched");
+  assert.equal(matchedOnly.classList.contains("hidden"), false);
+  matchedOnly.dispatch("click", {});
+  assert.deepEqual(rows().map((row) => row.children[2].textContent), ["/.git/config"]);
+
+  // The list comes back with its own switch.
+  f.els.get("#templatesViews").dispatch("click", { target: inside(Object.assign(fakeElement(), { dataset: { templatesView: "templates" } })) });
+  assert.equal(f.els.get("#templatesTable").classList.contains("hidden"), false);
+  assert.equal(f.els.get("#templatesResultsTable").classList.contains("hidden"), true);
   f.controller.dispose();
 });
 
+test("a scan's card opens its results; a scan that kept only matches says why a row has none", async () => {
+  const job = {
+    id: "example-job", session_id: "s-1", status: "completed", targets: ["https://app.example.com"], sent: 1, planned: 1, matched: 0,
+    templates: 1, started_at: "2026-10-22T01:00:00Z", history: "matched",
+    recent: [{ method: "GET", url: "https://app.example.com/", status: 200, ms: 5, template_id: "php-version" }],
+  };
+  const f = await listFixture([], () => 0, { sessionId: "s-1", jobs: [job] });
+  const card = f.els.get("#templatesScanJobs").children[0];
+  assert.equal(card.dataset.openScan, "example-job");
+  f.els.get("#templatesScanJobs").dispatch("click", { target: inside(card) });
+  await settle();
+  assert.equal(f.els.get("#templatesResultsTable").classList.contains("hidden"), false);
+  assert.equal(f.els.get("#templatesResultsMatched").classList.contains("hidden"), true, "nothing matched to narrow to");
+  f.els.get("#templatesResultsRows").dispatch("click", { target: inside(f.els.get("#templatesResultsRows").children[0]) });
+  await settle();
+  const texts = [];
+  const walk = (node) => { texts.push(node.textContent); for (const child of node.children || []) walk(child); };
+  walk(f.els.get("#templatesDetail"));
+  assert.match(texts.join(" "), /kept only the matched/);
+  f.controller.dispose();
+});
+
+// "Turned on" is one of the list's views; turning on what it shows, or a
+// range with Shift, sets each template's own On.
+test("the list shows what is turned on, and On goes on for many at once", async () => {
+  const items = [
+    { id: "example-a", name: "A", severity: "high", tags: [], passive_supported: true, active_supported: true },
+    { id: "example-b", name: "B", severity: "high", tags: [], active_supported: true },
+    { id: "example-c", name: "C", severity: "high", tags: [], passive_supported: true },
+  ];
+  const f = await listFixture(items, () => 0, { sessionId: "s-1", auto: { session_id: "s-1", enabled: false, hosts: [], rate: 10, templates: 0 } });
+  const support = f.els.get("#templatesSupport");
+  support.value = "on";
+  support.dispatch("change", {});
+  await settle();
+  assert.match(f.urls.filter((url) => url.startsWith("/api/templates?")).at(-1), /enabled=true/);
+  assert.doesNotMatch(f.urls.filter((url) => url.startsWith("/api/templates?")).at(-1), /support=/);
+  assert.equal(f.els.get("#templatesEnableShown").classList.contains("hidden"), false, "the list is narrowed");
+  support.value = "";
+  support.dispatch("change", {});
+  await settle();
+  assert.equal(f.els.get("#templatesEnableShown").classList.contains("hidden"), true, "the whole library");
+
+  const search = f.els.get("#templatesSearch");
+  search.value = "example";
+  search.dispatch("input", {});
+  await f.runTimers();
+  const on = f.els.get("#templatesEnableShown");
+  assert.equal(on.classList.contains("hidden"), false);
+  on.dispatch("click", {});
+  await settle();
+  const bulk = f.sent.slice(-2);
+  assert.deepEqual(bulk.map((sent) => sent.url).sort(), ["/api/templates/auto/templates", "/api/templates/passive"]);
+  for (const sent of bulk) assert.deepEqual(sent.body, { filter: { search: "example" }, enabled: true });
+
+  // Shift extends from the box ticked last: A, then Shift on C, turns on A..C.
+  const box = (index) => f.rows()[index].children[0].children[0];
+  box(0).checked = true;
+  f.els.get("#templatesRows").dispatch("click", { target: inside(box(0)) });
+  await settle();
+  const before = f.sent.length;
+  box(2).checked = true;
+  f.els.get("#templatesRows").dispatch("click", { target: inside(box(2)), shiftKey: true });
+  await settle();
+  const range = f.sent.slice(before);
+  assert.deepEqual(range.find((sent) => sent.url === "/api/templates/passive").body, { ids: ["example-a", "example-c"], enabled: true });
+  assert.deepEqual(range.find((sent) => sent.url === "/api/templates/auto/templates").body, { ids: ["example-b"], enabled: true });
+  f.controller.dispose();
+});
 test("a refusal reads as what the server said, not as its JSON", async () => {
   const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
   const refusal = "https://app.example.com is one of Sniper's own listeners.";

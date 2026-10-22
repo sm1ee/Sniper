@@ -42,6 +42,13 @@ that skips them rather than slow capture, and the library status counts it as
 
 ## Manual scan
 
+A manual scan sends, by default, the templates turned on in the list's On
+column; it can take the list's search results or the selected template
+instead. Tick On for several at once with **Turn on all**, which appears once
+the list is narrowed, or with Shift-click for a range. Its results open in
+place of the list: one row a request, and a row opens what was sent and what
+came back.
+
 ### What it sends
 
 A template can be sent when each of its HTTP request blocks is made of:
@@ -172,10 +179,12 @@ tagged `dos` are never sent.
 
 ### What it keeps
 
-- HTTP history keeps only the exchanges a template matched, each noted
-  `Sent by Active Scan.` with the template and scan id. The scan's request
-  log shows the latest 200 requests with method, URL, status, time and error,
-  never headers or bodies.
+- HTTP history keeps every exchange of a manual scan, as it keeps Fuzzer's,
+  each noted `Sent by Active Scan.` with the template and scan id. Options ▸
+  **Keep every request in HTTP history** off (`"history": "matched"`,
+  `--history matched`) keeps only the matched ones, as the auto scan always
+  does. The scan's request log shows the latest 200 requests with method,
+  URL, status, time and error, and the record each one is in.
 - Findings appear under the category `nuclei` with rule id
   `nuclei:<template-id>` or `nuclei:<template-id>:<matcher>`, once per
   template, matcher and endpoint. **Rescan** keeps them.
@@ -275,11 +284,14 @@ acknowledgment: **Download** in the app, `"acknowledged": true` in the API,
 `--yes` in the CLI.
 
 Templates reach the repository's `main` branch weeks before a release. To take
-them, pick **Main (unreleased)** beside **Download** (`"channel": "main"`,
-`--main`): Sniper asks the branch API for main's newest commit and fetches that
-commit's `.tar.gz`. Main publishes no checksum, so the library records the
-commit and refuses an archive that names another. While main is installed,
-**Check for updates** compares with main's newest commit.
+them, choose **Download main (unreleased)** or **Switch to main** in the ⋯ menu
+(`"channel": "main"`, `--main`): Sniper asks the branch API for main's newest
+commit and fetches that commit's `.tar.gz`. Main publishes no checksum, so the
+library records the commit and refuses an archive that names another.
+
+Once templates are installed, **Download** is gone until there is something to
+download: **Check for updates** asks GitHub, about main's newest commit while
+main is installed, and **Update** appears when there is a newer one.
 
 ### Import
 
@@ -300,7 +312,7 @@ id repeats, the first file wins.
 | `GET /api/templates` | List; query `search` (a substring of the id, name, path, tags, CVEs, description or references), `severity` (comma-separated), `protocol`, `support` (`passive`, `active`, `unsupported`), `tag`, `enabled`, `sort` (`on`, `severity`, `name`, `mode`, `tags`) with `direction` (`asc`, the most severe first for severity, or `desc`), `limit` (at most 30,000), `offset`. Each template's `requests` is the most one scan sends a target before redirects; a flow can stop sooner. |
 | `GET /api/templates/:id` | One template with its description, references and YAML. |
 | `POST /api/templates/passive` | Body `{"ids": [...], "enabled": bool}` or `{"filter": {...list query...}, "enabled": bool}`. Ids that cannot run passively are ignored and counted. |
-| `POST /api/templates/scans` | Body: `session_id`, `targets`, `ids` or `filter` (a list query), `allow_risks`, `rate`, `concurrency`, `max_requests`, `apply_match_replace`, plus `"preview": true` to count or `"acknowledged": true` to start. A start returns the scan; 409 while one runs. |
+| `POST /api/templates/scans` | Body: `session_id`, `targets`, `ids` or `filter` (a list query; `{"enabled": true}` takes the templates turned on), `allow_risks`, `rate`, `concurrency`, `max_requests`, `apply_match_replace`, `history` (`all`, the default, or `matched`), plus `"preview": true` to count or `"acknowledged": true` to start. A start returns the scan; 409 while one runs. |
 | `GET /api/templates/scans?session_id=` | The session's scans, newest first, without results or request logs. |
 | `GET /api/templates/scans/:id?session_id=` | One scan with its results (each naming the matched history record) and its latest requests. |
 | `POST /api/templates/scans/:id/stop` | Body `{"session_id"}`. Stops the running scan. |
@@ -325,6 +337,7 @@ sniper-cli templates passive set-enabled --enabled true --all --yes
 sniper-cli templates scan preview --target https://app.example.com --severity high,critical
 sniper-cli templates scan start --target https://app.example.com --severity high,critical --yes
 sniper-cli templates scan start --target https://app.example.com --id git-config --rate 5 --yes
+sniper-cli templates scan start --target https://app.example.com --on --history matched --yes
 sniper-cli templates scan list
 sniper-cli templates scan get --id <scan-id>
 sniper-cli templates scan stop --id <scan-id> --yes
@@ -336,6 +349,6 @@ sniper-cli templates auto set --enabled false --yes
 
 `download` and `import` wait until the release is installed and print the final
 status. `passive set-enabled` takes exactly one of ids, a filter or `--all`; a
-scan takes exactly one of ids or a filter, and `--allow-risk` once per risk.
+scan takes exactly one of ids, a filter or `--on`, and `--allow-risk` once per risk.
 `scan start` returns when the scan starts; `scan get` follows it. The scan
 commands use the active session unless `--session-id` names another.
