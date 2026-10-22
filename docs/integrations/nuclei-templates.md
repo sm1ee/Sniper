@@ -9,8 +9,9 @@ archive, then use templates in two ways:
 
 - **Passive**: turned-on templates check captured traffic and never send a
   request.
-- **Template Scan**: on demand, Sniper sends the templates you pick to the
-  targets you name, and keeps what matched.
+- **Manual scan**: on demand, Sniper sends the templates you pick to the
+  targets you name, and keeps what matched. The **Auto scan** does the same
+  for each new host the proxy captures.
 
 ## Passive templates
 
@@ -39,7 +40,7 @@ under load. At most four template evaluations run at once; a response beyond
 that skips them rather than slow capture, and the library status counts it as
 `passive_skipped_under_load`.
 
-## Template Scan
+## Manual scan
 
 ### What it sends
 
@@ -125,14 +126,15 @@ session's Interactsh server, set up in **Capture ▸ OAST**:
   application lives under (`https://app.example.com/shop`), without
   credentials, query or fragment. A scan takes at most 20 targets.
   `{{BaseURL}}` keeps the path; `{{RootURL}}` leaves it out.
-- Every target's host must match a Scope include pattern. Sniper checks this at
-  the start and again before each target's requests, so narrowing Scope stops
-  further requests to a host you removed.
+- Scope does not limit a manual scan: you named its targets, as you do in
+  Replay and Recon. Scope bounds only the auto scan, which picks its hosts
+  itself.
 - Sniper's own proxy and UI listeners and its `sniper` page are never
   targets, by address or by a name that resolves to this machine.
 - Redirects are followed only when the template asks (`redirects` or
-  `host-redirects`), for at most ten hops, and only while each hop stays in
-  Scope and away from Sniper. When a hop would leave, its redirect is the
+  `host-redirects`), for at most ten hops, and only while each hop goes to one
+  of the scan's targets (for the auto scan, a host in Scope or on its list)
+  and away from Sniper. When a hop would leave, its redirect is the
   response judged, and the job counts it as `redirects_not_followed`. Hops
   follow Go's HTTP client, as in Nuclei; `Authorization` and `Cookie` headers
   stay with their host.
@@ -171,7 +173,7 @@ tagged `dos` are never sent.
 ### What it keeps
 
 - HTTP history keeps only the exchanges a template matched, each noted
-  `Sent by Template Scan.` with the template and scan id. The scan's request
+  `Sent by Active Scan.` with the template and scan id. The scan's request
   log shows the latest 200 requests with method, URL, status, time and error,
   never headers or bodies.
 - Findings appear under the category `nuclei` with rule id
@@ -255,7 +257,7 @@ negated body matcher, a size, an expression that reads the body) skips that
 response.
 
 On release v10.5.0, 2,086 of 11,698 HTTP templates can run passively and 9,784
-can be sent by Template Scan, 446 of them out-of-band.
+can be sent by a manual or auto scan, 446 of them out-of-band.
 
 ## The library
 

@@ -107,7 +107,7 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 | **Capture** | HTTP history, WebSocket sessions, intercept queue, match & replace rules, HTML and image responses rendered in a sandbox |
 | **Findings** | Passive scanner: sensitive data, CORS, missing headers, JWT issues, and the management endpoints and backend addresses the Service Map names. Each issue is listed once per host, endpoint or value; **Rescan** applies the current rules to traffic already captured |
 | **Scan ▸ Recon** | Session-owned endpoint discovery from a scoped static crawler, urlscan and Wayback, with explicit provider consent and optional budgets |
-| **Scan ▸ Active Scan** | Nuclei community templates: turned-on templates check in-scope captured traffic without sending anything, and Template Scan sends the ones you pick to targets you name |
+| **Scan ▸ Active Scan** | Nuclei community templates: turned-on templates check in-scope captured traffic without sending anything, and a manual scan sends the ones you pick to targets you name |
 | **Replay** | Modify and resend any captured request, override host and port, render the response |
 | **Fuzzer** | Payload lists sent at marked positions, Sniper or Battering ram, in the background with progress and Stop |
 | **Tools** | Decode, encode, hash, JWT inspector, data transformations |
@@ -224,8 +224,8 @@ to 0 (unbounded), and a CLI timeout does not stop the background job. See
 (MIT license) without the `nuclei` program. While Passive Scan is on, the
 templates you turn on check responses from hosts that match a Scope include
 pattern, without sending anything; with no Scope includes they check nothing.
-**Template Scan** sends the templates you pick to targets in Scope after a
-preview and your confirmation. Templates tagged intrusive, default-login,
+A **manual scan** sends the templates you pick to the targets you name, when
+you start it; the plan under the form says what it will send. Templates tagged intrusive, default-login,
 bruteforce and the like, or that send PUT, DELETE or PATCH, run only if you
 allow each risk, and `dos` templates never run. Out-of-band templates
 (`{{interactsh-url}}`) are sent where the session has an Interactsh server

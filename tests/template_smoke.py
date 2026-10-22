@@ -1,6 +1,6 @@
 """Verify Nuclei templates against an isolated Sniper and a loopback upstream:
 import a synthetic release, enable passive templates, capture in scope,
-restart, and rescan after disabling; then run a Template Scan, check it sent
+restart, and rescan after disabling; then run a manual scan, check it sent
 only to its target, kept only matches, survives a rescan, sends raw requests
 as Nuclei does, and is marked interrupted when Sniper stops mid-scan. Nothing
 leaves this machine.
@@ -285,7 +285,7 @@ def main():
         assert remaining == ["nuclei-passive:example-detect"], remaining
         print("Import, passive capture, restart and rescan after disabling passed.", flush=True)
 
-        # Template Scan: the target is the upstream's origin, in Scope.
+        # Manual scan: the target is the upstream's origin.
         session = next(item["id"] for item in call("/api/sessions") if item["active"])
         origin = target.rstrip("/")
         scan = {"session_id": session, "targets": [origin], "ids": ["example-active", "example-detect"]}
@@ -304,7 +304,7 @@ def main():
         kept = [result["record_id"] for result in job["results"]]
         for record_id in kept:
             record = call(f"/api/transactions/{record_id}")
-            assert "Sent by Template Scan." in record["notes"], record["notes"]
+            assert "Sent by Active Scan." in record["notes"], record["notes"]
         call("/api/findings/rescan", {})
         after = {item["rule_id"] for item in call("/api/findings?limit=1000")
                  if item.get("rule_id", "").startswith("nuclei:")}
@@ -341,7 +341,7 @@ def main():
         survived = {item["rule_id"] for item in call("/api/findings?limit=1000")
                     if item.get("rule_id", "").startswith("nuclei:")}
         assert survived == scanned, survived
-        print("Template Scan, rescan and interruption by a restart passed.", flush=True)
+        print("Manual scan, rescan and interruption by a restart passed.", flush=True)
     finally:
         if process is not None and process.poll() is None:
             stop()

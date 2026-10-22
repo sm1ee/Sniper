@@ -597,7 +597,7 @@ enum TemplatesCommand {
         #[command(subcommand)]
         command: TemplatesPassiveCommand,
     },
-    /// Send templates to targets you name, when you ask: Template Scan.
+    /// Send templates to targets you name, when you ask: a manual scan.
     Scan {
         #[command(subcommand)]
         command: TemplatesScanCommand,
@@ -671,8 +671,8 @@ enum TemplatesScanCommand {
 struct TemplatesScanArgs {
     #[arg(long)]
     session_id: Option<Uuid>,
-    /// An http(s) origin, optionally with a path; repeat for up to 20. Its
-    /// host must be in Scope.
+    /// An http(s) origin, optionally with a path; repeat for up to 20. Scope
+    /// does not limit it; redirects are followed only among the targets.
     #[arg(long = "target", required = true)]
     targets: Vec<String>,
     /// A template id; repeat for several. Not with a filter.
@@ -3891,7 +3891,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.scan.preview",
             "templates scan preview --target <url>",
-            "Count what a Template Scan would send: the templates selected by ids or a filter that can run actively, the requests they make before any redirect, the templates left out by risk, and the out-of-band templates left out because the session has no Interactsh server (oast_unavailable). Checks every target is an http(s) origin in a non-empty Scope include list and not Sniper itself. Sends nothing.",
+            "Count what a manual scan would send: the templates selected by ids or a filter that can run actively, the requests they make before any redirect, the templates left out by risk, and the out-of-band templates left out because the session has no Interactsh server (oast_unavailable). Checks every target is an http(s) origin and not Sniper itself; Scope does not limit a manual scan. Sends nothing.",
             Read,
             false,
             &["targets"],
@@ -3900,7 +3900,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.scan.start",
             "templates scan start --target <url>",
-            "Send each selected template's requests to each target, paced and bounded, and keep in HTTP history only the exchanges a template matched; their findings appear under category nuclei as nuclei:<template-id>. Redirects are followed only while they stay in Scope. Templates with risk tags or PUT, DELETE or PATCH are left out unless allowed; dos never runs. Out-of-band templates ({{interactsh-url}}) are sent only where the session has an Interactsh server (capture oast) and match when the target calls back. Returns once the scan starts; read it with templates scan get.",
+            "Send each selected template's requests to each target, paced and bounded, and keep in HTTP history only the exchanges a template matched; their findings appear under category nuclei as nuclei:<template-id>. Redirects are followed only to one of the targets; Scope does not limit a manual scan. Templates with risk tags or PUT, DELETE or PATCH are left out unless allowed; dos never runs. Out-of-band templates ({{interactsh-url}}) are sent only where the session has an Interactsh server (capture oast) and match when the target calls back. Returns once the scan starts; read it with templates scan get.",
             Write,
             true,
             &["targets"],
@@ -3909,7 +3909,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.scan.list",
             "templates scan list",
-            "List the session's Template Scan jobs, newest first: status, targets, counts of planned, sent, failed, blocked and matched requests, warnings. Results and the request log are left out; templates scan get has them.",
+            "List the session's scans, manual and auto, newest first: status, targets, counts of planned, sent, failed, blocked and matched requests, warnings. Results and the request log are left out; templates scan get has them.",
             Read,
             false,
             &[],
@@ -3918,7 +3918,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.scan.get",
             "templates scan get --id <uuid>",
-            "Read one Template Scan job with its results (each naming the matched history record) and its latest 200 requests with status, time and errors.",
+            "Read one scan with its results (each naming the matched history record) and its latest 200 requests with status, time and errors.",
             Read,
             false,
             &["id"],
@@ -3927,7 +3927,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.scan.stop",
             "templates scan stop --id <uuid>",
-            "Stop the session's running Template Scan. Requests in flight are dropped; matches already stored stay.",
+            "Stop the session's running scan. Requests in flight are dropped; matches already stored stay.",
             Write,
             true,
             &["id"],
@@ -6192,7 +6192,7 @@ fn templates_input_schema(operation: &str) -> Option<Value> {
                 true,
                 "The session to scan in; omitted or null selects the active session.",
             );
-            properties["targets"] = json!({"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1,"maxLength":2048},"description":"http(s) origins, optionally with a path, without credentials, query or fragment; each host must be in a non-empty Scope include list."});
+            properties["targets"] = json!({"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1,"maxLength":2048},"description":"http(s) origins, optionally with a path, without credentials, query or fragment. Scope does not limit them; redirects are followed only among them."});
             properties["ids"] = json!({"type":["array","null"],"items":{"type":"string","pattern":"^([a-zA-Z0-9]+[-_])*[a-zA-Z0-9]+$"},"maxItems":30000,"description":"Template ids. Exactly one of ids or a filter (search, severity, tag)."});
             properties["allow_risks"] = json!({"type":["array","null"],"items":{"type":"string","enum":["intrusive","default-login","bruteforce","token-spray","credential-stuffing","fuzz","fuzzing","dast","osint","method:put","method:delete","method:patch"]},"description":"Risks to allow by name; templates with any other risk are left out. dos never runs."});
             properties["rate"] = json!({"type":["integer","null"],"minimum":1,"maximum":50,"default":10,"description":"Requests a second across the scan. Null uses 10."});

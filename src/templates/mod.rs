@@ -81,7 +81,7 @@ pub fn passive_findings(set: &PassiveSet, record: &TransactionRecord) -> Vec<Sca
         .collect()
 }
 
-/// A Template Scan finding: the record is the exchange the template matched.
+/// An Active Scan finding: the record is the exchange the template matched.
 pub fn active_finding(
     template: &CompiledTemplate,
     result: &TemplateMatch,
@@ -91,7 +91,7 @@ pub fn active_finding(
 ) -> ScannerFinding {
     let mut finding = finding(template, result, record, ACTIVE_RULE_PREFIX);
     finding.detail.push_str(&format!(
-        "\nSent by Template Scan job {job}, template library {library}.\nRequest: {} {}://{}{}",
+        "\nSent by Active Scan job {job}, template library {library}.\nRequest: {} {}://{}{}",
         record.method, record.scheme, record.host, record.path
     ));
     finding

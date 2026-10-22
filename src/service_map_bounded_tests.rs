@@ -2133,18 +2133,19 @@ fn an_origin_lists_what_no_rule_names() {
 }
 
 // An API's successful answer is not read, but the same answer to a request a
-// tester sent from Replay is, as is what a diagnostic path answers.
+// tester sent from Replay or a scan is, as is what a diagnostic path answers.
+// Rows a scan sent before it was renamed say so in the old words.
 #[test]
 fn a_replayed_answer_and_a_diagnostic_path_are_read() {
     use crate::store::ListFilters;
     let session = Uuid::from_u128(111);
-    let answer = |host: &str, path: &str, kind: &str, body: &[u8], replayed: bool, sequence| {
+    let answer = |host: &str, path: &str, kind: &str, body: &[u8], note: Option<&str>, sequence| {
         let mut record = filter_fixture(host, path, 200, kind, None, sequence);
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::CONTENT_TYPE, kind.parse().unwrap());
         record.response = Some(MessageRecord::from_headers_and_body(&headers, body, 4096));
-        if replayed {
-            record.notes.push(crate::model::REPLAY_NOTE.to_string());
+        if let Some(note) = note {
+            record.notes.push(note.to_string());
         }
         record
     };
@@ -2156,7 +2157,7 @@ fn a_replayed_answer_and_a_diagnostic_path_are_read() {
             "/api/cart",
             "application/json",
             trace,
-            false,
+            None,
             1,
         ),
         answer(
@@ -2164,7 +2165,7 @@ fn a_replayed_answer_and_a_diagnostic_path_are_read() {
             "/api/cart",
             "application/json",
             trace,
-            true,
+            Some(crate::model::REPLAY_NOTE),
             2,
         ),
         answer(
@@ -2172,8 +2173,24 @@ fn a_replayed_answer_and_a_diagnostic_path_are_read() {
             "/.git/config",
             "text/plain",
             b"[core]\n\trepositoryformatversion = 0\n",
-            false,
+            None,
             3,
+        ),
+        answer(
+            "d.example.com",
+            "/api/cart",
+            "application/json",
+            trace,
+            Some(crate::model::TEMPLATE_SCAN_NOTE),
+            4,
+        ),
+        answer(
+            "e.example.com",
+            "/api/cart",
+            "application/json",
+            trace,
+            Some("Sent by Template Scan."),
+            5,
         ),
     ]);
     let found = |origin: &str| {
@@ -2200,6 +2217,13 @@ fn a_replayed_answer_and_a_diagnostic_path_are_read() {
     );
     assert!(found("https://b.example.com").contains(&"java_stack_trace".to_string()));
     assert!(found("https://c.example.com").contains(&"git_config".to_string()));
+    assert_eq!(crate::model::TEMPLATE_SCAN_NOTE, "Sent by Active Scan.");
+    for scanned in ["https://d.example.com", "https://e.example.com"] {
+        assert!(
+            found(scanned).contains(&"java_stack_trace".to_string()),
+            "{scanned}"
+        );
+    }
 }
 
 // A page that is not UTF-8, as many Korean sites still serve in EUC-KR, is

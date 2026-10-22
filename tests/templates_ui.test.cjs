@@ -243,6 +243,9 @@ test("the Scan tool is registered where the UI and the server keep their tool li
     "ScanJobs", "Version", "AutoToggle", "AutoSummary", "AutoHosts", "AutoRate"]) {
     assert.match(html, new RegExp(`id="templates${id}"`), id);
   }
+  // Manual scan beside Auto scan: the one you start, the one that starts itself.
+  assert.match(html, /<h2 id="templatesScanTitle">Manual scan<\/h2>/);
+  assert.doesNotMatch(html, />Template scan</);
   // One switch says whether the auto scan is on and turns it on; a scan
   // starts without a preview step.
   for (const gone of ["AutoState", "AutoSave", "ScanPreview"]) assert.doesNotMatch(html, new RegExp(`id="templates${gone}"`), gone);
@@ -489,6 +492,7 @@ test("a scan's matches open their exchange, and its requests read as status, req
   const nodes = [];
   const walk = (node) => { nodes.push(node); for (const child of node.children || []) walk(child); };
   walk(f.els.get("#templatesDetail"));
+  assert.equal(nodes.find((node) => node.tag === "h3").textContent, "Manual scan · completed");
   const match = nodes.find((node) => node.className === "templates-match-open");
   assert.equal(match.dataset.recordId, "r-1");
   assert.deepEqual(match.children.map((part) => part.textContent), ["medium", "Git Configuration - Detect"]);
@@ -508,7 +512,7 @@ test("a scan's matches open their exchange, and its requests read as status, req
 
 test("a refusal reads as what the server said, not as its JSON", async () => {
   const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
-  const refusal = "https://app.example.com is not in Scope. Template Scan sends only to hosts in Scope; add app.example.com there.";
+  const refusal = "https://app.example.com is one of Sniper's own listeners.";
   const f = await listFixture(items, () => 0, { sessionId: "s-1", scanError: refusal });
   f.els.get("#templatesScanSelection").value = "filter";
   f.els.get("#templatesScanRate").value = "10";

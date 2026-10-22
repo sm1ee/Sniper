@@ -216,7 +216,7 @@
     return reason ? `No: ${reason}` : "No";
   }
 
-  // ---- Template Scan ----
+  // ---- Manual scan ----
 
   // Risks a scan leaves out unless each is allowed; dos is never sent.
   const RISKS = ["intrusive", "default-login", "bruteforce", "token-spray", "credential-stuffing", "fuzz", "fuzzing",
@@ -609,7 +609,7 @@
       renderDetail();
     }
 
-    // ---- Template Scan ----
+    // ---- Manual scan ----
 
     let scanSession = null;
     let scanJobs = [];
@@ -683,7 +683,7 @@
         const card = element("article", "recon-job");
         card.title = `Started ${new Date(job.started_at).toLocaleString()} · ${plural(job.templates, "template")}`;
         const header = element("div", "recon-job-header");
-        header.append(element("strong", "recon-job-target", (job.targets || []).join(", ") || "Template scan"));
+        header.append(element("strong", "recon-job-target", (job.targets || []).join(", ") || "Manual scan"));
         if (job.auto) header.append(element("span", "detail-chip", "auto"));
         header.append(element("span", `detail-chip ${job.status === "running" ? "info" : job.status === "completed" ? "ok" : "warn"}`, job.status));
         const results = element("button", "secondary-action", "Results");
@@ -706,7 +706,7 @@
 
     function renderJobDetail() {
       const job = openJob;
-      els.Detail.append(element("h3", "", `${job.auto ? "Auto scan" : "Template scan"} · ${job.status}`));
+      els.Detail.append(element("h3", "", `${job.auto ? "Auto scan" : "Manual scan"} · ${job.status}`));
       const fields = element("dl", "templates-facts");
       field(fields, "Targets", job.targets);
       field(fields, "Library", job.library);
@@ -769,11 +769,11 @@
       if (!visible || !sessionId) return;
       try {
         const query = `session_id=${encodeURIComponent(sessionId)}`;
-        const listed = await json(await fetcher(`/api/templates/scans?${query}`), "Could not list Template Scans");
+        const listed = await json(await fetcher(`/api/templates/scans?${query}`), "Could not list the scans");
         if (sessionId !== scanSession || listed.session_id !== sessionId) return;
         scanJobs = Array.isArray(listed.jobs) ? listed.jobs : [];
         if (openJob) {
-          const job = await json(await fetcher(`/api/templates/scans/${encodeURIComponent(openJob.id)}?${query}`), "Could not read the Template Scan");
+          const job = await json(await fetcher(`/api/templates/scans/${encodeURIComponent(openJob.id)}?${query}`), "Could not read the scan");
           if (sessionId !== scanSession) return;
           openJob = job;
           if (showingJob) renderDetail();

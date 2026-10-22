@@ -1,8 +1,10 @@
-//! Template Scan: templates the operator picks, sent to targets they name,
-//! when they ask. Every target and every redirect hop must be in a Scope the
-//! operator set, nothing goes to Sniper's own listeners, a job paces itself
-//! and stops when asked, and the history keeps only the exchanges a template
-//! matched. The job log keeps one line for each of the rest.
+//! Active Scan: templates sent to targets. A manual scan sends the templates
+//! the operator picks to the targets they name, when they ask, and follows a
+//! redirect only to one of those targets; the auto scan sends to each new host
+//! captured in Scope or on its own list. Nothing goes to Sniper's own
+//! listeners, a job paces itself and stops when asked, and the history keeps
+//! only the exchanges a template matched. The job log keeps one line for each
+//! of the rest.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -142,9 +144,10 @@ pub struct ScanJob {
     /// Requests that got no response.
     pub failed: usize,
     /// Requests not sent: a Match & Replace rule would have changed where
-    /// they went, or their host left Scope.
+    /// they went, or an auto scan's host left Scope.
     pub blocked: usize,
-    /// Redirects not followed because they led out of Scope or to Sniper.
+    /// Redirects not followed because they led to a host the scan may not
+    /// send to, or to Sniper.
     pub redirects_not_followed: usize,
     pub matched: usize,
     pub rate: u32,
@@ -498,7 +501,7 @@ fn session_load_error(error: anyhow::Error) -> ApiError {
     if error.to_string().contains("was not found") {
         return api_error(StatusCode::NOT_FOUND, "Session not found.");
     }
-    tracing::warn!(%error, "failed to load session for Template Scan");
+    tracing::warn!(%error, "failed to load session for Active Scan");
     api_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "Session could not be loaded.",
@@ -547,7 +550,7 @@ pub async fn get(
         .into_iter()
         .find(|job| job.id == id)
         .map(Json)
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Template Scan job not found."))
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Scan job not found."))
 }
 
 pub async fn start(
@@ -581,28 +584,9 @@ pub async fn start(
         .map_err(session_load_error)?;
     let (oast, metas, oast_unavailable) = with_oast(&session, metas).await;
     let planned = metas.iter().map(|meta| meta.requests).sum::<usize>() * targets.len();
-    let (include, exclude) = session.runtime.scope_lists().await;
-    if include.is_empty() {
-        return Err(bad_request(
-            "Scope has no include patterns. Template Scan sends only to hosts in Scope; add the hosts you test there.",
-        ));
-    }
+    // The operator named these targets, as they do in Replay and Recon; Scope
+    // bounds only what Sniper sends on its own, the auto scan.
     for target in &targets {
-        if !crate::scope::is_host_in_scope(&target.authority, &include, &exclude) {
-            // Say what to change: an exclusion is undone differently from a
-            // missing include.
-            return Err(bad_request(
-                if crate::scope::is_host_in_scope(&target.authority, &include, &[]) {
-                    format!("{} is excluded from Scope.", target.label)
-                } else {
-                    format!(
-                        "{} is not in Scope. Template Scan sends only to hosts in Scope; add {} there.",
-                        target.label,
-                        host_of(&target.authority)
-                    )
-                },
-            ));
-        }
         if crate::proxy::targets_own_listener(&state, &session, &target.scheme, &target.authority)
             .await
         {
@@ -785,7 +769,7 @@ async fn launch(
     if session.template_scans.is_running() {
         return Err(api_error(
             StatusCode::CONFLICT,
-            "A Template Scan is already running in this session.",
+            "A scan is already running in this session.",
         ));
     }
     let planned = templates
@@ -841,7 +825,7 @@ async fn launch(
             if job.auto {
                 "Auto scan started on a host"
             } else {
-                "Template Scan started"
+                "Manual scan started"
             },
             format!(
                 "{} templates, {} targets, {} requests planned",
@@ -868,7 +852,7 @@ async fn launch(
         skipped: targets.iter().map(|_| AtomicBool::new(false)).collect(),
         templates,
         targets,
-        extra_hosts: auto_hosts.unwrap_or_default(),
+        extra_hosts: auto_hosts,
         client,
         apply_match_replace,
         max_requests,
@@ -887,8 +871,8 @@ async fn launch(
     Ok(job)
 }
 
-/// Whether a scan may send to a host: one in a non-empty Scope or, for an auto
-/// scan, on its own host list; never one Scope excludes.
+/// Whether the auto scan may send to a host: one in a non-empty Scope or on
+/// its own host list; never one Scope excludes.
 async fn reaches(session: &SessionContext, authority: &str, hosts: &[String]) -> bool {
     let (include, exclude) = session.runtime.scope_lists().await;
     let within = |patterns: &[String]| {
@@ -1182,7 +1166,7 @@ pub async fn stop(
     if !session.template_scans.stop(Some(id)).await {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            "No running Template Scan job has this id.",
+            "No running scan has this id.",
         ));
     }
     session.schedule_state_persist();
@@ -1203,8 +1187,10 @@ struct Run {
     oast: Option<OastWatch>,
     templates: Vec<Arc<ActiveTemplate>>,
     targets: Vec<ScanTarget>,
-    /// Hosts an auto scan's requests may go to besides Scope's.
-    extra_hosts: Vec<String>,
+    /// For the auto scan, the hosts its requests may go to besides Scope's.
+    /// None for a scan the operator started, which goes only to the targets
+    /// they named.
+    extra_hosts: Option<Vec<String>>,
     client: reqwest::Client,
     apply_match_replace: bool,
     max_requests: usize,
@@ -1446,6 +1432,19 @@ impl Run {
         self.session.template_scans.update(self.job, change);
     }
 
+    /// Whether a request may go to a host: for the auto scan, one in Scope or
+    /// on its list; for a scan the operator started, one of the targets they
+    /// named, so a redirect cannot carry it to a host they did not.
+    async fn may_send(&self, authority: &str) -> bool {
+        match &self.extra_hosts {
+            Some(hosts) => reaches(&self.session, authority, hosts).await,
+            None => self
+                .targets
+                .iter()
+                .any(|target| target.authority.eq_ignore_ascii_case(authority)),
+        }
+    }
+
     fn warn(&self, warning: String) {
         self.update(|job| job.warn(warning));
     }
@@ -1528,10 +1527,11 @@ impl Run {
             .push(
                 EventLevel::Info,
                 "templates",
-                if cancelled {
-                    "Template Scan stopped"
-                } else {
-                    "Template Scan finished"
+                match (self.extra_hosts.is_some(), cancelled) {
+                    (true, true) => "Auto scan stopped",
+                    (true, false) => "Auto scan finished",
+                    (false, true) => "Manual scan stopped",
+                    (false, false) => "Manual scan finished",
                 },
                 format!(
                     "{} requests sent, {} matched, {} failed",
@@ -1699,7 +1699,7 @@ impl Run {
         loop {
             if hops.is_empty() {
                 // Scope may have narrowed since the scan started.
-                if !reaches(&self.session, &authority, &self.extra_hosts).await {
+                if !self.may_send(&authority).await {
                     if !self.skipped[target_index].swap(true, Ordering::Relaxed) {
                         self.update(|job| {
                             job.blocked += 1;
@@ -1946,7 +1946,7 @@ impl Run {
         if follow == Follow::SameHost && !next_authority.eq_ignore_ascii_case(&target.authority) {
             return None;
         }
-        if !reaches(&self.session, &next_authority, &self.extra_hosts).await
+        if !self.may_send(&next_authority).await
             || crate::special_host::is_special_host(&next_authority)
             || crate::proxy::targets_own_listener(
                 &self.state,
@@ -2411,7 +2411,8 @@ mod tests {
     async fn a_scan_sends_only_to_its_target_and_keeps_only_matches() {
         let (other, other_log, other_server) = site(1, false).await;
         let (address, log, server) = site(other.port(), false).await;
-        let state = scan_state("run", &["127.0.0.1"]).await;
+        // Scope is empty: the operator named the target, and that is enough.
+        let state = scan_state("run", &[]).await;
         let session = state.session().await;
         let target = format!("http://{address}");
         let selection = serde_json::json!({
@@ -2504,7 +2505,7 @@ mod tests {
             ]
         );
         assert!(seen.iter().all(|seen| seen.host == address.to_string()));
-        // The redirect led to a host outside Scope and was not followed.
+        // The redirect led to a host the scan was not given and was not followed.
         assert!(other_log.lock().unwrap().is_empty());
         let post = seen.iter().find(|seen| seen.path == "/submit").unwrap();
         assert_eq!(
@@ -3207,8 +3208,10 @@ mod tests {
         );
     }
 
+    // The operator names a scan's targets. Scope bounds what Sniper sends on its
+    // own, the auto scan, not this; Sniper itself is never a target.
     #[tokio::test]
-    async fn a_scan_refuses_targets_outside_scope_and_sniper_itself() {
+    async fn a_scan_takes_the_targets_it_is_given_whatever_scope_says_but_never_sniper() {
         let (address, log, server) = site(1, false).await;
         let target = format!("http://{address}");
         let state = scan_state("refuse", &[]).await;
@@ -3217,55 +3220,41 @@ mod tests {
         let body = serde_json::json!({
             "targets": [target], "ids": ["example-config"], "acknowledged": true,
         });
+        let counted = |state: Arc<AppState>, body: serde_json::Value| async move {
+            let mut preview = body;
+            preview["preview"] = true.into();
+            start(State(state), Json(request(session_id, preview)))
+                .await
+                .unwrap()
+                .0["templates"]
+                .clone()
+        };
         let refused = |state: Arc<AppState>, body: serde_json::Value| async move {
             let (_, Json(error)) = start(State(state), Json(request(session_id, body)))
                 .await
                 .unwrap_err();
             error["error"].as_str().unwrap().to_string()
         };
-        assert!(refused(state.clone(), body.clone())
-            .await
-            .contains("no include patterns"));
-        session
-            .runtime
-            .update(crate::runtime::RuntimeSettingsUpdate {
-                scope_patterns: Some(vec!["*.example.com".into()]),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        // The refusal says what to add, so the operator need not work it out.
-        assert!(refused(state.clone(), body.clone()).await.ends_with(
-            "is not in Scope. Template Scan sends only to hosts in Scope; add 127.0.0.1 there."
-        ));
-        session
-            .runtime
-            .update(crate::runtime::RuntimeSettingsUpdate {
-                scope_patterns: Some(vec!["127.0.0.1".into()]),
-                excluded_scope_patterns: Some(vec!["127.0.0.1".into()]),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert!(refused(state.clone(), body.clone())
-            .await
-            .ends_with("is excluded from Scope."));
-        session
-            .runtime
-            .update(crate::runtime::RuntimeSettingsUpdate {
-                excluded_scope_patterns: Some(Vec::new()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        session
-            .runtime
-            .update(crate::runtime::RuntimeSettingsUpdate {
-                scope_patterns: Some(vec!["127.0.0.1".into()]),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        // An empty Scope, one naming other hosts, one excluding this host.
+        assert_eq!(counted(state.clone(), body.clone()).await, 1);
+        let scopes: [(&[&str], &[&str]); 2] =
+            [(&["*.example.com"], &[]), (&["127.0.0.1"], &["127.0.0.1"])];
+        for (include, exclude) in scopes {
+            session
+                .runtime
+                .update(crate::runtime::RuntimeSettingsUpdate {
+                    scope_patterns: Some(include.iter().map(|s| s.to_string()).collect()),
+                    excluded_scope_patterns: Some(exclude.iter().map(|s| s.to_string()).collect()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                counted(state.clone(), body.clone()).await,
+                1,
+                "{include:?} {exclude:?}"
+            );
+        }
         state.set_active_proxy_addr(address).await;
         assert!(refused(state.clone(), body.clone())
             .await
