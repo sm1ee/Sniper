@@ -1665,7 +1665,11 @@
               <p class="recon-notice hidden" id="templatesProgress" role="status"></p>
               <progress class="templates-progress hidden" id="templatesProgressBar" aria-labelledby="templatesProgress"></progress>
               <div class="templates-actions">
-                <button class="primary-action" id="templatesDownload" type="button" disabled title="The latest release from github.com/projectdiscovery/nuclei-templates (MIT). GitHub sees this computer's address.">Download latest</button>
+                <select id="templatesChannel" aria-label="What to download">
+                  <option value="release">Latest release</option>
+                  <option value="main">Main (unreleased)</option>
+                </select>
+                <button class="primary-action" id="templatesDownload" type="button" disabled>Download</button>
                 <button class="secondary-action" id="templatesImport" type="button" title="Import a release .tar.gz">Import…</button>
                 <input class="hidden" id="templatesImportFile" type="file" accept=".gz,.tgz,application/gzip" />
               </div>

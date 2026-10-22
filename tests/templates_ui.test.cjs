@@ -32,6 +32,26 @@ test("the library line says where templates came from and whether they were veri
     "nuclei-templates v10.5.0 · checksum verified · commit f8b8b8dcd70d\n14,035 templates · 2,082 passive, 3 on · 0 scannable",
   );
   assert.match(templates.libraryLine({ library: { source: "import", verified: false }, templates: 1, passive_supported: 0, passive_enabled: 0 }), /Imported archive · not checksum-verified/);
+  assert.equal(
+    templates.libraryLine({
+      library: { source: "github", tag: "main", verified: false, commit: "50852f5ce7".repeat(4), committed_at: "2026-10-21T22:47:08Z" },
+      templates: 14100, passive_supported: 2100, passive_enabled: 0, active_supported: 9000,
+    }),
+    "nuclei-templates main · unreleased, no checksum · commit 50852f5ce750 · 2026-10-21\n14,100 templates · 2,100 passive, 0 on · 9,000 scannable",
+  );
+});
+
+test("an update check says what the installed channel has", () => {
+  assert.equal(templates.checkLine({ channel: "release", latest: "v10.5.1", current: "v10.5.0", update_available: true }),
+    "Release v10.5.1 is available (installed: v10.5.0).");
+  assert.equal(templates.checkLine({ channel: "release", latest: "v10.5.0", current: "v10.5.0", update_available: false }),
+    "Release v10.5.0 is installed and current.");
+  assert.equal(
+    templates.checkLine({ channel: "main", latest: "a".repeat(40), latest_at: "2026-10-22T01:02:03Z", current: "50852f5ce7".repeat(4), update_available: true }),
+    "Main has a newer commit, aaaaaaaaaaaa from 2026-10-22. Download main to take it.",
+  );
+  assert.equal(templates.checkLine({ channel: "main", latest: "a".repeat(40), current: "a".repeat(40), update_available: false }),
+    "Main is installed and current.");
 });
 
 test("the progress bar counts the templates checked once the total is known", () => {
@@ -166,7 +186,7 @@ test("the Scan tool is registered where the UI and the server keep their tool li
   assert.match(html, /<script src="\/templates\.js" defer><\/script>/);
   assert.match(app, /const IMPLEMENTED_TOOLS = new Set\(\[[^\]]*"templates"/);
   assert.match(settings, /const ACTIVE_TOOL_OPTIONS: &\[&str\] = &\[[^\]]*"templates"/);
-  for (const id of ["Status", "Progress", "ProgressBar", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
+  for (const id of ["Status", "Progress", "ProgressBar", "Channel", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
     "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Rows", "Detail",
     "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
     "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanPlan", "ScanStart", "ScanNotice",
@@ -227,7 +247,7 @@ function inside(element) {
 
 const settle = async () => { for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-async function listFixture(items, arrowStep, { sessionId = null, auto = null, scopeCount = 1 } = {}) {
+async function listFixture(items, arrowStep, { sessionId = null, auto = null, scopeCount = 1, library = { source: "import", verified: false } } = {}) {
   const els = new Map();
   const sent = [];
   const doc = fakeDocument((tag) => Object.assign(listeningElement(), { tag }));
@@ -235,7 +255,7 @@ async function listFixture(items, arrowStep, { sessionId = null, auto = null, sc
     ownerDocument: doc,
     querySelector(selector) { if (!els.has(selector)) els.set(selector, listeningElement()); return els.get(selector); },
   };
-  const status = { state: "idle", library: { source: "import", verified: false }, templates: items.length, passive_supported: 0, passive_enabled: 0 };
+  const status = { state: "idle", library, templates: items.length, passive_supported: 0, passive_enabled: 0 };
   const urls = [];
   const controller = templates.createController({
     root: shell, getSessionId: () => sessionId, getScopeIncludeCount: () => scopeCount, arrowStep,
@@ -306,13 +326,31 @@ test("an On box turns a scan template on for the auto scan, and Turn on turns it
   f.controller.dispose();
 });
 
-test("Download latest asks for nothing more and says it consents", async () => {
+test("Download takes the latest release unless main is picked, and says it consents", async () => {
   const f = await listFixture([], () => 0, { sessionId: "s-1" });
   const download = f.els.get("#templatesDownload");
   assert.equal(download.disabled, false);
   download.dispatch("click", {});
   await settle();
-  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true } });
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "release" } });
+  const channel = f.els.get("#templatesChannel");
+  channel.value = "main";
+  channel.dispatch("change", {});
+  assert.match(download.title, /no checksum/);
+  download.dispatch("click", {});
+  await settle();
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "main" } });
+  f.controller.dispose();
+});
+
+// Updating a library taken from main must not fall back to the release.
+test("Download starts on main when main is what is installed", async () => {
+  const library = { source: "github", tag: "main", verified: false, commit: "50852f5ce7".repeat(4) };
+  const f = await listFixture([], () => 0, { sessionId: "s-1", library });
+  assert.equal(f.els.get("#templatesChannel").value, "main");
+  f.els.get("#templatesDownload").dispatch("click", {});
+  await settle();
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "main" } });
   f.controller.dispose();
 });
 

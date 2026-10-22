@@ -4,8 +4,8 @@ Sniper runs the community templates of
 [projectdiscovery/nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)
 (MIT license) with its own engine, which implements a subset of the template
 language. It does not need the `nuclei` program. In **Scan ▸ Active Scan**,
-download the latest release or import a release archive, then use templates in
-two ways:
+download the latest release or main's newest commit, or import a release
+archive, then use templates in two ways:
 
 - **Passive**: turned-on templates check captured traffic and never send a
   request.
@@ -268,8 +268,15 @@ release's checksums file and source `.tar.gz` from `github.com`. It uses the
 environment's proxy settings and follows redirects only to GitHub hosts over
 HTTPS. If the archive does not match the release's published SHA-256, nothing
 is installed. There is no automatic update. A download needs an explicit
-acknowledgment: the checkbox above **Download latest** in the app,
-`"acknowledged": true` in the API, `--yes` in the CLI.
+acknowledgment: **Download** in the app, `"acknowledged": true` in the API,
+`--yes` in the CLI.
+
+Templates reach the repository's `main` branch weeks before a release. To take
+them, pick **Main (unreleased)** beside **Download** (`"channel": "main"`,
+`--main`): Sniper asks the branch API for main's newest commit and fetches that
+commit's `.tar.gz`. Main publishes no checksum, so the library records the
+commit and refuses an archive that names another. While main is installed,
+**Check for updates** compares with main's newest commit.
 
 ### Import
 
@@ -284,8 +291,8 @@ id repeats, the first file wins.
 | Method and path | Purpose |
 | --- | --- |
 | `GET /api/templates/library` | Status: installed release, counts (`passive_supported`, `active_supported`), passive templates on, and any download or import in progress (`state`: `loading`, `idle`, `downloading`, `importing`, `failed`). |
-| `POST /api/templates/library/check` | Ask GitHub for the newest tag; returns `latest`, `current`, `update_available`. |
-| `POST /api/templates/library/download` | Body `{"acknowledged": true}`. Starts a download; 202, or 409 while busy. |
+| `POST /api/templates/library/check` | Ask GitHub for the newest tag, or main's newest commit while main is installed; returns `channel` (`release` or `main`), `latest` (for main, a commit and its date `latest_at`), `current`, `update_available`. |
+| `POST /api/templates/library/download` | Body `{"acknowledged": true}`, plus `"channel": "main"` for main's newest commit. Starts a download; 202, or 409 while busy. |
 | `POST /api/templates/library/import` | Body: the `.tar.gz` (`application/gzip`). Starts an import; 202, or 409 while busy. |
 | `GET /api/templates` | List; query `search` (a substring of the id, name, path, tags, CVEs, description or references), `severity` (comma-separated), `protocol`, `support` (`passive`, `active`, `unsupported`), `tag`, `enabled`, `sort` (`on`, `severity`, `name`, `mode`, `tags`) with `direction` (`asc`, the most severe first for severity, or `desc`), `limit` (at most 30,000), `offset`. Each template's `requests` is the most one scan sends a target before redirects; a flow can stop sooner. |
 | `GET /api/templates/:id` | One template with its description, references and YAML. |
@@ -305,6 +312,7 @@ sniper-cli templates library status
 sniper-cli templates library check
 sniper-cli templates library download --dry-run
 sniper-cli templates library download --yes
+sniper-cli templates library download --main --yes
 sniper-cli templates library import --file nuclei-templates.tar.gz --yes
 sniper-cli templates list --support passive --search wordpress
 sniper-cli templates get --id tech-detect

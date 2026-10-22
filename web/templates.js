@@ -45,13 +45,33 @@
     if (!status) return "Loading the template library…";
     const library = status.library;
     if (!library) return "No templates installed. Download the community release or import an archive.";
+    const main = library.source === "github" && library.tag === "main";
     const parts = [
       library.source === "github" ? `nuclei-templates ${library.tag}` : "Imported archive",
-      library.verified ? "checksum verified" : "not checksum-verified",
+      library.verified ? "checksum verified" : main ? "unreleased, no checksum" : "not checksum-verified",
     ];
     if (library.commit) parts.push(`commit ${library.commit.slice(0, 12)}`);
+    if (library.committed_at) parts.push(String(library.committed_at).slice(0, 10));
     return `${parts.join(" · ")}\n${count(status.templates)} templates · ${count(status.passive_supported)} passive, ${count(status.passive_enabled)} on · ${count(status.active_supported)} scannable`;
   }
+
+  // What Check for updates found, for the channel the installed library came from.
+  function checkLine(result) {
+    if (result.channel === "main") {
+      const date = result.latest_at ? ` from ${String(result.latest_at).slice(0, 10)}` : "";
+      return result.update_available
+        ? `Main has a newer commit, ${String(result.latest).slice(0, 12)}${date}. Download main to take it.`
+        : "Main is installed and current.";
+    }
+    return result.update_available
+      ? `Release ${result.latest} is available${result.current ? ` (installed: ${result.current})` : ""}.`
+      : `Release ${result.latest} is installed and current.`;
+  }
+
+  const DOWNLOAD_TITLES = {
+    release: "The latest release from github.com/projectdiscovery/nuclei-templates (MIT). GitHub sees this computer's address.",
+    main: "The newest commit on main at github.com/projectdiscovery/nuclei-templates (MIT): templates not released yet, with no checksum to verify. GitHub sees this computer's address.",
+  };
 
   // What the library is doing, for the bar under its status: a value out of
   // a total once the total is known.
@@ -196,7 +216,7 @@
     const fetcher = options.fetch || root.fetch.bind(root);
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
-    const ids = ["Status", "Progress", "ProgressBar", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
+    const ids = ["Status", "Progress", "ProgressBar", "Channel", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
       "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
       "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
       "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanPlan", "ScanStart",
@@ -217,6 +237,9 @@
     let timer = null;
     let searchTimer = null;
     let busy = false;
+    // Until one is picked, Download follows the installed library, so updating
+    // a library taken from main does not fall back to the release.
+    let channelPicked = false;
     let listRequest = 0;
 
     function on(element, event, callback) {
@@ -273,6 +296,9 @@
         els.ProgressBar.max = progress.max;
         els.ProgressBar.value = progress.value;
       }
+      if (!channelPicked && status?.library) els.Channel.value = status.library.tag === "main" ? "main" : "release";
+      els.Download.title = DOWNLOAD_TITLES[channel()];
+      els.Channel.disabled = !!working || busy;
       els.Download.disabled = !!working || busy;
       els.Import.disabled = !!working || busy;
       els.Check.disabled = !!working || busy;
@@ -706,17 +732,20 @@
     on(els.AutoSave, "click", () => saveAuto(!!auto?.enabled, "Saved."));
     for (const control of [els.AutoHosts, els.AutoRate]) on(control, "input", () => { autoDraft = true; renderAuto(); });
 
+    function channel() {
+      return els.Channel.value === "main" ? "main" : "release";
+    }
+
+    on(els.Channel, "change", () => { channelPicked = true; renderStatus(); });
     on(els.Download, "click", () => act(async () => {
       await json(await fetcher("/api/templates/library/download", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledged: true }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledged: true, channel: channel() }),
       }), "Could not start the download");
       notice("");
     }));
     on(els.Check, "click", () => act(async () => {
       const result = await json(await fetcher("/api/templates/library/check", { method: "POST" }), "Could not reach GitHub");
-      notice(result.update_available
-        ? `Release ${result.latest} is available${result.current ? ` (installed: ${result.current})` : ""}.`
-        : `Release ${result.latest} is installed and current.`);
+      notice(checkLine(result));
     }));
     on(els.Import, "click", () => els.ImportFile.click());
     on(els.ImportFile, "change", () => {
@@ -870,7 +899,7 @@
     };
   }
 
-  const api = { createController, listQuery, nextSort, passiveRequest, libraryLine, progressOf, supportLabel, scanRequest, parseTargets,
+  const api = { createController, listQuery, nextSort, passiveRequest, libraryLine, checkLine, progressOf, supportLabel, scanRequest, parseTargets,
     previewLine, jobLine, autoRequest, autoLine, RISKS, PAGE_SIZE };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperTemplates = api;

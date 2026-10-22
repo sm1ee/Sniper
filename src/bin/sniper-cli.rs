@@ -720,12 +720,25 @@ struct TemplatesScanIdArgs {
 enum TemplatesLibraryCommand {
     /// The installed release, its counts, and any download or import in progress.
     Status,
-    /// Ask GitHub for the newest release tag: one request to api.github.com.
+    /// Ask GitHub for the newest release tag, or main's newest commit when main
+    /// is installed: one request to api.github.com.
     Check,
     /// Download the newest release from GitHub, verify it and install it.
-    Download,
+    Download(TemplatesDownloadArgs),
     /// Install a release archive (.tar.gz) from disk, for networks without GitHub.
     Import(TemplatesImportArgs),
+}
+
+#[derive(Args, Debug)]
+struct TemplatesDownloadArgs {
+    /// Take the newest commit on main instead: templates not released yet,
+    /// with no checksum to verify.
+    #[arg(long)]
+    main: bool,
+}
+
+fn templates_download_body(args: &TemplatesDownloadArgs) -> Value {
+    json!({ "acknowledged": true, "channel": if args.main { "main" } else { "release" } })
 }
 
 #[derive(Args, Debug)]
@@ -806,7 +819,7 @@ impl TemplatesCommand {
             Self::Library { command } => match command {
                 TemplatesLibraryCommand::Status => "templates.library.status",
                 TemplatesLibraryCommand::Check => "templates.library.check",
-                TemplatesLibraryCommand::Download => "templates.library.download",
+                TemplatesLibraryCommand::Download(_) => "templates.library.download",
                 TemplatesLibraryCommand::Import(_) => "templates.library.import",
             },
             Self::List(_) => "templates.list",
@@ -1048,10 +1061,10 @@ fn templates_api_preview(command: &TemplatesCommand) -> Value {
             TemplatesLibraryCommand::Check => {
                 api_preview("POST", "/api/templates/library/check", Some(json!({})))
             }
-            TemplatesLibraryCommand::Download => api_preview(
+            TemplatesLibraryCommand::Download(args) => api_preview(
                 "POST",
                 "/api/templates/library/download",
-                Some(json!({ "acknowledged": true })),
+                Some(templates_download_body(args)),
             ),
             TemplatesLibraryCommand::Import(args) => api_preview(
                 "POST",
@@ -3824,7 +3837,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.library.check",
             "templates library check",
-            "Ask GitHub for the newest nuclei-templates release tag: one request to api.github.com through the environment's proxy. Reports whether it differs from the installed one; installs nothing.",
+            "Ask GitHub for the newest nuclei-templates release tag, or main's newest commit when main is installed: one request to api.github.com through the environment's proxy. Reports whether it differs from the installed one; installs nothing.",
             Read,
             false,
             &[],
@@ -3832,12 +3845,12 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         ),
         op(
             "templates.library.download",
-            "templates library download",
-            "Download the newest nuclei-templates release (MIT) from GitHub, verify it against the SHA-256 the release publishes, and install it for every session. Waits until installed. Templates are data: code, javascript and headless templates are listed but never run.",
+            "templates library download [--main]",
+            "Download the newest nuclei-templates release (MIT) from GitHub, verify it against the SHA-256 the release publishes, and install it for every session. With main, take main's newest commit instead: templates not released yet, with no checksum to verify. Waits until installed. Templates are data: code, javascript and headless templates are listed but never run.",
             Write,
             true,
             &[],
-            vec![json!({})],
+            vec![json!({}), json!({"main": true})],
         ),
         op(
             "templates.library.import",
@@ -6149,9 +6162,11 @@ fn templates_input_schema(operation: &str) -> Option<Value> {
     });
     let empty = json!({"type":"object","additionalProperties":false,"required":[],"properties":{}});
     Some(match operation {
-        "templates.library.status" | "templates.library.check" | "templates.library.download" => {
-            empty
-        }
+        "templates.library.status" | "templates.library.check" => empty,
+        "templates.library.download" => json!({
+            "type":"object","additionalProperties":false,"required":[],
+            "properties":{"main":{"type":["boolean","null"],"default":false,"description":"Take main's newest commit instead of the latest release: templates not released yet, with no checksum to verify."}}
+        }),
         "templates.library.import" => json!({
             "type":"object","additionalProperties":false,"required":["file"],
             "properties":{"file":{"type":"string","minLength":1,"description":"Path to a nuclei-templates release .tar.gz on this machine, at most 64 MiB."}}
@@ -6767,9 +6782,8 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "sort_key",
             "sort_direction",
         ],
-        "templates.library.status" | "templates.library.check" | "templates.library.download" => {
-            &[]
-        }
+        "templates.library.status" | "templates.library.check" => &[],
+        "templates.library.download" => &["main"],
         "templates.library.import" => &["file"],
         "templates.list" => &[
             "search",
@@ -8142,7 +8156,7 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
         notes.push("This operation may send traffic; failed sends should not be retried blindly.");
     }
     match command.operation_name() {
-        "templates.library.check" | "templates.library.download" => notes.push("Contacts GitHub through the environment's proxy: the latest-release API, then for a download the release's checksums file and source .tar.gz. A download that does not match the published SHA-256 is not installed. Dry-run contacts nothing."),
+        "templates.library.check" | "templates.library.download" => notes.push("Contacts GitHub through the environment's proxy: the latest-release API, then for a download the release's checksums file and source .tar.gz; with main, the branch API and that commit's .tar.gz. A release that does not match its published SHA-256 is not installed; main has no checksum. Dry-run contacts nothing."),
         "templates.library.import" => notes.push("Reads the local .tar.gz and uploads it to the running Sniper, which installs it; nothing contacts GitHub. Dry-run reads nothing."),
         "templates.passive.set_enabled" => notes.push("Enabled passive templates judge captured responses whose host is in a non-empty Scope include list while Passive Scan is on, and never send requests. Run findings rescan to apply a change to stored history."),
         "templates.auto.set" => notes.push("While on, the auto scan sends requests to every new host the proxy captures in Scope or on its list. Dry-run contacts nothing."),
@@ -8481,7 +8495,9 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         },
         "templates.library.download" => Command::Templates {
             command: TemplatesCommand::Library {
-                command: TemplatesLibraryCommand::Download,
+                command: TemplatesLibraryCommand::Download(TemplatesDownloadArgs {
+                    main: call_optional::<bool>(operation, input, "main")?.unwrap_or(false),
+                }),
             },
         },
         "templates.library.import" => Command::Templates {
@@ -10373,11 +10389,11 @@ async fn handle_templates(api: ApiClient, command: TemplatesCommand) -> Result<(
                     .await?;
                 print_json(&checked)
             }
-            TemplatesLibraryCommand::Download => {
+            TemplatesLibraryCommand::Download(args) => {
                 let _: Value = api
                     .post_json(
                         "/api/templates/library/download",
-                        &json!({ "acknowledged": true }),
+                        &templates_download_body(&args),
                     )
                     .await?;
                 print_json(&wait_for_template_library(&api).await?)
@@ -21535,6 +21551,22 @@ mod tests {
         assert!(super::dry_run_notes(&download)
             .iter()
             .any(|note| note.contains("Contacts GitHub")));
+        assert_eq!(
+            super::command_api_preview(&download).unwrap()["body"],
+            json!({ "acknowledged": true, "channel": "release" })
+        );
+        // Main carries templates weeks before they are released.
+        let main =
+            command_from_operation_input("templates.library.download", &json!({"main": true}))
+                .unwrap();
+        assert_eq!(
+            super::command_api_preview(&main).unwrap()["body"],
+            json!({ "acknowledged": true, "channel": "main" })
+        );
+        assert!(
+            Cli::try_parse_from(["sniper-cli", "templates", "library", "download", "--main"])
+                .is_ok()
+        );
         let sorted = command_from_operation_input(
             "templates.list",
             &json!({"sort":"severity","direction":"desc"}),

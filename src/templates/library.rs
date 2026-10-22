@@ -46,6 +46,8 @@ use crate::state::AppState;
 const REPOSITORY: &str = "https://github.com/projectdiscovery/nuclei-templates";
 const LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/projectdiscovery/nuclei-templates/releases/latest";
+const MAIN_BRANCH_API: &str =
+    "https://api.github.com/repos/projectdiscovery/nuclei-templates/branches/main";
 pub const LICENSE: &str = "MIT";
 /// The same cap as an API request body, so a download and an upload of the
 /// same archive are held to the same size.
@@ -66,7 +68,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LibraryInfo {
-    /// The release tag, or `imported` for an archive the operator supplied.
+    /// The release tag, `main` for the newest commit on main, or `imported`
+    /// for an archive the operator supplied.
     pub tag: String,
     /// `github` or `import`.
     pub source: String,
@@ -75,6 +78,9 @@ pub struct LibraryInfo {
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// When main's commit was made, for a library taken from main.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_at: Option<DateTime<Utc>>,
     pub imported_at: DateTime<Utc>,
     pub templates: usize,
     pub bundle: String,
@@ -249,7 +255,23 @@ pub enum Source {
         tag: String,
         expected_sha256: String,
     },
+    /// The newest commit on main. Templates land there weeks before a release,
+    /// a critical CVE among them, but main publishes no checksum: the archive
+    /// must be the commit GitHub named.
+    Main {
+        commit: String,
+        committed_at: Option<DateTime<Utc>>,
+    },
     Import,
+}
+
+/// What a download takes from GitHub.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    #[default]
+    Release,
+    Main,
 }
 
 fn index_file_name(sha256: &str) -> String {
@@ -634,10 +656,26 @@ impl TemplateLibrary {
                 }
                 (tag.clone(), true)
             }
+            Source::Main { .. } => ("main".to_string(), false),
             Source::Import => ("imported".to_string(), false),
         };
         let unpacked = unpack(bytes)?;
-        let commit = unpacked.commit.clone();
+        let (commit, committed_at) = match &source {
+            Source::Main {
+                commit,
+                committed_at,
+            } => {
+                if unpacked
+                    .commit
+                    .as_deref()
+                    .is_some_and(|found| !found.eq_ignore_ascii_case(commit))
+                {
+                    bail!("the archive is not the commit GitHub named for main");
+                }
+                (Some(commit.clone()), *committed_at)
+            }
+            _ => (unpacked.commit.clone(), None),
+        };
         let mut offset = 0u64;
         let mut lines = Vec::with_capacity(unpacked.files.len() + unpacked.helpers.len());
         let mut entries = Vec::with_capacity(unpacked.files.len());
@@ -681,12 +719,13 @@ impl TemplateLibrary {
         let info = LibraryInfo {
             tag,
             source: match source {
-                Source::GitHub { .. } => "github".into(),
+                Source::GitHub { .. } | Source::Main { .. } => "github".into(),
                 Source::Import => "import".into(),
             },
             sha256,
             verified,
             commit,
+            committed_at,
             imported_at: Utc::now(),
             templates: built.templates.len(),
             bundle,
@@ -947,8 +986,38 @@ impl TemplateLibrary {
         Ok(tag)
     }
 
-    async fn download(self: Arc<Self>) -> Result<()> {
+    /// The newest commit on main and when it was made, asked of GitHub once.
+    pub async fn check_main(&self) -> Result<(String, Option<DateTime<Utc>>)> {
+        latest_main(&github_client()?).await
+    }
+
+    async fn download(self: Arc<Self>, channel: Channel) -> Result<()> {
         let client = github_client()?;
+        if channel == Channel::Main {
+            let (commit, committed_at) = latest_main(&client).await?;
+            // The commit names the archive, so it cannot move under the download.
+            let archive = fetch_bytes(
+                &client,
+                &format!("{REPOSITORY}/archive/{commit}.tar.gz"),
+                MAX_ARCHIVE_BYTES,
+                Some(&*self),
+            )
+            .await
+            .context("downloading the templates archive")?;
+            self.set_task(TaskState::Importing, None);
+            let library = Arc::clone(&self);
+            return tokio::task::spawn_blocking(move || {
+                library.import_blocking(
+                    &archive,
+                    Source::Main {
+                        commit,
+                        committed_at,
+                    },
+                )
+            })
+            .await
+            .context("the import stopped")?;
+        }
         let tag = latest_tag(&client).await?;
         self.task.lock().unwrap().latest = Some(tag.clone());
         let version = tag.trim_start_matches('v');
@@ -995,15 +1064,15 @@ impl TemplateLibrary {
         .context("the import stopped")?
     }
 
-    /// Starts downloading the latest release. False when a load, download or
-    /// import is already running.
-    pub fn start_download(self: &Arc<Self>) -> bool {
+    /// Starts downloading the latest release, or main's newest commit. False
+    /// when a load, download or import is already running.
+    pub fn start_download(self: &Arc<Self>, channel: Channel) -> bool {
         if !self.begin_task(TaskState::Downloading) {
             return false;
         }
         let library = Arc::clone(self);
         tokio::spawn(async move {
-            match Arc::clone(&library).download().await {
+            match Arc::clone(&library).download(channel).await {
                 Ok(()) => library.set_task(TaskState::Idle, None),
                 Err(error) => {
                     tracing::warn!(%error, "template download failed");
@@ -1465,6 +1534,28 @@ async fn latest_tag(client: &reqwest::Client) -> Result<String> {
     Ok(tag.to_string())
 }
 
+async fn latest_main(client: &reqwest::Client) -> Result<(String, Option<DateTime<Utc>>)> {
+    let body = fetch_bytes(client, MAIN_BRANCH_API, 1024 * 1024, None)
+        .await
+        .context("asking GitHub for main's newest commit")?;
+    let value: serde_json::Value = serde_json::from_slice(&body).context("reading the branch")?;
+    main_head(&value)
+}
+
+/// The commit a branch answer names, and when it was made. Only a full SHA,
+/// since it goes into the archive URL.
+fn main_head(branch: &serde_json::Value) -> Result<(String, Option<DateTime<Utc>>)> {
+    let commit = &branch["commit"];
+    let sha = commit["sha"].as_str().unwrap_or("");
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("GitHub returned an unexpected commit for main");
+    }
+    let committed_at = commit["commit"]["committer"]["date"]
+        .as_str()
+        .and_then(|date| date.parse().ok());
+    Ok((sha.to_ascii_lowercase(), committed_at))
+}
+
 /// `v10.5.0` and the like; anything else could steer the archive URL.
 fn valid_tag(tag: &str) -> bool {
     let digits = tag.strip_prefix('v').unwrap_or(tag);
@@ -1522,10 +1613,26 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Response {
 }
 
 pub async fn check_latest(State(state): State<Arc<AppState>>) -> Response {
+    let installed = state.templates.status().library;
+    // A library taken from main is current while main has no newer commit.
+    if let Some(info) = installed.filter(|info| info.tag == "main") {
+        return match state.templates.check_main().await {
+            Ok((commit, committed_at)) => Json(json!({
+                "channel": "main",
+                "latest": commit,
+                "latest_at": committed_at,
+                "current": info.commit,
+                "update_available": info.commit.as_deref() != Some(commit.as_str()),
+            }))
+            .into_response(),
+            Err(error) => (StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response(),
+        };
+    }
     match state.templates.check_latest().await {
         Ok(latest) => {
             let current = state.templates.status().library.map(|info| info.tag);
             Json(json!({
+                "channel": "release",
                 "latest": latest,
                 "current": current,
                 "update_available": current.as_deref() != Some(latest.as_str()),
@@ -1541,6 +1648,8 @@ pub async fn check_latest(State(state): State<Arc<AppState>>) -> Response {
 pub struct DownloadRequest {
     #[serde(default)]
     acknowledged: bool,
+    #[serde(default)]
+    channel: Channel,
 }
 
 pub async fn start_download(
@@ -1554,7 +1663,7 @@ pub async fn start_download(
         )
             .into_response();
     }
-    if !state.templates.start_download() {
+    if !state.templates.start_download(request.channel) {
         return busy();
     }
     (StatusCode::ACCEPTED, Json(state.templates.status())).into_response()
@@ -1698,6 +1807,107 @@ mod tests {
         let library = Arc::new(TemplateLibrary::empty(dir));
         library.load_blocking();
         library
+    }
+
+    /// A .tar.gz as GitHub serves a commit: a pax global header naming it, then
+    /// the files under one top directory.
+    fn commit_archive(commit: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let body = format!(" comment={commit}\n");
+        let digits = (body.len() + 2).to_string().len();
+        let record = format!("{}{body}", body.len() + digits);
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::XGlobalHeader);
+        header.set_size(record.len() as u64);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, "pax_global_header", record.as_bytes())
+            .unwrap();
+        for (path, body) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            builder.append_data(&mut header, path, *body).unwrap();
+        }
+        let tar = builder.into_inner().unwrap();
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(&tar).unwrap();
+        gzip.finish().unwrap()
+    }
+
+    // Templates reach main weeks before a release: a critical CVE can sit
+    // there, unreleased. Main has no published checksum, so the commit is what
+    // is recorded and checked.
+    #[test]
+    fn a_main_archive_installs_as_main_and_must_be_the_commit_asked_for() {
+        let commit = "50852f5ce7".repeat(4);
+        let committed_at: DateTime<Utc> = "2026-10-21T22:47:08Z".parse().unwrap();
+        let archive = commit_archive(
+            &commit,
+            &[(
+                &format!("nuclei-templates-{commit}/http/exposure.yaml"),
+                ACTIVE.as_bytes(),
+            )],
+        );
+        let dir = std::env::temp_dir().join(format!("sniper-templates-{}", uuid::Uuid::new_v4()));
+        let library = library(&dir);
+        let other = Source::Main {
+            commit: "a".repeat(40),
+            committed_at: None,
+        };
+        assert!(library.import_blocking(&archive, other).is_err());
+        library
+            .import_blocking(
+                &archive,
+                Source::Main {
+                    commit: commit.clone(),
+                    committed_at: Some(committed_at),
+                },
+            )
+            .unwrap();
+        let status = library.status();
+        let info = status.library.unwrap();
+        assert_eq!(info.tag, "main");
+        assert_eq!(info.source, "github");
+        assert!(!info.verified);
+        assert_eq!(info.commit.as_deref(), Some(commit.as_str()));
+        assert_eq!(info.committed_at, Some(committed_at));
+        assert_eq!(status.templates, 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_download_is_the_latest_release_unless_main_is_named() {
+        let release: DownloadRequest =
+            serde_json::from_value(json!({ "acknowledged": true })).unwrap();
+        assert_eq!(release.channel, Channel::Release);
+        let main: DownloadRequest =
+            serde_json::from_value(json!({ "acknowledged": true, "channel": "main" })).unwrap();
+        assert_eq!(main.channel, Channel::Main);
+        assert!(serde_json::from_value::<DownloadRequest>(
+            json!({ "acknowledged": true, "channel": "beta" })
+        )
+        .is_err());
+    }
+
+    // The commit goes into the archive URL, so only a full SHA is taken.
+    #[test]
+    fn the_main_head_github_names_is_a_full_commit_sha() {
+        let sha = "50852f5ce7".repeat(4);
+        let branch = json!({ "commit": { "sha": sha, "commit": { "committer": { "date": "2026-10-21T22:47:08Z" } } } });
+        let (commit, committed_at) = main_head(&branch).unwrap();
+        assert_eq!(commit, sha);
+        assert_eq!(
+            committed_at,
+            Some("2026-10-21T22:47:08Z".parse::<DateTime<Utc>>().unwrap())
+        );
+        for bad in ["../evil", "50852f5ce7", ""] {
+            assert!(
+                main_head(&json!({ "commit": { "sha": bad } })).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     // A flaw people know by a nickname (React2Shell, WP2Shell) may name it only
