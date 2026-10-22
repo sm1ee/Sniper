@@ -680,6 +680,10 @@ struct TemplatesScanArgs {
     ids: Vec<String>,
     #[command(flatten)]
     filter: TemplatesFilterArgs,
+    /// Send the templates turned on (the On box in the list) instead of ids
+    /// or a filter.
+    #[arg(long)]
+    on: bool,
     /// A risk to allow by name: intrusive, default-login, bruteforce,
     /// token-spray, credential-stuffing, fuzz, fuzzing, dast, osint,
     /// method:put, method:delete or method:patch. Repeat for several;
@@ -699,6 +703,9 @@ struct TemplatesScanArgs {
     /// would send elsewhere is not sent.
     #[arg(long)]
     apply_match_replace: bool,
+    /// What HTTP history keeps: every exchange (all) or only the matched ones.
+    #[arg(long, default_value = "all", value_parser = ["all", "matched"])]
+    history: String,
 }
 
 #[derive(Args, Debug)]
@@ -957,8 +964,13 @@ fn templates_scan_body(
     preview: bool,
 ) -> Result<Value> {
     let filter = templates_filter_json(&args.filter);
-    if args.ids.is_empty() == filter.is_empty() {
-        bail!("give template ids or a filter (--search, --severity, --tag); exactly one");
+    if [!args.ids.is_empty(), !filter.is_empty(), args.on]
+        .iter()
+        .filter(|given| **given)
+        .count()
+        != 1
+    {
+        bail!("give template ids, a filter (--search, --severity, --tag) or --on; exactly one");
     }
     if let Some(id) = args.ids.iter().find(|id| !valid_template_id(id)) {
         bail!("`{id}` is not a template id");
@@ -971,8 +983,11 @@ fn templates_scan_body(
         "concurrency": args.concurrency,
         "max_requests": args.max_requests,
         "apply_match_replace": args.apply_match_replace,
+        "history": args.history,
     });
-    if args.ids.is_empty() {
+    if args.on {
+        body["filter"] = json!({"enabled": true});
+    } else if args.ids.is_empty() {
         body["filter"] = Value::Object(filter);
     } else {
         body["ids"] = json!(args.ids);
@@ -992,6 +1007,8 @@ fn templates_scan_input(args: &TemplatesScanArgs) -> Value {
         ("concurrency", json!(args.concurrency)),
         ("max_requests", json!(args.max_requests)),
         ("apply_match_replace", json!(args.apply_match_replace)),
+        ("on", json!(args.on)),
+        ("history", json!(args.history)),
     ] {
         input.insert(key.into(), value);
     }
@@ -6199,6 +6216,8 @@ fn templates_input_schema(operation: &str) -> Option<Value> {
             properties["concurrency"] = json!({"type":["integer","null"],"minimum":1,"maximum":8,"default":4,"description":"Templates in flight at once. Null uses 4."});
             properties["max_requests"] = json!({"type":["integer","null"],"minimum":1,"maximum":50000,"default":10000,"description":"The most requests the scan sends, redirects included. Null uses 10000."});
             properties["apply_match_replace"] = json!({"type":["boolean","null"],"default":false,"description":"Apply the session's Match & Replace rules; a request a rule would send elsewhere is not sent."});
+            properties["on"] = json!({"type":["boolean","null"],"default":false,"description":"Send the templates turned on (the On box in the list) instead of ids or a filter."});
+            properties["history"] = json!({"type":["string","null"],"enum":["all","matched",null],"default":"all","description":"What HTTP history keeps: every exchange (all) or only the matched ones."});
             json!({"type":"object","additionalProperties":false,"required":["targets"],"properties":properties})
         }
         "templates.scan.list" => json!({
@@ -6811,6 +6830,8 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "concurrency",
             "max_requests",
             "apply_match_replace",
+            "on",
+            "history",
         ],
         "templates.scan.list" => &["session_id"],
         "templates.auto.get" => &["session_id"],
@@ -8581,6 +8602,14 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 concurrency: bounded("concurrency", 4, 8)?,
                 max_requests: bounded("max_requests", 10_000, 50_000)?,
                 apply_match_replace: call_bool(operation, input, "apply_match_replace")?,
+                on: call_bool(operation, input, "on")?,
+                history: call_optional_enum_string(
+                    operation,
+                    input,
+                    "history",
+                    &["all", "matched"],
+                )?
+                .unwrap_or_else(|| "all".into()),
             };
             templates_scan_body(&args, None, true)?;
             let command = if operation == "templates.scan.preview" {
@@ -21656,9 +21685,41 @@ mod tests {
             json!({
                 "session_id":null,"targets":["https://app.example.com"],"allow_risks":["intrusive"],
                 "rate":10,"concurrency":4,"max_requests":10000,"apply_match_replace":false,
-                "filter":{"severity":"high"},"acknowledged":true
+                "history":"all","filter":{"severity":"high"},"acknowledged":true
             })
         );
+        // The templates turned on are a selection of their own; history may
+        // keep only what matched.
+        let on = scan(
+            "templates.scan.start",
+            json!({"targets":target,"on":true,"history":"matched"}),
+        )
+        .unwrap();
+        let body = &super::command_api_preview(&on).unwrap()["body"];
+        assert_eq!(body["filter"], json!({"enabled": true}));
+        assert_eq!(body["history"], "matched");
+        assert!(scan(
+            "templates.scan.start",
+            json!({"targets":target,"on":true,"ids":["git-config"]})
+        )
+        .is_err());
+        assert!(scan(
+            "templates.scan.start",
+            json!({"targets":target,"on":true,"history":"some"})
+        )
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "templates",
+            "scan",
+            "start",
+            "--target",
+            "https://app.example.com",
+            "--on",
+            "--history",
+            "matched",
+        ])
+        .is_ok());
         let preview = scan(
             "templates.scan.preview",
             json!({"targets":target,"ids":["git-config"]}),

@@ -155,6 +155,9 @@ pub struct ScanJob {
     pub max_requests: usize,
     pub allow_risks: Vec<String>,
     pub apply_match_replace: bool,
+    /// What HTTP history keeps of it: `all` its exchanges, or `matched` ones.
+    #[serde(default = "matched_history")]
+    pub history: String,
     pub skipped_targets: Vec<String>,
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -194,6 +197,25 @@ pub struct ScanLogEntry {
     pub matched: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The exchange in HTTP history, when the scan kept it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<Uuid>,
+}
+
+/// Jobs recorded before a scan could keep every exchange kept only matches.
+fn matched_history() -> String {
+    "matched".into()
+}
+
+/// Which of a manual scan's exchanges HTTP history keeps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryMode {
+    /// Every one, as Fuzzer keeps its own.
+    #[default]
+    All,
+    /// Only those a template matched, as the auto scan keeps.
+    Matched,
 }
 
 impl ScanJob {
@@ -351,6 +373,8 @@ pub struct StartScan {
     /// Count what would be sent, and send nothing.
     #[serde(default)]
     pub preview: bool,
+    #[serde(default)]
+    pub history: HistoryMode,
 }
 
 fn default_rate() -> u32 {
@@ -653,6 +677,7 @@ pub async fn start(
             max_requests: request.max_requests,
             apply_match_replace: request.apply_match_replace,
             auto_hosts: None,
+            keep_all: request.history == HistoryMode::All,
             warnings: Vec::new(),
         },
     )
@@ -700,6 +725,8 @@ struct Plan {
     /// For a job the auto scan starts, its own host list, which its requests
     /// may also go to; None for one the operator started.
     auto_hosts: Option<Vec<String>>,
+    /// Keep every exchange in history, not only the matched ones.
+    keep_all: bool,
     warnings: Vec<String>,
 }
 
@@ -720,6 +747,7 @@ async fn launch(
         max_requests,
         apply_match_replace,
         auto_hosts,
+        keep_all,
         warnings,
     } = plan;
     // Compiled before the job exists, from the release the list came from.
@@ -791,6 +819,7 @@ async fn launch(
         max_requests,
         allow_risks,
         apply_match_replace,
+        history: if keep_all { "all" } else { "matched" }.into(),
         ..ScanJob::default()
     };
     for warning in warnings {
@@ -853,6 +882,7 @@ async fn launch(
         templates,
         targets,
         extra_hosts: auto_hosts,
+        keep_all,
         client,
         apply_match_replace,
         max_requests,
@@ -990,6 +1020,8 @@ pub fn pump(
                 max_requests: planned.clamp(1, MAX_MAX_REQUESTS),
                 apply_match_replace: false,
                 auto_hosts: Some(hosts),
+                // Unattended, it would fill history with every host it met.
+                keep_all: false,
                 warnings,
             };
             match launch(&state, &session, plan).await {
@@ -1191,6 +1223,8 @@ struct Run {
     /// None for a scan the operator started, which goes only to the targets
     /// they named.
     extra_hosts: Option<Vec<String>>,
+    /// Keep every exchange in history, not only the matched ones.
+    keep_all: bool,
     client: reqwest::Client,
     apply_match_replace: bool,
     max_requests: usize,
@@ -2035,16 +2069,21 @@ impl Run {
             matched |= verdict.matched;
             let results = verdict.results;
             let found = !results.is_empty();
+            let template_id = template.blocks[block].template.info.id.clone();
+            if self.keep_all {
+                self.store(&template_id, hop.record.clone(), None).await;
+            }
             self.update(|job| {
                 job.log(ScanLogEntry {
                     at: Utc::now(),
-                    template_id: template.blocks[block].template.info.id.clone(),
+                    template_id,
                     method: hop.request.method.clone(),
                     url: hop.url(),
                     status: hop.record.status,
                     ms: hop.record.duration_ms,
                     matched: found,
                     error: None,
+                    record_id: (self.keep_all || found).then_some(hop.record.id),
                 })
             });
             if found {
@@ -2152,6 +2191,7 @@ impl Run {
                 ms: hop.record.duration_ms,
                 matched: true,
                 error: None,
+                record_id: Some(hop.record.id),
             })
         });
         self.keep(
@@ -2163,8 +2203,20 @@ impl Run {
         .await;
     }
 
-    /// Stores a matched exchange in the history and files its findings,
-    /// with the callback that made it match, if one did.
+    /// Puts an exchange in history, noted with its template and job and with
+    /// what else is said of it.
+    async fn store(&self, template_id: &str, mut record: TransactionRecord, also: Option<String>) {
+        record
+            .notes
+            .push(format!("Template {template_id}, job {}.", self.job));
+        record.notes.extend(also);
+        crate::proxy::store_record_and_scan_unconditionally(&self.state, &self.session, record)
+            .await;
+    }
+
+    /// Files a matched exchange's findings, with the callback that made it
+    /// match, if one did. A scan that keeps every exchange stored it when it
+    /// was judged; one that keeps only matches stores it now.
     async fn keep(
         &self,
         block: &active::Block,
@@ -2173,24 +2225,23 @@ impl Run {
         callback: Option<&OastCallback>,
     ) {
         let url = hop.url();
-        let mut record = hop.record;
-        record.notes.push(format!(
-            "Template {}, job {}.",
-            block.template.info.id, self.job
-        ));
+        let record = hop.record;
         let heard = callback.map(|callback| {
             format!(
                 "OAST: {} callback from {}.",
                 callback.protocol, callback.remote_addr
             )
         });
-        record.notes.extend(heard.clone());
-        crate::proxy::store_record_and_scan_unconditionally(
-            &self.state,
-            &self.session,
-            record.clone(),
-        )
-        .await;
+        if !self.keep_all {
+            self.store(&block.template.info.id, record.clone(), heard.clone())
+                .await;
+        } else if let Some(heard) = &heard {
+            // It is in history already, from before the callback came.
+            self.session
+                .store
+                .update_record(record.id, |stored| stored.notes.push(heard.clone()))
+                .await;
+        }
         let info = &block.template.info;
         for result in &results {
             let mut finding =
@@ -2453,6 +2504,7 @@ mod tests {
         acknowledged["acknowledged"] = true.into();
         acknowledged["filter"] = serde_json::json!({"search": "example-", "tag": ""});
         acknowledged["ids"] = serde_json::json!([]);
+        acknowledged["history"] = "matched".into();
         let started = start(
             State(state.clone()),
             Json(request(session.id(), acknowledged)),
@@ -3206,6 +3258,118 @@ mod tests {
             "{}",
             finding.detail
         );
+        // Every answer is in history once, the callback's noted on the one it
+        // matched, though the answer was stored before the callback came.
+        assert_eq!(session.store.len().await, job.sent - job.failed);
+        let hit = job
+            .results
+            .iter()
+            .find(|result| result.template_id == "example-oast-hit")
+            .unwrap();
+        let record = session.store.get(hit.record_id).await.unwrap();
+        assert!(
+            record
+                .notes
+                .iter()
+                .any(|note| note == "OAST: http callback from 192.0.2.10."),
+            "{:?}",
+            record.notes
+        );
+    }
+
+    // A manual scan keeps every exchange in history, as Fuzzer does, so each
+    // line of its log opens what was sent and what came back. Told to, it keeps
+    // only the matched ones, as the auto scan always does.
+    #[tokio::test]
+    async fn a_manual_scan_keeps_every_exchange_unless_told_to_keep_only_matches() {
+        let (address, _log, server) = site(1, false).await;
+        let target = format!("http://{address}");
+        for (name, history) in [
+            ("history-default", None),
+            ("history-all", Some("all")),
+            ("history-matched", Some("matched")),
+        ] {
+            let state = scan_state(name, &[]).await;
+            let session = state.session().await;
+            let mut body = serde_json::json!({
+                "targets": [target], "ids": ["example-config", "example-miss"],
+                "acknowledged": true, "rate": 50,
+            });
+            if let Some(history) = history {
+                body["history"] = history.into();
+            }
+            let started = start(State(state.clone()), Json(request(session.id(), body)))
+                .await
+                .unwrap()
+                .0;
+            let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+            let job = finished(&state, id).await;
+            assert_eq!((job.sent, job.matched), (2, 1), "{name}: {job:?}");
+            let keeps_all = history != Some("matched");
+            assert_eq!(
+                job.history,
+                if keeps_all { "all" } else { "matched" },
+                "{name}"
+            );
+            assert_eq!(
+                session.store.len().await,
+                if keeps_all { 2 } else { 1 },
+                "{name}"
+            );
+            for entry in &job.recent {
+                assert_eq!(
+                    entry.record_id.is_some(),
+                    keeps_all || entry.matched,
+                    "{name}: {entry:?}"
+                );
+                if let Some(record_id) = entry.record_id {
+                    let record = session.store.get(record_id).await.unwrap();
+                    assert!(entry.url.ends_with(&record.path), "{name}");
+                    assert!(record
+                        .notes
+                        .iter()
+                        .any(|note| note == crate::model::TEMPLATE_SCAN_NOTE));
+                    assert_eq!(
+                        record
+                            .notes
+                            .iter()
+                            .filter(|note| note.starts_with("Template "))
+                            .count(),
+                        1,
+                        "{name}: one record, noted once"
+                    );
+                }
+            }
+        }
+        server.abort();
+    }
+
+    // "Turned on": the templates whose On box is ticked, whatever the search.
+    #[tokio::test]
+    async fn a_scan_can_take_the_templates_turned_on() {
+        let (address, _log, server) = site(1, false).await;
+        let state = scan_state("turned-on", &[]).await;
+        let session = state.session().await;
+        state
+            .templates
+            .set_auto(&["example-config".into()], true)
+            .unwrap();
+        let preview = start(
+            State(state.clone()),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [format!("http://{address}")],
+                    "filter": {"enabled": true}, "preview": true,
+                }),
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(preview["templates"], 1);
+        assert_eq!(preview["requests"], 1);
+        server.abort();
     }
 
     // The operator names a scan's targets. Scope bounds what Sniper sends on its

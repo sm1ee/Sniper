@@ -873,9 +873,9 @@ impl TemplateLibrary {
         filter: Option<&ListQuery>,
     ) -> (Vec<TemplateMeta>, usize) {
         if let Some(filter) = filter {
+            // `enabled` takes the templates turned on, as the list does.
             let query = ListQuery {
                 support: Some("active".into()),
-                enabled: None,
                 limit: Some(MAX_LIST_LIMIT),
                 offset: Some(0),
                 ..filter.clone()
