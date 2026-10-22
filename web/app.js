@@ -1076,6 +1076,8 @@ let lastUiSettingsPayload = null;
 let proxySettingsSaveInFlight = false;
 let proxySettingsSavePromise = null;
 let toolsBootPromise = null;
+// What the decoder input last read as, so a tool opens once per new value.
+let decoderInputKind = null;
 let displaySettingsPreviewActive = false;
 let displaySettingsReturnFocus = null;
 const cliPathState = createCliPathState();
@@ -1737,6 +1739,7 @@ function bindEvents() {
   wireTabIndicator(document.querySelector(".main-tabs"));
   document.querySelectorAll(".sub-tabs, .target-tabs, .compare-tabs").forEach(wireTabIndicator);
   wireTabIndicator(els.displaySettingsModal.querySelector(".settings-tabs"));
+  wireTabIndicator(document.getElementById("tabs"));
   els.displaySettingsModal.addEventListener("click", (event) => {
     if (event.target === els.displaySettingsModal) {
       closeDisplaySettingsModal();
@@ -9187,7 +9190,7 @@ async function bootToolsWorkbench() {
 
   const $ = window.jQuery;
   const refreshOutputs = () => {
-    window.hasher.update();
+    if (!followDecoderInput(document.getElementById("input-value")?.value || "")) window.hasher.update();
     syncDecoderToolMeta();
     if (typeof window.autoScroll === "function") {
       window.autoScroll(els.toolsShell);
@@ -9221,6 +9224,70 @@ function syncDecoderToolMeta() {
   const activeLabel = activeTab?.textContent?.trim() || "Decoder";
   els.toolsActiveToolTitle.textContent = `${activeLabel} output`;
   markEmptyDecoderOutputs();
+  markIdleDecoderTabs();
+}
+
+// The decoder library's words for a transform that does not apply: nothing,
+// NaN, and its parse, range and input errors.
+function decoderOutputShows(value) {
+  return !/^(?:|NaN|Parse error|Out of range|Invalid\b.*|Error\b.*)$/s.test(String(value ?? ""));
+}
+
+// A category with nothing to show for this input dims and takes no clicks,
+// which points at the ones that do; the one in use stays open. Each category
+// stops at its first output that shows.
+function markIdleDecoderTabs() {
+  const input = document.getElementById("input-value")?.value || "";
+  const password = document.getElementById("input-password")?.value || "";
+  // ponytail: past 20,000 characters nothing is judged, rather than running
+  // every transform on each keystroke; a worker would lift the cap.
+  const judged = input.length > 0 && input.length <= 20000;
+  const shown = new Set();
+  for (const element of judged ? Object.values(window.hasher.elements) : []) {
+    if (shown.has(element.tab)) continue;
+    try {
+      if (decoderOutputShows(element.calculate(input, password))) shown.add(element.tab);
+    } catch {
+      // A transform that throws has nothing to show.
+    }
+  }
+  for (const [name, tab] of Object.entries(window.tabs)) {
+    document.getElementById(name)?.classList.toggle("idle", judged && !shown.has(tab) && tab !== window.hasher.tab);
+  }
+}
+
+// The decoder tab a value can only be. Only a JWT is certain enough to move
+// for: three base64url parts, the first two JSON objects, the first naming its
+// algorithm. A guess that moved the operator off the tool they chose would
+// cost more than it saves.
+function decoderTabFor(text) {
+  const parts = String(text).trim().split(".");
+  if (parts.length !== 3 || !/^[\w-]+$/.test(parts[0]) || !/^[\w-]+$/.test(parts[1]) || !/^[\w-]*$/.test(parts[2])) {
+    return null;
+  }
+  try {
+    const json = (part) => JSON.parse(atob(part.replace(/-/g, "+").replace(/_/g, "/")
+      .padEnd(Math.ceil(part.length / 4) * 4, "=")));
+    const header = json(parts[0]);
+    const payload = json(parts[1]);
+    return header && typeof header === "object" && typeof header.alg === "string"
+      && payload && typeof payload === "object" ? "jwt" : null;
+  } catch {
+    return null;
+  }
+}
+
+// A value that can only be one thing opens its tool as it arrives. Going back
+// to another tool sticks until the value turns into something else.
+function followDecoderInput(value) {
+  const kind = decoderTabFor(value);
+  const move = kind !== null && kind !== decoderInputKind && window.tabs[kind] !== window.hasher.tab;
+  decoderInputKind = kind;
+  if (move) {
+    window.hasher.tab = window.tabs[kind];
+    window.hasher.updateUI();
+  }
+  return move;
 }
 
 // An output with nothing in it is a row of noise. Rows show once they hold a
@@ -9230,7 +9297,7 @@ function markEmptyDecoderOutputs() {
   if (!output) return;
   let shown = 0;
   for (const element of output.querySelectorAll(".element")) {
-    const empty = !element.querySelector("textarea")?.value;
+    const empty = !decoderOutputShows(element.querySelector("textarea")?.value);
     element.classList.toggle("hidden", empty);
     if (!empty) shown += 1;
   }
@@ -21282,7 +21349,8 @@ function wireTabIndicator(strip) {
 
   let placed = false;
   const place = () => {
-    const active = strip.querySelector(".active");
+    // A strip may name its own active class; Tools' decoder library uses "on".
+    const active = strip.querySelector(strip.dataset.tabActive || ".active");
     if (!active || !strip.offsetWidth) {
       indicator.style.opacity = "0";
       placed = false;

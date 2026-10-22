@@ -73,13 +73,15 @@ function fixture({ missingGlobals = false, partialFailure = false } = {}) {
     tabs: { encode: "fixture" },
     jQuery: selector => ({ on(type, callback) { bindings.push({ selector, type, callback }); } }),
     hasher: {
+      // No transforms, so judging which categories apply runs none.
+      elements: {},
       update() { assert.fail("No transform may execute in a presentation test"); },
       updateUI() { updates++; if (partialFailure) throw new Error(privateError); },
     },
     autoScroll: shell => scrolls.push(shell),
   };
   const context = loadFunctions([
-    "renderToolPanels", "ensureDecoderWorkbench", "bootToolsWorkbench", "loadScriptOnce", "syncDecoderToolMeta", "markEmptyDecoderOutputs",
+    "renderToolPanels", "ensureDecoderWorkbench", "bootToolsWorkbench", "loadScriptOnce", "syncDecoderToolMeta", "markEmptyDecoderOutputs", "markIdleDecoderTabs", "decoderOutputShows",
   ], {
     state, els, document, window, mainTabs: [], toolsBootPromise: null,
     DECODER_SCRIPT_SOURCES: ["/fixture-private-first.js", "/fixture-private-second.js"],

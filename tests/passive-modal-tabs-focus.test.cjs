@@ -261,9 +261,9 @@ for (const shiftKey of [false, true]) {
 function indicatorFixture() {
   const mutationObservers = [], resizeObservers = [], appended = [];
   const strip = {
-    classList: classList(), offsetWidth: 400,
+    classList: classList(), offsetWidth: 400, dataset: {},
     active: { offsetLeft: 35, offsetTop: 1, offsetWidth: 82, offsetHeight: 28 },
-    querySelector: selector => { assert.equal(selector, ".active"); return strip.active; },
+    querySelector: selector => { assert.equal(selector, strip.dataset.tabActive || ".active"); return strip.active; },
     appendChild: node => appended.push(node),
   };
   function observer(list) {
@@ -301,6 +301,14 @@ test("tab indicator wiring is optional and idempotent, with class-only mutation 
   assert.deepEqual([...f.mutationObservers[0].options.attributeFilter], ["class"]);
   assert.equal(f.mutationObservers[0].options.subtree, true);
   assert.equal(f.resizeObservers[0].target, f.strip);
+  assertIndicatorPosition(f.appended[0], f.strip.active);
+});
+
+// Tools' decoder library marks the category in use "on", not "active".
+test("tab indicator follows the class a strip names for its active tab", () => {
+  const f = indicatorFixture();
+  f.strip.dataset.tabActive = ".on";
+  f.context.wireTabIndicator(f.strip);
   assertIndicatorPosition(f.appended[0], f.strip.active);
 });
 

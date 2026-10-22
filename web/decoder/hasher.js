@@ -1114,6 +1114,7 @@ var hasher = {
         $("#"+this.elements[i].id+"-value").click(function (event) {
           var copyGeneration = ++hasher.copyGeneration;
           $("#output .note").hide();
+          $("#output .element").removeClass("copied");
           var id = this.id.toString().replace("-value", "");
           var textarea = $("#"+id)[0];
 
@@ -1127,10 +1128,12 @@ var hasher = {
           if ($("#"+id).val().length > 0) {
             copyToClipboard(id).then(function () {
               if (copyGeneration !== hasher.copyGeneration) return;
-              $("#"+id+"-note").text("copied").show("fast");
+              // The row it came from lights up, so the copy shows where the eye is.
+              $("#"+id+"-value").closest(".element").addClass("copied");
+              $("#"+id+"-note").text("Copied").show("fast");
             }).catch(function () {
               if (copyGeneration !== hasher.copyGeneration) return;
-              $("#"+id+"-note").text("copy failed").show("fast");
+              $("#"+id+"-note").text("Copy failed").show("fast");
             });
           }
         });
@@ -1146,6 +1149,7 @@ var hasher = {
     // Clipboard completions belong to the output and click that started them.
     this.copyGeneration++;
     $("#output .note").hide();
+    $("#output .element").removeClass("copied");
     var input = $("#input-value").val();
     var password = $("#input-password").val();
 

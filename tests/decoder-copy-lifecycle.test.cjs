@@ -24,6 +24,8 @@ function fixture({ modern = true, secure = true, fallbackResult = true, copyErro
   add("input-value"); add("input-password"); add("output");
   function $(selector) {
     const selected = selector === "#output .note" ? [...nodes.values()].filter(node => node.id.endsWith("-note"))
+      // A value wrapper stands in for the row around it.
+      : selector === "#output .element" ? [...nodes.values()].filter(node => node.id.endsWith("-value"))
       : [nodes.get(selector.slice(1))].filter(Boolean);
     const result = { length: selected.length,
       val(value) {
@@ -37,6 +39,9 @@ function fixture({ modern = true, secure = true, fallbackResult = true, copyErro
       hide() { selected.forEach(node => { node.visible = false; }); return this; },
       show() { selected.forEach(node => { node.visible = true; }); return this; },
       attr() { return this; },
+      addClass(name) { selected.forEach(node => { (node.classes ||= new Set()).add(name); }); return this; },
+      removeClass(name) { selected.forEach(node => node.classes?.delete(name)); return this; },
+      closest() { return this; },
       html() {
         if (selector === "#output") {
           outputIds.forEach(id => nodes.delete(id)); outputIds.clear();
@@ -100,14 +105,14 @@ test("current modern copy captures the complete displayed Unicode output synchro
   assert.equal(f.writes[0].text, f.nodes.get("first").value);
   assert.deepEqual(f.feedback(), []);
   f.writes[0].resolve(); await tick();
-  assert.deepEqual(f.feedback(), [["first-note", "copied"]]);
+  assert.deepEqual(f.feedback(), [["first-note", "Copied"]]);
   assert.deepEqual(f.selections, []); assert.deepEqual(f.fallback, []);
 });
 
 test("current modern copy rejection reports failure", async () => {
   const f = fixture(); f.click();
   f.writes[0].reject(new Error("Synthetic denial")); await tick();
-  assert.deepEqual(f.feedback(), [["first-note", "copy failed"]]);
+  assert.deepEqual(f.feedback(), [["first-note", "Copy failed"]]);
 });
 
 for (const fallbackResult of [true, false]) for (const modern of [false, true]) {
@@ -115,7 +120,7 @@ for (const fallbackResult of [true, false]) for (const modern of [false, true]) 
     const f = fixture({ modern, secure: false, fallbackResult }); f.click(); await tick();
     assert.deepEqual(f.fallback, [f.nodes.get("first").value]);
     assert.deepEqual(f.selections, ["first"]); assert.deepEqual(f.writes, []);
-    assert.deepEqual(f.feedback(), [["first-note", fallbackResult ? "copied" : "copy failed"]]);
+    assert.deepEqual(f.feedback(), [["first-note", fallbackResult ? "Copied" : "Copy failed"]]);
   });
 }
 
@@ -124,7 +129,7 @@ for (const api of ["modern", "fallback"]) {
     const error = new Error("Synthetic copy failure");
     const f = fixture(api === "modern" ? { modernError: error } : { modern: false, copyError: error });
     assert.doesNotThrow(() => f.click()); await tick();
-    assert.deepEqual(f.feedback(), [["first-note", "copy failed"]]);
+    assert.deepEqual(f.feedback(), [["first-note", "Copy failed"]]);
   });
 }
 
@@ -152,7 +157,7 @@ for (const id of ["first", "second"]) for (const outcome of ["success", "failure
     const f = fixture(); f.click(); f.click(id);
     f.writes[1].resolve(); await tick();
     if (outcome === "success") f.writes[0].resolve(); else f.writes[0].reject(new Error("Synthetic delayed failure"));
-    await tick(); assert.deepEqual(f.feedback(), [[id + "-note", "copied"]]);
+    await tick(); assert.deepEqual(f.feedback(), [[id + "-note", "Copied"]]);
   });
 }
 
@@ -160,7 +165,7 @@ test("an older failure stays quiet while the newer copy is pending", async () =>
   const f = fixture(); f.click(); f.click("second");
   f.writes[0].reject(new Error("Synthetic delayed failure")); await tick();
   assert.deepEqual(f.feedback(), []);
-  f.writes[1].resolve(); await tick(); assert.deepEqual(f.feedback(), [["second-note", "copied"]]);
+  f.writes[1].resolve(); await tick(); assert.deepEqual(f.feedback(), [["second-note", "Copied"]]);
 });
 
 test("selecting output text preserves the selection and never automatically copies", async () => {
@@ -174,4 +179,23 @@ test("selecting output text preserves the selection and never automatically copi
 test("empty output does not copy a previously displayed value", async () => {
   const f = fixture(); f.update(""); f.click(); await tick();
   assert.deepEqual(f.writes, []); assert.deepEqual(f.fallback, []); assert.deepEqual(f.feedback(), []);
+});
+
+// "Copied" beside a name was easy to miss; the row it came from lights up too,
+// until the next copy or the next recalculation.
+test("a copy lights its row until the next copy or recalculation", async () => {
+  const f = fixture();
+  const lit = id => f.nodes.get(id + "-value").classes?.has("copied") || false;
+  f.click(); f.writes[0].resolve(); await tick();
+  assert.equal(lit("first"), true);
+  f.click("second"); assert.equal(lit("first"), false);
+  f.writes[1].resolve(); await tick();
+  assert.equal(lit("second"), true);
+  f.update("next value"); assert.equal(lit("second"), false);
+});
+
+test("a failed copy says so without lighting the row", async () => {
+  const f = fixture(); f.click();
+  f.writes[0].reject(new Error("Synthetic denial")); await tick();
+  assert.equal(f.nodes.get("first-value").classes?.has("copied") || false, false);
 });
