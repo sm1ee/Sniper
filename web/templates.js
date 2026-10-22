@@ -41,18 +41,128 @@
     return { filter, enabled: !!enabled };
   }
 
-  function libraryLine(status) {
-    if (!status) return "Loading the template library…";
+  function plural(n, word) { return `${count(n)} ${word}${Number(n) === 1 ? "" : "s"}`; }
+
+  // What is installed, for the library card: its name, a badge saying whether
+  // it was checked, and its counts. The rest sits in the tooltip.
+  function librarySummary(status) {
+    if (!status) return { name: "Loading…", badge: null, detail: "", counts: "", title: "" };
     const library = status.library;
-    if (!library) return "No templates installed. Download the community release or import an archive.";
-    const main = library.source === "github" && library.tag === "main";
-    const parts = [
-      library.source === "github" ? `nuclei-templates ${library.tag}` : "Imported archive",
-      library.verified ? "checksum verified" : main ? "unreleased, no checksum" : "not checksum-verified",
-    ];
-    if (library.commit) parts.push(`commit ${library.commit.slice(0, 12)}`);
-    if (library.committed_at) parts.push(String(library.committed_at).slice(0, 10));
-    return `${parts.join(" · ")}\n${count(status.templates)} templates · ${count(status.passive_supported)} passive, ${count(status.passive_enabled)} on · ${count(status.active_supported)} scannable`;
+    if (!library) return { name: "No templates", badge: null, detail: "", counts: "Download a release or import an archive.", title: "" };
+    const on = Number(status.passive_enabled) || 0;
+    const counts = `${plural(status.templates, "template")} · ${count(status.passive_supported)} passive${on ? ` (${count(on)} on)` : ""} · ${count(status.active_supported)} scan`;
+    const commit = library.commit ? library.commit.slice(0, 12) : "";
+    if (library.source !== "github") return { name: "Imported archive", badge: { text: "not verified", tone: "warn" }, detail: "", counts, title: "" };
+    if (library.tag === "main") {
+      const date = library.committed_at ? String(library.committed_at).slice(0, 10) : "";
+      return {
+        name: "main", badge: { text: "unreleased", tone: "warn" }, detail: [commit.slice(0, 7), date].filter(Boolean).join(" · "), counts,
+        title: `nuclei-templates main${commit ? ` · commit ${commit}` : ""} · no checksum`,
+      };
+    }
+    return {
+      name: library.tag, badge: library.verified ? { text: "verified", tone: "ok" } : { text: "not verified", tone: "warn" }, detail: "", counts,
+      title: `nuclei-templates ${library.tag}${commit ? ` · commit ${commit}` : ""}`,
+    };
+  }
+
+  // ---- YAML ----
+
+  const YAML_KEY = /^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^\s#'"[\]{},:][^#]*?)(:)(?=\s|$)/;
+  const YAML_BLOCK = /^[|>][+-]?\d*(?=\s|$)/;
+  const YAML_QUOTED = /^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')/;
+  const YAML_CLASSES = {
+    key: "token-json-key", punct: "token-punctuation", string: "token-json-string", number: "token-json-number",
+    bool: "token-json-boolean", comment: "templates-yaml-comment", expr: "token-url",
+  };
+
+  // A part of a line, with each {{expression}} in it set apart.
+  function withExpressions(kind, text) {
+    const parts = [];
+    let last = 0;
+    for (const match of String(text).matchAll(/\{\{.*?\}\}/g)) {
+      if (match.index > last) parts.push([kind, text.slice(last, match.index)]);
+      parts.push(["expr", match[0]]);
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) parts.push([kind, text.slice(last)]);
+    return parts;
+  }
+
+  // A value after `key:` or `- `: a block marker, a quoted string, a number,
+  // a boolean or plain text, then any comment.
+  function yamlValue(value) {
+    if (!value) return [];
+    if (value.startsWith("#")) return [["comment", value]];
+    const block = value.match(YAML_BLOCK);
+    const quoted = !block && value.match(YAML_QUOTED);
+    let body = value;
+    let tail = "";
+    if (block || quoted) {
+      body = (block || quoted)[0];
+      tail = value.slice(body.length);
+    } else {
+      const comment = value.search(/\s#/);
+      if (comment >= 0) {
+        body = value.slice(0, comment);
+        tail = value.slice(comment);
+      }
+    }
+    const parts = block ? [["punct", body]]
+      : quoted ? withExpressions("string", body)
+        : /^[-+]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(body) ? [["number", body]]
+          : /^(?:true|false|null|~)$/i.test(body) ? [["bool", body]]
+            : withExpressions("text", body);
+    const comment = tail.match(/^(\s*)(#.*)$/);
+    if (comment) return [...parts, ["text", comment[1]], ["comment", comment[2]]];
+    return tail ? [...parts, ["text", tail]] : parts;
+  }
+
+  // A template's YAML as lines of [kind, text]; kinds are key, punct, string,
+  // number, bool, comment, expr and text. The lines of a block scalar (`|`,
+  // `>`) are its text, so a raw request's `Host:` is not read as a key.
+  function yamlLines(text) {
+    const lines = [];
+    let block = -1;
+    for (const line of String(text || "").split(/\r?\n/)) {
+      const indent = line.length - line.trimStart().length;
+      if (block >= 0 && (!line.trim() || indent > block)) {
+        lines.push(withExpressions("text", line));
+        continue;
+      }
+      block = -1;
+      const parts = [];
+      let rest = line.slice(indent);
+      if (indent) parts.push(["text", line.slice(0, indent)]);
+      if (rest.startsWith("#") || rest === "---" || rest === "...") {
+        parts.push([rest.startsWith("#") ? "comment" : "punct", rest]);
+        lines.push(parts);
+        continue;
+      }
+      while (/^-(?:\s|$)/.test(rest)) {
+        const space = rest.slice(1).match(/^\s*/)[0];
+        parts.push(["punct", "-"]);
+        if (space) parts.push(["text", space]);
+        rest = rest.slice(1 + space.length);
+      }
+      const key = rest.match(YAML_KEY);
+      if (key) {
+        const space = rest.slice(key[0].length).match(/^\s*/)[0];
+        parts.push(["key", key[1]], ["punct", ":"]);
+        if (space) parts.push(["text", space]);
+        rest = rest.slice(key[0].length + space.length);
+      }
+      if (YAML_BLOCK.test(rest)) block = indent;
+      parts.push(...yamlValue(rest));
+      // Neighbouring text runs are one.
+      lines.push(parts.reduce((merged, part) => {
+        const previous = merged[merged.length - 1];
+        if (previous && previous[0] === "text" && part[0] === "text") previous[1] += part[1];
+        else if (part[1]) merged.push([part[0], part[1]]);
+        return merged;
+      }, []));
+    }
+    return lines;
   }
 
   // What Check for updates found, for the channel the installed library came from.
@@ -190,24 +300,26 @@
   // The card's badge says whether it is on.
   function autoLine(auto) {
     if (!auto) return "Loading…";
-    const plural = (n, word) => `${count(n)} ${word}${Number(n) === 1 ? "" : "s"}`;
     const templates = plural(auto.templates, "template");
     if (!auto.enabled) return templates;
     return `${templates} · ${plural(auto.scanned, "host")} scanned · ${count(auto.queued)} waiting`;
   }
 
   function previewLine(preview) {
-    const plural = (n, word) => `${count(n)} ${word}${Number(n) === 1 ? "" : "s"}`;
     const left = Object.entries(preview.excluded_by_risk || {}).map(([risk, n]) => `${risk} ${count(n)}`);
     if (preview.oast_unavailable) left.push(`${plural(preview.oast_unavailable, "OAST template")} (no Interactsh server)`);
     return `Sends ${plural(preview.requests, "request")} from ${plural(preview.templates, "template")} to ${(preview.targets || []).join(", ")}.${left.length ? ` Left out: ${left.join("; ")}.` : ""}`;
   }
 
-  function jobLine(job) {
-    const parts = [job.status, `${count(job.sent)} of ${count(job.planned)} sent`, `${count(job.matched)} matched`];
+  function jobCounts(job) {
+    const parts = [`${count(job.sent)} of ${count(job.planned)} sent`, `${count(job.matched)} matched`];
     if (job.failed) parts.push(`${count(job.failed)} failed`);
     if (job.blocked) parts.push(`${count(job.blocked)} not sent`);
     return parts.join(" · ");
+  }
+
+  function jobLine(job) {
+    return `${job.status} · ${jobCounts(job)}`;
   }
 
   function createController(options) {
@@ -216,12 +328,11 @@
     const fetcher = options.fetch || root.fetch.bind(root);
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
-    const ids = ["Status", "Progress", "ProgressBar", "Channel", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
+    const ids = ["Version", "Status", "Progress", "ProgressBar", "Channel", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
       "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
       "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
-      "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanPlan", "ScanStart",
-      "ScanNotice", "ScanJobs", "AutoState", "AutoSummary", "AutoHosts", "AutoRate", "AutoToggle",
-      "AutoSave", "AutoNotice"];
+      "ScanMaxRequests", "ScanMatchReplace", "ScanPlan", "ScanStart",
+      "ScanNotice", "ScanJobs", "AutoSummary", "AutoHosts", "AutoRate", "AutoToggle", "AutoNotice"];
     const els = Object.fromEntries(ids.map((id) => [id, shell.querySelector(`#templates${id}`)]));
     const listeners = [];
     let visible = false;
@@ -283,7 +394,12 @@
 
     function renderStatus() {
       const working = status && BUSY_STATES.has(status.state);
-      els.Status.textContent = libraryLine(status);
+      const summary = librarySummary(status);
+      els.Version.replaceChildren(element("strong", "", summary.name));
+      if (summary.badge) els.Version.append(element("span", `detail-chip ${summary.badge.tone}`, summary.badge.text));
+      if (summary.detail) els.Version.append(element("span", "recon-help", summary.detail));
+      els.Version.title = summary.title;
+      els.Status.textContent = summary.counts;
       const progress = progressOf(status);
       els.Progress.textContent = progress?.label || "";
       els.Progress.classList.toggle("hidden", !progress);
@@ -311,8 +427,8 @@
         button.classList.toggle("hidden", !bulk);
         button.disabled = busy;
       }
-      // Preview waits for a library, which may arrive after the scan form
-      // was first drawn.
+      // Start waits for a library, which may arrive after the scan form was
+      // first drawn.
       renderScan();
     }
 
@@ -355,8 +471,10 @@
         severityCell.append(element("span", `severity-badge ${severityClass(meta.severity)}`, meta.severity || "unknown"));
         const nameCell = element("td");
         nameCell.append(element("div", "templates-name", meta.name || meta.id), element("div", "recon-help", meta.id));
-        row.append(toggleCell, severityCell, nameCell, element("td", "", supportLabel(meta)),
-          element("td", "", (meta.tags || []).slice(0, 6).join(", ")));
+        const tagsCell = element("td", "templates-tags");
+        for (const tag of (meta.tags || []).slice(0, 6)) tagsCell.append(element("span", "templates-tag", tag));
+        tagsCell.title = (meta.tags || []).join(", ");
+        row.append(toggleCell, severityCell, nameCell, element("td", "", supportLabel(meta)), tagsCell);
         els.Rows.append(row);
       }
       const first = total ? page * PAGE_SIZE + 1 : 0;
@@ -371,6 +489,16 @@
       list.append(element("dt", "", label), element("dd", "", Array.isArray(value) ? value.join(", ") : value));
     }
 
+    // Spans straight in the pre: the app's inline <code> style would box every line.
+    function yamlBlock(text) {
+      const pre = element("pre", "templates-yaml");
+      yamlLines(text).forEach((parts, index) => {
+        if (index) pre.append(element("span", "", "\n"));
+        for (const [kind, part] of parts) pre.append(element("span", YAML_CLASSES[kind] || "", part));
+      });
+      return pre;
+    }
+
     function renderDetail() {
       els.Detail.replaceChildren();
       if (showingJob && openJob) {
@@ -378,24 +506,29 @@
         return;
       }
       if (!selected) {
-        els.Detail.append(element("p", "recon-empty", "Select a template to see what it checks."));
+        els.Detail.append(element("p", "recon-empty", "Select a template."));
         return;
       }
       els.Detail.append(element("h3", "", selected.name || selected.id));
-      if (selected.description) els.Detail.append(element("p", "", selected.description));
-      const fields = element("dl", "recon-detail-fields");
-      field(fields, "Id", selected.id);
-      field(fields, "Severity", selected.severity);
-      field(fields, "Protocol", selected.protocol);
-      field(fields, "Passive", selected.passive_supported ? `${PASSIVE_KINDS[selected.passive] || "Yes"}${selected.enabled ? " · on" : ""}` : "Cannot run passively");
-      field(fields, "Template Scan", selected.active_supported ? `Sends ${count(selected.requests)} ${selected.requests === 1 ? "request" : "requests"} a target, redirects aside${selected.oast ? ", and listens for the callback on the session's Interactsh server" : ""}` : "Cannot be sent");
+      const badges = element("div", "templates-detail-badges");
+      badges.append(element("span", `severity-badge ${severityClass(selected.severity)}`, selected.severity || "unknown"),
+        element("span", "templates-detail-id", selected.id));
+      els.Detail.append(badges);
+      if (selected.description) els.Detail.append(element("p", "templates-description", selected.description));
+      const fields = element("dl", "templates-facts");
+      field(fields, "Passive", selected.passive_supported ? `${PASSIVE_KINDS[selected.passive] || "Yes"}${selected.enabled ? " · on" : ""}` : "No");
+      field(fields, "Scan", selected.active_supported ? `${plural(selected.requests, "request")} per target${selected.oast ? " · waits for an OAST callback" : ""}` : "No");
       field(fields, "Why not", selected.reasons);
-      field(fields, "Risk tags", selected.risks);
-      field(fields, "Tags", selected.tags);
+      field(fields, "Risk", selected.risks);
       field(fields, "CVE", selected.cve);
       field(fields, "CWE", selected.cwe);
       field(fields, "Authors", selected.authors);
       field(fields, "Path", selected.path);
+      if (selected.tags?.length) {
+        const tags = element("dd");
+        for (const tag of selected.tags) tags.append(element("span", "templates-tag", tag));
+        fields.append(element("dt", "", "Tags"), tags);
+      }
       els.Detail.append(fields);
       if (selected.references?.length) {
         els.Detail.append(element("h4", "", "References"));
@@ -403,8 +536,7 @@
         for (const reference of selected.references.slice(0, 20)) list.append(element("li", "", reference));
         els.Detail.append(list);
       }
-      els.Detail.append(element("h4", "", "Template"));
-      els.Detail.append(element("pre", "templates-yaml", selected.yaml || ""));
+      els.Detail.append(element("h4", "", "Template"), yamlBlock(selected.yaml || ""));
     }
 
     function clearTimer() { if (timer !== null) unschedule(timer); timer = null; }
@@ -465,7 +597,7 @@
       pendingId = null;
       selected = detail;
       showingJob = false;
-      if (els.ScanSelection.value === "selected") invalidatePreview();
+      if (els.ScanSelection.value === "selected") schedulePlan();
       renderList();
       renderDetail();
     }
@@ -476,10 +608,10 @@
     let scanJobs = [];
     let openJob = null;
     let showingJob = false;
-    // The start the last preview counted; any change to the form needs a new one.
-    let previewed = null;
     let scanBusy = false;
     let scanTimer = null;
+    let planTimer = null;
+    let planRequest = 0;
 
     function scanNotice(message, error = false) {
       els.ScanNotice.textContent = message;
@@ -500,26 +632,51 @@
     function startBody() {
       return scanRequest(scanValues(), filters(), selected?.id, options.getSessionId?.(), false);
     }
-    function invalidatePreview() {
-      previewed = null;
-      els.ScanPlan.textContent = "Preview to see what it sends.";
-      renderScan();
+    function showPlan(text, warning = false) {
+      els.ScanPlan.textContent = text;
+      els.ScanPlan.classList.toggle("recon-warning", warning);
+    }
+    // What the form would send, counted by the server a moment after it
+    // stops changing; an answer to an older form is dropped.
+    async function plan() {
+      const request = ++planRequest;
+      let body;
+      try {
+        body = scanRequest(scanValues(), filters(), selected?.id, options.getSessionId?.(), true);
+      } catch (error) {
+        showPlan(els.ScanTargets.value.trim() ? error.message : "", true);
+        return;
+      }
+      try {
+        const preview = await json(await fetcher("/api/templates/scans", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        }), "Could not count the scan");
+        if (request !== planRequest) return;
+        if (preview.templates) showPlan(previewLine(preview));
+        else showPlan(preview.oast_unavailable ? "These templates need an Interactsh server: Capture ▸ OAST." : "No template that can be sent matches.", true);
+      } catch (error) {
+        if (request === planRequest) showPlan(error.message, true);
+      }
+    }
+    function schedulePlan() {
+      if (planTimer !== null) unschedule(planTimer);
+      planTimer = schedule(() => { planTimer = null; void plan(); }, 400);
     }
     function clearScanTimer() { if (scanTimer !== null) unschedule(scanTimer); scanTimer = null; }
 
     function renderScan() {
       const running = scanJobs.some((job) => job.status === "running");
-      els.ScanPreview.disabled = scanBusy || !status?.library;
-      // Start sends what the preview showed; the click is the consent.
-      els.ScanStart.disabled = scanBusy || running || !previewed;
+      // The click is the consent; the plan above it says what it sends.
+      els.ScanStart.disabled = scanBusy || running || !status?.library;
       els.ScanStart.textContent = running ? "A scan is running" : "Start scan";
       const nodes = [];
       for (const job of scanJobs) {
         const card = element("article", "recon-job");
+        card.title = `Started ${new Date(job.started_at).toLocaleString()} · ${plural(job.templates, "template")}`;
         const header = element("div", "recon-job-header");
-        header.append(element("strong", "recon-job-target", (job.targets || []).join(", ") || "Template Scan"));
-        if (job.auto) header.append(element("span", "recon-badge", "Auto"));
-        header.append(element("span", `recon-badge${job.status === "running" ? "" : job.status === "completed" ? "" : " recon-badge-warning"}`, job.status));
+        header.append(element("strong", "recon-job-target", (job.targets || []).join(", ") || "Template scan"));
+        if (job.auto) header.append(element("span", "detail-chip", "auto"));
+        header.append(element("span", `detail-chip ${job.status === "running" ? "info" : job.status === "completed" ? "ok" : "warn"}`, job.status));
         const results = element("button", "secondary-action", "Results");
         results.type = "button";
         results.dataset.openScan = job.id;
@@ -531,18 +688,17 @@
           stop.disabled = scanBusy;
           header.append(stop);
         }
-        card.append(header, element("p", "recon-help", `${jobLine(job)} · ${count(job.templates)} templates · started ${new Date(job.started_at).toLocaleString()}`));
+        card.append(header, element("p", "recon-help", jobCounts(job)));
         for (const warning of (job.warnings || []).slice(0, 3)) card.append(element("p", "recon-warning", warning));
         nodes.push(card);
       }
-      if (!nodes.length) nodes.push(element("p", "recon-empty", "No scans in this session yet."));
       els.ScanJobs.replaceChildren(...nodes);
     }
 
     function renderJobDetail() {
       const job = openJob;
-      els.Detail.append(element("h3", "", `${job.auto ? "Auto scan" : "Template Scan"} · ${job.status}`));
-      const fields = element("dl", "recon-detail-fields");
+      els.Detail.append(element("h3", "", `${job.auto ? "Auto scan" : "Template scan"} · ${job.status}`));
+      const fields = element("dl", "templates-facts");
       field(fields, "Targets", job.targets);
       field(fields, "Library", job.library);
       field(fields, "Progress", jobLine(job));
@@ -554,26 +710,35 @@
       els.Detail.append(fields);
       for (const warning of job.warnings || []) els.Detail.append(element("p", "recon-warning", warning));
       els.Detail.append(element("h4", "", `Matches (${count(job.matched)})`));
-      const results = element("ul", "recon-raw-urls templates-scan-results");
+      const results = element("ul", "templates-matches");
       for (const result of job.results || []) {
         const item = element("li");
-        const open = element("button", "recon-endpoint-button", `${result.severity} · ${result.name || result.template_id}${result.matcher ? ` [${result.matcher}]` : ""}`);
+        const open = element("button", "templates-match-open");
         open.type = "button";
         open.dataset.recordId = result.record_id;
         open.setAttribute("aria-label", `Open the matched exchange for ${result.template_id} in HTTP history`);
-        item.append(open, element("div", "recon-help", `${result.method} ${result.url}${result.evidence ? ` — ${result.evidence}` : ""}`));
+        open.append(element("span", `severity-badge ${severityClass(result.severity)}`, result.severity || "unknown"),
+          element("span", "", `${result.name || result.template_id}${result.matcher ? ` [${result.matcher}]` : ""}`));
+        item.append(open, element("div", "templates-match-where", `${result.method} ${result.url}${result.evidence ? ` — ${result.evidence}` : ""}`));
         results.append(item);
       }
-      if (!results.childNodes.length) results.append(element("li", "recon-help", job.status === "running" ? "Nothing matched yet." : "Nothing matched."));
+      if (!results.children.length) results.append(element("li", "recon-help", job.status === "running" ? "Nothing matched yet." : "Nothing matched."));
       els.Detail.append(results);
       const recent = (job.recent || []).slice(-50).reverse();
       els.Detail.append(element("h4", "", "Latest requests"));
-      const log = element("ul", "recon-raw-urls");
+      const log = element("ul", "templates-requests");
+      // With one target the origin says nothing; the path is what differs.
+      const origin = (job.targets || []).length === 1 ? String(job.targets[0]).replace(/^(https?:\/\/[^/]+).*$/, "$1") : null;
       for (const entry of recent) {
-        const outcome = entry.error ? entry.error : `${entry.status ?? "—"} · ${count(entry.ms)} ms${entry.matched ? " · matched" : ""}`;
-        log.append(element("li", "", `${entry.method} ${entry.url} — ${outcome} (${entry.template_id})`));
+        const item = element("li", entry.matched ? "templates-matched" : "");
+        const url = origin && String(entry.url).startsWith(`${origin}/`) ? String(entry.url).slice(origin.length) : entry.url;
+        item.title = `${entry.method} ${entry.url}`;
+        item.append(element("span", `templates-request-status${entry.error ? " templates-request-error" : ""}`, entry.error ? "error" : String(entry.status ?? "—")),
+          element("span", "templates-request-url", `${entry.method} ${url}`),
+          element("span", "recon-help", `${entry.error || `${count(entry.ms)} ms`} · ${entry.template_id}`));
+        log.append(item);
       }
-      if (!log.childNodes.length) log.append(element("li", "recon-help", "No requests yet."));
+      if (!log.children.length) log.append(element("li", "recon-help", "No requests yet."));
       els.Detail.append(log);
     }
 
@@ -587,7 +752,8 @@
         showingJob = false;
         auto = null;
         autoDraft = false;
-        invalidatePreview();
+        showPlan("");
+        renderScan();
         renderDetail();
         renderAuto();
       }
@@ -641,24 +807,24 @@
       }
     }
 
-    function setPassive(body, describe) {
+    function setPassive(body) {
       return act(async () => {
         const result = await json(await fetcher("/api/templates/passive", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         }), "Could not save the passive templates");
-        const count = Number(result.passive_enabled) || 0;
-        notice(`${describe} ${count.toLocaleString()} passive ${count === 1 ? "template is" : "templates are"} on. Rescan in Capture ▸ Findings applies the change to traffic already captured.`);
+        // The count is in the library summary; what it does not say is that
+        // traffic already captured waits for a Rescan.
+        notice(body.enabled ? "Checks new traffic. Rescan in Findings checks what is already captured." : "");
         if (selected && Array.isArray(body.ids) && body.ids.includes(selected.id)) await open(selected.id);
       });
     }
 
-    function setAuto(body, describe) {
+    function setAuto(body) {
       return act(async () => {
-        const result = await json(await fetcher("/api/templates/auto/templates", {
+        await json(await fetcher("/api/templates/auto/templates", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         }), "Could not save the templates for the auto scan");
-        const on = Number(result.auto_enabled) || 0;
-        notice(`${describe} ${on.toLocaleString()} ${on === 1 ? "template is" : "templates are"} on for the auto scan.`);
+        notice("");
         await refreshAuto();
       });
     }
@@ -680,19 +846,20 @@
     }
     function renderAuto() {
       const on = !!auto?.enabled;
-      els.AutoState.textContent = auto ? (on ? "On" : "Off") : "";
-      els.AutoState.classList.toggle("recon-badge-warning", on);
-      const nowhere = auto && !(auto.hosts || []).length && (options.getScopeIncludeCount?.() || 0) === 0;
-      els.AutoSummary.textContent = autoLine(auto)
-        + (auto && !auto.templates ? ". Turn on Scan templates in the list." : "")
-        + (nowhere ? `${auto.templates ? "." : ""} Scope is empty and no hosts are listed.` : "");
+      // While it is on, say why it would send nothing.
+      const warning = !on ? ""
+        : !auto.templates ? "Turn on Scan templates in the list."
+          : !(auto.hosts || []).length && (options.getScopeIncludeCount?.() || 0) === 0 ? "Scope is empty and no hosts are listed." : "";
+      els.AutoSummary.textContent = `${autoLine(auto)}${warning ? `. ${warning}` : ""}`;
+      els.AutoSummary.classList.toggle("recon-warning", !!warning);
       if (auto && !autoDraft) {
         els.AutoHosts.value = (auto.hosts || []).join("\n");
         els.AutoRate.value = String(auto.rate || 10);
       }
-      els.AutoToggle.textContent = on ? "Turn off" : "Turn on";
+      els.AutoToggle.textContent = on ? "On" : "Off";
+      els.AutoToggle.classList.toggle("online", on);
+      els.AutoToggle.setAttribute("aria-pressed", on ? "true" : "false");
       els.AutoToggle.disabled = autoBusy || !auto;
-      els.AutoSave.disabled = autoBusy || !auto || !autoDraft;
     }
     async function refreshAuto() {
       const sessionId = options.getSessionId?.() || null;
@@ -706,7 +873,7 @@
       }
       renderAuto();
     }
-    async function saveAuto(enabled, describe) {
+    async function saveAuto(enabled) {
       if (autoBusy) return;
       autoBusy = true;
       renderAuto();
@@ -716,7 +883,7 @@
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         }), "Could not save the auto scan");
         autoDraft = false;
-        autoNotice(describe);
+        autoNotice("");
       } catch (error) {
         autoNotice(error.message || "The request failed.", true);
       } finally {
@@ -726,11 +893,12 @@
       }
     }
 
-    on(els.AutoToggle, "click", () => (auto?.enabled
-      ? saveAuto(false, "Off. Waiting hosts were dropped.")
-      : saveAuto(true, "On. New hosts the proxy captures get the turned-on templates.")));
-    on(els.AutoSave, "click", () => saveAuto(!!auto?.enabled, "Saved."));
-    for (const control of [els.AutoHosts, els.AutoRate]) on(control, "input", () => { autoDraft = true; renderAuto(); });
+    on(els.AutoToggle, "click", () => saveAuto(!auto?.enabled));
+    // The hosts and pace save when the field is left.
+    for (const control of [els.AutoHosts, els.AutoRate]) {
+      on(control, "input", () => { autoDraft = true; });
+      on(control, "change", () => { if (autoDraft) void saveAuto(!!auto?.enabled); });
+    }
 
     function channel() {
       return els.Channel.value === "main" ? "main" : "release";
@@ -769,47 +937,25 @@
     on(els.Previous, "click", () => { page = Math.max(0, page - 1); void loadList(); });
     on(els.Next, "click", () => { page += 1; void loadList(); });
     on(els.EnableShown, "click", () => (els.Support.value === "active"
-      ? setAuto(autoTemplatesRequest(filters(), true), "Turned on the scan templates the filter shows.")
-      : setPassive(passiveRequest(filters(), true), "Turned on the passive templates the filter shows.")));
+      ? setAuto(autoTemplatesRequest(filters(), true))
+      : setPassive(passiveRequest(filters(), true))));
     on(els.DisableShown, "click", () => (els.Support.value === "active"
-      ? setAuto(autoTemplatesRequest(filters(), false), "Turned off the scan templates the filter shows.")
-      : setPassive(passiveRequest(filters(), false), "Turned off the passive templates the filter shows.")));
-    on(els.ScanPreview, "click", () => scanAct(async () => {
-      const body = scanRequest(scanValues(), filters(), selected?.id, options.getSessionId?.(), true);
-      const preview = await json(await fetcher("/api/templates/scans", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-      }), "Could not preview the scan");
-      invalidatePreview();
-      if (!preview.templates) {
-        scanNotice(preview.oast_unavailable
-          ? "These templates need an Interactsh server to hear their callbacks. Set one up in Capture ▸ OAST."
-          : "No template that can be sent matches. Change the list filter, the selection or the allowed risks.", true);
-        return;
-      }
-      previewed = JSON.stringify(startBody());
-      els.ScanPlan.textContent = previewLine(preview);
-      scanNotice("");
-    }));
+      ? setAuto(autoTemplatesRequest(filters(), false))
+      : setPassive(passiveRequest(filters(), false))));
     on(els.ScanStart, "click", () => scanAct(async () => {
-      const body = startBody();
-      if (JSON.stringify(body) !== previewed) {
-        invalidatePreview();
-        throw new Error("The form changed since the preview. Preview the scan again.");
-      }
       const job = await json(await fetcher("/api/templates/scans", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(startBody()),
       }), "Could not start the scan");
-      invalidatePreview();
       openJob = job;
       showingJob = true;
       renderDetail();
-      scanNotice("Started. Matches show here and in Findings.");
+      scanNotice("");
     }));
-    for (const control of [els.ScanTargets, els.ScanRate, els.ScanConcurrency, els.ScanMaxRequests]) on(control, "input", invalidatePreview);
-    for (const control of [els.ScanSelection, els.ScanMatchReplace, els.ScanRisks]) on(control, "change", invalidatePreview);
-    // The filter selects what a scan sends.
-    on(els.Search, "input", () => { if (els.ScanSelection.value === "filter") invalidatePreview(); });
-    on(els.Severity, "change", () => { if (els.ScanSelection.value === "filter") invalidatePreview(); });
+    for (const control of [els.ScanTargets, els.ScanRate, els.ScanConcurrency, els.ScanMaxRequests]) on(control, "input", schedulePlan);
+    for (const control of [els.ScanSelection, els.ScanMatchReplace, els.ScanRisks]) on(control, "change", schedulePlan);
+    // The search and severity choose what a scan sends.
+    on(els.Search, "input", () => { if (els.ScanSelection.value === "filter") schedulePlan(); });
+    on(els.Severity, "change", () => { if (els.ScanSelection.value === "filter") schedulePlan(); });
     on(els.ScanJobs, "click", (event) => {
       const stop = event.target.closest("[data-stop-scan]");
       if (stop) {
@@ -836,12 +982,12 @@
     on(els.Rows, "click", (event) => {
       const toggle = event.target.closest("[data-template-toggle]");
       if (toggle) {
-        void setPassive({ ids: [toggle.dataset.templateToggle], enabled: toggle.checked }, toggle.checked ? "Turned it on." : "Turned it off.");
+        void setPassive({ ids: [toggle.dataset.templateToggle], enabled: toggle.checked });
         return;
       }
       const autoBox = event.target.closest("[data-template-auto]");
       if (autoBox) {
-        void setAuto({ ids: [autoBox.dataset.templateAuto], enabled: autoBox.checked }, autoBox.checked ? "Turned it on." : "Turned it off.");
+        void setAuto({ ids: [autoBox.dataset.templateAuto], enabled: autoBox.checked });
         return;
       }
       const row = event.target.closest("[data-template-id]");
@@ -895,12 +1041,17 @@
       scopeChanged: renderStatus,
       // Another session's scans are not this one's.
       syncSession() { void refreshScans(); },
-      dispose() { clearTimer(); clearScanTimer(); listeners.forEach((remove) => remove()); },
+      dispose() {
+        clearTimer();
+        clearScanTimer();
+        if (planTimer !== null) unschedule(planTimer);
+        listeners.forEach((remove) => remove());
+      },
     };
   }
 
-  const api = { createController, listQuery, nextSort, passiveRequest, libraryLine, checkLine, progressOf, supportLabel, scanRequest, parseTargets,
-    previewLine, jobLine, autoRequest, autoLine, RISKS, PAGE_SIZE };
+  const api = { createController, listQuery, nextSort, passiveRequest, librarySummary, checkLine, progressOf, supportLabel, scanRequest, parseTargets,
+    previewLine, jobLine, autoRequest, autoLine, yamlLines, RISKS, PAGE_SIZE };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperTemplates = api;
 })(typeof window !== "undefined" ? window : globalThis);

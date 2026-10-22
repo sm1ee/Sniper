@@ -1738,7 +1738,7 @@ function bindEvents() {
   });
   wireReplayHistorySwipe();
   wireTabIndicator(document.querySelector(".main-tabs"));
-  wireTabIndicator(document.querySelector(".sub-tabs"));
+  document.querySelectorAll(".sub-tabs, .target-tabs, .compare-tabs").forEach(wireTabIndicator);
   wireTabIndicator(els.displaySettingsModal.querySelector(".settings-tabs"));
   els.displaySettingsModal.addEventListener("click", (event) => {
     if (event.target === els.displaySettingsModal) {

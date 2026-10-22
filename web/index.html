@@ -1655,13 +1655,14 @@
 
         <section class="templates-shell hidden" id="templatesShell" aria-labelledby="templatesTitle">
           <div class="templates-side">
-          <section class="panel-card templates-library">
+          <section class="panel-card templates-library" aria-labelledby="templatesTitle">
             <header class="panel-toolbar">
-              <div><p class="placeholder-kicker">Nuclei</p><h2 id="templatesTitle">Templates</h2></div>
+              <h2 id="templatesTitle">Templates</h2>
               <div class="toolbar-actions"><button class="secondary-action" id="templatesCheck" type="button">Check for updates</button></div>
             </header>
             <div class="recon-form">
-              <p class="recon-help templates-status" id="templatesStatus">Loading the template library…</p>
+              <div class="templates-version" id="templatesVersion"><strong>Loading…</strong></div>
+              <p class="recon-help" id="templatesStatus"></p>
               <p class="recon-notice hidden" id="templatesProgress" role="status"></p>
               <progress class="templates-progress hidden" id="templatesProgressBar" aria-labelledby="templatesProgress"></progress>
               <div class="templates-actions">
@@ -1673,32 +1674,29 @@
                 <button class="secondary-action" id="templatesImport" type="button" title="Import a release .tar.gz">Import…</button>
                 <input class="hidden" id="templatesImportFile" type="file" accept=".gz,.tgz,application/gzip" />
               </div>
-              <p class="recon-help">Passive templates you turn on check in-scope traffic and report to Findings.</p>
               <p class="recon-notice recon-warning hidden" id="templatesScopeNote">Scope is empty, so the templates turned on check nothing.</p>
               <p class="recon-notice hidden" id="templatesNotice" role="status"></p>
             </div>
           </section>
           <section class="panel-card templates-auto" aria-labelledby="templatesAutoTitle">
             <header class="panel-toolbar">
-              <div title="Sends the Scan templates turned on in the list to each new host the proxy captures in Scope or listed here, once a host. Only for hosts you may test."><p class="placeholder-kicker">Auto scan</p><h2 id="templatesAutoTitle">Send to new hosts</h2></div>
-              <span class="recon-badge" id="templatesAutoState"></span>
+              <h2 id="templatesAutoTitle" title="Sends the Scan templates turned on in the list to each new host the proxy captures in Scope or listed here, once a host. Only for hosts you may test.">Auto scan</h2>
+              <div class="toolbar-actions"><button class="toggle-pill" id="templatesAutoToggle" type="button" aria-pressed="false" aria-label="Auto scan" disabled>Off</button></div>
             </header>
             <div class="recon-form">
-              <p class="recon-help" id="templatesAutoSummary">Loading the auto scan…</p>
-              <label class="recon-field" for="templatesAutoHosts">Hosts besides Scope
-                <textarea id="templatesAutoHosts" rows="2" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
-              </label>
-              <label class="recon-field" for="templatesAutoRate">Requests a second<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
-              <div class="templates-actions">
-                <button class="primary-action" id="templatesAutoToggle" type="button" disabled>Turn on</button>
-                <button class="secondary-action" id="templatesAutoSave" type="button" disabled>Save</button>
+              <p class="recon-help" id="templatesAutoSummary">Loading…</p>
+              <div class="templates-auto-fields">
+                <label class="recon-field" for="templatesAutoHosts">Extra hosts
+                  <textarea id="templatesAutoHosts" rows="1" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
+                </label>
+                <label class="recon-field" for="templatesAutoRate">Requests/s<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
               </div>
               <p class="recon-notice hidden" id="templatesAutoNotice" role="status" aria-live="polite"></p>
             </div>
           </section>
           <section class="panel-card templates-scan" aria-labelledby="templatesScanTitle">
             <header class="panel-toolbar">
-              <div><p class="placeholder-kicker">Template Scan</p><h2 id="templatesScanTitle">Send templates</h2></div>
+              <h2 id="templatesScanTitle">Template scan</h2>
             </header>
             <div class="recon-form">
               <label class="recon-field" for="templatesScanTargets">Targets
@@ -1706,39 +1704,36 @@
               </label>
               <label class="recon-field" for="templatesScanSelection">Templates
                 <select id="templatesScanSelection">
-                  <option value="filter">Matching the search and severity</option>
-                  <option value="selected">The selected template</option>
+                  <option value="filter">Search results</option>
+                  <option value="selected">Selected template</option>
                 </select>
               </label>
-              <details class="recon-limits">
-                <summary>Risks and limits</summary>
-                <fieldset class="recon-sources" id="templatesScanRisks">
-                  <legend>Also send templates marked</legend>
-                    <label class="recon-check"><input type="checkbox" data-risk="intrusive" /> intrusive</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="default-login" /> default-login</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="bruteforce" /> bruteforce</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="token-spray" /> token-spray</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="credential-stuffing" /> credential-stuffing</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="fuzz" /> fuzz</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="fuzzing" /> fuzzing</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="dast" /> dast</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="osint" /> osint</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="method:put" /> method:put</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="method:delete" /> method:delete</label>
-                    <label class="recon-check"><input type="checkbox" data-risk="method:patch" /> method:patch</label>
-                </fieldset>
-                <div class="recon-limit-fields">
-                  <label class="recon-field" for="templatesScanRate">Requests a second<input id="templatesScanRate" type="number" min="1" max="50" value="10" /></label>
-                  <label class="recon-field" for="templatesScanConcurrency">Templates at once<input id="templatesScanConcurrency" type="number" min="1" max="8" value="4" /></label>
-                  <label class="recon-field" for="templatesScanMaxRequests">Request limit<input id="templatesScanMaxRequests" type="number" min="1" max="50000" value="10000" /></label>
+              <details class="recon-limits templates-options">
+                <summary>Options</summary>
+                <div class="templates-risks" id="templatesScanRisks" role="group" aria-label="Also send templates marked" title="Templates marked with these are left out unless allowed. dos templates are never sent.">
+                  <span class="recon-help">Allow</span>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="intrusive" /><span>intrusive</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="default-login" /><span>default-login</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="bruteforce" /><span>bruteforce</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="token-spray" /><span>token-spray</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="credential-stuffing" /><span>credential-stuffing</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="fuzz" /><span>fuzz</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="fuzzing" /><span>fuzzing</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="dast" /><span>dast</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="osint" /><span>osint</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="method:put" /><span>method:put</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="method:delete" /><span>method:delete</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="method:patch" /><span>method:patch</span></label>
                 </div>
-                <label class="recon-check"><input id="templatesScanMatchReplace" type="checkbox" /> Apply Match &amp; Replace rules</label>
+                <div class="recon-limit-fields templates-limits">
+                  <label class="recon-field" for="templatesScanRate">Requests/s<input id="templatesScanRate" type="number" min="1" max="50" value="10" /></label>
+                  <label class="recon-field" for="templatesScanConcurrency">Parallel<input id="templatesScanConcurrency" type="number" min="1" max="8" value="4" title="Templates sent at once" /></label>
+                  <label class="recon-field" for="templatesScanMaxRequests">Max requests<input id="templatesScanMaxRequests" type="number" min="1" max="50000" value="10000" /></label>
+                </div>
+                <label class="recon-check"><input id="templatesScanMatchReplace" type="checkbox" /> Apply Match &amp; Replace</label>
               </details>
-              <p class="recon-help" id="templatesScanPlan">Preview to see what it sends.</p>
-              <div class="templates-actions">
-                <button class="secondary-action" id="templatesScanPreview" type="button">Preview</button>
-                <button class="primary-action" id="templatesScanStart" type="button" disabled>Start scan</button>
-              </div>
+              <p class="recon-help" id="templatesScanPlan" aria-live="polite"></p>
+              <div class="templates-actions"><button class="primary-action" id="templatesScanStart" type="button" disabled>Start scan</button></div>
               <p class="recon-notice hidden" id="templatesScanNotice" role="status" aria-live="polite"></p>
             </div>
             <div class="recon-jobs" id="templatesScanJobs"></div>

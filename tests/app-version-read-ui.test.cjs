@@ -62,6 +62,7 @@ function fixture() {
   document.activeElement = els.openDisplaySettingsButton;
   document.getElementById = () => null;
   document.querySelector = () => els.openDisplaySettingsButton;
+  document.querySelectorAll = () => [];
 
   const requests = [], errors = [], intervals = [], timers = [], calls = [];
   const state = { appVersion: null, activeProxyTab: "history" };

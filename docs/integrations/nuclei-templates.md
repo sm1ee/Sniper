@@ -150,11 +150,12 @@ tagged `dos` are never sent.
 
 ### Pace, limits and stopping
 
-- **Preview** counts the templates and the requests they send before any
+- A preview counts the templates and the requests they send before any
   redirect, lists refused targets with the reason, and lists what each risk
-  left out. It sends nothing to a target.
-- Starting needs an explicit acknowledgment: the checkbox under **Preview** in
-  the app, `"acknowledged": true` in the API, `--yes` in the CLI.
+  left out. It sends nothing to a target. The app shows it under the form as
+  you edit it; the CLI has `templates scan preview`.
+- Starting needs an explicit acknowledgment: **Start scan** in the app,
+  `"acknowledged": true` in the API, `--yes` in the CLI.
 - Rate: 1 to 50 requests a second across the scan, default 10. Concurrency: 1
   to 8 templates at once, default 4. A template's requests go one after
   another.

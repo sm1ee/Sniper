@@ -20,25 +20,28 @@ test("bulk changes only ever select passive-capable templates", () => {
   assert.deepEqual(templates.passiveRequest({}, 0), { filter: { support: "passive" }, enabled: false });
 });
 
-test("the library line says where templates came from and whether they were verified", () => {
-  assert.match(templates.libraryLine(null), /Loading/);
-  assert.match(templates.libraryLine({ library: null }), /No templates installed/);
-  const line = templates.libraryLine({
+test("the library summary names what is installed, says whether it was verified, and counts", () => {
+  assert.deepEqual(templates.librarySummary(null), { name: "Loading…", badge: null, detail: "", counts: "", title: "" });
+  assert.deepEqual(templates.librarySummary({ library: null }),
+    { name: "No templates", badge: null, detail: "", counts: "Download a release or import an archive.", title: "" });
+  assert.deepEqual(templates.librarySummary({
     library: { source: "github", tag: "v10.5.0", verified: true, commit: "f8b8b8dcd70d1234567890abcdef12345678901" },
-    templates: 14035, passive_supported: 2082, passive_enabled: 3,
+    templates: 14035, passive_supported: 2082, passive_enabled: 3, active_supported: 9784,
+  }), {
+    name: "v10.5.0", badge: { text: "verified", tone: "ok" }, detail: "",
+    counts: "14,035 templates · 2,082 passive (3 on) · 9,784 scan", title: "nuclei-templates v10.5.0 · commit f8b8b8dcd70d",
   });
-  assert.equal(
-    line,
-    "nuclei-templates v10.5.0 · checksum verified · commit f8b8b8dcd70d\n14,035 templates · 2,082 passive, 3 on · 0 scannable",
-  );
-  assert.match(templates.libraryLine({ library: { source: "import", verified: false }, templates: 1, passive_supported: 0, passive_enabled: 0 }), /Imported archive · not checksum-verified/);
-  assert.equal(
-    templates.libraryLine({
-      library: { source: "github", tag: "main", verified: false, commit: "50852f5ce7".repeat(4), committed_at: "2026-10-21T22:47:08Z" },
-      templates: 14100, passive_supported: 2100, passive_enabled: 0, active_supported: 9000,
-    }),
-    "nuclei-templates main · unreleased, no checksum · commit 50852f5ce750 · 2026-10-21\n14,100 templates · 2,100 passive, 0 on · 9,000 scannable",
-  );
+  assert.deepEqual(templates.librarySummary({
+    library: { source: "github", tag: "main", verified: false, commit: "50852f5ce7".repeat(4), committed_at: "2026-10-21T22:47:08Z" },
+    templates: 14100, passive_supported: 2100, passive_enabled: 0, active_supported: 9000,
+  }), {
+    name: "main", badge: { text: "unreleased", tone: "warn" }, detail: "50852f5 · 2026-10-21",
+    counts: "14,100 templates · 2,100 passive · 9,000 scan", title: "nuclei-templates main · commit 50852f5ce750 · no checksum",
+  });
+  assert.deepEqual(templates.librarySummary({ library: { source: "import", verified: false }, templates: 1, passive_supported: 0, passive_enabled: 0 }), {
+    name: "Imported archive", badge: { text: "not verified", tone: "warn" }, detail: "",
+    counts: "1 template · 0 passive · 0 scan", title: "",
+  });
 });
 
 test("an update check says what the installed channel has", () => {
@@ -83,7 +86,7 @@ test("rows show severity as Findings do, and a box wherever a template can run",
   };
   const status = { state: "idle", library: { source: "import", verified: false }, templates: 2, passive_supported: 1, passive_enabled: 0 };
   const items = [
-    { id: "example-active", name: "Example Active", severity: "high", tags: [], passive_supported: false, active_supported: true },
+    { id: "example-active", name: "Example Active", severity: "high", tags: ["cve", "php"], passive_supported: false, active_supported: true },
     { id: "example-passive", name: "Example Passive", severity: "unknown", tags: [], passive_supported: true, passive: "global" },
     { id: "example-dns", name: "Example DNS", severity: "info", tags: [], reasons: ["protocol:dns"] },
   ];
@@ -106,6 +109,8 @@ test("rows show severity as Findings do, and a box wherever a template can run",
   assert.equal(passive.children[0].children[0].type, "checkbox");
   assert.equal(passive.children[0].children[0].dataset.templateToggle, "example-passive");
   assert.equal(dns.children[0].children[0].textContent, "—");
+  assert.deepEqual(active.children[4].children.map((chip) => [chip.className, chip.textContent]),
+    [["templates-tag", "cve"], ["templates-tag", "php"]]);
   // Turning on what the list shows applies to passive templates, so it is
   // offered only while the list shows those.
   assert.equal(els.get("#templatesEnableShown").classList.contains("hidden"), true);
@@ -171,6 +176,50 @@ test("previews and jobs read as what was or will be sent", () => {
   );
 });
 
+// Each segment written as {kind|text}; plain text as it is.
+function yamlNotation(text) {
+  const short = { key: "k", punct: "p", string: "s", number: "n", bool: "b", comment: "c", expr: "e" };
+  return templates.yamlLines(text).map((line) => line.map(([kind, part]) => (kind === "text" ? part : `{${short[kind]}|${part}}`)).join(""));
+}
+
+test("a template's YAML is split into keys, values, comments and {{expressions}}", () => {
+  const yaml = [
+    "id: example",
+    "info:",
+    '  name: "Example" # note',
+    "  tags: a,b",
+    "http:",
+    "  - raw:",
+    "      - |",
+    "        GET /{{path}} HTTP/1.1",
+    "        Host: {{Hostname}}",
+    "    matchers:",
+    "      - type: status",
+    "        status:",
+    "          - 200",
+    "        negative: true",
+    '    path: "{{BaseURL}}/.git/config"',
+  ].join("\n");
+  assert.deepEqual(yamlNotation(yaml), [
+    "{k|id}{p|:} example",
+    "{k|info}{p|:}",
+    '  {k|name}{p|:} {s|"Example"} {c|# note}',
+    "  {k|tags}{p|:} a,b",
+    "{k|http}{p|:}",
+    "  {p|-} {k|raw}{p|:}",
+    "      {p|-} {p||}",
+    // A block scalar's lines are its text, not keys, even with a colon.
+    "        GET /{e|{{path}}} HTTP/1.1",
+    "        Host: {e|{{Hostname}}}",
+    "    {k|matchers}{p|:}",
+    "      {p|-} {k|type}{p|:} status",
+    "        {k|status}{p|:}",
+    "          {p|-} {n|200}",
+    "        {k|negative}{p|:} {b|true}",
+    '    {k|path}{p|:} {s|"}{e|{{BaseURL}}}{s|/.git/config"}',
+  ]);
+});
+
 test("template text is never written as markup", () => {
   const source = fs.readFileSync(path.join(__dirname, "../web/templates.js"), "utf8");
   assert.doesNotMatch(source, /innerHTML|insertAdjacentHTML|outerHTML/);
@@ -189,10 +238,13 @@ test("the Scan tool is registered where the UI and the server keep their tool li
   for (const id of ["Status", "Progress", "ProgressBar", "Channel", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
     "Search", "Severity", "Support", "EnabledOnly", "EnableShown", "DisableShown", "Meta", "Rows", "Detail",
     "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
-    "ScanMaxRequests", "ScanMatchReplace", "ScanPreview", "ScanPlan", "ScanStart", "ScanNotice",
-    "ScanJobs"]) {
+    "ScanMaxRequests", "ScanMatchReplace", "ScanPlan", "ScanStart", "ScanNotice",
+    "ScanJobs", "Version", "AutoToggle", "AutoSummary", "AutoHosts", "AutoRate"]) {
     assert.match(html, new RegExp(`id="templates${id}"`), id);
   }
+  // One switch says whether the auto scan is on and turns it on; a scan
+  // starts without a preview step.
+  for (const gone of ["AutoState", "AutoSave", "ScanPreview"]) assert.doesNotMatch(html, new RegExp(`id="templates${gone}"`), gone);
   // A button is the consent; the screen asks for no box to be ticked first.
   const shell = html.slice(html.indexOf('id="templatesShell"'), html.indexOf('id="templatesRows"'));
   assert.doesNotMatch(shell, /Consent/);
@@ -247,7 +299,7 @@ function inside(element) {
 
 const settle = async () => { for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-async function listFixture(items, arrowStep, { sessionId = null, auto = null, scopeCount = 1, library = { source: "import", verified: false } } = {}) {
+async function listFixture(items, arrowStep, { sessionId = null, auto = null, scopeCount = 1, library = { source: "import", verified: false }, jobs = [], openRecord } = {}) {
   const els = new Map();
   const sent = [];
   const doc = fakeDocument((tag) => Object.assign(listeningElement(), { tag }));
@@ -257,8 +309,9 @@ async function listFixture(items, arrowStep, { sessionId = null, auto = null, sc
   };
   const status = { state: "idle", library, templates: items.length, passive_supported: 0, passive_enabled: 0 };
   const urls = [];
+  const timers = [];
   const controller = templates.createController({
-    root: shell, getSessionId: () => sessionId, getScopeIncludeCount: () => scopeCount, arrowStep,
+    root: shell, getSessionId: () => sessionId, getScopeIncludeCount: () => scopeCount, arrowStep, openRecord,
     fetch: async (url, init = {}) => {
       urls.push(String(url));
       if (init.method === "POST") sent.push({ url: String(url), body: JSON.parse(init.body) });
@@ -270,16 +323,22 @@ async function listFixture(items, arrowStep, { sessionId = null, auto = null, sc
               ? (JSON.parse(init.body).preview
                 ? { requests: 3, templates: 1, targets: JSON.parse(init.body).targets, max_requests: 10000 }
                 : { id: "example-job", session_id: sessionId, status: "running", targets: JSON.parse(init.body).targets })
-            : String(url).startsWith("/api/templates/scans") ? { session_id: sessionId, jobs: [] }
-              : id ? { ...items.find((meta) => meta.id === decodeURIComponent(id)), yaml: "" }
+            : String(url).startsWith("/api/templates/scans/") ? jobs.find((job) => String(url).includes(job.id))
+              : String(url).startsWith("/api/templates/scans") ? { session_id: sessionId, jobs }
+              : id ? { yaml: "", ...items.find((meta) => meta.id === decodeURIComponent(id)) }
                 : { items, total: items.length };
       return { ok: true, json: async () => body };
     },
-    setTimeout: () => 0, clearTimeout() {},
+    setTimeout: (callback) => timers.push({ callback, live: true }), clearTimeout(handle) { if (timers[handle - 1]) timers[handle - 1].live = false; },
   });
   controller.setVisible(true);
   await settle();
-  return { controller, els, doc, urls, sent, rows: () => els.get("#templatesRows").children };
+  // Runs what is waiting on a timer once, as the time passing would.
+  const runTimers = async () => {
+    for (const timer of timers.splice(0)) if (timer.live) timer.callback();
+    await settle();
+  };
+  return { controller, els, doc, urls, sent, runTimers, rows: () => els.get("#templatesRows").children };
 }
 
 test("the auto scan request carries its hosts and pace, and turning it on is the consent", () => {
@@ -301,7 +360,7 @@ test("the auto scan request carries its hosts and pace, and turning it on is the
   );
 });
 
-test("an On box turns a scan template on for the auto scan, and Turn on turns it on", async () => {
+test("an On box turns a scan template on for the auto scan, and its switch turns it on", async () => {
   const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
   const auto = { session_id: "s-1", enabled: false, hosts: [], rate: 10, templates: 0, scanned: 0, queued: 0 };
   const f = await listFixture(items, () => 0, { sessionId: "s-1", auto });
@@ -316,13 +375,33 @@ test("an On box turns a scan template on for the auto scan, and Turn on turns it
   f.els.get("#templatesAutoHosts").dispatch("input", {});
   f.els.get("#templatesAutoRate").value = "5";
   f.els.get("#templatesAutoRate").dispatch("input", {});
-  f.els.get("#templatesAutoToggle").dispatch("click", {});
+  const toggle = f.els.get("#templatesAutoToggle");
+  assert.equal(toggle.textContent, "Off");
+  toggle.dispatch("click", {});
   await settle();
   assert.deepEqual(f.sent.at(-1), {
     url: "/api/templates/auto",
     body: { session_id: "s-1", enabled: true, hosts: ["*.example.com"], rate: 5, acknowledged: true },
   });
-  assert.equal(f.els.get("#templatesAutoToggle").textContent, "Turn off");
+  assert.equal(toggle.textContent, "On");
+  assert.equal(toggle.classList.contains("online"), true);
+  f.controller.dispose();
+});
+
+test("the auto scan's hosts and pace save when the field is left", async () => {
+  const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
+  const auto = { session_id: "s-1", enabled: false, hosts: [], rate: 10, templates: 1, scanned: 0, queued: 0 };
+  const f = await listFixture(items, () => 0, { sessionId: "s-1", auto });
+  const hosts = f.els.get("#templatesAutoHosts");
+  hosts.value = "*.example.com";
+  hosts.dispatch("input", {});
+  hosts.dispatch("change", {});
+  await settle();
+  assert.deepEqual(f.sent.at(-1), {
+    url: "/api/templates/auto",
+    body: { session_id: "s-1", enabled: false, hosts: ["*.example.com"], rate: 10 },
+  });
+  assert.equal(f.els.get("#templatesAutoToggle").textContent, "Off");
   f.controller.dispose();
 });
 
@@ -354,7 +433,7 @@ test("Download starts on main when main is what is installed", async () => {
   f.controller.dispose();
 });
 
-test("a previewed scan starts with one click, and only the scan previewed", async () => {
+test("Start scan is ready at once and sends the form as it stands, and the plan follows the form", async () => {
   const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];
   const f = await listFixture(items, () => 0, { sessionId: "s-1" });
   const start = f.els.get("#templatesScanStart");
@@ -363,13 +442,17 @@ test("a previewed scan starts with one click, and only the scan previewed", asyn
   f.els.get("#templatesScanRate").value = "10";
   f.els.get("#templatesScanConcurrency").value = "4";
   f.els.get("#templatesScanMaxRequests").value = "10000";
+  assert.equal(start.disabled, false, "nothing to do before Start");
+  start.dispatch("click", {});
+  await settle();
+  assert.match(f.els.get("#templatesScanNotice").textContent, /Name at least one target/);
+  assert.equal(f.sent.filter((sent) => sent.url === "/api/templates/scans").length, 0);
+
   f.els.get("#templatesScanTargets").value = "https://app.example.com";
   f.els.get("#templatesScanTargets").dispatch("input", {});
-  assert.equal(start.disabled, true, "nothing to start before a preview");
-  f.els.get("#templatesScanPreview").dispatch("click", {});
-  await settle();
+  await f.runTimers();
+  assert.equal(f.sent.at(-1).body.preview, true);
   assert.equal(f.els.get("#templatesScanPlan").textContent, "Sends 3 requests from 1 template to https://app.example.com.");
-  assert.equal(start.disabled, false);
   start.dispatch("click", {});
   await settle();
   const sent = f.sent.at(-1);
@@ -377,6 +460,61 @@ test("a previewed scan starts with one click, and only the scan previewed", asyn
   assert.equal(sent.body.acknowledged, true);
   assert.equal(sent.body.preview, undefined);
   assert.deepEqual(sent.body.targets, ["https://app.example.com"]);
+  f.controller.dispose();
+});
+
+test("a scan's matches open their exchange, and its requests read as status, request and template", async () => {
+  const job = {
+    id: "example-job", session_id: "s-1", status: "completed", targets: ["https://app.example.com"], sent: 2, planned: 2, matched: 1,
+    templates: 1, started_at: "2026-10-22T01:00:00Z",
+    results: [{ record_id: "r-1", severity: "medium", name: "Git Configuration - Detect", template_id: "git-config", method: "GET",
+      url: "https://app.example.com/.git/config", evidence: "[core]" }],
+    recent: [
+      { method: "GET", url: "https://app.example.com/x", error: "timeout", template_id: "git-config" },
+      { method: "GET", url: "https://app.example.com/.git/config", status: 200, ms: 3, matched: true, template_id: "git-config" },
+    ],
+  };
+  const opened = [];
+  const f = await listFixture([], () => 0, { sessionId: "s-1", jobs: [job], openRecord: (id) => opened.push(id) });
+  const card = f.els.get("#templatesScanJobs").children[0];
+  const open = card.children[0].children.find((node) => node.dataset.openScan === "example-job");
+  f.els.get("#templatesScanJobs").dispatch("click", { target: inside(open) });
+  await settle();
+  const nodes = [];
+  const walk = (node) => { nodes.push(node); for (const child of node.children || []) walk(child); };
+  walk(f.els.get("#templatesDetail"));
+  const match = nodes.find((node) => node.className === "templates-match-open");
+  assert.equal(match.dataset.recordId, "r-1");
+  assert.deepEqual(match.children.map((part) => part.textContent), ["medium", "Git Configuration - Detect"]);
+  f.els.get("#templatesDetail").dispatch("click", { target: inside(match) });
+  assert.deepEqual(opened, ["r-1"]);
+  // Newest first.
+  const requests = nodes.find((node) => node.className === "templates-requests").children;
+  // One target, so the path is what each line shows; the whole URL is its tooltip.
+  assert.deepEqual(requests.map((row) => row.children.map((part) => part.textContent)), [
+    ["200", "GET /.git/config", "3 ms · git-config"],
+    ["error", "GET /x", "timeout · git-config"],
+  ]);
+  assert.equal(requests[0].title, "GET https://app.example.com/.git/config");
+  assert.equal(requests[0].className, "templates-matched");
+  f.controller.dispose();
+});
+
+test("the detail shows tags as chips and the template highlighted", async () => {
+  const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: ["cve", "php"], active_supported: true,
+    yaml: "id: example-active\ninfo:\n  name: Example Active" }];
+  const f = await listFixture(items, () => 0, { sessionId: "s-1" });
+  f.els.get("#templatesRows").dispatch("click", { target: inside(f.rows()[0]) });
+  await settle();
+  const nodes = [];
+  const walk = (node) => { nodes.push(node); for (const child of node.children || []) walk(child); };
+  walk(f.els.get("#templatesDetail"));
+  assert.deepEqual(nodes.filter((node) => node.className === "templates-tag").map((chip) => chip.textContent), ["cve", "php"]);
+  const yaml = nodes.find((node) => node.className === "templates-yaml");
+  const keys = [];
+  const collect = (node) => { if (node.className === "token-json-key") keys.push(node.textContent); for (const child of node.children || []) collect(child); };
+  collect(yaml);
+  assert.deepEqual(keys, ["id", "info", "name"]);
   f.controller.dispose();
 });
 
@@ -462,7 +600,7 @@ test("opening Scan rereads the scope, and its warning follows the scope it is to
   controller.dispose();
 });
 
-test("Preview can be pressed once the library has loaded", async () => {
+test("Start scan can be pressed once the library has loaded", async () => {
   const els = new Map();
   const shell = {
     ownerDocument: fakeDocument(() => fakeElement()),
@@ -474,11 +612,11 @@ test("Preview can be pressed once the library has loaded", async () => {
     fetch: async (url) => ({ ok: true, json: async () => (String(url).includes("/library") ? status : { items: [], total: 0 }) }),
     setTimeout: () => 0, clearTimeout() {},
   });
-  const preview = els.get("#templatesScanPreview");
-  assert.equal(preview.disabled, true, "nothing to preview before the library loads");
+  const start = els.get("#templatesScanStart");
+  assert.equal(start.disabled, true, "nothing to send before the library loads");
   controller.setVisible(true);
   for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(preview.disabled, false);
+  assert.equal(start.disabled, false);
   controller.dispose();
 });
 

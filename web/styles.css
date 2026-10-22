@@ -982,7 +982,7 @@ code {
 .sub-tab {
   position: relative;
   border: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-soft);
   cursor: pointer;
@@ -995,7 +995,7 @@ code {
 }
 
 .sub-tab {
-  padding: 10px 14px 9px;
+  padding: 6px 12px;
   font-size: var(--font-sm);
 }
 
@@ -1009,18 +1009,6 @@ code {
 .sub-tab.active {
   color: var(--point);
   background: var(--point-soft);
-}
-
-.main-tab.active::after,
-.sub-tab.active::after {
-  content: "";
-  position: absolute;
-  right: 8px;
-  bottom: 0;
-  left: 8px;
-  height: 3px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--point) 0%, var(--point-border) 100%);
 }
 
 .workspace {
@@ -6463,10 +6451,6 @@ button.utility-button.replay-tab-add {
     padding: 6px 10px 5px;
   }
 
-  .sub-tab {
-    padding: 4px 8px 3px;
-  }
-
   .proxy-shell {
     grid-template-rows:
       auto
@@ -7577,10 +7561,10 @@ button.utility-button.replay-tab-add {
   margin-bottom: -1px;
 }
 
-/* One highlight that slides between tabs, rather than a pill and underline that
-   blink from one to the next. The active tab keeps its text colour and hands the
-   background and the underline to the indicator, which is the same shape in the
-   same place — so a strip that is not moving looks exactly as it did. */
+/* One highlight that slides between tabs, rather than a pill that blinks from
+   one to the next. The active tab keeps its text colour and hands its background
+   to the indicator, which is the same shape in the same place — so a strip that
+   is not moving looks exactly as it did. */
 .has-tab-indicator {
   position: relative;
 }
@@ -7596,11 +7580,6 @@ button.utility-button.replay-tab-add {
   background: transparent;
 }
 
-.has-tab-indicator .main-tab.active::after,
-.has-tab-indicator .sub-tab.active::after {
-  content: none;
-}
-
 .tab-indicator {
   position: absolute;
   top: 0;
@@ -7612,17 +7591,6 @@ button.utility-button.replay-tab-add {
   background: var(--point-soft);
   pointer-events: none;
   transition: left 0.2s cubic-bezier(0.2, 0, 0, 1), width 0.2s cubic-bezier(0.2, 0, 0, 1);
-}
-
-.tab-indicator::after {
-  content: "";
-  position: absolute;
-  right: 8px;
-  bottom: 0;
-  left: 8px;
-  height: 3px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--point) 0%, var(--point-border) 100%);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -8234,6 +8202,12 @@ button.utility-button.replay-tab-add {
 .recon-scan-options .recon-check { overflow-wrap: anywhere; }
 /* Recon and Active Scan share the Scan tab: its own tabs, then whichever is open. */
 .scan-shell { height: 100%; min-height: 0; display: flex; flex-direction: column; background: var(--shell); }
+/* In a flex column the strip shrank to its 24px minimum and cut its tabs off. */
+.scan-shell > .sub-tabs { flex: 0 0 auto; }
+/* Buttons are toolbar-size here: the 40px default towered over 26px fields. */
+.scan-shell :is(.primary-action, .secondary-action) {
+  min-height: var(--control-h); padding: 4px 14px; font-size: var(--font-xs); border-radius: 6px;
+}
 .scan-shell > .recon-shell, .scan-shell > .templates-shell { flex: 1 1 auto; height: auto; }
 /* Templates reuses Recon's form, table and detail styles; only its layout is its own. */
 .templates-shell {
@@ -8262,7 +8236,61 @@ button.utility-button.replay-tab-add {
 /* The list's filters keep their own width beside the search box: sized to the
    column like the form's controls, the search box shrinks to nothing. */
 .templates-shell .recon-search-controls select { width: auto; min-width: 130px; }
-.templates-status { white-space: pre-line; }
+.templates-shell .panel-toolbar { align-items: center; }
+.templates-shell .recon-form { gap: 10px; padding: 12px 14px; }
+.templates-shell .recon-field { gap: 4px; color: var(--text-dim); font-size: var(--font-xs); }
+.scan-shell input[type="checkbox"] { accent-color: var(--point); }
+.templates-shell .recon-check { align-items: center; }
+.templates-shell .recon-check input { margin: 0; }
+.templates-shell .templates-actions select { flex: 1 1 110px; width: auto; }
+.templates-version { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.templates-version strong { font-family: var(--mono); font-weight: 600; }
+.templates-auto-fields { display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 10px; align-items: start; }
+.templates-options[open] > summary { margin-bottom: 10px; }
+.templates-limits { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* Risks a scan may also send, as chips that light up when allowed. */
+.templates-risks { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.templates-chip-toggle { position: relative; display: inline-flex; cursor: pointer; }
+.templates-chip-toggle input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
+.templates-chip-toggle span,
+.templates-tag {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 7px;
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  color: var(--text-soft); font-size: var(--font-2xs); white-space: nowrap;
+}
+.templates-chip-toggle input:checked + span { color: var(--point); border-color: var(--point-border); background: var(--point-soft); }
+.templates-chip-toggle input:focus-visible + span { outline: 2px solid var(--info); outline-offset: 1px; }
+.templates-tag { margin-right: 4px; }
+.templates-scan .recon-job { padding: 8px 14px; border-top: 1px solid var(--line); border-bottom: 0; }
+.templates-scan .recon-job-header { gap: 6px; margin-bottom: 2px; }
+.templates-scan .recon-job-target { font-size: var(--font-xs); }
+.templates-detail-badges { display: flex; align-items: center; gap: 8px; margin: -4px 0 10px; }
+.templates-detail-id { font-family: var(--mono); color: var(--text-dim); font-size: var(--font-xs); }
+.templates-description { margin: 0 0 12px; color: var(--text-soft); line-height: 1.5; }
+/* Label beside value, the way a property sheet reads. */
+.templates-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; }
+.templates-facts dt { color: var(--text-dim); font-size: var(--font-xs); line-height: 18px; }
+.templates-facts dd { margin: 0; line-height: 18px; overflow-wrap: anywhere; }
+.templates-facts dd .templates-tag { margin-bottom: 4px; }
+.templates-yaml-comment { color: var(--text-dim); font-style: italic; }
+.templates-matches,
+.templates-requests { margin: 0; padding: 0; list-style: none; display: grid; }
+.templates-matches { gap: 8px; }
+.templates-match-open {
+  display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none;
+  color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.templates-match-open:hover { color: var(--point); }
+.templates-match-where { margin-top: 2px; color: var(--text-dim); font-family: var(--mono); font-size: var(--font-xs); overflow-wrap: anywhere; }
+/* One request a line: status, request, then how long and which template. */
+.templates-requests { gap: 3px; font-size: var(--font-xs); }
+.templates-requests li { display: grid; grid-template-columns: 36px minmax(0, 1fr) minmax(0, max-content); gap: 8px; align-items: baseline; }
+.templates-requests li > .recon-help { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.templates-request-status { color: var(--text-soft); font-family: var(--mono); }
+.templates-request-error { color: var(--danger); }
+.templates-request-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+.templates-requests .templates-matched .templates-request-url,
+.templates-requests .templates-matched .templates-request-status { color: var(--point); }
 .templates-progress {
   width: 100%; height: 6px; border: 0; border-radius: 3px;
   -webkit-appearance: none; appearance: none; background: var(--panel-code); overflow: hidden;
@@ -8294,7 +8322,7 @@ button.utility-button.replay-tab-add {
 .templates-table .recon-help { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .templates-yaml {
   margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 5px;
-  background: var(--panel-code); font-family: var(--mono); font-size: var(--font-sm);
+  background: var(--panel-code); color: var(--token-plain-color); font-family: var(--mono); font-size: var(--font-sm); line-height: 1.5;
   white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;
 }
 @media (max-width: 760px) {

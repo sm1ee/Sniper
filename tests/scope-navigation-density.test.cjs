@@ -67,9 +67,17 @@ test('Map strip keeps compact height and adds no vertical padding', () => {
   assert.doesNotMatch(css, /\.target-tab(?:\.active)?\s*\{/);
 });
 
-test('Map keeps existing responsive sub-tab padding and active indicator', () => {
-  assert.match(css, /@media \(max-height: 920px\)\s*\{[^]*?\.sub-tab\s*\{\s*padding:\s*4px 8px 3px;/);
-  assert.match(css, /\.sub-tab\.active::after\s*\{/);
+// Every strip of tabs is one size at every window height, and the active tab
+// is the rounded highlight alone: the gold underline is gone.
+test('every tab strip uses one medium tab size and no underline', () => {
+  assert.match(css, /\n\.sub-tab \{\n  padding: 6px 12px;/);
+  const short = css.slice(css.indexOf('@media (max-height: 920px)'));
+  assert.doesNotMatch(short.slice(0, short.indexOf('\n}\n')), /\.sub-tab\s*\{/);
+  assert.doesNotMatch(css, /\.(?:sub-tab|main-tab)\.active::after|\.tab-indicator::after/);
+  // Each strip slides the same highlight, not only the first one on the page.
+  assert.match(app, /document\.querySelectorAll\("\.sub-tabs, \.target-tabs, \.compare-tabs"\)\.forEach\(wireTabIndicator\)/);
+  // Scan's strip sits in a flex column, where it shrank and cut its tabs off.
+  assert.match(css, /\.scan-shell > \.sub-tabs \{ flex: 0 0 auto; \}/);
   assert.match(rule('.target-tabs'), /overflow-x:\s*auto;/);
   assert.match(rule('.target-passive-label', 2), /margin-left:\s*auto;/);
 });
