@@ -2881,13 +2881,14 @@ mod tests {
             }
 
             fn ctx(&self) -> LaunchContext<'_> {
-                self.build(PROXY, Duration::from_secs(5), Duration::from_millis(50))
+                self.build(PROXY, Duration::from_secs(30), Duration::from_millis(50))
             }
 
             // The waits only cost time when the thing they wait for never happens,
             // so a test that expects it gets a generous limit and only the tests for
             // "never happens" use a short one. Short limits everywhere failed under
-            // parallel load. The startup settle is zero so a second launch is a
+            // parallel load, and so did five seconds for the DevTools port while the
+            // whole suite ran. The startup settle is zero so a second launch is a
             // handoff unless a test is about the settle itself.
             fn build(
                 &self,
@@ -3833,9 +3834,10 @@ mod tests {
                 "{again:?}"
             );
 
-            // ...and the fresh alternative it names really works.
+            // ...and the fresh alternative it names really works. This browser never
+            // reports a port, so the wait for one is short.
             let fresh = launch_at(
-                &fixture.ctx(),
+                &fixture.build(PROXY, Duration::from_millis(300), Duration::from_millis(50)),
                 BrowserKind::Edge,
                 &exe,
                 LaunchRequest {
