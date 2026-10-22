@@ -16,7 +16,7 @@ function fixture(kind) {
     targetScopeDraftVersion: 0, matchReplaceRules: [{ ...rule }], selectedMatchReplaceRuleId: rule.id,
     matchReplaceDirty: true, matchReplaceEditorSessionId: 'session-a', matchReplaceDraftVersion: 0 };
   const input = value => ({ value, listeners: {}, addEventListener(name, callback) { this.listeners[name] = callback; } });
-  const els = { targetScopeEditor: input('example.com'), targetScopeExcludeEditor: input(''),
+  const els = { targetScopeEditor: input('example.com'), targetScopeExcludeEditor: input(''), saveTargetScopeButton: { classList: { remove() {}, toggle() {} } },
     matchReplaceScope: input('request'), matchReplaceTarget: input('any'), matchReplaceSearch: input(''),
     matchReplaceReplace: input(''), matchReplaceRegex: { checked: false }, matchReplaceCaseSensitive: { checked: false } };
   const context = loadFunctions(['currentSessionId', 'expectedActiveSessionIdForWrite', 'sessionWritePath',
@@ -154,7 +154,7 @@ test('scope: optional unchanged read permits normal canonicalization and success
   assert.notEqual(await saving, false); assert.equal(f.state.targetScopeDraft, 'example.com'); assert.equal(f.toasts.length, 0);
 });
 function bindSaveButton(f, kind) {
-  f.els.saveTargetScopeButton = {}; f.els.saveMatchReplaceRuleButton = {};
+  f.els.saveTargetScopeButton = { classList: { remove() {}, toggle() {} } }; f.els.saveMatchReplaceRuleButton = {};
   f.context.onClickWithProgress = (_, handler) => { f.clickSave = handler; };
   const start = kind === 'scope' ? '  onClickWithProgress(els.saveTargetScopeButton, () =>' : '  onClickWithProgress(els.saveMatchReplaceRuleButton, () => {';
   const end = kind === 'scope' ? '  els.targetScopeEditor.addEventListener' : '  els.addMatchReplaceRuleButton.addEventListener';

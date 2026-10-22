@@ -16,10 +16,8 @@ function setup() {
   f.old = f.tab('saved-a'); f.seed([f.old]);
   f.reloads = []; f.errors = []; f.warnings = [];
   f.els.dashboardCreateSessionName = { value: 'New stored session' };
-  for (const key of ['dashboardCurrentSessionName', 'dashboardCurrentSessionStatus', 'dashboardCurrentSessionPath',
-    'dashboardCurrentSessionRequests', 'dashboardCurrentSessionWebsockets', 'dashboardCurrentSessionEvents',
-    'dashboardCurrentSessionFuzzer', 'dashboardCurrentSessionRules', 'dashboardCurrentSessionCreated',
-    'dashboardCurrentSessionOpened', 'dashboardSessionsBody']) f.els[key] = { querySelectorAll: () => [] };
+  for (const key of ['dashboardCurrentSessionName', 'dashboardCurrentSessionStorage', 'dashboardCurrentSessionPath',
+    'dashboardSessionsBody']) f.els[key] = { querySelectorAll: () => [] };
   Object.assign(f.context, {
     sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
     requireOkResponse: async response => { if (!response.ok) throw new Error('Synthetic session read failed'); },
@@ -93,7 +91,7 @@ for (const operation of ['create', 'activate', 'delete']) {
     if (operation === 'delete') assert.equal(f.state.selectedSessionId, 'session-a');
     if (operation === 'activate') {
       assert.match(f.toasts[0][0], /active session changed.*Keep a copy of unsaved edits.*Reload sessions/);
-      assert.equal(f.els.dashboardCurrentSessionStatus.textContent, 'Active');
+      assert.match(f.els.dashboardSessionsBody.innerHTML, /session-active" data-id="session-b"/);
     } else assert.match(f.toasts[0][0], /may have completed/);
   });
 

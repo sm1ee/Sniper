@@ -607,6 +607,7 @@ function useActualScopePreflight(f) {
   Object.assign(f.context, { renderInterceptStatus() {}, renderProxySettings() {}, scheduleRefresh() {} });
   let input;
   f.els.targetScopeEditor = { value: '', addEventListener: (name, callback) => { input = callback; } };
+  f.els.saveTargetScopeButton = { classList: { remove() {}, toggle() {} } };
   const marker = '  els.targetScopeEditor.addEventListener("input", () => {';
   const binding = appSource.slice(appSource.indexOf(marker));
   vm.runInContext(binding.slice(0, binding.indexOf('\n  });') + 6), f.context);

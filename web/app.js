@@ -631,18 +631,14 @@ const els = {
   templatesShell: document.getElementById("templatesShell"),
   dashboardShell: document.getElementById("dashboardShell"),
   dashboardCurrentSessionName: document.getElementById("dashboardCurrentSessionName"),
-  dashboardCurrentSessionStatus: document.getElementById("dashboardCurrentSessionStatus"),
   dashboardCurrentSessionPath: document.getElementById("dashboardCurrentSessionPath"),
+  dashboardCurrentSessionStorage: document.getElementById("dashboardCurrentSessionStorage"),
   dashboardOpenStorageBtn: document.getElementById("dashboardOpenStorageBtn"),
-  dashboardCurrentSessionRequests: document.getElementById("dashboardCurrentSessionRequests"),
-  dashboardCurrentSessionWebsockets: document.getElementById("dashboardCurrentSessionWebsockets"),
-  dashboardCurrentSessionEvents: document.getElementById("dashboardCurrentSessionEvents"),
-  dashboardCurrentSessionFuzzer: document.getElementById("dashboardCurrentSessionFuzzer"),
-  dashboardCurrentSessionRules: document.getElementById("dashboardCurrentSessionRules"),
-  dashboardCurrentSessionCreated: document.getElementById("dashboardCurrentSessionCreated"),
-  dashboardCurrentSessionOpened: document.getElementById("dashboardCurrentSessionOpened"),
   dashboardCreateSessionName: document.getElementById("dashboardCreateSessionName"),
   dashboardCreateSessionButton: document.getElementById("dashboardCreateSessionButton"),
+  dashboardCreateSessionForm: document.getElementById("dashboardCreateSessionForm"),
+  dashboardNewSessionButton: document.getElementById("dashboardNewSessionButton"),
+  dashboardSessionsMore: document.getElementById("dashboardSessionsMore"),
   dashboardReloadSessionsButton: document.getElementById("dashboardReloadSessionsButton"),
   dashboardSessionsBody: document.getElementById("dashboardSessionsBody"),
   proxyStatusIndicator: document.getElementById("proxyStatusIndicator"),
@@ -663,6 +659,7 @@ const els = {
   toolsShell: document.getElementById("toolsShell"),
   toolsLoadError: document.getElementById("toolsLoadError"),
   toolsActiveToolTitle: document.getElementById("toolsActiveToolTitle"),
+  toolsOutputHint: document.getElementById("toolsOutputHint"),
   replayTabStrip: document.getElementById("replayTabStrip"),
   newReplayTabButton: document.getElementById("newReplayTabButton"),
   fuzzerShell: document.getElementById("fuzzerShell"),
@@ -936,7 +933,6 @@ const els = {
   targetScopeEditor: document.getElementById("targetScopeEditor"),
   targetScopeExcludeEditor: document.getElementById("targetScopeExcludeEditor"),
   saveTargetScopeButton: document.getElementById("saveTargetScopeButton"),
-  reloadTargetButton: document.getElementById("reloadTargetButton"),
   targetTree: document.getElementById("targetTree"),
   fuzzerRequestHighlight: document.getElementById("fuzzerRequestHighlight"),
   fuzzerRequestEditor: document.getElementById("fuzzerRequestEditor"),
@@ -1831,7 +1827,23 @@ function bindEvents() {
   onClickWithProgress(els.dashboardReloadSessionsButton, () =>
     loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError));
   onClickWithProgress(els.dashboardCreateSessionButton, () =>
-    createSession().catch(handleWorkspaceActionError));
+    createSession()
+      .then(() => { if (!els.dashboardCreateSessionName.value) closeSessionCreateForm(); })
+      .catch(handleWorkspaceActionError));
+  els.dashboardNewSessionButton.addEventListener("click", openSessionCreateForm);
+  els.dashboardCreateSessionName.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") els.dashboardCreateSessionButton.click();
+    else if (event.key === "Escape") closeSessionCreateForm();
+  });
+  // The ⋯ menu closes once an item is chosen or the click lands elsewhere.
+  els.dashboardSessionsMore.addEventListener("click", (event) => {
+    if (event.target.closest(".context-menu-item")) els.dashboardSessionsMore.open = false;
+  });
+  document.addEventListener("click", (event) => {
+    if (els.dashboardSessionsMore.open && !els.dashboardSessionsMore.contains(event.target)) {
+      els.dashboardSessionsMore.open = false;
+    }
+  });
   onClickWithProgress(els.dashboardOpenStorageBtn, () => {
     const sessionId = state.dashboardStorageSessionId;
     if (!sessionId) return undefined;
@@ -2102,6 +2114,7 @@ function bindEvents() {
     state.targetScopeDraft = els.targetScopeEditor.value;
     state.targetScopeDirty = true;
     state.targetScopeEditorSessionId = currentSessionId();
+    els.saveTargetScopeButton.classList.remove("hidden");
   });
   els.targetScopeExcludeEditor?.addEventListener("input", () => {
     if (state.targetScopeExcludeDraft !== els.targetScopeExcludeEditor.value) {
@@ -2110,9 +2123,8 @@ function bindEvents() {
     state.targetScopeExcludeDraft = els.targetScopeExcludeEditor.value;
     state.targetScopeDirty = true;
     state.targetScopeEditorSessionId = currentSessionId();
+    els.saveTargetScopeButton.classList.remove("hidden");
   });
-  onClickWithProgress(els.reloadTargetButton, () =>
-    reloadTargetSiteMapFromButton().catch((error) => console.error(error)));
   els.startFuzzerButton.addEventListener("click", () => {
     runFuzzerAttack().catch((error) => {
       console.error("Fuzzer start error:", error);
@@ -2187,6 +2199,8 @@ function bindEvents() {
   });
 
   onClickWithProgress(document.getElementById("newSequenceButton"), () =>
+    createNewSequence().catch(handleSequenceActionError));
+  onClickWithProgress(document.getElementById("sequenceEmptyNewButton"), () =>
     createNewSequence().catch(handleSequenceActionError));
   document.getElementById("addSequenceStepButton").addEventListener("click", addSequenceStep);
   onClickWithProgress(document.getElementById("saveSequenceButton"), () =>
@@ -7830,13 +7844,6 @@ async function flushTargetScopeDraft(options = {}) {
   }
 }
 
-async function reloadTargetSiteMapFromButton() {
-  if (!(await flushTargetScopeDraft())) {
-    return;
-  }
-  await loadTargetSiteMap(true);
-}
-
 async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
   const sessionId = currentSessionId();
   const workspaceGeneration = workspaceStateGeneration;
@@ -9213,6 +9220,21 @@ function syncDecoderToolMeta() {
   const activeTab = document.querySelector("#tabs li.on");
   const activeLabel = activeTab?.textContent?.trim() || "Decoder";
   els.toolsActiveToolTitle.textContent = `${activeLabel} output`;
+  markEmptyDecoderOutputs();
+}
+
+// An output with nothing in it is a row of noise. Rows show once they hold a
+// value; until one does, the header says where results will appear.
+function markEmptyDecoderOutputs() {
+  const output = document.getElementById("output");
+  if (!output) return;
+  let shown = 0;
+  for (const element of output.querySelectorAll(".element")) {
+    const empty = !element.querySelector("textarea")?.value;
+    element.classList.toggle("hidden", empty);
+    if (!empty) shown += 1;
+  }
+  els.toolsOutputHint.classList.toggle("hidden", shown > 0);
 }
 
 function clearToolsInputs() {
@@ -9290,6 +9312,19 @@ function loadScriptOnce(source) {
   });
 }
 
+// New session gives its place to a name field; Escape, or a created session,
+// gives it back.
+function openSessionCreateForm() {
+  els.dashboardNewSessionButton.classList.add("hidden");
+  els.dashboardCreateSessionForm.classList.remove("hidden");
+  els.dashboardCreateSessionName.focus();
+}
+
+function closeSessionCreateForm() {
+  els.dashboardCreateSessionForm.classList.add("hidden");
+  els.dashboardNewSessionButton.classList.remove("hidden");
+}
+
 function renderDashboard() {
   // Ensure selectedSessionId defaults to active session
   const activeSession = state.sessions.find((session) => session.active)
@@ -9305,20 +9340,10 @@ function renderDashboard() {
   // bound to the path still on screen if that reload is delayed or fails.
   state.dashboardStorageSessionId = current?.id || null;
   els.dashboardCurrentSessionName.textContent = current?.name || "No active session";
-  const isActive = Boolean(current && (current.active || current.id === activeSession?.id));
-  els.dashboardCurrentSessionStatus.textContent = current ? (isActive ? "Active" : "Stored") : "No session";
-  els.dashboardCurrentSessionStatus.className = `detail-chip ${isActive ? "active-badge" : "none"}`;
-  els.dashboardCurrentSessionPath.textContent = current?.storage_path || "No storage path";
-  els.dashboardCurrentSessionRequests.textContent =
-    formatCappedCount(current?.request_count ?? 0);
-  els.dashboardCurrentSessionWebsockets.textContent =
-    formatCappedCount(current?.websocket_count ?? 0, retainedEntriesCap());
-  els.dashboardCurrentSessionEvents.textContent =
-    formatCappedCount(current?.event_count ?? 0, retainedEntriesCap());
-  els.dashboardCurrentSessionFuzzer.textContent = String(current?.fuzzer_count ?? 0);
-  els.dashboardCurrentSessionRules.textContent = String(current?.rule_count ?? 0);
-  els.dashboardCurrentSessionCreated.textContent = current ? formatTimestamp(current.created_at) : "-";
-  els.dashboardCurrentSessionOpened.textContent = current ? formatTimestamp(current.last_opened_at) : "-";
+  els.dashboardCurrentSessionPath.textContent = current?.storage_path || "";
+  // The header names where the selected session is kept; with none there is
+  // nothing to name. Its counts are the row's own.
+  els.dashboardCurrentSessionStorage.hidden = !current;
 
   // Sort sessions
   const sortedSessions = getSortedSessions();
@@ -9341,7 +9366,7 @@ function renderDashboard() {
   els.dashboardSessionsBody.innerHTML = sortedSessions.length
     ? sortedSessions
         .map((session) => `
-          <tr class="history-row ${session.id === state.selectedSessionId ? "selected" : ""}" data-id="${session.id}">
+          <tr class="${["history-row", session.id === state.selectedSessionId && "selected", session.active && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
             <td>${escapeHtml(session.name)}</td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -9350,12 +9375,10 @@ function renderDashboard() {
             <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
             <td>${escapeHtml(formatTimestamp(session.last_opened_at))}</td>
             <td>
-              <div class="session-actions">
-                ${session.active
-                  ? `<button class="session-active-badge" type="button" disabled>Active</button>`
-                  : `<button class="secondary-action session-open-button" type="button">Open</button>`}
-                <button class="session-delete-button" type="button" ${session.active ? "disabled" : ""}>Delete</button>
-              </div>
+              ${session.active ? "" : `<div class="session-actions">
+                <button class="secondary-action session-open-button" type="button">Open</button>
+                <button class="session-delete-button" type="button">Delete</button>
+              </div>`}
             </td>
           </tr>
         `)
@@ -15278,6 +15301,7 @@ function renderTarget() {
   if (editorSessionMismatch || document.activeElement !== els.targetScopeEditor) {
     state.targetScopeEditorSessionId = sessionId;
   }
+  els.saveTargetScopeButton.classList.toggle("hidden", !state.targetScopeDirty);
 
   const siteMap = Array.isArray(state.targetSiteMap) ? state.targetSiteMap : [];
   const liveHosts = new Set(siteMap.map((host) => String(host.host || "")));
@@ -15306,7 +15330,7 @@ function renderTarget() {
                   <div class="target-path-meta">${requestCount} captured request${requestCount === 1 ? "" : "s"} · ${paths.length} path${paths.length === 1 ? "" : "s"} · ${escapeHtml(schemes.join(", ") || "http")}</div>
                 </div>
                 <div class="target-host-actions">
-                  <span class="detail-chip ${host.in_scope ? "ok" : "none"}">${host.in_scope ? "In scope" : "Out of scope"}</span>
+                  ${host.in_scope ? "" : '<span class="detail-chip none">Out of scope</span>'}
                   <span class="target-host-chevron" aria-hidden="true">▾</span>
                 </div>
               </button>
@@ -17659,6 +17683,13 @@ function renderSequencePanel() {
   const resultsBody = document.getElementById("sequenceRunResultsBody");
   const pastBody = document.getElementById("sequencePastRunsBody");
 
+  // With no sequence there is nothing to list, edit or run: a line on what a
+  // sequence does and the button that makes one stand in for the panes.
+  const none = !state.sequenceDefinitions.length;
+  document.getElementById("sequenceEmpty").classList.toggle("hidden", !none);
+  document.getElementById("sequenceHeader").classList.toggle("hidden", none);
+  document.getElementById("sequenceLayout").classList.toggle("hidden", none);
+
   // List
   listBody.innerHTML = state.sequenceDefinitions.length
     ? state.sequenceDefinitions.map((def) => {
@@ -17687,6 +17718,8 @@ function renderSequencePanel() {
   const sequenceRunning = Boolean(state.sequenceRunning);
   addStepBtn.disabled = !hasSequence;
   saveBtn.disabled = !hasSequence;
+  // The editor's buttons wait for a sequence to act on.
+  for (const button of [addStepBtn, saveBtn, runBtn]) button.classList.toggle("hidden", !hasSequence);
   runBtn.disabled = sequenceRunning || !hasSequence || !editing?.steps?.length;
   runBtn.textContent = sequenceRunning ? "Running..." : "Run";
   editorTitle.textContent = hasSequence ? editing.name : "No sequence selected";

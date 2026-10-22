@@ -66,69 +66,24 @@
 
       <main class="workspace">
         <section class="dashboard-shell hidden" id="dashboardShell">
-          <section class="split-panel split-panel-tight">
-            <section class="panel-card">
-              <header class="panel-toolbar">
-                <div>
-                  <p class="placeholder-kicker">Workspace</p>
-                  <h2 id="dashboardCurrentSessionName">Current session</h2>
-                </div>
-                <div class="toolbar-actions">
-                  <span class="detail-chip info" id="dashboardCurrentSessionStatus">Active</span>
-                </div>
-              </header>
-              <dl class="modal-list runtime-list">
-                <dt>Storage path</dt>
-                <dd><span id="dashboardCurrentSessionPath">Loading...</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></dd>
-                <dt>Requests</dt>
-                <dd id="dashboardCurrentSessionRequests">0</dd>
-                <dt>WebSockets</dt>
-                <dd id="dashboardCurrentSessionWebsockets">0</dd>
-                <dt>Event log</dt>
-                <dd id="dashboardCurrentSessionEvents">0</dd>
-                <dt>Fuzzer runs</dt>
-                <dd id="dashboardCurrentSessionFuzzer">0</dd>
-                <dt>Replace rules</dt>
-                <dd id="dashboardCurrentSessionRules">0</dd>
-                <dt>Created</dt>
-                <dd id="dashboardCurrentSessionCreated">-</dd>
-                <dt>Last opened</dt>
-                <dd id="dashboardCurrentSessionOpened">-</dd>
-              </dl>
-            </section>
-
-            <section class="panel-card">
-              <header class="panel-toolbar">
-                <div>
-                  <p class="placeholder-kicker">Sessions</p>
-                  <h2>Create a new session</h2>
-                </div>
-                <div class="toolbar-actions">
-                  <button class="secondary-action" id="dashboardReloadSessionsButton" type="button">Reload</button>
-                </div>
-              </header>
-              <div class="settings-form">
-                <label class="settings-field">
-                  <span>Session name</span>
-                  <input
-                    id="dashboardCreateSessionName"
-                    type="text"
-                    placeholder="Bug bounty run, staging review, mobile replay"
-                  />
-                  <small>Create a session to keep traffic, rules, notes, and runtime state isolated.</small>
-                </label>
-                <div class="toolbar-actions">
-                  <button class="primary-action" id="dashboardCreateSessionButton" type="button">Create</button>
-                </div>
-              </div>
-            </section>
-          </section>
-
           <section class="panel-card">
             <header class="panel-toolbar">
               <div>
-                <p class="placeholder-kicker">History</p>
-                <h2>Recent sessions</h2>
+                <h2>Sessions</h2>
+                <p class="dashboard-storage" id="dashboardCurrentSessionStorage"><span id="dashboardCurrentSessionName">Current session</span> is stored in <span class="dashboard-storage-path" id="dashboardCurrentSessionPath">Loading...</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></p>
+              </div>
+              <div class="toolbar-actions">
+                <div class="dashboard-create hidden" id="dashboardCreateSessionForm">
+                  <input id="dashboardCreateSessionName" type="text" placeholder="Session name" aria-label="Session name" />
+                  <button class="primary-action" id="dashboardCreateSessionButton" type="button">Create</button>
+                </div>
+                <button class="primary-action" id="dashboardNewSessionButton" type="button" title="A session keeps its own traffic, rules, notes and settings">New session</button>
+                <details class="more-menu" id="dashboardSessionsMore">
+                  <summary class="secondary-action" aria-label="More">⋯</summary>
+                  <div class="context-menu more-menu-list" role="menu">
+                    <button class="context-menu-item" id="dashboardReloadSessionsButton" type="button" role="menuitem">Reload sessions</button>
+                  </div>
+                </details>
               </div>
             </header>
             <div class="history-table-shell">
@@ -1181,11 +1136,10 @@
               <header class="panel-toolbar tools-output-toolbar">
                 <div>
                   <h2 id="toolsActiveToolTitle">Encode output</h2>
+                  <p class="inline-copy" id="toolsOutputHint">Results appear here as you type.</p>
                 </div>
               </header>
-              <div id="output" class="tools-output-list">
-                <div class="tools-empty-state">Choose a decoder tool and start typing to see results here.</div>
-              </div>
+              <div id="output" class="tools-output-list"></div>
             </section>
           </section>
         </section>
@@ -1425,7 +1379,12 @@
         </section>
 
         <section class="sequence-shell hidden" id="sequenceShell">
-          <header class="panel-toolbar replay-header">
+          <section class="sequence-empty hidden" id="sequenceEmpty">
+            <h2>No sequences yet</h2>
+            <p>A sequence sends requests in order and passes values between them. Write <code>{{variable}}</code> in a later step to use a value an earlier step extracted.</p>
+            <button class="primary-action" id="sequenceEmptyNewButton" type="button">New sequence</button>
+          </section>
+          <header class="panel-toolbar replay-header" id="sequenceHeader">
             <div>
               <p class="inline-copy">Chain requests with variable extraction. Use <code>{{variable}}</code> in subsequent steps.</p>
             </div>
@@ -1434,7 +1393,7 @@
             </div>
           </header>
 
-          <section class="sequence-layout">
+          <section class="sequence-layout" id="sequenceLayout">
             <section class="panel-card sequence-list-card">
               <header class="panel-toolbar">
                 <h2>Sequences</h2>
@@ -1510,9 +1469,8 @@
           <section class="split-panel split-panel-tight">
             <section class="panel-card target-scope-card" id="targetRulesPanel" aria-labelledby="targetRulesTitle">
               <header class="panel-toolbar">
-                <div><p class="placeholder-kicker">Scope rules</p><h2 id="targetRulesTitle">Included and excluded hosts</h2></div>
+                <h2 id="targetRulesTitle">Scope</h2>
                 <div class="toolbar-actions">
-                  <button class="secondary-action" id="reloadTargetButton" type="button">Reload</button>
                   <button class="primary-action" id="saveTargetScopeButton" type="button">Save</button>
                 </div>
               </header>
@@ -1530,7 +1488,7 @@
               </div>
             </section>
             <section class="panel-card" id="targetPathsPanel" aria-labelledby="targetPathsTitle">
-              <header class="panel-toolbar"><div><p class="placeholder-kicker">Site map</p><h2 id="targetPathsTitle">Captured and discovered hosts and paths</h2></div></header>
+              <header class="panel-toolbar"><h2 id="targetPathsTitle">Site map</h2></header>
               <div class="target-tree" id="targetTree"></div>
             </section>
           </section>
@@ -1660,9 +1618,9 @@
               <h2 id="templatesTitle">Templates</h2>
               <div class="toolbar-actions">
                 <button class="secondary-action hidden" id="templatesCheck" type="button">Check for updates</button>
-                <details class="templates-more" id="templatesMore">
+                <details class="more-menu" id="templatesMore">
                   <summary class="secondary-action" aria-label="More">⋯</summary>
-                  <div class="context-menu templates-more-menu" role="menu">
+                  <div class="context-menu more-menu-list" role="menu">
                     <button class="context-menu-item" id="templatesSwitch" type="button" role="menuitem">Download main (unreleased)</button>
                     <button class="context-menu-item" id="templatesImportMenu" type="button" role="menuitem">Import archive…</button>
                   </div>

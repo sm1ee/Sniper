@@ -79,7 +79,7 @@ function fixture({ missingGlobals = false, partialFailure = false } = {}) {
     autoScroll: shell => scrolls.push(shell),
   };
   const context = loadFunctions([
-    "renderToolPanels", "ensureDecoderWorkbench", "bootToolsWorkbench", "loadScriptOnce", "syncDecoderToolMeta",
+    "renderToolPanels", "ensureDecoderWorkbench", "bootToolsWorkbench", "loadScriptOnce", "syncDecoderToolMeta", "markEmptyDecoderOutputs",
   ], {
     state, els, document, window, mainTabs: [], toolsBootPromise: null,
     DECODER_SCRIPT_SOURCES: ["/fixture-private-first.js", "/fixture-private-second.js"],

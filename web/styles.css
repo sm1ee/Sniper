@@ -1062,7 +1062,7 @@ code {
 
 .dashboard-shell {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 12px;
   padding: 12px;
   overflow: auto;
@@ -1105,11 +1105,58 @@ code {
   padding: 12px;
 }
 
+/* Session and Scope: a title and its actions, no bar beneath. */
+:is(.dashboard-shell, .target-shell) .panel-toolbar {
+  align-items: center;
+  padding: 16px 18px 8px;
+  border-bottom: 0;
+  background: none;
+}
+
+:is(.dashboard-shell, .target-shell) .panel-toolbar h2 {
+  font-size: var(--font-md);
+}
+
+.dashboard-shell .more-menu > summary:not(:hover) {
+  border-color: transparent;
+  background: none;
+  color: var(--text-soft);
+}
+
+.dashboard-storage {
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  overflow-wrap: anywhere;
+}
+
+.dashboard-storage-path {
+  font-family: var(--mono);
+}
+
+.dashboard-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dashboard-create input {
+  width: 220px;
+  min-height: var(--control-h);
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel-code);
+  color: var(--text);
+}
+
 .replay-shell {
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 
+/* Tools has no view strip either: its one workbench fills the shell, however
+   short the outputs are. */
 .tools-shell {
+  grid-template-rows: minmax(0, 1fr);
   padding: 12px;
 }
 
@@ -1145,40 +1192,46 @@ code {
   padding: 12px 16px 0;
 }
 
+/* The categories read as the app's tabs: text, and a gold line under the
+   one in use. */
 .tools-tool-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 2px;
   margin: 0;
   padding: 0;
+  border-bottom: 1px solid var(--line);
   list-style: none;
 }
 
 .tools-tool-list li {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  min-height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.03);
+  padding: 6px 10px;
   color: var(--text-soft);
   cursor: pointer;
-  font-size: var(--font-xs);
-  font-weight: 700;
-  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+  font-size: var(--font-sm);
+  transition: color 140ms ease;
 }
 
 .tools-tool-list li:hover {
-  border-color: var(--point-border);
   color: var(--text);
 }
 
 .tools-tool-list li.on {
-  border-color: var(--point-border);
-  background: var(--point-soft);
-  color: var(--text);
+  color: var(--tab-active, var(--point));
+}
+
+.tools-tool-list li.on::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--point);
 }
 
 .tools-input-stack {
@@ -1240,23 +1293,19 @@ code {
   min-height: 0;
   height: 100%;
   overflow: auto;
-  padding: 14px 16px 16px;
+  padding: 6px 16px 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
 }
 
-.tools-empty-state {
-  padding: 16px;
-  border: 1px dashed var(--point-border);
-  border-radius: 12px;
-  color: var(--text-soft);
-  background: rgba(255, 255, 255, 0.02);
-}
-
+/* One row an output: its name, then its value. */
 .tools-output-list .element {
   display: grid;
-  gap: 6px;
+  grid-template-columns: minmax(140px, 220px) minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
 }
 
 .tools-output-list .element > div:first-child {
@@ -1267,11 +1316,10 @@ code {
 }
 
 .tools-output-list .title {
+  padding-top: 3px;
   color: var(--text-soft);
+  font-family: var(--mono);
   font-size: var(--font-xs);
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 
 .tools-output-list .note {
@@ -1289,23 +1337,20 @@ code {
 .tools-output-list .value {
   display: flex;
   min-height: 0;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--panel-code-alt);
+  border-radius: 6px;
   cursor: pointer;
-  transition: border-color 140ms ease, background-color 140ms ease;
+  transition: background-color 140ms ease;
 }
 
 .tools-output-list .value:hover {
-  border-color: var(--point-border);
   background: rgba(255, 255, 255, 0.04);
 }
 
 .tools-output-list .value textarea {
   width: 100%;
-  min-height: 42px;
+  min-height: 0;
   margin: 0;
-  padding: 10px 12px;
+  padding: 3px 6px;
   border: none;
   background: transparent;
   color: var(--text);
@@ -3086,7 +3131,43 @@ body.pane-resizing-y {
   line-height: 1;
 }
 .sequence-shell .mini-table {
+  min-width: 0;
   font-size: var(--font-xs);
+}
+
+/* No sequence yet: what a sequence does, and the button that makes one. */
+.sequence-empty {
+  grid-row: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin: 12px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  text-align: center;
+}
+
+.sequence-empty h2 {
+  margin: 0 0 8px;
+  font-size: var(--font-lg);
+  font-weight: 600;
+}
+
+.sequence-empty p {
+  max-width: 460px;
+  margin: 0 0 18px;
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+
+.sequence-empty .primary-action {
+  min-height: var(--control-h);
+  padding: 4px 16px;
+  font-size: var(--font-xs);
+  border-radius: 6px;
 }
 .sequence-shell .mini-table thead th {
   font-size: var(--font-2xs);
@@ -3606,12 +3687,22 @@ body.pane-resizing-y {
   font-weight: 600;
 }
 
+/* One list, a line a host. A grid stretches its rows to the pane, so six
+   hosts used to fill it in tall cards; the list keeps its own height. */
 .target-tree {
   display: grid;
-  gap: 10px;
+  align-content: start;
+  align-self: start;
   min-height: 0;
-  padding: 14px 16px 16px;
+  max-height: calc(100% - 16px);
+  margin: 0 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
   overflow: auto;
+}
+
+.target-scope-field + .target-scope-field {
+  margin-top: 14px;
 }
 
 .target-scope-card {
@@ -3644,10 +3735,11 @@ body.pane-resizing-y {
 
 .target-host-card {
   display: grid;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.02);
   overflow: visible;
+}
+
+.target-host-card + .target-host-card {
+  border-top: 1px solid var(--line);
 }
 
 .target-host-toggle {
@@ -3656,8 +3748,8 @@ body.pane-resizing-y {
   align-items: center;
   gap: 12px;
   width: 100%;
-  min-height: 52px;
-  padding: 12px 14px;
+  min-height: 0;
+  padding: 10px 14px;
   border: none;
   border-bottom: 1px solid transparent;
   overflow: visible;
@@ -3668,11 +3760,11 @@ body.pane-resizing-y {
 }
 
 .target-host-copy {
-  display: grid;
-  align-content: start;
-  gap: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
   min-width: 0;
-  padding-block: 1px;
 }
 
 .target-host-title,
@@ -3697,6 +3789,7 @@ body.pane-resizing-y {
 .target-host-toggle .target-path-meta {
   line-height: 1.4;
   display: block;
+  color: var(--text-dim);
 }
 
 .target-host-toggle.expanded {
@@ -3707,12 +3800,6 @@ body.pane-resizing-y {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-}
-
-.target-host-actions .detail-chip.ok {
-  color: var(--warning);
-  border-color: rgba(246, 196, 110, 0.18);
-  background: rgba(246, 196, 110, 0.12);
 }
 
 .target-host-chevron {
@@ -4565,29 +4652,32 @@ button.utility-button.replay-tab-add {
   border-radius: var(--radius-md);
 }
 
+/* The session in use carries a dot; the others offer Open and Delete where
+   the pointer, the keyboard or the selection is. */
+.session-table .history-row td:first-child::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+.session-table .session-active td:first-child::before {
+  background: var(--point);
+}
+
 .session-table .session-actions {
   display: flex;
   gap: 6px;
   flex-wrap: nowrap;
   white-space: nowrap;
+  visibility: hidden;
 }
 
-.detail-chip.active-badge {
-  color: #7dca6e;
-  border-color: rgba(125, 202, 110, 0.25);
-  background: rgba(125, 202, 110, 0.1);
-}
-
-.session-table .session-active-badge {
-  padding: 5px 12px;
-  min-width: 72px;
-  border: 1px solid rgba(125, 202, 110, 0.3);
-  border-radius: var(--radius-md);
-  background: rgba(125, 202, 110, 0.1);
-  color: #7dca6e;
-  font-size: var(--font-xs);
-  cursor: default;
-  text-align: center;
+.session-table .history-row:is(:hover, :focus-within, .selected) .session-actions {
+  visibility: visible;
 }
 
 .session-table .session-delete-button {
@@ -6795,6 +6885,14 @@ button.utility-button.replay-tab-add {
   display: none;
 }
 
+/* "⋯": a button that drops a menu below it. What is seldom needed waits here. */
+.more-menu { position: relative; }
+.more-menu > summary { list-style: none; cursor: pointer; }
+.more-menu > summary::-webkit-details-marker { display: none; }
+.more-menu .more-menu-list { position: absolute; top: calc(100% + 4px); right: 0; width: max-content; min-width: 210px; padding: 6px; }
+/* Chromium lets an absolutely placed child out of a closed <details>. */
+.more-menu:not([open]) .more-menu-list { display: none; }
+
 .context-menu-section {
   padding: 4px 10px;
 }
@@ -8369,11 +8467,6 @@ button.utility-button.replay-tab-add {
 .templates-facts dd { margin: 0; line-height: 18px; overflow-wrap: anywhere; }
 .templates-facts dd .templates-tag { margin-bottom: 4px; }
 .templates-yaml-comment { color: var(--text-dim); font-style: italic; }
-/* "⋯": what is seldom needed waits here. */
-.templates-more { position: relative; }
-.templates-more > summary { list-style: none; cursor: pointer; }
-.templates-more > summary::-webkit-details-marker { display: none; }
-.templates-more .templates-more-menu { position: absolute; top: calc(100% + 4px); right: 0; width: max-content; min-width: 210px; padding: 6px; }
 /* Templates | Results, there only once a scan has results to show. */
 .templates-views { display: flex; gap: 4px; }
 .templates-results-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
