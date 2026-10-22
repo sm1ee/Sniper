@@ -737,7 +737,7 @@ struct TemplatesImportArgs {
 
 #[derive(Args, Debug, Default, Clone)]
 struct TemplatesFilterArgs {
-    /// Substring of an id, name, path, tag or CVE, case-insensitive.
+    /// Substring of an id, name, path, tag, CVE, description or reference, case-insensitive.
     #[arg(long)]
     search: Option<String>,
     /// Comma-separated severities: info, low, medium, high, critical, unknown.
@@ -6143,7 +6143,7 @@ fn op(
 
 fn templates_input_schema(operation: &str) -> Option<Value> {
     let filter = json!({
-        "search":{"type":["string","null"],"maxLength":200,"description":"Substring of an id, name, path, tag or CVE, case-insensitive."},
+        "search":{"type":["string","null"],"maxLength":200,"description":"Substring of an id, name, path, tag, CVE, description or reference, case-insensitive."},
         "severity":{"type":["string","null"],"maxLength":200,"description":"Comma-separated severities: info, low, medium, high, critical, unknown."},
         "tag":{"type":["string","null"],"maxLength":200,"description":"One exact tag, case-insensitive."}
     });

@@ -154,6 +154,10 @@ struct IndexFile {
     engine: u32,
     sha256: String,
     templates: Vec<TemplateMeta>,
+    /// Each template's description and references, lowercase, in the
+    /// templates' order.
+    #[serde(default)]
+    about: Vec<String>,
     #[serde(default)]
     helpers: Vec<HelperRow>,
     #[serde(default)]
@@ -215,6 +219,10 @@ pub struct LibraryStatus {
 struct Loaded {
     manifest: Manifest,
     index: Arc<Vec<TemplateMeta>>,
+    /// What the search reads besides the index, in its order: a flaw known by
+    /// a nickname (React2Shell, WP2Shell) may name it only in its description
+    /// or a reference. Kept out of `TemplateMeta` so the list does not carry it.
+    about: Vec<String>,
     /// The release's payload files by path, which scans compile with.
     helpers: Arc<HashMap<String, String>>,
     by_id: HashMap<String, usize>,
@@ -351,6 +359,7 @@ impl TemplateLibrary {
                     let helpers = read_helpers(&bundle, &index.helpers)?;
                     let built = BuiltIndex {
                         templates: index.templates,
+                        about: index.about,
                         helpers: index.helpers,
                         duplicates: index.duplicates,
                         skipped: index.skipped,
@@ -397,6 +406,7 @@ impl TemplateLibrary {
         *self.loaded.write().unwrap() = Loaded {
             manifest,
             index: Arc::new(built.templates),
+            about: built.about,
             helpers: Arc::new(helpers),
             by_id,
             duplicates: built.duplicates,
@@ -727,6 +737,27 @@ impl TemplateLibrary {
         let mut matching: Vec<&TemplateMeta> = loaded
             .index
             .iter()
+            .enumerate()
+            .filter(|(position, meta)| {
+                search.as_ref().is_none_or(|needle| {
+                    meta.id.to_ascii_lowercase().contains(needle)
+                        || meta.name.to_ascii_lowercase().contains(needle)
+                        || meta.path.to_ascii_lowercase().contains(needle)
+                        || meta
+                            .tags
+                            .iter()
+                            .any(|t| t.to_ascii_lowercase().contains(needle))
+                        || meta
+                            .cve
+                            .iter()
+                            .any(|c| c.to_ascii_lowercase().contains(needle))
+                        || loaded
+                            .about
+                            .get(*position)
+                            .is_some_and(|about| about.contains(needle))
+                })
+            })
+            .map(|(_, meta)| meta)
             .filter(|meta| severities.is_empty() || severities.contains(&meta.severity))
             .filter(|meta| protocols.is_empty() || protocols.contains(&meta.protocol))
             .filter(|meta| {
@@ -743,21 +774,6 @@ impl TemplateLibrary {
                 query
                     .enabled
                     .is_none_or(|on| on == enabled.contains(meta.id.as_str()))
-            })
-            .filter(|meta| {
-                search.as_ref().is_none_or(|needle| {
-                    meta.id.to_ascii_lowercase().contains(needle)
-                        || meta.name.to_ascii_lowercase().contains(needle)
-                        || meta.path.to_ascii_lowercase().contains(needle)
-                        || meta
-                            .tags
-                            .iter()
-                            .any(|t| t.to_ascii_lowercase().contains(needle))
-                        || meta
-                            .cve
-                            .iter()
-                            .any(|c| c.to_ascii_lowercase().contains(needle))
-                })
             })
             .collect();
         // Templates Sniper can run come first, so a list of everything does not
@@ -1111,6 +1127,7 @@ struct BundleRow {
 #[derive(Default)]
 struct BuiltIndex {
     templates: Vec<TemplateMeta>,
+    about: Vec<String>,
     helpers: Vec<HelperRow>,
     duplicates: usize,
     skipped: usize,
@@ -1147,6 +1164,7 @@ fn index_entries(
 ) -> BuiltIndex {
     let mut seen = HashSet::new();
     let mut templates = Vec::new();
+    let mut about = Vec::new();
     let mut duplicates = 0;
     let mut skipped = 0;
     let total = entries.len();
@@ -1196,6 +1214,13 @@ fn index_entries(
             }
         }
         let info = parsed.info;
+        about.push(
+            std::iter::once(info.description.as_str())
+                .chain(info.references.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_ascii_lowercase(),
+        );
         templates.push(TemplateMeta {
             id: info.id,
             path,
@@ -1226,6 +1251,7 @@ fn index_entries(
     progress(total, total);
     BuiltIndex {
         templates,
+        about,
         helpers: Vec::new(),
         duplicates,
         skipped,
@@ -1239,6 +1265,7 @@ fn write_index(dir: &Path, sha256: &str, built: &BuiltIndex) -> Result<()> {
             engine: ENGINE_VERSION,
             sha256: sha256.to_string(),
             templates: built.templates.clone(),
+            about: built.about.clone(),
             helpers: built.helpers.clone(),
             duplicates: built.duplicates,
             skipped: built.skipped,
@@ -1671,6 +1698,32 @@ mod tests {
         let library = Arc::new(TemplateLibrary::empty(dir));
         library.load_blocking();
         library
+    }
+
+    // A flaw people know by a nickname (React2Shell, WP2Shell) may name it only
+    // in its description or a reference.
+    #[test]
+    fn a_nickname_in_the_description_or_a_reference_finds_its_template() {
+        const NICKNAMED: &str = "id: example-rce\ninfo:\n  name: Example Server - Remote Code Execution\n  severity: critical\n  description: An example flaw, widely called Example2Shell.\n  reference:\n    - https://example.com/research/wp2example-rce\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/status']\n    matchers:\n      - type: word\n        words: ['Example Server']\n";
+        let dir = std::env::temp_dir().join(format!("sniper-templates-{}", uuid::Uuid::new_v4()));
+        let first = library(&dir);
+        first
+            .import_blocking(
+                &archive(&[("nuclei-templates-1.0/http/rce.yaml", NICKNAMED.as_bytes())]),
+                Source::Import,
+            )
+            .unwrap();
+        let reloaded = library(&dir);
+        for loaded in [&first, &reloaded] {
+            for needle in ["example2shell", "WP2EXAMPLE"] {
+                let found = loaded.list(&ListQuery {
+                    search: Some(needle.into()),
+                    ..ListQuery::default()
+                });
+                assert_eq!(found.total, 1, "{needle}");
+            }
+        }
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
