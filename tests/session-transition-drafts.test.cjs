@@ -16,7 +16,7 @@ function setup({ rendered = true } = {}) {
     configurable: true, set(value) { this.innerText = value; },
   });
   for (const name of [
-    'renderReplay', 'applyWorkspaceState', 'createSession', 'activateSessionById',
+    'renderReplay', 'retireFindingActionProgress', 'applyWorkspaceState', 'createSession', 'activateSessionById',
     'reloadSessionWorkspace', 'resetSessionScopedUiState', 'renderReplayClearedState',
     'renderReplayRequestHighlight', 'renderToolPanels', 'applyReplayTargetFields',
     'setReplayTargetInputValidity', 'startHexByteEdit', 'syncReplayRequestTextFromEditor',
@@ -41,7 +41,7 @@ function setup({ rendered = true } = {}) {
     'resetOastUiState', 'resetScannerConfigUiState', 'resetFindingsUiState', 'clearFuzzerAttackRecord',
     'clearCompareState', 'renderHistory', 'renderEmptyDetail', 'renderWebsocketSessions', 'hideFrameDetail',
     'renderEventLog', 'renderMatchReplaceRules', 'renderTarget', 'renderFindings', 'renderFuzzer',
-    'renderSequencePanel', 'renderReplayResponseView', 'updateReplaySearchPane', 'renderDashboard',
+    'renderSequencePanel', 'renderReplayResponseView', 'updateReplaySearchPane', 'renderDashboard', 'sessionFindingCount', 'formatSize',
     'renderProxyPanels', 'refreshReplayTabLabel', 'renderReplayEmptyResponse', 'bindHexByteHandlers',
     'renderWsReplay', 'setReplaySending',
   ]) f.context[name] = () => {};
@@ -79,7 +79,6 @@ function setup({ rendered = true } = {}) {
     'dashboardShell', 'proxyShell', 'replayShell', 'toolsShell',
     'fuzzerShell', 'sequenceShell', 'targetShell', 'loggerShell',
   ]) f.els[name] = { classList: { toggle: (key, value) => { f.els[name][key] = value; } } };
-  f.els.footerMode = {};
   for (const name of ['sendReplayButton', 'cancelReplayButton', 'replayBackButton', 'replayForwardButton']) {
     f.els[name] = {};
   }
@@ -602,12 +601,13 @@ for (const operation of ['create', 'activate']) {
 }
 
 function useActualScopePreflight(f) {
-  for (const name of ['flushTargetScopeDraft', 'saveTargetScope', 'formatScopePatternsText']) {
+  for (const name of ['flushTargetScopeDraft', 'saveTargetScope', 'postRuntimeSettings', 'formatScopePatternsText']) {
     vm.runInContext(source(name), f.context);
   }
   Object.assign(f.context, { renderInterceptStatus() {}, renderProxySettings() {}, scheduleRefresh() {} });
   let input;
   f.els.targetScopeEditor = { value: '', addEventListener: (name, callback) => { input = callback; } };
+  f.els.saveTargetScopeButton = { classList: { remove() {}, toggle() {} } };
   const marker = '  els.targetScopeEditor.addEventListener("input", () => {';
   const binding = appSource.slice(appSource.indexOf(marker));
   vm.runInContext(binding.slice(0, binding.indexOf('\n  });') + 6), f.context);
@@ -732,6 +732,7 @@ function useLateMetadataEditor(f, editor) {
   }
   for (const name of ['flushMatchReplaceDraft', 'saveMatchReplaceRules', 'getSelectedMatchReplaceRule', 'syncMatchReplaceEditor', 'sessionWritePath', 'jsonArray']) vm.runInContext(source(name), f.context);
   f.context.URLSearchParams = URLSearchParams;
+  f.context.updateMatchReplaceSaveState = () => {}; // the Save button is not under test here
   f.state.matchReplaceRules = [{ id: 'disabled-late-metadata', enabled: false, description: '', scope: 'request', target: 'any', search: '', replace: '', regex: false, case_sensitive: false }];
   f.state.selectedMatchReplaceRuleId = 'disabled-late-metadata'; f.state.matchReplaceEditorSessionId = 'session-a'; f.state.matchReplaceDirty = false;
   for (const [key, value] of Object.entries({ Scope: 'request', Target: 'any', Search: '', Replace: '' })) f.els[`matchReplace${key}`] = { value };

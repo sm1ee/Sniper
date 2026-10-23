@@ -343,3 +343,82 @@ fn whole_history_read_resumes_below_the_oldest_retained_row_it_read() {
     let replaced = StoreInner::from_newest_first((0..10).rev().map(row).collect());
     assert_eq!(resume_below(&replaced, &read), None);
 }
+
+// Auto-refresh asks for freshness after an event, without throwing away the
+// whole-history cache when that event did not change this store's data.
+#[test]
+fn whole_history_cache_fresh_reuses_complete_unchanged_bytes() {
+    let store = TransactionStore::from_records(vec![row(1)]);
+    let bytes = bytes::Bytes::from_static(b"synthetic complete map");
+    store.store_service_map(
+        "filter-one".into(),
+        store.service_map_history_token(),
+        std::time::Duration::from_secs(10),
+        true,
+        bytes.clone(),
+    );
+    assert_eq!(store.cached_service_map("filter-one", true), Some(bytes));
+    assert!(store.cached_service_map("filter-two", true).is_none());
+}
+
+#[tokio::test]
+async fn whole_history_cache_fresh_bypasses_changed_history_cooldown() {
+    let store = Arc::new(TransactionStore::from_records(vec![row(1)]));
+    let worker = Arc::clone(&store);
+    tokio::task::spawn_blocking(move || {
+        worker.store_service_map(
+            "filter".into(),
+            worker.service_map_history_token(),
+            std::time::Duration::from_secs(10),
+            true,
+            bytes::Bytes::from_static(b"before capture"),
+        );
+    })
+    .await
+    .unwrap();
+    store.insert(row(2)).await;
+    tokio::task::spawn_blocking(move || {
+        // A normal poll still sees the previous map during the 40-second
+        // cooldown, but an event-informed fresh read can rebuild immediately.
+        assert_eq!(
+            store.cached_service_map("filter", false),
+            Some(bytes::Bytes::from_static(b"before capture"))
+        );
+        assert!(store.cached_service_map("filter", true).is_none());
+        let bytes = bytes::Bytes::from_static(b"after capture");
+        store.store_service_map(
+            "filter".into(),
+            store.service_map_history_token(),
+            std::time::Duration::from_secs(10),
+            true,
+            bytes.clone(),
+        );
+        assert_eq!(store.cached_service_map("filter", true), Some(bytes));
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+fn whole_history_cache_clean_polls_continue_private_enrichment() {
+    let store = TransactionStore::from_records(vec![row(1)]);
+    // Public projection completeness is not the private enrichment flag.
+    let bytes = bytes::Bytes::from_static(br#"{"snapshot":{"complete":true}}"#);
+    store.store_service_map(
+        "filter".into(),
+        store.service_map_history_token(),
+        std::time::Duration::from_secs(10),
+        false,
+        bytes.clone(),
+    );
+    assert_eq!(store.cached_service_map("filter", false), Some(bytes));
+    store
+        .service_map_result
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .built = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    assert!(store.cached_service_map("filter", false).is_none());
+    assert!(store.cached_service_map("filter", true).is_none());
+}

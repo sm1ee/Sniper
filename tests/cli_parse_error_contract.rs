@@ -103,10 +103,7 @@ fn direct_aliases_and_hyphenated_actions_use_manifest_operations() {
         (vec!["target", "get-scope", "--unknown"], "scope.get"),
         (vec!["event-log", "list", "--unknown"], "event_log.list"),
         (vec!["sequence", "run-get", "--unknown"], "sequence.run_get"),
-        (
-            vec!["skills", "update-preview", "--unknown"],
-            "skills.update_preview",
-        ),
+        (vec!["skills", "status", "--unknown"], "skills.status"),
     ] {
         assert_eq!(parse_error(&args)["operation"], expected, "{args:?}");
     }
@@ -399,23 +396,8 @@ fn saved_discovery_and_skill_help_explain_read_only_workflows_offline() {
             vec![
                 "this CLI host",
                 "modified_or_outdated",
-                "current bundle",
                 "Exit status 0",
                 "entries[].status",
-                "Preserve edits",
-            ],
-        ),
-        (
-            vec!["skills", "update-preview", "--help"],
-            vec![
-                "this CLI host",
-                "enrollment baseline",
-                "modified",
-                "update_available",
-                "Exit status 0",
-                "entries[].state",
-                "status may be current while update-preview remains modified",
-                "Preserve edited files",
             ],
         ),
     ] {

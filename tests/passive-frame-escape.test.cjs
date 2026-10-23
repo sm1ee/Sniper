@@ -65,11 +65,12 @@ function fixture(overrides = {}) {
     "closeBrowserMenu", "onBrowserMenuKeydown",
   ], {
     state, els, document, HTMLElement,
-    activeConfirmDialog: null, displaySettingsReturnFocus: null, filterSettingsReturnFocus: null, filterSettingsEditedControls: new Set(),
+    activeConfirmDialog: null, compareLoadGeneration: 0, displaySettingsReturnFocus: null, filterSettingsReturnFocus: null, filterSettingsEditedControls: new Set(),
     displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(), wsFrameContextMenuTarget: null, browserMenu: null,
     window: { getComputedStyle: () => ({ visibility: "visible" }) },
     hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, selectSettingsTab() {},
     hydrateFilterForm() {}, saveDisplaySettingsFromForm() {}, applyFilterSettings() {}, closeCurlImportModal() {},
+    closeCompareModal() {},
     moveHistorySelection: async offset => calls.push(["history", offset]),
     moveWebsocketSelection: async offset => calls.push(["websockets", offset]),
     moveFrameSelection: offset => calls.push(["frames", offset]),

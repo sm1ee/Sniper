@@ -25,13 +25,13 @@ use crate::{
     event_log::{EventLogEntry, EventLogStore},
     fuzzer::{FuzzerAttackRecord, FuzzerStore},
     intercept::{InterceptQueue, ResponseInterceptQueue},
-    match_replace::{MatchReplaceRule, MatchReplaceStore},
+    match_replace::{MatchReplaceRule, MatchReplaceScope, MatchReplaceStore, MatchReplaceTarget},
     model::{
         compact_annotation_client_versions_for_insert, TransactionRecord, WebSocketFrameRecord,
         WebSocketSessionRecord,
     },
     runtime::{RuntimeSettings, RuntimeSettingsSnapshot},
-    scanner::{scan_transaction, ScannerConfig, ScannerFinding, ScannerStore},
+    scanner::{scan_transaction, ScannerConfig, ScannerFinding, ScannerStore, Severity},
     sequence::{SequenceDefinition, SequenceRunRecord, SequenceStore},
     store::{
         normalize_storage_sequences, transaction_journal_checkpoint_path, NullableStringPatch,
@@ -90,6 +90,8 @@ pub struct SessionMetadata {
     pub fuzzer_count: usize,
     #[serde(default)]
     pub rule_count: usize,
+    #[serde(default)]
+    pub overview: SessionOverview,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,6 +110,285 @@ pub struct SessionSummary {
     pub rule_count: usize,
     pub storage_path: String,
     pub active: bool,
+}
+
+/// A session as the Session screen lists it: its summary, what it holds, and
+/// the bytes its files take on disk. Kept apart from `SessionSummary`, whose
+/// fields the saved.v1 contract fixes and whose copies rename receipts keep.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionListing {
+    #[serde(flatten)]
+    pub summary: SessionSummary,
+    pub overview: SessionOverview,
+    pub storage_bytes: u64,
+}
+
+/// Findings counted by severity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SeverityCounts {
+    pub critical: usize,
+    pub high: usize,
+    pub medium: usize,
+    pub low: usize,
+    pub info: usize,
+}
+
+impl SeverityCounts {
+    pub fn count<'a>(findings: impl IntoIterator<Item = &'a ScannerFinding>) -> Self {
+        let mut counts = Self::default();
+        for finding in findings {
+            *match finding.severity {
+                Severity::Critical => &mut counts.critical,
+                Severity::High => &mut counts.high,
+                Severity::Medium => &mut counts.medium,
+                Severity::Low => &mut counts.low,
+                Severity::Info => &mut counts.info,
+            } += 1;
+        }
+        counts
+    }
+}
+
+/// A host and how many of a session's requests went to it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRequestCount {
+    pub host: String,
+    pub requests: usize,
+}
+
+/// A scan or Recon job as the overview names it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    /// `manual scan`, `auto scan` or `recon`.
+    pub kind: String,
+    pub target: String,
+    pub started_at: DateTime<Utc>,
+    pub status: String,
+    /// Templates that matched, for a scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<usize>,
+}
+
+/// What tells sessions apart without opening them: the scope set, where the
+/// traffic went, what the operator marked, pinned, rewrote and scanned, and
+/// what was found. Stored with the counts on a full save; a loaded session
+/// reports live values. Labels are the operator's own (a pinned tab's name, a
+/// rule's description) or a method, host and path without its query, so no
+/// captured value or rule text is copied into the registry.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionOverview {
+    pub scope: Vec<String>,
+    pub scope_count: usize,
+    pub excluded_scope: Vec<String>,
+    pub excluded_scope_count: usize,
+    pub top_hosts: Vec<HostRequestCount>,
+    pub last_captured_at: Option<DateTime<Utc>>,
+    pub marked_requests: usize,
+    pub pinned_replays: Vec<String>,
+    pub pinned_replay_count: usize,
+    pub replace_rules: Vec<String>,
+    pub replace_rule_count: usize,
+    pub activity: Vec<ActivityEntry>,
+    pub activity_count: usize,
+    pub findings: SeverityCounts,
+}
+
+/// How many of each list the overview keeps by name, and how long a name is.
+const OVERVIEW_LIST_LIMIT: usize = 5;
+const OVERVIEW_SCOPE_LIMIT: usize = 8;
+const OVERVIEW_LABEL_CHARS: usize = 80;
+
+/// What a session's records say about it.
+#[derive(Debug, Default, PartialEq)]
+pub struct TrafficOverview {
+    pub top_hosts: Vec<HostRequestCount>,
+    pub last_captured_at: Option<DateTime<Utc>>,
+    pub marked_requests: usize,
+}
+
+impl TrafficOverview {
+    /// CONNECT tunnels and records without a host stay out of the hosts, as the
+    /// site map leaves them out. A mark is a colour or the operator's note, not
+    /// a note Sniper adds itself.
+    pub fn from_records<'a>(records: impl IntoIterator<Item = &'a TransactionRecord>) -> Self {
+        let mut hosts: HashMap<&str, usize> = HashMap::new();
+        let mut overview = Self::default();
+        for record in records {
+            overview.last_captured_at = overview.last_captured_at.max(Some(record.started_at));
+            if record.color_tag.is_some() || record.user_note.is_some() {
+                overview.marked_requests += 1;
+            }
+            if record.method != "CONNECT" && !record.host.is_empty() {
+                *hosts.entry(record.host.as_str()).or_default() += 1;
+            }
+        }
+        let mut ranked: Vec<_> = hosts.into_iter().collect();
+        ranked
+            .sort_unstable_by(|(a_host, a), (b_host, b)| b.cmp(a).then_with(|| a_host.cmp(b_host)));
+        overview.top_hosts = ranked
+            .into_iter()
+            .take(OVERVIEW_LIST_LIMIT)
+            .map(|(host, requests)| HostRequestCount {
+                host: host.to_string(),
+                requests,
+            })
+            .collect();
+        overview
+    }
+}
+
+impl SessionOverview {
+    fn new(traffic: TrafficOverview, state: &StoredSessionSnapshot) -> Self {
+        let pinned: Vec<_> = state
+            .workspace
+            .replay
+            .tabs
+            .iter()
+            .filter(|tab| tab.pinned)
+            .collect();
+        let rules: Vec<_> = state
+            .match_replace_rules
+            .iter()
+            .filter(|rule| rule.enabled)
+            .collect();
+        let mut activity: Vec<_> = state
+            .template_scans
+            .jobs
+            .iter()
+            .map(|job| ActivityEntry {
+                kind: if job.auto { "auto scan" } else { "manual scan" }.to_string(),
+                target: list_label(&job.targets),
+                started_at: job.started_at,
+                status: job.status.clone(),
+                matched: Some(job.matched),
+            })
+            .chain(state.recon.jobs.iter().map(|job| ActivityEntry {
+                kind: "recon".to_string(),
+                target: overview_label(&job.target_url),
+                started_at: job.started_at,
+                status: job.status.clone(),
+                matched: None,
+            }))
+            .collect();
+        activity.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        let activity_count = activity.len();
+        activity.truncate(OVERVIEW_LIST_LIMIT);
+        let runtime = &state.runtime;
+        Self {
+            scope: runtime
+                .scope_patterns
+                .iter()
+                .take(OVERVIEW_SCOPE_LIMIT)
+                .cloned()
+                .collect(),
+            scope_count: runtime.scope_patterns.len(),
+            excluded_scope: runtime
+                .excluded_scope_patterns
+                .iter()
+                .take(OVERVIEW_SCOPE_LIMIT)
+                .cloned()
+                .collect(),
+            excluded_scope_count: runtime.excluded_scope_patterns.len(),
+            top_hosts: traffic.top_hosts,
+            last_captured_at: traffic.last_captured_at,
+            marked_requests: traffic.marked_requests,
+            pinned_replays: pinned
+                .iter()
+                .take(OVERVIEW_LIST_LIMIT)
+                .map(|tab| replay_tab_label(tab))
+                .collect(),
+            pinned_replay_count: pinned.len(),
+            replace_rules: rules
+                .iter()
+                .take(OVERVIEW_LIST_LIMIT)
+                .map(|rule| replace_rule_label(rule))
+                .collect(),
+            replace_rule_count: rules.len(),
+            activity,
+            activity_count,
+            findings: SeverityCounts::count(&state.scanner_findings),
+        }
+    }
+}
+
+fn overview_label(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= OVERVIEW_LABEL_CHARS {
+        return text.to_string();
+    }
+    let mut short: String = text.chars().take(OVERVIEW_LABEL_CHARS - 1).collect();
+    short.push('…');
+    short
+}
+
+fn list_label(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => overview_label(one),
+        [first, rest @ ..] => format!("{} +{}", overview_label(first), rest.len()),
+    }
+}
+
+/// A pinned tab by the name the operator gave it, else by its method, host and
+/// path without the query.
+fn replay_tab_label(tab: &crate::workspace::ReplayTabState) -> String {
+    if !tab.custom_label.trim().is_empty() {
+        return overview_label(&tab.custom_label);
+    }
+    match &tab.base_request {
+        Some(request) => {
+            let path = request.path.split(['?', '#']).next().unwrap_or_default();
+            overview_label(&format!("{} {}{}", request.method, request.host, path))
+        }
+        None => {
+            let host = if tab.target_host.is_empty() {
+                &tab.ws_host
+            } else {
+                &tab.target_host
+            };
+            overview_label(&format!("Replay {host}"))
+        }
+    }
+}
+
+/// A rule by the description the operator gave it, else by what it rewrites:
+/// its search and replace text stay out of the registry.
+fn replace_rule_label(rule: &MatchReplaceRule) -> String {
+    if !rule.description.trim().is_empty() {
+        return overview_label(&rule.description);
+    }
+    let scope = match rule.scope {
+        MatchReplaceScope::Request => "Request",
+        MatchReplaceScope::Response => "Response",
+    };
+    let target = match rule.target {
+        MatchReplaceTarget::Any => "",
+        MatchReplaceTarget::Path => " path",
+        MatchReplaceTarget::HeaderName => " header name",
+        MatchReplaceTarget::HeaderValue => " header value",
+        MatchReplaceTarget::Body => " body",
+    };
+    format!("{scope}{target} rule")
+}
+
+/// Bytes the files under `dir` take. Links are not followed and unreadable
+/// entries count as nothing.
+pub fn directory_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => directory_bytes(&entry.path()),
+            Ok(kind) if kind.is_file() => {
+                entry.metadata().map(|metadata| metadata.len()).unwrap_or(0)
+            }
+            _ => 0,
+        })
+        .sum()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -169,6 +450,8 @@ struct StoredSessionSnapshot {
     sequence_runs: Vec<SequenceRunRecord>,
     #[serde(default)]
     recon: crate::recon::ReconSnapshot,
+    #[serde(default)]
+    template_scans: crate::templates::scan::TemplateScanSnapshot,
     #[serde(default)]
     oast_callbacks: Option<Vec<crate::oast::OastCallback>>,
     #[serde(default)]
@@ -332,6 +615,7 @@ pub struct SessionContext {
     pub scanner: Arc<ScannerStore>,
     pub sequence: Arc<SequenceStore>,
     pub recon: Arc<crate::recon::ReconStore>,
+    pub template_scans: Arc<crate::templates::scan::TemplateScanStore>,
     pub oast: Arc<crate::oast::OastStore>,
     pub workspace: Arc<WorkspaceStateStore>,
     websocket_journal_tx: Option<mpsc::Sender<WebSocketJournalCommand>>,
@@ -487,6 +771,9 @@ impl SessionContext {
                 snapshot.sequence_runs,
             )),
             recon: Arc::new(crate::recon::ReconStore::from_snapshot(snapshot.recon)),
+            template_scans: Arc::new(crate::templates::scan::TemplateScanStore::from_snapshot(
+                snapshot.template_scans,
+            )),
             oast: {
                 let store = Arc::new(crate::oast::OastStore::new_with_config(
                     max_entries,
@@ -1067,6 +1354,7 @@ impl SessionContext {
             sequence_definitions: self.sequence.snapshot_definitions().await,
             sequence_runs: self.sequence.snapshot_runs(Some(self.max_entries)).await,
             recon: self.recon.snapshot(),
+            template_scans: self.template_scans.snapshot(),
             oast_callbacks: Some(self.oast.snapshot().await),
             oast_cleared_callback_keys: self.oast.snapshot_cleared_keys().await,
             oast_registration: self.oast.snapshot_registration().await,
@@ -1079,6 +1367,22 @@ impl SessionContext {
             compactable_websocket_journal: false,
             unresolved_websocket_journal: false,
         }
+    }
+
+    /// This session's overview from its live state. Only the parts it names are
+    /// copied: the CLI lists sessions on most calls, and the event log or a
+    /// fuzzer's results can be large.
+    pub async fn overview(&self) -> SessionOverview {
+        let state = StoredSessionSnapshot {
+            runtime: self.runtime.snapshot().await,
+            match_replace_rules: self.match_replace.snapshot().await,
+            scanner_findings: self.scanner.snapshot(Some(self.max_entries)).await,
+            recon: self.recon.snapshot(),
+            template_scans: self.template_scans.snapshot(),
+            workspace: self.workspace.snapshot().await,
+            ..StoredSessionSnapshot::default()
+        };
+        SessionOverview::new(self.store.traffic_overview().await, &state)
     }
 
     /// Persists everything except transactions and websockets. Those two are
@@ -1100,6 +1404,52 @@ impl SessionContext {
         })
         .await
         .context("session state writer failed")?
+    }
+
+    /// What an API change to the small components needs: runtime settings,
+    /// rules, the event log, OAST callbacks, sequence runs. They are all in
+    /// state.json, and the session list's counts are refreshed with them. The
+    /// full save copied the whole of transactions.ndjson for each, gigabytes on
+    /// a large session for one intercept toggle; captured traffic is durable
+    /// through its journal, and a full save still compacts that once it grows
+    /// (TRANSACTION_JOURNAL_COMPACT_BYTES).
+    pub async fn persist_state_mutation_locked(&self) -> Result<SessionMetadata> {
+        let persist_guard = self.owned_persist_guard().await;
+        // A request queued behind session deletion must not recreate its root.
+        ensure_existing_private_session_dir(&self.storage_dir)?;
+        let state = self
+            .build_state_snapshot(self.workspace.snapshot().await)
+            .await;
+        let mut metadata = self
+            .metadata
+            .read()
+            .expect("session metadata lock poisoned")
+            .clone();
+        // The request and websocket counts are the full save's to keep: these
+        // changes leave captured traffic as it is.
+        metadata.updated_at = Utc::now();
+        metadata.event_count = state.event_log.len();
+        metadata.fuzzer_count = state.fuzzer_attacks.len();
+        metadata.rule_count = state.match_replace_rules.len();
+        let storage_dir = self.storage_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let _persist_guard = persist_guard;
+            ensure_existing_private_session_dir(&storage_dir)?;
+            write_json(&state_path(&storage_dir), &state)
+        })
+        .await
+        .context("session state writer failed")??;
+        // Registry-owned fields may have moved meanwhile, as in a full save.
+        let mut current = self
+            .metadata
+            .write()
+            .expect("session metadata lock poisoned");
+        metadata.name.clone_from(&current.name);
+        metadata.created_at = current.created_at;
+        metadata.last_opened_at = current.last_opened_at;
+        metadata.updated_at = metadata.updated_at.max(current.updated_at);
+        *current = metadata.clone();
+        Ok(metadata)
     }
 
     async fn persist_with_workspace_snapshot_locked(
@@ -1160,6 +1510,10 @@ impl SessionContext {
         metadata.event_count = snapshot.event_log.len();
         metadata.fuzzer_count = snapshot.fuzzer_attacks.len();
         metadata.rule_count = snapshot.match_replace_rules.len();
+        metadata.overview = SessionOverview::new(
+            TrafficOverview::from_records(transactions.iter().map(|(record, _)| record)),
+            &snapshot,
+        );
 
         let snapshot_file = snapshot_path(&self.storage_dir);
         let transactions_file = transactions_path(&self.storage_dir);
@@ -1564,20 +1918,30 @@ impl SessionRegistry {
     }
 
     pub fn summaries(&self) -> Vec<SessionSummary> {
+        self.listings()
+            .into_iter()
+            .map(|listing| listing.summary)
+            .collect()
+    }
+
+    /// Sessions newest opened first, each with the overview its last save kept.
+    pub fn listings(&self) -> Vec<SessionListing> {
         let registry = self.inner.read().expect("session registry lock poisoned");
         let active_id = registry.active_session_id;
         let mut sessions = registry
             .sessions
             .iter()
-            .map(|metadata| {
-                session_summary(
+            .map(|metadata| SessionListing {
+                summary: session_summary(
                     metadata,
                     &session_dir(&self.root_dir, metadata.id),
                     metadata.id == active_id,
-                )
+                ),
+                overview: metadata.overview.clone(),
+                storage_bytes: 0,
             })
             .collect::<Vec<_>>();
-        sessions.sort_by_key(|session| std::cmp::Reverse(session.last_opened_at));
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.summary.last_opened_at));
         sessions
     }
 
@@ -1601,6 +1965,7 @@ impl SessionRegistry {
             event_count: 0,
             fuzzer_count: 0,
             rule_count: 0,
+            overview: SessionOverview::default(),
         };
 
         persist_session_snapshot(&self.root_dir, &metadata, &StoredSessionSnapshot::default())?;
@@ -2196,17 +2561,24 @@ fn update_metadata_counts_from_snapshot(
         .len()
         .min(crate::match_replace::MAX_MATCH_REPLACE_RULES);
 
+    let next_overview = SessionOverview::new(
+        TrafficOverview::from_records(&snapshot.transactions),
+        snapshot,
+    );
+
     let changed = metadata.request_count != next_request_count
         || metadata.websocket_count != next_websocket_count
         || metadata.event_count != next_event_count
         || metadata.fuzzer_count != next_fuzzer_count
-        || metadata.rule_count != next_rule_count;
+        || metadata.rule_count != next_rule_count
+        || metadata.overview != next_overview;
 
     metadata.request_count = next_request_count;
     metadata.websocket_count = next_websocket_count;
     metadata.event_count = next_event_count;
     metadata.fuzzer_count = next_fuzzer_count;
     metadata.rule_count = next_rule_count;
+    metadata.overview = next_overview;
 
     changed
 }
@@ -2669,6 +3041,7 @@ fn recovered_session_metadata(
         event_count: 0,
         fuzzer_count: 0,
         rule_count: 0,
+        overview: SessionOverview::default(),
     };
     update_metadata_counts_from_snapshot(
         &mut metadata,
@@ -2692,6 +3065,7 @@ fn default_session_metadata(name: &str) -> SessionMetadata {
         event_count: 0,
         fuzzer_count: 0,
         rule_count: 0,
+        overview: SessionOverview::default(),
     }
 }
 
@@ -3099,6 +3473,7 @@ fn prepare_transactions_file_streaming(
     let mut locators = HashMap::with_capacity(entries.len());
     let mut metadata = Vec::with_capacity(entries.len());
     let mut offset = 0u64;
+    let mut kept_aside = false;
     {
         let mut file = create_private_file(&tmp_path)
             .with_context(|| format!("failed to write {}", tmp_path.display()))?;
@@ -3116,28 +3491,47 @@ fn prepare_transactions_file_streaming(
                         .seek(std::io::SeekFrom::Start(locator.offset))
                         .and_then(|_| reader.read_exact(&mut line))
                         .context("failed to copy stored transaction bodies for snapshot")?;
-                    let mut full: TransactionRecord = serde_json::from_slice(&line)
-                        .context("stored transaction line is invalid")?;
-                    if full.id != record.id {
-                        bail!("stored transaction locator does not match its record");
-                    }
-                    // An annotation changes without materializing the body. Its
-                    // durable line must still carry the snapshot's annotations:
-                    // the optional metadata cache cannot be their sole copy.
-                    if full.notes != record.notes
-                        || full.color_tag != record.color_tag
-                        || full.user_note != record.user_note
-                        || full.annotation_revision != record.annotation_revision
-                        || full.annotation_client_versions != record.annotation_client_versions
-                    {
-                        full.notes.clone_from(&record.notes);
-                        full.color_tag.clone_from(&record.color_tag);
-                        full.user_note.clone_from(&record.user_note);
-                        full.annotation_revision = record.annotation_revision;
-                        full.annotation_client_versions
-                            .clone_from(&record.annotation_client_versions);
-                        line = serde_json::to_vec(&full)
-                            .context("failed to serialize annotated transaction record")?;
+                    if let Ok(mut full) = serde_json::from_slice::<TransactionRecord>(&line) {
+                        // A whole line of another record means stale offsets,
+                        // not damage: emptying the row would drop a body that
+                        // is still in the file.
+                        if full.id != record.id {
+                            bail!("stored transaction locator does not match its record");
+                        }
+                        // An annotation changes without materializing the body. Its
+                        // durable line must still carry the snapshot's annotations:
+                        // the optional metadata cache cannot be their sole copy.
+                        if full.notes != record.notes
+                            || full.color_tag != record.color_tag
+                            || full.user_note != record.user_note
+                            || full.annotation_revision != record.annotation_revision
+                            || full.annotation_client_versions != record.annotation_client_versions
+                        {
+                            full.notes.clone_from(&record.notes);
+                            full.color_tag.clone_from(&record.color_tag);
+                            full.user_note.clone_from(&record.user_note);
+                            full.annotation_revision = record.annotation_revision;
+                            full.annotation_client_versions
+                                .clone_from(&record.annotation_client_versions);
+                            line = serde_json::to_vec(&full)
+                                .context("failed to serialize annotated transaction record")?;
+                        }
+                    } else {
+                        // A torn write after power loss. Refusing would refuse
+                        // every later save and load, so the row keeps its
+                        // metadata without bodies, and the file as it was goes
+                        // aside first: nothing this rewrite drops is lost.
+                        if !kept_aside {
+                            keep_damaged_transactions_file_aside(source);
+                            kept_aside = true;
+                        }
+                        warn!(
+                            record_id = %record.id,
+                            offset = locator.offset,
+                            "stored transaction line is damaged; keeping the record without bodies"
+                        );
+                        line = serde_json::to_vec(record)
+                            .context("failed to serialize transaction record")?;
                     }
                 } else {
                     line = serde_json::to_vec(record)
@@ -3413,7 +3807,7 @@ fn tighten_private_dir(_path: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn create_private_file(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn create_private_file(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -3423,7 +3817,7 @@ fn create_private_file(path: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(not(unix))]
-fn create_private_file(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn create_private_file(path: &Path) -> io::Result<fs::File> {
     fs::File::create(path)
 }
 
@@ -3667,6 +4061,25 @@ fn move_corrupt_session_file_aside(parent_dir: &Path, path: &Path, label: &str) 
     }
 }
 
+/// Keeps the transactions file as it was before a rewrite drops a damaged line
+/// from it. A hard link costs no space until the rewrite replaces the file; a
+/// copy stands in where links are unsupported.
+fn keep_damaged_transactions_file_aside(source: &Path) {
+    let Some(parent_dir) = source.parent() else {
+        return;
+    };
+    let aside = parent_dir.join(format!(".transactions.ndjson.corrupt-{}", Uuid::new_v4()));
+    if let Err(error) =
+        fs::hard_link(source, &aside).or_else(|_| fs::copy(source, &aside).map(drop))
+    {
+        warn!(
+            ?error,
+            path = %aside.display(),
+            "failed to keep the damaged transactions file aside"
+        );
+    }
+}
+
 fn repeated_transaction_ids(records: &[TransactionRecord]) -> bool {
     let mut ids = HashSet::with_capacity(records.len());
     records.iter().any(|record| !ids.insert(record.id))
@@ -3818,11 +4231,14 @@ fn replay_transaction_journal(
         let Some(locator) = snapshot.transaction_locators.remove(id) else {
             continue;
         };
-        let mut full = read_transaction_at(storage_dir, locator)
-            .filter(|full| full.id == *id)
-            .ok_or_else(|| {
-                anyhow!("failed to read stored transaction while replaying annotations")
-            })?;
+        let Some(mut full) =
+            read_transaction_at(storage_dir, locator).filter(|full| full.id == *id)
+        else {
+            // The record keeps its replayed annotations, and the rewrite this
+            // replay leads to judges the line as it judges any other.
+            snapshot.transaction_locators.insert(*id, locator);
+            continue;
+        };
         full.notes = std::mem::take(&mut record.notes);
         full.color_tag = record.color_tag.take();
         full.user_note = record.user_note.take();
@@ -4727,7 +5143,7 @@ fn persist_session_snapshot(
     write_json(&snapshot_path(&storage_dir), snapshot)
 }
 
-fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     write_json_with_commit_status(path, value).map_err(|failure| failure.error)
 }
 
@@ -12196,6 +12612,99 @@ mod tests {
         drop(registry);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn a_damaged_body_line_keeps_its_row_without_bodies_and_the_old_file_aside() {
+        // A torn write after power loss leaves the file its size; the damaged
+        // line is read when a journal replay rewrites the file on load, when
+        // the next save does, or when a replayed annotation needs its body.
+        // A whole line of another record still aborts the save: see
+        // snapshot_missing_or_mismatched_source_fails_without_publishing_empty_bodies.
+        for damage in ["torn-on-load", "torn-on-save", "torn-annotated"] {
+            let (root, registry, session) = snapshot_correction_fixture().await;
+            let mut ids = Vec::new();
+            for sequence in 1..=3 {
+                let record = deletion_test_record(sequence);
+                ids.push(record.id);
+                session.store.insert(record).await;
+            }
+            session.persist().await.unwrap();
+            match damage {
+                "torn-on-load" => {
+                    session.store.insert(deletion_test_record(4)).await;
+                }
+                "torn-annotated" => {
+                    session
+                        .store
+                        .update_annotations_durable_with_client(
+                            ids[1],
+                            None,
+                            Some(Some("kept note".into())),
+                            Some("client".into()),
+                            Some(1),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let session_id = session.id();
+            let storage = session.storage_dir().to_path_buf();
+            drop(session);
+            let path = super::transactions_path(&storage);
+            let meta = super::read_transactions_meta(&storage).unwrap();
+            let locator = meta.iter().find(|(row, _)| row.id == ids[1]).unwrap().1;
+            let mut before = std::fs::read(&path).unwrap();
+            let start = locator.offset as usize;
+            before[start..start + 8].copy_from_slice(&[0; 8]);
+            std::fs::write(&path, &before).unwrap();
+
+            let session = registry.load_context(session_id).unwrap();
+            if damage.ends_with("-on-save") {
+                session.persist().await.unwrap();
+            }
+            let aside: Vec<Vec<u8>> = std::fs::read_dir(&storage)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".transactions.ndjson.corrupt-")
+                })
+                .map(|entry| std::fs::read(entry.path()).unwrap())
+                .collect();
+            assert_eq!(aside, vec![before], "{damage}");
+            drop(session);
+            drop(registry);
+
+            let (registry, session) = SessionRegistry::load_or_create(&root, 32, 32).unwrap();
+            let kept = session.store.get(ids[1]).await.unwrap();
+            assert_eq!(kept.path, "/2", "{damage}");
+            assert!(kept.request.body_preview.is_empty(), "{damage}");
+            if damage == "torn-annotated" {
+                assert_eq!(kept.user_note.as_deref(), Some("kept note"));
+            }
+            for (index, sequence) in [(0, 1), (2, 3)] {
+                assert_eq!(
+                    session
+                        .store
+                        .get(ids[index])
+                        .await
+                        .unwrap()
+                        .request
+                        .body_preview,
+                    format!("fixture request body {sequence}"),
+                    "{damage}"
+                );
+            }
+            drop(session);
+            drop(registry);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn snapshot_ambiguous_duplicate_preflight_preserves_all_session_files() {
         fn files(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
@@ -12242,6 +12751,242 @@ mod tests {
             "preflight must precede every writable repair"
         );
         drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn overview_record(method: &str, host: &str, path: &str, seconds: i64) -> TransactionRecord {
+        let message = MessageRecord {
+            headers: Vec::new(),
+            body_preview: String::new(),
+            body_encoding: BodyEncoding::Utf8,
+            body_size: 0,
+            decoded_body_size: None,
+            preview_truncated: false,
+            content_type: None,
+            content_decoded: false,
+        };
+        TransactionRecord::http(
+            DateTime::<Utc>::from_timestamp(1_800_000_000 + seconds, 0).unwrap(),
+            method.into(),
+            "https".into(),
+            host.into(),
+            path.into(),
+            Some(200),
+            1,
+            message.clone(),
+            Some(message),
+            Vec::new(),
+            None,
+            None,
+        )
+    }
+
+    fn overview_finding(severity: Severity) -> ScannerFinding {
+        ScannerFinding {
+            id: Uuid::new_v4(),
+            record_id: Uuid::new_v4(),
+            found_at: Utc::now(),
+            rule_id: String::new(),
+            severity,
+            category: "test".into(),
+            title: "synthetic".into(),
+            detail: String::new(),
+            evidence: String::new(),
+            host: "example.com".into(),
+            path: "/".into(),
+            location: None,
+        }
+    }
+
+    #[test]
+    fn traffic_overview_ranks_hosts_skips_tunnels_and_counts_what_the_operator_marked() {
+        let mut records = vec![
+            overview_record("GET", "b.example.com", "/", 1),
+            overview_record("GET", "a.example.com", "/", 2),
+            overview_record("GET", "b.example.com", "/", 3),
+            overview_record("CONNECT", "c.example.com", "", 9),
+            overview_record("GET", "", "/", 4),
+        ];
+        for host in [
+            "d.example.com",
+            "e.example.com",
+            "f.example.com",
+            "g.example.com",
+        ] {
+            records.push(overview_record("GET", host, "/", 5));
+        }
+        records[0].color_tag = Some("red".into());
+        records[1].user_note = Some("token reuse".into());
+        // A note Sniper adds itself is not the operator's mark.
+        records[2].notes.push("Sent by Active Scan.".into());
+
+        let overview = super::TrafficOverview::from_records(&records);
+
+        let hosts: Vec<_> = overview
+            .top_hosts
+            .iter()
+            .map(|host| (host.host.as_str(), host.requests))
+            .collect();
+        assert_eq!(
+            hosts,
+            [
+                ("b.example.com", 2),
+                ("a.example.com", 1),
+                ("d.example.com", 1),
+                ("e.example.com", 1),
+                ("f.example.com", 1)
+            ]
+        );
+        assert_eq!(
+            overview.last_captured_at,
+            DateTime::<Utc>::from_timestamp(1_800_000_009, 0)
+        );
+        assert_eq!(overview.marked_requests, 2);
+    }
+
+    #[test]
+    fn session_overview_names_scope_pins_rules_scans_and_findings_without_copying_values() {
+        let mut snapshot = super::StoredSessionSnapshot::default();
+        snapshot.runtime.scope_patterns = vec!["*.example.com".into(), "api.example.net".into()];
+        snapshot.runtime.excluded_scope_patterns = vec!["static.example.com".into()];
+        let tab = |label: &str, pinned: bool, path: &str| ReplayTabState {
+            custom_label: label.into(),
+            pinned,
+            base_request: Some(EditableRequest {
+                scheme: "https".into(),
+                host: "api.example.com".into(),
+                method: "POST".into(),
+                path: path.into(),
+                headers: Vec::new(),
+                body: "secret=value".into(),
+                body_encoding: BodyEncoding::Utf8,
+                preview_truncated: false,
+            }),
+            ..Default::default()
+        };
+        snapshot.workspace.replay.tabs = vec![
+            tab("Login bypass", true, "/login"),
+            tab("", true, "/v1/orders?token=abc#top"),
+            tab("Scratch", false, "/"),
+        ];
+        let rule =
+            |description: &str, enabled: bool, target: MatchReplaceTarget| MatchReplaceRule {
+                id: Uuid::new_v4(),
+                enabled,
+                description: description.into(),
+                scope: MatchReplaceScope::Request,
+                target,
+                search: "Bearer secret".into(),
+                replace: "Bearer other".into(),
+                regex: false,
+                case_sensitive: false,
+            };
+        snapshot.match_replace_rules = vec![
+            rule("Strip CSP", true, MatchReplaceTarget::HeaderName),
+            rule("", true, MatchReplaceTarget::HeaderValue),
+            rule("Off", false, MatchReplaceTarget::Body),
+        ];
+        let at =
+            |seconds: i64| DateTime::<Utc>::from_timestamp(1_800_000_000 + seconds, 0).unwrap();
+        snapshot.template_scans.jobs = vec![
+            crate::templates::scan::ScanJob {
+                status: "completed".into(),
+                started_at: at(10),
+                targets: vec![
+                    "https://app.example.com".into(),
+                    "https://api.example.com".into(),
+                ],
+                matched: 2,
+                ..Default::default()
+            },
+            crate::templates::scan::ScanJob {
+                status: "completed".into(),
+                auto: true,
+                started_at: at(30),
+                targets: vec!["https://www.example.com".into()],
+                ..Default::default()
+            },
+        ];
+        snapshot.recon.jobs = vec![crate::recon::ReconJob {
+            id: Uuid::new_v4(),
+            target_url: "https://app.example.com/".into(),
+            status: "completed".into(),
+            started_at: at(20),
+            finished_at: None,
+            sources: Vec::new(),
+            error: None,
+        }];
+        snapshot.scanner_findings = vec![
+            overview_finding(Severity::High),
+            overview_finding(Severity::Low),
+            overview_finding(Severity::Low),
+        ];
+
+        let overview = super::SessionOverview::new(super::TrafficOverview::default(), &snapshot);
+
+        assert_eq!(overview.scope, ["*.example.com", "api.example.net"]);
+        assert_eq!(overview.excluded_scope, ["static.example.com"]);
+        assert_eq!(
+            overview.pinned_replays,
+            ["Login bypass", "POST api.example.com/v1/orders"]
+        );
+        assert_eq!(overview.pinned_replay_count, 2);
+        assert_eq!(
+            overview.replace_rules,
+            ["Strip CSP", "Request header value rule"]
+        );
+        assert_eq!(overview.replace_rule_count, 2);
+        let activity: Vec<_> = overview
+            .activity
+            .iter()
+            .map(|entry| (entry.kind.as_str(), entry.target.as_str(), entry.matched))
+            .collect();
+        assert_eq!(
+            activity,
+            [
+                ("auto scan", "https://www.example.com", Some(0)),
+                ("recon", "https://app.example.com/", None),
+                ("manual scan", "https://app.example.com +1", Some(2)),
+            ]
+        );
+        assert_eq!(
+            overview.findings,
+            super::SeverityCounts {
+                high: 1,
+                low: 2,
+                ..Default::default()
+            }
+        );
+        // Nothing from a request or a rule's text reaches the registry.
+        let stored = serde_json::to_string(&overview).unwrap();
+        for value in ["token=abc", "secret=value", "Bearer"] {
+            assert!(!stored.contains(value), "{value} leaked into the overview");
+        }
+
+        let mut metadata = super::default_session_metadata("overview");
+        assert!(super::update_metadata_counts_from_snapshot(
+            &mut metadata,
+            &snapshot,
+            10,
+            10
+        ));
+        assert_eq!(metadata.overview, overview);
+        assert!(!super::update_metadata_counts_from_snapshot(
+            &mut metadata,
+            &snapshot,
+            10,
+            10
+        ));
+    }
+
+    #[test]
+    fn directory_bytes_adds_up_files_below_a_session_folder() {
+        let root = std::env::temp_dir().join(format!("sniper-overview-size-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("a"), [0u8; 100]).unwrap();
+        std::fs::write(root.join("nested").join("b"), [0u8; 23]).unwrap();
+        assert_eq!(super::directory_bytes(&root), 123);
+        assert_eq!(super::directory_bytes(&root.join("missing")), 0);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

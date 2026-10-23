@@ -445,34 +445,28 @@ test('HTTP session counts remain exact at/above the legacy global limit; non-HTT
   ];
   const state = { sessions, activeSession: sessions[0], settings: { max_transaction_entries: 250000, max_entries: 250 } };
   const els = new Proxy({}, { get: (obj, key) => obj[key] ||= { querySelectorAll: () => [] } });
-  const context = loadFunctions(['renderDashboard', 'formatCappedCount', 'retainedEntriesCap'], {
+  const context = loadFunctions(['renderDashboard', 'sessionFindingCount', 'formatSize', 'formatCappedCount', 'retainedEntriesCap'], {
     state, els, document: { getElementById: () => null }, getSortedSessions: () => sessions,
     formatTimestamp: () => '-', escapeHtml: String,
   });
   context.renderDashboard();
-  assert.equal(els.dashboardCurrentSessionRequests.textContent, '250000');
-  assert.equal(els.dashboardCurrentSessionWebsockets.textContent, '250+');
-  assert.equal(els.dashboardCurrentSessionEvents.textContent, '250+');
+  assert.match(els.dashboardSessionsBody.innerHTML, /<td>250000<\/td>\s*<td>250\+<\/td>/);
   assert.match(els.dashboardSessionsBody.innerHTML, /<td>500001<\/td>/);
   assert.doesNotMatch(els.dashboardSessionsBody.innerHTML, /250000\+|500001\+/);
-  state.selectedSessionId = 'session-b'; context.renderDashboard();
-  assert.equal(els.dashboardCurrentSessionRequests.textContent, '500001');
-  assert.equal(els.dashboardCurrentSessionWebsockets.textContent, '251+');
-  assert.equal(els.dashboardCurrentSessionEvents.textContent, '300+');
+  assert.match(els.dashboardSessionsBody.innerHTML, /<td>500001<\/td>\s*<td>251\+<\/td>/);
 });
 
 test('global capture/settings information only reports body preview size, never a legacy HTTP retention limit', async () => {
   const state = {}, elements = {};
   const els = new Proxy({}, { get: (obj, key) => obj[key] ||= control() });
   const document = { getElementById(id) { return elements[id] ||= control(); }, activeElement: null };
-  const context = loadFunctions(['_applySettings', 'formatSize'], {
-    state, els, document, syncHttpCapturePill() {}, updateProxyStatusIndicator() {}, updateRemoteUiIndicator() {},
+  const context = loadFunctions(['_applySettings', 'currentSessionId', 'formatSize'], {
+    state, els, document, resetFindingsUiState() {}, syncHttpCapturePill() {}, updateProxyStatusIndicator() {}, updateRemoteUiIndicator() {},
     formatTimestamp: () => '-', escapeHtml: String, renderInterceptStatus() {}, renderProxySettings() {}, renderDashboard() {},
   });
   const settings = { body_preview_bytes: 65536, max_transaction_entries: 250000, runtime: {}, active_session: { id: 'session-a' },
     certificate: { special_host_http: 'http://example.com', special_host_https: 'https://example.com' } };
   await context._applySettings(response(settings));
-  assert.equal(els.captureMode.textContent, '64 KB body preview cap');
   // Execute the actual label assignment from the independent runtime panel.
   const assignment = appSource.match(/^  els\.proxySettingsCaptureCap\.textContent = .*;$/m)[0];
   require('node:vm').runInContext(assignment, context);

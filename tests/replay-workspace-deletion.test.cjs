@@ -46,19 +46,18 @@ test("closing an inactive tab preserves current unsynced CodeMirror text and foc
   assert.deepEqual(f.renders.map(render => render.kind), ["strip"]);
 });
 
-test("closing the last saved HTTP tab makes a fresh local draft with monotonic sequence", async () => {
+test("closing the last saved HTTP tab elsewhere leaves Replay empty with a monotonic sequence", async () => {
   const f = fixture(), a = f.tab("last");
   f.state.replayTabSequence = 93;
   f.seed([a]);
   await f.adopt(f.remote([]));
-  const fresh = f.state.replayTabs[0];
-  assert.notEqual(fresh.id, a.id);
-  assert.equal(fresh.sequence, 94);
-  assert.equal(f.state.replayTabSequence, 94);
+  assert.equal(f.state.replayTabs.length, 0);
+  assert.equal(f.state.activeReplayTabId, null);
+  assert.equal(f.state.replayTabSequence, 93);
   assert.equal(f.context.workspaceSaveCommittedSnapshot.replay.tabs.length, 0);
   await f.adopt(f.remote([], 12));
-  assert.equal(f.state.replayTabs[0], fresh, "uncommitted replacement must not be mistaken for an external deletion");
-  assert.equal(f.state.replayTabSequence, 94);
+  assert.equal(f.state.replayTabs.length, 0);
+  assert.equal(f.state.replayTabSequence, 93);
   assert.equal(f.context.snapshotWorkspaceState().replay.tabs.some(tab => tab.id === a.id), false);
 });
 
@@ -182,21 +181,21 @@ test("normal save still commits and updates the baseline", async () => {
 });
 
 test("newer accepted fetch wins over a late older fetch, even if its payload claims a newer revision", async () => {
-  const f = selectedFixture(), first = f.context.adoptExternalReplayTabs(), second = f.context.adoptExternalReplayTabs();
+  const f = selectedFixture(), first = f.context.adoptExternalWorkspace(), second = f.context.adoptExternalWorkspace();
   f.succeed(1, f.remote([f.b], 12)); await second;
   f.succeed(0, f.remote([f.a, f.b], 13)); await first;
   assert.equal(f.state.workspaceRevision, 12); assert.equal(f.state.replayTabs.some(tab => tab.id === f.a.id), false);
 });
 
 test("an older revision fetched after a save is ignored", async () => {
-  const f = selectedFixture(), reading = f.context.adoptExternalReplayTabs(), saving = f.context.saveWorkspaceState();
+  const f = selectedFixture(), reading = f.context.adoptExternalWorkspace(), saving = f.context.saveWorkspaceState();
   f.succeed(1, { session_id: "session-a", revision: 12 }); await saving;
   f.succeed(0, f.remote([], 11)); await reading;
   assert.equal(f.state.workspaceRevision, 12); assert.equal(f.state.replayTabs.length, 2);
 });
 
 test("A to B to A workspace generation rejects stale adoption and save acknowledgement", async () => {
-  const f = selectedFixture(), reading = f.context.adoptExternalReplayTabs(), saving = f.context.saveWorkspaceState();
+  const f = selectedFixture(), reading = f.context.adoptExternalWorkspace(), saving = f.context.saveWorkspaceState();
   const resetStart = appSource.indexOf("function resetSessionScopedUiState() {");
   const resetEnd = appSource.indexOf("  clearReplaySendInFlight();", resetStart);
   assert.ok(resetEnd > resetStart);
@@ -298,7 +297,7 @@ test("a dirty inactive deletion preserves every current editor and leaves clean 
   f.els.renameInput = { value: "still typing" };
   const baseline = plain(f.context.workspaceSaveCommittedSnapshot);
   const added = f.tab("new-remote");
-  const reading = f.context.adoptExternalReplayTabs(), concurrent = f.context.adoptExternalReplayTabs();
+  const reading = f.context.adoptExternalWorkspace(), concurrent = f.context.adoptExternalWorkspace();
   f.succeed(0, f.remote([f.b, added], 11)); await reading;
   f.succeed(1, f.remote([added], 12)); await concurrent;
   assert.equal(f.context.workspaceSaveConflictPending, true);
@@ -311,22 +310,24 @@ test("a dirty inactive deletion preserves every current editor and leaves clean 
   assert.equal(f.renders.length, 0);
 });
 
-test("the existing local close-last flow also preserves tab sequence and generates a new ID", async () => {
+// The server refuses an empty workspace only when its sequence is zero, the mark
+// of a client that never loaded; a deliberate close of the last tab keeps it.
+test("the existing local close-last flow saves no tabs and keeps the tab sequence", async () => {
   const f = fixture(), last = f.tab("last");
   f.state.replayTabSequence = 80; f.seed([last]);
   const closing = f.context.closeRepeaterTab(last.id);
   assert.equal(f.requests.length, 1);
   const payload = JSON.parse(f.requests[0].options.body);
-  assert.equal(payload.replay.tab_sequence, 81);
-  assert.equal(payload.replay.tabs[0].sequence, 81);
-  assert.notEqual(payload.replay.tabs[0].id, last.id);
+  assert.equal(payload.replay.tab_sequence, 80);
+  assert.deepEqual(payload.replay.tabs, []);
   f.succeed(0, { session_id: "session-a", revision: 11 }); await closing;
-  assert.equal(f.state.replayTabSequence, 81);
+  assert.equal(f.state.replayTabSequence, 80);
+  assert.equal(f.context.createReplayTab().sequence, 81);
 });
 
 
 for (const closeLocally of [false, true]) {
-  test(`${closeLocally ? "local" : "external"} close preserves a legacy tab sequence ahead of its counter`, async () => {
+  test(`${closeLocally ? "local" : "external"} close keeps a legacy tab sequence ahead of its counter`, async () => {
     const f = fixture(), last = f.tab("legacy");
     last.sequence = 50; f.state.replayTabSequence = 1; f.seed([last]);
     if (closeLocally) {
@@ -335,13 +336,14 @@ for (const closeLocally of [false, true]) {
     } else {
       await f.adopt(f.remote([]));
     }
-    assert.equal(f.state.replayTabs[0].sequence, 51); assert.equal(f.state.replayTabSequence, 51);
+    assert.equal(f.state.replayTabs.length, 0); assert.equal(f.state.replayTabSequence, 50);
+    assert.equal(f.context.createReplayTab().sequence, 51);
   });
 }
 
 test("external adoption fetch is pinned to its initiating session in the query", async () => {
   const f = selectedFixture(); f.state.activeSession.id = "session with/slash";
-  const reading = f.context.adoptExternalReplayTabs();
+  const reading = f.context.adoptExternalWorkspace();
   assert.equal(f.requests[0].url, "/api/workspace-state?session_id=session%20with%2Fslash");
   f.succeed(0, f.remote([f.b])); await reading;
   assert.equal(f.state.workspaceRevision, 11);

@@ -933,6 +933,19 @@ fn links_count_rows_whose_response_allowed_the_source_origin() {
             link.relationship
         );
     }
+    // Each row names the page in both headers: eight requests, not sixteen.
+    assert_eq!(api.header_sources.len(), 1);
+    let source = &api.header_sources[0];
+    assert_eq!(source.source_origin, page);
+    assert_eq!(
+        (
+            source.request_count,
+            source.request_kinds.values().sum::<usize>(),
+            source.cors_allowed_count,
+            source.cors_credentials_count
+        ),
+        (8, 8, 3, 1)
+    );
 }
 
 // Bundles, pages and asset URLs name front-end technologies; the map gives an
@@ -2120,18 +2133,19 @@ fn an_origin_lists_what_no_rule_names() {
 }
 
 // An API's successful answer is not read, but the same answer to a request a
-// tester sent from Replay is, as is what a diagnostic path answers.
+// tester sent from Replay or a scan is, as is what a diagnostic path answers.
+// Rows a scan sent before it was renamed say so in the old words.
 #[test]
 fn a_replayed_answer_and_a_diagnostic_path_are_read() {
     use crate::store::ListFilters;
     let session = Uuid::from_u128(111);
-    let answer = |host: &str, path: &str, kind: &str, body: &[u8], replayed: bool, sequence| {
+    let answer = |host: &str, path: &str, kind: &str, body: &[u8], note: Option<&str>, sequence| {
         let mut record = filter_fixture(host, path, 200, kind, None, sequence);
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::CONTENT_TYPE, kind.parse().unwrap());
         record.response = Some(MessageRecord::from_headers_and_body(&headers, body, 4096));
-        if replayed {
-            record.notes.push(crate::model::REPLAY_NOTE.to_string());
+        if let Some(note) = note {
+            record.notes.push(note.to_string());
         }
         record
     };
@@ -2143,7 +2157,7 @@ fn a_replayed_answer_and_a_diagnostic_path_are_read() {
             "/api/cart",
             "application/json",
             trace,
-            false,
+            None,
             1,
         ),
         answer(
@@ -2151,7 +2165,7 @@ fn a_replayed_answer_and_a_diagnostic_path_are_read() {
             "/api/cart",
             "application/json",
             trace,
-            true,
+            Some(crate::model::REPLAY_NOTE),
             2,
         ),
         answer(
@@ -2159,8 +2173,24 @@ fn a_replayed_answer_and_a_diagnostic_path_are_read() {
             "/.git/config",
             "text/plain",
             b"[core]\n\trepositoryformatversion = 0\n",
-            false,
+            None,
             3,
+        ),
+        answer(
+            "d.example.com",
+            "/api/cart",
+            "application/json",
+            trace,
+            Some(crate::model::TEMPLATE_SCAN_NOTE),
+            4,
+        ),
+        answer(
+            "e.example.com",
+            "/api/cart",
+            "application/json",
+            trace,
+            Some("Sent by Template Scan."),
+            5,
         ),
     ]);
     let found = |origin: &str| {
@@ -2187,6 +2217,13 @@ fn a_replayed_answer_and_a_diagnostic_path_are_read() {
     );
     assert!(found("https://b.example.com").contains(&"java_stack_trace".to_string()));
     assert!(found("https://c.example.com").contains(&"git_config".to_string()));
+    assert_eq!(crate::model::TEMPLATE_SCAN_NOTE, "Sent by Active Scan.");
+    for scanned in ["https://d.example.com", "https://e.example.com"] {
+        assert!(
+            found(scanned).contains(&"java_stack_trace".to_string()),
+            "{scanned}"
+        );
+    }
 }
 
 // A page that is not UTF-8, as many Korean sites still serve in EUC-KR, is
@@ -2799,4 +2836,117 @@ fn scoped_map_assets_of_capped_origins_do_not_use_body_reads() {
         .stopped_by
         .contains(&"origins_limit".to_string()));
     assert_eq!(map.snapshot.omitted_rows, 1);
+}
+
+// The Flow view lists the selected origin's rows and those of the origins it
+// links to directly, in order, one phase per page load, repeats folded.
+#[test]
+fn flow_orders_an_origins_requests_by_page_load_and_folds_repeats() {
+    let session = Uuid::from_u128(101);
+    let page = "https://www.example.com/";
+    let navigate = |host: &str, path: &str, status: u16, sequence: u64| {
+        with_request_headers(
+            filter_fixture(host, path, status, "text/html", Some(page), sequence),
+            &[("Sec-Fetch-Dest", "document")],
+        )
+    };
+    let call = |sequence| {
+        with_request_headers(
+            filter_fixture(
+                "api.example.com",
+                "/v1/config",
+                200,
+                "application/json",
+                Some(page),
+                sequence,
+            ),
+            &[
+                ("Origin", "https://www.example.com"),
+                ("Sec-Fetch-Dest", "empty"),
+            ],
+        )
+    };
+    let mut login = navigate("sso.example.com", "/login", 302, 5);
+    login.response.as_mut().unwrap().headers.push(HeaderRecord {
+        name: "Location".into(),
+        value: "https://www.example.com/callback".into(),
+    });
+    let mut records = vec![
+        with_request_headers(
+            filter_fixture("www.example.com", "/", 200, "text/html", None, 1),
+            &[("Sec-Fetch-Dest", "document")],
+        ),
+        call(2),
+        call(3),
+        call(4),
+        login,
+        navigate("www.example.com", "/callback", 200, 6),
+        with_request_headers(
+            filter_fixture("other.example.com", "/", 200, "text/html", None, 7),
+            &[("Sec-Fetch-Dest", "document")],
+        ),
+    ];
+    // The store takes the newest record first.
+    records.reverse();
+    let store = TransactionStore::from_records(records);
+    let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
+        session,
+        DEFAULT_MAX_RECORDS,
+        technology::CatalogVersion::V2,
+        &crate::store::ListFilters::default(),
+    );
+    let flow = crate::service_map_flow::build(
+        session,
+        snapshot,
+        "https://www.example.com",
+        false,
+        &[],
+        &[],
+    )
+    .unwrap();
+
+    assert_eq!(
+        flow.lanes,
+        [
+            "https://www.example.com",
+            "https://api.example.com",
+            "https://sso.example.com"
+        ]
+    );
+    assert_eq!((flow.flow_rows, flow.complete), (6, true));
+    let pages: Vec<_> = flow
+        .phases
+        .iter()
+        .map(|phase| {
+            phase
+                .page
+                .as_ref()
+                .map(|page| format!("{}{}", page.origin, page.path))
+        })
+        .collect();
+    assert_eq!(
+        pages,
+        [
+            Some("https://www.example.com/".to_string()),
+            Some("https://sso.example.com/login".to_string()),
+            Some("https://www.example.com/callback".to_string()),
+        ]
+    );
+    let first = &flow.phases[0].steps;
+    assert_eq!(first.len(), 2, "the three config calls fold into one step");
+    assert_eq!(
+        (
+            first[1].origin.as_str(),
+            first[1].path.as_str(),
+            first[1].count,
+            first[1].request_kind
+        ),
+        ("https://api.example.com", "/v1/config", 3, "api")
+    );
+    assert_eq!(first[1].evidence.len(), 2, "the first and the newest row");
+    let redirect = flow.phases[1].steps[0].redirect.as_ref().unwrap();
+    assert_eq!(
+        (redirect.origin.as_str(), redirect.path.as_str()),
+        ("https://www.example.com", "/callback")
+    );
 }

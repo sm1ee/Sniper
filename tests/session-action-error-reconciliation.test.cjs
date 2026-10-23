@@ -16,12 +16,10 @@ function setup() {
   f.old = f.tab('saved-a'); f.seed([f.old]);
   f.reloads = []; f.errors = []; f.warnings = [];
   f.els.dashboardCreateSessionName = { value: 'New stored session' };
-  for (const key of ['dashboardCurrentSessionName', 'dashboardCurrentSessionStatus', 'dashboardCurrentSessionPath',
-    'dashboardCurrentSessionRequests', 'dashboardCurrentSessionWebsockets', 'dashboardCurrentSessionEvents',
-    'dashboardCurrentSessionFuzzer', 'dashboardCurrentSessionRules', 'dashboardCurrentSessionCreated',
-    'dashboardCurrentSessionOpened', 'dashboardSessionsBody']) f.els[key] = { querySelectorAll: () => [] };
+  for (const key of ['dashboardCurrentSessionName', 'dashboardCurrentSessionStorage', 'dashboardCurrentSessionPath',
+    'dashboardSessionsBody', 'dashboardTiles', 'dashboardDetail']) f.els[key] = { querySelectorAll: () => [] };
   Object.assign(f.context, {
-    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
+    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
     requireOkResponse: async response => { if (!response.ok) throw new Error('Synthetic session read failed'); },
     flushTargetScopeDraft: async () => true, flushMatchReplaceDraft: async () => true,
     flushSequenceDraft: async () => true, flushAllPendingAnnotations: async () => {},
@@ -35,7 +33,7 @@ function setup() {
     console: { error() {}, warn: (...args) => f.warnings.push(args) },
   });
   for (const name of ['createSession', 'activateSessionById', 'deleteSessionById', 'loadSessions',
-    'reconcileSessionsAfterActionError', 'renderDashboard', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
+    'reconcileSessionsAfterActionError', 'renderDashboard', 'sessionFindingCount', 'formatSize', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
     const source = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'));
     // Keep the fixture behavioral: baseline handlers do not yet use this helper.
     if (!source && name === 'reconcileSessionsAfterActionError') continue;
@@ -93,7 +91,7 @@ for (const operation of ['create', 'activate', 'delete']) {
     if (operation === 'delete') assert.equal(f.state.selectedSessionId, 'session-a');
     if (operation === 'activate') {
       assert.match(f.toasts[0][0], /active session changed.*Keep a copy of unsaved edits.*Reload sessions/);
-      assert.equal(f.els.dashboardCurrentSessionStatus.textContent, 'Active');
+      assert.match(f.els.dashboardSessionsBody.innerHTML, /session-active" data-id="session-b"/);
     } else assert.match(f.toasts[0][0], /may have completed/);
   });
 
@@ -222,7 +220,7 @@ for (const operation of ['create', 'activate']) {
 }
 
 function installWorkspaceReload(f) {
-  for (const name of ['reloadSessionWorkspace', 'loadSettings', 'loadWorkspaceState', 'applyWorkspaceState']) {
+  for (const name of ['reloadSessionWorkspace', 'loadSettings', 'loadWorkspaceState', 'retireFindingActionProgress', 'applyWorkspaceState']) {
     vm.runInContext(appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'))[0], f.context);
   }
   vm.runInContext(appSource.match(/^class WorkspaceSessionMismatchError[^]*?^\}/m)[0], f.context);

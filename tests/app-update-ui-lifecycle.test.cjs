@@ -101,8 +101,9 @@ function fixture() {
   };
   const context = loadFunctions([
     "loadAppVersionInfo", "performSelfUpdate", "requireOkResponse",
-    "readApiErrorMessage", "formatStructuredApiErrorMessage", "setActiveTool",
+    "readApiErrorMessage", "formatStructuredApiErrorMessage", "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveTool",
   ], {
+    closeScannerSettings() {},
     TextDecoder,
     state,
     els: { openUpdateButton: button, appVersionLabel: element() },

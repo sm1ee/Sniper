@@ -17,9 +17,10 @@ function fixture() {
     classList: { add: (...values) => values.forEach(value => classes.add(value)), remove: (...values) => values.forEach(value => classes.delete(value)) } };
   const els = { openEventLogButton: button, eventLogStatus: {}, eventLogTableBody: {} };
   const c = loadFunctions([
-    "onClickWithProgress", "withButtonProgress", "setActiveTool", "loadEventLog", "jsonArray",
+    "onClickWithProgress", "withButtonProgress", "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveTool", "loadEventLog", "jsonArray",
     "renderEventLog", "escapeHtml", "mergeEventLogEntries",
   ], {
+    closeScannerSettings() {},
     state, els, session: "saved-session", BUTTON_PROGRESS_DELAY_MS: 180, EVENT_LOG_LIMIT: 500,
     _eventLogLoadGeneration: 0, _eventLogMutationGeneration: 0, _eventLogClearGeneration: 0,
     sanitizeActiveTool: value => value, scheduleUiSettingsSave() {},

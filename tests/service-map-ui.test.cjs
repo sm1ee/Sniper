@@ -40,7 +40,7 @@ function node() {
 function fixture(options = {}) {
   let session = 'session-one';
   const requests = [];
-  const els = Object.fromEntries(['panel', 'apiDocs', 'status', 'refresh', 'search', 'scope', 'canvas', 'graphBounds', 'detail', 'content', 'catalog', 'mapControls', 'allOrigins', 'directRelations', 'focusSelection', 'boundsDetails', 'graphDiagnostics', 'overlayStatus', 'viewport', 'zoomControls', 'zoomFit', 'zoomOut', 'zoomReset', 'zoomIn'].map(name => [name, node()]));
+  const els = Object.fromEntries(['panel', 'apiDocs', 'status', 'refresh', 'search', 'scope', 'canvas', 'graphBounds', 'detail', 'content', 'catalog', 'mapControls', 'allOrigins', 'directRelations', 'flow', 'flowMermaid', 'linkKinds', 'focusSelection', 'boundsDetails', 'graphDiagnostics', 'overlayStatus', 'viewport', 'zoomControls', 'zoomFit', 'zoomOut', 'zoomReset', 'zoomIn'].map(name => [name, node()]));
   els.viewport.clientWidth = 620; els.viewport.clientHeight = 500;
   const document = { activeElement: null, body: {}, documentElement: node(), querySelector: () => null };
   document.documentElement.style.setProperty("--ui-root-size", "12px");
@@ -68,6 +68,12 @@ test('every map toolbar control uses the standard compact toolbar sizing, and Re
   const reload = css.match(/\.service-map-reload \{([^}]+)\}/)?.[1];
   assert.match(reload, /flex: 0 0 auto;/); assert.match(reload, /white-space: nowrap;/);
   assert.match(css, /\.service-map-reload\.service-map-background-refresh:disabled \{[^}]*opacity: 1;/);
+});
+test('the map or the API list fills the workspace whichever siblings are hidden', () => {
+  const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
+  const workspace = css.match(/^\.service-map-workspace \{([^}]+)\}/m)?.[1];
+  assert.match(workspace, /display: flex; flex-direction: column;/);
+  assert.match(css, /^\.service-map-content, \.service-map-api-catalog \{ flex: 1; \}/m);
 });
 test('map is lazy: construction/hidden refresh cause no request', async () => {
   const f = fixture(); f.controller.setVisible(false); await f.controller.refresh();
@@ -353,7 +359,7 @@ for (const tool of ['target', 'map']) test(`${tool} loader only requests legacy 
   await ctx.loadTargetSiteMap();
   assert.equal(requests.some(url => url.startsWith('/api/target/site-map')), tool === 'target');
 });
-test('map/APIs polling bypasses legacy runtime/path reads entirely', async () => {
+test('map/APIs auxiliary polling leaves reads to the controller and bypasses legacy paths', async () => {
   for (const view of ['service-map', 'apis']) {
     let refreshes = 0;
     const ctx = loadFunctions(['pollAuxiliaryData'], {
@@ -362,7 +368,7 @@ test('map/APIs polling bypasses legacy runtime/path reads entirely', async () =>
       isWebsocketHistoryVisible: () => false, shouldPollFindingsBadge: () => false,
       loadTargetSiteMap() { assert.fail('Legacy path loader must not run in the bounded map'); },
     });
-    await ctx.pollAuxiliaryData(); assert.equal(refreshes, 1);
+    await ctx.pollAuxiliaryData(); assert.equal(refreshes, 0);
   }
 });
 test('integration wires session, removal, gap and owned transaction invalidation', () => {
@@ -457,7 +463,7 @@ for (const hidden of [false, true]) test(`a scope-rule save fences old map data 
   if (hidden) f.controller.setVisible(false);
   const runtime = deferred();
   const appState = { runtime: { scope_patterns: ['*.example.com'], excluded_scope_patterns: [] }, targetScopeEditorSessionId: 'session-one', targetScopeDraft: 'api.example.com', targetScopeExcludeDraft: '', targetScopeDraftVersion: 0, targetScopeSaveToken: 0 };
-  const ctx = loadFunctions(['saveTargetScope', 'formatScopePatternsText'], {
+  const ctx = loadFunctions(['saveTargetScope', 'postRuntimeSettings', 'formatScopePatternsText'], {
     state: appState, els: { targetScopeEditor: { value: 'api.example.com' }, targetScopeExcludeEditor: { value: '' } },
     currentSessionId: () => 'session-one', workspaceStateGeneration: 1, targetServiceMapController: f.controller,
     expectedActiveSessionIdForWrite: id => id, fetch: () => runtime.promise, showToast() {}, renderInterceptStatus() {}, renderProxySettings() {}, invalidateVisibleEntriesCache() {}, scheduleRefresh() {},
@@ -637,7 +643,8 @@ test('card and relationship selections never move a pinned anchor; Focus selecti
   f.els.panel.dispatch('click', { target: { closest: () => ({ dataset: { serviceOrigin: originB } }) } });
   assert.equal(f.state.anchorOrigin, originA);
   assert.equal(JSON.stringify([...f.state.layoutSlots]), slots);
-  f.els.directRelations.dispatch('click'); assert.equal(f.state.anchorOrigin, originA, 'active mode does not repin');
+  f.els.directRelations.dispatch('click'); assert.equal(f.state.anchorOrigin, null, 'a second press turns it off and never repins');
+  pin(f, originA);
   f.controller.selectOrigin(originB, 0);
   const pending = f.controller.loadEvidence('evidence-one');
   f.requests.at(-1).resolve(response(evidence('evidence-one', originB))); await pending;
@@ -705,7 +712,7 @@ test('in-contract direct neighbors remain available beyond the global 100 and pa
   assert.match(boundsText(f), /100-reference-card limit/);
 });
 
-test('direct arrows include only anchor-incident metadata, count distinct type/directions and exclude self links', async () => {
+test('direct arrows include only anchor-incident metadata, count distinct types, draw one arrow per direction and exclude self links', async () => {
   const f = fixture(), a = origin(originA), b = origin(originB), c = origin('https://third.example.com');
   a.redirects = [redirect(originB, '/one'), redirect(originB, '/two'), redirect(originA)];
   b.redirects = [redirect(c.origin)];
@@ -714,17 +721,19 @@ test('direct arrows include only anchor-incident metadata, count distinct type/d
   await f.load(snapshot([a, b, c])); pin(f, originA);
   assert.match(boundsText(f), /2 known direct neighbors/);
   assert.match(boundsText(f), /Non-self distinct typed links: 1 incoming \/ 3 outgoing · 1 redirect \/ 1 Origin \/ 2 Referer/);
-  assert.match(boundsText(f), /4 \/ 4 arrows between displayed cards \(cap 40\)/);
+  // The redirects, Origin and Referer from A to B share one arrow.
+  assert.match(boundsText(f), /2 \/ 2 arrows between displayed cards \(cap 40\)/);
   assert.doesNotMatch(f.els.canvas.innerHTML, /api.example.com → https:\/\/third.example.com/);
   assert.match(f.els.detail.innerHTML, /api.example.com\/one/);
   assert.match(f.els.detail.innerHTML, /api.example.com\/two/);
 });
 
-test('direct arrow cap reports visible-card eligible links separately from off-card links', async () => {
+test('direct arrow cap reports visible-card eligible arrows separately from off-card arrows', async () => {
   const f = fixture(), app = origin(originA), peers = Array.from({ length: 30 }, (_, i) => origin(`https://peer${i}.example.com`));
-  peers.forEach(peer => { peer.header_links = [header(originA), header(originA, 'referer_header')]; app.redirects.push(redirect(peer.origin)); });
+  // Each peer and the anchor point at each other: two arrows a peer.
+  peers.forEach(peer => { peer.header_links = [header(originA), header(originA, 'referer_header')]; peer.redirects = [redirect(originA)]; app.redirects.push(redirect(peer.origin)); });
   await f.load(snapshot([app, ...peers])); pin(f, originA);
-  assert.match(boundsText(f), /40 \/ 69 arrows between displayed cards \(cap 40\) · 21 links outside displayed cards/);
+  assert.match(boundsText(f), /40 \/ 46 arrows between displayed cards \(cap 40\) · 14 arrows outside displayed cards/);
   assert.equal((f.els.canvas.innerHTML.match(/marker-end=/g) || []).length, 40);
 });
 
@@ -946,10 +955,10 @@ test('direct primary summary stays compact while native disclosure retains all c
 
 test('primary direct summary keeps meaningful omissions visible without opening details', async () => {
   const f = fixture(), app = origin(originA), peers = Array.from({ length: 30 }, (_, i) => origin(`https://peer${String(i).padStart(2, '0')}.example.com`));
-  peers.forEach(peer => { peer.header_links = [header(originA), header(originA, 'referer_header')]; app.redirects.push(redirect(peer.origin)); });
+  peers.forEach(peer => { peer.header_links = [header(originA), header(originA, 'referer_header')]; peer.redirects = [redirect(originA)]; app.redirects.push(redirect(peer.origin)); });
   await f.load(snapshot([app, ...peers])); pin(f, originA);
   assert.match(f.els.graphBounds.textContent, /7 omitted by 24-card cap/);
-  assert.match(f.els.graphBounds.textContent, /29 arrows omitted by 40-arrow cap/);
+  assert.match(f.els.graphBounds.textContent, /6 arrows omitted by 40-arrow cap/);
   f.els.search.value = 'peer2'; f.els.search.dispatch('input');
   assert.match(f.els.graphBounds.textContent, /20 hidden by query/);
   assert.match(f.els.graphBounds.textContent, /Pinned anchor is outside the search query/);
@@ -1133,7 +1142,7 @@ test('partial output exposes truncation, omissions, long origins and full indepe
   assert.equal(f.state.bodyReferences.references.length, 100);
   assert.match(f.els.detail.innerHTML, /100 referenced origins · 700 literal URL occurrences/);
   assert.match(f.els.detail.innerHTML, /Partial retained-preview scan/);
-  assert.match(f.els.detail.innerHTML, /30 reference occurrence\(s\) omitted/);
+  assert.match(f.els.detail.innerHTML, /30 reference occurrences omitted/);
   assert.match(f.els.detail.innerHTML, /Scan: 262,144 bytes · Serialized row read: 2,097,152 bytes · Origins: 100 · URL candidates: 4,096 · Candidate: 4,096 bytes · Offsets per origin: 5/);
   assert.ok(f.els.detail.innerHTML.includes(longOrigin));
   assert.equal((f.els.detail.innerHTML.match(/class="service-map-body-reference-origin"/g) || []).length, 100);
@@ -1161,12 +1170,11 @@ test('canonical omitted references cannot exceed the inspected candidate budget'
 });
 
 function pollRealTargetMap(f) {
-  return loadFunctions(['pollAuxiliaryData'], {
-    state: { activeTool: 'map', activeTargetView: 'service-map' }, targetServiceMapController: f.controller,
-    isWebsocketHistoryVisible: () => false, shouldPollFindingsBadge: () => false,
-    loadTargetSiteMap() { assert.fail('No legacy map read'); },
-  }).pollAuxiliaryData();
+  // The controller now owns periodic reads. Its deterministic clock lifecycle
+  // is exercised separately in service-map-auto-refresh.test.cjs.
+  return f.controller.refresh();
 }
+
 function clickBodyInspector(f) {
   f.els.panel.dispatch('click', { target: { closest: () => ({ dataset: { serviceBodyReferences: 'inspect' } }) } });
 }
@@ -1390,7 +1398,8 @@ test('explicit Show and Clear are local, keep All origins default, and remove on
   const reads = f.requests.length; clickOverlay(f);
   assert.equal(f.state.anchorOrigin, originA);
   assert.equal(f.state.bodyReferenceOverlay.source.evidenceId, 'evidence-one');
-  assert.equal(f.els.allOrigins.attributes['aria-pressed'], 'false');
+  assert.equal(f.els.allOrigins.attributes['aria-pressed'], 'true', 'pinned is still the Origins view');
+  assert.equal(f.els.directRelations.attributes['aria-pressed'], 'true');
   assert.deepEqual(new Set(cardIds(f)), new Set([originA, 'https://assets.example.com']));
   assert.match(f.els.canvas.innerHTML, /data-relationship="body_url_reference"/);
   f.controller.selectOrigin('https://assets.example.com');
@@ -1468,23 +1477,23 @@ test('100 body origins retain the source and prioritize 23 reference cards with 
   assert.equal(f.requests.length, 3);
 });
 
-test('body, Origin, Referer and redirect arrows keep unique types and bounded distinct curves under 40 arrows', async () => {
+test('body arrows keep their type and metadata arrows merge per direction, with bounded distinct curves under 40 arrows', async () => {
   const f = fixture(), source = origin(originA), peers = Array.from({ length: 23 }, (_, i) => origin(`https://peer${String(i).padStart(2, '0')}.example.com`));
   peers.forEach(peer => { peer.header_links = [header(originA), header(originA, 'referer_header')]; source.redirects.push(redirect(peer.origin)); });
   await f.load(snapshot([source, ...peers])); await inspectSource(f);
   await resolveBodyReferences(f, bodyReferences({ references: bodyTargets(peers.map(item => item.origin)), candidates_scanned: 23 })); clickOverlay(f);
   assert.match(boundsText(f), /23 known direct neighbors/);
   assert.match(boundsText(f), /69 metadata \/ 23 body URL links/);
-  assert.match(boundsText(f), /40 \/ 92 arrows/);
-  assert.match(boundsText(f), /52 arrows omitted by 40-arrow cap/);
-  const arrows = [...f.els.canvas.innerHTML.matchAll(/<path class="service-map-edge ([^"]*)" data-relationship="([^"]+)" d="([^"]+)"[^>]*><title>([^<]+)<\/title>/g)];
+  assert.match(boundsText(f), /40 \/ 46 arrows/);
+  assert.match(boundsText(f), /6 arrows omitted by 40-arrow cap/);
+  const arrows = [...f.els.canvas.innerHTML.matchAll(/<path class="service-map-edge ([^"]*)" data-relationship="([^"]+)"(?: style="[^"]*")? d="([^"]+)"[^>]*><title>([^<]+)<\/title>/g)];
   assert.equal(arrows.length, 40);
   assert.equal(arrows.filter(item => item[2] === 'body_url_reference').length, 23);
   f.els.search.value = 'peer00'; f.els.search.dispatch('input');
-  const pair = [...f.els.canvas.innerHTML.matchAll(/<path class="service-map-edge ([^"]*)" data-relationship="([^"]+)" d="([^"]+)"[^>]*><title>([^<]+)<\/title>/g)];
-  assert.equal(pair.length, 4);
-  assert.equal(new Set(pair.map(item => item[3])).size, 4, 'same directed pair has distinct bounded curves');
-  assert.equal(new Set(pair.map(item => item[2])).size, 4);
+  const pair = [...f.els.canvas.innerHTML.matchAll(/<path class="service-map-edge ([^"]*)" data-relationship="([^"]+)"(?: style="[^"]*")? d="([^"]+)"[^>]*><title>([^<]+)<\/title>/g)];
+  assert.equal(pair.length, 2, 'the body arrow, and one arrow for the redirect, Origin and Referer');
+  assert.equal(new Set(pair.map(item => item[3])).size, 2, 'same directed pair has distinct bounded curves');
+  assert.equal(new Set(pair.map(item => item[2])).size, 2);
   f.controller.selectOrigin(peers[0].origin);
   assert.match(f.els.detail.innerHTML, /2 sampled HTTP rows/);
   const reads = f.requests.length; clickOverlay(f, 'clear');
@@ -1535,7 +1544,7 @@ test('manual Clear preserves native inspector disclosure, focus and nested scrol
   assert.equal(f.requests.length, 3);
 });
 
-test('opposite-direction metadata and body links use seven bounded, non-overpainting attachment offsets', () => {
+test('opposite-direction metadata and body links use bounded, non-overpainting attachment offsets', () => {
   const a = origin(originA), b = origin(originB);
   a.redirects = [redirect(originB)]; b.redirects = [redirect(originA)];
   a.header_links = [header(originB), header(originB, 'referer_header')];
@@ -1543,15 +1552,16 @@ test('opposite-direction metadata and body links use seven bounded, non-overpain
   const data = map.normalizeSnapshot(snapshot([a, b]), 'session-one');
   const layout = map.graphLayout(data.origins, [originA, originB], new Map(), originA,
     [{ source: originA, target: originB, relationship: 'body_url_reference', label: 'Literal body URL reference' }]);
-  assert.equal(layout.edges.length, 7);
+  // Each direction's metadata is one arrow; the inspected body link keeps its own.
+  assert.equal(layout.edges.length, 3);
   const offsets = layout.edges.map(edge => {
     const source = layout.nodes.find(node => node.origin === edge.source);
     return Number(edge.path.match(/^M [-\d.]+ ([-\d.]+)/)[1]) - source.y - map.GRAPH_GEOMETRY.cardHeight / 2;
   });
-  assert.equal(new Set(offsets).size, 7);
+  assert.equal(new Set(offsets).size, 3);
   assert.ok(offsets.every(value => Math.abs(value) <= map.GRAPH_GEOMETRY.cardHeight * 0.3 + 0.001));
-  assert.equal(layout.edges.filter(edge => edge.source === originA).length, 4);
-  assert.equal(layout.edges.filter(edge => edge.source === originB).length, 3);
+  assert.equal(layout.edges.filter(edge => edge.source === originA).length, 2);
+  assert.equal(layout.edges.filter(edge => edge.source === originB).length, 1);
 });
 
 test('overlay direct star keeps the pinned source opposite every incoming and outgoing neighbor', async () => {
@@ -1606,14 +1616,149 @@ test('metadata chain reads left to right, one column per link, inside its canvas
   assertCanvasContainsGeometry(refreshed);
 });
 
+function flowStep(origin, method, path, status, kind, count = 1, extra = {}) {
+  return { origin, method, path, status, request_kind: kind, count, first_seen: '2026-10-20T00:00:00Z', last_seen: '2026-10-20T00:00:01Z', evidence: ['evidence-one'], record_id: recordId, ...extra };
+}
+function flowPayload(session = 'session-one') {
+  return { schema_version: 1, session_id: session, origin: originA, lanes: [originA, originB], considered_rows: 10, flow_rows: 7, complete: true, phases: [
+    { page: { origin: originA, path: '/' }, steps: [flowStep(originA, 'GET', '/', 200, 'navigation'), flowStep(originB, 'GET', '/v1/config', 200, 'api', 3), flowStep(originB, 'GET', '/logo.png', 200, 'static', 2)] },
+    { page: { origin: originB, path: '/login' }, steps: [flowStep(originB, 'GET', '/login', 302, 'navigation', 1, { redirect: { origin: originA, path: '/callback' } })] },
+  ] };
+}
+
+test('a flow keeps its lanes, folds repeats, hides hidden kinds and draws a redirect back to the client', () => {
+  const flow = map.normalizeFlow(flowPayload(), 'session-one', originA);
+  assert.deepEqual([...flow.lanes], [originA, originB]);
+  const layout = map.flowLayout(flow, ['static']);
+  assert.equal(layout.bands.length, 2);
+  assert.equal(layout.arrows.filter(arrow => !arrow.redirect).length, 3, 'the static step is hidden');
+  assert.equal(layout.arrows.filter(arrow => arrow.redirect).length, 1);
+  const markup = map.flowMarkup(layout);
+  assert.match(markup, /GET \/v1\/config ×3 200/);
+  assert.match(markup, /302 to app\.example\.com\/callback/);
+  assert.doesNotMatch(markup, /logo\.png/);
+  assert.match(markup, new RegExp(`data-service-flow-record="${recordId}"`));
+  const mermaid = map.flowMermaid(flow, ['static']);
+  assert.match(mermaid, /^sequenceDiagram\n/);
+  assert.match(mermaid, /C->>O1: GET \/v1\/config ×3 200/);
+  assert.match(mermaid, /O1-->>C: 302 to app\.example\.com\/callback/);
+  assert.match(mermaid, /Note over C,O1: Page load: api\.example\.com\/login/);
+  assert.equal(map.normalizeFlow({ ...flowPayload(), origin: originB }, 'session-one', originA), null, 'another origin');
+  assert.equal(map.normalizeFlow(flowPayload('session-two'), 'session-one', originA), null, 'another session');
+});
+
+test('a flow draws method and status pills, each lane\'s requests and the time since the first request', () => {
+  const payload = flowPayload();
+  payload.phases[0].steps[1].first_seen = '2026-10-20T00:00:01.500Z';
+  payload.phases[1].steps[0].first_seen = '2026-10-20T00:01:05Z';
+  const markup = map.flowMarkup(map.flowLayout(map.normalizeFlow(payload, 'session-one', originA), ['static']));
+  assert.match(markup, /service-map-flow-pill method-get/);
+  assert.match(markup, /service-map-flow-pill status-ok/);
+  assert.match(markup, /service-map-flow-pill status-info/, 'the 302');
+  assert.match(markup, />×3</);
+  assert.match(markup, />5 requests</, 'the client sent every shown request');
+  assert.match(markup, />4 requests</, 'the API lane: the config three times and the login');
+  for (const time of ['+0ms', '+1.5s', '+1m05s']) assert.ok(markup.includes(`>${time}<`), time);
+  // WebKit draws no context-stroke marker, so heads are paths of their own.
+  assert.doesNotMatch(markup, /marker-end/);
+  assert.match(markup, /class="service-map-flow-head"/);
+});
+
+test('a flow draws its lane headers last, on a backdrop, so they can stay in view', () => {
+  const markup = map.flowMarkup(map.flowLayout(map.normalizeFlow(flowPayload(), 'session-one', originA), []));
+  const heads = markup.indexOf('class="service-map-flow-heads"');
+  assert.ok(heads > markup.lastIndexOf('class="service-map-flow-step'), 'the headers paint over the steps');
+  assert.match(markup.slice(heads), /service-map-flow-heads-backdrop/);
+  assert.match(markup.slice(heads), />Client</);
+  // Scrolled 300px down at half size, the headers move 600 flow units.
+  assert.equal(map.flowHeadsOffset(100, -200, 0.5), 600);
+  assert.equal(map.flowHeadsOffset(100, 140, 1), 0, 'not yet scrolled past');
+});
+
+test('Origins and Flow are the views; Direct relations and Copy Mermaid sit in the view they belong to', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  const toolbar = html.slice(html.indexOf('id="serviceMapViewControls"'), html.indexOf('id="serviceMapZoomControls"'));
+  assert.match(toolbar, /id="serviceMapAllOrigins"[^>]*>Origins</);
+  assert.match(toolbar, /id="serviceMapFlow"/);
+  assert.doesNotMatch(toolbar, /serviceMapDirectRelations|serviceMapFocusSelection|serviceMapFlowMermaid/);
+  const legend = html.slice(html.indexOf('class="service-map-legend"'), html.indexOf('id="serviceMapResizer"'));
+  for (const id of ['serviceMapDirectRelations', 'serviceMapFocusSelection', 'serviceMapFlowMermaid']) assert.match(legend, new RegExp(`id="${id}"`), id);
+  const f = fixture();
+  await f.load(); f.controller.selectOrigin(originA);
+  f.els.directRelations.dispatch('click');
+  assert.equal(f.state.anchorOrigin, originA);
+  f.els.directRelations.dispatch('click');
+  assert.equal(f.state.anchorOrigin, null, 'a second press turns it off');
+  f.els.flow.dispatch('click');
+  f.requests.at(-1).resolve(response(flowPayload()));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.els.allOrigins.attributes['aria-pressed'], 'false');
+  assert.equal(f.els.directRelations.classList.contains('hidden'), true);
+  assert.equal(f.els.flowMermaid.classList.contains('hidden'), false);
+  f.els.allOrigins.dispatch('click');
+  assert.equal(f.els.flowMermaid.classList.contains('hidden'), true);
+  assert.equal(f.els.directRelations.classList.contains('hidden'), false);
+});
+
+test('in Flow the kind toggles count the flow\'s requests and the legend shows Flow lines', async () => {
+  const f = fixture();
+  const legend = node();
+  f.els.linkKinds.parentElement = legend;
+  await f.load(); f.controller.selectOrigin(originA);
+  f.els.flow.dispatch('click');
+  f.requests.at(-1).resolve(response(flowPayload()));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(f.els.linkKinds.innerHTML, /Requests:/);
+  assert.match(f.els.linkKinds.innerHTML, /API calls 3/);
+  assert.match(f.els.linkKinds.innerHTML, /Static files 2/);
+  assert.equal(legend.classList.contains('flow-active'), true);
+  f.els.allOrigins.dispatch('click');
+  assert.doesNotMatch(f.els.linkKinds.innerHTML, /Requests:/);
+  assert.equal(legend.classList.contains('flow-active'), false);
+});
+
+test('Flow reads the selected origin and opens a step in HTTP history', async () => {
+  const opened = [];
+  const f = fixture({ openInHistory: id => opened.push(id) });
+  await f.load(); f.controller.selectOrigin(originA);
+  f.els.flow.dispatch('click');
+  const request = f.requests.at(-1);
+  assert.match(request.url, /^\/api\/target\/service-map\/flow\?/);
+  const params = new URL(request.url, 'http://localhost').searchParams;
+  assert.deepEqual([params.get('origin'), params.get('session_id'), params.get('max_records')], [originA, 'session-one', '50000']);
+  request.resolve(response(flowPayload()));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.els.flow.attributes['aria-pressed'], 'true');
+  assert.match(f.els.canvas.innerHTML, /service-map-flow/);
+  const step = { dataset: { serviceFlowRecord: recordId }, closest: selector => selector.includes('[data-service-flow-record]') ? step : null };
+  f.els.panel.dispatch('click', { target: step });
+  assert.deepEqual(opened, [recordId]);
+  f.els.allOrigins.dispatch('click');
+  assert.equal(f.els.flow.attributes['aria-pressed'], 'false');
+  assert.doesNotMatch(f.els.canvas.innerHTML, /service-map-flow/);
+});
+
+test('an arrow for Origin and Referer counts each request once', () => {
+  const a = origin('https://a.example.com'), b = origin('https://b.example.com');
+  b.header_links = [header(a.origin), header(a.origin, 'referer_header')].map(link => ({ ...link, request_count: 3, request_kinds: { api: 3 } }));
+  b.header_sources = [{ source_origin: a.origin, request_count: 3, request_kinds: { api: 3 } }];
+  const data = map.normalizeSnapshot(snapshot([a, b]), 'session-one');
+  for (const anchor of [null, b.origin]) {
+    const [edge] = map.graphLayout(data.origins, [a.origin, b.origin], new Map(), anchor).edges;
+    assert.deepEqual([...edge.relationships], ['origin_header', 'referer_header']);
+    assert.equal(edge.count, 3, 'three requests, not six');
+    assert.deepEqual({ ...edge.kinds }, { api: 3 });
+  }
+});
+
 test('reciprocal metadata curves and direct relations remain unclipped without body overlays or self arrows', () => {
   const a = origin('https://a.example.com'), b = origin('https://b.example.com'), c = origin('https://c.example.com');
   a.redirects = [redirect(b.origin)]; b.redirects = [redirect(c.origin), redirect(b.origin)]; c.redirects = [redirect(b.origin)];
   b.header_links = [header(c.origin), header(c.origin, 'referer_header'), header(b.origin)];
   c.header_links = [header(b.origin), header(b.origin, 'referer_header')];
   const data = map.normalizeSnapshot(snapshot([a, b, c]), 'session-one');
-  // The overview draws one arrow per direction; Direct relations one per relationship.
-  for (const [anchor, arrows] of [[null, 3], [b.origin, 7]]) {
+  // The overview and Direct relations both draw one arrow per direction.
+  for (const [anchor, arrows] of [[null, 3], [b.origin, 3]]) {
     const layout = map.graphLayout(data.origins, [a.origin, b.origin, c.origin], new Map(), anchor);
     assert.equal(layout.edges.length, arrows); assert.equal(layout.edgeCount, arrows);
     assert.equal(layout.edges.filter(edge => edge.source !== a.origin).length, arrows - 1);

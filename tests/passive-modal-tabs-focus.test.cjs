@@ -61,7 +61,7 @@ function tabFixture() {
   for (const name of [
     "colorTagFilter", "filterBar", "trafficRegion", "historyWorkbenchResizer", "lowerWorkbench",
     "interceptPanel", "websocketPanel", "matchReplacePanel", "findingsPanel", "oastPanel",
-    "proxySettingsPanel", "proxySubPlaceholder", "footerMode", "closeDisplaySettingsButton", "openDisplaySettingsButton",
+    "proxySettingsPanel", "proxySubPlaceholder", "closeDisplaySettingsButton", "openDisplaySettingsButton",
   ]) els[name] = node();
   els.displaySettingsModal = node({}, "hidden");
   els.displaySettingsModal.querySelectorAll = selector => {
@@ -80,9 +80,11 @@ function tabFixture() {
   document.activeElement = els.openDisplaySettingsButton;
   const state = { activeProxyTab: "websockets-history", historyDirty: false };
   const context = loadFunctions([
-    "setActiveProxyTab", "sanitizeActiveProxyTab", "renderProxyPanels", "selectSettingsTab",
+    "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveProxyTab", "sanitizeActiveProxyTab", "renderProxyPanels", "selectSettingsTab",
     "openDisplaySettingsModal", "closeDisplaySettingsModal", "isModalVisible", "restoreModalFocus",
   ], {
+    closeScannerSettings() {},
+    compareLoadGeneration: 0,
     document, els, state,
     IMPLEMENTED_PROXY_TABS: new Set(captureTabs.map(tab => tab.dataset.proxyTab)),
     scheduleUiSettingsSave: delay => saved.push(delay),
@@ -218,6 +220,7 @@ test("modal restoration tolerates no saved invoker or no available fallback", ()
   f.context.restoreModalFocus(null);
   assert.equal(f.document.activeElement, f.fallback);
   f.document.activeElement = null;
+  f.document.querySelector = () => null;
   f.context.restoreModalFocus(undefined, null);
   assert.equal(f.document.activeElement, null);
 });
@@ -258,9 +261,9 @@ for (const shiftKey of [false, true]) {
 function indicatorFixture() {
   const mutationObservers = [], resizeObservers = [], appended = [];
   const strip = {
-    classList: classList(), offsetWidth: 400,
+    classList: classList(), offsetWidth: 400, dataset: {},
     active: { offsetLeft: 35, offsetTop: 1, offsetWidth: 82, offsetHeight: 28 },
-    querySelector: selector => { assert.equal(selector, ".active"); return strip.active; },
+    querySelector: selector => { assert.equal(selector, strip.dataset.tabActive || ".active"); return strip.active; },
     appendChild: node => appended.push(node),
   };
   function observer(list) {
@@ -298,6 +301,14 @@ test("tab indicator wiring is optional and idempotent, with class-only mutation 
   assert.deepEqual([...f.mutationObservers[0].options.attributeFilter], ["class"]);
   assert.equal(f.mutationObservers[0].options.subtree, true);
   assert.equal(f.resizeObservers[0].target, f.strip);
+  assertIndicatorPosition(f.appended[0], f.strip.active);
+});
+
+// Tools' decoder library marks the category in use "on", not "active".
+test("tab indicator follows the class a strip names for its active tab", () => {
+  const f = indicatorFixture();
+  f.strip.dataset.tabActive = ".on";
+  f.context.wireTabIndicator(f.strip);
   assertIndicatorPosition(f.appended[0], f.strip.active);
 });
 
@@ -341,3 +352,26 @@ for (const shiftKey of [false, true]) {
     assert.equal(controls.some(control => control.focusCalls.length), false);
   });
 }
+
+
+for (const [reason, options] of [
+  ["detached", { isConnected: false }], ["disabled", { disabled: true }],
+  ["outside tab order", { tabIndex: -1 }], ["not laid out", { rects: [] }],
+  ["hidden", { visibility: "hidden" }],
+]) {
+  test(`modal restoration skips a ${reason} supplied fallback for the visible main tab`, () => {
+    const f = focusFixture(), previous = f.node({ isConnected: false }), supplied = f.node(options);
+    f.context.restoreModalFocus(previous, supplied);
+    assert.equal(f.document.activeElement, f.fallback);
+    assert.equal(supplied.focusCalls.length, 0);
+    assert.equal(f.fallback.focusCalls[0].preventScroll, true);
+  });
+}
+
+test("modal restoration does not try a hidden default fallback when no eligible target exists", () => {
+  const f = focusFixture(), previous = f.node({ isConnected: false }), supplied = f.node({ disabled: true });
+  f.fallback.visibility = "hidden";
+  f.context.restoreModalFocus(previous, supplied);
+  assert.equal(f.fallback.focusCalls.length, 0);
+  assert.equal(supplied.focusCalls.length, 0);
+});

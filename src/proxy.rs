@@ -554,9 +554,19 @@ pub async fn send_replay_request_for_session(
         target,
         source_transaction_id,
         http_version,
+        SentFrom::Replay,
     )
     .await
     .map_err(ReplaySendError::into_error)
+}
+
+/// Who sent a request the operator built: the note its row carries, and
+/// whether the event log gets a line for it. A Fuzzer attack logs itself once
+/// instead of once for each of its requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SentFrom {
+    Replay,
+    Fuzzer,
 }
 
 #[derive(Debug)]
@@ -604,6 +614,7 @@ pub async fn try_send_replay_request_for_session(
     target: Option<RequestTargetOverride>,
     source_transaction_id: Option<Uuid>,
     http_version: Option<String>,
+    sent_from: SentFrom,
 ) -> std::result::Result<TransactionRecord, ReplaySendError> {
     request
         .try_body_bytes()
@@ -640,7 +651,13 @@ pub async fn try_send_replay_request_for_session(
     .map_err(ReplaySendError::without_record)?;
     let outbound_uri_authority = build_replay_outbound_uri_authority(&request, target.as_ref())
         .map_err(ReplaySendError::without_record)?;
-    notes.push(crate::model::REPLAY_NOTE.to_string());
+    notes.push(
+        match sent_from {
+            SentFrom::Replay => crate::model::REPLAY_NOTE,
+            SentFrom::Fuzzer => crate::model::FUZZER_NOTE,
+        }
+        .to_string(),
+    );
     let exchange = execute_http_exchange(
         state.clone(),
         session.clone(),
@@ -686,15 +703,17 @@ pub async fn try_send_replay_request_for_session(
         return Err(ReplaySendError::with_record(message, record));
     }
 
-    session
-        .event_log
-        .push(
-            EventLevel::Info,
-            "replay",
-            "Request sent",
-            format!("{} {}{}", record.method, record.host, record.path),
-        )
-        .await;
+    if sent_from == SentFrom::Replay {
+        session
+            .event_log
+            .push(
+                EventLevel::Info,
+                "replay",
+                "Request sent",
+                format!("{} {}{}", record.method, record.host, record.path),
+            )
+            .await;
+    }
     store_record_and_scan_unconditionally(&state, &session, record.clone()).await;
     Ok(record)
 }
@@ -703,7 +722,16 @@ fn build_client(
     upstream_insecure: bool,
     proxy: &crate::upstream_proxy::UpstreamProxy,
 ) -> Result<ProxyClient> {
-    proxy
+    client_builder(upstream_insecure, proxy)?
+        .build()
+        .context("failed to build upstream HTTP client")
+}
+
+fn client_builder(
+    upstream_insecure: bool,
+    proxy: &crate::upstream_proxy::UpstreamProxy,
+) -> Result<reqwest::ClientBuilder> {
+    Ok(proxy
         .apply(Client::builder())?
         // Enabling native-tls for the legacy retry changes reqwest's default;
         // keep the first attempt on rustls.
@@ -711,9 +739,118 @@ fn build_client(
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure)
         .connect_timeout(REPLAY_CONNECT_TIMEOUT)
-        .http1_only()
+        .http1_only())
+}
+
+/// How long one Template Scan request may take before it counts as failed,
+/// unless a raw request's `@timeout:` says otherwise.
+pub(crate) const TEMPLATE_SCAN_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Template Scan's client: one per job, so its connections are reused, with
+/// the session's TLS setting and upstream chain like everything Sniper sends.
+/// The scan times each request itself, as a template may ask for longer.
+pub(crate) fn build_template_scan_client(
+    upstream_insecure: bool,
+    proxy: &crate::upstream_proxy::UpstreamProxy,
+) -> Result<Client> {
+    client_builder(upstream_insecure, proxy)?
         .build()
-        .context("failed to build upstream HTTP client")
+        .context("failed to build the Template Scan client")
+}
+
+/// Why a Template Scan request has no answer to judge.
+#[derive(Debug)]
+pub(crate) enum TemplateScanSendError {
+    /// A Match & Replace rule would have sent it somewhere else.
+    Blocked,
+    /// No response: the reason, never a synthetic 502 a matcher could read.
+    Failed(String),
+}
+
+/// Sends one Template Scan request with the job's client. The record is not
+/// stored here: a scan keeps only the exchanges a template matched.
+pub(crate) async fn send_template_scan_request(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    client: &Client,
+    request: EditableRequest,
+    apply_match_replace: bool,
+) -> std::result::Result<TransactionRecord, TemplateScanSendError> {
+    let started_at = Utc::now();
+    let started = Instant::now();
+    let (request, mut notes, original_request_capture) = if apply_match_replace {
+        let (scheme, host) = (request.scheme.clone(), request.host.clone());
+        let applied =
+            apply_request_match_replace(session.as_ref(), request, state.config.body_preview_bytes)
+                .await;
+        // The operator chose the target: a rule may change what is sent,
+        // never where it goes.
+        let request = &applied.0;
+        let host_header = request
+            .headers
+            .iter()
+            .find(|header| header.name.eq_ignore_ascii_case("host"))
+            .map(|header| header.value.as_str());
+        if !request.scheme.eq_ignore_ascii_case(&scheme)
+            || !request.host.eq_ignore_ascii_case(&host)
+            || host_header.is_some_and(|value| !value.eq_ignore_ascii_case(&host))
+        {
+            return Err(TemplateScanSendError::Blocked);
+        }
+        applied
+    } else {
+        (request, Vec::new(), None)
+    };
+    notes.push(crate::model::TEMPLATE_SCAN_NOTE.to_string());
+    let exchange = execute_http_exchange(
+        state.clone(),
+        session.clone(),
+        client,
+        request,
+        started_at,
+        started,
+        notes,
+        false,
+        original_request_capture,
+        Some(Version::HTTP_11),
+        None,
+        None,
+        SocketPeerCapture::Disabled,
+    )
+    .await;
+    match exchange.response {
+        Ok(_) => Ok(exchange.record),
+        Err(error) => Err(TemplateScanSendError::Failed(error.message)),
+    }
+}
+
+/// Whether `scheme://authority` reaches one of Sniper's own listeners, the
+/// proxy or the UI, by address or by a name that resolves to this machine.
+pub(crate) async fn targets_own_listener(
+    state: &AppState,
+    session: &SessionContext,
+    scheme: &str,
+    authority: &str,
+) -> bool {
+    let Ok(uri) = Uri::builder()
+        .scheme(scheme)
+        .authority(authority)
+        .path_and_query("/")
+        .build()
+    else {
+        return true;
+    };
+    for listener in [
+        state.get_active_proxy_addr().await,
+        state.get_active_ui_addr().await,
+    ] {
+        if request_targets_own_listener(&uri, listener)
+            || name_resolves_to_own_listener(session, &uri, listener).await
+        {
+            return true;
+        }
+    }
+    false
 }
 
 const RENDER_RESOURCE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1194,6 +1331,29 @@ async fn handle_connect(
         )
         .await;
     }
+    // A passthrough tunnel carries whatever the client sends, so what another
+    // machine may not reach is refused here as well as per request.
+    let tunnel = Uri::builder()
+        .scheme("http")
+        .authority(target.as_str())
+        .path_and_query("/")
+        .build();
+    if let Ok(uri) = &tunnel {
+        if remote_client_reaches_guarded(&state, &session, peer_addr.ip(), uri).await {
+            return record_connect_rejection(
+                &state,
+                &session,
+                request.uri(),
+                request.headers(),
+                started_at,
+                started,
+                StatusCode::FORBIDDEN,
+                REMOTE_GUARDED_MESSAGE.to_string(),
+                request_http_version,
+            )
+            .await;
+        }
+    }
     let request_capture = MessageRecord::from_headers_and_body(
         request.headers(),
         &[],
@@ -1437,6 +1597,22 @@ async fn handle_forwardable_request(
             .await
         }
     };
+    if remote_client_reaches_guarded(&state, &session, peer_addr.ip(), &absolute_uri).await {
+        return record_http_rejection(
+            &state,
+            &session,
+            RejectedRequestIdentity::from_absolute_uri(&parts.method, &absolute_uri),
+            &parts.headers,
+            &[],
+            Some(parts.version),
+            started_at,
+            started,
+            StatusCode::FORBIDDEN,
+            REMOTE_GUARDED_MESSAGE.to_string(),
+            "remote client guard",
+        )
+        .await;
+    }
     let proxy_addr = state.get_active_proxy_addr().await;
     if request_targets_own_listener(&absolute_uri, proxy_addr)
         || name_resolves_to_own_listener(&session, &absolute_uri, proxy_addr).await
@@ -1716,6 +1892,52 @@ fn target_port(uri: &Uri) -> Option<u16> {
         uri.scheme_str()
             .and_then(|scheme| default_port_for_scheme(scheme).ok())
     })
+}
+
+const REMOTE_GUARDED_MESSAGE: &str =
+    "Sniper's UI and the browsers it opened are not reachable through the proxy from another machine.";
+
+/// What a client on another machine is refused through the proxy. The UI trusts
+/// a connection from this machine, and the proxy's own outbound one is such a
+/// connection, so a phone using a proxy bound beyond loopback would otherwise
+/// reach the UI's API past `remote_ui_auth_guard`. The loopback ports a browser
+/// Sniper opened is driven through (`browser::driver_ports`) hand over its
+/// logged-in sessions. A client on this machine reaches these directly anyway,
+/// and the browser Sniper opens sends loopback traffic through the proxy, the UI
+/// included; other local ports, a dev server for one, stay open to a phone.
+fn remote_client_targets(client: IpAddr, uri: &Uri, guarded: &[SocketAddr]) -> bool {
+    !client.to_canonical().is_loopback()
+        && guarded
+            .iter()
+            .any(|listener| request_targets_own_listener(uri, *listener))
+}
+
+/// `remote_client_targets` for the listeners guarded now, with names that
+/// resolve to them.
+async fn remote_client_reaches_guarded(
+    state: &AppState,
+    session: &SessionContext,
+    client: IpAddr,
+    uri: &Uri,
+) -> bool {
+    if client.to_canonical().is_loopback() {
+        return false;
+    }
+    let mut guarded = vec![state.get_active_ui_addr().await];
+    guarded.extend(
+        crate::browser::driver_ports()
+            .into_iter()
+            .map(|port| SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))),
+    );
+    if remote_client_targets(client, uri, &guarded) {
+        return true;
+    }
+    for listener in guarded {
+        if name_resolves_to_own_listener(session, uri, listener).await {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when `uri` resolves back to the proxy's own listener, which would make
@@ -3579,7 +3801,7 @@ async fn maybe_intercept_response(
         )
         .await;
 
-    let editable = EditableResponse::from_status_headers_body(status.as_u16(), headers, body);
+    let editable = editable_response_from_parts(status, headers, body);
     let resolution = session
         .response_intercepts
         .enqueue(ResponseInterceptRecord {
@@ -3610,30 +3832,41 @@ async fn store_record_and_scan(
     if !session.runtime.http_capture_enabled().await {
         return;
     }
+    // The auto scan hears of each host the proxy captures; replays and its own
+    // requests take the unconditional path and never reach it.
+    crate::templates::scan::observe(state, session, &record.scheme, &record.host).await;
     store_record_and_scan_unconditionally(state, session, record).await;
 }
 
 /// The same, for traffic the operator asked for by hand. A replay send is an
 /// explicit action and its result is the answer to it, so pausing capture must
 /// not swallow it.
-async fn store_record_and_scan_unconditionally(
+pub(crate) async fn store_record_and_scan_unconditionally(
     state: &Arc<AppState>,
     session: &Arc<SessionContext>,
     record: TransactionRecord,
 ) {
     let insert_outcome =
         insert_transaction_quiet(session, record.clone(), "captured transaction").await;
-    scan_record_for_session(session, record);
+    scan_record_for_session(state, session, record);
     persist_transaction_insert_outcome(state, session, insert_outcome).await;
 }
 
-fn scan_record_for_session(session: &Arc<SessionContext>, record: TransactionRecord) {
+fn scan_record_for_session(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    record: TransactionRecord,
+) {
     let scanner = session.scanner.clone();
     let scan_generation = scanner.clear_generation();
     let scan_session = Arc::clone(session);
+    let templates = Arc::clone(&state.templates);
     spawn_tracked_proxy_task(session.id(), PROXY_WORK_CAPTURE_TASK, async move {
         let config = scanner.get_config().await;
-        let findings = crate::scanner::scan_transaction(&record, &config);
+        let mut findings = crate::scanner::scan_transaction(&record, &config);
+        if config.enabled {
+            findings.extend(passive_template_findings(&templates, &scan_session, record).await);
+        }
         let mut accepted_findings = false;
         for finding in findings {
             accepted_findings |= scanner.push_if_generation(finding, scan_generation).await;
@@ -3646,6 +3879,33 @@ fn scan_record_for_session(session: &Arc<SessionContext>, record: TransactionRec
             persist_session_state_quiet(&scan_session);
         }
     });
+}
+
+/// The findings of the Nuclei templates the operator turned on, for a record
+/// in scope. They run on the blocking pool; when a burst already fills it,
+/// the record skips them rather than wait inside a proxy task, which would
+/// hold the session busy. Rescan covers what was skipped.
+async fn passive_template_findings(
+    templates: &crate::templates::library::TemplateLibrary,
+    session: &SessionContext,
+    record: TransactionRecord,
+) -> Vec<crate::scanner::ScannerFinding> {
+    let Some(set) = templates.passive_set() else {
+        return Vec::new();
+    };
+    let (include, exclude) = session.runtime.scope_lists().await;
+    if !crate::templates::passive_applies(&record, &include, &exclude) {
+        return Vec::new();
+    }
+    let Some(permit) = templates.try_passive_permit() else {
+        return Vec::new();
+    };
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::templates::passive_findings(&set, &record)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 async fn insert_transaction_quiet(
@@ -3719,7 +3979,7 @@ async fn persist_transaction_insert_outcome(
 /// is about 5,000 records at the average record size of a real session. Raising it
 /// makes the expensive snapshot rewrites rarer, at the cost of a slower load and a
 /// longer window of non-journaled state (event log entries) to lose in a crash.
-const TRANSACTION_JOURNAL_COMPACT_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const TRANSACTION_JOURNAL_COMPACT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Persists only the small components, to state.json. For changes that are not a
 /// captured transaction — an intercept enqueue, a websocket open, a scanner
@@ -4225,7 +4485,16 @@ impl StreamedRecordContext {
             {
                 let mut scan_record = record;
                 scan_record.id = record_id;
-                scan_record_for_session(&self.session, scan_record);
+                // A streamed response finishes a record stored when it began,
+                // so it tells the auto scan here, as store_record_and_scan does.
+                crate::templates::scan::observe(
+                    &self.state,
+                    &self.session,
+                    &scan_record.scheme,
+                    &scan_record.host,
+                )
+                .await;
+                scan_record_for_session(&self.state, &self.session, scan_record);
                 forget_persist_context_if_clean(self.session.id(), self.persist_generation);
                 return;
             }
@@ -4882,6 +5151,36 @@ fn editable_request_from_parts(
         body_encoding,
         preview_truncated: false,
     }
+}
+
+/// A held response, framed the way the editor shows it. As with held requests,
+/// the body is already de-chunked, so a chunked response is described by its
+/// length instead — the editor refuses to forward a message that says chunked.
+/// An empty body gets no length: a HEAD answer's Content-Length describes the
+/// representation, and the proxy frames whatever it sends anyway.
+fn editable_response_from_parts(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> EditableResponse {
+    let mut editable = EditableResponse::from_status_headers_body(status.as_u16(), headers, body);
+    let plain_chunked_transfer = transfer_encoding_tokens(headers)
+        .map(|codings| codings.len() == 1 && codings[0].eq_ignore_ascii_case("chunked"))
+        .unwrap_or(false);
+    if plain_chunked_transfer {
+        editable.headers.retain(|header| {
+            !header.name.eq_ignore_ascii_case(TRANSFER_ENCODING.as_str())
+                && !header.name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str())
+        });
+        let len = editable.body_bytes().len();
+        if len > 0 {
+            editable.headers.push(HeaderRecord {
+                name: CONTENT_LENGTH.as_str().to_string(),
+                value: len.to_string(),
+            });
+        }
+    }
+    editable
 }
 
 fn is_raw_request_body_utf8(body: &[u8]) -> bool {
@@ -8796,6 +9095,30 @@ mod tests {
     }
 
     #[test]
+    fn held_chunked_response_is_described_by_its_length() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        let framing = |response: &EditableResponse| {
+            response
+                .headers
+                .iter()
+                .filter(|header| {
+                    header.name.eq_ignore_ascii_case("transfer-encoding")
+                        || header.name.eq_ignore_ascii_case("content-length")
+                })
+                .map(|header| format!("{}: {}", header.name, header.value))
+                .collect::<Vec<_>>()
+        };
+
+        let held = editable_response_from_parts(StatusCode::OK, &headers, b"hello");
+        assert_eq!(framing(&held), ["content-length: 5"]);
+        // A HEAD answer arrives chunked with no body; its length is not zero.
+        let empty = editable_response_from_parts(StatusCode::OK, &headers, b"");
+        assert!(framing(&empty).is_empty());
+    }
+
+    #[test]
     fn connect_target_rejects_non_authority_path_before_upgrade() {
         let uri: Uri = "/".parse().unwrap();
         let error = connect_target(&uri).unwrap_err();
@@ -8857,6 +9180,55 @@ mod tests {
             assert!(allowed(active).is_none(), "{active}");
         }
         assert!(render_resource_content_type(&HeaderMap::new()).is_none());
+    }
+
+    #[tokio::test]
+    async fn another_machine_is_refused_the_ports_of_a_browser_sniper_opened() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-driver-ports");
+        let session = state.session().await;
+        let profile = data_dir.join("browser-profiles").join("example");
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let devtools: Uri = "http://127.0.0.1:45123/json/version".parse().unwrap();
+        assert!(!remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
+
+        crate::browser::remember_driver_ports(&profile, vec![45123]);
+        assert!(remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
+        assert!(!remote_client_reaches_guarded(&state, &session, local, &devtools).await);
+
+        // Once the browser exits the port is anyone's again.
+        crate::browser::forget_driver_ports(&profile);
+        assert!(!remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn a_client_on_another_machine_cannot_reach_the_ui_through_the_proxy() {
+        // The UI, and a DevTools port of a browser Sniper opened.
+        let guarded: [SocketAddr; 2] = [
+            "127.0.0.1:8081".parse().unwrap(),
+            "127.0.0.1:9222".parse().unwrap(),
+        ];
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let mapped: IpAddr = "::ffff:192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        for target in [
+            "http://127.0.0.1:8081/api/runtime",
+            "http://localhost:8081/",
+            "http://127.1:8081/",
+            "http://127.0.0.1:9222/json/version",
+            "http://localhost:9222/",
+        ] {
+            let uri: Uri = target.parse().unwrap();
+            assert!(remote_client_targets(remote, &uri, &guarded), "{target}");
+            assert!(remote_client_targets(mapped, &uri, &guarded), "{target}");
+            // A browser on this machine, Sniper's own among them, opens the UI
+            // through the proxy; that machine reaches the UI directly anyway.
+            assert!(!remote_client_targets(local, &uri, &guarded), "{target}");
+        }
+        // A dev server on this machine stays reachable from a phone.
+        let elsewhere: Uri = "http://127.0.0.1:3000/".parse().unwrap();
+        assert!(!remote_client_targets(remote, &elsewhere, &guarded));
     }
 
     #[test]

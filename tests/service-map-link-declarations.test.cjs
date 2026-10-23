@@ -248,18 +248,19 @@ test('32 target observations obey 23-neighbor display cap and independent query 
   assert.match(f.els.graphBounds.textContent, /31 hidden by query/); assert.doesNotMatch(f.els.graphBounds.textContent, /omitted by 24-card cap/);
 });
 
-test('up to ten mixed typed and reverse arrows have distinct deterministic geometry within default and 20px cards', () => {
+test('typed Link arrows and both directions\' metadata arrows have distinct deterministic geometry within default and 20px cards', () => {
   const a = { ...origin(SOURCE), captured: true }, b = { ...origin(OTHER), captured: true };
   for (const [source, target] of [[a,b], [b,a]]) { source.redirects = [{ target_origin: target.origin }]; source.header_links = ['origin_header', 'referer_header'].map(relationship => ({ source_origin: target.origin, relationship })); }
   const links = LINK_TYPES.map(relationship => ({ source: SOURCE, target: OTHER, relationship, label: relationship }));
   for (const size of [12, 20]) {
     const geometry = map.graphGeometry(size), layout = map.graphLayout([a,b], [SOURCE,OTHER], new Map(), SOURCE, links, geometry);
-    assert.equal(layout.edges.length, 10); const paths = new Set();
+    // Four Link types, and the metadata one arrow each way.
+    assert.equal(layout.edges.length, 6); const paths = new Set();
     for (const edge of layout.edges) { const n = edge.path.match(/-?\d+(?:\.\d+)?/g).map(Number), reverse = [n[6], n[7], n[4], n[5], n[2], n[3], n[0], n[1]];
       paths.add([n.join(','), reverse.join(',')].sort()[0]); assert.ok(n[1] >= 36 && n[1] < 24 + geometry.cardHeight - 8); assert.ok(n.every(Number.isFinite));
       for (let i = 0; i < n.length; i += 2) assert.ok(n[i] >= 0 && n[i] <= layout.width);
     }
-    assert.equal(paths.size, 10); assert.equal(JSON.stringify(layout.edges), JSON.stringify(map.graphLayout([a,b], [SOURCE,OTHER], layout.slots, SOURCE, links, geometry).edges));
+    assert.equal(paths.size, 6); assert.equal(JSON.stringify(layout.edges), JSON.stringify(map.graphLayout([a,b], [SOURCE,OTHER], layout.slots, SOURCE, links, geometry).edges));
     assert.equal(geometry.cardWidth, 220); assert.ok(geometry.cardHeight >= 84); if (size === 12) assert.equal(geometry.cardHeight, 84);
   }
 });
@@ -271,7 +272,8 @@ test('all thirty-two Link observations and metadata keep distinct arrow cap omis
   const f = await displayedLink(linkScan(targets.map(target => ({ target, relations: RELATIONS }))), snapshot([source]));
   assert.equal((f.els.canvas.innerHTML.match(/data-relationship=/g) || []).length, 40);
   assert.match(f.els.graphDiagnostics.textContent, /Link declaration typed arrows: 32 \/ 32 shown · 0 outside displayed cards · 0 omitted by arrow cap/);
-  assert.match(f.els.graphDiagnostics.textContent, /Metadata typed arrows: 8 \/ 24 shown · 0 outside displayed cards · 16 omitted by arrow cap/);
+  // A redirect out and Origin and Referer back: two metadata arrows a target.
+  assert.match(f.els.graphDiagnostics.textContent, /Metadata arrows: 8 \/ 16 shown · 0 outside displayed cards · 8 omitted by arrow cap/);
 });
 
 test('Link eligibility requires fresh verified exact identity without depending on retained body availability', async () => {

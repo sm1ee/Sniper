@@ -43,6 +43,7 @@ function fixture() {
     if (appSource.includes(`function ${name}(`)) functions.push(name);
   }
   const context = loadFunctions(functions, {
+    compareLoadGeneration: 0,
     document, els, displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(), displaySettingsReturnFocus: null, activeConfirmDialog: null,
     hydrateDisplaySettingsForm() {}, renderShortcutReference() {}, selectSettingsTab() {},
     applyDisplaySettingsState: () => applied.push("saved"),

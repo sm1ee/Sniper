@@ -28,7 +28,7 @@ function fixture(kind, options = {}) {
   const document = eventTarget(), window = eventTarget(), handle = eventTarget();
   document.body = { classList: classList(), style: { cursor: options.cursor || "", userSelect: options.userSelect || "" } };
   handle.classList = classList();
-  let detailHeight = 240, tableHeight = 360;
+  let detailHeight = 240, tableHeight = 360, tableFlex = "0 0 360px";
   const writes = [], normalized = [], resets = [];
   const detailStyle = {};
   Object.defineProperty(detailStyle, "flex", {
@@ -37,10 +37,12 @@ function fixture(kind, options = {}) {
   });
   const tableStyle = {};
   Object.defineProperty(tableStyle, "flex", {
-    set(value) { tableHeight = Number(value.match(/([\d.]+)px$/)[1]); },
+    set(value) { tableFlex = value; tableHeight = Number(value.match(/([\d.]+)px$/)[1]); },
   });
   const detail = { style: detailStyle, getBoundingClientRect: () => ({ height: detailHeight }) };
-  const table = { style: tableStyle, getBoundingClientRect: () => ({ height: tableHeight }) };
+  const table = { style: tableStyle, getBoundingClientRect: () => ({
+    height: tableFlex === "1 1 0px" ? 600 - detailHeight : tableHeight,
+  }) };
   handle.parentElement = { getBoundingClientRect: () => ({ height: 600 }) };
   const els = {
     frameDetailResizer: handle, frameDetailPanel: detail,

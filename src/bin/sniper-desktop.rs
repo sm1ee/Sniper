@@ -238,7 +238,11 @@ fn run_desktop() -> Result<()> {
         .context("failed to read bound UI address")?;
     config.ui_addr = runtime_state::advertise_local_api_addr(bound_ui_addr);
 
-    // Keep agent skill installation opt-in; normal desktop launch should not edit user dotfiles.
+    // An outdated skill sends agents after commands this CLI no longer has, so
+    // installed skills follow the app. Installing one where none exists stays opt-in.
+    for skill in skills::update_installed_all() {
+        info!(agent = skill.agent, path = %skill.path, "updated sniper-operator skill");
+    }
     let install_skills_env = env::var(INSTALL_SKILLS_ENV).ok();
     if should_install_skills_on_launch(install_skills_env.as_deref()) {
         let skill_results = skills::auto_install_all();
@@ -419,9 +423,6 @@ fn run_desktop() -> Result<()> {
         }
     };
 
-    // Construction succeeded. The first idle event may now schedule the one-shot
-    // host policy check; a failed WebView never reaches this point.
-    let mut skill_updates = sniper::skill_auto_update::DesktopTask::default();
     let close_state = state.clone();
     let close_data_dir = close_state.config.data_dir.clone();
     let close_runtime_instance_id = close_state.runtime_instance_id;
@@ -440,12 +441,10 @@ fn run_desktop() -> Result<()> {
         let _keep_proxy_task = &proxy_task;
         *control_flow = ControlFlow::Wait;
 
-        let mut teardown_once = |session_persisted: bool,
-                                 skill_updates: &mut sniper::skill_auto_update::DesktopTask| {
+        let mut teardown_once = |session_persisted: bool| {
             if !begin_desktop_teardown(teardown_started.as_ref()) {
                 return;
             }
-            skill_updates.shutdown(&runtime);
             if let Some(ui_task) = ui_task.take() {
                 ui_task.abort();
                 if let Err(error) = runtime.block_on(ui_task) {
@@ -502,16 +501,10 @@ fn run_desktop() -> Result<()> {
         };
 
         match event {
-            Event::MainEventsCleared => {
-                if !close_flush_in_progress && !teardown_started.load(Ordering::Acquire) {
-                    skill_updates.first_idle(&runtime, &close_data_dir);
-                }
-            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                skill_updates.request_stop();
                 if shutdown_done.load(Ordering::Acquire) {
                     *control_flow = ControlFlow::Exit;
                     return;
@@ -529,7 +522,6 @@ fn run_desktop() -> Result<()> {
                 }
             }
             Event::UserEvent(DesktopUserEvent::ShutdownSignal) => {
-                skill_updates.request_stop();
                 if shutdown_done.load(Ordering::Acquire) {
                     *control_flow = ControlFlow::Exit;
                     return;
@@ -570,7 +562,7 @@ fn run_desktop() -> Result<()> {
                 }
                 match persist_desktop_session_state(&runtime, close_state.as_ref()) {
                     Ok(()) => {
-                        teardown_once(true, &mut skill_updates);
+                        teardown_once(true);
                         *control_flow = ControlFlow::Exit;
                     }
                     Err(error) => {
@@ -607,7 +599,7 @@ fn run_desktop() -> Result<()> {
                         "forced desktop teardown will preserve runtime state after failed persistence"
                     );
                 }
-                teardown_once(session_persisted, &mut skill_updates);
+                teardown_once(session_persisted);
             }
             _ => {}
         }
@@ -761,7 +753,7 @@ fn persist_desktop_session_state(
     runtime: &tokio::runtime::Runtime,
     state: &AppState,
 ) -> Result<()> {
-    runtime.block_on(state.stop_recon_jobs())?;
+    runtime.block_on(state.stop_background_jobs())?;
     let relay_result = runtime
         .block_on(proxy::close_live_websocket_relays(
             state,

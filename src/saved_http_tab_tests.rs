@@ -308,6 +308,12 @@ async fn saved_http_tab_duplicate_clones_every_saved_field_without_focus_or_capt
     let ws_id = ws.id;
     session.websockets.open(ws).await;
     let attack = FuzzerAttackRecord {
+        attack_type: Default::default(),
+        url_encode: false,
+        planned: 0,
+        concurrency: 1,
+        running: false,
+        stopped: false,
         id: Uuid::new_v4(),
         started_at: Utc::now(),
         completed_at: Utc::now(),

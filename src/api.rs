@@ -47,7 +47,7 @@ use crate::{
     runtime_state::{self, RuntimeStateSnapshot},
     scanner::{scanner_config_token, validate_scanner_config, ScannerConfigSnapshot},
     sequence::{self, SequenceDefinition},
-    session::{SessionContext, SessionSummary},
+    session::{SessionContext, SessionListing},
     state::AppState,
     store::{BodySearchRequest, BodySearchSides, ListFilters, TransactionListPage},
     target::{TargetHostNode, TargetPathNode},
@@ -361,10 +361,51 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/decoder/", get(decoder_index))
         .route("/decoder/*path", get(decoder_asset))
         .route("/app.js", get(app_js))
+        .route("/fuzzer-workflow.js", get(fuzzer_workflow_js))
         .route("/recon.js", get(recon_js))
+        .route("/templates.js", get(templates_js))
         .route("/api/recon", get(crate::recon::list))
         .route("/api/recon/jobs", post(crate::recon::start))
         .route("/api/recon/jobs/:id/stop", post(crate::recon::stop))
+        .route(
+            "/api/templates/library",
+            get(crate::templates::library::get_status),
+        )
+        .route(
+            "/api/templates/library/check",
+            post(crate::templates::library::check_latest),
+        )
+        .route(
+            "/api/templates/library/download",
+            post(crate::templates::library::start_download),
+        )
+        .route(
+            "/api/templates/library/import",
+            post(crate::templates::library::start_import),
+        )
+        .route(
+            "/api/templates/passive",
+            post(crate::templates::library::set_passive),
+        )
+        .route(
+            "/api/templates/auto",
+            get(crate::templates::scan::auto_status).post(crate::templates::scan::set_auto_scan),
+        )
+        .route(
+            "/api/templates/auto/templates",
+            post(crate::templates::library::set_auto),
+        )
+        .route("/api/templates", get(crate::templates::library::list))
+        .route(
+            "/api/templates/scans",
+            get(crate::templates::scan::list).post(crate::templates::scan::start),
+        )
+        .route("/api/templates/scans/:id", get(crate::templates::scan::get))
+        .route(
+            "/api/templates/scans/:id/stop",
+            post(crate::templates::scan::stop),
+        )
+        .route("/api/templates/:id", get(crate::templates::library::get))
         .route("/service-map.js", get(service_map_js))
         .route("/product-icons.js", get(product_icons_js))
         .route("/codemirror.js", get(codemirror_js))
@@ -436,6 +477,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/findings/count", get(count_findings))
         .route("/api/findings/:id", get(get_finding))
         .route("/api/findings/clear", post(clear_findings))
+        .route("/api/findings/rescan", post(rescan_findings))
         .route(
             "/api/transactions/upstream-peer-settings",
             get(get_upstream_peer_settings).post(update_upstream_peer_settings),
@@ -482,6 +524,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route(
             "/api/target/service-map/openapi",
             get(get_target_service_map_openapi),
+        )
+        .route(
+            "/api/target/service-map/flow",
+            get(get_target_service_map_flow),
         )
         .route(
             "/api/target/service-map/favicon",
@@ -537,6 +583,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             get(list_fuzzer_attacks).post(run_fuzzer_attack),
         )
         .route("/api/fuzzer/attacks/:id", get(get_fuzzer_attack))
+        .route("/api/fuzzer/attacks/:id/stop", post(stop_fuzzer_attack))
         .route("/api/sequences", get(list_sequences).post(upsert_sequence))
         .route(
             "/api/sequences/:id",
@@ -1151,25 +1198,9 @@ fn validate_status_range(input: &str) -> Option<()> {
 }
 
 fn validate_since(input: &str) -> Option<()> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    for suffix in ['h', 'm', 'd', 's'] {
-        if let Some(value) = trimmed.strip_suffix(suffix) {
-            return value
-                .parse::<i64>()
-                .ok()
-                .filter(|value| *value > 0)
-                .map(|_| ());
-        }
-    }
-    if chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").is_ok() {
-        return Some(());
-    }
-    chrono::DateTime::parse_from_rfc3339(trimmed)
-        .ok()
-        .map(|_| ())
+    // A syntactically valid duration can still overflow the cutoff date. Use
+    // the listing parser so an accepted filter cannot silently become None.
+    crate::store::parse_history_since(input).map(|_| ())
 }
 
 pub(crate) fn validate_editable_request(
@@ -3000,8 +3031,8 @@ async fn self_update(
     })
 }
 
-async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
-    Json(state.list_sessions().await)
+async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionListing>> {
+    Json(state.list_session_listings().await)
 }
 
 async fn create_session(
@@ -4450,7 +4481,7 @@ async fn update_startup_settings(
                         .push(level, "config", title, message)
                         .await;
                     if let Err(error) = state
-                        .persist_session_context_mutation_locked(&event_session)
+                        .persist_session_state_mutation_locked(&event_session)
                         .await
                     {
                         event_session.event_log.replace_all(previous_events).await;
@@ -4713,6 +4744,133 @@ async fn clear_findings(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Serialize)]
+struct FindingsRescanOutcome {
+    scanned: usize,
+    unreadable: usize,
+    findings: usize,
+}
+
+/// Scans the retained history again with the current rules and replaces what
+/// it found, so a session captured under older rules loses their false
+/// positives. Reading every body back can take a while, so only the swap holds
+/// the session's operation lock; capture, edits and switching carry on.
+async fn rescan_findings(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+) -> Response {
+    if let Some(response) = expected_active_session_conflict_response(
+        &state,
+        query.expected_active_session_id,
+        query.session_id,
+    ) {
+        return response;
+    }
+    let session = match resolve_session_for_optional_id(&state, query.session_id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let require_still_active =
+        query.session_id.is_none() || query.expected_active_session_id.is_some();
+    let Some(_rescan_slot) = session.scanner.begin_rescan() else {
+        return (
+            StatusCode::CONFLICT,
+            "Findings are already being rescanned for this session.",
+        )
+            .into_response();
+    };
+    let (config, generation, started_at) = {
+        let _operation_guard =
+            match guard_session_write_operation(&state, &session, require_still_active).await {
+                Ok(guard) => guard,
+                Err(response) => return response,
+            };
+        let config = session.scanner.get_config().await;
+        if !config.enabled {
+            return (
+                StatusCode::CONFLICT,
+                "Passive Scan is off. Turn it on to rescan findings.",
+            )
+                .into_response();
+        }
+        (
+            config,
+            session.scanner.clear_generation(),
+            chrono::Utc::now(),
+        )
+    };
+    // Disabling a noisy template and rescanning is how its findings go away.
+    let rescan_templates = match state.templates.passive_set() {
+        Some(set) => {
+            let (include, exclude) = session.runtime.scope_lists().await;
+            Some(crate::scanner::RescanTemplates {
+                set,
+                include,
+                exclude,
+            })
+        }
+        None => None,
+    };
+    let Some((rescan, unreadable)) = session
+        .store
+        .visit_records(
+            crate::scanner::Rescan::new(config).with_templates(rescan_templates),
+            |rescan, record| rescan.scan(record),
+        )
+        .await
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let _operation_guard =
+        match guard_session_write_operation(&state, &session, require_still_active).await {
+            Ok(guard) => guard,
+            Err(response) => return response,
+        };
+    // A Clear meanwhile wins, and a session switched away and reopened has a
+    // new context that this one must not overwrite.
+    if session.scanner.clear_generation() != generation
+        || !state.is_current_session_context(&session).await
+    {
+        return (
+            StatusCode::CONFLICT,
+            "The session changed during the rescan. Rescan again.",
+        )
+            .into_response();
+    }
+    let _mutation_guard = session.mutation_guard().await;
+    let (rescanned, scanned) = rescan.finish();
+    let previous = session
+        .scanner
+        .snapshot(Some(state.config.max_entries))
+        .await;
+    // Rows captured during the rescan were scanned as they arrived, and a
+    // Template Scan's findings came from requests a rescan does not send.
+    let mut findings: Vec<_> = previous
+        .iter()
+        .filter(|finding| {
+            (finding.found_at >= started_at && !scanned.contains(&finding.record_id))
+                || finding
+                    .rule_id
+                    .starts_with(crate::templates::ACTIVE_RULE_PREFIX)
+        })
+        .cloned()
+        .collect();
+    findings.extend(rescanned);
+    session.scanner.replace_all(findings).await;
+    if let Err(error) = session.persist_state_only().await {
+        tracing::warn!(%error, session_id = %session.id(), "failed to persist rescanned findings");
+        session.scanner.replace_all(previous).await;
+        session.schedule_state_persist();
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    Json(FindingsRescanOutcome {
+        scanned: scanned.len(),
+        unreadable,
+        findings: session.scanner.count().await,
+    })
+    .into_response()
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -5883,6 +6041,112 @@ async fn get_target_service_map_openapi(
     }
 }
 
+// One origin's requests and those of the origins it links to directly, in
+// time order, one phase per page load. It reads the map's newest-row window
+// and display filter, and like the map it holds the one map-read slot and
+// fails rather than publish a flow from a session, scope or history that
+// changed while it was read.
+async fn get_target_service_map_flow(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ServiceMapQuery>,
+) -> Response {
+    let (catalog, _) = match service_map_catalog(&headers) {
+        Ok(selection) => selection,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    if let Err(message) = validate_advanced_regex(
+        query.advanced_search.as_deref(),
+        query.advanced_regex,
+        query.advanced_case_sensitive,
+    ) {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
+    let Some(origin) = query.origin.clone().filter(|origin| {
+        crate::service_map::canonical_origin(origin).as_deref() == Some(origin.as_str())
+    }) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "origin must be a canonical HTTP(S) origin without credentials, path, query, or fragment",
+        )
+            .into_response();
+    };
+    if query.all_rows {
+        return (
+            StatusCode::BAD_REQUEST,
+            "the flow reads the newest max_records rows; all_rows is not supported",
+        )
+            .into_response();
+    }
+    let max_records = query
+        .max_records
+        .unwrap_or(crate::service_map::DEFAULT_MAX_RECORDS);
+    if !(1..=crate::service_map::MAX_RECORDS).contains(&max_records) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "max_records must be between 1 and 50000",
+        )
+            .into_response();
+    }
+    let Some(permit) = state.service_map_read().await else {
+        return ServiceMapReadError::Busy.into_response();
+    };
+    let implicit_session = query.session_id.is_none();
+    let session = match resolve_read_session_for_optional_id(&state, query.session_id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let (include, exclude) = session.runtime.scope_lists().await;
+    let row_filters = service_map_row_filters(&query);
+    let in_scope_only = query.in_scope_only;
+    let (worker_session, worker_include, worker_exclude) =
+        (session.clone(), include.clone(), exclude.clone());
+    let result = tokio::task::spawn_blocking(move || {
+        let (snapshot, epoch) = worker_session
+            .store
+            .service_map_snapshot_blocking_for_catalog(
+                worker_session.id(),
+                max_records,
+                catalog,
+                &row_filters,
+            );
+        let flow = crate::service_map_flow::build(
+            worker_session.id(),
+            snapshot,
+            &origin,
+            in_scope_only,
+            &worker_include,
+            &worker_exclude,
+        )
+        .map_err(|_| ServiceMapReadError::ScopeWorkLimit)?;
+        let bytes = serde_json::to_vec(&flow).map_err(|_| ServiceMapReadError::BuildFailed)?;
+        Ok::<_, ServiceMapReadError>((bytes, epoch, permit))
+    })
+    .await;
+    let (bytes, epoch, _permit) = match result {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => return error.into_response(),
+        Err(_) => return ServiceMapReadError::BuildFailed.into_response(),
+    };
+    if !state.sessions.contains_session(session.id())
+        || !state.is_current_session_context(&session).await
+        || implicit_session && !Arc::ptr_eq(&state.active_session_for_read().await, &session)
+    {
+        return ServiceMapReadError::SessionChanged.into_response();
+    }
+    if session.runtime.scope_lists().await != (include, exclude) {
+        return ServiceMapReadError::ScopeChanged.into_response();
+    }
+    if !session
+        .store
+        .service_map_metadata_epoch_matches(epoch)
+        .await
+    {
+        return ServiceMapReadError::HistoryChanged.into_response();
+    }
+    ([(header::CONTENT_TYPE, "application/json")], bytes).into_response()
+}
+
 // An origin's icon from retained history, for its map card. It reads a
 // retained body, so like the other body reads it serves the active session
 // only. Only raster images whose own bytes say so are served, never SVG, and a
@@ -6171,7 +6435,48 @@ async fn get_target_site_map(
         Ok(session) => session,
         Err(response) => return response,
     };
-    let records = session.store.site_map_records().await;
+    let hosts = target_site_map_hosts(
+        session.store.site_map_records().await,
+        session.recon.site_map_endpoints(),
+    );
+
+    let mut site_map = Vec::with_capacity(hosts.len());
+    for (_, host) in hosts {
+        let mut paths = host
+            .paths
+            .into_iter()
+            .map(|(_, path)| TargetPathNode {
+                path: path.path,
+                methods: path.methods,
+                last_seen: path.last_seen,
+                status: path.status,
+                note_count: path.note_count,
+                is_websocket: path.is_websocket,
+                captured: path.captured,
+                discovered: path.recon_last_seen.is_some(),
+                recon_sources: path.recon_sources,
+                recon_kinds: path.recon_kinds,
+                recon_last_seen: path.recon_last_seen,
+            })
+            .collect::<Vec<_>>();
+        paths.sort_by_key(|path| std::cmp::Reverse(path.last_seen));
+
+        site_map.push(TargetHostNode {
+            host: host.host.clone(),
+            schemes: host.schemes,
+            request_count: host.request_count,
+            in_scope: session.runtime.is_in_scope(&host.host).await,
+            paths,
+        });
+    }
+
+    Json(site_map).into_response()
+}
+
+fn target_site_map_hosts(
+    records: Vec<crate::store::SiteMapRecord>,
+    recon_endpoints: Vec<crate::target::ReconSiteMapEndpoint>,
+) -> IndexMap<String, TargetHostAccumulator> {
     let mut hosts = IndexMap::<String, TargetHostAccumulator>::new();
 
     for record in records {
@@ -6197,6 +6502,10 @@ async fn get_target_site_map(
                 status: record.status,
                 note_count: 0,
                 is_websocket: record.is_websocket,
+                captured: true,
+                recon_sources: Vec::new(),
+                recon_kinds: Vec::new(),
+                recon_last_seen: None,
             });
         push_unique(&mut path.methods, record.method.clone());
         if record.started_at > path.last_seen {
@@ -6207,32 +6516,106 @@ async fn get_target_site_map(
         path.is_websocket = path.is_websocket || record.is_websocket;
     }
 
-    let mut site_map = Vec::with_capacity(hosts.len());
-    for (_, host) in hosts {
-        let mut paths = host
-            .paths
-            .into_iter()
-            .map(|(_, path)| TargetPathNode {
-                path: path.path,
-                methods: path.methods,
-                last_seen: path.last_seen,
-                status: path.status,
-                note_count: path.note_count,
-                is_websocket: path.is_websocket,
-            })
-            .collect::<Vec<_>>();
-        paths.sort_by_key(|path| std::cmp::Reverse(path.last_seen));
-
-        site_map.push(TargetHostNode {
-            host: host.host.clone(),
-            schemes: host.schemes,
-            request_count: host.request_count,
-            in_scope: session.runtime.is_in_scope(&host.host).await,
-            paths,
-        });
+    // Recon normalizes URL authorities (including default ports and hostname
+    // case), while capture retains the original Host spelling. Reuse matching
+    // captured buckets without regrouping or rewriting existing traffic.
+    let mut captured_aliases = IndexMap::<(String, String), Vec<String>>::new();
+    for host in hosts.values() {
+        for scheme in &host.schemes {
+            let Ok(url) = url::Url::parse(&format!("{scheme}://{}/", host.host)) else {
+                continue;
+            };
+            let authority = url[url::Position::BeforeHost..url::Position::AfterPort].to_string();
+            captured_aliases
+                .entry((scheme.clone(), authority))
+                .or_default()
+                .push(host.host.clone());
+        }
     }
 
-    Json(site_map).into_response()
+    for endpoint in recon_endpoints {
+        if endpoint.url.trim() != endpoint.url || endpoint.url.chars().any(char::is_control) {
+            continue;
+        }
+        let Ok(url) = url::Url::parse(&endpoint.url) else {
+            continue;
+        };
+        if !matches!(url.scheme(), "http" | "https" | "ws" | "wss")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            continue;
+        }
+        let authority = url[url::Position::BeforeHost..url::Position::AfterPort].to_string();
+        let path_and_query = url[url::Position::BeforePath..url::Position::AfterQuery].to_string();
+        let aliases = captured_aliases.get(&(url.scheme().to_string(), authority.clone()));
+        let existing_path_host = hosts
+            .get(&authority)
+            .filter(|host| host.paths.contains_key(&path_and_query))
+            .map(|host| host.host.clone())
+            .or_else(|| {
+                aliases.and_then(|aliases| {
+                    aliases
+                        .iter()
+                        .find(|key| hosts[*key].paths.contains_key(&path_and_query))
+                        .cloned()
+                })
+            });
+        let host_key = existing_path_host.unwrap_or_else(|| {
+            if hosts.contains_key(&authority) {
+                authority.clone()
+            } else {
+                aliases
+                    .and_then(|aliases| aliases.first())
+                    .cloned()
+                    .unwrap_or(authority)
+            }
+        });
+        let host = hosts
+            .entry(host_key.clone())
+            .or_insert_with(|| TargetHostAccumulator {
+                host: host_key,
+                schemes: Vec::new(),
+                request_count: 0,
+                paths: IndexMap::new(),
+            });
+        push_unique(&mut host.schemes, url.scheme().to_string());
+        let path =
+            host.paths
+                .entry(path_and_query.clone())
+                .or_insert_with(|| TargetPathAccumulator {
+                    path: path_and_query,
+                    methods: Vec::new(),
+                    last_seen: endpoint.last_seen,
+                    status: None,
+                    note_count: 0,
+                    is_websocket: false,
+                    captured: false,
+                    recon_sources: Vec::new(),
+                    recon_kinds: Vec::new(),
+                    recon_last_seen: None,
+                });
+        if Method::from_bytes(endpoint.method.as_bytes()).is_ok() {
+            push_unique(&mut path.methods, endpoint.method);
+        }
+        // Discovery timestamps and historical status codes never replace the
+        // captured response. A discovery-only path has no response to display.
+        if !path.captured {
+            path.last_seen = path.last_seen.max(endpoint.last_seen);
+        }
+        path.recon_last_seen = Some(
+            path.recon_last_seen
+                .map_or(endpoint.last_seen, |seen| seen.max(endpoint.last_seen)),
+        );
+        for source in endpoint.sources {
+            push_unique(&mut path.recon_sources, source);
+        }
+        for kind in endpoint.kinds {
+            push_unique(&mut path.recon_kinds, kind);
+        }
+    }
+    hosts
 }
 
 async fn list_transactions(
@@ -7741,6 +8124,7 @@ async fn send_replay(
         payload.target,
         payload.source_transaction_id,
         http_version,
+        proxy::SentFrom::Replay,
     )
     .await
     {
@@ -7753,17 +8137,6 @@ async fn send_replay(
             }),
         )
             .into_response(),
-    }
-}
-
-fn fuzzer_attack_error_status(error: &anyhow::Error) -> StatusCode {
-    if error
-        .chain()
-        .any(|cause| cause.is::<fuzzer::FuzzerPersistenceError>())
-    {
-        StatusCode::INTERNAL_SERVER_ERROR
-    } else {
-        StatusCode::BAD_REQUEST
     }
 }
 
@@ -7849,19 +8222,7 @@ async fn run_fuzzer_attack(
             return (StatusCode::BAD_REQUEST, error).into_response();
         }
     }
-    let target = payload.target.as_ref();
-    if let Err(error) =
-        fuzzer::validate_expanded_requests(&payload.template, &payload.payloads, |request| {
-            validate_runnable_editable_request(request)?;
-            if let Some(target) = target {
-                validate_request_target_override_for_request(request, target)?;
-            }
-            Ok(())
-        })
-    {
-        return (StatusCode::BAD_REQUEST, error.to_string()).into_response();
-    }
-    let _session_owner = match begin_session_proxy_operation(
+    let session_owner = match begin_session_proxy_operation(
         &state,
         &session,
         payload.expected_active_session_id,
@@ -7872,7 +8233,7 @@ async fn run_fuzzer_attack(
         Ok(owner) => owner,
         Err(response) => return response,
     };
-    match fuzzer::run_attack_for_session(
+    let started = fuzzer::start_attack(
         state,
         session,
         payload.template,
@@ -7880,11 +8241,56 @@ async fn run_fuzzer_attack(
         payload.source_transaction_id,
         http_version,
         payload.target,
+        fuzzer::FuzzerAttackOptions {
+            attack_type: payload.attack_type,
+            url_encode: payload.url_encode,
+            concurrency: payload.concurrency,
+        },
     )
-    .await
-    {
+    .await;
+    // The attack runs on its own, leaving the session free to switch.
+    drop(session_owner);
+    match started {
         Ok(record) => Json(record).into_response(),
-        Err(error) => (fuzzer_attack_error_status(&error), error.to_string()).into_response(),
+        Err(fuzzer::FuzzerStartError::Invalid(message)) => {
+            (StatusCode::BAD_REQUEST, message).into_response()
+        }
+        Err(fuzzer::FuzzerStartError::Busy) => (
+            StatusCode::CONFLICT,
+            "A Fuzzer attack is already running in this session; stop it first.",
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FuzzerStopPayload {
+    session_id: Option<Uuid>,
+}
+
+async fn stop_fuzzer_attack(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<FuzzerStopPayload>,
+) -> Response {
+    let Ok(id) = Uuid::parse_str(&id) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let session = match resolve_read_session_for_optional_id(&state, payload.session_id).await {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let operation_lock = state.session_operation_lock(session.id()).await;
+    let _operation_guard = operation_lock.lock().await;
+    // Not under the mutation guard: storing an exchange persists the session,
+    // which takes it.
+    if !session.fuzzer.stop(Some(id)).await {
+        return (StatusCode::NOT_FOUND, "No attack with that id is running.").into_response();
+    }
+    session.schedule_state_persist();
+    match session.fuzzer.get(id).await {
+        Some(record) => Json(record).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -8768,10 +9174,24 @@ async fn app_js() -> Response {
     )
 }
 
+async fn fuzzer_workflow_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/fuzzer-workflow.js"),
+    )
+}
+
 async fn recon_js() -> Response {
     asset_response(
         "application/javascript; charset=utf-8",
         include_str!("../web/recon.js"),
+    )
+}
+
+async fn templates_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/templates.js"),
     )
 }
 
@@ -8904,6 +9324,10 @@ struct TargetPathAccumulator {
     status: Option<u16>,
     note_count: usize,
     is_websocket: bool,
+    captured: bool,
+    recon_sources: Vec<String>,
+    recon_kinds: Vec<String>,
+    recon_last_seen: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -8917,7 +9341,7 @@ async fn persist_session_mutation_locked_result(
     session: &Arc<SessionContext>,
 ) -> std::result::Result<(), String> {
     state
-        .persist_session_context_mutation_locked(session)
+        .persist_session_state_mutation_locked(session)
         .await
         .map(|_| ())
         .map_err(|error| {
@@ -8954,12 +9378,12 @@ async fn persist_rolled_back_session_snapshot(
     session: &Arc<SessionContext>,
     action: &'static str,
 ) -> bool {
-    if let Err(error) = state.persist_session_context_mutation_locked(session).await {
+    if let Err(error) = state.persist_session_state_mutation_locked(session).await {
         tracing::warn!(
             %error,
             action,
             session_id = %session.id(),
-            "failed to fully persist rolled back session state"
+            "failed to persist rolled back session state"
         );
         return false;
     }
@@ -9193,10 +9617,10 @@ mod tests {
 
     use super::{
         build_ws_replay_url, decode_ws_replay_control_payload, decode_ws_replay_payload,
-        fuzzer_attack_error_status, get_target_site_map, normalize_replay_http_version,
-        persist_bound_runtime_state, sequence_run_error_status, validate_annotations_payload,
-        validate_editable_request, validate_editable_response, validate_match_replace_rules,
-        validate_since, validate_status_code, validate_status_range, validate_transaction_query,
+        get_target_site_map, normalize_replay_http_version, persist_bound_runtime_state,
+        sequence_run_error_status, validate_annotations_payload, validate_editable_request,
+        validate_editable_response, validate_match_replace_rules, validate_since,
+        validate_status_code, validate_status_range, validate_transaction_query,
         validate_ws_replay_headers, validate_ws_replay_text_payload, AnnotationsPayload,
         TransactionQuery, MAX_WS_REPLAY_OUTBOUND_MESSAGE_BYTES,
     };
@@ -9560,6 +9984,65 @@ mod tests {
             Some(expected_owner_session_id.as_str())
         );
         assert!(payload.get("session_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_settings_change_is_saved_without_rewriting_the_captured_traffic() {
+        let (state, data_dir) = test_state("sniper-api-state-only-save");
+        let session = state.session().await;
+        session
+            .store
+            .insert(test_replay_response_record("/captured", 200))
+            .await;
+        state.persist_active_session().await.unwrap();
+        let traffic = session.storage_dir().join("transactions.ndjson");
+        let saved = std::fs::metadata(&traffic).unwrap().modified().unwrap();
+
+        // An intercept toggle or a scope edit: a change made many times a session.
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/runtime",
+            serde_json::json!({
+                "session_id": session.id(),
+                "expected_active_session_id": session.id(),
+                "intercept_enabled": true,
+                "scope_patterns": ["example.com"],
+            }),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert_eq!(
+            std::fs::metadata(&traffic).unwrap().modified().unwrap(),
+            saved,
+            "a settings change rewrote the captured traffic"
+        );
+
+        // It is on disk all the same, with the traffic beside it.
+        let reloaded = state.sessions.load_context_read_only(session.id()).unwrap();
+        let runtime = reloaded.runtime.snapshot().await;
+        assert!(runtime.intercept_enabled);
+        assert_eq!(runtime.scope_patterns, vec!["example.com".to_string()]);
+        assert_eq!(reloaded.store.len().await, 1);
+
+        // The session list still counts what such a change touches.
+        session
+            .event_log
+            .push(EventLevel::Info, "config", "Example", "example event")
+            .await;
+        state
+            .persist_session_state_mutation_locked(&session)
+            .await
+            .unwrap();
+        let listed = state
+            .sessions
+            .summaries()
+            .into_iter()
+            .find(|summary| summary.id == session.id())
+            .unwrap();
+        assert_eq!(listed.event_count, session.event_log.len().await);
+        assert_eq!(listed.request_count, 1);
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
@@ -10662,6 +11145,53 @@ mod tests {
     }
 
     #[test]
+    fn history_since_query_rejects_unusable_cutoffs() {
+        for since in [
+            "+1h",
+            "9223372036854775807h",
+            "9223372036854775807s",
+            "999999999d",
+            "-1h",
+            "0m",
+            "00s",
+            "1.5h",
+            "2026-02-30",
+            " ",
+        ] {
+            let query = TransactionQuery {
+                since: Some(since.into()),
+                ..TransactionQuery::default()
+            };
+            assert!(validate_transaction_query(&query).is_err(), "{since}");
+        }
+    }
+
+    #[test]
+    fn history_since_query_accepts_existing_date_and_duration_forms() {
+        for since in [
+            "1h",
+            "30m",
+            "2d",
+            "60s",
+            " 1h ",
+            "01h",
+            "2026-01-01",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T05:30:00+05:30",
+        ] {
+            let query = TransactionQuery {
+                since: Some(since.into()),
+                ..TransactionQuery::default()
+            };
+            assert!(validate_transaction_query(&query).is_ok(), "{since}");
+            assert!(
+                crate::store::parse_history_since(since).is_some(),
+                "{since}"
+            );
+        }
+    }
+
+    #[test]
     fn transaction_query_validation_rejects_zero_limit() {
         let query = TransactionQuery {
             limit: Some(0),
@@ -10763,21 +11293,6 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[test]
-    fn fuzzer_persistence_errors_are_reported_as_server_errors() {
-        let persistence_error: anyhow::Error =
-            crate::fuzzer::FuzzerPersistenceError::new(anyhow::anyhow!("session snapshot failed"))
-                .into();
-        assert_eq!(
-            fuzzer_attack_error_status(&persistence_error),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-        assert_eq!(
-            fuzzer_attack_error_status(&anyhow::anyhow!("Request template is missing markers")),
-            StatusCode::BAD_REQUEST
-        );
     }
 
     #[test]
@@ -17352,6 +17867,403 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    fn site_map_recon_endpoint(
+        url: &str,
+        method: &str,
+        last_seen: chrono::DateTime<Utc>,
+        source: &str,
+        kind: &str,
+    ) -> crate::recon::ReconEndpoint {
+        crate::recon::ReconEndpoint {
+            url: url.into(),
+            method: method.into(),
+            raw_urls: vec![url.into()],
+            evidence: vec![crate::recon::ReconEvidence {
+                source: source.into(),
+                kind: kind.into(),
+                location: "synthetic fixture".into(),
+                timestamp: Some("20000101000000".into()),
+                status: Some(404),
+            }],
+            first_seen: last_seen,
+            last_seen,
+        }
+    }
+
+    #[test]
+    fn target_site_map_merges_recon_without_overwriting_capture_metadata() {
+        let captured_at = Utc::now();
+        let discovered_at = captured_at + chrono::Duration::hours(1);
+        let records = vec![crate::store::SiteMapRecord {
+            started_at: captured_at,
+            method: "GET".into(),
+            scheme: "https".into(),
+            host: "example.com:8443".into(),
+            path: "/shared?item=one".into(),
+            status: Some(204),
+            note_count: 2,
+            is_websocket: true,
+        }];
+        let recon = crate::recon::ReconStore::from_snapshot(crate::recon::ReconSnapshot {
+            endpoints: vec![
+                site_map_recon_endpoint(
+                    "https://example.com:8443/shared?item=one",
+                    "GET",
+                    discovered_at,
+                    "wayback",
+                    "history",
+                ),
+                site_map_recon_endpoint(
+                    "https://example.com:8443/shared?item=one",
+                    "POST",
+                    discovered_at,
+                    "static",
+                    "candidate",
+                ),
+                site_map_recon_endpoint(
+                    "https://example.com:8443/discovered",
+                    "GET",
+                    discovered_at,
+                    "wayback",
+                    "history",
+                ),
+            ],
+            ..Default::default()
+        });
+        let hosts = super::target_site_map_hosts(records, recon.site_map_endpoints());
+        let host = &hosts["example.com:8443"];
+        assert_eq!(host.request_count, 1);
+        assert_eq!(host.schemes, ["https"]);
+        assert_eq!(host.paths.len(), 2);
+        let shared = &host.paths["/shared?item=one"];
+        assert!(shared.captured);
+        assert_eq!(shared.status, Some(204));
+        assert_eq!(shared.last_seen, captured_at);
+        assert_eq!(shared.recon_last_seen, Some(discovered_at));
+        assert_eq!(shared.note_count, 2);
+        assert!(shared.is_websocket);
+        assert_eq!(shared.methods, ["GET", "POST"]);
+        assert_eq!(shared.recon_sources, ["wayback", "static"]);
+        assert_eq!(shared.recon_kinds, ["history", "candidate"]);
+        let discovered = &host.paths["/discovered"];
+        assert!(!discovered.captured);
+        assert_eq!(
+            discovered.status, None,
+            "historical 404 is not a captured response"
+        );
+        assert_eq!(discovered.last_seen, discovered_at);
+        assert_eq!(discovered.recon_last_seen, Some(discovered_at));
+        assert_eq!(discovered.note_count, 0);
+        assert!(!discovered.is_websocket);
+    }
+
+    #[test]
+    fn target_site_map_recon_preserves_queries_ports_and_rejects_unsafe_urls() {
+        let now = Utc::now();
+        let urls = [
+            "https://example.com:8443/search?q=one&v=%2F#fragment",
+            "https://example.com:8443/search?q=two",
+            "https://example.com:8444/search?q=one&v=%2F",
+            "http://example.com:8443/search?q=two",
+            "https://[::1]:8443/ipv6?x=1",
+            "wss://example.com:8443/socket?token=example",
+            "ws://example.com:8443/socket?token=example",
+            "not an absolute URL",
+            "/relative",
+            "file:///tmp/local",
+            "javascript:alert(1)",
+            "https://user:password@example.com/secret",
+            "https://user@example.com/secret",
+            "https://:password@example.com/secret",
+            "https://example.com:invalid/",
+            " https://example.com/whitespace",
+            "https://example.com/control\n",
+        ];
+        let recon = crate::recon::ReconStore::from_snapshot(crate::recon::ReconSnapshot {
+            endpoints: urls
+                .into_iter()
+                .map(|url| site_map_recon_endpoint(url, "GET", now, "static", "candidate"))
+                .collect(),
+            ..Default::default()
+        });
+        let hosts = super::target_site_map_hosts(Vec::new(), recon.site_map_endpoints());
+        assert_eq!(hosts.len(), 3);
+        let host = &hosts["example.com:8443"];
+        assert_eq!(host.request_count, 0);
+        assert_eq!(host.schemes, ["https", "http", "wss", "ws"]);
+        assert_eq!(host.paths.len(), 3);
+        let socket = &host.paths["/socket?token=example"];
+        assert!(!socket.captured);
+        assert!(
+            !socket.is_websocket,
+            "passive evidence is not a captured connection"
+        );
+        assert_eq!(socket.status, None);
+        assert!(host.paths.contains_key("/search?q=one&v=%2F"));
+        assert!(host.paths.contains_key("/search?q=two"));
+        assert_eq!(host.paths["/search?q=two"].methods, ["GET"]);
+        assert_eq!(host.paths["/search?q=two"].recon_sources, ["static"]);
+        assert!(hosts["example.com:8444"]
+            .paths
+            .contains_key("/search?q=one&v=%2F"));
+        assert!(hosts["[::1]:8443"].paths.contains_key("/ipv6?x=1"));
+    }
+
+    #[test]
+    fn target_site_map_recon_reuses_capture_default_port_and_case_aliases() {
+        let now = Utc::now();
+        let records = [
+            ("https", "EXAMPLE.COM:443", "/secure"),
+            ("http", "example.com:80", "/plain"),
+        ]
+        .into_iter()
+        .map(|(scheme, host, path)| crate::store::SiteMapRecord {
+            started_at: now,
+            method: "GET".into(),
+            scheme: scheme.into(),
+            host: host.into(),
+            path: path.into(),
+            status: Some(200),
+            note_count: 0,
+            is_websocket: false,
+        })
+        .collect();
+        let recon = crate::recon::ReconStore::from_snapshot(crate::recon::ReconSnapshot {
+            endpoints: vec![
+                site_map_recon_endpoint(
+                    "https://example.com/secure",
+                    "GET",
+                    now,
+                    "wayback",
+                    "history",
+                ),
+                site_map_recon_endpoint(
+                    "http://example.com/plain",
+                    "GET",
+                    now,
+                    "wayback",
+                    "history",
+                ),
+                site_map_recon_endpoint(
+                    "https://example.com/new",
+                    "GET",
+                    now,
+                    "static",
+                    "candidate",
+                ),
+            ],
+            ..Default::default()
+        });
+        let hosts = super::target_site_map_hosts(records, recon.site_map_endpoints());
+        assert_eq!(hosts.len(), 2, "legacy capture buckets remain intact");
+        let secure = &hosts["EXAMPLE.COM:443"];
+        assert_eq!(secure.request_count, 1);
+        assert!(secure.paths["/secure"].captured);
+        assert_eq!(secure.paths["/secure"].recon_sources, ["wayback"]);
+        assert!(!secure.paths["/new"].captured);
+        assert_eq!(
+            hosts["example.com:80"].paths["/plain"].recon_sources,
+            ["wayback"]
+        );
+    }
+
+    #[test]
+    fn target_site_map_recon_includes_inventory_beyond_old_global_limit() {
+        let now = Utc::now();
+        let endpoints = (0..5_100)
+            .map(|index| {
+                site_map_recon_endpoint(
+                    &format!("https://example.com/path/{index}"),
+                    "GET",
+                    now,
+                    "wayback",
+                    "history",
+                )
+            })
+            .collect();
+        let recon = crate::recon::ReconStore::from_snapshot(crate::recon::ReconSnapshot {
+            endpoints,
+            ..Default::default()
+        });
+        let hosts = super::target_site_map_hosts(Vec::new(), recon.site_map_endpoints());
+        assert_eq!(hosts["example.com"].paths.len(), 5_100);
+        assert_eq!(hosts["example.com"].request_count, 0);
+        assert!(hosts["example.com"].paths.contains_key("/path/5099"));
+    }
+
+    #[tokio::test]
+    async fn target_site_map_recon_survives_restart_and_pinned_session_lifecycle() {
+        let (state, data_dir) = test_state("target-recon-lifecycle");
+        let config = state.config.clone();
+        let active = state.session().await;
+        let active_id = active.id();
+        let inactive_metadata = state
+            .sessions
+            .create_session(Some("Recon fixture".into()))
+            .unwrap();
+        let inactive = state.sessions.load_context(inactive_metadata.id).unwrap();
+        let now = Utc::now();
+        active
+            .store
+            .insert(TransactionRecord::http(
+                now,
+                "GET".into(),
+                "https".into(),
+                "example.com".into(),
+                "/captured".into(),
+                Some(204),
+                1,
+                MessageRecord::from_headers_and_body(&HeaderMap::new(), &[], 0),
+                None,
+                Vec::new(),
+                None,
+                None,
+            ))
+            .await;
+        active.persist().await.unwrap();
+        inactive
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["inactive.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        inactive.persist().await.unwrap();
+        let active_state_path = active.storage_dir().join("state.json");
+        let inactive_state_path = inactive.storage_dir().join("state.json");
+        drop(active);
+        drop(inactive);
+        drop(state);
+        for (path, url) in [
+            (
+                &active_state_path,
+                "https://example.com/discovered?active=1",
+            ),
+            (
+                &inactive_state_path,
+                "https://inactive.example.com:8443/only?inactive=1",
+            ),
+        ] {
+            let mut saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            saved["recon"] = serde_json::to_value(crate::recon::ReconSnapshot {
+                endpoints: vec![site_map_recon_endpoint(
+                    url, "GET", now, "wayback", "history",
+                )],
+                jobs: vec![crate::recon::ReconJob {
+                    id: Uuid::new_v4(),
+                    target_url: url.into(),
+                    status: "running".into(),
+                    started_at: now,
+                    finished_at: None,
+                    sources: Vec::new(),
+                    error: None,
+                }],
+            })
+            .unwrap();
+            std::fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        }
+        let state = Arc::new(AppState::new(config.clone()).unwrap());
+        let inactive_bytes = std::fs::read(&inactive_state_path).unwrap();
+        let active_map: Vec<crate::target::TargetHostNode> = response_json(
+            get_target_site_map(
+                State(state.clone()),
+                Query(super::TargetSiteMapQuery { session_id: None }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(active_map.len(), 1);
+        assert_eq!(active_map[0].host, "example.com");
+        assert_eq!(active_map[0].request_count, 1);
+        assert_eq!(active_map[0].paths.len(), 2);
+        assert!(active_map[0]
+            .paths
+            .iter()
+            .any(|path| path.captured && !path.discovered));
+        assert!(active_map[0]
+            .paths
+            .iter()
+            .any(|path| !path.captured && path.discovered && path.status.is_none()));
+        let inactive_map: Vec<crate::target::TargetHostNode> = response_json(
+            get_target_site_map(
+                State(state.clone()),
+                Query(super::TargetSiteMapQuery {
+                    session_id: Some(inactive_metadata.id),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(inactive_map.len(), 1);
+        assert_eq!(inactive_map[0].host, "inactive.example.com:8443");
+        assert!(inactive_map[0].in_scope);
+        assert_eq!(inactive_map[0].request_count, 0);
+        assert_eq!(inactive_map[0].paths[0].path, "/only?inactive=1");
+        assert!(!inactive_map[0].paths[0].captured);
+        assert!(inactive_map[0].paths[0].discovered);
+        assert_eq!(
+            std::fs::read(&inactive_state_path).unwrap(),
+            inactive_bytes,
+            "reading inventory must not persist or start discovery"
+        );
+        assert_eq!(state.session().await.id(), active_id);
+        assert_eq!(state.session().await.store.len().await, 1);
+        assert_eq!(
+            state.session().await.recon.snapshot().jobs[0].status,
+            "interrupted"
+        );
+        state.activate_session(inactive_metadata.id).await.unwrap();
+        let inactive = state.session().await;
+        assert_eq!(inactive.store.len().await, 0);
+        assert!(!inactive.recon.is_running());
+        inactive
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["other.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        inactive.persist().await.unwrap();
+        drop(inactive);
+        drop(state);
+        let state = Arc::new(AppState::new(config).unwrap());
+        let map: Vec<crate::target::TargetHostNode> = response_json(
+            get_target_site_map(
+                State(state.clone()),
+                Query(super::TargetSiteMapQuery { session_id: None }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(map.len(), 1);
+        assert!(!map[0].in_scope);
+        assert_eq!(
+            map[0].paths.len(),
+            1,
+            "scope changes do not erase inventory"
+        );
+        assert_eq!(map[0].paths[0].recon_sources, ["wayback"]);
+        state.activate_session(active_id).await.unwrap();
+        state.delete_session(inactive_metadata.id).await.unwrap();
+        assert_eq!(
+            get_target_site_map(
+                State(state.clone()),
+                Query(super::TargetSiteMapQuery {
+                    session_id: Some(inactive_metadata.id),
+                }),
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(state.session().await.recon.snapshot().endpoints.len(), 1);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
     #[tokio::test]
     async fn target_site_map_counts_notes_once_per_record() {
         let config = AppConfig {
@@ -18509,6 +19421,251 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    // A session captured under older rules keeps their findings until it is
+    // scanned again; a rescan replaces them with what the current rules find.
+    #[tokio::test]
+    async fn findings_rescan_replaces_stale_findings_with_current_rules() {
+        let (state, path) = test_state("findings-rescan");
+        let session = state.session().await;
+        let mut config = session.scanner.get_config().await;
+        config.enabled = true;
+        session.scanner.update_config(config).await;
+        let mut headers = HeaderMap::new();
+        headers.insert("server", "nginx/1.25.3".parse().unwrap());
+        headers.insert(
+            "set-cookie",
+            "JSESSIONID=synthetic-session; Path=/; Secure; HttpOnly"
+                .parse()
+                .unwrap(),
+        );
+        let record = TransactionRecord::http(
+            Utc::now(),
+            "GET".into(),
+            "https".into(),
+            "example.com".into(),
+            "/".into(),
+            Some(200),
+            1,
+            MessageRecord::from_headers_and_body(&HeaderMap::new(), b"", 4096),
+            Some(MessageRecord::from_headers_and_body(
+                &headers,
+                b"<html></html>",
+                4096,
+            )),
+            vec![],
+            None,
+            None,
+        );
+        let record_id = record.id;
+        session.store.insert(record).await;
+        let stale = ScannerFinding {
+            id: Uuid::new_v4(),
+            record_id,
+            found_at: Utc::now(),
+            rule_id: String::new(),
+            severity: Severity::Medium,
+            category: "cookie".to_string(),
+            title: "Cookie without Secure flag".to_string(),
+            detail: String::new(),
+            evidence: "BIGipServerpool".to_string(),
+            host: "example.com".to_string(),
+            path: "/".to_string(),
+            location: None,
+        };
+        let mut legacy_cache = stale.clone();
+        legacy_cache.id = Uuid::new_v4();
+        legacy_cache.severity = Severity::Low;
+        legacy_cache.category = "misconfig".into();
+        legacy_cache.title = "Missing Cache-Control on authenticated response".into();
+        legacy_cache.detail = "Response to an authenticated request lacks Cache-Control header. Sensitive data may be cached by browsers or proxies.".into();
+        legacy_cache.evidence.clear();
+        session
+            .scanner
+            .replace_all(vec![stale.clone(), legacy_cache.clone()])
+            .await;
+        let query = || {
+            Query(super::SessionWriteQuery {
+                session_id: None,
+                expected_active_session_id: None,
+            })
+        };
+
+        let response = super::rescan_findings(State(state.clone()), query()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let outcome: serde_json::Value = response_json(response).await;
+        assert_eq!(outcome["scanned"], 1);
+        assert_eq!(outcome["unreadable"], 0);
+        let findings = session.scanner.list(None).await;
+        assert!(findings.iter().all(|finding| finding.id != stale.id));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.record_id == record_id && finding.category == "server"));
+        assert_eq!(outcome["findings"], findings.len());
+        // Saved with the session, not only held in memory.
+        let saved = state.sessions.load_context_read_only(session.id()).unwrap();
+        assert_eq!(saved.scanner.list(None).await.len(), findings.len());
+        for store in [&session.scanner, &saved.scanner] {
+            let snapshot = store.snapshot(None).await;
+            assert!(snapshot.iter().all(|finding| {
+                finding.id != legacy_cache.id && finding.title != legacy_cache.title
+            }));
+            let cache = snapshot
+                .iter()
+                .find(|finding| {
+                    finding.title
+                        == "Missing Cache-Control with session or authorization indicators"
+                })
+                .expect("Rescan replaces the legacy cache claim in memory and on disk");
+            assert_eq!(cache.record_id, record_id);
+            assert_eq!(cache.severity, Severity::Low);
+            assert_eq!(cache.detail, "An Authorization header or session-like cookie was observed. This does not establish an authenticated user. The response lacks Cache-Control, so any sensitive content may be cached by browsers or proxies.");
+            assert!(cache.evidence.is_empty());
+        }
+
+        // One at a time, and never with Passive Scan off, which would empty it.
+        let slot = session.scanner.begin_rescan().unwrap();
+        let response = super::rescan_findings(State(state.clone()), query()).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        drop(slot);
+        let mut config = session.scanner.get_config().await;
+        config.enabled = false;
+        session.scanner.update_config(config).await;
+        let response = super::rescan_findings(State(state.clone()), query()).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(session.scanner.list(None).await.len(), findings.len());
+        drop(saved);
+        drop(session);
+        drop(state);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    // Passive Nuclei templates the operator enabled judge in-scope history on
+    // Rescan, and nothing when no scope is set.
+    #[tokio::test]
+    async fn findings_rescan_runs_enabled_passive_templates_in_scope() {
+        use std::io::Write as _;
+        let (state, path) = test_state("findings-rescan-templates");
+        for _ in 0..200 {
+            if state.templates.status().state != crate::templates::library::TaskState::Loading {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let template = "id: example-detect\ninfo:\n  name: Example Detect\n  severity: low\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}']\n    matchers:\n      - type: word\n        words: ['Example Server']\n";
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(template.len() as u64);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, "release/http/detect.yaml", template.as_bytes())
+            .unwrap();
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(&builder.into_inner().unwrap()).unwrap();
+        state
+            .templates
+            .import_blocking(
+                &gzip.finish().unwrap(),
+                crate::templates::library::Source::Import,
+            )
+            .unwrap();
+        state
+            .templates
+            .set_passive(&["example-detect".into()], true)
+            .unwrap();
+
+        let session = state.session().await;
+        let mut config = session.scanner.get_config().await;
+        config.enabled = true;
+        session.scanner.update_config(config).await;
+        let record = TransactionRecord::http(
+            Utc::now(),
+            "GET".into(),
+            "https".into(),
+            "app.example.com".into(),
+            "/".into(),
+            Some(200),
+            1,
+            MessageRecord::from_headers_and_body(&HeaderMap::new(), b"", 4096),
+            Some(MessageRecord::from_headers_and_body(
+                &HeaderMap::new(),
+                b"<html>Example Server</html>",
+                4096,
+            )),
+            vec![],
+            None,
+            None,
+        );
+        session.store.insert(record).await;
+        let query = || {
+            Query(super::SessionWriteQuery {
+                session_id: None,
+                expected_active_session_id: None,
+            })
+        };
+        let template_findings = |findings: Vec<crate::scanner::FindingSummary>| {
+            findings
+                .into_iter()
+                .filter(|finding| finding.rule_id == "nuclei-passive:example-detect")
+                .count()
+        };
+        // A Template Scan finding: one per endpoint, whatever value it saw
+        // reflected, and a rescan, which sends nothing, keeps it.
+        for evidence in ["first-random", "second-random"] {
+            session
+                .scanner
+                .push(crate::scanner::ScannerFinding {
+                    id: Uuid::new_v4(),
+                    record_id: Uuid::new_v4(),
+                    found_at: Utc::now() - chrono::Duration::hours(1),
+                    rule_id: "nuclei:example-active".into(),
+                    severity: crate::scanner::Severity::High,
+                    category: "nuclei".into(),
+                    title: "Example Active".into(),
+                    detail: String::new(),
+                    evidence: evidence.into(),
+                    host: "app.example.com".into(),
+                    path: "/echo?q=1".into(),
+                    location: None,
+                })
+                .await;
+        }
+        let active_findings = |findings: Vec<crate::scanner::FindingSummary>| {
+            findings
+                .into_iter()
+                .filter(|finding| finding.rule_id == "nuclei:example-active")
+                .count()
+        };
+        assert_eq!(active_findings(session.scanner.list(None).await), 1);
+
+        // No scope set: a template nobody pointed anywhere judges nothing.
+        let response = super::rescan_findings(State(state.clone()), query()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(template_findings(session.scanner.list(None).await), 0);
+        assert_eq!(active_findings(session.scanner.list(None).await), 1);
+
+        session
+            .runtime
+            .update(crate::runtime::RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["*.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let response = super::rescan_findings(State(state.clone()), query()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let findings = session.scanner.list(None).await;
+        assert_eq!(template_findings(findings.clone()), 1);
+        let finding = findings
+            .iter()
+            .find(|finding| finding.rule_id.starts_with("nuclei-passive:"))
+            .unwrap();
+        assert_eq!(finding.category, "nuclei");
+        assert_eq!(finding.title, "Example Detect");
+        drop(session);
+        drop(state);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
     #[tokio::test]
     async fn rule_write_body_session_id_targets_inactive_session_and_rejects_conflicts() {
         let data_dir = std::env::temp_dir().join(format!(
@@ -19301,6 +20458,12 @@ mod tests {
         let state = Arc::new(AppState::new(config).unwrap());
         let session = state.session().await;
         let attack = FuzzerAttackRecord {
+            attack_type: Default::default(),
+            url_encode: false,
+            planned: 0,
+            concurrency: 1,
+            running: false,
+            stopped: false,
             id: Uuid::new_v4(),
             started_at: Utc::now(),
             completed_at: Utc::now(),
@@ -20229,6 +21392,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state.clone()),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: Some(Uuid::new_v4()),
                 expected_active_session_id: None,
                 expected_workspace_revision: None,
@@ -20276,6 +21442,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state.clone()),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: None,
                 expected_active_session_id: None,
                 expected_workspace_revision: None,
@@ -20303,8 +21472,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    async fn wait_for_fuzzer_attack_end(
+        session: &crate::session::SessionContext,
+        id: uuid::Uuid,
+    ) -> crate::fuzzer::FuzzerAttackRecord {
+        for _ in 0..1000 {
+            let record = session.fuzzer.get(id).await.unwrap();
+            if !record.running {
+                return record;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the attack did not end");
+    }
+
     #[tokio::test]
-    async fn fuzzer_run_rejects_expanded_ip_host_target_override_before_attack() {
+    async fn fuzzer_stop_ends_the_running_attack_and_says_when_none_runs() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-test-fuzzer-stop-{}", uuid::Uuid::new_v4()));
+        let state = Arc::new(
+            AppState::new(AppConfig {
+                proxy_addr: "127.0.0.1:0".parse().unwrap(),
+                ui_addr: "127.0.0.1:0".parse().unwrap(),
+                max_entries: 100,
+                max_transaction_entries: 100,
+                body_preview_bytes: 4096,
+                data_dir: data_dir.clone(),
+            })
+            .unwrap(),
+        );
+        let session = state.session().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 1024];
+                    let _ = stream.read(&mut buffer).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                        .await;
+                });
+            }
+        });
+
+        let response = super::run_fuzzer_attack(
+            State(state.clone()),
+            Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: true,
+                concurrency: 1,
+                session_id: Some(session.id()),
+                expected_active_session_id: None,
+                expected_workspace_revision: None,
+                template: EditableRequest {
+                    scheme: "http".to_string(),
+                    host: addr.to_string(),
+                    method: "GET".to_string(),
+                    path: "/$payload$".to_string(),
+                    headers: Vec::new(),
+                    body: String::new(),
+                    body_encoding: BodyEncoding::Utf8,
+                    preview_truncated: false,
+                },
+                payloads: (0..10).map(|index| format!("p{index}")).collect(),
+                source_transaction_id: None,
+                http_version: None,
+                target: None,
+            }),
+        )
+        .await;
+        let started: crate::fuzzer::FuzzerAttackRecord = response_json(response).await;
+        let stop = || {
+            super::stop_fuzzer_attack(
+                State(state.clone()),
+                Path(started.id.to_string()),
+                Json(super::FuzzerStopPayload {
+                    session_id: Some(session.id()),
+                }),
+            )
+        };
+
+        let response = stop().await;
+        assert_eq!(response.status(), super::StatusCode::OK);
+        let stopped: crate::fuzzer::FuzzerAttackRecord = response_json(response).await;
+        assert!(stopped.stopped);
+        assert!(!stopped.running);
+        assert!(stopped.results.len() < 10);
+        assert_eq!(stop().await.status(), super::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn fuzzer_run_never_sends_a_payload_that_makes_the_host_an_ip_address() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-fuzzer-expanded-ip-target-{}",
             uuid::Uuid::new_v4()
@@ -20323,6 +21585,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state.clone()),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: Some(session.id()),
                 expected_active_session_id: None,
                 expected_workspace_revision: None,
@@ -20348,11 +21613,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), super::StatusCode::BAD_REQUEST);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body = String::from_utf8_lossy(&body);
-        assert!(body.contains("request host is an IP address"));
-        assert!(session.fuzzer.list(Some(10)).await.is_empty());
+        assert_eq!(response.status(), super::StatusCode::OK);
+        let started: crate::fuzzer::FuzzerAttackRecord = response_json(response).await;
+        let attack = wait_for_fuzzer_attack_end(&session, started.id).await;
+        let note = attack.results[0].note.as_deref().unwrap_or_default();
+        assert!(note.starts_with("Not sent:"), "{note}");
+        assert!(note.contains("request host is an IP address"), "{note}");
+        assert_eq!(attack.results[0].transaction_id, None);
+        assert!(session.store.snapshot(Some(10)).await.is_empty());
 
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -20382,6 +21650,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state.clone()),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: Some(original_id),
                 expected_active_session_id: Some(original_id),
                 expected_workspace_revision: None,
@@ -20447,6 +21718,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state.clone()),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: Some(session_id),
                 expected_active_session_id: None,
                 expected_workspace_revision: Some(stale_revision),
@@ -20503,6 +21777,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state.clone()),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: Some(inactive.id),
                 expected_active_session_id: Some(active_id),
                 expected_workspace_revision: None,
@@ -20561,6 +21838,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: Some(Uuid::new_v4()),
                 expected_active_session_id: None,
                 expected_workspace_revision: None,
@@ -20588,7 +21868,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fuzzer_run_rejects_payload_expansion_that_invalidates_request() {
+    async fn fuzzer_run_reports_a_payload_that_breaks_the_request_and_sends_nothing() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-fuzzer-expanded-request-validation-{}",
             uuid::Uuid::new_v4()
@@ -20607,6 +21887,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state.clone()),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: Some(session.id()),
                 expected_active_session_id: None,
                 expected_workspace_revision: None,
@@ -20628,8 +21911,16 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), super::StatusCode::BAD_REQUEST);
-        assert!(session.fuzzer.list(Some(10)).await.is_empty());
+        assert_eq!(response.status(), super::StatusCode::OK);
+        let started: crate::fuzzer::FuzzerAttackRecord = response_json(response).await;
+        let attack = wait_for_fuzzer_attack_end(&session, started.id).await;
+        assert!(matches!(
+            attack.status,
+            crate::fuzzer::FuzzerAttackStatus::Failed
+        ));
+        let note = attack.results[0].note.as_deref().unwrap_or_default();
+        assert!(note.starts_with("Not sent:"), "{note}");
+        assert!(session.store.snapshot(Some(10)).await.is_empty());
 
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -20665,6 +21956,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state.clone()),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: Some(session.id()),
                 expected_active_session_id: None,
                 expected_workspace_revision: None,
@@ -20687,7 +21981,9 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), super::StatusCode::OK);
-        let attack: crate::fuzzer::FuzzerAttackRecord = response_json(response).await;
+        let started: crate::fuzzer::FuzzerAttackRecord = response_json(response).await;
+        assert!(started.running);
+        let attack = wait_for_fuzzer_attack_end(&session, started.id).await;
         assert!(matches!(
             attack.status,
             crate::fuzzer::FuzzerAttackStatus::Completed
@@ -20718,6 +22014,9 @@ mod tests {
         let response = super::run_fuzzer_attack(
             State(state.clone()),
             Json(crate::fuzzer::FuzzerAttackPayload {
+                attack_type: Default::default(),
+                url_encode: false,
+                concurrency: 1,
                 session_id: Some(session.id()),
                 expected_active_session_id: None,
                 expected_workspace_revision: None,
@@ -21875,6 +23174,12 @@ mod tests {
             preview_truncated: false,
         };
         let attack = FuzzerAttackRecord {
+            attack_type: Default::default(),
+            url_encode: false,
+            planned: 0,
+            concurrency: 1,
+            running: false,
+            stopped: false,
             id: Uuid::new_v4(),
             started_at: Utc::now(),
             completed_at: Utc::now(),
@@ -25360,6 +26665,9 @@ mod tests {
             session.store.insert(record).await;
             history_retention_wait_count(&session, 1).await;
         }
+        // Outwait the compaction interval (one second under test): trims from
+        // captures under an unchanged policy leave the rewrite to journal growth.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         assert!(session.store.retention_compaction_pending());
         assert_eq!(
             session
@@ -25367,6 +26675,27 @@ mod tests {
                 .compactions_started
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
+        );
+        // A changed policy still reclaims the space promptly.
+        assert_eq!(
+            history_retention_save(&state, &session, history_retention_policy(2))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while session.store.retention_compaction_pending() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            session
+                .history_retention
+                .compactions_started
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
         );
         drop(session);
         drop(state);

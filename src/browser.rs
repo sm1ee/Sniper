@@ -1113,6 +1113,10 @@ async fn launch_at(
     } else {
         driver.control(port, server_name.as_deref())
     };
+    let ports: Vec<u16> = own_port.into_iter().chain(port).collect();
+    if !ended && !ports.is_empty() {
+        remember_driver_ports(&profile, ports);
+    }
     let hint = if ended {
         Some("the browser ended at once, so there is nothing to drive; see warnings".to_string())
     } else if let Some(hint) = driver.shared_instance_hint() {
@@ -1336,6 +1340,7 @@ fn watch_browser(
                 if live.get(&profile).is_some_and(|owner| owner.pid == pid) {
                     live.remove(&profile);
                     let _ = fs::remove_file(profile.join(OWNER_FILE));
+                    forget_driver_ports(&profile);
                 }
             }
             if fresh {
@@ -1684,6 +1689,43 @@ fn process_runs_as(pid: u32, expected: &Path) -> bool {
 fn live_profiles() -> &'static Mutex<HashMap<PathBuf, Owner>> {
     static LIVE: OnceLock<Mutex<HashMap<PathBuf, Owner>>> = OnceLock::new();
     LIVE.get_or_init(Default::default)
+}
+
+/// The loopback ports a browser Sniper opened is driven through, by profile: its
+/// DevTools or MCP port, and the daemon its driver calls. Each hands over the
+/// browser's logged-in sessions, so while the browser runs the proxy refuses them
+/// to a client on another machine. A launch refuses to open one while the proxy
+/// listens beyond loopback, but the proxy can be moved there afterwards.
+fn driver_ports_by_profile() -> &'static Mutex<HashMap<PathBuf, Vec<u16>>> {
+    static PORTS: OnceLock<Mutex<HashMap<PathBuf, Vec<u16>>>> = OnceLock::new();
+    PORTS.get_or_init(Default::default)
+}
+
+pub fn driver_ports() -> Vec<u16> {
+    let mut ports: Vec<u16> = driver_ports_by_profile()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+pub(crate) fn remember_driver_ports(profile: &Path, ports: Vec<u16>) {
+    driver_ports_by_profile()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(profile.to_path_buf(), ports);
+}
+
+pub(crate) fn forget_driver_ports(profile: &Path) {
+    driver_ports_by_profile()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(profile);
 }
 
 #[cfg(test)]
@@ -2839,13 +2881,14 @@ mod tests {
             }
 
             fn ctx(&self) -> LaunchContext<'_> {
-                self.build(PROXY, Duration::from_secs(5), Duration::from_millis(50))
+                self.build(PROXY, Duration::from_secs(30), Duration::from_millis(50))
             }
 
             // The waits only cost time when the thing they wait for never happens,
             // so a test that expects it gets a generous limit and only the tests for
             // "never happens" use a short one. Short limits everywhere failed under
-            // parallel load. The startup settle is zero so a second launch is a
+            // parallel load, and so did five seconds for the DevTools port while the
+            // whole suite ran. The startup settle is zero so a second launch is a
             // handoff unless a test is about the settle itself.
             fn build(
                 &self,
@@ -3430,6 +3473,93 @@ mod tests {
             assert_eq!(leftovers, 0);
         }
 
+        // No browser or credentials: the fixture writes an ordinary sentinel in
+        // its selected user data directory, then exits. A second launch must see
+        // the same bytes after the watcher has forgotten the first process.
+        #[tokio::test]
+        async fn aside_and_ego_keep_their_saved_profile_after_exit_and_relaunch() {
+            for kind in [BrowserKind::Aside, BrowserKind::Ego] {
+                let fixture = Fixture::new();
+                let profile = fixture.profile(kind.name());
+                let out = fixture.dir.join("profile-visits.txt");
+                let exe = fixture.script(&format!(
+                    "for a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${{a#--user-data-dir=}}\";; esac; done\n\
+                     mkdir -p \"$d/Default\"\n\
+                     if [ -f \"$d/Default/synthetic-state.txt\" ]; then\n\
+                       cat \"$d/Default/synthetic-state.txt\" >> '{out}'\n\
+                     else\n\
+                       printf 'synthetic-state\\n' > \"$d/Default/synthetic-state.txt\"\n\
+                       printf 'created\\n' >> '{out}'\n\
+                     fi",
+                    out = out.display()
+                ));
+                let mut names = Vec::new();
+                for _ in 0..2 {
+                    let launched = launch_at(&fixture.ctx(), kind, &exe, LaunchRequest::default())
+                        .await
+                        .unwrap();
+                    assert_eq!(Path::new(&launched.profile_dir), profile);
+                    assert!(!launched.fresh);
+                    assert!(!launched.reused, "the previous fixture has exited");
+                    names.push(
+                        kind.driver()
+                            .server_name(18890, Path::new(&launched.profile_dir)),
+                    );
+                    wait_for_profile_release(&profile).await;
+                    assert_eq!(
+                        fs::read_to_string(profile.join("Default/synthetic-state.txt")).unwrap(),
+                        "synthetic-state\n"
+                    );
+                }
+                assert_eq!(names[0], names[1], "ego's instance name is stable too");
+                assert_eq!(
+                    fs::read_to_string(out).unwrap(),
+                    "created\nsynthetic-state\n"
+                );
+
+                // A deliberate clean launch gets its own directory and its cleanup
+                // must not erase the saved profile that will be used next time.
+                let fresh = launch_at(
+                    &fixture.ctx(),
+                    kind,
+                    &exe,
+                    LaunchRequest {
+                        fresh: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(fresh.fresh);
+                assert_ne!(Path::new(&fresh.profile_dir), profile);
+                for _ in 0..500 {
+                    if !Path::new(&fresh.profile_dir).exists() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                assert!(!Path::new(&fresh.profile_dir).exists());
+                assert_eq!(
+                    fs::read_to_string(profile.join("Default/synthetic-state.txt")).unwrap(),
+                    "synthetic-state\n"
+                );
+            }
+        }
+
+        async fn wait_for_profile_release(profile: &Path) {
+            for _ in 0..500 {
+                let registered = live_profiles()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains_key(profile);
+                if !registered && !profile.join(OWNER_FILE).exists() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("the synthetic browser did not release its profile");
+        }
+
         #[tokio::test]
         async fn a_fresh_profile_is_unique_and_removed_when_the_browser_exits() {
             let fixture = Fixture::new();
@@ -3447,7 +3577,11 @@ mod tests {
                 .unwrap();
             assert_ne!(a.profile_dir, b.profile_dir);
 
-            for _ in 0..100 {
+            // A thread deletes each profile once its browser exits, and one that
+            // ran for HANDOVER_MIN_LIFETIME first waits out a handover; under a
+            // loaded test run that outlasts two seconds, so allow what
+            // wait_for_profile_release does.
+            for _ in 0..500 {
                 if !Path::new(&a.profile_dir).exists() && !Path::new(&b.profile_dir).exists() {
                     return;
                 }
@@ -3500,6 +3634,46 @@ mod tests {
             .unwrap();
             assert!(launched.control.is_none());
             assert_eq!(launched.warnings.len(), 1);
+        }
+
+        // The proxy refuses these to another machine for as long as the browser runs.
+        #[tokio::test]
+        async fn the_ports_a_launched_browser_is_driven_through_are_known_while_it_runs() {
+            let fixture = Fixture::new();
+            let reports = fixture.open_browser(
+                "for a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${a#--user-data-dir=}\";; esac; done\n\
+                 printf '47123\\n/devtools/browser/x\\n' > \"$d/DevToolsActivePort\"",
+            );
+            let with_port = LaunchRequest {
+                agent: true,
+                ..Default::default()
+            };
+            let launched = launch_at(&fixture.ctx(), BrowserKind::Chromium, &reports, with_port)
+                .await
+                .unwrap();
+            assert!(launched.control.is_some(), "{:?}", launched.warnings);
+            // Aside's extension calls the daemon every Aside on the machine shares.
+            let aside = fixture.open_browser("");
+            launch_at(
+                &fixture.ctx(),
+                BrowserKind::Aside,
+                &aside,
+                LaunchRequest::default(),
+            )
+            .await
+            .unwrap();
+            let ports = driver_ports();
+            assert!(ports.contains(&47123), "{ports:?}");
+            assert!(ports.contains(&21420), "{ports:?}");
+
+            drop(fixture);
+            for _ in 0..500 {
+                if !driver_ports().contains(&47123) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("the port of a browser that exited is still listed");
         }
 
         // Neo writes the port down before its server starts, and the server can fail to
@@ -3660,9 +3834,10 @@ mod tests {
                 "{again:?}"
             );
 
-            // ...and the fresh alternative it names really works.
+            // ...and the fresh alternative it names really works. This browser never
+            // reports a port, so the wait for one is short.
             let fresh = launch_at(
-                &fixture.ctx(),
+                &fixture.build(PROXY, Duration::from_millis(300), Duration::from_millis(50)),
                 BrowserKind::Edge,
                 &exe,
                 LaunchRequest {

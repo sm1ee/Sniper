@@ -85,7 +85,7 @@ function fixture({ joinAnnotations = false } = {}) {
     "truncateUtf8", "truncateUtf8Preview", "utf8ByteLength",
     "isHttpHistoryVisible", "isModalVisible", "restoreModalFocus",
     "openDisplaySettingsModal", "closeDisplaySettingsModal", "openFilterModal", "closeFilterModal",
-    "setActiveTool", "setActiveProxyTab", "sanitizeActiveTool", "sanitizeActiveProxyTab",
+    "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveTool", "setActiveProxyTab", "sanitizeActiveTool", "sanitizeActiveProxyTab",
     "openContextMenu", "closeContextMenu", "positionContextMenu", "renderContextMenuNotes",
     "createTransactionRecordMenuTarget", "getHistoryItem",
   ];
@@ -107,10 +107,11 @@ function fixture({ joinAnnotations = false } = {}) {
   );
   const context = loadFunctions(functions, {
     session: "fixture-session", MAX_ANNOTATION_NOTE_BYTES: 32 * 1024, TextEncoder,
+    closeScannerSettings() {},
     pendingHistoryNoteRead: null,
     IMPLEMENTED_TOOLS: new Set(["proxy", "replay"]),
     IMPLEMENTED_PROXY_TABS: new Set(["http-history", "websockets-history"]),
-    displaySettingsReturnFocus: null, displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(), filterSettingsReturnFocus: null,
+    compareLoadGeneration: 0, displaySettingsReturnFocus: null, displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(), filterSettingsReturnFocus: null,
     filterSettingsEditedControls: new Set(),
     hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, selectSettingsTab() {},
     hydrateFilterForm() {},
@@ -440,7 +441,7 @@ test("a real candidate autosave acknowledgement keeps the composing editor conne
   assert.equal(f.state._itemsVersion, 1);
   assert.equal(f.state.historyPaging.annotationMutationGeneration, 1);
   assert.equal(f.state._historyEntries[0].item, f.item);
-  assert.match(f.context.els.historyMeta.textContent, /1 loaded item\(s\) visible/);
+  assert.match(f.context.els.historyMeta.textContent, /1 loaded item visible/);
   input.dispatch("compositionend");
   runTimers(f);
   assert.equal(annotationRequests(f).length, 1, "ending the same candidate must not duplicate the save");
@@ -564,7 +565,7 @@ test("an unrelated record acknowledgement preserves the open note while updating
   assert.equal(f.cell.isConnected, true);
   assert.equal(input.value, "아직");
   assert.equal(f.historyWrites.length, 0);
-  assert.match(f.context.els.historyMeta.textContent, /2 loaded item\(s\) visible/);
+  assert.match(f.context.els.historyMeta.textContent, /2 loaded items visible/);
   input.dispatch("compositionend");
   input.dispatch("keydown", "Escape");
   assert.equal(f.historyWrites.length, 1);
@@ -586,7 +587,7 @@ test("an acknowledgement can remove a filtered row without interrupting its edit
   assert.equal(f.state.historyPaging.filteredTotal, 0);
   assert.equal(f.state.historyPaging.total, 1);
   assert.equal(f.state._historyEntries.length, 0);
-  assert.match(f.context.els.historyMeta.textContent, /0 loaded item\(s\) visible.*notes only/);
+  assert.match(f.context.els.historyMeta.textContent, /0 loaded items visible.*notes only/);
   assert.equal(f.historyWrites.length, 0, "even an empty-list acknowledgement must defer tbody replacement");
   assert.equal(f.cell.isConnected, true);
   input.dispatch("compositionend");
@@ -627,7 +628,7 @@ for (const composing of [false, true]) {
       assert.equal(f.state.selectedRecord, null);
       assert.equal(f.state._itemById.get(f.item.id), f.state.items[0]);
       assert.equal(f.state._itemIndexById.get(f.item.id), 0);
-      assert.match(f.context.els.historyMeta.textContent, /1 loaded item\(s\) visible/);
+      assert.match(f.context.els.historyMeta.textContent, /1 loaded item visible/);
       assert.equal(f.cell.querySelector(), input);
       assert.equal(f.historyWrites.length, 0);
       if (composing) { input.dispatch("compositionend"); runTimers(f); }

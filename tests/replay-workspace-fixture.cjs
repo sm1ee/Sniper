@@ -4,7 +4,9 @@ const vm = require("node:vm");
 const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 const plain = value => JSON.parse(JSON.stringify(value));
 const functions = [
-  "adoptExternalReplayTabs", "replayTabHasUncommittedEditorState", "adoptExternalReplayResult",
+  "adoptExternalWorkspace", "replayTabHasUncommittedEditorState", "adoptExternalReplayResult",
+  "readFuzzerWorkspace", "applyFuzzerWorkspace", "snapshotFuzzerWorkspace", "fuzzerWorkspaceChanged",
+  "fuzzerWorkspaceAttackRecordId",
   "adoptExternalReplayLabel", "adoptExternalReplayRequest", "replayTabRequestShape",
   "snapshotHttpReplayTab", "snapshotWorkspaceState", "workspaceReplayTabsById", "workspaceSnapshotValueChanged",
   "cloneWorkspaceSnapshotForBaseline", "hydrateReplayTab", "hydrateRepeaterHistoryEntry", "normalizeReplayTabCustomLabel",
@@ -59,6 +61,11 @@ function fixture() {
     createWsReplaySnapshotBudgetAllocator: () => () => ({ frames: 0, bytes: 0 }),
     expectedActiveSessionIdForWrite: id => id,
     normalizeFuzzerTargetOverride: target => target || null,
+    normalizeFuzzerTargetAuthority: value => value || null,
+    fuzzerTargetAuthorityFromRequestText: () => null, fuzzerTargetAuthorityFromEditableRequest: () => null,
+    normalizeFuzzerAttackRecord: () => null, hydrateFuzzerAttackRecordById() {},
+    setFuzzerAttackRecord(record) { state.fuzzerAttackRecord = record; state.fuzzerAttackRecordId = record?.id || null; },
+    renderFuzzer: () => renders.push({ kind: "fuzzer" }),
     deriveRepeaterRequest: tab => tab.baseRequest,
     getCMView: () => editor,
     boundWorkspaceSnapshotForSave: snapshot => snapshot,
@@ -95,11 +102,12 @@ function fixture() {
   function remote(tabs = [], revision = 11) {
     return { session_id: state.activeSession.id, revision,
       replay: { tabs: tabs.map(item => item.requestText === undefined ? plain(item) : plain(context.snapshotHttpReplayTab(item))), tab_sequence: state.replayTabSequence, active_tab_id: tabs[0]?.id || null },
-      fuzzer: { request_text: "remote fuzzer" },
+      // The other writer left the Fuzzer as this client last saved it.
+      fuzzer: plain(context.workspaceSaveCommittedSnapshot?.fuzzer || {}),
     };
   }
   const succeed = (index, snapshot) => requests[index].resolve({ ok: true, status: 200, json: async () => plain(snapshot) });
-  const adopt = async snapshot => { const index = requests.length; const pending = context.adoptExternalReplayTabs(); if (requests.length > index) succeed(index, snapshot); await pending; };
+  const adopt = async snapshot => { const index = requests.length; const pending = context.adoptExternalWorkspace(); if (requests.length > index) succeed(index, snapshot); await pending; };
   return { context, state, els, document, versionSelect, requests, toasts, renders, beacons, timers, tab, seed, remote, succeed, adopt, syncDom,
     setEditor: value => { editor = { getContent: () => value }; }, plain };
 }

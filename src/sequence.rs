@@ -624,6 +624,7 @@ pub async fn run_sequence(
             step.target.clone(),
             step.source_transaction_id,
             step.http_version.clone(),
+            proxy::SentFrom::Replay,
         )
         .await
         {
@@ -748,10 +749,7 @@ pub async fn run_sequence(
         )
         .await;
     let evicted_runs = session.sequence.insert_run(record.clone()).await;
-    if let Err(error) = state
-        .persist_session_context_mutation_locked(&session)
-        .await
-    {
+    if let Err(error) = state.persist_session_state_mutation_locked(&session).await {
         rollback_failed_sequence_persist(
             &session,
             record.id,
@@ -762,10 +760,7 @@ pub async fn run_sequence(
             started_evicted_events,
         )
         .await;
-        if let Err(rollback_error) = state
-            .persist_session_context_mutation_locked(&session)
-            .await
-        {
+        if let Err(rollback_error) = state.persist_session_state_mutation_locked(&session).await {
             tracing::warn!(
                 ?rollback_error,
                 session_id = %session.id(),

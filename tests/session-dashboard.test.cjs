@@ -12,7 +12,7 @@ function fixture() {
   const errors = [], rendered = [];
   const context = loadFunctions(["loadSessions", "jsonArray"], {
     state, currentSessionId: () => state.activeSession?.id,
-    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
+    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
     fetch: async () => response([]),
     requireOkResponse: async res => { if (!res.ok) throw new Error("Failed to load sessions."); },
     renderDashboard: () => rendered.push([...state.sessions]),
@@ -69,7 +69,7 @@ test("a genuinely empty session list remains valid", async () => {
 function dashboardFixture(sessions, selectedSessionId) {
   const state = { sessions, activeSession: sessions.find(s => s.active) || null, selectedSessionId };
   const els = new Proxy({}, { get: (obj, key) => obj[key] ||= { querySelectorAll: () => [] } });
-  const context = loadFunctions(["renderDashboard"], {
+  const context = loadFunctions(["renderDashboard", "sessionFindingCount", "formatSize"], {
     state, els, document: { getElementById: () => null }, getSortedSessions: () => sessions,
     formatCappedCount: value => String(value ?? 0), retainedTransactionsCap() {}, retainedEntriesCap() {},
     formatTimestamp: () => "-", escapeHtml: value => String(value),
@@ -95,6 +95,53 @@ test("an empty refreshed list clears an obsolete selection", () => {
   const f = dashboardFixture([], "fixture-removed");
   f.context.renderDashboard();
   assert.equal(f.state.selectedSessionId, null);
+  assert.equal(f.els.dashboardCurrentSessionStorage.hidden, true, "no session, so no storage line");
+});
+
+// The session in use carries a dot; only the others can be opened or deleted.
+test("only the sessions not in use offer Open and Delete", () => {
+  const f = dashboardFixture([session("fixture-active", true), session("fixture-stored")], "fixture-active");
+  f.context.renderDashboard();
+  const [active, stored] = f.els.dashboardSessionsBody.innerHTML.split("</tr>");
+  assert.match(active, /class="history-row selected session-active"/);
+  assert.doesNotMatch(active, /session-open-button|session-delete-button|>Active</);
+  assert.match(stored, /session-open-button[^]*session-delete-button/);
+  assert.equal(f.els.dashboardCurrentSessionStorage.hidden, false);
+});
+
+// New session swaps itself for a name field; Escape puts the button back.
+test("New session opens a name field in its place and closes back to the button", () => {
+  const classes = () => {
+    const names = new Set(["hidden"]);
+    return { add: (n) => names.add(n), remove: (n) => names.delete(n), contains: (n) => names.has(n) };
+  };
+  const focused = [];
+  const els = {
+    dashboardNewSessionButton: { classList: classes() },
+    dashboardCreateSessionForm: { classList: classes() },
+    dashboardCreateSessionName: { focus: () => focused.push("name") },
+  };
+  els.dashboardNewSessionButton.classList.remove("hidden");
+  const c = loadFunctions(["openSessionCreateForm", "closeSessionCreateForm"], { els });
+  c.openSessionCreateForm();
+  assert.equal(els.dashboardNewSessionButton.classList.contains("hidden"), true);
+  assert.equal(els.dashboardCreateSessionForm.classList.contains("hidden"), false);
+  assert.deepEqual(focused, ["name"]);
+  c.closeSessionCreateForm();
+  assert.equal(els.dashboardNewSessionButton.classList.contains("hidden"), false);
+  assert.equal(els.dashboardCreateSessionForm.classList.contains("hidden"), true);
+});
+
+test("the Session screen is one list with its actions in the header", () => {
+  const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/index.html"), "utf8");
+  const shell = html.slice(html.indexOf('id="dashboardShell"'), html.indexOf('id="proxyShell"'));
+  assert.match(shell, /<h2>Sessions<\/h2>/);
+  assert.match(shell, /id="dashboardNewSessionButton"[^>]*>New session<\/button>/);
+  // Reload stays reachable: the recovery messages tell people to use it.
+  assert.match(shell, /<details class="more-menu"[^]*id="dashboardReloadSessionsButton"[^>]*>Reload sessions<\/button>/);
+  for (const gone of ["Status", "Requests", "Websockets", "Events", "Fuzzer", "Rules", "Created", "Opened"]) {
+    assert.doesNotMatch(shell, new RegExp(`id="dashboardCurrentSession${gone}"`), gone);
+  }
 });
 
 test("a refreshed dashboard never restores a removed selection from a stale workspace session", () => {
@@ -112,7 +159,8 @@ test("a refreshed dashboard does not label the previous workspace session as sti
   f.state.activeSession = session("fixture-old-active", true);
   f.context.renderDashboard();
   assert.equal(f.state.selectedSessionId, "fixture-old-active");
-  assert.equal(f.els.dashboardCurrentSessionStatus.textContent, "Stored");
+  assert.match(f.els.dashboardSessionsBody.innerHTML, /class="history-row session-active" data-id="fixture-new-active"/);
+  assert.doesNotMatch(f.els.dashboardSessionsBody.innerHTML, /session-active" data-id="fixture-old-active"/);
 });
 
 // Promise ordering is controlled here; these never call a real API or session action.

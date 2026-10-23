@@ -49,7 +49,7 @@ async function open(f) { await f.load(); f.controller.selectOrigin(A, 0); }
 function historyActions(f) {
   const noop = () => {};
   const globals = { currentSessionId: f.getSession,
-    targetServiceMapController: { invalidate() { f.historyPending = f.controller.invalidate(); } },
+    targetServiceMapController: { invalidate() { f.historyPending = f.controller.invalidate(); }, retentionChanged() { f.controller.retentionChanged(); } },
     state: { items: [], historyPaging: {}, _itemsVersion: 0 }, document: { querySelectorAll: () => [] }, els: {},
     pendingHistoryNoteRead: null, contextMenuTargetId: null, _pendingTransactionSummaries: [], _historyPagingGeneration: 0, _historyDetailGeneration: 0,
     clearHistoryBackfill: noop, cancelHistoryDetailLoading: noop, precomputeItemIndexes: noop, invalidateVisibleEntriesCache: noop,
@@ -58,7 +58,7 @@ function historyActions(f) {
   return loadFunctions(['applyConfirmedHistoryRemoval', 'applyHistoryRetentionDeletedEvent', 'invalidateHistoryAfterEventGap'], globals);
 }
 
-for (const reason of ['delete', 'retention', 'event gap']) test(`${reason} invalidation discards cached values and rereads the same surviving endpoint`, async () => {
+for (const reason of ['delete', 'event gap']) test(`${reason} invalidation discards cached values and rereads the same surviving endpoint`, async () => {
   const f = fixture(); await open(f); await f.completeParameters('removed-value');
   const actions = historyActions(f);
   if (reason === 'delete') actions.applyConfirmedHistoryRemoval(['removed-row']);

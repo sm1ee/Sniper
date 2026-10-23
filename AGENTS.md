@@ -79,7 +79,7 @@ interval — intercepts appear asynchronously.
 
 ## 4. Where things live
 
-`README.md` lists the modules. This is the reverse index: what to open for a
+`docs/architecture.md` lists the modules. This is the reverse index: what to open for a
 given change, including the parts that are easy to miss.
 
 | Change | Files |
@@ -104,6 +104,10 @@ Changes that must land in more than one place:
   them.
 - **Scope semantics** are shared by the history filter, intercept, and the site
   map. Change `src/scope.rs` and all three follow.
+- **A new workspace section** must also be adopted in `adoptExternalWorkspace`
+  (`web/app.js`). The app saves the whole workspace at the revision it last
+  adopted, so a section it does not adopt puts back what another writer, such
+  as `sniper-cli`, just saved there.
 
 ## 5. Persistence invariants
 
@@ -118,6 +122,12 @@ several files under the session's storage directory:
 | `transactions.ndjson` | Captured transactions, one JSON object per line |
 | `transactions.meta.ndjson` | The same records without bodies — the load path |
 | `transactions.journal`, `websockets.journal` | Append-only, compacted on size |
+
+A change to the small components (settings, rules, the event log) is saved
+with `AppState::persist_session_state_mutation_locked`, which writes
+`state.json` alone. The full save rewrites `transactions.ndjson` and is for
+journal compaction, session switches, shutdown and purging deleted traffic; on
+a large session it takes seconds, so a settings change must not go through it.
 
 The invariants:
 
@@ -173,6 +183,10 @@ seriously.
   carrying the session cookie. Nothing validates the bind address itself, so that
   guard is the only thing standing between a remote listener and someone else's
   captured traffic. Do not remove it, and do not add a path that bypasses it.
+  The proxy is one when it listens beyond loopback, since its own connection to
+  the UI comes from this host; it refuses another machine's requests and tunnels
+  to the UI and to the ports the browsers Sniper opened are driven through
+  (`remote_client_targets` in `src/proxy.rs`).
 - **Never log captured traffic content** — bodies, headers, cookies, or tokens —
   into event logs, error messages, or temp files.
 - **Never put a real hostname in a test fixture, UI placeholder, or example.**
@@ -196,19 +210,22 @@ PATH="$HOME/.cargo/bin:$PATH" ALLOW_ADHOC_RELEASE=1 DMG_ARCH=universal \
 4. Tag `vX.Y.Z` (lightweight, at the released commit), push the tag, and publish
    with `gh release create` attaching `dist/Sniper-X.Y.Z-universal.dmg` and its
    `.sha256`.
-5. The Windows archive attaches itself. Pushing the tag runs
-   `.github/workflows/windows.yml`, which builds the package and waits up to
-   fifteen minutes for the release to appear before uploading the `.zip` and its
-   `.sha256`. Create the release in step 4 within that window; if the job gives
-   up, download `dist/` from the run and attach it by hand.
+5. The Windows and Linux packages attach themselves. Pushing the tag runs
+   `.github/workflows/windows.yml` and `.github/workflows/linux.yml`, which
+   build their packages and wait up to fifteen minutes for the release to appear
+   before uploading them: the Windows `.zip` and `-setup.exe`, and the Debian
+   `.deb` and `.tar.gz` with the build manifest and the runtime check's
+   `-runtime-PASS.json`, each with its `.sha256`. Create the release in step 4
+   within that window; if a job gives up, download its artifacts from the run
+   and attach them by hand.
 6. Update the Homebrew cask. `packaging/homebrew/render-cask.sh` fills the
    version and the DMG's SHA-256 into `packaging/homebrew/sniper.rb`; write it to
    `Casks/sniper.rb` in a clone of `sm1ee/homebrew-tap` and commit it as
    `sniper X.Y.Z`. Until then `brew install --cask sm1ee/tap/sniper` installs the
    previous release, which then updates itself.
 
-Both artifacts ship a `.sha256` in the `<hash>  <filename>` form, so a
-downloader can check either with `shasum -a 256 -c`. Releases are ad-hoc signed,
+Every package ships a `.sha256` in the `<hash>  <filename>` form, so a
+downloader can check any of them with `shasum -a 256 -c`. Releases are ad-hoc signed,
 which makes that checksum the only integrity signal a downloader gets — do not
 drop it.
 

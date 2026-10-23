@@ -15,7 +15,7 @@ function fixture() {
           values.set(selector, value);
           return this;
         },
-        hide() { return this; }, attr() { return this; },
+        hide() { return this; }, removeClass() { return this; }, attr() { return this; },
         text() { return this; }, html() { return this; },
       };
     },

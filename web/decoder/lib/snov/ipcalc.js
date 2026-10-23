@@ -128,10 +128,10 @@ function ipCalc(str) {
   }
 
   /**
-   *  Validates IP. IP should be in range 0 - 2^32
+   *  Validates IP. IP should be in range 0 - (2^32 - 1)
    */
   var validateIp = function() {
-    if (ip >= 0 && ip <= 4294967296) {
+    if (ip >= 0 && ip <= 4294967295) {
       ipValid = true;
     } else {
       ip = null;

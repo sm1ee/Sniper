@@ -49,7 +49,7 @@ function fixture({ render = true } = {}) {
   let timerId = 0, rows = [];
   const button = node(), body = node();
   Object.defineProperty(body, "innerHTML", { set(value) {
-    rows = [...value.matchAll(/<tr class="history-row [^"]*" data-id="([^"]+)">/g)].map(match => {
+    rows = [...value.matchAll(/<tr class="history-row[^"]*" data-id="([^"]+)">/g)].map(match => {
       const row = node(); row.dataset.id = match[1];
       row.open = node(); row.open.closest = () => row;
       row.delete = node(); row.delete.closest = () => row;
@@ -71,7 +71,7 @@ function fixture({ render = true } = {}) {
   };
   const clearTimeout = id => timers.delete(id);
   const context = loadFunctions([
-    "renderDashboard", "getSortedSessions", "revealSessionFolder", "requireOkResponse", "readApiErrorMessage",
+    "renderDashboard", "sessionFindingCount", "formatSize", "getSortedSessions", "revealSessionFolder", "requireOkResponse", "readApiErrorMessage",
     "onClickWithProgress", "withButtonProgress", "showSessionContextMenu", "closeSessionContextMenu",
     "activateSessionById", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "currentSessionId",
     "canReloadWorkspaceAfterSessionAction", "canLeaveSessionAfterDraftPreflight", "hasPendingWorkspaceStateSave",
@@ -164,7 +164,7 @@ test("an empty rendered dashboard cannot open its stale workspace owner", async 
   const f = fixture();
   f.state.sessions = [];
   f.context.renderDashboard();
-  assert.equal(f.els.dashboardCurrentSessionPath.textContent, "No storage path");
+  assert.equal(f.els.dashboardCurrentSessionStorage.hidden, true);
   f.open(); await tick();
   assert.equal(f.requests.length, 0); assert.equal(f.state.activeSession, f.a); f.assertIdle();
 });
@@ -232,7 +232,7 @@ test("late completion after an empty render cannot restore a stale folder target
   const f = fixture(); f.open(); f.state.sessions = []; f.context.renderDashboard();
   f.succeed(0, f.a); await tick(); f.open(); await tick();
   assert.equal(f.requests.length, 1);
-  assert.equal(f.els.dashboardCurrentSessionPath.textContent, "No storage path"); f.assertIdle();
+  assert.equal(f.els.dashboardCurrentSessionStorage.hidden, true); f.assertIdle();
 });
 
 test("double clicks issue one open request and progress clears even after its delayed indicator appears", async () => {

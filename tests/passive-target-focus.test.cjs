@@ -11,6 +11,7 @@ function classes(initial = []) {
     contains: value => values.has(value),
     add: value => values.add(value),
     remove: value => values.delete(value),
+    toggle: (value, on) => (on ? values.add(value) : values.delete(value)),
   };
 }
 
@@ -64,7 +65,7 @@ function targetFixture(hosts = ["one.example.com", "two.example.com"]) {
   };
   const els = {
     targetShell: node(), targetScopeEditor: node(), targetScopeExcludeEditor: node(),
-    reloadTargetButton: node(), saveTargetScopeButton: node(),
+    saveTargetScopeButton: node(),
   };
   const tree = node({ parentElement: els.targetShell, buttons: [] });
   tree.querySelectorAll = selector => {
@@ -219,7 +220,7 @@ for (const remaining of [["one.example.com"], []]) {
     assert.equal(f.document.activeElement, f.document.body);
     assert.equal(f.focusCalls.length, 0);
     assert.equal(f.state.targetExpandedHosts.has("two.example.com"), false);
-    if (!remaining.length) assert.match(f.tree.innerHTML, /No captured targets yet/);
+    if (!remaining.length) assert.match(f.tree.innerHTML, /No targets yet/);
   });
 }
 
@@ -230,7 +231,7 @@ test("initial render and unchanged empty state do not invent focus", () => {
   assert.equal(f.focusCalls.length, 0);
 });
 
-for (const name of ["targetScopeEditor", "targetScopeExcludeEditor", "reloadTargetButton", "saveTargetScopeButton"]) {
+for (const name of ["targetScopeEditor", "targetScopeExcludeEditor", "saveTargetScopeButton"]) {
   test(`Target refresh leaves ${name} focus and unsaved scope text alone`, () => {
     const f = targetFixture();
     f.state.targetScopeDirty = true;
@@ -374,4 +375,68 @@ test("a tree without a current session never restores a previous host's focus", 
   f.render();
   assert.equal(f.document.activeElement, f.document.body);
   assert.equal(f.focusCalls.length, 0);
+});
+
+
+test("Recon discoveries show provenance without implying captured traffic or a live status", () => {
+  const f = targetFixture(["example.com"]);
+  f.state.targetSiteMap[0].request_count = 0;
+  f.state.targetSiteMap[0].paths = [{
+    path: "/archived?item=1", methods: ["GET"], status: null,
+    captured: false, discovered: true, last_seen: "discovery-time",
+    recon_sources: ["wayback", "<script>"], recon_kinds: ["history", "candidate"],
+  }];
+  f.render();
+  assert.match(f.tree.innerHTML, /0 captured requests/);
+  assert.match(f.tree.innerHTML, /Recon discovery · not captured/);
+  assert.match(f.tree.innerHTML, /Last discovered: discovery-time/);
+  assert.match(f.tree.innerHTML, /Recon: wayback, &lt;script&gt; · history, candidate/);
+  assert.doesNotMatch(f.tree.innerHTML, /null|<script>|Last captured/);
+});
+
+test("captured paths with Recon evidence retain captured status and source labels", () => {
+  const f = targetFixture(["example.com"]);
+  Object.assign(f.state.targetSiteMap[0].paths[0], {
+    captured: true, discovered: true, recon_sources: ["crawler"], recon_kinds: ["live"],
+  });
+  f.render();
+  assert.match(f.tree.innerHTML, /Captured \+ Recon · GET · 200 · Last captured: inert/);
+  assert.match(f.tree.innerHTML, /Recon: crawler · live/);
+  assert.doesNotMatch(f.tree.innerHTML, /not captured/);
+});
+
+test("legacy sitemap responses remain captured and empty state offers Recon", () => {
+  const f = targetFixture(["example.com"]);
+  assert.match(f.tree.innerHTML, /Captured · GET · 200 · Last captured: inert/);
+  f.setHosts([]);
+  f.render();
+  assert.match(f.tree.innerHTML, /Capture proxy traffic or run Recon/);
+});
+
+// Save is there while there is something to save; the map refreshes itself.
+test("Save shows only while the scope has unsaved edits", () => {
+  const f = targetFixture();
+  f.render();
+  assert.equal(f.els.saveTargetScopeButton.classList.contains("hidden"), true);
+  f.state.targetScopeDirty = true;
+  f.render();
+  assert.equal(f.els.saveTargetScopeButton.classList.contains("hidden"), false);
+});
+
+// A mark on every host said nothing; one on the hosts left out says something.
+test("a host is marked only when it is out of scope", () => {
+  const f = targetFixture(["in.example.com", "out.example.com"]);
+  f.state.targetSiteMap[0].in_scope = true;
+  f.render();
+  const [inside, outside] = f.tree.innerHTML.split('<section class="target-host-card">').slice(1);
+  assert.doesNotMatch(inside, /In scope|Out of scope/);
+  assert.match(outside, /Out of scope/);
+});
+
+test("the Scope screen names its two halves and has no Reload", () => {
+  const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/index.html"), "utf8");
+  assert.match(html, /<h2 id="targetRulesTitle">Scope<\/h2>/);
+  assert.match(html, /<h2 id="targetPathsTitle">Site map<\/h2>/);
+  assert.match(html, /id="saveTargetScopeButton"[^>]*>Save<\/button>/);
+  assert.doesNotMatch(html, /id="reloadTargetButton"/);
 });

@@ -255,6 +255,44 @@ fn auto_install_all_to(claude_root: PathBuf, codex_root: PathBuf) -> Vec<Install
     installed
 }
 
+/// Overwrite every installed skill that differs from this build's copy, edits
+/// included, so an update reaches the agents. Agents without the skill are
+/// left alone.
+pub fn update_installed_all() -> Vec<InstalledSkill> {
+    let (Some(claude_root), Some(codex_root)) =
+        (default_claude_skills_dir(), default_codex_skills_dir())
+    else {
+        return Vec::new();
+    };
+    update_installed_all_to(claude_root, codex_root)
+}
+
+fn update_installed_all_to(claude_root: PathBuf, codex_root: PathBuf) -> Vec<InstalledSkill> {
+    let mut updated = Vec::new();
+    if ensure_distinct_skill_install_targets(&codex_root, &claude_root).is_err() {
+        return updated;
+    }
+    for (agent, root, skill_md) in [
+        ("claude", claude_root, CLAUDE_SKILL_TEMPLATE),
+        ("codex", codex_root, CODEX_SKILL_TEMPLATE),
+    ] {
+        let Ok(installed) = fs::read(root.join(SKILL_NAME).join("SKILL.md")) else {
+            continue;
+        };
+        if installed == skill_md.as_bytes() {
+            continue;
+        }
+        match install_skill_folder(&root, SKILL_NAME, skill_md) {
+            Ok(path) => updated.push(InstalledSkill {
+                agent,
+                path: path.display().to_string(),
+            }),
+            Err(error) => tracing::warn!(agent, %error, "could not update sniper-operator skill"),
+        }
+    }
+    updated
+}
+
 #[cfg(test)]
 mod tests {
     use super::{agent_home_dir, auto_install_all_to, install_skill_folder};
@@ -286,61 +324,25 @@ mod tests {
         for term in [
             "`technology_observations`",
             "`reported_version`",
-            "not verified installed software or a vulnerability judgment",
-            "conflicting versions separately",
-            "`version_status: \"reported\"`",
             "`not_reported`",
             "`unsupported_format`",
             "`non_product_version`",
-            "`reported_version: null`",
-            "extension means unavailable metadata; a present empty",
-            "Neither proves product\nabsence",
-            "defaults to catalog 2",
+            "conflicting versions separately",
             "`--technology-catalog-version 1`",
             "`technology_catalog_version: 1`",
-            "`X-Sniper-Technology-Catalog-Version`",
-            "marker means legacy v1\ncoverage and triggers a warning",
-            "present marker must match the requested supported catalog",
-            "adds no target traffic, body reads, fallback reads, or automatic retries",
-            "map and evidence reads remain metadata-only",
             "SERVICE_MAP_BUSY",
             "SERVICE_MAP_SCOPE_WORK_LIMIT",
             "SERVICE_MAP_SESSION_CHANGED",
             "SERVICE_MAP_SCOPE_CHANGED",
             "SERVICE_MAP_HISTORY_CHANGED",
             "SERVICE_MAP_BUILD_FAILED",
-            "`retryable:false` and no automatic retry",
-            "wait for the running refresh to finish, then deliberately retry",
-            "smaller `max_records` / `--max-records` window",
-            "simplify scope rules only with explicit authorization",
-            "A failed map is not a complete empty inventory",
-            "Only an explicit Refresh or actual scope/session change can resume reads",
-            "History events, reconnecting, reopening the view, and local filters do not clear",
-            "filters issue zero\nreads",
-            "do not\nprove endpoint-level product/version declarations",
-            "remain separate, explicit reads and never run automatically on recovery",
-            "scope service-map html-generators",
-            "target.service_map.html_generators.get",
+            "A failed map is not an empty inventory",
+            "Run these only when the user asks",
+            "target.service_map.body_references.get",
             "target.service_map.link_declarations.get",
+            "target.service_map.html_generators.get",
             "target.service_map.socket_peer_matches.get",
-            "never enables capture",
-            "Scope matching uses the original captured host",
-            "Duplicate UUID rows count separately",
-            "undirected observation links",
-            "Socket addresses may reveal",
-            "only response headers, never body files or linked resources",
-            "Show explicitly adds one exact inspection",
-            "eight-entry cap rejects additions without eviction",
-            "overlapping per-inspection totals are never\nsummed",
-            "Validated events for another record UUID preserve body/Link entries",
-            "not original wire ordering",
-            "same exact-row and active-session restrictions apply",
-            "separate\nbounded retained-preview read",
-            "never retry with body\nhydration",
-            "`scan_prefix_bytes`",
-            "`head_closed`",
-            "reported\ngenerator claims",
-            "There is no map\naggregation, automatic body scan, or persistence",
+            "Do not scan, probe, replay or crawl",
         ] {
             assert!(
                 guidance.contains(term),
@@ -412,7 +414,7 @@ mod tests {
             "capture.intercept_rule.update",
             "capture.intercept_rule.set_enabled",
             "label-only `replay.update`",
-            "They do not\nuse `saved.v1` receipts.",
+            "They do not use `saved.v1` receipts.",
         ] {
             assert!(
                 configuration.contains(term),
@@ -499,24 +501,10 @@ mod tests {
         let section = maintenance(super::CODEX_SKILL_TEMPLATE);
         assert_eq!(section, maintenance(super::CLAUDE_SKILL_TEMPLATE));
         for term in [
+            "every launch",
+            "local edits do not last",
             "skills status",
-            "skills update-preview",
-            "skills.enroll",
-            "skills.stage_update",
-            "skills.apply_update",
-            "skills.update_result",
-            "skills.rollback_update",
-            "activated:false",
-            "does not enable automatic updates",
-            "strictly newer semantic version",
-            "canonical lowercase hyphenated UUID",
-            "same original operation ID",
-            "never blindly retry",
-            "agent_reloaded:false",
-            "128 retained operations",
-            "manual reconciliation",
-            "overwrite",
-            "loaded context",
+            "skills install",
         ] {
             assert!(
                 section.contains(term),
@@ -923,6 +911,29 @@ mod tests {
             std::fs::read_to_string(codex_skill).unwrap(),
             "# custom codex skill\n"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_installed_all_overwrites_installed_skills_only() {
+        let root =
+            std::env::temp_dir().join(format!("sniper-skill-update-{}", uuid::Uuid::new_v4()));
+        let claude_root = root.join("claude");
+        let codex_root = root.join("codex");
+        let codex_skill = codex_root.join(super::SKILL_NAME).join("SKILL.md");
+        std::fs::create_dir_all(codex_skill.parent().unwrap()).unwrap();
+        std::fs::write(&codex_skill, "# edited codex skill\n").unwrap();
+
+        let updated = super::update_installed_all_to(claude_root.clone(), codex_root.clone());
+
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].agent, "codex");
+        assert_eq!(
+            std::fs::read_to_string(&codex_skill).unwrap(),
+            super::CODEX_SKILL_TEMPLATE
+        );
+        assert!(!claude_root.join(super::SKILL_NAME).exists());
+        assert!(super::update_installed_all_to(claude_root, codex_root).is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

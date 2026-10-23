@@ -16,7 +16,7 @@
           <button class="main-tab" data-tool="target">Scope</button>
           <button class="main-tab active" data-tool="proxy">Capture</button>
           <button class="main-tab" data-tool="map">Map</button>
-          <button class="main-tab" data-tool="recon">Recon</button>
+          <button class="main-tab" data-tool="templates">Scan</button>
           <button class="main-tab" data-tool="replay">Replay</button>
           <button class="main-tab" data-tool="fuzzer">Fuzzer</button>
           <button class="main-tab" data-tool="sequence">Sequence</button>
@@ -66,88 +66,45 @@
 
       <main class="workspace">
         <section class="dashboard-shell hidden" id="dashboardShell">
-          <section class="split-panel split-panel-tight">
-            <section class="panel-card">
-              <header class="panel-toolbar">
-                <div>
-                  <p class="placeholder-kicker">Workspace</p>
-                  <h2 id="dashboardCurrentSessionName">Current session</h2>
-                </div>
-                <div class="toolbar-actions">
-                  <span class="detail-chip info" id="dashboardCurrentSessionStatus">Active</span>
-                </div>
-              </header>
-              <dl class="modal-list runtime-list">
-                <dt>Storage path</dt>
-                <dd><span id="dashboardCurrentSessionPath">Loading...</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></dd>
-                <dt>Requests</dt>
-                <dd id="dashboardCurrentSessionRequests">0</dd>
-                <dt>WebSockets</dt>
-                <dd id="dashboardCurrentSessionWebsockets">0</dd>
-                <dt>Event log</dt>
-                <dd id="dashboardCurrentSessionEvents">0</dd>
-                <dt>Fuzzer runs</dt>
-                <dd id="dashboardCurrentSessionFuzzer">0</dd>
-                <dt>Replace rules</dt>
-                <dd id="dashboardCurrentSessionRules">0</dd>
-                <dt>Created</dt>
-                <dd id="dashboardCurrentSessionCreated">-</dd>
-                <dt>Last opened</dt>
-                <dd id="dashboardCurrentSessionOpened">-</dd>
-              </dl>
-            </section>
-
-            <section class="panel-card">
-              <header class="panel-toolbar">
-                <div>
-                  <p class="placeholder-kicker">Sessions</p>
-                  <h2>Create a new session</h2>
-                </div>
-                <div class="toolbar-actions">
-                  <button class="secondary-action" id="dashboardReloadSessionsButton" type="button">Reload</button>
-                </div>
-              </header>
-              <div class="settings-form">
-                <label class="settings-field">
-                  <span>Session name</span>
-                  <input
-                    id="dashboardCreateSessionName"
-                    type="text"
-                    placeholder="Bug bounty run, staging review, mobile replay"
-                  />
-                  <small>Create a session to keep traffic, rules, notes, and runtime state isolated.</small>
-                </label>
-                <div class="toolbar-actions">
-                  <button class="primary-action" id="dashboardCreateSessionButton" type="button">Create</button>
-                </div>
-              </div>
-            </section>
-          </section>
-
           <section class="panel-card">
             <header class="panel-toolbar">
               <div>
-                <p class="placeholder-kicker">History</p>
-                <h2>Recent sessions</h2>
+                <h2>Sessions</h2>
+                <p class="dashboard-storage" id="dashboardCurrentSessionStorage"><span id="dashboardCurrentSessionName">Current session</span> is stored in <span class="dashboard-storage-path" id="dashboardCurrentSessionPath">Loading...</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></p>
+              </div>
+              <div class="toolbar-actions">
+                <div class="dashboard-create hidden" id="dashboardCreateSessionForm">
+                  <input id="dashboardCreateSessionName" type="text" placeholder="Session name" aria-label="Session name" />
+                  <button class="primary-action" id="dashboardCreateSessionButton" type="button">Create</button>
+                </div>
+                <button class="primary-action" id="dashboardNewSessionButton" type="button" title="A session keeps its own traffic, rules, notes and settings">New session</button>
+                <details class="more-menu" id="dashboardSessionsMore">
+                  <summary class="secondary-action" aria-label="More">⋯</summary>
+                  <div class="context-menu more-menu-list" role="menu">
+                    <button class="context-menu-item" id="dashboardReloadSessionsButton" type="button" role="menuitem">Reload sessions</button>
+                  </div>
+                </details>
               </div>
             </header>
+            <div class="dashboard-tiles" id="dashboardTiles"></div>
             <div class="history-table-shell">
               <table class="history-table session-table" id="dashboardSessionsTable">
                 <thead>
                   <tr>
                     <th data-sort-key="name">Name</th>
+                    <th data-sort-key="storage_bytes">Size</th>
                     <th data-sort-key="request_count">Requests</th>
                     <th data-sort-key="websocket_count">WebSockets</th>
-                    <th data-sort-key="event_count">Events</th>
-                    <th data-sort-key="rule_count">Rules</th>
+                    <th data-sort-key="finding_count">Findings</th>
+                    <th data-sort-key="last_captured_at">Last capture</th>
                     <th data-sort-key="created_at">Created</th>
-                    <th data-sort-key="last_opened_at">Last opened</th>
                     <th>Action</th>
                   </tr>
                 </thead>
                 <tbody id="dashboardSessionsBody"></tbody>
               </table>
             </div>
+            <section class="dashboard-detail" id="dashboardDetail" aria-label="Selected session"></section>
           </section>
         </section>
 
@@ -530,16 +487,17 @@
               </section>
 
               <section class="panel-card">
-                <header class="panel-toolbar">
+                <header class="panel-toolbar hidden" id="matchReplaceEditorHeader">
                   <div>
                     <p class="placeholder-kicker" id="matchReplaceEditorPath">Rule</p>
                     <h2 id="matchReplaceEditorTitle">New rule</h2>
                   </div>
                   <div class="toolbar-actions">
-                    <button class="primary-action" id="saveMatchReplaceRuleButton" type="button">Add</button>
+                    <button class="primary-action" id="saveMatchReplaceRuleButton" type="button" disabled>Save</button>
                   </div>
                 </header>
-                <div class="settings-form">
+                <p class="panel-empty" id="matchReplaceEmpty">Add a rule to rewrite requests or responses as they pass through.</p>
+                <div class="settings-form hidden" id="matchReplaceForm">
                   <label class="settings-field">
                     <span>Scope</span>
                     <select id="matchReplaceScope">
@@ -583,7 +541,7 @@
               <!-- Filter controls -->
               <div class="findings-filter-bar">
                 <select id="findingsFilterSeverity" class="findings-filter-select">
-                  <option value="">All Severity</option>
+                  <option value="">All severities</option>
                   <option value="critical">Critical</option>
                   <option value="high">High+</option>
                   <option value="medium">Medium+</option>
@@ -591,7 +549,7 @@
                   <option value="info">Info+</option>
                 </select>
                 <select id="findingsFilterCategory" class="findings-filter-select">
-                  <option value="">All Categories</option>
+                  <option value="">All categories</option>
                   <option value="jwt">JWT</option>
                   <option value="header">Headers</option>
                   <option value="cookie">Cookie</option>
@@ -603,18 +561,19 @@
                   <option value="info">Information</option>
                   <option value="auth">Authentication</option>
                 </select>
-                <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search..." />
+                <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search" />
               </div>
               <div class="findings-toolbar-actions">
                 <label class="scanner-quick-toggle" title="Show only in-scope findings">
                   <input id="findingsInScopeOnly" type="checkbox" />
-                  <span class="scanner-quick-toggle-label">In Scope</span>
+                  <span class="scanner-quick-toggle-label">In scope</span>
                 </label>
                 <label class="scanner-quick-toggle" title="Toggle Passive Scan">
                   <input id="scannerQuickToggle" type="checkbox" checked />
                   <span class="scanner-quick-toggle-label">Passive Scan</span>
                 </label>
                 <button class="secondary-action" id="findingsSettingsButton" type="button" title="Detection Rules">&#9881;</button>
+                <button class="secondary-action" id="findingsRescanButton" type="button" title="Scan the retained history again with the current rules">Rescan</button>
                 <button class="secondary-action" id="findingsClearButton" type="button">Clear</button>
               </div>
             </div>
@@ -1109,6 +1068,14 @@
               </div>
             </div>
           </div>
+
+          <div class="replay-empty hidden" id="replayEmptyState">
+            <p>Send a request here from HTTP history with <kbd data-shortcut="mod+r"></kbd>, or start one.</p>
+            <div class="replay-empty-actions">
+              <button class="secondary-action" id="replayEmptyNewTabButton" type="button">New tab</button>
+              <button class="secondary-action" id="replayEmptyImportCurlButton" type="button">Import cURL</button>
+            </div>
+          </div>
         </section>
 
         <section class="tools-shell hidden" id="toolsShell">
@@ -1122,7 +1089,7 @@
                   </div>
                 </div>
                 <div class="tools-tool-strip">
-                  <ul id="tabs" class="tools-tool-list">
+                  <ul id="tabs" class="tools-tool-list" data-tab-active=".on">
                     <li id="encode" class="on">Encode</li>
                     <li id="string">Strings</li>
                     <li id="number">Num</li>
@@ -1180,24 +1147,36 @@
               <header class="panel-toolbar tools-output-toolbar">
                 <div>
                   <h2 id="toolsActiveToolTitle">Encode output</h2>
+                  <p class="inline-copy" id="toolsOutputHint">Results appear here as you type.</p>
                 </div>
               </header>
-              <div id="output" class="tools-output-list">
-                <div class="tools-empty-state">Choose a decoder tool and start typing to see results here.</div>
-              </div>
+              <div id="output" class="tools-output-list"></div>
             </section>
           </section>
         </section>
 
         <section class="fuzzer-shell hidden" id="fuzzerShell">
-          <header class="panel-toolbar replay-header">
-            <div>
-              <p class="inline-copy">Use <code>$payload$</code> markers in the request template.</p>
+          <header class="panel-toolbar replay-header fuzzer-workflow-header">
+            <div class="fuzzer-header-row">
+              <h2>Fuzzer</h2>
+              <div class="toolbar-actions">
+                <button class="secondary-action" id="resetFuzzerButton" type="button">Reset</button>
+                <button class="secondary-action hidden" id="stopFuzzerButton" type="button">Stop</button>
+                <button class="primary-action" id="startFuzzerButton" type="button" aria-describedby="fuzzerPreflightSummary fuzzerPreflightNotice">Start</button>
+              </div>
             </div>
-            <div class="toolbar-actions">
-              <button class="secondary-action" id="resetFuzzerButton" type="button">Reset</button>
-              <button class="primary-action" id="startFuzzerButton" type="button">Start</button>
-            </div>
+            <section class="fuzzer-preflight" aria-label="Review before running">
+              <div id="fuzzerPreflightSummary" class="fuzzer-preflight-summary" role="status" aria-live="polite">No request selected.</div>
+              <p id="fuzzerPreflightNotice" class="fuzzer-help" role="status" aria-live="polite"></p>
+              <details class="fuzzer-disclosure fuzzer-preview-disclosure hidden" id="fuzzerPreviewDisclosure">
+                <summary>Preview &amp; details</summary>
+                <div class="fuzzer-disclosure-body">
+                  <p class="fuzzer-help">A position is a value marked as <code>§value§</code> (or <code>$payload$</code>). Sniper puts each payload in one position at a time; Battering ram puts it in every position at once.</p>
+                  <p class="fuzzer-help" id="fuzzerPreviewNotes"></p>
+                  <div id="fuzzerPreviewSamples" class="fuzzer-preview-samples">Add a request and payloads to preview.</div>
+                </div>
+              </details>
+            </section>
           </header>
 
           <section class="fuzzer-layout">
@@ -1205,19 +1184,82 @@
             <div class="fuzzer-top-row">
               <section class="panel-card fuzzer-template-card">
                 <header class="panel-toolbar">
-                  <h2>Request template</h2>
+                  <h2 id="fuzzerRequestHeading">1. Request</h2>
+                  <div class="toolbar-actions">
+                    <button class="secondary-action" id="fuzzerMarkSelectionButton" type="button" title="Mark the selected text as a position">Mark selection</button>
+                    <button class="secondary-action" id="fuzzerUndoMarkerButton" type="button" disabled>Undo marker</button>
+                  </div>
                 </header>
-                <div class="editor-panel">
+                <div class="fuzzer-control-row fuzzer-quick-controls hidden" id="fuzzerValueRow">
+                  <label class="compact-field fuzzer-field-grow" for="fuzzerCandidateSelect">
+                    <span>Value</span>
+                    <select id="fuzzerCandidateSelect" disabled><option value="">Select text in the request</option></select>
+                  </label>
+                  <button class="secondary-action" id="fuzzerMarkCandidateButton" type="button" disabled>Mark value</button>
+                </div>
+                <div class="editor-panel" role="group" aria-labelledby="fuzzerRequestHeading">
                   <div id="fuzzerRequestCM" class="cm-container" style="height:100%"></div>
                 </div>
               </section>
               <div class="fuzzer-col-resizer" id="fuzzerColResizer"></div>
               <section class="panel-card fuzzer-payloads-card">
                 <header class="panel-toolbar">
-                  <h2>Payloads</h2>
+                  <h2><label for="fuzzerPayloadsEditor">2. Payloads</label></h2>
+                  <div class="toolbar-actions">
+                    <input id="fuzzerPayloadFile" type="file" accept=".txt,text/plain" hidden aria-label="Payload text file" />
+                    <button class="secondary-action" id="fuzzerImportPayloadButton" type="button" aria-controls="fuzzerPayloadFile">Import file</button>
+                  </div>
                 </header>
+                <div class="fuzzer-control-row fuzzer-attack-options">
+                  <label class="compact-field" for="fuzzerAttackType">
+                    <span>Attack</span>
+                    <select id="fuzzerAttackType">
+                      <option value="sniper" selected>Sniper: one position at a time</option>
+                      <option value="battering_ram">Battering ram: every position at once</option>
+                    </select>
+                  </label>
+                  <label class="compact-field fuzzer-concurrency-field" for="fuzzerConcurrency">
+                    <span>At once</span>
+                    <input id="fuzzerConcurrency" type="number" min="1" max="16" step="1" value="4" />
+                  </label>
+                  <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
+                </div>
+                <details class="fuzzer-disclosure fuzzer-control-disclosure">
+                  <summary>More payload options</summary>
+                  <div class="fuzzer-disclosure-body">
+                    <div class="fuzzer-control-row">
+                      <label class="compact-field fuzzer-field-grow" for="fuzzerPayloadImportMode">
+                        <span>Add payloads</span>
+                        <select id="fuzzerPayloadImportMode">
+                          <option value="append" selected>Append to list</option>
+                          <option value="replace">Replace list</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="fuzzer-control-row">
+                      <label class="compact-field fuzzer-field-grow" for="fuzzerPayloadPreset">
+                        <span>Boundary preset</span>
+                        <select id="fuzzerPayloadPreset">
+                          <option value="text-boundaries">Text boundaries</option>
+                          <option value="number-boundaries">Number boundaries</option>
+                        </select>
+                      </label>
+                      <button class="secondary-action" id="fuzzerApplyPresetButton" type="button">Use preset</button>
+                    </div>
+                    <fieldset class="fuzzer-range-fields">
+                      <legend>Inclusive number range</legend>
+                      <div class="fuzzer-range-grid">
+                        <label class="compact-field" for="fuzzerRangeStart"><span>From</span><input id="fuzzerRangeStart" type="number" value="1" step="1" /></label>
+                        <label class="compact-field" for="fuzzerRangeEnd"><span>Through</span><input id="fuzzerRangeEnd" type="number" value="10" step="1" /></label>
+                        <label class="compact-field" for="fuzzerRangeStep"><span>Step</span><input id="fuzzerRangeStep" type="number" value="1" step="1" /></label>
+                      </div>
+                      <button class="secondary-action" id="fuzzerGenerateRangeButton" type="button">Generate range</button>
+                    </fieldset>
+                    <p class="fuzzer-help" id="fuzzerPayloadHelp">One payload per line. Spaces are preserved. Blank lines are empty payloads; a final line break is ignored.</p>
+                  </div>
+                </details>
                 <div class="editor-panel">
-                  <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="one payload per line"></textarea>
+                  <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="Paste payloads, one per line" aria-describedby="fuzzerPayloadHelp"></textarea>
                 </div>
               </section>
             </div>
@@ -1227,19 +1269,81 @@
             <section class="panel-card fuzzer-results-card" style="display:flex;flex-direction:column;min-height:0">
               <header class="panel-toolbar">
                 <div>
-                  <h2>Run results</h2>
-                  <p class="inline-copy" id="fuzzerMeta">No fuzz run has been started yet.</p>
+                  <h2>3. Results</h2>
+                  <p class="inline-copy" id="fuzzerMeta">No results yet.</p>
+                </div>
+                <div class="toolbar-actions">
+                  <button class="secondary-action" id="fuzzerCompareBaseButton" type="button" disabled title="Use the selected result as the comparison baseline">Set compare base</button>
+                  <button class="secondary-action" id="fuzzerCompareButton" type="button" disabled title="Compare the selected result with the comparison baseline">Compare selected</button>
                 </div>
               </header>
+              <div class="fuzzer-result-tools">
+                <details class="fuzzer-disclosure fuzzer-result-filters">
+                  <summary id="fuzzerResultFilterSummary">Filter and sort results <span id="fuzzerResultFilterBadge" class="fuzzer-filter-badge hidden"></span></summary>
+                  <div class="fuzzer-disclosure-body">
+                    <div class="fuzzer-filter-grid">
+                      <label class="compact-field" for="fuzzerResultStatus">
+                        <span>Status</span>
+                        <select id="fuzzerResultStatus">
+                          <option value="all">All statuses</option>
+                          <option value="error">Errors</option>
+                          <option value="2xx">2xx</option>
+                          <option value="3xx">3xx</option>
+                          <option value="4xx">4xx</option>
+                          <option value="5xx">5xx</option>
+                        </select>
+                      </label>
+                      <label class="compact-field" for="fuzzerResultMinBytes"><span>Min bytes</span><input id="fuzzerResultMinBytes" type="number" min="0" step="1" placeholder="Any" /></label>
+                      <label class="compact-field" for="fuzzerResultMaxBytes"><span>Max bytes</span><input id="fuzzerResultMaxBytes" type="number" min="0" step="1" placeholder="Any" /></label>
+                      <label class="compact-field" for="fuzzerResultMinMs"><span>Min ms</span><input id="fuzzerResultMinMs" type="number" min="0" step="any" placeholder="Any" /></label>
+                      <label class="compact-field" for="fuzzerResultMaxMs"><span>Max ms</span><input id="fuzzerResultMaxMs" type="number" min="0" step="any" placeholder="Any" /></label>
+                      <label class="compact-field" for="fuzzerResultSort">
+                        <span>Sort by</span>
+                        <select id="fuzzerResultSort">
+                          <option value="index">Request order</option>
+                          <option value="payload">Payload</option>
+                          <option value="status">Status</option>
+                          <option value="bytes">Response bytes</option>
+                          <option value="duration">Duration</option>
+                        </select>
+                      </label>
+                      <label class="compact-field" for="fuzzerResultDirection">
+                        <span>Direction</span>
+                        <select id="fuzzerResultDirection">
+                          <option value="asc">Ascending</option>
+                          <option value="desc">Descending</option>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                </details>
+                <details class="fuzzer-disclosure fuzzer-saved-runs">
+                  <summary>View or reuse a saved run</summary>
+                  <div class="fuzzer-disclosure-body">
+                    <div class="fuzzer-control-row">
+                      <label class="compact-field fuzzer-field-grow" for="fuzzerSavedRunSelect"><span>Saved run</span><select id="fuzzerSavedRunSelect"><option value="">Choose a saved run</option></select></label>
+                      <button class="secondary-action" id="fuzzerRefreshRunsButton" type="button">Refresh</button>
+                      <button class="secondary-action" id="fuzzerViewRunButton" type="button" disabled>View results</button>
+                      <button class="secondary-action" id="fuzzerReuseRunButton" type="button" disabled>Reuse setup</button>
+                    </div>
+                    <p class="fuzzer-help">View results keeps your current draft. Reuse setup asks before replacing it; the original target or source request may be unavailable.</p>
+                    <p class="fuzzer-help" id="fuzzerSavedRunNotice" role="status" aria-live="polite"></p>
+                  </div>
+                </details>
+              </div>
+              <div class="fuzzer-result-status" id="fuzzerResultStatusRow">
+                <p class="fuzzer-help fuzzer-filter-count" id="fuzzerResultFilterCount" role="status" aria-live="polite">No results to filter.</p>
+                <button class="secondary-action hidden" id="fuzzerClearResultFiltersButton" type="button">Clear filters</button>
+              </div>
               <div class="history-table-shell" style="flex:1;min-height:0;overflow:auto">
-                <table class="mini-table">
-                  <thead>
+                <table class="mini-table fuzzer-results-table">
+                  <thead id="fuzzerResultsHead">
                     <tr>
-                      <th>#</th>
-                      <th>Payload</th>
-                      <th>Status</th>
-                      <th>Duration</th>
-                      <th>Response</th>
+                      <th class="table-sortable active" data-sort="index" aria-sort="ascending"># <span class="table-sort-indicator" aria-hidden="true">↑</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                      <th class="table-sortable" data-sort="payload" aria-sort="none">Payload <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                      <th class="table-sortable" data-sort="status" aria-sort="none">Status <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                      <th class="table-sortable" data-sort="duration" aria-sort="none">Duration <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                      <th class="table-sortable" data-sort="bytes" aria-sort="none">Response <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
                       <th>Transaction</th>
                     </tr>
                   </thead>
@@ -1286,16 +1390,21 @@
         </section>
 
         <section class="sequence-shell hidden" id="sequenceShell">
-          <header class="panel-toolbar replay-header">
+          <section class="sequence-empty hidden" id="sequenceEmpty">
+            <h2>No sequences yet</h2>
+            <p>A sequence sends requests in order and passes values between them. Write <code>{{variable}}</code> in a later step to use a value an earlier step extracted.</p>
+            <button class="primary-action" id="sequenceEmptyNewButton" type="button">New sequence</button>
+          </section>
+          <header class="panel-toolbar replay-header" id="sequenceHeader">
             <div>
               <p class="inline-copy">Chain requests with variable extraction. Use <code>{{variable}}</code> in subsequent steps.</p>
             </div>
             <div class="toolbar-actions">
-              <button class="secondary-action" id="newSequenceButton" type="button">New Sequence</button>
+              <button class="secondary-action" id="newSequenceButton" type="button">New sequence</button>
             </div>
           </header>
 
-          <section class="sequence-layout">
+          <section class="sequence-layout" id="sequenceLayout">
             <section class="panel-card sequence-list-card">
               <header class="panel-toolbar">
                 <h2>Sequences</h2>
@@ -1371,9 +1480,8 @@
           <section class="split-panel split-panel-tight">
             <section class="panel-card target-scope-card" id="targetRulesPanel" aria-labelledby="targetRulesTitle">
               <header class="panel-toolbar">
-                <div><p class="placeholder-kicker">Scope rules</p><h2 id="targetRulesTitle">Included and excluded hosts</h2></div>
+                <h2 id="targetRulesTitle">Scope</h2>
                 <div class="toolbar-actions">
-                  <button class="secondary-action" id="reloadTargetButton" type="button">Reload</button>
                   <button class="primary-action" id="saveTargetScopeButton" type="button">Save</button>
                 </div>
               </header>
@@ -1391,7 +1499,7 @@
               </div>
             </section>
             <section class="panel-card" id="targetPathsPanel" aria-labelledby="targetPathsTitle">
-              <header class="panel-toolbar"><div><p class="placeholder-kicker">Site map</p><h2 id="targetPathsTitle">Captured hosts and paths</h2></div></header>
+              <header class="panel-toolbar"><h2 id="targetPathsTitle">Site map</h2></header>
               <div class="target-tree" id="targetTree"></div>
             </section>
           </section>
@@ -1408,9 +1516,8 @@
           <section class="service-map-workspace" id="targetServiceMapPanel" role="tabpanel" aria-labelledby="targetServiceMapTab">
             <div class="service-map-toolbar">
               <div class="service-map-view-controls" id="serviceMapViewControls" role="group" aria-label="Service map view">
-                <button class="service-map-mode" id="serviceMapAllOrigins" type="button" aria-pressed="true">All origins</button>
-                <button class="service-map-mode" id="serviceMapDirectRelations" type="button" aria-pressed="false" title="Pin the selected origin and show its direct retained relations">Direct relations</button>
-                <button class="secondary-action hidden" id="serviceMapFocusSelection" type="button">Focus selection</button>
+                <button class="service-map-mode" id="serviceMapAllOrigins" type="button" aria-pressed="true" title="Captured origins and how they relate">Origins</button>
+                <button class="service-map-mode" id="serviceMapFlow" type="button" aria-pressed="false" title="Show the selected origin's requests in time order, one band per page load">Flow</button>
               </div>
               <div class="service-map-zoom-controls" id="serviceMapZoomControls" role="group" aria-label="Map zoom">
                 <button class="secondary-action" id="serviceMapZoomOut" type="button" aria-label="Zoom out">−</button>
@@ -1429,7 +1536,7 @@
               <section class="service-map-graph" aria-label="Captured service origins">
                 <div class="service-map-body-overlay hidden" id="serviceMapBodyOverlay" aria-label="Shown retained inspections" aria-live="polite"></div>
                 <div class="service-map-viewport" id="serviceMapViewport" tabindex="0" aria-label="Service map. Plus or minus to zoom, zero to reset, F to fit."><div class="service-map-canvas" id="serviceMapCanvas"></div></div>
-                <div class="service-map-legend"><span class="service-map-line" aria-hidden="true"></span>Redirect <span class="service-map-line dashed" aria-hidden="true"></span>Origin / Referer <span class="service-map-line dotted" aria-hidden="true"></span>Body URL <span class="service-map-line link-declaration" aria-hidden="true"></span>Link header <span class="service-map-line preconnect-hint" aria-hidden="true"></span>Preconnect <span class="service-map-line peer-observation" aria-hidden="true"></span>Same address <span class="service-map-line client-request" aria-hidden="true"></span>Direct request<span id="serviceMapLinkKinds" class="service-map-kinds" role="group" aria-label="Origin and Referer links by request kind"></span><span id="serviceMapSiteControls" class="service-map-kinds" role="group" aria-label="Site grouping and origins hidden from the map"></span><details class="service-map-bounds-details hidden" id="serviceMapBoundsDetails"><summary id="serviceMapDetailsSummary">Details</summary><p class="service-map-status" id="serviceMapStatus"></p><p id="serviceMapGraphBounds"></p><p id="serviceMapGraphDiagnostics"></p></details></div>
+                <div class="service-map-legend"><span class="service-map-legend-lines"><span class="service-map-line" aria-hidden="true"></span>Redirect <span class="service-map-line dashed" aria-hidden="true"></span>Origin / Referer <span class="service-map-line dotted" aria-hidden="true"></span>Body URL <span class="service-map-line link-declaration" aria-hidden="true"></span>Link header <span class="service-map-line preconnect-hint" aria-hidden="true"></span>Preconnect <span class="service-map-line peer-observation" aria-hidden="true"></span>Same address <span class="service-map-line client-request" aria-hidden="true"></span>Direct request</span><span class="service-map-legend-flow"><span class="service-map-line flow-api" aria-hidden="true"></span>API call <span class="service-map-line flow-page" aria-hidden="true"></span>Page <span class="service-map-line flow-static" aria-hidden="true"></span>Script or static file <span class="service-map-line flow-redirect" aria-hidden="true"></span>Redirect back</span><span id="serviceMapLinkKinds" class="service-map-kinds" role="group" aria-label="Origin and Referer links by request kind"></span><span id="serviceMapSiteControls" class="service-map-kinds" role="group" aria-label="Site grouping and origins hidden from the map"></span><details class="service-map-bounds-details hidden" id="serviceMapBoundsDetails"><summary id="serviceMapDetailsSummary">Details</summary><p class="service-map-status" id="serviceMapStatus"></p><p id="serviceMapGraphBounds"></p><p id="serviceMapGraphDiagnostics"></p></details><span class="service-map-view-actions"><button class="service-map-mode" id="serviceMapDirectRelations" type="button" aria-pressed="false" title="Pin the selected origin and show only its direct retained relations">Direct relations</button><button class="secondary-action hidden" id="serviceMapFocusSelection" type="button">Focus selection</button><button class="secondary-action hidden" id="serviceMapFlowMermaid" type="button" title="Copy this flow as a Mermaid sequence diagram">Copy Mermaid</button></span></div>
               </section>
               <div class="pane-resizer service-map-resizer" id="serviceMapResizer" role="separator" aria-orientation="vertical" aria-label="Resize the map and the inspector" tabindex="0" title="Drag to resize; double-click to reset"></div>
               <aside class="service-map-detail" id="serviceMapDetail" aria-label="Selected origin details"></aside>
@@ -1438,6 +1545,11 @@
           </section>
         </section>
 
+        <section class="scan-shell hidden" id="scanShell" aria-label="Scan">
+          <nav class="sub-tabs" aria-label="Scan tools">
+            <button class="sub-tab" data-scan-tool="recon" type="button">Recon</button>
+            <button class="sub-tab" data-scan-tool="templates" type="button">Active Scan</button>
+          </nav>
         <section class="recon-shell hidden" id="reconShell" aria-labelledby="reconTitle">
           <section class="panel-card recon-setup">
             <header class="panel-toolbar">
@@ -1445,14 +1557,11 @@
               <button class="secondary-action" id="reconRefresh" type="button">Refresh</button>
             </header>
             <form id="reconForm" class="recon-form">
-              <div class="recon-target-row">
-                <label class="recon-field recon-target-field" for="reconTarget">Target URL
-                  <input id="reconTarget" type="url" placeholder="https://example.com/" required autocomplete="off" spellcheck="false" />
-                </label>
-                <button class="primary-action" id="reconStart" type="submit" disabled>Start discovery</button>
-              </div>
-              <label class="recon-check"><input id="reconSubdomains" type="checkbox" /> Include subdomains (same effective port)</label>
-              <p class="recon-help" id="reconScope">Enter an explicit HTTP or HTTPS URL. Discovery is limited to that hostname and effective port.</p>
+              <label class="recon-field recon-target-field" for="reconTarget">Target URL
+                <input id="reconTarget" type="url" placeholder="https://example.com/" required autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="recon-check"><input id="reconSubdomains" type="checkbox" /> Include subdomains on the same port</label>
+              <p class="recon-help" id="reconScope">Discovery stays on the URL's scheme, host and port.</p>
               <fieldset class="recon-sources">
                 <legend>Sources</legend>
                 <label class="recon-check"><input id="reconCrawler" type="checkbox" checked /> Static HTML / JavaScript crawler</label>
@@ -1460,22 +1569,24 @@
                 <label class="recon-check"><input id="reconWayback" type="checkbox" /> Wayback Machine history</label>
                 <label class="recon-check"><input id="reconUrlscanSubmit" type="checkbox" /> Submit a new urlscan.io browser scan</label>
               </fieldset>
-              <p class="recon-help">The crawler sends bounded GET requests and reads static HTML and JavaScript. It does not run a browser or submit forms. Historical results and extracted candidates do not prove an endpoint is live. Only test targets you are authorized to access.</p>
+              <p class="recon-help">The crawler only sends GET requests: no browser, no forms. Historical and candidate endpoints may not be live. Only test targets you are authorized to access.</p>
               <label class="recon-check recon-history-consent hidden" id="reconHistoryConsentRow"><input id="reconHistoryConsent" type="checkbox" /><span id="reconHistoryConsentText">Allow sending the target domain to the selected history services.</span></label>
               <div id="reconScanOptions" class="recon-scan-options hidden">
                 <label class="recon-field" for="reconScanVisibility">New scan visibility<select id="reconScanVisibility"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></label>
-                <p class="recon-help">A new scan sends the full target URL to urlscan.io; remove query strings and fragments first. Its remote browser may contact third-party resources outside Sniper's scope. Public results are visible to everyone; unlisted results are not private. urlscan.io plan and retention limits apply. The API key is configured only on the backend.</p>
+                <p class="recon-help">urlscan.io gets the full URL, so drop the query and fragment first, and its browser may load third-party resources. Public results are visible to everyone; unlisted ones are not private.</p>
                 <label class="recon-check"><input id="reconScanConsent" type="checkbox" /><span id="reconScanConsentText">Allow a new urlscan.io scan of this URL with the selected visibility.</span></label>
               </div>
               <details class="recon-limits">
-                <summary>Discovery limits</summary>
+                <summary>Optional discovery budgets</summary>
+                <p class="recon-help">0 means no limit. Stop ends a job early.</p>
                 <div class="recon-limit-fields">
-                  <label class="recon-field" for="reconMaxRequests">Crawler requests<input id="reconMaxRequests" type="number" min="1" max="1000" value="100" required /></label>
-                  <label class="recon-field" for="reconMaxDepth">Crawl depth<input id="reconMaxDepth" type="number" min="0" max="10" value="3" required /></label>
-                  <label class="recon-field" for="reconMaxEndpoints">Endpoints<input id="reconMaxEndpoints" type="number" min="1" max="5000" value="5000" required /></label>
-                  <label class="recon-field" for="reconMaxPages">History pages per source<input id="reconMaxPages" type="number" min="1" max="20" value="5" required /></label>
+                  <label class="recon-field" for="reconMaxRequests">Crawler requests<input id="reconMaxRequests" type="number" min="0" step="1" value="0" /></label>
+                  <label class="recon-field" for="reconMaxDepth">Crawl depth<input id="reconMaxDepth" type="number" min="0" step="1" value="0" /></label>
+                  <label class="recon-field" for="reconMaxEndpoints">Endpoints<input id="reconMaxEndpoints" type="number" min="0" step="1" value="0" /></label>
+                  <label class="recon-field" for="reconMaxPages">History pages per source<input id="reconMaxPages" type="number" min="0" step="1" value="0" /></label>
                 </div>
               </details>
+              <button class="primary-action recon-start" id="reconStart" type="submit" disabled>Start discovery</button>
               <p class="recon-notice hidden" id="reconActionStatus" role="status" aria-live="polite"></p>
             </form>
           </section>
@@ -1495,12 +1606,13 @@
             </header>
             <p id="reconLoadStatus" class="recon-notice hidden" role="status" aria-live="polite"></p>
             <div class="recon-results">
-              <div class="recon-table-scroll">
+              <div class="recon-table-scroll" tabindex="0" aria-label="Endpoints">
                 <table class="mini-table recon-table">
-                  <thead><tr><th>Method</th><th>URL</th><th>Evidence</th><th>Sources</th></tr></thead>
+                  <thead id="reconHead"><tr><th class="table-sortable" data-sort="method" aria-sort="none">Method <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="url" aria-sort="none">URL <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="evidence" aria-sort="none">Evidence <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="sources" aria-sort="none">Sources <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
                   <tbody id="reconEndpoints"></tbody>
                 </table>
               </div>
+              <div class="pane-resizer list-detail-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the list and its details" tabindex="0" title="Drag to resize; double-click to reset"></div>
               <aside class="recon-detail" id="reconDetail" aria-labelledby="reconDetailTitle"><h3 id="reconDetailTitle">Endpoint details</h3><p class="recon-help">Select an endpoint to inspect its raw URLs and provenance.</p></aside>
             </div>
             <footer class="recon-pagination">
@@ -1508,6 +1620,159 @@
               <div class="toolbar-actions"><button class="secondary-action" id="reconPrevious" type="button" disabled>Previous</button><button class="secondary-action" id="reconNext" type="button" disabled>Next</button></div>
             </footer>
           </section>
+        </section>
+
+        <section class="templates-shell hidden" id="templatesShell" aria-labelledby="templatesTitle">
+          <div class="templates-side">
+          <section class="panel-card templates-library" aria-labelledby="templatesTitle">
+            <header class="panel-toolbar">
+              <h2 id="templatesTitle">Templates</h2>
+              <div class="toolbar-actions">
+                <button class="secondary-action hidden" id="templatesCheck" type="button">Check for updates</button>
+                <details class="more-menu" id="templatesMore">
+                  <summary class="secondary-action" aria-label="More">⋯</summary>
+                  <div class="context-menu more-menu-list" role="menu">
+                    <button class="context-menu-item" id="templatesSwitch" type="button" role="menuitem">Download main (unreleased)</button>
+                    <button class="context-menu-item" id="templatesImportMenu" type="button" role="menuitem">Import archive…</button>
+                  </div>
+                </details>
+              </div>
+            </header>
+            <div class="recon-form">
+              <div class="templates-version" id="templatesVersion"><strong>Loading…</strong></div>
+              <p class="recon-help" id="templatesStatus"></p>
+              <p class="recon-notice hidden" id="templatesProgress" role="status"></p>
+              <progress class="templates-progress hidden" id="templatesProgressBar" aria-labelledby="templatesProgress"></progress>
+              <div class="templates-actions">
+                <button class="primary-action hidden" id="templatesDownload" type="button">Download</button>
+                <button class="secondary-action hidden" id="templatesImport" type="button" title="Import a release .tar.gz">Import…</button>
+                <input class="hidden" id="templatesImportFile" type="file" accept=".gz,.tgz,application/gzip" />
+              </div>
+              <p class="recon-notice recon-warning hidden" id="templatesScopeNote">Scope is empty, so the templates turned on check nothing.</p>
+              <p class="recon-notice hidden" id="templatesNotice" role="status"></p>
+            </div>
+          </section>
+          <section class="panel-card templates-auto" aria-labelledby="templatesAutoTitle">
+            <header class="panel-toolbar">
+              <h2 id="templatesAutoTitle" title="Sends the Scan templates turned on in the list to each new host the proxy captures in Scope or listed here, once a host. Only for hosts you may test.">Auto scan</h2>
+              <div class="toolbar-actions"><button class="switch" id="templatesAutoToggle" type="button" role="switch" aria-checked="false" aria-label="Auto scan" disabled></button></div>
+            </header>
+            <div class="recon-form">
+              <p class="recon-help" id="templatesAutoSummary">Loading…</p>
+              <details class="recon-limits templates-options" id="templatesAutoOptions">
+                <summary>Options</summary>
+                <div class="templates-auto-fields">
+                  <label class="recon-field" for="templatesAutoHosts">Extra hosts
+                    <textarea id="templatesAutoHosts" rows="1" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
+                  </label>
+                  <label class="recon-field" for="templatesAutoRate">Requests/s<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
+                </div>
+              </details>
+              <p class="recon-notice hidden" id="templatesAutoNotice" role="status" aria-live="polite"></p>
+            </div>
+          </section>
+          <section class="panel-card templates-scan" aria-labelledby="templatesScanTitle">
+            <header class="panel-toolbar">
+              <h2 id="templatesScanTitle">Manual scan</h2>
+            </header>
+            <div class="recon-form">
+              <label class="recon-field" for="templatesScanTargets">Targets
+                <textarea id="templatesScanTargets" rows="2" placeholder="https://app.example.com" autocomplete="off" spellcheck="false"></textarea>
+              </label>
+              <label class="recon-field" for="templatesScanSelection">Templates
+                <select id="templatesScanSelection">
+                  <option value="on" selected>Turned on</option>
+                  <option value="filter">Search results</option>
+                  <option value="selected">Selected template</option>
+                </select>
+              </label>
+              <details class="recon-limits templates-options">
+                <summary>Options</summary>
+                <div class="templates-risks" id="templatesScanRisks" role="group" aria-label="Also send templates marked" title="Templates marked with these are left out unless allowed. dos templates are never sent.">
+                  <span class="recon-help">Allow</span>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="intrusive" /><span>intrusive</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="default-login" /><span>default-login</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="bruteforce" /><span>bruteforce</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="token-spray" /><span>token-spray</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="credential-stuffing" /><span>credential-stuffing</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="fuzz" /><span>fuzz</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="fuzzing" /><span>fuzzing</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="dast" /><span>dast</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="osint" /><span>osint</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="method:put" /><span>method:put</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="method:delete" /><span>method:delete</span></label>
+                  <label class="templates-chip-toggle"><input type="checkbox" data-risk="method:patch" /><span>method:patch</span></label>
+                </div>
+                <div class="recon-limit-fields templates-limits">
+                  <label class="recon-field" for="templatesScanRate">Requests/s<input id="templatesScanRate" type="number" min="1" max="50" value="10" /></label>
+                  <label class="recon-field" for="templatesScanConcurrency">Parallel<input id="templatesScanConcurrency" type="number" min="1" max="8" value="4" title="Templates sent at once" /></label>
+                  <label class="recon-field" for="templatesScanMaxRequests">Max requests<input id="templatesScanMaxRequests" type="number" min="1" max="50000" value="10000" /></label>
+                </div>
+                <label class="recon-check"><input id="templatesScanMatchReplace" type="checkbox" /> Apply Match &amp; Replace</label>
+                <label class="recon-check"><input id="templatesScanKeepAll" type="checkbox" checked /> Keep every request in HTTP history</label>
+              </details>
+              <p class="recon-help" id="templatesScanPlan" aria-live="polite"></p>
+              <div class="templates-actions"><button class="primary-action" id="templatesScanStart" type="button" disabled>Start scan</button></div>
+              <p class="recon-notice hidden" id="templatesScanNotice" role="status" aria-live="polite"></p>
+            </div>
+            <div class="recon-jobs" id="templatesScanJobs"></div>
+          </section>
+          </div>
+          <section class="panel-card recon-inventory templates-list">
+            <header class="panel-toolbar recon-inventory-toolbar">
+              <div class="templates-views hidden" id="templatesViews" role="tablist" aria-label="List or results">
+                <button class="sub-tab active" type="button" role="tab" data-templates-view="templates">Templates</button>
+                <button class="sub-tab" type="button" role="tab" data-templates-view="results">Results</button>
+              </div>
+              <div class="recon-search-controls" id="templatesListControls">
+                <input id="templatesSearch" type="search" placeholder="Search id, name, tag, CVE or reference" aria-label="Search templates" />
+                <select id="templatesSeverity" aria-label="Severity">
+                  <option value="">All severities</option>
+                  <option value="critical">Critical</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                  <option value="info">Info</option>
+                </select>
+                <select id="templatesSupport" aria-label="Show">
+                  <option value="" selected>All</option>
+                  <option value="on">Turned on</option>
+                  <option value="passive">Passive</option>
+                  <option value="active">Scan</option>
+                  <option value="unsupported">Unsupported</option>
+                </select>
+              </div>
+              <div class="toolbar-actions" id="templatesListActions">
+                <button class="secondary-action hidden" id="templatesEnableShown" type="button">Turn on all</button>
+                <button class="secondary-action hidden" id="templatesDisableShown" type="button">Turn off all</button>
+              </div>
+              <span class="recon-help" id="templatesMeta"></span>
+              <span class="recon-help templates-results-title hidden" id="templatesResultsTitle"></span>
+              <div class="toolbar-actions">
+                <button class="secondary-action hidden" id="templatesResultsMatched" type="button" aria-pressed="false">Matched only</button>
+                <button class="secondary-action hidden" id="templatesResultsStop" type="button">Stop</button>
+              </div>
+            </header>
+            <div class="recon-results">
+              <div class="recon-table-scroll" tabindex="0" aria-label="Templates">
+                <table class="mini-table recon-table templates-table" id="templatesTable">
+                  <thead id="templatesHead"><tr><th class="table-sortable" data-sort="on" aria-sort="none" title="On: a template that can judge captured traffic checks it; one that must send its requests goes to each new host while the auto scan is on.">On <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="severity" aria-sort="none">Severity <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="name" aria-sort="none">Template <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="mode" aria-sort="none">Mode <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="tags" aria-sort="none">Tags <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
+                  <tbody id="templatesRows"></tbody>
+                </table>
+                <table class="mini-table recon-table templates-results-table hidden" id="templatesResultsTable">
+                  <thead id="templatesResultsHead"><tr><th class="table-sortable" data-result-sort="status" aria-sort="none">Status <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="method" aria-sort="none">Method <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="path" aria-sort="none">Request <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="template" aria-sort="none">Template <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="ms" aria-sort="none">Time <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-result-sort="matched" aria-sort="none" title="Matched">✓ <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
+                  <tbody id="templatesResultsRows"></tbody>
+                </table>
+              </div>
+              <div class="pane-resizer list-detail-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the list and its details" tabindex="0" title="Drag to resize; double-click to reset"></div>
+              <aside class="recon-detail" id="templatesDetail" aria-label="Template details"></aside>
+            </div>
+            <footer class="recon-pagination" id="templatesPagination">
+              <span id="templatesPageMeta"></span>
+              <div class="toolbar-actions"><button class="secondary-action" id="templatesPrevious" type="button" disabled>Previous</button><button class="secondary-action" id="templatesNext" type="button" disabled>Next</button></div>
+            </footer>
+          </section>
+        </section>
         </section>
 
         <section class="logger-shell hidden" id="loggerShell">
@@ -1551,10 +1816,6 @@
         <div class="status-left">
           <button class="status-link" id="openEventLogButton" type="button">Event log</button>
           <span id="eventLogStatus">0 entries</span>
-          <span id="footerMode">HTTP active</span>
-        </div>
-        <div class="status-right">
-          <span id="captureMode">Preview capture only</span>
         </div>
       </footer>
     </div>
@@ -1574,7 +1835,8 @@
             <h3>Request type</h3>
             <label class="settings-toggle"><input id="filterInScopeOnly" type="checkbox" /><span>Show only in-scope items</span></label>
             <label class="settings-toggle"><input id="filterHideWithoutResponses" type="checkbox" /><span>Hide items without responses</span></label>
-            <label class="settings-toggle"><input id="filterOnlyParameterized" type="checkbox" /><span>Show only parameterized requests</span></label>
+            <label class="settings-toggle"><input id="filterOnlyParameterized" type="checkbox" aria-describedby="filterOnlyParameterizedHelp" /><span>Show only requests with query parameters</span></label>
+            <small id="filterOnlyParameterizedHelp">Matches a ? in the URL, including an empty query. JSON, form and multipart body fields do not affect this filter.</small>
             <label class="settings-toggle"><input id="filterOnlyNotes" type="checkbox" /><span>Show only items with notes</span></label>
           </section>
 
@@ -1940,6 +2202,8 @@
     <script src="/product-icons.js" defer></script>
     <script src="/service-map.js" defer></script>
     <script src="/recon.js" defer></script>
+    <script src="/templates.js" defer></script>
+    <script src="/fuzzer-workflow.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

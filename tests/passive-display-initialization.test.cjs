@@ -78,7 +78,7 @@ function fixture() {
     historyColumnWidths: {}, historyColumnOrder: [], wsColumnWidths: {}, workbenchPaneWidths: {},
   };
   const globals = {
-    state, els, document, displaySettingsPreviewActive: false, displaySettingsReturnFocus: null,
+    state, els, document, displaySettingsPreviewActive: false, compareLoadGeneration: 0, displaySettingsReturnFocus: null,
     displaySettingsEditedControls: new Set(), displaySettingsReady: false, pendingDisplaySettingsApply: null,
     uiSettingsLoadState: "loading", uiSettingsLoadPromise: null,
     uiSettingsInitialPostGeneration: 0, uiSettingsInitialPostRevision: 0,
@@ -123,7 +123,7 @@ function fixture() {
   const names = [
     "createDefaultDisplaySettings", "sanitizeDisplaySettings", "openDisplaySettingsModal", "closeDisplaySettingsModal",
     "hydrateDisplaySettingsForm", "collectDisplaySettingsFormValues", "previewDisplaySettingsFromForm",
-    "saveDisplaySettingsFromForm", "applyDisplaySettingsState", "applyUiSettingsSnapshot", "loadUiSettings",
+    "saveDisplaySettingsFromForm", "applyDisplaySettingsState", "retireFindingActionProgress", "invalidateFindingNavigation", "applyUiSettingsSnapshot", "loadUiSettings",
     "updateUiSettingsServerRevision", "isModalVisible", "getActiveModalAction", "persistUiSettings",
     "snapshotUiSettings", "nextUiSettingsSnapshot", "scheduleUiSettingsSave", "scheduleUiSettingsRetry",
   ];

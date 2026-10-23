@@ -39,7 +39,7 @@ function fixture() {
   const requests = [], copies = [], replays = [], opened = [];
   const els = Object.fromEntries(['panel', 'apiDocs', 'status', 'refresh', 'search', 'scope', 'canvas', 'graphBounds', 'detail', 'content', 'catalog', 'mapControls', 'allOrigins', 'directRelations', 'focusSelection', 'boundsDetails', 'graphDiagnostics', 'overlayStatus'].map(name => [name, node()]));
   const controller = context.SniperServiceMap.createController({ elements: els, getSessionId: () => session,
-    document: { activeElement: null }, copyText: (...args) => copies.push(args), sendToReplay: id => replays.push(id), openUrl: url => opened.push(url),
+    document: { activeElement: null }, copyText: (text, label) => copies.push([text, label]), sendToReplay: id => replays.push(id), openUrl: url => opened.push(url),
     request(url, options) { const read = { url, options, ...deferred() }; requests.push(read); return read.promise; } });
   controller.setVisible(true);
   return { controller, els, requests, copies, replays, opened, state: controller.getState(), setSession(value) { session = value; },

@@ -2,7 +2,6 @@
   "use strict";
 
   const PAGE_SIZE = 50;
-  const MAX_ENDPOINTS = 5000;
   const SOURCE_NAMES = { crawler: "Static crawler", urlscan: "urlscan.io history", wayback: "Wayback history", urlscan_submit: "New urlscan.io scan" };
   const KIND_NAMES = { live: "Live", observed: "Observed", history: "Historical", candidate: "Candidate" };
   const ACTIVE_STATUSES = new Set(["running", "queued", "stopping"]);
@@ -18,10 +17,10 @@
     return target;
   }
 
-  function boundedInteger(value, min, max, label) {
-    const number = Number(value);
-    if (String(value).trim() === "" || !Number.isInteger(number) || number < min || number > max) {
-      throw new Error(`${label} must be a whole number from ${min} to ${max}.`);
+  function optionalBudget(value, label) {
+    const number = Number(value ?? 0);
+    if (!Number.isSafeInteger(number) || number < 0) {
+      throw new Error(`${label} must be a nonnegative safe integer (0 means unlimited).`);
     }
     return number;
   }
@@ -47,10 +46,10 @@
       history_acknowledged: history && !!values.historyAcknowledged,
       scan_acknowledged: submission && !!values.scanAcknowledged,
       scan_visibility: submission ? values.scanVisibility : "private",
-      max_requests: boundedInteger(values.maxRequests, 1, 1000, "Crawler requests"),
-      max_depth: boundedInteger(values.maxDepth, 0, 10, "Crawl depth"),
-      max_endpoints: boundedInteger(values.maxEndpoints, 1, MAX_ENDPOINTS, "Endpoint limit"),
-      max_pages: boundedInteger(values.maxPages, 1, 20, "History pages"),
+      max_requests: optionalBudget(values.maxRequests, "Crawler requests"),
+      max_depth: optionalBudget(values.maxDepth, "Crawl depth"),
+      max_endpoints: optionalBudget(values.maxEndpoints, "Endpoint budget"),
+      max_pages: optionalBudget(values.maxPages, "History pages"),
     };
   }
 
@@ -68,6 +67,27 @@
     });
   }
 
+  // The text each column shows, which is what it sorts by.
+  const SORT_TEXT = {
+    method: (endpoint) => endpoint.method || "UNKNOWN",
+    url: (endpoint) => endpoint.url || "",
+    evidence: (endpoint) => kindsOf(endpoint).map((kind) => KIND_NAMES[kind] || kind).join(", "),
+    sources: (endpoint) => sourcesOf(endpoint).map((source) => SOURCE_NAMES[source] || source).join(", "),
+  };
+  // A copy in the column's order; ties keep the order they came in.
+  function sortEndpoints(list, sort) {
+    const text = SORT_TEXT[sort?.key];
+    if (!text) return list;
+    const sign = sort.direction === "desc" ? -1 : 1;
+    return list.map((endpoint, index) => [text(endpoint).toLowerCase(), index, endpoint])
+      .sort((a, b) => (a[0] < b[0] ? -sign : a[0] > b[0] ? sign : a[1] - b[1]))
+      .map(([, , endpoint]) => endpoint);
+  }
+  // A header click sorts by its column, and a second click reverses it.
+  function nextSort(current, key) {
+    if (current.key === key) return { key, direction: current.direction === "asc" ? "desc" : "asc" };
+    return { key, direction: "asc" };
+  }
   function pageEndpoints(endpoints, requestedPage, pageSize = PAGE_SIZE) {
     const pages = Math.max(1, Math.ceil(endpoints.length / pageSize));
     const page = Math.max(0, Math.min(Number.isInteger(requestedPage) ? requestedPage : 0, pages - 1));
@@ -91,7 +111,7 @@
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
     const guard = createSessionGuard(options.getSessionId, options.getSessionGeneration);
-    const ids = ["Form", "Target", "Subdomains", "Scope", "Crawler", "Urlscan", "Wayback", "HistoryConsentRow", "HistoryConsent", "HistoryConsentText", "UrlscanSubmit", "ScanOptions", "ScanVisibility", "ScanConsent", "ScanConsentText", "MaxRequests", "MaxDepth", "MaxEndpoints", "MaxPages", "Start", "Refresh", "ActionStatus", "Jobs", "JobsMeta", "Search", "Kind", "InventoryMeta", "LoadStatus", "Endpoints", "Detail", "PageMeta", "Previous", "Next"];
+    const ids = ["Form", "Target", "Subdomains", "Scope", "Crawler", "Urlscan", "Wayback", "HistoryConsentRow", "HistoryConsent", "HistoryConsentText", "UrlscanSubmit", "ScanOptions", "ScanVisibility", "ScanConsent", "ScanConsentText", "MaxRequests", "MaxDepth", "MaxEndpoints", "MaxPages", "Start", "Refresh", "ActionStatus", "Jobs", "JobsMeta", "Search", "Kind", "InventoryMeta", "LoadStatus", "Head", "Endpoints", "Detail", "PageMeta", "Previous", "Next"];
     const els = Object.fromEntries(ids.map((id) => [id, shell.querySelector(`#recon${id}`)]));
     let visible = false;
     let sessionId = null;
@@ -106,6 +126,9 @@
     let actionMessage = "";
     let actionError = false;
     let page = 0;
+    let sort = { key: "", direction: "asc" };
+    // The endpoints the page shows, which ↑/↓ move through.
+    let pageItems = [];
     let selectedKey = null;
     let inventoryTruncated = false;
     let disposed = false;
@@ -157,8 +180,8 @@
       els.ScanConsentText.textContent = `Allow sharing ${target ? target.href : "the full target URL"} with urlscan.io for a new ${els.ScanVisibility.value} browser scan, including requests outside Sniper's scope.`;
       els.HistoryConsentText.textContent = `Allow sending ${target ? target.hostname : "the target domain"}${els.Subdomains.checked ? " and its subdomain search scope" : ""} to ${services.join(" and ")} for historical lookups.`;
       els.Scope.textContent = target
-        ? `Scope: ${target.protocol}//${target.hostname}:${target.port || (target.protocol === "https:" ? "443" : "80")}${els.Subdomains.checked ? " and subdomains on the same effective port" : " only"}. Default-port HTTP → HTTPS redirects on the same host are allowed.`
-        : "Enter an explicit HTTP or HTTPS URL. Discovery is limited to its scheme, hostname and effective port.";
+        ? `Stays on ${target.protocol}//${target.hostname}:${target.port || (target.protocol === "https:" ? "443" : "80")}${els.Subdomains.checked ? " and its subdomains" : ""}; a same-host redirect from HTTP to HTTPS is followed.`
+        : "Discovery stays on the URL's scheme, host and port.";
     }
     function renderJobs() {
       const fragment = doc.createDocumentFragment();
@@ -231,24 +254,18 @@
       els.Detail.replaceChildren(...nodes);
     }
     function renderInventory() {
-      const filtered = filterEndpoints(endpoints, els.Search.value, els.Kind.value);
+      const filtered = sortEndpoints(filterEndpoints(endpoints, els.Search.value, els.Kind.value), sort);
       const current = pageEndpoints(filtered, page);
       page = current.page;
+      pageItems = current.items;
       const fragment = doc.createDocumentFragment();
-      const focusedKey = doc.activeElement?.dataset?.endpointKey;
-      let focusedButton = null;
       for (const endpoint of current.items) {
         const key = endpointKey(endpoint);
         const row = element("tr", key === selectedKey ? "recon-selected" : "");
+        row.dataset.endpointKey = key;
+        row.setAttribute("aria-selected", String(key === selectedKey));
         const method = element("td", "recon-method", endpoint.method || "UNKNOWN");
-        const url = element("td", "recon-url-cell");
-        const button = element("button", "recon-endpoint-button", endpoint.url);
-        button.type = "button";
-        button.dataset.endpointKey = key;
-        if (key === focusedKey) focusedButton = button;
-        button.setAttribute("aria-label", `Inspect ${endpoint.method || "unknown method"} ${endpoint.url}`);
-        button.setAttribute("aria-pressed", String(key === selectedKey));
-        url.append(button);
+        const url = element("td", "recon-url-cell", endpoint.url);
         row.append(method, url,
           element("td", "", kindsOf(endpoint).map((kind) => KIND_NAMES[kind] || kind).join(", ") || "Unknown"),
           element("td", "", sourcesOf(endpoint).map((source) => SOURCE_NAMES[source] || source).join(", ") || "Unknown"));
@@ -262,9 +279,8 @@
         fragment.append(row);
       }
       els.Endpoints.replaceChildren(fragment);
-      focusedButton?.focus({ preventScroll: true });
       const running = jobs.some((job) => ACTIVE_STATUSES.has(job.status));
-      els.InventoryMeta.textContent = `${number(endpoints.length)} endpoints in this session${running ? " · Discovery in progress" : ""}${inventoryTruncated ? " · Response truncated; inventory is partial" : endpoints.length >= MAX_ENDPOINTS ? " · 5,000 endpoint display cap reached; inventory may be partial" : ""}`;
+      els.InventoryMeta.textContent = `${number(endpoints.length)} endpoints in this session${running ? " · Discovery in progress" : ""}${inventoryTruncated ? " · Response truncated; inventory is partial" : ""}`;
       els.PageMeta.textContent = filtered.length ? `${number(page * PAGE_SIZE + 1)}–${number(Math.min((page + 1) * PAGE_SIZE, filtered.length))} of ${number(filtered.length)} matching · Page ${page + 1} / ${current.pages}` : "0 matching endpoints";
       els.Previous.disabled = page === 0;
       els.Next.disabled = page + 1 >= current.pages;
@@ -287,7 +303,7 @@
       return response.json();
     }
     async function refresh() {
-      if (!sessionId || disposed || read || mutation) return;
+      if (!visible || !sessionId || disposed || read || mutation) return;
       clearTimer();
       const token = guard.capture();
       if (!canUse(token)) return;
@@ -302,8 +318,8 @@
           throw new Error("Recon returned an invalid session snapshot. Refresh to try again.");
         }
         jobs = [...snapshot.jobs].sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")));
-        endpoints = snapshot.endpoints.slice(0, MAX_ENDPOINTS);
-        inventoryTruncated = !!snapshot.truncated || snapshot.endpoints.length > MAX_ENDPOINTS;
+        endpoints = snapshot.endpoints;
+        inventoryTruncated = !!snapshot.truncated;
         loaded = true;
         loadError = "";
         render();
@@ -351,7 +367,7 @@
           if (!job || job.stopped !== true || job.session_id !== token.sessionId) throw new Error("The stop response could not be verified.");
           jobs = jobs.map((item) => item.id === id && ACTIVE_STATUSES.has(item.status) ? { ...item, status: "stopping" } : item);
         }
-        setAction(type === "start" ? "Discovery started. Progress and any limits appear below." : "Stop requested. Results already discovered are retained.");
+        setAction(type === "start" ? "Discovery started. Progress and any optional budgets appear below." : "Stop requested. Results already discovered are retained.");
       } catch (error) {
         if (!canUse(token) || mutation !== request || error.name === "AbortError") return;
         setAction(`${error.message || "The request failed."} Refresh jobs to confirm the current state before trying again.`, true);
@@ -401,8 +417,12 @@
       const changed = visible !== !!next;
       visible = !!next;
       syncSession();
-      if (!visible) clearTimer();
-      else if (changed && !read) void refresh();
+      if (!visible) {
+        clearTimer();
+        // Reads belong to this view; pending start/stop requests still own their result.
+        if (read) { read.controller.abort(); read = null; }
+        renderControls();
+      } else if (changed && !read) void refresh();
     }
 
     on(els.Form, "submit", (event) => { event.preventDefault(); void mutate("start"); });
@@ -414,10 +434,39 @@
     on(els.Previous, "click", () => { page -= 1; renderInventory(); });
     on(els.Next, "click", () => { page += 1; renderInventory(); });
     on(els.Endpoints, "click", (event) => {
-      const button = event.target.closest("[data-endpoint-key]");
-      if (!button) return;
-      selectedKey = button.dataset.endpointKey;
+      const row = event.target.closest("[data-endpoint-key]");
+      if (!row) return;
+      selectedKey = row.dataset.endpointKey;
       renderInventory();
+    });
+    on(els.Head, "click", (event) => {
+      if (event.target.closest(".table-col-resize")) return;
+      const header = event.target.closest("[data-sort]");
+      if (!header) return;
+      sort = nextSort(sort, header.dataset.sort);
+      for (const column of els.Head.querySelectorAll("[data-sort]")) {
+        const active = column.dataset.sort === sort.key;
+        column.classList.toggle("active", active);
+        column.setAttribute("aria-sort", active ? (sort.direction === "asc" ? "ascending" : "descending") : "none");
+        const indicator = column.querySelector(".table-sort-indicator");
+        if (indicator) indicator.textContent = active ? (sort.direction === "asc" ? "↑" : "↓") : "↕";
+      }
+      page = 0;
+      renderInventory();
+    });
+    // ↑/↓ move through the page, as in Findings; the app says when they are
+    // free, not while a field has focus or a modal is open.
+    on(doc, "keydown", (event) => {
+      if (!visible || !pageItems.length) return;
+      const step = options.arrowStep?.(event) || 0;
+      if (!step) return;
+      const current = pageItems.findIndex((endpoint) => endpointKey(endpoint) === selectedKey);
+      const next = current < 0 ? (step > 0 ? 0 : pageItems.length - 1) : current + step;
+      if (next < 0 || next >= pageItems.length) return;
+      event.preventDefault();
+      selectedKey = endpointKey(pageItems[next]);
+      renderInventory();
+      Array.from(els.Endpoints.children || []).find((row) => row.dataset.endpointKey === selectedKey)?.scrollIntoView?.({ block: "nearest" });
     });
     on(els.Jobs, "click", (event) => {
       const button = event.target.closest("[data-stop-job]");
@@ -427,7 +476,7 @@
     return { setVisible, syncSession, refresh, reset, dispose() { reset(); disposed = true; listeners.forEach((remove) => remove()); } };
   }
 
-  const api = { createController, buildJobRequest, parseTarget, filterEndpoints, pageEndpoints, endpointKey, createSessionGuard };
+  const api = { createController, buildJobRequest, parseTarget, filterEndpoints, sortEndpoints, pageEndpoints, endpointKey, createSessionGuard };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperRecon = api;
 })(typeof window !== "undefined" ? window : globalThis);

@@ -124,6 +124,7 @@
   // Busy answers in a row before refresh pauses; the server waits up to 20 s
   // for the running read before each.
   const MAX_BUSY_RETRIES = 5;
+  const AUTO_REFRESH_MS = 5000;
   const MAP_FAILURES = new Map([
     ["busy", { status: 429, message: "Service map is busy." }],
     ["scope_work_limit", { status: 422, message: "Scope matching exceeded the service map work limit. Simplify scope rules or use a smaller CLI --max-records window." }],
@@ -399,9 +400,9 @@
     // An exposure and the way requests authenticate each take a product place.
     const shown = 2 - (warning ? 1 : 0) - (lock ? 1 : 0);
     const full = (product) => [product.observations.length ? "Header-reported declarations; versions unverified." : "",
-      ...product.observations.map((item) => `${productText(item)} · ${item.header_name} header · ${item.row_count} retained row(s) · First: ${item.first_seen} · Last: ${item.last_seen}`),
-      ...product.declared.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row(s) from ${item.source_origin}`),
-      ...product.seen.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row(s) · ${item.signals.join(", ")}`)].filter(Boolean).join("\n");
+      ...product.observations.map((item) => `${productText(item)} · ${item.header_name} header · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} · First: ${item.first_seen} · Last: ${item.last_seen}`),
+      ...product.declared.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${item.source_origin}`),
+      ...product.seen.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} · ${item.signals.join(", ")}`)].filter(Boolean).join("\n");
     const label = (product) => `${product.name}${product.versions.size > 1 ? ` · ${product.versions.size} versions` : product.versions.size ? ` ${[...product.versions][0]}` : ""}`;
     return `<span class="service-map-clues service-map-products" title="${escape(products.map(full).join("\n"))}">${warning}${lock}${products.slice(0, shown).map((product) => `<span title="${escape(full(product))}">${productIcon(product.id)}${escape(label(product))}</span>`).join("")}${products.length > shown ? `<span class="service-map-products-more" aria-label="${products.length - shown} additional products" data-more="${escape(products.slice(shown).map(label).join("\n"))}" title="">+${products.length - shown}</span>` : ""}</span>`;
   }
@@ -1053,6 +1054,11 @@
           request_kinds: Object.fromEntries(REQUEST_KINDS.filter((kind) => count(link.request_kinds?.[kind]) > 0).map((kind) => [kind, count(link.request_kinds[kind])])),
           cors_allowed_count: count(link.cors_allowed_count), cors_credentials_count: count(link.cors_credentials_count),
         })),
+        header_sources: array(item.header_sources).filter((source) => safeOrigin(source?.source_origin)).map((source) => ({
+          source_origin: safeOrigin(source.source_origin), request_count: count(source.request_count),
+          request_kinds: Object.fromEntries(REQUEST_KINDS.filter((kind) => count(source.request_kinds?.[kind]) > 0).map((kind) => [kind, count(source.request_kinds[kind])])),
+          cors_allowed_count: count(source.cors_allowed_count), cors_credentials_count: count(source.cors_credentials_count),
+        })),
         redirects: array(item.redirects).filter((redirect) => redirect.relationship === "redirect_instruction" && safeOrigin(redirect.target_origin)).map((redirect) => ({
           target_origin: safeOrigin(redirect.target_origin), target_path: safePath(redirect.target_path),
           evidence: array(redirect.evidence).filter((id) => typeof id === "string" && id.length > 0),
@@ -1217,6 +1223,158 @@
     return slots;
   }
   const LINK_LABELS = { origin_header: "Origin header", referer_header: "Referer header", client_request: "Direct request" };
+  // The Flow view: the selected origin's requests and those of the origins it
+  // links to, in time order, a band per page load, the client on the left.
+  const FLOW = Object.freeze({ gutter: 64, clientX: 136, laneWidth: 220, laneBox: 180, top: 12, header: 46, kicker: 30, step: 42, padding: 20 });
+  const FLOW_STOPS = Object.freeze({ lanes_limit: "more origins link here; the five with the most rows are shown", steps_limit: "older steps left out" });
+  const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const hostOf = (origin) => { try { return new URL(origin).host; } catch { return String(origin); } };
+  const flowStepLabel = (step) => `${step.method} ${step.path}${step.count > 1 ? ` ×${step.count}` : ""}${step.status == null ? "" : ` ${step.status}`}`;
+  const flowRedirectLabel = (step) => `${step.status ?? "3xx"} to ${hostOf(step.redirect.origin)}${step.redirect.path}`;
+  const flowPageLabel = (phase) => phase.page ? `Page load: ${hostOf(phase.page.origin)}${phase.page.path}` : "Before the first page load";
+  const FLOW_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+  const flowStatusClass = (status) => status == null ? "" : status >= 500 ? " status-error" : status >= 400 ? " status-warn" : status >= 300 ? " status-info" : " status-ok";
+  const flowTime = (ms) => ms < 1000 ? `+${Math.round(ms)}ms` : ms < 60000 ? `+${(ms / 1000).toFixed(1)}s`
+    : `+${Math.floor(ms / 60000)}m${String(Math.floor(ms % 60000 / 1000)).padStart(2, "0")}s`;
+  // SVG text is placed, not measured: a character of the 12px monospace path
+  // is about 7.2px wide and one of an 11px bold pill about 7px.
+  const flowFit = (text, room, perChar = 7.2) => text.length * perChar <= room ? text : `${text.slice(0, Math.max(3, Math.floor(room / perChar) - 1))}…`;
+  function flowPill(x, y, text, kind) {
+    const width = 14 + text.length * 7;
+    return { width, markup: `<g class="service-map-flow-pill${kind}"><rect x="${x}" y="${y - 9}" width="${width}" height="18" rx="9"></rect><text x="${x + width / 2}" y="${y}" text-anchor="middle" dominant-baseline="central">${escape(text)}</text></g>` };
+  }
+
+  // A flow read that does not match the origin and session asked for, or
+  // names a lane it does not list, shows nothing rather than a wrong diagram.
+  function normalizeFlow(raw, sessionId, origin) {
+    if (!raw || raw.schema_version !== 1 || raw.session_id !== sessionId || raw.origin !== origin) return null;
+    const lanes = array(raw.lanes).map((lane) => safeOrigin(lane));
+    if (!lanes.length || lanes[0] !== origin || lanes.some((lane, index) => lane !== raw.lanes[index])) return null;
+    const target = (value) => value && safeOrigin(value.origin) ? { origin: safeOrigin(value.origin), path: safePath(value.path) } : null;
+    const phases = array(raw.phases).map((phase) => ({
+      page: target(phase?.page),
+      steps: array(phase?.steps).filter((step) => lanes.includes(step?.origin) && UUID_PATTERN.test(String(step.record_id || ""))).map((step) => ({
+        origin: step.origin, method: String(step.method || "?").slice(0, 16), path: safePath(step.path),
+        status: Number.isInteger(step.status) ? step.status : null, kind: REQUEST_KINDS.includes(step.request_kind) ? step.request_kind : "other",
+        count: Math.max(1, count(step.count)), recordId: step.record_id, redirect: target(step.redirect), firstSeen: Date.parse(step.first_seen),
+      })),
+    })).filter((phase) => phase.steps.length);
+    return { origin, lanes, phases, flowRows: count(raw.flow_rows), consideredRows: count(raw.considered_rows), complete: raw.complete === true, stoppedBy: array(raw.stopped_by).map(String) };
+  }
+
+  // A card per page load with a row per shown step and one more for its
+  // redirect; a page load whose steps are all of hidden kinds gets no card.
+  function flowLayout(flow, hiddenKinds = []) {
+    const hidden = new Set(hiddenKinds);
+    const laneX = new Map(flow.lanes.map((origin, index) => [origin, FLOW.clientX + FLOW.laneWidth * (index + 1)]));
+    const laneRequests = new Map(flow.lanes.map((origin) => [origin, 0]));
+    const phases = flow.phases.map((phase) => ({ phase, steps: phase.steps.filter((step) => !hidden.has(step.kind)) })).filter(({ steps }) => steps.length);
+    const start = Math.min(...phases.flatMap(({ steps }) => steps.map((step) => step.firstSeen)).filter(Number.isFinite));
+    const bands = [], arrows = [];
+    let y = FLOW.top + FLOW.header + 16;
+    for (const { phase, steps } of phases) {
+      const top = y;
+      y += FLOW.kicker;
+      for (const step of steps) {
+        laneRequests.set(step.origin, laneRequests.get(step.origin) + step.count);
+        const at = Number.isFinite(step.firstSeen) && Number.isFinite(start) ? step.firstSeen - start : null;
+        for (const redirect of step.redirect ? [false, true] : [false]) {
+          arrows.push({ top: y, y: y + FLOW.step - 13, x: laneX.get(step.origin), step, redirect, at: redirect ? null : at });
+          y += FLOW.step;
+        }
+      }
+      y += 8;
+      bands.push({ y: top, height: y - top, page: phase.page });
+      y += 14;
+    }
+    return { lanes: flow.lanes, laneX, laneRequests, bands, arrows, width: FLOW.clientX + FLOW.laneWidth * flow.lanes.length + FLOW.laneBox / 2 + FLOW.padding, height: y + FLOW.padding };
+  }
+
+  function flowMarkup(layout) {
+    const bottom = layout.height - FLOW.padding / 2, right = layout.width - FLOW.padding;
+    const requests = (value) => `${value} request${value === 1 ? "" : "s"}`;
+    const total = [...layout.laneRequests.values()].reduce((sum, value) => sum + value, 0);
+    const lane = (x, name, detail, title, attributes = "") => `<g class="service-map-flow-lane"${attributes}><title>${escape(title)}</title>`
+      + `<rect x="${x - FLOW.laneBox / 2}" y="${FLOW.top}" width="${FLOW.laneBox}" height="${FLOW.header}" rx="8"></rect>`
+      + `<text class="service-map-flow-lane-name" x="${x}" y="${FLOW.top + 17}" text-anchor="middle" dominant-baseline="central">${escape(flowFit(name, FLOW.laneBox - 20, 7))}</text>`
+      + `<text class="service-map-flow-lane-detail" x="${x}" y="${FLOW.top + 33}" text-anchor="middle" dominant-baseline="central">${escape(detail)}</text></g>`;
+    const xs = [FLOW.clientX, ...layout.lanes.map((origin) => layout.laneX.get(origin))];
+    const lifelines = xs.map((x) => `<line class="service-map-flow-life" x1="${x}" y1="${FLOW.top + FLOW.header}" x2="${x}" y2="${bottom}"></line>`);
+    const lanes = [lane(FLOW.clientX, "Client", requests(total), "Requests as the client sent them"),
+      ...layout.lanes.map((origin, index) => lane(layout.laneX.get(origin), hostOf(origin), requests(layout.laneRequests.get(origin)),
+        index ? `${origin} · show its flow` : origin, index ? ` data-service-flow-lane="${escape(origin)}" role="button" tabindex="0"` : ' data-selected="true"'))];
+    // The headers come last, over a backdrop, so they can stay in view while
+    // the steps scroll under them.
+    const heads = `<g class="service-map-flow-heads"><rect class="service-map-flow-heads-backdrop" x="0" y="0" width="${layout.width}" height="${FLOW.top + FLOW.header + 6}"></rect>${lanes.join("")}</g>`;
+    const cards = layout.bands.map((band) => `<rect class="service-map-flow-phase" x="8" y="${band.y}" width="${layout.width - 16}" height="${band.height}" rx="8"></rect>`
+      + `<rect class="service-map-flow-phase-accent" x="8" y="${band.y + 8}" width="3" height="${band.height - 16}" rx="1.5"></rect>`);
+    // A card's title sits on a patch of its own colour so the lifelines pass behind it.
+    const titles = layout.bands.map((band) => {
+      const kicker = band.page ? "PAGE LOAD" : "BEFORE THE FIRST PAGE LOAD";
+      const place = band.page ? flowFit(`${hostOf(band.page.origin)}${band.page.path}`, right - 120) : "";
+      const width = 16 + kicker.length * 6.6 + (place ? 8 + place.length * 7.2 : 0);
+      return `<g class="service-map-flow-phase-title"><rect x="18" y="${band.y + 6}" width="${width}" height="20" rx="4"></rect>`
+        + `<text x="26" y="${band.y + 16}" dominant-baseline="central"><tspan class="service-map-flow-kicker">${kicker}</tspan>${place ? `<tspan class="service-map-flow-place" dx="8">${escape(place)}</tspan>` : ""}</text></g>`;
+    });
+    const arrows = layout.arrows.map(({ x, y, top, step, redirect, at }) => {
+      const label = redirect ? flowRedirectLabel(step) : flowStepLabel(step);
+      const labelY = y - 15, parts = [];
+      let cursor = FLOW.clientX + 12;
+      const pill = (text, kind) => { const made = flowPill(cursor, labelY, text, kind); parts.push(made.markup); cursor += made.width + 6; };
+      const words = (text, room) => {
+        const fitted = flowFit(text, room);
+        parts.push(`<text class="service-map-flow-path" x="${cursor}" y="${labelY}" dominant-baseline="central">${escape(fitted)}</text>`);
+        cursor += fitted.length * 7.2 + 8;
+      };
+      if (redirect) {
+        pill(String(step.status ?? "3xx"), flowStatusClass(step.status));
+        words(`to ${hostOf(step.redirect.origin)}${step.redirect.path}`, right - cursor);
+      } else {
+        const method = step.method.toUpperCase();
+        pill(method, FLOW_METHODS.has(method) ? ` method-${method.toLowerCase()}` : "");
+        const after = (step.count > 1 ? 20 + String(step.count).length * 7 : 0) + (step.status == null ? 0 : 41);
+        words(step.path, right - cursor - after);
+        if (step.count > 1) pill(`×${step.count}`, " count");
+        if (step.status != null) pill(String(step.status), flowStatusClass(step.status));
+      }
+      // A request runs from the client to its origin; a redirect back again.
+      const [from, to, back] = redirect ? [x, FLOW.clientX, 1] : [FLOW.clientX, x, -1];
+      const head = `M${to + back * 9},${y - 5} L${to},${y} L${to + back * 9},${y + 5} Z`;
+      return `<g class="service-map-flow-step kind-${step.kind}${redirect ? " redirect" : ""}" data-service-flow-record="${escape(step.recordId)}" role="button" tabindex="0">`
+        + `<title>${escape(`${label} · ${step.origin}${step.path} · open in HTTP history`)}</title>`
+        + `<rect class="service-map-flow-row" x="14" y="${top + 2}" width="${layout.width - 28}" height="${FLOW.step - 4}" rx="6"></rect>`
+        + (at == null ? "" : `<text class="service-map-flow-time" x="${FLOW.gutter}" y="${y}" text-anchor="end" dominant-baseline="central">${flowTime(at)}</text>`)
+        + `${parts.join("")}<line x1="${from}" y1="${y}" x2="${to + back * 8}" y2="${y}"></line><path class="service-map-flow-head" d="${head}"></path></g>`;
+    });
+    return `<svg class="service-map-flow" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" role="group" aria-label="Requests in time order">`
+      + `${cards.join("")}${lifelines.join("")}${titles.join("")}${arrows.join("")}${heads}</svg>`;
+  }
+
+  // How far the flow's top has scrolled above the viewport's, in flow units:
+  // where its lane headers go to stay in view.
+  function flowHeadsOffset(viewportTop, flowTop, scale) {
+    return Math.max(0, (viewportTop - flowTop) / (scale || 1));
+  }
+
+  // Mermaid sequence diagram text; ";" and "#" would end or escape a message.
+  function flowMermaid(flow, hiddenKinds = []) {
+    const hidden = new Set(hiddenKinds);
+    const ids = new Map(flow.lanes.map((origin, index) => [origin, `O${index}`]));
+    const text = (value) => String(value).replace(/[;#\r\n]/g, " ");
+    const lines = ["sequenceDiagram", "  participant C as Client", ...flow.lanes.map((origin) => `  participant ${ids.get(origin)} as ${text(hostOf(origin))}`)];
+    const last = ids.get(flow.lanes.at(-1));
+    for (const phase of flow.phases) {
+      const steps = phase.steps.filter((step) => !hidden.has(step.kind));
+      if (!steps.length) continue;
+      lines.push(`  Note over C,${last}: ${text(flowPageLabel(phase))}`);
+      for (const step of steps) {
+        lines.push(`  C->>${ids.get(step.origin)}: ${text(flowStepLabel(step))}`);
+        if (step.redirect) lines.push(`  ${ids.get(step.origin)}-->>C: ${text(flowRedirectLabel(step))}`);
+      }
+    }
+    return `${lines.join("\n")}\n`;
+  }
+
   function graphLayout(origins, order, previousSlots = new Map(), anchor = null, bodyEdges = [], geometry = GRAPH_GEOMETRY, hiddenKinds = [], clientCards = 0) {
     const byOrigin = new Map(origins.map((origin) => [origin.origin, origin]));
     const visibleOrigins = order.filter((id) => byOrigin.has(id)).slice(0, MAX_CARDS + clientCards).map((id) => byOrigin.get(id));
@@ -1232,11 +1390,25 @@
       return [{ source: link.source_origin, target: origin.origin, relationship: link.relationship, label: LINK_LABELS[link.relationship] || "Referer header",
         kind: kinds[0][0], kinds: Object.fromEntries(kinds), count: kinds.reduce((sum, [, rows]) => sum + rows, 0), cors: linkCors(link) }];
     };
+    // Origin and Referer from one source make one arrow that counts requests: a
+    // row naming the source in both is one request in the server's
+    // header_sources. An older server sends no such count; each header then
+    // keeps its own.
+    const headerEdges = (origin) => {
+      const bySource = new Map();
+      for (const link of origin.header_links) bySource.set(link.source_origin, [...(bySource.get(link.source_origin) || []), link]);
+      return [...bySource].flatMap(([source, links]) => {
+        const rows = (origin.header_sources || []).find((item) => item.source_origin === source);
+        if (!rows || links.length < 2) return links.flatMap((link) => headerEdge(origin, link));
+        return headerEdge(origin, { ...rows, relationship: links[0].relationship }).map((edge) => ({ ...edge,
+          relationships: links.map((link) => link.relationship), labels: links.map((link) => LINK_LABELS[link.relationship] || "Referer header") }));
+      });
+    };
     // The explicit overlay gets the first arrow slots. Metadata remains distinct
     // even when the same pair also occurs in a retained response body.
-    const declaredEdges = [...bodyEdges, ...visibleOrigins.flatMap((origin) => [
+    const declaredEdges = [...bodyEdges.map((edge) => ({ ...edge, inspected: true })), ...visibleOrigins.flatMap((origin) => [
       ...origin.redirects.map((redirect) => ({ source: origin.origin, target: redirect.target_origin, relationship: "redirect_instruction", label: "Redirect instruction", kind: "redirect", count: Math.max(1, count(redirect.request_count)) })),
-      ...origin.header_links.flatMap((link) => headerEdge(origin, link)),
+      ...headerEdges(origin),
     ])];
     const seen = new Map();
     const shown = [];
@@ -1244,17 +1416,22 @@
     for (const edge of declaredEdges) {
       // The overview draws one arrow per direction: whatever one card has to
       // another (a redirect, Origin and Referer, an inspection) shares it, drawn
-      // as the first of them, its title naming them all. Direct relations keeps
-      // each relationship's own arrow, the typed view it is for. Redirects to
-      // several paths of one origin share an arrow and their rows, as do the
-      // links of one site's origins; inspected body and Link references count
-      // no rows.
-      const key = JSON.stringify(anchor ? [edge.source, edge.target, edge.relationship] : [edge.source, edge.target]);
+      // as the first of them, its title naming them all. Direct relations does
+      // the same for what the metadata says, so a page that called its API
+      // through redirects, Origin and Referer is one arrow, not three; only an
+      // inspection the operator ran keeps each type's own arrow there, the typed
+      // view it is for. Redirects to several paths of one origin share an arrow
+      // and their rows, as do the links of one site's origins; inspected body and
+      // Link references count no rows.
+      const key = JSON.stringify(!anchor ? [edge.source, edge.target]
+        : edge.inspected ? [edge.source, edge.target, edge.relationship] : [edge.source, edge.target, "metadata"]);
       if (edge.source === edge.target || !visibleIds.has(edge.source) || !visibleIds.has(edge.target)
         || anchor && edge.source !== anchor && edge.target !== anchor) continue;
       if (seen.has(key)) {
-        const drawn = seen.get(key);
-        if (!drawn.relationships.includes(edge.relationship)) { drawn.relationships.push(edge.relationship); drawn.labels.push(edge.label); }
+        const drawn = seen.get(key), labels = edge.labels || [edge.label];
+        (edge.relationships || [edge.relationship]).forEach((relationship, index) => {
+          if (!drawn.relationships.includes(relationship)) { drawn.relationships.push(relationship); drawn.labels.push(labels[index]); }
+        });
         if (edge.layers) drawn.layers = [...new Set([...(drawn.layers || []), ...edge.layers])];
         if (edge.count) drawn.count = (drawn.count || 0) + edge.count;
         if (edge.kinds) {
@@ -1265,7 +1442,7 @@
         if (edge.cors) drawn.cors = drawn.cors ? drawn.cors.map((value, index) => value + edge.cors[index]) : [...edge.cors];
         continue;
       }
-      const drawn = { ...edge, relationships: [edge.relationship], labels: [edge.label] };
+      const drawn = { ...edge, relationships: [...(edge.relationships || [edge.relationship])], labels: [...(edge.labels || [edge.label])] };
       seen.set(key, drawn);
       edgeCount += 1;
       if (shown.length < MAX_EDGES) shown.push(drawn);
@@ -1391,7 +1568,7 @@
     }
   }
   const referenceOrigin = (id) => ({ origin: id, captured: false, in_scope: false, endpoints: [], technology_clues: [], technology_observations: [], technology_observations_present: false, redirects: [], header_links: [], references: [], referencesOmitted: 0 });
-  function createController({ elements: els, getSessionId, getEventStreamReady = () => true, getFilterQuery = () => ({}), getFilterSummary = () => null, getHiddenLinkKinds = null, setHiddenLinkKinds = null, getSiteDisplay = null, setSiteDisplay = null, request: sendRequest, copyText = null, sendToReplay = null, openUrl = null, document: doc = root.document }) {
+  function createController({ elements: els, getSessionId, getEventStreamReady = () => true, getFilterQuery = () => ({}), getFilterSummary = () => null, getHiddenLinkKinds = null, setHiddenLinkKinds = null, getSiteDisplay = null, setSiteDisplay = null, request: sendRequest, copyText = null, sendToReplay = null, openInHistory = null, openUrl = null, onApiDocsOpen = null, isActiveModal = () => true, restoreFocus = null, document: doc = root.document }) {
     // Request kinds whose links are not drawn. The app keeps them in UI
     // settings; without it they live for this controller only.
     let localHiddenLinkKinds = [...DEFAULT_HIDDEN_LINK_KINDS];
@@ -1413,8 +1590,9 @@
     // request. Enforce this for every map/inspector read, preserving its signal.
     const request = (path, options) => sendRequest(path, { ...options, redirect: "error" });
     const productFilterContainer = els.productFilters || els.panel.querySelector?.("#serviceMapProductFilters");
+    const productFilterDisclosure = productFilterContainer?.parentElement;
     const state = {
-      sessionId: null, snapshot: null, order: [], selectedOrigin: null, selectedClient: null, selectionInitialized: false,
+      sessionId: null, snapshot: null, order: [], selectedOrigin: null, selectedClient: null, selectedSite: null, selectionInitialized: false,
       query: "", scopeOnly: false, view: "service-map", detailTab: "apis", endpointIndex: null, endpointSelection: null,
       endpointMethod: "", endpointPath: "", productId: "", productVersion: "", pageAnchor: null, detailPageAnchor: null,
       expandedEndpointGroups: new Set(), loading: false, backgroundLoading: false, error: "", refreshPaused: false, requestId: 0, evidenceRequestId: 0, evidence: null,
@@ -1426,17 +1604,90 @@
       parameters: null, parametersKey: null, parametersLoading: false, parametersError: "", parametersRequestId: 0, busyRetries: 0,
       htmlGenerators: null, htmlGeneratorsLoading: false, htmlGeneratorsError: "", htmlGeneratorsRequestId: 0, htmlGeneratorsSource: null,
       inactiveSessionId: null, historyVersion: 0, stale: false, anchorOrigin: null, modeNotice: "", zoomScale: 1,
+      flowOrigin: null, flow: null, flowLoading: false, flowError: "", flowRequestId: 0,
     };
     Object.defineProperty(state, "bodyReferenceOverlay", { get: () => state.relationLayers.at(-1) || null });
     let abort = null;
+    let flowAbort = null;
     let evidenceAbort = null;
     let bodyReferencesAbort = null;
     let peerMatchesAbort = null;
     let htmlGeneratorsAbort = null;
     let parametersAbort = null;
+    let apiDocsCopyId = 0;
+    let replayActionId = 0;
+    let apiDocsReturnFocus = null;
     let detailRender = null;
     const renderedMarkup = new WeakMap();
     let visible = false;
+    let destroyed = false;
+    let pageHidden = false;
+    let refreshTimer = null;
+    let historyPresentationPending = false;
+    const eventDisposers = [];
+    function listen(element, type, handler, options) {
+      const owned = (...args) => { if (!destroyed) return handler(...args); };
+      element?.addEventListener?.(type, owned, options);
+      eventDisposers.push(() => element?.removeEventListener?.(type, owned, options));
+    }
+    function closeProductFilters(returnFocus = false) {
+      if (!productFilterDisclosure?.open) return false;
+      const restore = returnFocus && productFilterDisclosure.contains(doc?.activeElement);
+      productFilterDisclosure.open = false;
+      if (restore) productFilterDisclosure.querySelector("summary")?.focus({ preventScroll: true });
+      return true;
+    }
+    if (productFilterDisclosure) {
+      listen(doc, "pointerdown", (event) => {
+        if (visible && !productFilterDisclosure.contains(event.target)) closeProductFilters();
+      }, true);
+      listen(doc, "keydown", (event) => {
+        if (!visible || event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+        if (closeProductFilters(true)) event.preventDefault();
+      });
+    }
+    const canRefresh = () => visible && !destroyed && !pageHidden && doc?.hidden !== true;
+    function clearRefreshTimer() {
+      if (refreshTimer !== null) root.clearTimeout?.(refreshTimer);
+      refreshTimer = null;
+    }
+    function scheduleAutomaticRefresh() {
+      if (refreshTimer !== null || !canRefresh() || state.loading || state.refreshPaused || !getSessionId() || !root.setTimeout) return;
+      // Start the delay after completion, so a slow map never accumulates polls.
+      refreshTimer = root.setTimeout(() => {
+        refreshTimer = null;
+        refresh();
+      }, AUTO_REFRESH_MS);
+    }
+    function suspendRefresh() {
+      clearRefreshTimer();
+      state.requestId += 1;
+      abort?.abort();
+      abort = null;
+      state.loading = false;
+      state.backgroundLoading = false;
+    }
+    function onVisibilityChange() {
+      if (!canRefresh()) suspendRefresh();
+      else {
+        if (historyPresentationPending) render();
+        else renderStatus();
+        historyPresentationPending = false;
+        scheduleAutomaticRefresh();
+      }
+    }
+    function onPageHide() { pageHidden = true; suspendRefresh(); }
+    function onPageShow() { pageHidden = false; onVisibilityChange(); }
+    function renderHistoryChange(graphChanged) {
+      if (!canRefresh()) { historyPresentationPending = true; return; }
+      // A history event changes freshness and inspection ownership, not the
+      // loaded graph. Do not lay it out per captured/retained row.
+      if (graphChanged) render();
+      else { renderStatus(); renderDetail(); renderOverlayStatus(); }
+    }
+    doc?.addEventListener?.("visibilitychange", onVisibilityChange);
+    root.addEventListener?.("pagehide", onPageHide);
+    root.addEventListener?.("pageshow", onPageShow);
     let currentLayout = null;
     function viewportSize() {
       return { width: Number(els.viewport?.clientWidth) || 0, height: Number(els.viewport?.clientHeight) || 0 };
@@ -1465,6 +1716,16 @@
         els.canvas.style.setProperty("--service-map-scaled-height", `${currentLayout.height * state.zoomScale}px`);
       }
       updateZoomControls();
+      pinFlowHeads();
+    }
+    // An SVG holds no sticky element, so a flow's lane headers follow the
+    // scroll instead.
+    function pinFlowHeads() {
+      const heads = els.canvas?.querySelector?.(".service-map-flow-heads");
+      const flow = heads?.ownerSVGElement;
+      if (!flow || !els.viewport?.getBoundingClientRect) return;
+      const offset = flowHeadsOffset(els.viewport.getBoundingClientRect().top, flow.getBoundingClientRect().top, state.zoomScale);
+      heads.setAttribute("transform", `translate(0 ${offset})`);
     }
     // `anchor` is a point in the viewport, such as the fingers of a pinch, that
     // stays over the same part of the graph; without one it is the center.
@@ -1623,6 +1884,7 @@
           && !(typeof value === "string" && /^reported:[0-9][0-9A-Za-z.+-]{0,39}$/.test(value))) return;
         state.productVersion = value || "";
       }
+      replayActionId += 1;
       // Product filters change membership, never source identity or pending
       // reads. Retain exact catalog anchors and the independent inspector page.
       if (state.snapshot) reconcileEndpointPages();
@@ -1672,6 +1934,13 @@
     }
     function selectedOrigin() {
       return findOrigin(state.selectedOrigin);
+    }
+    function siteDetails(site) {
+      if (!site) return null;
+      // A site's inspector, like an origin's, belongs to the loaded snapshot.
+      // Searching can ungroup or hide its card without removing its members.
+      const members = graphOrigins().filter((origin) => !origin.endpointNode && siteKey(origin.origin) === site);
+      return members.length ? { site, members } : null;
     }
     const layerKey = (layer) => `${layer.kind}:${layer.source.evidenceId}`;
     const layerReferences = (layer) => layer.kind === "body" ? layer.scan.references : layer.kind === "link" ? layer.scan.observations : [];
@@ -1806,12 +2075,15 @@
       if (state.neighborhoodSnapshot === state.snapshot && state.neighborhoodAnchor === state.anchorOrigin && state.neighborhoodOverlay === state.relationLayers) return state.neighborhood;
       const anchor = findOrigin(state.anchorOrigin);
       if (!anchor) return null;
-      const ids = new Set(), seen = new Set();
+      // Links are typed; arrows are what graphLayout draws: one per direction
+      // for the metadata, one per type for an inspection.
+      const ids = new Set(), seen = new Set(), metadataArrows = new Set(), inspectedArrows = new Set();
       const counts = { incoming: 0, outgoing: 0, redirect_instruction: 0, origin_header: 0, referer_header: 0, body_url_reference: 0 };
       for (const relation of metadataRelations(state.snapshot.origins)) {
         const { sourceOrigin, targetOrigin, relationship } = relation;
         if (sourceOrigin === targetOrigin || sourceOrigin !== anchor.origin && targetOrigin !== anchor.origin) continue;
         ids.add(sourceOrigin === anchor.origin ? targetOrigin : sourceOrigin);
+        metadataArrows.add(JSON.stringify([sourceOrigin, targetOrigin]));
         const key = JSON.stringify([sourceOrigin, targetOrigin, relationship]);
         if (seen.has(key)) continue;
         seen.add(key);
@@ -1824,6 +2096,7 @@
         const neighbor = edge.source === anchor.origin ? edge.target : edge.source;
         ids.add(neighbor); bodyIds.add(neighbor);
         const key = JSON.stringify([edge.source, edge.target, edge.relationship]);
+        inspectedArrows.add(key);
         if (seen.has(key)) continue;
         seen.add(key);
         if (!edge.undirected) counts[edge.source === anchor.origin ? "outgoing" : "incoming"] += 1;
@@ -1835,11 +2108,13 @@
       const neighbors = [...ids].sort().map((id) => byOrigin.get(id) || referenceOrigin(id));
       state.neighborhoodSnapshot = state.snapshot; state.neighborhoodAnchor = state.anchorOrigin;
       state.neighborhoodOverlay = state.relationLayers;
-      state.neighborhood = { anchor, neighbors, counts, bodyIds, edgeCount: seen.size };
+      state.neighborhood = { anchor, neighbors, counts, bodyIds, edgeCount: seen.size,
+        metadataArrowCount: metadataArrows.size, arrowCount: metadataArrows.size + inspectedArrows.size };
       return state.neighborhood;
     }
     function setMapMode(direct) {
       if (state.sessionId !== getSessionId()) { reset(); return; }
+      leaveFlow();
       if (direct) {
         if (state.anchorOrigin || !selectedOrigin()) return;
         state.anchorOrigin = state.selectedOrigin;
@@ -1850,6 +2125,82 @@
       }
       state.modeNotice = "";
       render();
+    }
+    function leaveFlow() {
+      flowAbort?.abort();
+      state.flowRequestId += 1;
+      Object.assign(state, { flowOrigin: null, flow: null, flowLoading: false, flowError: "" });
+    }
+    // Flow follows one origin: the selected one, or a lane clicked in a flow.
+    function setFlowMode(origin) {
+      if (state.sessionId !== getSessionId()) { reset(); return; }
+      if (!origin) { leaveFlow(); render(); return; }
+      Object.assign(state, { flowOrigin: origin, flow: null, flowError: "", anchorOrigin: null, modeNotice: "" });
+      if (state.selectedOrigin !== origin) selectOrigin(origin);
+      loadFlow();
+    }
+    async function loadFlow() {
+      const origin = state.flowOrigin, sessionId = getSessionId();
+      if (!origin) return;
+      flowAbort?.abort();
+      flowAbort = new AbortController();
+      const requestId = ++state.flowRequestId;
+      state.flowLoading = true;
+      render();
+      // The newest rows the server reads at most: a flow shows what happened
+      // lately, and only a row window keeps the rows' order.
+      const params = new URLSearchParams({ ...getFilterQuery(), session_id: sessionId, origin, in_scope_only: String(state.scopeOnly), max_records: "50000" });
+      let flow = null, error = "";
+      try {
+        const response = await request(`/api/target/service-map/flow?${params}`, { signal: flowAbort.signal });
+        if (!response.ok) error = response.status === 404 ? "This Sniper cannot draw flows; update it." : "The flow could not be read.";
+        else flow = normalizeFlow(await response.json(), sessionId, origin);
+        if (!flow && !error) error = "The flow did not match the origin asked for.";
+      } catch (failure) {
+        if (failure?.name === "AbortError") return;
+        error = "The flow could not be read.";
+      }
+      if (destroyed || requestId !== state.flowRequestId || state.flowOrigin !== origin || sessionId !== getSessionId()) return;
+      Object.assign(state, { flow, flowError: error, flowLoading: false });
+      render();
+    }
+    function renderModeButtons(selected) {
+      const flow = !!state.flowOrigin;
+      // Origins and Flow are the views; Direct relations narrows Origins.
+      els.allOrigins?.setAttribute("aria-pressed", String(!flow));
+      els.directRelations?.setAttribute("aria-pressed", String(!!state.anchorOrigin && !flow));
+      els.directRelations?.classList.toggle("hidden", flow);
+      els.flow?.setAttribute("aria-pressed", String(flow));
+      if (els.directRelations) els.directRelations.disabled = !state.snapshot || !state.anchorOrigin && !selected;
+      if (els.flow) els.flow.disabled = !state.snapshot || !flow && !selected;
+      els.flowMermaid?.classList.toggle("hidden", !flow || !state.flow);
+      els.linkKinds?.parentElement?.classList.toggle("flow-active", flow);
+    }
+    function renderFlow() {
+      renderModeButtons(selectedOrigin());
+      renderLinkKinds();
+      els.mapControls?.classList.toggle("hidden", state.view === "apis");
+      els.focusSelection?.classList.toggle("hidden", true);
+      const flow = state.flow;
+      const layout = flow && flowLayout(flow, hiddenLinkKinds());
+      const shown = layout ? layout.arrows.filter((arrow) => !arrow.redirect).length : 0;
+      if (!shown) {
+        currentLayout = null;
+        const message = !flow ? state.flowError || "Reading the flow…" : "No requests of the kinds shown. Turn more kinds on under Requests.";
+        replace(els.canvas, `<div class="service-map-empty"><span class="service-map-empty-symbol" aria-hidden="true">◎</span><h3>${escape(message)}</h3></div>`);
+        els.graphBounds.textContent = "";
+        if (els.graphDiagnostics) els.graphDiagnostics.textContent = "";
+        updateZoomControls();
+        return;
+      }
+      currentLayout = { nodes: layout.lanes, edges: [], width: layout.width, height: layout.height };
+      replace(els.canvas, `<div class="service-map-scaled"><div class="service-map-layout">${flowMarkup(layout)}</div></div>`);
+      applyGraphScale();
+      pinFlowHeads();
+      const steps = flow.phases.reduce((sum, phase) => sum + phase.steps.length, 0);
+      els.graphBounds.textContent = [`${shown} / ${steps} steps in ${layout.bands.length} page loads`, `${flow.flowRows} of the newest ${flow.consideredRows} rows`,
+        ...flow.stoppedBy.map((reason) => FLOW_STOPS[reason] || `stopped by ${reason}`)].join(" · ");
+      if (els.graphDiagnostics) els.graphDiagnostics.textContent = "";
     }
     function focusSelection() {
       if (state.sessionId !== getSessionId()) { reset(); return; }
@@ -2089,20 +2440,23 @@
       state.evidenceId = null;
     }
     function reset() {
+      replayActionId += 1;
       clearOverlay("Temporary body references cleared because the session changed.");
-      state.requestId += 1;
-      abort?.abort();
-      abort = null;
+      suspendRefresh();
       cancelEvidence();
       closeApiDocs();
       cancelParameters();
-      Object.assign(state, { sessionId: getSessionId(), snapshot: null, order: [], selectedOrigin: null, selectedClient: null,
+      flowAbort?.abort();
+      Object.assign(state, { flowOrigin: null, flow: null, flowLoading: false, flowError: "" });
+      Object.assign(state, { sessionId: getSessionId(), snapshot: null, order: [], selectedOrigin: null, selectedClient: null, selectedSite: null,
         inactiveSessionId: null, selectionInitialized: false, endpointIndex: null, endpointSelection: null, endpointMethod: "", endpointPath: "", productId: "", productVersion: "", pageAnchor: null, detailPageAnchor: null, expandedEndpointGroups: new Set(), loading: false, backgroundLoading: false, error: "", refreshPaused: false, page: 0, detailPage: 0, stale: false, anchorOrigin: null, modeNotice: "", zoomScale: 1 });
       render();
+      scheduleAutomaticRefresh();
     }
     function selectOrigin(origin, endpointIndex = null) {
       const item = findOrigin(origin);
       if (!item || endpointIndex !== null && (!Number.isSafeInteger(endpointIndex) || !item.endpoints[endpointIndex])) return;
+      replayActionId += 1;
       const changedOrigin = state.selectedOrigin !== origin;
       const endpoint = endpointIndex === null ? null : item.endpoints[endpointIndex];
       if (changedOrigin || state.endpointSelection?.method !== endpoint?.method || state.endpointSelection?.path !== endpoint?.path) cancelParameters();
@@ -2135,32 +2489,69 @@
     const TRANSACTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     async function openApiDocs(originId) {
       if (!els.apiDocs) return;
+      onApiDocsOpen?.();
+      replayActionId += 1;
+      const sessionId = getSessionId();
+      const opening = !state.apiDocs;
+      if (opening) apiDocsReturnFocus = doc?.activeElement;
       const requestId = ++state.apiDocsRequestId;
-      state.apiDocs = { origin: originId, document: null, error: "" };
-      renderApiDocs();
+      state.apiDocs = { origin: originId, sessionId, document: null, error: "" };
+      renderApiDocs(opening);
       try {
-        const response = await request(`/api/target/service-map/openapi?${new URLSearchParams({ session_id: getSessionId(), origin: originId })}`);
+        const response = await request(`/api/target/service-map/openapi?${new URLSearchParams({ session_id: sessionId, origin: originId })}`);
         if (!response.ok) throw new Error(response.status === 409 ? "API docs are read from the active session only." : "API docs unavailable.");
         const document = await response.json();
-        if (requestId !== state.apiDocsRequestId) return;
+        if (requestId !== state.apiDocsRequestId || sessionId !== getSessionId()) return;
         if (document?.openapi !== "3.1.0" || document.servers?.[0]?.url !== originId || typeof document.paths !== "object" || !document.paths) throw new Error("API docs unavailable.");
-        state.apiDocs = { origin: originId, document, error: "" };
+        state.apiDocs = { origin: originId, sessionId, document, error: "" };
       } catch (error) {
-        if (requestId !== state.apiDocsRequestId) return;
-        state.apiDocs = { origin: originId, document: null, error: error.message || "API docs unavailable." };
+        if (requestId !== state.apiDocsRequestId || sessionId !== getSessionId()) return;
+        state.apiDocs = { origin: originId, sessionId, document: null, error: error.message || "API docs unavailable." };
       }
       renderApiDocs();
     }
-    function closeApiDocs() {
+    function apiDocsOwnsFocus() {
+      return !!doc?.activeElement && els.apiDocs?.contains(doc.activeElement) && isActiveModal(els.apiDocs);
+    }
+    function closeApiDocs(returnFocus = true) {
+      if (state.apiDocs) replayActionId += 1;
+      // A pointer press on the non-focusable backdrop can leave body focused
+      // before its click dismisses the dialog.
+      const restore = returnFocus && state.apiDocs && isActiveModal(els.apiDocs)
+        && (apiDocsOwnsFocus() || !!doc?.body && doc.activeElement === doc.body);
       state.apiDocsRequestId += 1;
       state.apiDocs = null;
       renderApiDocs();
+      if (restore) restoreFocus?.(apiDocsReturnFocus);
+      apiDocsReturnFocus = null;
     }
-    function renderApiDocs() {
+    function sendApiDocsToReplay(id) {
+      const apiDocs = state.apiDocs;
+      if (!visible || !apiDocs?.document || apiDocs.sessionId !== getSessionId()
+        || !TRANSACTION_ID.test(id) || !Object.values(apiDocs.document.paths).some((path) =>
+          API_DOC_METHODS.some((method) => path?.[method]?.["x-sniper-newest-transaction"] === id))) return;
+      // Sending deliberately closes the document. Capture a separate action
+      // owner afterward so that close permits this read, while newer intent
+      // (including leaving and returning to Map) cannot revive it.
+      closeApiDocs();
+      const actionId = replayActionId;
+      const isCurrent = () => actionId === replayActionId && visible && apiDocs.sessionId === getSessionId();
+      sendToReplay?.(id, isCurrent);
+    }
+    function copyApiDocs(label) {
+      const apiDocs = state.apiDocs, sessionId = getSessionId(), copyId = ++apiDocsCopyId;
+      if (!apiDocs?.document) return;
+      const isCurrent = () => state.apiDocs === apiDocs && getSessionId() === sessionId && apiDocsCopyId === copyId;
+      copyText?.(JSON.stringify(apiDocs.document, null, 2), label, isCurrent);
+    }
+    function renderApiDocs(opening = false) {
       if (!els.apiDocs) return;
       els.apiDocs.classList.toggle("hidden", !state.apiDocs);
+      // Replacing the loading markup detaches its focused Close button. Keep
+      // that focus inside, but do not take it back from a newer dialog.
+      const focus = state.apiDocs && isActiveModal(els.apiDocs) && (opening || apiDocsOwnsFocus());
       replace(els.apiDocs, state.apiDocs ? apiDocsMarkup(state.apiDocs) : "");
-      if (state.apiDocs) els.apiDocs.querySelector?.("[data-api-docs-close]")?.focus();
+      if (focus) els.apiDocs.querySelector?.("[data-api-docs-close]")?.focus();
     }
     function apiDocsMarkup({ origin, document, error }) {
       const body = error ? `<p class="service-map-filter-notice" role="status">${escape(error)}</p>`
@@ -2171,7 +2562,29 @@
       const schemes = document.components?.securitySchemes || {};
       const schemeText = (scheme) => scheme?.type === "http" ? `HTTP ${scheme.scheme}${scheme.bearerFormat ? ` (${scheme.bearerFormat})` : ""}`
         : `${{ cookie: "Cookie", query: "Query parameter" }[scheme?.in] || "Header"} ${scheme?.name || ""}`;
-      const typeOf = (schema) => [schema?.type, schema?.format].filter(Boolean).join(" · ") || "any";
+      const typeOf = (schema) => {
+        const labels = new Set();
+        let remaining = 32;
+        const visit = (value, depth) => {
+          remaining -= 1;
+          if (depth > 4) { labels.add("…"); return; }
+          const types = Array.isArray(value?.type);
+          const label = types ? "" : [value?.type, value?.format].filter((part) => typeof part === "string" && part)
+            .map((part) => part.length > 80 ? `${part.slice(0, 79)}…` : part).join(" · ");
+          if (label) { labels.add(label); return; }
+          const variants = types ? value.type : value?.anyOf;
+          if (!Array.isArray(variants) || !variants.length) { labels.add("any"); return; }
+          // Mixed path identifiers carry anyOf; JSON fields can have type arrays.
+          // Bound even malformed nested schemas without changing Copy or Replay.
+          for (const variant of variants) {
+            if (!remaining) { labels.add("…"); break; }
+            const branch = types ? (typeof variant === "string" && variant ? { type: variant, format: value.format } : null) : variant;
+            visit(branch, depth + 1);
+          }
+        };
+        visit(schema, 0);
+        return [...labels].join(" | ");
+      };
       const table = (head, rows) => rows.length ? `<table class="service-map-api-docs-table"><thead><tr>${head.map((cell) => `<th>${cell}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody></table>` : "";
       const operations = Object.entries(document.paths).flatMap(([path, item]) => API_DOC_METHODS.filter((method) => item?.[method]).map((method) => ({ path, method, item, operation: item[method] })));
       const operationMarkup = ({ path, method, item, operation }) => {
@@ -2229,14 +2642,16 @@
       renderDetail();
     }
     async function refresh({ force = false, retry = false } = {}) {
-      if (!visible) return false;
+      if (!canRefresh()) return false;
       const sessionId = getSessionId();
       if (state.sessionId !== sessionId) reset();
       if (!sessionId || state.refreshPaused && !retry || state.loading && !force) return false;
+      clearRefreshTimer();
       if (force || retry) state.busyRetries = 0;
-      // The app polls every 1.2 seconds. A same-source background snapshot must
+      // A same-source background snapshot must
       // not erase an explicit inspection or continually abort its pending read.
       if (force) {
+        replayActionId += 1;
         cancelParameters();
         clearOverlay("Temporary body references cleared by Reload. Inspect and show references again when ready.");
         closeApiDocs();
@@ -2249,7 +2664,10 @@
       const requestId = ++state.requestId;
       const scopeOnly = state.scopeOnly;
       const filterQuery = getFilterQuery();
+      const filterSignature = JSON.stringify(filterQuery);
       const historyVersion = state.historyVersion;
+      const current = () => canRefresh() && requestId === state.requestId && sessionId === getSessionId()
+        && scopeOnly === state.scopeOnly && filterSignature === JSON.stringify(getFilterQuery());
       state.backgroundLoading = !!state.snapshot && !force;
       state.loading = true;
       state.error = "";
@@ -2259,16 +2677,36 @@
       try {
         // The Service Map filter's conditions use HTTP history's parameter names.
         // Every retained row, not a newest-rows window. The server serves an
-        // unchanged or recent whole-history map from its cache; Reload and the
-        // first read ask for a fresh one.
-        const params = new URLSearchParams({ ...filterQuery, session_id: sessionId, in_scope_only: String(scopeOnly), all_rows: "true", ...(force || !state.snapshot ? { fresh: "true" } : {}) });
+        // unchanged or recent whole-history map from its cache. A history event
+        // bypasses the build-cost cooldown without the manual Reload's resets;
+        // fresh=true still reuses a complete, unchanged map. Clean polls keep
+        // progressing body enrichment, whose completion is private to the cache
+        // and is deliberately not inferred from snapshot.complete (display caps).
+        const params = new URLSearchParams({ ...filterQuery, session_id: sessionId, in_scope_only: String(scopeOnly), all_rows: "true", ...(force || !state.snapshot || state.stale ? { fresh: "true" } : {}) });
         const response = await request(`/api/target/service-map?${params}`, { signal: abort.signal, headers: { [TECHNOLOGY_CATALOG_HEADER]: String(TECHNOLOGY_CATALOG_VERSION) } });
         if (!response.ok) {
           failure = mapFailure(response);
           throw new Error("Service map unavailable");
         }
         const snapshot = normalizeSnapshot(await response.json(), sessionId);
-        if (requestId !== state.requestId || sessionId !== getSessionId() || scopeOnly !== state.scopeOnly) return false;
+        if (!current()) return false;
+        if (!force && !state.stale && historyVersion === state.historyVersion
+          && typeof snapshot.snapshot.id === "string" && snapshot.snapshot.id
+          && snapshot.snapshot.id === state.snapshot?.snapshot.id
+          && snapshot.snapshot.generation === state.snapshot.snapshot.generation
+          && snapshot.technologyCatalogVersion === state.snapshot.technologyCatalogVersion
+          && filterSignature === state.filterSignature
+          && state.kindSignature === JSON.stringify(hiddenLinkKinds())
+          && state.siteDisplaySignature === JSON.stringify(siteDisplay())
+          && !(state.endpointSelection && state.parametersKey === null)
+          && JSON.stringify(snapshot) === JSON.stringify(state.snapshot)) {
+          // Reusing serialized cache bytes must not rebuild the graph or disturb
+          // an inspection, scroll position or focused input every five seconds.
+          state.loading = false;
+          state.busyRetries = 0;
+          renderStatus();
+          return true;
+        }
         clearOverlay("Shown inspections removed: exact sources are no longer verified in the loaded projection or retained history changed.", (layer) =>
           !(layer.kind === "peer" ? peerSourceIsCurrent(layer.source, snapshot) : layer.kind === "link"
             ? htmlGeneratorSourceIsRetained(layer.source, snapshot) : sourceIsRetained(layer.source, snapshot)));
@@ -2282,13 +2720,13 @@
         if (state.htmlGeneratorsSource && !htmlGeneratorSourceIsRetained(state.htmlGeneratorsSource, snapshot)) cancelHtmlGenerators();
         state.snapshot = snapshot;
         state.refreshPaused = false;
+        if (state.flowOrigin) loadFlow();
         state.busyRetries = 0;
         state.stale = historyVersion !== state.historyVersion;
         const allOrigins = graphOrigins();
         // Another filter counts other rows, and other hidden request kinds draw
         // other links, wherever either changed (the dialog, a loaded setting,
         // another window): rank the cards again for them.
-        const filterSignature = JSON.stringify(filterQuery);
         const kindSignature = JSON.stringify(hiddenLinkKinds());
         if (state.filterSignature !== undefined && (state.filterSignature !== filterSignature || state.kindSignature !== kindSignature)) {
           state.order = [];
@@ -2325,7 +2763,7 @@
         render();
         return true;
       } catch (_) {
-        if (requestId !== state.requestId || sessionId !== getSessionId() || scopeOnly !== state.scopeOnly) return false;
+        if (!current()) return false;
         // Another read outlasted the server's wait for it. It is still running
         // and finishes, so the next poll asks again and nothing shown is stale
         // for it; only a long run of these pauses, as other failures do.
@@ -2352,6 +2790,13 @@
         state.error = failure?.message || (state.snapshot ? "Reload failed." : "Could not load the service map.");
         render();
         return false;
+      } finally {
+        if (requestId === state.requestId) {
+          abort = null;
+          state.loading = false;
+          renderStatus();
+          scheduleAutomaticRefresh();
+        }
       }
     }
     function evidenceItems(origin) {
@@ -2510,6 +2955,7 @@
     }
     function setRelationshipKind(kind) {
       if (!["body", "link"].includes(kind) || kind === state.relationshipKind) return false;
+      replayActionId += 1;
       cancelBodyReferences();
       state.relationshipKind = kind;
       renderDetail();
@@ -2629,6 +3075,7 @@
       }
     }
     function renderStatus() {
+      if (destroyed) return;
       // Re-rendered with the status so a filter restored from settings shows.
       if (els.filterSummary) {
         const summary = getFilterSummary();
@@ -2649,7 +3096,7 @@
         if (state.snapshot.legacyCatalog) status += ` · ${LEGACY_CATALOG_NOTICE}`;
         if (state.scopeOnly) status += " · In scope only";
         if (state.stale) status += state.refreshPaused ? " · Stale snapshot: counts have not been revalidated" : " · History changed: counts are from the previous snapshot";
-        if (state.snapshot.warningCount) status += ` · ${state.snapshot.warningCount} metadata notice(s)`;
+        if (state.snapshot.warningCount) status += ` · ${state.snapshot.warningCount} metadata notice${state.snapshot.warningCount === 1 ? "" : "s"}`;
       }
       // A deletion/gap can clear the retained snapshot while refresh is paused.
       // Derive this suffix now so it never claims cleared data is still shown.
@@ -2667,7 +3114,7 @@
       }
       els.status.classList.toggle("service-map-error", !!state.error);
       els.refresh.disabled = state.loading;
-      // Polling must not resize or dim the toolbar every 1.2 seconds. Keep the
+      // Polling must not resize or dim the toolbar on each check. Keep the
       // request guard, but reserve visible progress for initial/manual loads.
       els.refresh.textContent = "Reload";
       els.refresh.classList.toggle("service-map-background-refresh", state.loading && state.backgroundLoading);
@@ -2684,15 +3131,21 @@
       if (!els.linkKinds) return;
       const hidden = new Set(hiddenLinkKinds());
       const links = new Map(REQUEST_KINDS.map((kind) => [kind, 0]));
-      for (const origin of state.snapshot?.origins || []) {
-        for (const link of origin.header_links || []) {
+      // In Flow they count the flow's requests, which they hide or draw.
+      const flow = !!state.flowOrigin;
+      if (flow) for (const step of (state.flow?.phases || []).flatMap((phase) => phase.steps)) links.set(step.kind, links.get(step.kind) + step.count);
+      for (const origin of flow ? [] : state.snapshot?.origins || []) {
+        // One link per source, whichever headers named it; older servers send
+        // only the per-header counts.
+        for (const link of origin.header_sources?.length ? origin.header_sources : origin.header_links || []) {
           // A page naming its own origin is no link and is never drawn.
           if (link.source_origin === origin.origin) continue;
           for (const [kind] of linkKindCounts(link)) links.set(kind, links.get(kind) + 1);
         }
       }
-      const toggles = REQUEST_KINDS.filter((kind) => links.get(kind) > 0).map((kind) => `<button class="service-map-kind kind-${kind}" type="button" data-link-kind="${kind}" data-service-focus="link-kind:${kind}" aria-pressed="${!hidden.has(kind)}" title="${REQUEST_KIND_LABELS[kind]} in ${links.get(kind)} Origin/Referer link(s). ${hidden.has(kind) ? "Draw" : "Hide"} them."><span class="service-map-kind-swatch" aria-hidden="true"></span>${REQUEST_KIND_LABELS[kind]} ${links.get(kind)}</button>`).join("");
-      replace(els.linkKinds, toggles ? `<span class="service-map-kinds-label">Links by request:</span>${toggles}` : "");
+      const counted = (n) => flow ? `${n} request${n === 1 ? "" : "s"} in this flow` : `${n} Origin/Referer link${n === 1 ? "" : "s"}`;
+      const toggles = REQUEST_KINDS.filter((kind) => links.get(kind) > 0).map((kind) => `<button class="service-map-kind kind-${kind}" type="button" data-link-kind="${kind}" data-service-focus="link-kind:${kind}" aria-pressed="${!hidden.has(kind)}" title="${REQUEST_KIND_LABELS[kind]}: ${counted(links.get(kind))}. ${hidden.has(kind) ? "Draw" : "Hide"} them."><span class="service-map-kind-swatch" aria-hidden="true"></span>${REQUEST_KIND_LABELS[kind]} ${links.get(kind)}</button>`).join("");
+      replace(els.linkKinds, toggles ? `<span class="service-map-kinds-label">${flow ? "Requests:" : "Links by request:"}</span>${toggles}` : "");
     }
     // Group by site, and every origin or site hidden from the map with a way
     // back for each.
@@ -2746,14 +3199,17 @@
         favicons.set(token, false);
         const image = new Image();
         image.onload = () => {
+          if (destroyed) return;
           favicons.set(token, true);
-          faviconRedraw ??= setTimeout(() => { faviconRedraw = null; renderGraph(); }, 0);
+          faviconRedraw ??= setTimeout(() => { faviconRedraw = null; if (!destroyed) renderGraph(); }, 0);
         };
         image.src = source;
       }
       return favicons.get(token) ? source : null;
     }
     function renderGraph() {
+      if (destroyed) return;
+      if (state.flowOrigin) return renderFlow();
       const selected = selectedOrigin();
       const direct = directNeighborhood();
       const query = state.query.trim().toLowerCase();
@@ -2775,8 +3231,12 @@
       const collectionIds = new Set(overlayEdges().flatMap((edge) => [edge.source, edge.target]));
       const allOrder = stableOrder(state.order, origins);
       const sourceIds = new Set(state.relationLayers.map((layer) => layer.source.origin));
+      // Overview ordering needs membership only; rescanning every origin for
+      // every ID made redraws quadratic even when no address nodes were shown.
+      const endpointNodeIds = direct ? null : new Set(origins.filter((item) => item.endpointNode).map((item) => item.origin));
       const order = direct ? [direct.anchor.origin, ...neighborOrder.filter((id) => direct.bodyIds.has(id)), ...neighborOrder.filter((id) => !direct.bodyIds.has(id))]
-        : [...allOrder.filter((id) => origins.find((item) => item.origin === id)?.endpointNode), ...allOrder.filter((id) => sourceIds.has(id)), ...allOrder.filter((id) => collectionIds.has(id) && !sourceIds.has(id) && !origins.find((item) => item.origin === id)?.endpointNode), ...allOrder.filter((id) => !collectionIds.has(id))];
+        : [...allOrder.filter((id) => endpointNodeIds.has(id)), ...allOrder.filter((id) => sourceIds.has(id)), ...allOrder.filter((id) => collectionIds.has(id) && !sourceIds.has(id) && !endpointNodeIds.has(id)), ...allOrder.filter((id) => !collectionIds.has(id))];
+      state.siteDisplaySignature = JSON.stringify(display);
       const filterKey = JSON.stringify([query, state.productId, state.productVersion, state.scopeOnly, state.sessionId, state.anchorOrigin, hiddenLinkKinds(), display]);
       if (state.layoutFilter !== filterKey) { state.layoutSlots = new Map(); state.layoutFilter = filterKey; }
       const textSize = doc?.documentElement && typeof root.getComputedStyle === "function"
@@ -2806,15 +3266,13 @@
       if (!direct && els.graphDiagnostics) els.graphDiagnostics.textContent = state.snapshot
         ? `${stages.loaded.length} loaded origins · ${stages.queryHidden} query-hidden · ${stages.productHidden} product/version-hidden · ${stages.matching.length} matching · ${shownOrigins} shown · ${Math.max(0, stages.matching.length - shownOrigins)} omitted by ${MAX_CARDS}-card cap. Counts describe only loaded origins and reference cards; server projection omissions and omitted reference declarations are separate. Unloaded products and distinct origins are not counted.` : "";
       els.mapControls?.classList.toggle("hidden", state.view === "apis");
-      els.allOrigins?.setAttribute("aria-pressed", String(!state.anchorOrigin));
-      els.directRelations?.setAttribute("aria-pressed", String(!!state.anchorOrigin));
-      if (els.directRelations) els.directRelations.disabled = !state.snapshot || !state.anchorOrigin && !selected;
+      renderModeButtons(selected);
       if (els.focusSelection) {
         els.focusSelection.classList.toggle("hidden", !state.anchorOrigin);
         els.focusSelection.disabled = !selected || selected.origin === state.anchorOrigin;
         els.focusSelection.title = selected ? `Pin ${selected.origin} without changing its inspector` : "Select an origin to pin it";
       }
-      const selectionNotice = !selected || layout.nodes.some((node) => node.origin === grouped.card(selected.origin)) ? ""
+      const originSelectionNotice = !selected || layout.nodes.some((node) => node.origin === grouped.card(selected.origin)) ? ""
         : !shown(selected) ? "Selected origin is hidden from the map; inspector retained."
         : direct && !direct.neighbors.some((origin) => origin.origin === selected.origin) ? "Selected origin is outside this direct neighborhood; inspector retained."
         : origins.some((origin) => origin.origin === selected.origin)
@@ -2822,6 +3280,8 @@
         : !direct && !graphOrigins().some((origin) => origin.origin === selected.origin) && (!query || selected.origin.toLowerCase().includes(query))
           ? `Selected origin is outside the ${MAX_REFERENCE_CARDS}-reference-card limit; inspector retained.`
           : "Selected origin is outside this filter; inspector retained.";
+      const selectionNotice = state.selectedSite && siteDetails(state.selectedSite) && !layout.nodes.some((node) => node.site === state.selectedSite)
+        ? "Selected site has no grouped card in this view; inspector retained." : originSelectionNotice;
       if (!origins.length) {
         if (direct && !anchorShown) {
           replace(els.canvas, '<div class="service-map-empty"><span class="service-map-empty-symbol" aria-hidden="true">◎</span><h3>No visible origins</h3><p>Show hidden origins or change the neighbor filters to see this direct neighborhood.</p></div>');
@@ -2840,7 +3300,7 @@
       const requests = (edge) => edge.count > 1 || edge.kinds
         ? ` · ${edge.count} request${edge.count === 1 ? "" : "s"}${edge.kinds ? ` (${REQUEST_KINDS.filter((kind) => edge.kinds[kind]).map((kind) => `${REQUEST_KIND_LABELS[kind]} ${edge.kinds[kind]}`).join(", ")})` : ""}${edge.cors?.[0] ? ` · ${corsText(edge.cors)}` : ""}` : "";
       const cardName = (id) => String(id).startsWith("site:") ? `*.${id.slice(5)}` : String(id).startsWith("client:") ? clientName(clientById(id)) : id;
-      const title = (edge) => `${escape(cardName(edge.source))} ${edge.undirected ? "—" : "→"} ${escape(edge.undirected ? findOrigin(edge.target)?.address : cardName(edge.target))} · ${escape((edge.labels || [edge.label]).join(" + "))} · ${(edge.relationships || [edge.relationship]).join(", ")}${requests(edge)}${edge.layers ? ` · ${edge.layers.length} inspected source(s)` : ""}`;
+      const title = (edge) => `${escape(cardName(edge.source))} ${edge.undirected ? "—" : "→"} ${escape(edge.undirected ? findOrigin(edge.target)?.address : cardName(edge.target))} · ${escape((edge.labels || [edge.label]).join(" + "))} · ${(edge.relationships || [edge.relationship]).join(", ")}${requests(edge)}${edge.layers ? ` · ${edge.layers.length} inspected source${edge.layers.length === 1 ? "" : "s"}` : ""}`;
       const edges = layout.edges.map((edge) => `<path class="service-map-edge ${edge.undirected ? "peer-observation" : edge.relationship === "body_url_reference" ? "body-reference" : edge.relationship === "link_preconnect" ? "preconnect-hint" : edge.relationship.startsWith("link_") ? "link-declaration" : edge.relationship === "client_request" ? "client-request" : edge.relationship !== "redirect_instruction" ? "header-declaration" : ""}${edge.kind ? ` kind-${edge.kind}` : ""} ${[edge.source, edge.target].includes(selectedCard) ? "selected" : ""}" data-relationship="${edge.relationship}"${weight(edge.count) ? ` style="--edge-weight:${weight(edge.count)}px"` : ""} d="${edge.path}" ${edge.undirected ? "" : `marker-end="url(#service-map-arrow${[edge.source, edge.target].includes(selectedCard) ? "-selected" : edge.kind === "api" ? "-api" : ""})"`}><title>${title(edge)}</title></path>`).join("")
         // Arrows are thin, so a wide transparent stroke over each recorded one
         // takes the pointer: its tooltip, and a click that opens its entry.
@@ -2945,10 +3405,10 @@
           `Direct relations · ${direct.neighbors.length} known direct neighbors in loaded metadata${state.bodyReferenceOverlay ? linkOverlay ? " and temporary Link declarations (unique union)" : " and temporary body references (unique union)" : ""}`,
           `${direct.neighbors.length} loaded neighbors · ${queryHidden} query-hidden · ${productHidden} product/version-hidden · ${matchingNeighbors.length} matching · ${shownNeighbors} shown · ${capOmitted} omitted by ${MAX_CARDS}-card cap (anchor ${anchorShown ? "included" : "hidden"}). Pinned anchor is context, excluded from matching counts`,
           `Non-self distinct typed links: ${counts.incoming} incoming / ${counts.outgoing} outgoing · ${counts.redirect_instruction} redirect / ${counts.origin_header} Origin / ${counts.referer_header} Referer${state.bodyReferenceOverlay ? linkOverlay ? Object.values(LINK_RELATIONS).map((item) => ` / ${counts[item.type] || 0} ${item.type}`).join("") : ` / ${counts.body_url_reference} body_url_reference` : ""}`,
-          `${layout.edges.length} / ${layout.edgeCount} arrows between displayed cards (cap ${MAX_EDGES}) · ${direct.edgeCount - layout.edgeCount} links outside displayed cards`,
+          `${layout.edges.length} / ${layout.edgeCount} arrows between displayed cards (cap ${MAX_EDGES}) · ${direct.arrowCount - layout.edgeCount} arrows outside displayed cards`,
           ...(state.bodyReferenceOverlay ? [
             `${overlayName} typed arrows: ${shownBodyArrows} / ${overlayCount} shown · ${overlayCount - availableBodyArrows} outside displayed cards · ${availableBodyArrows - shownBodyArrows} omitted by arrow cap`,
-            `Metadata typed arrows: ${shownMetadataArrows} / ${metadataArrows} shown · ${metadataArrows - availableMetadataArrows} outside displayed cards · ${availableMetadataArrows - shownMetadataArrows} omitted by arrow cap`,
+            `Metadata arrows: ${shownMetadataArrows} / ${direct.metadataArrowCount} shown · ${direct.metadataArrowCount - availableMetadataArrows} outside displayed cards · ${availableMetadataArrows - shownMetadataArrows} omitted by arrow cap`,
             `${linkOverlay ? "Link" : "Body"} targets and arrows take priority within the same 24-card and 40-arrow limits.`,
           ] : []),
           "Links count distinct origin pairs and relationship types, not requests, URL occurrences or redirect paths. Incoming and outgoing are relative to the pinned anchor; self-links are excluded.",
@@ -3002,6 +3462,7 @@
     }
     function setEndpointFilter(kind, value) {
       if (!["method", "path", "clear"].includes(kind)) return;
+      replayActionId += 1;
       if (kind === "clear") { state.endpointMethod = ""; state.endpointPath = ""; }
       else state[kind === "method" ? "endpointMethod" : "endpointPath"] = String(value || "");
       state.page = 0;
@@ -3084,7 +3545,7 @@
         summary = `<div class="service-map-body-reference-result" role="status"><p>${escape(message)}</p>${result.reasons.length ? `<p class="service-map-muted">${result.reasons.map((reason) => escape(BODY_REFERENCE_REASONS[reason] || reason.replace(/_/g, " "))).join(" · ")}</p>` : ""}</div>
           ${result.references.length ? `<ul class="service-map-body-reference-list" aria-label="Literal URL reference origins">${result.references.map((item) => `<li><span class="service-map-body-reference-origin">${escape(item.target_origin)}</span><span>${item.occurrences.toLocaleString()} occurrence${item.occurrences === 1 ? "" : "s"}</span></li>`).join("")}</ul>` : ""}`;
       }
-      return `<div aria-busy="${state.bodyReferencesLoading}"><button class="secondary-action" type="button" data-service-body-references="inspect" data-service-focus="body-references:inspect" ${activeInspectionsBlocked() || state.bodyReferencesLoading ? "disabled" : ""}>${buttonLabel}</button>${state.bodyReferencesLoading ? '<p class="service-map-muted" role="status">Inspecting one retained preview locally…</p>' : ""}${state.bodyReferencesError ? `<p class="service-map-error" role="status">${escape(state.bodyReferencesError)}</p>` : ""}${summary}${state.bodyReferencesSource && scanned ? relationshipSourceMarkup(state.bodyReferencesSource, result, "body") : ""}<button class="secondary-action" type="button" data-service-show-body-references="show" data-service-focus="body-references:show" aria-pressed="${showing}"${showHint ? ' aria-describedby="serviceMapBodyShowHint"' : ""} ${showDisabled ? "disabled" : ""}>${showing ? "Update this shown inspection" : "Show references on map"}</button>${showHint ? `<p class="service-map-muted" id="serviceMapBodyShowHint">${showHint}</p>` : ""}<details class="service-map-body-reference-limits"><summary data-service-focus="body-references:limits">Coverage and limits</summary>${scanned ? `<p>${result.complete ? "Complete retained-preview scan" : "Partial retained-preview scan"} · ${result.scanned_bytes.toLocaleString()} / ${result.retained_preview_bytes.toLocaleString()} UTF-8 preview bytes inspected${result.omitted_reference_occurrences ? ` · ${result.omitted_reference_occurrences.toLocaleString()} reference occurrence(s) omitted` : ""}</p>` : ""}<p>Literal absolute HTTP(S) URLs only. Origins are text, never fetched. No script execution or relative URL resolution. Only Show references on map adds session-local relationships. Offsets are zero-based bytes relative to the retained UTF-8 preview, not the original response.</p><p>Scan: ${BODY_REFERENCE_LIMITS.scan_bytes.toLocaleString()} bytes · Serialized row read: ${BODY_REFERENCE_LIMITS.serialized_row_bytes.toLocaleString()} bytes · Origins: ${BODY_REFERENCE_LIMITS.origins} · URL candidates: ${BODY_REFERENCE_LIMITS.candidates.toLocaleString()} · Candidate: ${BODY_REFERENCE_LIMITS.candidate_bytes.toLocaleString()} bytes · Offsets per origin: ${BODY_REFERENCE_LIMITS.offsets_per_origin}.</p>${result ? `<p>${result.candidates_scanned.toLocaleString()} candidates inspected · Capture preview truncated: ${result.capture_preview_truncated ? "yes" : "no"} · Scan prefix truncated: ${result.scan_prefix_truncated ? "yes" : "no"}.</p>` : ""}</details></div>`;
+      return `<div aria-busy="${state.bodyReferencesLoading}"><button class="secondary-action" type="button" data-service-body-references="inspect" data-service-focus="body-references:inspect" ${activeInspectionsBlocked() || state.bodyReferencesLoading ? "disabled" : ""}>${buttonLabel}</button>${state.bodyReferencesLoading ? '<p class="service-map-muted" role="status">Inspecting one retained preview locally…</p>' : ""}${state.bodyReferencesError ? `<p class="service-map-error" role="status">${escape(state.bodyReferencesError)}</p>` : ""}${summary}${state.bodyReferencesSource && scanned ? relationshipSourceMarkup(state.bodyReferencesSource, result, "body") : ""}<button class="secondary-action" type="button" data-service-show-body-references="show" data-service-focus="body-references:show" aria-pressed="${showing}"${showHint ? ' aria-describedby="serviceMapBodyShowHint"' : ""} ${showDisabled ? "disabled" : ""}>${showing ? "Update this shown inspection" : "Show references on map"}</button>${showHint ? `<p class="service-map-muted" id="serviceMapBodyShowHint">${showHint}</p>` : ""}<details class="service-map-body-reference-limits"><summary data-service-focus="body-references:limits">Coverage and limits</summary>${scanned ? `<p>${result.complete ? "Complete retained-preview scan" : "Partial retained-preview scan"} · ${result.scanned_bytes.toLocaleString()} / ${result.retained_preview_bytes.toLocaleString()} UTF-8 preview bytes inspected${result.omitted_reference_occurrences ? ` · ${result.omitted_reference_occurrences.toLocaleString()} reference occurrence${result.omitted_reference_occurrences === 1 ? "" : "s"} omitted` : ""}</p>` : ""}<p>Literal absolute HTTP(S) URLs only. Origins are text, never fetched. No script execution or relative URL resolution. Only Show references on map adds session-local relationships. Offsets are zero-based bytes relative to the retained UTF-8 preview, not the original response.</p><p>Scan: ${BODY_REFERENCE_LIMITS.scan_bytes.toLocaleString()} bytes · Serialized row read: ${BODY_REFERENCE_LIMITS.serialized_row_bytes.toLocaleString()} bytes · Origins: ${BODY_REFERENCE_LIMITS.origins} · URL candidates: ${BODY_REFERENCE_LIMITS.candidates.toLocaleString()} · Candidate: ${BODY_REFERENCE_LIMITS.candidate_bytes.toLocaleString()} bytes · Offsets per origin: ${BODY_REFERENCE_LIMITS.offsets_per_origin}.</p>${result ? `<p>${result.candidates_scanned.toLocaleString()} candidates inspected · Capture preview truncated: ${result.capture_preview_truncated ? "yes" : "no"} · Scan prefix truncated: ${result.scan_prefix_truncated ? "yes" : "no"}.</p>` : ""}</details></div>`;
     }
     function relationshipSourceMarkup(source, result, kind) {
       return `<p class="service-map-overlay-source">${escape(source.method)} ${escape(source.origin)}${escape(source.path)}</p><p class="service-map-muted">Sequence ${escape(source.sequence)} · Captured ${escape(source.startedAt)} · ${kind === "link" ? "Response Link headers" : "Body URL references"} · ${result.complete ? "Complete" : "Partial"} inspection</p>`;
@@ -3132,7 +3593,7 @@
       const { source, scan } = overlay;
       if (overlay.kind === "peer") return `<p class="service-map-overlay-source" title="${escape(overlay.scan.source.origin)} · Source sequence ${escape(overlay.scan.source.sequence)}">${escape(overlay.scan.source.origin)} · Source sequence ${escape(overlay.scan.source.sequence)}</p><p>${escape(peerAddressNode(overlay).address)} · Recorded ${escape(scan.source.observed_at)} · Inspected ${escape(scan.snapshot.captured_at)}</p><p>${overlay.scan.complete ? "Complete considered window" : "Partial inspection"} · ${overlay.scan.snapshot.considered_rows} / ${overlay.scan.snapshot.retained_rows} retained rows considered · ${overlay.scan.counts.matching_rows} other matching rows</p><details class="service-map-peer-coverage"><summary data-service-focus="peer:coverage">Inspection coverage and privacy</summary>${peerCountsMarkup(overlay.scan)}<p>${PEER_PRIVACY}</p><p>Recorded timestamps do not imply connection counts or continuous endpoint occupancy.</p></details>`;
       if (overlay.kind === "link") return `${relationshipSourceMarkup(source, scan, "link")}${scan.reasons.length ? `<p class="service-map-muted">${scan.reasons.map((reason) => escape(LINK_REASONS[reason])).join(" · ")}</p>` : ""}`;
-      return `<p class="service-map-overlay-source" title="${escape(`${source.method} ${source.origin}${source.path}`)}">${escape(source.method)} ${escape(source.origin)}${escape(source.path)}</p><p>Sequence ${escape(source.sequence)} · ${escape(source.startedAt)} · ${scan.complete ? "Complete" : "Partial"} retained-preview scan</p>${!scan.complete ? `<p class="service-map-muted">${scan.reasons.map((reason) => escape(BODY_REFERENCE_REASONS[reason] || reason.replace(/_/g, " "))).join(" · ")}${scan.omitted_reference_occurrences ? ` · ${scan.omitted_reference_occurrences} reference occurrence(s) omitted` : ""}</p>` : ""}`;
+      return `<p class="service-map-overlay-source" title="${escape(`${source.method} ${source.origin}${source.path}`)}">${escape(source.method)} ${escape(source.origin)}${escape(source.path)}</p><p>Sequence ${escape(source.sequence)} · ${escape(source.startedAt)} · ${scan.complete ? "Complete" : "Partial"} retained-preview scan</p>${!scan.complete ? `<p class="service-map-muted">${scan.reasons.map((reason) => escape(BODY_REFERENCE_REASONS[reason] || reason.replace(/_/g, " "))).join(" · ")}${scan.omitted_reference_occurrences ? ` · ${scan.omitted_reference_occurrences} reference occurrence${scan.omitted_reference_occurrences === 1 ? "" : "s"} omitted` : ""}</p>` : ""}`;
     }
     function renderOverlayStatus() {
       if (!els.overlayStatus) return;
@@ -3255,7 +3716,7 @@
     }
     function siteDetailMarkup(site) {
       const inScope = site.members.filter((member) => member.in_scope).length;
-      return `<header class="service-map-detail-header"><div><h3 title="${escape(site.site)}">*.${escape(site.site)}</h3><p>${site.members.length} origins grouped by site</p></div><span class="detail-chip ${inScope ? "ok" : "none"}">${inScope === site.members.length ? "In scope" : inScope ? "Partly in scope" : "Out of scope"}</span></header><div class="service-map-detail-body"><div class="service-map-overlay-actions"><button class="secondary-action" type="button" data-service-site-expand="${escape(site.site)}" data-service-focus="site:expand">Show origins separately</button><button class="secondary-action" type="button" data-service-hide="${escape(site.site)}" data-service-focus="site:hide">Hide site from map</button></div><h4>Origins</h4><div class="service-map-evidence-list">${site.members.map((member) => `<button class="service-map-evidence-button" type="button" data-service-origin="${escape(member.origin)}" data-service-focus="site-member:${escape(member.origin)}"><span>${escape(member.origin)}<br>${member.captured === false ? "Referenced only in this snapshot" : `${member.endpoints.length} API paths · ${count(member.request_count).toLocaleString()} sampled rows`}</span><span>Inspect ›</span></button>`).join("")}</div></div>`;
+      return `<header class="service-map-detail-header"><div><h3 title="${escape(site.site)}">*.${escape(site.site)}</h3><p>${site.members.length} loaded origin${site.members.length === 1 ? "" : "s"} in this site</p></div><span class="detail-chip ${inScope ? "ok" : "none"}">${inScope === site.members.length ? "In scope" : inScope ? "Partly in scope" : "Out of scope"}</span></header><div class="service-map-detail-body"><div class="service-map-overlay-actions"><button class="secondary-action" type="button" data-service-site-expand="${escape(site.site)}" data-service-focus="site:expand">Show origins separately</button><button class="secondary-action" type="button" data-service-hide="${escape(site.site)}" data-service-focus="site:hide">Hide site from map</button></div><h4>Origins</h4><div class="service-map-evidence-list">${site.members.map((member) => `<button class="service-map-evidence-button" type="button" data-service-origin="${escape(member.origin)}" data-service-focus="site-member:${escape(member.origin)}"><span>${escape(member.origin)}<br>${member.captured === false ? "Referenced only in this snapshot" : `${member.endpoints.length} API paths · ${count(member.request_count).toLocaleString()} sampled rows`}</span><span>Inspect ›</span></button>`).join("")}</div></div>`;
     }
     // Hide or show an origin, and group its site again once shown separately.
     function originActionsMarkup(origin) {
@@ -3268,12 +3729,15 @@
       return `<div class="service-map-overlay-actions service-map-origin-actions">${openApi}${hiddenAs ? `<button class="secondary-action" type="button" data-service-unhide="${escape(hiddenAs)}" data-service-focus="origin:unhide">${hiddenAs === origin.origin ? "Show on map" : `Show *.${escape(site)} on map`}</button>` : `<button class="secondary-action" type="button" data-service-hide="${escape(origin.origin)}" data-service-focus="origin:hide">Hide from map</button>`}${regroup ? `<button class="secondary-action" type="button" data-service-site-collapse="${escape(site)}" data-service-focus="origin:regroup">Group *.${escape(site)} again</button>` : ""}</div>`;
     }
     function renderDetail() {
+      if (destroyed) return;
       const client = state.selectedClient ? clientById(state.selectedClient) : null;
       if (client) { replaceDetail(clientDetailMarkup(client)); return; }
       state.selectedClient = null;
-      const site = state.selectedSite ? state.siteCards?.get(state.selectedSite) : null;
+      const site = siteDetails(state.selectedSite);
       if (site) { replaceDetail(siteDetailMarkup(site)); return; }
-      state.selectedSite = null;
+      // Invalidation drops data before its replacement arrives. Only a current
+      // snapshot can establish that the selected site's members disappeared.
+      if (state.snapshot) state.selectedSite = null;
       const origin = selectedOrigin();
       if (!origin) { replaceDetail('<div class="service-map-empty"><h3>Select an origin</h3><p>Choose a card to inspect its API paths and retained evidence.</p></div>'); return; }
       if (origin.peerInspectionOnly) {
@@ -3293,7 +3757,7 @@
       if (!state.detailPageAnchor && units[start]) state.detailPageAnchor = endpointIdentity(units[start].members[0]);
       replaceDetail(`<header class="service-map-detail-header"><div><h3 title="${escape(new URL(origin.origin).host)}">${escape(new URL(origin.origin).host)}</h3><p title="${escape(origin.origin)}">${escape(origin.origin)}</p></div><span class="detail-chip ${origin.in_scope ? "ok" : "none"}">${origin.in_scope ? "In scope" : "Out of scope"}</span></header>${originActionsMarkup(origin)}
         <div class="service-map-detail-tabs" role="tablist" aria-label="Origin details"><button type="button" role="tab" id="serviceMapDetailApisTab" aria-controls="serviceMapDetailBody" aria-selected="${state.detailTab === "apis"}" tabindex="${state.detailTab === "apis" ? 0 : -1}" data-service-detail-tab="apis" data-service-focus="detail:apis">APIs</button><button type="button" role="tab" id="serviceMapDetailEvidenceTab" aria-controls="serviceMapDetailBody" aria-selected="${state.detailTab === "evidence"}" tabindex="${state.detailTab === "evidence" ? 0 : -1}" data-service-detail-tab="evidence" data-service-focus="detail:evidence">Evidence</button></div>
-        <div class="service-map-detail-body" id="serviceMapDetailBody" role="tabpanel" aria-labelledby="${state.detailTab === "apis" ? "serviceMapDetailApisTab" : "serviceMapDetailEvidenceTab"}">${endpointSelectionNotice(origin)}${state.detailTab === "evidence" ? evidenceMarkup(origin) : `${authMarkup(origin)}${endpointFiltersMarkup("serviceMapDetail")}${endpointCoverageMarkup(units.length, origin.endpoints.length, start, 0, 0, entries.length)}<div class="service-map-api-list">${units.slice(start, start + API_PAGE_SIZE).map((unit) => endpointUnitMarkup(unit)).join("") || '<p class="empty-copy">No loaded endpoints match these filters for this origin.</p>'}</div>${pageCount > 1 ? `<div class="service-map-pagination"><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage - 1}" ${state.detailPage === 0 ? "disabled" : ""}>Previous</button><span>${state.detailPage + 1} / ${pageCount}</span><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage + 1}" ${state.detailPage + 1 >= pageCount ? "disabled" : ""}>Next</button></div>` : ""}${peerOriginMarkup(origin)}${technologyMarkup(origin.technology_observations, origin)}${serverTechnologiesMarkup(origin)}${frontTechnologiesMarkup(origin)}${unnamedMarkup(origin)}${relationshipMarkup(origin)}<div class="service-map-evidence-summary"><h4>Evidence summary</h4><p>${origin.request_count.toLocaleString()} sampled HTTP rows in this snapshot. ${origin.redirects.length} redirect instruction(s).</p><button class="secondary-action" type="button" data-service-detail-tab="evidence" data-service-focus="view:evidence">${state.endpointSelection ? "View selected endpoint evidence" : "View evidence"}</button></div>`}</div>`);
+        <div class="service-map-detail-body" id="serviceMapDetailBody" role="tabpanel" aria-labelledby="${state.detailTab === "apis" ? "serviceMapDetailApisTab" : "serviceMapDetailEvidenceTab"}">${endpointSelectionNotice(origin)}${state.detailTab === "evidence" ? evidenceMarkup(origin) : `${authMarkup(origin)}${endpointFiltersMarkup("serviceMapDetail")}${endpointCoverageMarkup(units.length, origin.endpoints.length, start, 0, 0, entries.length)}<div class="service-map-api-list">${units.slice(start, start + API_PAGE_SIZE).map((unit) => endpointUnitMarkup(unit)).join("") || '<p class="empty-copy">No loaded endpoints match these filters for this origin.</p>'}</div>${pageCount > 1 ? `<div class="service-map-pagination"><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage - 1}" ${state.detailPage === 0 ? "disabled" : ""}>Previous</button><span>${state.detailPage + 1} / ${pageCount}</span><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage + 1}" ${state.detailPage + 1 >= pageCount ? "disabled" : ""}>Next</button></div>` : ""}${peerOriginMarkup(origin)}${technologyMarkup(origin.technology_observations, origin)}${serverTechnologiesMarkup(origin)}${frontTechnologiesMarkup(origin)}${unnamedMarkup(origin)}${relationshipMarkup(origin)}<div class="service-map-evidence-summary"><h4>Evidence summary</h4><p>${origin.request_count.toLocaleString()} sampled HTTP rows in this snapshot. ${origin.redirects.length} redirect instruction${origin.redirects.length === 1 ? "" : "s"}.</p><button class="secondary-action" type="button" data-service-detail-tab="evidence" data-service-focus="view:evidence">${state.endpointSelection ? "View selected endpoint evidence" : "View evidence"}</button></div>`}</div>`);
     }
     function renderCatalog() {
       const loaded = loadedEndpointEntries((state.snapshot?.origins || []).filter((origin) => !state.scopeOnly || origin.in_scope), false);
@@ -3311,6 +3775,7 @@
       replace(els.catalog, `<header class="service-map-catalog-header"><div><h3>Observed API paths</h3></div><span>${entries.length.toLocaleString()} matching loaded combinations</span></header>${endpointFiltersMarkup("serviceMapCatalog")}${endpointSelectionNotice()}${endpointCoverageMarkup(units.length, loaded.length, start, loaded.length - searchedEntries.length, searchedEntries.length - originEntries.length, entries.length)}<div class="service-map-api-list">${units.slice(start, start + API_PAGE_SIZE).map((unit) => endpointUnitMarkup(unit, true)).join("") || `<p class="empty-copy">${state.loading && !state.snapshot ? "Loading retained API paths…" : "No loaded endpoints match these filters, origin search and origin products/versions."}</p>`}</div><div class="service-map-pagination"><button class="secondary-action" type="button" data-service-page="${state.page - 1}" ${!state.snapshot || state.page === 0 ? "disabled" : ""}>Previous</button><span>${units.length ? start + 1 : 0}–${Math.min(start + API_PAGE_SIZE, units.length)} / ${units.length}</span><button class="secondary-action" type="button" data-service-page="${state.page + 1}" ${state.page + 1 >= pages ? "disabled" : ""}>Next</button></div>`);
     }
     function render() {
+      if (destroyed) return;
       renderStatus();
       renderProductFilters();
       renderOverlayStatus();
@@ -3339,6 +3804,7 @@
     // A site card selects the site; its inspector lists the origins it holds.
     function selectSite(site) {
       if (!state.siteCards?.has(site)) return;
+      replayActionId += 1;
       cancelEvidence();
       cancelParameters();
       Object.assign(state, { selectedSite: site, selectedClient: null, selectedOrigin: null, endpointIndex: null, endpointSelection: null, highlightedRelation: null, selectionInitialized: true });
@@ -3347,6 +3813,7 @@
     // A client card selects the client; its inspector lists where it sent rows.
     function selectClient(id) {
       if (!clientById(id)) return;
+      replayActionId += 1;
       cancelEvidence();
       cancelParameters();
       Object.assign(state, { selectedClient: id, selectedSite: null, selectedOrigin: null, endpointIndex: null, endpointSelection: null, highlightedRelation: null, selectionInitialized: true });
@@ -3355,11 +3822,16 @@
     // Showing a site's origins separately selects the first of them, so the
     // inspector stays on what was being looked at.
     function expandSite(site) {
-      const first = state.siteCards?.get(site)?.members[0]?.origin;
+      const first = siteDetails(site)?.members[0]?.origin;
+      if (!first) return;
       saveSiteDisplay({ expandedSites: [...new Set([...siteDisplay().expandedSites, site])] });
-      if (first) selectOrigin(first);
+      selectOrigin(first);
     }
     function handleClick(event) {
+      replayActionId += 1;
+      const flowHit = event.target.closest?.("[data-service-flow-record], [data-service-flow-lane]");
+      const flowRecord = flowHit?.dataset?.serviceFlowRecord, flowLane = flowHit?.dataset?.serviceFlowLane;
+      if ((flowRecord || flowLane) && els.panel.contains(flowHit)) return flowRecord ? openInHistory?.(flowRecord) : setFlowMode(flowLane);
       const hit = event.target.closest?.("[data-service-edge]");
       if (hit?.dataset?.serviceEdge !== undefined && els.panel.contains(hit)) return selectEdge(currentLayout?.edges[Number(hit.dataset.serviceEdge)]);
       const button = event.target.closest("button");
@@ -3420,48 +3892,54 @@
       }
     }
     let onViewChange = null;
-    els.panel.addEventListener("click", handleClick);
-    els.panel.addEventListener("change", (event) => {
+    listen(els.panel, "click", handleClick);
+    listen(els.panel, "change", (event) => {
       if (event.target?.dataset?.serviceProductFilter) setProductFilter(event.target.dataset.serviceProductFilter, event.target.value);
       else if (event.target?.dataset?.serviceRelationshipKind) setRelationshipKind(event.target.value);
       else if (event.target?.dataset?.serviceEndpointFilter === "method") setEndpointFilter("method", event.target.value);
     });
-    els.panel.addEventListener("input", (event) => {
+    listen(els.panel, "input", (event) => {
       if (event.target?.dataset?.serviceEndpointFilter === "path") setEndpointFilter("path", event.target.value);
     });
-    els.panel.addEventListener("keydown", (event) => {
+    listen(els.panel, "keydown", (event) => {
+      const flowKey = event.target.closest?.("[data-service-flow-record], [data-service-flow-lane]");
+      if ((event.key === "Enter" || event.key === " ") && (flowKey?.dataset?.serviceFlowRecord || flowKey?.dataset?.serviceFlowLane)) {
+        event.preventDefault();
+        return handleClick(event);
+      }
       const tab = event.target.closest('[role="tab"][data-service-detail-tab]');
       if (!tab || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
       event.preventDefault();
+      replayActionId += 1;
       state.detailTab = event.key === "Home" ? "apis" : event.key === "End" ? "evidence" : state.detailTab === "apis" ? "evidence" : "apis";
       renderDetail();
       const next = [...els.detail.querySelectorAll('[role="tab"][data-service-detail-tab]')].find((button) => button.dataset.serviceDetailTab === state.detailTab);
       next?.focus();
     });
-    els.apiDocs?.addEventListener("click", (event) => {
+    listen(els.apiDocs, "click", (event) => {
       if (event.target === els.apiDocs) return closeApiDocs();
       const data = event.target.closest?.("button")?.dataset;
       if (!data) return;
       if (data.apiDocsClose !== undefined) closeApiDocs();
       // The text is already read, so the copy runs within the click.
-      else if (data.apiDocsCopy !== undefined && state.apiDocs?.document) copyText?.(JSON.stringify(state.apiDocs.document, null, 2), "Copied OpenAPI");
+      else if (data.apiDocsCopy !== undefined && state.apiDocs?.document) copyApiDocs("Copied OpenAPI");
       // Swagger Editor cannot fetch the document from this app, so the click
       // copies it to paste there. Nothing is sent to the site.
       else if (data.apiDocsEditor !== undefined && state.apiDocs?.document) {
-        copyText?.(JSON.stringify(state.apiDocs.document, null, 2), "Copied OpenAPI; paste it into Swagger Editor");
+        copyApiDocs("Copied OpenAPI; paste it into Swagger Editor");
         openUrl?.(SWAGGER_EDITOR_URL);
       }
-      else if (data.apiDocsReplay) { closeApiDocs(); sendToReplay?.(data.apiDocsReplay); }
+      else if (data.apiDocsReplay) sendApiDocsToReplay(data.apiDocsReplay);
     });
-    els.apiDocs?.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape") return;
+    listen(els.apiDocs, "keydown", (event) => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || !isActiveModal(els.apiDocs)) return;
       event.preventDefault?.();
       closeApiDocs();
     });
-    els.zoomOut?.addEventListener("click", () => setZoom(state.zoomScale - ZOOM_LIMITS.step));
-    els.zoomReset?.addEventListener("click", fitOrReset);
-    els.zoomIn?.addEventListener("click", () => setZoom(state.zoomScale + ZOOM_LIMITS.step));
-    els.viewport?.addEventListener("keydown", (event) => {
+    listen(els.zoomOut, "click", () => setZoom(state.zoomScale - ZOOM_LIMITS.step));
+    listen(els.zoomReset, "click", fitOrReset);
+    listen(els.zoomIn, "click", () => setZoom(state.zoomScale + ZOOM_LIMITS.step));
+    listen(els.viewport, "keydown", (event) => {
       if (event.target !== els.viewport || event.ctrlKey || event.metaKey || event.altKey) return;
       const handled = event.key === "+" || event.key === "=" ? setZoom(state.zoomScale + ZOOM_LIMITS.step)
         : event.key === "-" ? setZoom(state.zoomScale - ZOOM_LIMITS.step)
@@ -3479,7 +3957,8 @@
       return rect && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
         ? { x: event.clientX - rect.left, y: event.clientY - rect.top } : null;
     };
-    els.viewport?.addEventListener("wheel", (event) => {
+    listen(els.viewport, "scroll", pinFlowHeads, { passive: true });
+    listen(els.viewport, "wheel", (event) => {
       if (!event.ctrlKey || pinchStartScale !== null || !zoomAvailable()) return;
       event.preventDefault();
       // A mouse notch is about 100px against a few px per trackpad frame; the cap
@@ -3488,27 +3967,28 @@
       const delta = Math.max(-20, Math.min(20, (Number(event.deltaY) || 0) * lines));
       setZoom(state.zoomScale * Math.exp(-delta / 100), { anchor: pinchAnchor(event) });
     }, { passive: false });
-    els.viewport?.addEventListener("gesturestart", (event) => {
+    listen(els.viewport, "gesturestart", (event) => {
       if (!zoomAvailable()) return;
       event.preventDefault();
       pinchStartScale = state.zoomScale;
     });
-    els.viewport?.addEventListener("gesturechange", (event) => {
+    listen(els.viewport, "gesturechange", (event) => {
       if (pinchStartScale === null) return;
       event.preventDefault();
       if (Number.isFinite(event.scale)) setZoom(pinchStartScale * event.scale, { anchor: pinchAnchor(event) });
     });
-    els.viewport?.addEventListener("gestureend", (event) => {
+    listen(els.viewport, "gestureend", (event) => {
       if (pinchStartScale === null) return;
       event.preventDefault();
       pinchStartScale = null;
     });
     // Resize only refreshes control availability; Fit is an explicit one-shot
     // action, so resizing or polling cannot silently change the user's zoom.
-    if (els.viewport && typeof root.ResizeObserver === "function") new root.ResizeObserver(updateZoomControls).observe(els.viewport);
+    const resizeObserver = els.viewport && typeof root.ResizeObserver === "function" ? new root.ResizeObserver(updateZoomControls) : null;
+    resizeObserver?.observe(els.viewport);
     // Showing or hiding a request kind changes which links count, so the cards
     // are ranked and laid out again for the links that remain.
-    els.linkKinds?.addEventListener("click", (event) => {
+    listen(els.linkKinds, "click", (event) => {
       const kind = event.target?.closest?.("[data-link-kind]")?.dataset.linkKind;
       if (!REQUEST_KINDS.includes(kind)) return;
       const hidden = new Set(hiddenLinkKinds());
@@ -3522,7 +4002,7 @@
       }
       renderGraph();
     });
-    els.refresh.addEventListener("click", () => {
+    listen(els.refresh, "click", () => {
       // Polling keeps cards where they are; an explicit Reload may move them so
       // relationships captured since the map opened come within the card cap.
       if (state.snapshot) {
@@ -3531,11 +4011,15 @@
       }
       return refresh({ force: true, retry: true });
     });
-    els.allOrigins?.addEventListener("click", () => setMapMode(false));
-    els.directRelations?.addEventListener("click", () => setMapMode(true));
-    els.focusSelection?.addEventListener("click", focusSelection);
-    els.search.addEventListener("input", () => { state.query = els.search.value; state.page = 0; state.pageAnchor = null; render(); });
-    els.scope.addEventListener("click", () => {
+    listen(els.allOrigins, "click", () => setMapMode(false));
+    listen(els.directRelations, "click", () => setMapMode(!state.anchorOrigin));
+    listen(els.flow, "click", () => setFlowMode(state.selectedOrigin));
+    listen(els.flowMermaid, "click", () => {
+      if (state.flow) copyText?.(flowMermaid(state.flow, hiddenLinkKinds()), "Copied the flow as a Mermaid sequence diagram");
+    });
+    listen(els.focusSelection, "click", focusSelection);
+    listen(els.search, "input", () => { replayActionId += 1; state.query = els.search.value; state.page = 0; state.pageAnchor = null; render(); });
+    listen(els.scope, "click", () => {
       state.scopeOnly = !state.scopeOnly;
       els.scope.classList.toggle("active", state.scopeOnly);
       els.scope.setAttribute("aria-pressed", String(state.scopeOnly));
@@ -3579,7 +4063,7 @@
           const summary = typeof event?.data === "string" ? JSON.parse(event.data) : null;
           if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(summary?.id || "")) recordId = summary.id.toLowerCase();
         } catch (_) { /* Unknown event identity invalidates every inspection. */ }
-        clearOverlay("Affected inspections removed because retained history changed. Inspect and show those sources again when ready.",
+        const graphChanged = clearOverlay("Affected inspections removed because retained history changed. Inspect and show those sources again when ready.",
           (layer) => !recordId || layer.kind === "peer" || !validTechnologyEvidence(layer.source.evidenceId, layer.source.sessionId, layer.source.generation) || layer.source.evidenceId.split(".")[5].toLowerCase() === recordId);
         state.historyVersion += 1;
         state.stale = true;
@@ -3587,18 +4071,20 @@
         // every captured row, so clearing them here would empty the dialog and
         // the panel while traffic flows. A count one row behind is harmless,
         // and Replay reports a row that is gone. Deletion, retention and Clear
-        // go through invalidate(), which does clear them. The evidence read
+        // take their own invalidation paths, which do clear them. The evidence read
         // stays too unless this is its row, or no source could be inspected
         // while traffic flowed; peer matches count other rows, so any row
         // can change them.
         const evidenceRecord = state.peerEvidenceBinding ? null : String(state.evidenceId || "").split(".")[5]?.toLowerCase();
         if (recordId && evidenceRecord && evidenceRecord !== recordId) cancelPeerMatches();
         else cancelEvidence();
-        // Hidden, it is drawn again when shown; redrawing it for every row cost
-        // the whole map's layout while the user worked elsewhere.
-        if (visible) render();
+        renderHistoryChange(graphChanged);
       },
       setVisible(value, view = state.view) {
+        if (destroyed) return;
+        if (!value || view !== state.view) closeProductFilters();
+        if (!value || view !== state.view) suspendRefresh();
+        if (!value || view !== state.view) replayActionId += 1;
         if (!value) cancelParameters();
         if (!value || view !== "service-map") {
           clearOverlay("Temporary body references cleared because the map was hidden.");
@@ -3606,14 +4092,35 @@
           cancelHtmlGenerators();
           cancelPeerMatches();
         }
-        if (!value || view !== state.view) closeApiDocs();
+        if (!value || view !== state.view) closeApiDocs(false);
         visible = value;
         state.view = view;
         if (state.sessionId !== getSessionId()) reset();
         render();
+        historyPresentationPending = false;
+        scheduleAutomaticRefresh();
+      },
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        visible = false;
+        closeProductFilters();
+        suspendRefresh();
+        replayActionId += 1;
+        closeApiDocs(false);
+        cancelEvidence();
+        cancelParameters();
+        resizeObserver?.disconnect();
+        for (const dispose of eventDisposers) dispose();
+        if (faviconRedraw !== null) root.clearTimeout?.(faviconRedraw);
+        faviconRedraw = null;
+        doc?.removeEventListener?.("visibilitychange", onVisibilityChange);
+        root.removeEventListener?.("pagehide", onPageHide);
+        root.removeEventListener?.("pageshow", onPageShow);
       },
       setViewChange(callback) { onViewChange = callback; },
       disconnect() {
+        replayActionId += 1;
         clearOverlay("Temporary body references cleared because the session event connection was lost.");
         state.requestId += 1;
         state.historyVersion += 1;
@@ -3625,8 +4132,25 @@
         cancelEvidence();
         cancelParameters();
         render();
+        scheduleAutomaticRefresh();
+      },
+      retentionChanged() {
+        // At the retention cap each capture can remove a row. Canceling and
+        // restarting on every removal would starve a slow map forever. Keep
+        // its captured window explicitly stale and coalesce one next read;
+        // exact inspections cannot retain bindings to possibly removed rows.
+        replayActionId += 1;
+        state.historyVersion += 1;
+        state.stale = true;
+        const graphChanged = clearOverlay("Shown inspections cleared because automatic cleanup removed retained history.");
+        closeApiDocs();
+        cancelEvidence();
+        cancelParameters();
+        renderHistoryChange(graphChanged);
+        scheduleAutomaticRefresh();
       },
       invalidate() {
+        replayActionId += 1;
         clearOverlay("Temporary body references cleared because history or scope was invalidated.");
         state.requestId += 1;
         state.historyVersion += 1;
@@ -3640,9 +4164,11 @@
         render();
         return refresh();
       },
+      getApiDocsModalAction: () => state.apiDocs && visible && els.apiDocs?.getClientRects().length
+        ? { modal: els.apiDocs, close: closeApiDocs, apply: null } : null,
       // State access makes offline lifecycle tests use the same real controller.
       getState: () => state,
     };
   }
-  root.SniperServiceMap = { createController, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
+  root.SniperServiceMap = { createController, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
 })(typeof window === "undefined" ? globalThis : window);

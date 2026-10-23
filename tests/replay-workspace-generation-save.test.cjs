@@ -13,12 +13,12 @@ function setup() {
   f.seed([f.old]);
   f.sessionB = f.remote([f.b, f.otherB], 3); f.sessionB.session_id = 'session-b';
   for (const name of ['reloadSessionWorkspace', 'loadSessions',
-    'loadWorkspaceState', 'applyWorkspaceState', 'toggleReplayTabPin', 'commitReplayTabRename']) {
+    'loadWorkspaceState', 'retireFindingActionProgress', 'applyWorkspaceState', 'toggleReplayTabPin', 'commitReplayTabRename']) {
     vm.runInContext(appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'))[0], f.context);
   }
   f.errors = [];
   Object.assign(f.context, {
-    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
+    sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
     handleWorkspaceActionError: error => f.errors.push(error),
     requireOkResponse: async response => assert.equal(response.ok, true),
     flushTargetScopeDraft: async () => true, flushMatchReplaceDraft: async () => true,

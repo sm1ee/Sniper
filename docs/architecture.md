@@ -1,32 +1,30 @@
 # Sniper Architecture
 
-## Product direction
+## Design
 
-Sniper starts as a lightweight local traffic proxy with a direct capture workflow:
+Sniper is a local traffic proxy built around a direct capture workflow:
 
 - traffic enters through a dedicated proxy listener
 - captured transactions are normalized into a single in-memory store
 - a separate UI/API listener renders records and detail panels
 - a local certificate authority bootstraps trust through a dedicated `sniper` host
 - a session registry isolates traffic, rules, and runtime settings per workspace
-- later features plug into the same transaction model instead of coupling directly to socket logic
+- new features should plug into the shared transaction model through explicit
+  stages (accept, normalize, intercept, forward, post-process, persist/publish)
+  instead of coupling directly to socket logic
 
-The first milestone intentionally focuses on:
+Rust fits this: low memory overhead and good concurrency for proxy I/O, a single
+deployable binary, strong type boundaries between capture, storage and UI/API,
+and room to grow into high-volume workflows without rewriting the core.
 
-- fast local feedback for HTTP requests
-- local termination of `CONNECT` tunnels for HTTPS MITM
-- an English-only capture + detail UI
-- self-service root CA export from the desktop UI and `https://sniper`
-- modular boundaries for MITM, replay, scanner, and extension hooks
-
-## Why Rust first
-
-Rust is the best fit for the current repo and environment because it gives us:
-
-- low memory overhead and good concurrency for proxy I/O
-- a single deployable binary
-- strong type boundaries between capture, storage, and UI/API layers
-- room to grow into TLS MITM and high-volume workflows without rewriting the core
+| Layer | Technology |
+|---|---|
+| Core | **Rust** — proxy, MITM, TLS, session management |
+| HTTP | `hyper` + `tokio` async runtime |
+| TLS | `rustls` + `rcgen` for on-the-fly certificate generation |
+| UI server | `axum` serving the embedded SPA |
+| Frontend | Vanilla **JS** + **CSS**, no framework and no build step |
+| Desktop shell | Native **WebView** (`wry`) |
 
 ## System layout
 
@@ -40,142 +38,95 @@ flowchart LR
     API --> UI["Desktop UI + Session Workspace"]
     Proxy -. bootstrap .-> SpecialHost["sniper / certificate portal"]
     SpecialHost --> CA["Persistent Root CA"]
-    Store -. future .-> Replay["Replay"]
-    Store -. future .-> MITM["HTTPS MITM CA + TLS Termination"]
-    Store -. future .-> Scanner["Passive / Active Scanner"]
 ```
 
-For desktop mode, the same core runs behind a native shell:
+In desktop mode the same core runs in one process behind a native window: an
+embedded WebView talks to a local UI/API listener on an automatic port, and that
+listener and the proxy share the in-memory ring buffer and event bus. The shell
+uses WebKit on macOS and WebView2 on Windows. The WebView2 profile lives under
+the data directory, so an installation in a read-only application folder still
+works.
 
-```mermaid
-flowchart LR
-    Desktop["Sniper Desktop Window"] --> WebView["Embedded WebView"]
-    WebView --> LocalUI["Local UI/API Listener (auto port)"]
-    LocalUI --> Store["In-Memory Ring Buffer + Event Bus"]
-    Client["Browser / CLI / Device"] --> Proxy["Proxy Listener"]
-    Proxy --> Store
-```
+## Modules
 
-## Current modules
+- `src/proxy.rs`: accepts HTTP proxy traffic, forwards plain HTTP upstream,
+  terminates `CONNECT` for HTTPS MITM, and terminates `CONNECT sniper:443`
+  locally to serve the certificate portal.
+- `src/certificate.rs`, `src/special_host.rs`: the persistent root CA and the
+  `http://sniper` / `https://sniper` portal that serves it as PEM and DER.
+- `src/store.rs`: a bounded ring buffer of transactions that emits live events
+  to the UI.
+- `src/session.rs`: session metadata and the active workspace; persists each
+  session's settings, records, WebSockets, rules and fuzzer records under
+  `data_dir/sessions/<session-id>`.
+- `src/model.rs`: the transaction schema shared by the proxy, the API and other
+  tooling.
+- `src/scanner.rs`: the passive vulnerability scanner.
+- `src/intercept.rs`, `src/match_replace.rs`: the request intercept queue and
+  the match & replace rules.
+- `src/fuzzer.rs`, `src/websocket.rs`: the payload fuzzer engine and WebSocket
+  capture.
+- `src/service_map*.rs`, `web/service-map.js`: the Service Map, a bounded,
+  on-demand projection of retained history. It starts no network discovery and
+  keeps no persistent index; see [Service Map](integrations/service-map.md).
+- `src/api.rs`: the record and detail APIs, the embedded UI, root CA downloads,
+  and authentication for a non-loopback UI listener.
+- `src/bin/sniper-desktop.rs`: runs the proxy and UI listeners in one process
+  and opens the UI in a native window.
+- `src/bin/sniper-cli.rs`: the JSON-first CLI.
+- `src/platform.rs`: the data directory shared by desktop, server and CLI, plus
+  Windows file locks, process identity and persistence operations.
+- `web/`: the frontend SPA, in vanilla JS and CSS.
+- `packaging/macos/`, `packaging/skills/`: the `.app` and `.dmg` packaging
+  scripts, and the Claude and Codex skill templates.
 
-- `src/proxy.rs`
-  - accepts HTTP proxy traffic
-  - forwards plain HTTP requests upstream
-  - terminates `CONNECT` for HTTPS MITM and replays requests upstream
-  - terminates `CONNECT sniper:443` locally to serve the certificate portal
-- `src/certificate.rs`
-  - loads or creates a persistent local root CA
-  - exposes export metadata and the TLS config for `https://sniper`
-- `src/special_host.rs`
-  - serves the `http://sniper` / `https://sniper` bootstrap portal
-  - returns PEM and DER downloads for the local root CA
-- `src/store.rs`
-  - keeps a bounded ring buffer of transactions
-  - emits live events to the UI
-- `src/session.rs`
-  - tracks session metadata and the active workspace
-  - persists per-session snapshots under `data_dir/sessions/<session-id>`
-  - restores runtime settings, records, websockets, rules, and fuzzer records per session
-- `src/model.rs`
-  - defines the shared transaction schema used by proxy, API, and future tooling
-- `src/service_map.rs`
-  - builds a bounded, on-demand projection of retained HTTP metadata for Scope and
-    the CLI, with exact-row evidence and explicitly typed header declarations
-  - reads no bodies and starts no network discovery or persistent index; see
-    [Service Map](integrations/service-map.md) for limits and evidence semantics
-- `src/service_map_body.rs`
-  - inspects one explicitly selected retained UTF-8 HTML/JavaScript response
-    preview for bounded literal absolute HTTP(S) references in the active session
-  - returns canonical origins and retained-preview offsets, with explicit limits
-    and unsupported/unavailable states; it performs no target requests and never
-    augments the default metadata projection automatically
-- `web/service-map.js`
-  - renders the metadata inventory and exact-source inspector without loading
-    whole-history bodies
-  - can collect up to eight explicitly shown body, Link and recorded-peer
-    inspections in one session-local graph with exact provenance and removal
-  - typed references and undirected address observations share display caps;
-    the collection changes no captured counts or API catalog and is never persisted
-- `src/api.rs`
-  - exposes record/detail APIs
-  - serves the lightweight desktop UI
-  - exports the root CA through API download routes
-  - requires a one-time bootstrap token and process-scoped session cookie when
-    the UI listener uses a non-loopback address
-- `src/bin/sniper-desktop.rs`
-  - starts the proxy and UI listeners inside one process
-  - opens the desktop UI in a native window
-- `src/platform.rs`
-  - shares the user data directory between desktop, server and CLI
-  - handles Windows file locks, process identity and persistence operations
+## UI access
 
-The desktop shell uses WebKit on macOS and WebView2 on Windows. Its WebView2
-profile lives under the data directory, so an installation in a read-only
-application folder remains usable. Windows packages contain all three
-executables; automatic DMG installation is restricted to macOS.
+Same-machine UI clients are trusted, so the desktop shell and `sniper-cli` need
+no credentials. A non-loopback UI listener authenticates clients from other
+hosts before it serves assets or API routes. The bootstrap token is generated
+in memory, printed once at startup, consumed on first use, and exchanged for an
+HttpOnly, SameSite session cookie that expires with the server process.
 
-On Windows, journal workers close their handles before acknowledging commands:
-an idle open journal otherwise prevents renaming its session directory for
-deletion. Rotation uses a separate writable handle because append-only handles
-cannot truncate a file. Snapshot rewrites close their source reader before
-replacement and still adopt the new body locators. File contents are synced
-before replacement; Unix also syncs the parent directory, while Windows uses
-write-through renames with the standard library's rename fallback where needed.
-Windows does not provide the same directory fsync operation as Unix.
+## Persistence
+
+File contents are synced before replacement. Unix also syncs the parent
+directory; Windows has no equivalent, so it uses write-through renames. On
+Windows, journal workers close their handles before acknowledging commands,
+because an open journal blocks renaming its session directory for deletion.
+Rotation uses a separate writable handle because an append-only handle cannot
+truncate a file, and snapshot rewrites close their source reader before
+replacing the file.
 
 ### Interrupted session deletion
 
-Deletion first moves session storage into a `.deleted-<session UUID>-<UUID>`
-quarantine, then commits its registry tombstone. If that registry write and the
-attempt to restore the directory both fail, the original data can remain in
-quarantine while the registry still lists the session. Startup now refuses this
-state before cleanup or registry repair, preserving the registry, quarantine,
-and any canonical directory for recovery. It does not automatically restore or
-merge them. Stop Sniper and preserve the entire sessions directory before
-recovery; deleting a quarantine can discard the original stored data.
+Deleting a session moves its storage into a `.deleted-<session UUID>-<UUID>`
+quarantine, then commits the registry tombstone. If that registry write and the
+rollback both fail, the data can stay in quarantine while the registry still
+lists the session. Startup then refuses to run, and leaves the registry, the
+quarantine and any canonical directory untouched; it does not restore or merge
+them. It also refuses quarantine evidence beside a missing, corrupt or
+incomplete registry, and malformed quarantine names, because an uncertain
+deletion must not be completed only because its directory looks like debris.
+Quarantines from a normal deletion with a valid registry are still cleaned up.
 
-Startup also refuses quarantine evidence when the registry is missing, corrupt,
-or omits its session membership array, and refuses malformed quarantine names.
-These are intentional safety restrictions: an uncertain deletion must not be
-completed merely because its directory looks like cleanup debris. A valid
-registry's explicit tombstones retain authority for normally generated
-quarantines. Exact generated quarantines unreferenced by a valid explicit
-membership array retain normal orphan cleanup. Missing-active-ID and empty-array
-registry compatibility remains unchanged, as does recovery without quarantine
-evidence.
+To recover, stop Sniper and back up the whole sessions directory first;
+deleting a quarantine can discard the original data. The check runs only at
+startup, so a running process can still recreate partial canonical storage
+after a failed rollback. The next startup then stops and keeps both copies.
 
-This safeguard applies at startup only. A running process is not fenced after a
-failed rollback: cached workspace or state writes can still recreate partial
-canonical storage. Startup then stops and preserves both copies; that is
-recoverable data preservation, not a claim that the session has been restored.
+## HTTP history search
 
-Same-machine UI clients are trusted so the local desktop shell and `sniper-cli`
-keep their existing workflow. A non-loopback UI listener authenticates clients
-from other hosts before serving either embedded assets or API routes. The
-bootstrap token is generated in memory, printed once at startup, consumed on
-first use, and exchanged for an HttpOnly, SameSite session cookie that expires
-with the server process.
-
-### HTTP history search
-
-The desktop history opts into complete request/response header-name and value
-matching with `search_headers=true` on its existing transactions-page reads.
-Quick and advanced searches match either their existing metadata fields or the
-header block; they do not match across the boundary between those two fields.
-Plain header matching folds ASCII case unless advanced case-sensitive search is
-selected. Negative advanced search excludes matches in either field.
-
-The store caches one caseful and one ASCII-folded header string, without loading
-bodies or truncating late/large headers. UI pages and live summaries carry that
-complete derived text for local filtering, including ASCII-folded plain matching.
-Metadata and regex behavior otherwise retain their existing rules. This adds
-memory and UI-payload cost proportional to the captured header size. The derived
-text is not a second persisted copy and is never written to event logs. Default
-list responses, annotation acknowledgements, and saved-record selections remain
-metadata-only; the UI explicitly requests headers in annotation acknowledgements
-as well. This preserves the existing CLI output, query, and deletion contracts.
-The authenticated UI event stream carries full headers because its subscribers
-filter newly inserted history rows locally.
+The desktop history adds `search_headers=true` to its page reads, so quick and
+advanced searches also match complete request and response header names and
+values, but never across the boundary between metadata and headers. Plain
+header matching ignores ASCII case unless case-sensitive search is on. The
+store caches a case-preserving and an ASCII-folded header string per record,
+without loading bodies, at a memory and payload cost proportional to header
+size. UI pages and live summaries carry that text, and the authenticated UI
+event stream carries full headers, because the UI filters rows locally. The
+text is never persisted or written to event logs, and default list responses
+stay metadata-only.
 
 ## Bootstrap and trust flow
 
@@ -185,40 +136,14 @@ flowchart LR
     Proxy --> Special["http://sniper or https://sniper"]
     Special --> Download["PEM / DER root CA download"]
     Download --> Trust["Trust certificate in OS/browser"]
-    Trust --> Future["Future full HTTPS MITM for target hosts"]
+    Trust --> MITM["HTTPS MITM for target hosts"]
 ```
 
-The current bootstrap experience is intentionally self-service:
+Sniper generates one local root CA and reuses it across restarts. The GUI and
+the `sniper` host both export it, and it is used right away for HTTPS MITM on
+any host.
 
-- generate one local root CA and reuse it across restarts
-- expose export buttons in the GUI
-- expose the same CA through a built-in special hostname
-- use that CA immediately for arbitrary-host HTTPS MITM
+## Known tradeoffs
 
-## Extension strategy
-
-The next features should plug in through the transaction model and explicit middleware stages:
-
-1. `accept`
-2. `normalize`
-3. `intercept`
-4. `forward`
-5. `post-process`
-6. `persist/publish`
-
-That lets us add:
-
-- HTTPS MITM as a transport plugin
-- replay by resending normalized requests
-- passive scanner as a post-processing stage
-- project/workspace persistence behind a storage trait
-
-## Known tradeoffs in milestone 1
-
-- request and response bodies are fully collected before forwarding completes
-- only preview bytes are persisted in-memory for inspection
-- HTTPS MITM currently speaks HTTP/1.1 to the client-facing side
-- session persistence currently writes full JSON snapshots instead of an append-only store
-- WebSocket records and richer request-hold controls are still evolving
-
-These tradeoffs keep the first implementation simple while preserving the right boundaries for the next iteration.
+- Request bodies are fully collected before they are forwarded.
+- HTTPS MITM speaks HTTP/1.1 to the client side.

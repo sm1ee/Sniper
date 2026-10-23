@@ -31,7 +31,7 @@ function fixture() {
     displayRenderResourcesInput: {},
   };
   const globals = {
-    state, els, document, displaySettingsPreviewActive: false, displaySettingsReturnFocus: null,
+    state, els, document, displaySettingsPreviewActive: false, compareLoadGeneration: 0, displaySettingsReturnFocus: null,
     displaySettingsReady: true, pendingDisplaySettingsApply: null, displaySettingsEditedControls: new Set(),
     uiSettingsServerRevision: 0, uiSettingsDirty: false, uiSettingsSaveTimer: null,
     window: { clearTimeout() {} }, WS_COLUMN_RULES: {},
@@ -61,7 +61,7 @@ function fixture() {
   const context = loadFunctions([
     "createDefaultDisplaySettings", "sanitizeDisplaySettings", "openDisplaySettingsModal", "closeDisplaySettingsModal",
     "displaySettingsFormControls", "hydrateDisplaySettingsForm", "collectDisplaySettingsFormValues", "previewDisplaySettingsFromForm",
-    "saveDisplaySettingsFromForm", "applyDisplaySettingsState", "applyUiSettingsSnapshot",
+    "saveDisplaySettingsFromForm", "applyDisplaySettingsState", "retireFindingActionProgress", "invalidateFindingNavigation", "applyUiSettingsSnapshot",
     "updateUiSettingsServerRevision", "isModalVisible",
   ], globals);
   const remote = {

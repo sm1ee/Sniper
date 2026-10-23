@@ -39,7 +39,7 @@ numbers = {
     return this.convert(str, 10, 16);
   },
   hexToDec : function(str) { 
-    if (/[^0-9a-f]/.test(str)) {
+    if (/[^0-9a-fA-F]/.test(str)) {
       return "NaN";
     }
     return this.convert(str, 16, 10);

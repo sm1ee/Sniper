@@ -16,14 +16,15 @@ function fixture(kind) {
     targetScopeDraftVersion: 0, matchReplaceRules: [{ ...rule }], selectedMatchReplaceRuleId: rule.id,
     matchReplaceDirty: true, matchReplaceEditorSessionId: 'session-a', matchReplaceDraftVersion: 0 };
   const input = value => ({ value, listeners: {}, addEventListener(name, callback) { this.listeners[name] = callback; } });
-  const els = { targetScopeEditor: input('example.com'), targetScopeExcludeEditor: input(''),
+  const els = { targetScopeEditor: input('example.com'), targetScopeExcludeEditor: input(''), saveTargetScopeButton: { classList: { remove() {}, toggle() {} } },
     matchReplaceScope: input('request'), matchReplaceTarget: input('any'), matchReplaceSearch: input(''),
     matchReplaceReplace: input(''), matchReplaceRegex: { checked: false }, matchReplaceCaseSensitive: { checked: false } };
   const context = loadFunctions(['currentSessionId', 'expectedActiveSessionIdForWrite', 'sessionWritePath',
-    'sessionQueryPath', 'saveTargetScope', 'saveMatchReplaceRules', 'formatScopePatternsText', 'jsonArray',
+    'sessionQueryPath', 'saveTargetScope', 'postRuntimeSettings', 'saveMatchReplaceRules', 'formatScopePatternsText', 'jsonArray',
     'syncMatchReplaceEditor', 'getSelectedMatchReplaceRule', 'flushTargetScopeDraft', 'flushMatchReplaceDraft',
     'loadTargetSiteMap', 'syncTargetScopeDraft', 'deleteSelectedMatchReplaceRule', 'canLeaveSessionAfterDraftPreflight',
-    'preserveActiveHttpReplayDraftBeforeSessionChange', 'getRenderedHttpReplayDraftOwner'], {
+    'preserveActiveHttpReplayDraftBeforeSessionChange', 'getRenderedHttpReplayDraftOwner', 'saveMatchReplaceSwitch',
+    'matchReplaceRuleUnsaved'], {
     state, els, workspaceStateGeneration: 0, workspaceSaveConflictPending: false, URLSearchParams,
     workspaceLoaded: false, renderedHttpReplayDraftOwner: null, getActiveReplayTab: () => null,
     requireOkResponse: async response => { if (!response.ok) throw response.error; },
@@ -154,8 +155,9 @@ test('scope: optional unchanged read permits normal canonicalization and success
   assert.notEqual(await saving, false); assert.equal(f.state.targetScopeDraft, 'example.com'); assert.equal(f.toasts.length, 0);
 });
 function bindSaveButton(f, kind) {
-  f.els.saveTargetScopeButton = {}; f.els.saveMatchReplaceRuleButton = {};
+  f.els.saveTargetScopeButton = { classList: { remove() {}, toggle() {} } }; f.els.saveMatchReplaceRuleButton = {};
   f.context.onClickWithProgress = (_, handler) => { f.clickSave = handler; };
+  f.context.updateMatchReplaceSaveState = () => {};
   const start = kind === 'scope' ? '  onClickWithProgress(els.saveTargetScopeButton, () =>' : '  onClickWithProgress(els.saveMatchReplaceRuleButton, () => {';
   const end = kind === 'scope' ? '  els.targetScopeEditor.addEventListener' : '  els.addMatchReplaceRuleButton.addEventListener';
   const binding = appSource.slice(appSource.indexOf(start)); vm.runInContext(binding.slice(0, binding.indexOf(end)), f.context);
@@ -236,6 +238,7 @@ test('rules: new-rule construction advances version without changing dirty or au
 });
 test('rules: actual checkbox callback versions mutations but keeps no-op and dirty semantics', async () => {
   const f = fixture('rules'); f.state.matchReplaceDirty = false; let callback, saves = 0;
+  f.state.matchReplaceSavedRules = [{ ...f.rule }];
   const toggle = { checked: false, dataset: { ruleToggle: f.rule.id }, addEventListener(_, listener) { callback = listener; } };
   f.els.matchReplaceTableBody = { querySelectorAll: () => [toggle] };
   // Structural UI counter test only: no enabled definition is persisted or run.

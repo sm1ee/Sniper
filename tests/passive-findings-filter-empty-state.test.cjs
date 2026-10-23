@@ -39,7 +39,7 @@ function fixture(data = [row("alpha", "Alpha saved entry"), row("beta", "Beta sa
   const c = loadFunctions([
     "getFilteredFindings", "renderFindings", "updateCategoryFilter", "ensureFindingsCategoryOption",
     "renderFindingsVirtual", "getFindingsRowHeight", "measuredRowPitch", "severityClass", "severityLabel", "escapeHtml",
-    "resetFindingsUiState", "clearFindingDetail", "setFindingDetailActionsEnabled", "resetFindingsSearchUi",
+    "resetFindingsUiState", "clearFindingDetail", "updateFindingsSelection", "setFindingDetailActionsEnabled", "resetFindingsSearchUi",
     "updateFindingsBadge", "formatCappedCount", "retainedEntriesCap",
   ], {
     state, els, findingsData: rows, selectedFindingId: null, findingsDetailGeneration: 0,

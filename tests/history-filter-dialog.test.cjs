@@ -65,13 +65,13 @@ function fixture() {
   const context = loadFunctions([
     "createDefaultFilterSettings", "openFilterModal", "closeFilterModal", "isModalVisible", "restoreModalFocus", "trapModalFocus", "getActiveModalAction",
     "hydrateFilterForm", "applyFilterSettings", "syncColorTagFilterUI", "truncateUiSettingsText", "sanitizeHttpFilterSettings", "sanitizeHttpBooleanMap", "sanitizeHttpColorTags", "serializeHttpFilterSettings",
-    "isUiSettingsLoadSnapshot", "loadUiSettings", "applyUiSettingsSnapshot", "updateUiSettingsServerRevision", "snapshotUiSettings", "nextUiSettingsSnapshot", "scheduleUiSettingsSave", "scheduleUiSettingsRetry", "persistUiSettings",
+    "isUiSettingsLoadSnapshot", "loadUiSettings", "retireFindingActionProgress", "invalidateFindingNavigation", "applyUiSettingsSnapshot", "updateUiSettingsServerRevision", "snapshotUiSettings", "nextUiSettingsSnapshot", "scheduleUiSettingsSave", "scheduleUiSettingsRetry", "persistUiSettings",
     "serviceMapFilterApplied", "serviceMapFilterQuery", "serviceMapFilterSummary", "selectedMimeTypes", "selectedStatusClasses",
   ], {
     targetServiceMapController: { filterChanged: () => mapFilterChanges.push(true) },
     SERVICE_MAP_FILTER_MIME_LABELS: { html: "HTML", script: "script", json: "JSON", css: "CSS", image: "images", websocket: "WebSocket", other: "other types" },
     SERVICE_MAP_FILTER_STATUS_LABELS: { success: "2xx", redirect: "3xx", clientError: "4xx", serverError: "5xx", other: "other status" },
-    state, els, document, activeConfirmDialog: null, filterSettingsReturnFocus: null, filterSettingsEditedControls: new Set(),
+    state, els, document, activeConfirmDialog: null, compareLoadGeneration: 0, filterSettingsReturnFocus: null, filterSettingsEditedControls: new Set(),
     uiSettingsLoadState: "loading", uiSettingsLoadPromise: null, displaySettingsReady: true, pendingDisplaySettingsApply: null,
     uiSettingsInitialPostGeneration: 0, uiSettingsInitialPostRevision: 0,
     updateDisplaySettingsReadiness() {}, hydrateDisplaySettingsForm() {},

@@ -7,19 +7,12 @@ const vm = require("node:vm");
 const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 
 const surfaces = ["http-history", "ws-sessions", "ws-frames", "findings", "ws-replay"];
-const scannerModalBlock = `    // Skip if scanner settings modal is open
-    if (els.scannerSettingsBackdrop && !els.scannerSettingsBackdrop.classList.contains("hidden")) {
-      if (e.key === "Escape") { e.preventDefault(); closeScannerSettings(); }
-      if (e.key === "Enter" && !e.target.matches("input, textarea, select")) { e.preventDefault(); saveScannerSettingsFromModal(); }
-      return;
-    }
-`;
 
 function keyboardRegistrations() {
   const mainStart = appSource.indexOf('  document.addEventListener("keydown", (event) => {\n    const activeModalAction');
   // Stop at the end of passive frame selection, before Replay execution shortcuts.
   const mainEnd = appSource.indexOf("    // Ctrl+Tab / Ctrl+Shift+Tab: cycle through Replay tabs", mainStart);
-  const findingsStart = appSource.indexOf('  document.addEventListener("keydown", (e) => {\n    // Skip if scanner settings modal is open');
+  const findingsStart = appSource.indexOf('  // Arrow key navigation\n', appSource.indexOf('function bindFindingsEvents()'));
   const findingsEnd = appSource.indexOf("\n\n  // Findings detail search", findingsStart);
   const browser = '  document.addEventListener("keydown", onBrowserMenuKeydown);';
   const bindStart = appSource.indexOf("function bindEvents() {");
@@ -47,6 +40,7 @@ function fixture(surface) {
     }
     closest() { return this.editableParent || null; }
     matches(selector) { return selector.split(", ").includes(this.tagName.toLowerCase()); }
+    getClientRects() { return this.classes.has("hidden") ? [] : [1]; }
     focus() { document.activeElement = this; }
     setAttribute() {}
   }
@@ -101,6 +95,7 @@ function fixture(surface) {
     closeCertificateModal: () => closed.push("certificate"),
     closeFilterModal: () => closed.push("filter"),
     closeCurlImportModal: forbidden("import close"),
+    closeCompareModal() {},
     saveDisplaySettingsFromForm: forbidden("settings save"),
     applyFilterSettings: forbidden("filter apply"),
     closeScannerSettings: forbidden("scanner settings close"),
@@ -249,11 +244,14 @@ test("Enter remains unconsumed in read-selection handlers", () => {
   }
 });
 
-test("Scanner-modal Escape and Enter block remains byte-for-byte unchanged", () => {
+test("scanner modal keyboard actions belong to the shared dispatcher, not Findings navigation", () => {
   const { findings } = keyboardRegistrations();
-  const start = findings.indexOf("    // Skip if scanner settings modal is open");
-  const end = findings.indexOf("    // Only handle when findings tab", start);
-  assert.equal(findings.slice(start, end), scannerModalBlock);
+  assert.doesNotMatch(findings, /closeScannerSettings|saveScannerSettingsFromModal/);
+  const f = fixture("findings");
+  f.els.scannerSettingsBackdrop.classes.delete("hidden");
+  assert.equal(f.context.getActiveModalAction().modal, f.els.scannerSettingsBackdrop);
+  for (const key of ["ArrowUp", "ArrowDown"]) f.key(key);
+  assertUnchanged(f);
 });
 
 test("Chooser-consumed Escape does not dismiss WebSocket frame detail", () => {

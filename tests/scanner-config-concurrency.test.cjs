@@ -47,19 +47,23 @@ function fixture() {
     querySelectorAll: selector => selector === ".scanner-custom-rule-card" ? cards : deleteButtons,
   };
   const els = {
+    proxyShell: { getClientRects: () => [1] },
     scannerBuiltinRules: builtinNode, scannerCustomRules: customNode,
     scannerQuickToggle: { checked: true, disabled: false },
+    scannerSettingsClose: { focus() {} },
     scannerSettingsBackdrop: { classList: { add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name) } },
   };
   const context = loadFunctions([
     "resetScannerConfigUiState", "scannerConfigContextIsCurrent", "scannerConfigSnapshot", "loadScannerConfig", "saveScannerConfig",
     "openScannerSettings", "renderCustomRulesEditor", "collectCustomRulesFromEditor", "customRuleId", "collectScannerConfig", "closeScannerSettings", "saveScannerSettingsFromModal",
-    "refreshScannerQuickToggle", "saveScannerQuickToggle", "syncQuickToggle", "sessionQueryPath", "sessionWritePath", "expectedActiveSessionIdForWrite",
+    "isModalVisible", "refreshScannerQuickToggle", "saveScannerQuickToggle", "syncQuickToggle", "sessionQueryPath", "sessionWritePath", "expectedActiveSessionIdForWrite",
     "requireOkResponse", "readApiErrorMessage", "formatStructuredApiErrorMessage",
   ], {
+    state: { activeTool: "proxy", activeProxyTab: "findings" }, getActiveModalAction: () => null,
+    document: { activeElement: null }, scannerSettingsReturnFocus: null,
     els, URLSearchParams, sessionId: "session-a", scannerConfigCache: null,
     scannerConfigStateGeneration: 0, scannerConfigLoadGeneration: 0, scannerConfigSavePending: null,
-    scannerSettingsSessionId: null, scannerSettingsBaseline: null, scannerSettingsGeneration: 0, scannerSettingsSavePending: null, scannerQuickTogglePending: null,
+    compareLoadGeneration: 0, scannerSettingsSessionId: null, scannerSettingsBaseline: null, scannerSettingsGeneration: 0, scannerSettingsSavePending: null, scannerQuickTogglePending: null,
     BUILTIN_RULE_LABELS: { jwt: "JWT Analysis", header: "Security Headers" },
     generateUuid: () => `fixture-${++uuid}`,
     escapeHtml: value => String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
