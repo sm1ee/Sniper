@@ -990,7 +990,9 @@ code {
 }
 
 .main-tab,
-.sub-tab {
+.sub-tab,
+.view-tab,
+.replay-view-tab {
   position: relative;
   border: none;
   border-radius: var(--radius-md);
@@ -1011,7 +1013,9 @@ code {
 }
 
 .main-tab:hover,
-.sub-tab:hover {
+.sub-tab:hover,
+.view-tab:hover,
+.replay-view-tab:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.04);
 }
@@ -1021,12 +1025,16 @@ code {
    set --tab-active to their text colour: their gold is a mid-tone that reads
    dimmer than the tabs beside it. */
 .main-tab.active,
-.sub-tab.active {
+.sub-tab.active,
+.view-tab.active,
+.replay-view-tab.active {
   color: var(--tab-active, var(--point));
 }
 
 .main-tab.active::after,
-.sub-tab.active::after {
+.sub-tab.active::after,
+.view-tab.active::after,
+.replay-view-tab.active::after {
   content: "";
   position: absolute;
   right: 8px;
@@ -2522,37 +2530,16 @@ code {
   min-width: 0;
 }
 
+/* Pretty, Raw, Hex and Render switch a message pane's view. They are drawn as
+   the tabs above them are, a little tighter to fit a pane's header. */
 .view-tabs {
   display: flex;
-  gap: 10px;
+  gap: 2px;
 }
 
 .view-tab,
 .replay-view-tab {
-  position: relative;
-  padding: 6px 0;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-}
-
-.view-tab.active,
-.replay-view-tab.active {
-  color: var(--text);
-  font-weight: 700;
-}
-
-.view-tab.active::after,
-.replay-view-tab.active::after {
-  content: "";
-  position: absolute;
-  right: 0;
-  bottom: -1px;
-  left: 0;
-  height: 3px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-trail, #a9bacd) 100%);
+  padding: 6px 10px;
 }
 
 /* ── Diff view ─────────────────────────────────────── */
@@ -6191,7 +6178,8 @@ button.utility-button.replay-tab-add {
 .utility-button,
 .modal-close,
 .sub-tab,
-.view-tab {
+.view-tab,
+.replay-view-tab {
   transition: transform 0.08s, background 0.08s, border-color 0.15s, color 0.15s;
 }
 
@@ -6203,7 +6191,8 @@ button.utility-button.replay-tab-add {
 .utility-button:active,
 .modal-close:active,
 .sub-tab:active,
-.view-tab:active {
+.view-tab:active,
+.replay-view-tab:active {
   transform: scale(0.92);
 }
 
@@ -7990,13 +7979,17 @@ button.utility-button.replay-tab-add {
 }
 
 .has-tab-indicator .main-tab,
-.has-tab-indicator .sub-tab {
+.has-tab-indicator .sub-tab,
+.has-tab-indicator .view-tab,
+.has-tab-indicator .replay-view-tab {
   position: relative;
   z-index: 1;
 }
 
 .has-tab-indicator .main-tab.active::after,
-.has-tab-indicator .sub-tab.active::after {
+.has-tab-indicator .sub-tab.active::after,
+.has-tab-indicator .view-tab.active::after,
+.has-tab-indicator .replay-view-tab.active::after {
   content: none;
 }
 

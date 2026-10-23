@@ -1744,7 +1744,7 @@ function bindEvents() {
   });
   wireReplayHistorySwipe();
   wireTabIndicator(document.querySelector(".main-tabs"));
-  document.querySelectorAll(".sub-tabs, .target-tabs, .compare-tabs").forEach(wireTabIndicator);
+  document.querySelectorAll(".sub-tabs, .target-tabs, .compare-tabs, .view-tabs").forEach(wireTabIndicator);
   wireTabIndicator(els.displaySettingsModal.querySelector(".settings-tabs"));
   wireTabIndicator(document.getElementById("tabs"));
   els.displaySettingsModal.addEventListener("click", (event) => {

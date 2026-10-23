@@ -75,12 +75,15 @@ test('every tab strip uses one medium tab size and marks the active tab with a t
   assert.doesNotMatch(short.slice(0, short.indexOf('\n}\n')), /\.sub-tab\s*\{/);
   const indicator = css.match(/\n\.tab-indicator \{([^}]+)\}/)?.[1] || '';
   assert.match(indicator, /background: transparent;/);
+  // The Pretty / Raw / Hex views of a message pane are tabs like any other.
+  const tabs = (state) => ['main-tab', 'sub-tab', 'view-tab', 'replay-view-tab']
+    .map((name) => `\\.${name}${state}`).join(',\\n');
   for (const line of [css.match(/\n\.tab-indicator::after \{([^}]+)\}/)?.[1] || '',
-    css.match(/\n\.main-tab\.active::after,\n\.sub-tab\.active::after \{([^}]+)\}/)?.[1] || '']) {
+    css.match(new RegExp(`\\n${tabs('\\.active::after')} \\{([^}]+)\\}`))?.[1] || '']) {
     assert.match(line, /height: 2px;/);
     assert.match(line, /background: var\(--point\);/);
   }
-  const active = css.match(/\n\.main-tab\.active,\n\.sub-tab\.active \{([^}]+)\}/)?.[1] || '';
+  const active = css.match(new RegExp(`\\n${tabs('\\.active')} \\{([^}]+)\\}`))?.[1] || '';
   assert.doesNotMatch(active, /background:/);
   // Gold text on the dark themes; on the light ones gold is a mid-tone that
   // reads dimmer than the tabs beside it, so they use their text colour.
@@ -90,7 +93,7 @@ test('every tab strip uses one medium tab size and marks the active tab with a t
     assert.match(block, /--tab-active: var\(--text\);/, theme);
   }
   // Each strip slides the same highlight, not only the first one on the page.
-  assert.match(app, /document\.querySelectorAll\("\.sub-tabs, \.target-tabs, \.compare-tabs"\)\.forEach\(wireTabIndicator\)/);
+  assert.match(app, /document\.querySelectorAll\("\.sub-tabs, \.target-tabs, \.compare-tabs, \.view-tabs"\)\.forEach\(wireTabIndicator\)/);
   // Scan's strip sits in a flex column, where it shrank and cut its tabs off.
   assert.match(css, /\.scan-shell > \.sub-tabs \{ flex: 0 0 auto; \}/);
   assert.match(rule('.target-tabs'), /overflow-x:\s*auto;/);
