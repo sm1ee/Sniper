@@ -114,13 +114,14 @@ test('active close keeps the fallback and its newer editor on failure', async ()
   assert.deepEqual(f.renders.map(r => r.kind), ['full', 'strip']);
 });
 
-test('last-tab replacement and monotonic sequence survive failure', async () => {
+test('closing the last tab leaves Replay empty, and a failed save restores it', async () => {
   const f = fixture(), a = f.tab('last'); f.seed([a]);
-  const closing = f.context.closeRepeaterTab(a.id), replacement = f.state.replayTabs[0];
+  const closing = f.context.closeRepeaterTab(a.id);
+  assert.equal(f.state.replayTabs.length, 0); assert.equal(f.state.activeReplayTabId, null);
   const sequence = f.state.replayTabSequence;
   await fail(f, closing);
-  assert.equal(f.state.replayTabs.includes(a), true); assert.equal(f.state.replayTabs.includes(replacement), true);
-  assert.equal(f.state.activeReplayTabId, replacement.id); assert.equal(f.state.replayTabSequence, sequence);
+  assert.equal(f.state.replayTabs.length, 1); assert.equal(f.state.replayTabs[0], a);
+  assert.equal(f.state.activeReplayTabId, a.id); assert.equal(f.state.replayTabSequence, sequence);
 });
 
 for (const change of ['generation', 'session']) {

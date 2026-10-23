@@ -487,16 +487,17 @@
               </section>
 
               <section class="panel-card">
-                <header class="panel-toolbar">
+                <header class="panel-toolbar hidden" id="matchReplaceEditorHeader">
                   <div>
                     <p class="placeholder-kicker" id="matchReplaceEditorPath">Rule</p>
                     <h2 id="matchReplaceEditorTitle">New rule</h2>
                   </div>
                   <div class="toolbar-actions">
-                    <button class="primary-action" id="saveMatchReplaceRuleButton" type="button">Add</button>
+                    <button class="primary-action" id="saveMatchReplaceRuleButton" type="button" disabled>Save</button>
                   </div>
                 </header>
-                <div class="settings-form">
+                <p class="panel-empty" id="matchReplaceEmpty">Add a rule to rewrite requests or responses as they pass through.</p>
+                <div class="settings-form hidden" id="matchReplaceForm">
                   <label class="settings-field">
                     <span>Scope</span>
                     <select id="matchReplaceScope">
@@ -1065,6 +1066,14 @@
                 </div>
                 <pre class="code-view" id="wsFrameDetailView" tabindex="0"></pre>
               </div>
+            </div>
+          </div>
+
+          <div class="replay-empty hidden" id="replayEmptyState">
+            <p>Send a request here from HTTP history with <kbd data-shortcut="mod+r"></kbd>, or start one.</p>
+            <div class="replay-empty-actions">
+              <button class="secondary-action" id="replayEmptyNewTabButton" type="button">New tab</button>
+              <button class="secondary-action" id="replayEmptyImportCurlButton" type="button">Import cURL</button>
             </div>
           </div>
         </section>

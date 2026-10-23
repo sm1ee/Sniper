@@ -254,10 +254,11 @@ const DECODER_SCRIPT_SOURCES = [
 const BUTTON_PROGRESS_DELAY_MS = 180;
 
 // Registers a click listener whose element shows progress while it runs. The
-// handler MUST return its promise — that is what the progress waits on.
-function onClickWithProgress(element, handler) {
+// handler MUST return its promise — that is what the progress waits on. Progress
+// ends by enabling the element; `afterProgress` may then set its own state.
+function onClickWithProgress(element, handler, afterProgress) {
   element?.addEventListener("click", (event) => {
-    withButtonProgress(element, () => handler(event));
+    withButtonProgress(element, () => handler(event)).then(afterProgress);
   });
 }
 
@@ -535,6 +536,8 @@ const state = {
   eventLog: [],
   matchReplaceRules: [],
   selectedMatchReplaceRuleId: null,
+  // The rules as the server last returned them, to tell what is unsaved.
+  matchReplaceSavedRules: [],
   matchReplaceDirty: false,
   matchReplaceDraftVersion: 0,
   matchReplaceSaveToken: 0,
@@ -664,6 +667,9 @@ const els = {
   toolsOutputHint: document.getElementById("toolsOutputHint"),
   replayTabStrip: document.getElementById("replayTabStrip"),
   newReplayTabButton: document.getElementById("newReplayTabButton"),
+  replayEmptyState: document.getElementById("replayEmptyState"),
+  replayEmptyNewTabButton: document.getElementById("replayEmptyNewTabButton"),
+  replayEmptyImportCurlButton: document.getElementById("replayEmptyImportCurlButton"),
   fuzzerShell: document.getElementById("fuzzerShell"),
   sequenceShell: document.getElementById("sequenceShell"),
   targetShell: document.getElementById("targetShell"),
@@ -922,6 +928,9 @@ const els = {
   matchReplaceTableBody: document.getElementById("matchReplaceTableBody"),
   matchReplaceEditorPath: document.getElementById("matchReplaceEditorPath"),
   matchReplaceEditorTitle: document.getElementById("matchReplaceEditorTitle"),
+  matchReplaceEditorHeader: document.getElementById("matchReplaceEditorHeader"),
+  matchReplaceForm: document.getElementById("matchReplaceForm"),
+  matchReplaceEmpty: document.getElementById("matchReplaceEmpty"),
   matchReplaceDescription: document.getElementById("matchReplaceDescription"),
   matchReplaceScope: document.getElementById("matchReplaceScope"),
   matchReplaceTarget: document.getElementById("matchReplaceTarget"),
@@ -1347,12 +1356,8 @@ function bindEvents() {
         loadUpstreamPeerSettings();
       }
       if (state.activeProxyTab === "replace") {
-        flushMatchReplaceDraft()
-          .then((ok) => {
-            if (ok) return loadMatchReplaceRules();
-            return null;
-          })
-          .catch((error) => console.error(error));
+        // Rules are saved by Save; the loader leaves unsaved edits in place.
+        loadMatchReplaceRules().catch((error) => console.error(error));
       }
       if (state.activeProxyTab === "oast") {
         loadOastCallbacks().catch((error) => console.error(error));
@@ -2065,6 +2070,8 @@ function bindEvents() {
   els.newReplayTabButton.addEventListener("click", () => {
     openBlankReplayTab();
   });
+  els.replayEmptyNewTabButton.addEventListener("click", () => openBlankReplayTab());
+  els.replayEmptyImportCurlButton.addEventListener("click", () => openCurlImportModal());
   els.cancelReplayButton.addEventListener("click", cancelReplaySend);
   els.replayBackButton.addEventListener("click", () => {
     navigateReplayHistory(-1);
@@ -2076,19 +2083,17 @@ function bindEvents() {
     followRedirect().catch(handleReplayActionError);
   });
   onClickWithProgress(els.saveMatchReplaceRuleButton, () => {
-    if (!state.selectedMatchReplaceRuleId) {
-      createNewMatchReplaceRule();
-    }
     syncMatchReplaceEditor();
     return saveMatchReplaceRules()
       .then((saved) => { if (saved !== false) showToast("Rule saved"); })
       .catch((error) => { console.error(error); showToast("Failed to save rule", "error"); });
-  });
+  }, updateMatchReplaceSaveState);
   els.addMatchReplaceRuleButton.addEventListener("click", () => {
     syncMatchReplaceEditor();
-    createNewMatchReplaceRule();
-    // Don't save immediately — let user fill in fields first
-    renderMatchReplaceRules();
+    // Don't save immediately — let user fill in fields first. A new rule still
+    // empty is reused rather than stacked.
+    if (!untouchedNewMatchReplaceRule()) createNewMatchReplaceRule();
+    els.matchReplaceSearch.focus();
   });
   els.deleteMatchReplaceRuleButton.addEventListener("click", () => {
     deleteSelectedMatchReplaceRule().catch((error) => {
@@ -2105,8 +2110,12 @@ function bindEvents() {
     els.matchReplaceRegex,
     els.matchReplaceCaseSensitive,
   ].forEach((element) => {
-    element.addEventListener("input", syncMatchReplaceEditor);
-    element.addEventListener("change", syncMatchReplaceEditor);
+    const edit = () => {
+      syncMatchReplaceEditor();
+      updateMatchReplaceSaveState();
+    };
+    element.addEventListener("input", edit);
+    element.addEventListener("change", edit);
   });
   onClickWithProgress(els.saveTargetScopeButton, () =>
     saveTargetScope()
@@ -5258,6 +5267,7 @@ function resetSessionScopedUiState() {
   _lastWebsocketPageRefreshAt = 0;
   resetEventLogUiState();
   state.matchReplaceRules = [];
+  state.matchReplaceSavedRules = [];
   state.selectedMatchReplaceRuleId = null;
   state.matchReplaceDirty = false;
   state.matchReplaceEditorSessionId = null;
@@ -7750,6 +7760,7 @@ async function loadMatchReplaceRules() {
     return;
   }
   state.matchReplaceRules = rules;
+  state.matchReplaceSavedRules = rules.map((rule) => ({ ...rule }));
   if (!state.matchReplaceRules.some((rule) => rule.id === state.selectedMatchReplaceRuleId)) {
     state.selectedMatchReplaceRuleId = state.matchReplaceRules[0]?.id ?? null;
   }
@@ -7793,6 +7804,7 @@ async function saveMatchReplaceRules(options = {}) {
     return false;
   }
   state.matchReplaceRules = rules;
+  state.matchReplaceSavedRules = rules.map((rule) => ({ ...rule }));
   if (!state.matchReplaceRules.some((rule) => rule.id === state.selectedMatchReplaceRuleId)) {
     state.selectedMatchReplaceRuleId = state.matchReplaceRules[0]?.id ?? null;
   }
@@ -14573,10 +14585,11 @@ function renderReplay(options = {}) {
 
   const isWsTab = tab && tab.type === "websocket";
 
-  // Toggle HTTP vs WS panels
-  if (els.httpReplayToolbar) els.httpReplayToolbar.classList.toggle("hidden", isWsTab);
-  if (els.httpReplayWorkbench) els.httpReplayWorkbench.classList.toggle("hidden", isWsTab);
+  // Toggle HTTP vs WS panels; with no tab, neither, but how to start one.
+  if (els.httpReplayToolbar) els.httpReplayToolbar.classList.toggle("hidden", !tab || isWsTab);
+  if (els.httpReplayWorkbench) els.httpReplayWorkbench.classList.toggle("hidden", !tab || isWsTab);
   if (els.wsReplayPanel) els.wsReplayPanel.classList.toggle("hidden", !isWsTab);
+  if (els.replayEmptyState) els.replayEmptyState.classList.toggle("hidden", !!tab);
 
   if (isWsTab) {
     renderedHttpReplayDraftOwner = null;
@@ -15248,6 +15261,11 @@ function renderMatchReplaceRules() {
   Array.from(els.matchReplaceTableBody.querySelectorAll(".history-row")).forEach((row) => {
     row.addEventListener("click", (event) => {
       if (event.target.closest(".mini-toggle")) return;
+      // A new rule left empty goes away rather than waiting to be saved blank.
+      const untouched = untouchedNewMatchReplaceRule();
+      if (untouched && untouched.id !== row.dataset.id) {
+        state.matchReplaceRules = state.matchReplaceRules.filter((rule) => rule !== untouched);
+      }
       state.selectedMatchReplaceRuleId = row.dataset.id;
       renderMatchReplaceRules();
     });
@@ -15262,7 +15280,7 @@ function renderMatchReplaceRules() {
           state.matchReplaceDraftVersion = (state.matchReplaceDraftVersion || 0) + 1;
         }
         rule.enabled = toggle.checked;
-        saveMatchReplaceRules().catch((error) => {
+        saveMatchReplaceSwitch(rule.id, rule.enabled).catch((error) => {
           console.error(error);
           showToast(error?.message || "Failed to save rule", "error");
           loadMatchReplaceRules().catch(console.error);
@@ -15271,30 +15289,25 @@ function renderMatchReplaceRules() {
     });
   });
 
-  if (!selected) {
-    els.matchReplaceEditorPath.textContent = "Rule";
-    els.matchReplaceEditorTitle.textContent = "New rule";
-    els.matchReplaceScope.value = "request";
-    els.matchReplaceTarget.value = "any";
-    els.matchReplaceSearch.value = "";
-    els.matchReplaceReplace.value = "";
-    els.matchReplaceRegex.checked = false;
-    els.matchReplaceCaseSensitive.checked = false;
-    els.deleteMatchReplaceRuleButton.disabled = true;
-    els.saveMatchReplaceRuleButton.textContent = "Save";
-    return;
-  }
+  // With no rule there is nothing to edit: the editor says how to start rather
+  // than offering fields whose input would go nowhere.
+  els.matchReplaceEditorHeader.classList.toggle("hidden", !selected);
+  els.matchReplaceForm.classList.toggle("hidden", !selected);
+  els.matchReplaceEmpty.classList.toggle("hidden", !!selected);
+  els.deleteMatchReplaceRuleButton.disabled = !selected;
+  updateMatchReplaceSaveState();
+  if (!selected) return;
 
+  const isNew = !state.matchReplaceSavedRules.some((rule) => rule.id === selected.id);
   els.matchReplaceEditorPath.textContent = `${selected.scope} / ${selected.target}`;
-  els.matchReplaceEditorTitle.textContent = selected.search ? `${selected.search} → ${selected.replace || "∅"}` : "Edit rule";
+  els.matchReplaceEditorTitle.textContent = isNew ? "New rule"
+    : selected.search ? `${selected.search} → ${selected.replace || "∅"}` : "Edit rule";
   els.matchReplaceScope.value = selected.scope;
   els.matchReplaceTarget.value = selected.target;
   els.matchReplaceSearch.value = selected.search;
   els.matchReplaceReplace.value = selected.replace;
   els.matchReplaceRegex.checked = Boolean(selected.regex);
   els.matchReplaceCaseSensitive.checked = Boolean(selected.case_sensitive);
-  els.deleteMatchReplaceRuleButton.disabled = false;
-  els.saveMatchReplaceRuleButton.textContent = "Save";
 }
 
 function initializeTargetWorkspace() {
@@ -16372,6 +16385,52 @@ function createNewMatchReplaceRule() {
 
 function getSelectedMatchReplaceRule() {
   return state.matchReplaceRules.find((rule) => rule.id === state.selectedMatchReplaceRuleId) || null;
+}
+
+// A rule the server does not have yet, or one edited since it was saved.
+function matchReplaceRuleUnsaved(rule) {
+  const saved = state.matchReplaceSavedRules.find((item) => item.id === rule.id);
+  return !saved || ["enabled", "scope", "target", "search", "replace", "regex", "case_sensitive"]
+    .some((field) => (saved[field] ?? false) !== (rule[field] ?? false));
+}
+
+// Save is on when something is unsaved and the rule on screen has a search
+// term; a rule without one matches nothing. Unsaved rows are marked.
+function updateMatchReplaceSaveState() {
+  const selected = getSelectedMatchReplaceRule();
+  els.saveMatchReplaceRuleButton.disabled = !selected?.search
+    || !state.matchReplaceRules.some(matchReplaceRuleUnsaved);
+  els.matchReplaceTableBody.querySelectorAll("tr[data-id]").forEach((row) => {
+    const rule = state.matchReplaceRules.find((item) => item.id === row.dataset.id);
+    const unsaved = !!rule && matchReplaceRuleUnsaved(rule);
+    row.classList.toggle("unsaved", unsaved);
+    row.title = unsaved ? "Not saved yet" : "";
+  });
+}
+
+// The selected rule when it is new and nothing has been typed into it.
+function untouchedNewMatchReplaceRule() {
+  const rule = getSelectedMatchReplaceRule();
+  return rule && !rule.search && !rule.replace
+    && !state.matchReplaceSavedRules.some((item) => item.id === rule.id) ? rule : null;
+}
+
+// The On switch saves that switch alone: edits in the editor stay unsaved until
+// Save. With nothing else unsaved, the ordinary save does the same.
+async function saveMatchReplaceSwitch(ruleId, enabled) {
+  const saved = state.matchReplaceSavedRules.find((rule) => rule.id === ruleId);
+  if (saved) saved.enabled = enabled; // a second switch builds on this one
+  if (!state.matchReplaceRules.some(matchReplaceRuleUnsaved)) return saveMatchReplaceRules();
+  if (!saved) return;
+  const sessionId = currentSessionId();
+  const response = await fetch(sessionWritePath("/api/match-replace", sessionId), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, rules: state.matchReplaceSavedRules }),
+  });
+  await requireOkResponse(response, "Failed to save match-replace rules.");
+  const rules = jsonArray(await response.json());
+  if (sessionId === currentSessionId()) state.matchReplaceSavedRules = rules.map((rule) => ({ ...rule }));
 }
 
 function syncMatchReplaceEditor() {
@@ -19802,12 +19861,12 @@ function createReplayTab(seed = {}) {
   };
 }
 
+// The active tab, falling back to the first. With no tabs Replay stays empty
+// rather than making a blank request up.
 function ensureRepeaterTab() {
   if (!state.replayTabs.length) {
-    const tab = createReplayTab();
-    state.replayTabs = [tab];
-    state.activeReplayTabId = tab.id;
-    return tab;
+    state.activeReplayTabId = null;
+    return null;
   }
 
   if (!state.replayTabs.some((tab) => tab.id === state.activeReplayTabId)) {
@@ -20431,9 +20490,7 @@ async function closeRepeaterTab(id, pendingRename = null) {
     ...state.replayTabs.map((tab) => tab.sequence || 0));
   state.replayTabs.splice(currentIndex, 1);
   if (!state.replayTabs.length) {
-    const replacement = createReplayTab();
-    state.replayTabs = [replacement];
-    state.activeReplayTabId = replacement.id;
+    state.activeReplayTabId = null;
   } else if (state.activeReplayTabId === id) {
     const remainingVisualIds = visualOrderBeforeClose.filter((tabId) =>
       tabId !== id && state.replayTabs.some((tab) => tab.id === tabId)
@@ -28688,6 +28745,10 @@ els.interceptContextMenu?.querySelectorAll("[data-intercept-action]").forEach((i
 });
 
 decorateContextMenuShortcuts();
+// Shortcuts written into a sentence, such as Replay's empty state.
+document.querySelectorAll("kbd[data-shortcut]").forEach((kbd) => {
+  kbd.textContent = formatShortcut(kbd.dataset.shortcut);
+});
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.contextMenu.classList.contains("hidden")) {

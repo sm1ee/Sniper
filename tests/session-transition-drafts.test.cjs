@@ -732,6 +732,7 @@ function useLateMetadataEditor(f, editor) {
   }
   for (const name of ['flushMatchReplaceDraft', 'saveMatchReplaceRules', 'getSelectedMatchReplaceRule', 'syncMatchReplaceEditor', 'sessionWritePath', 'jsonArray']) vm.runInContext(source(name), f.context);
   f.context.URLSearchParams = URLSearchParams;
+  f.context.updateMatchReplaceSaveState = () => {}; // the Save button is not under test here
   f.state.matchReplaceRules = [{ id: 'disabled-late-metadata', enabled: false, description: '', scope: 'request', target: 'any', search: '', replace: '', regex: false, case_sensitive: false }];
   f.state.selectedMatchReplaceRuleId = 'disabled-late-metadata'; f.state.matchReplaceEditorSessionId = 'session-a'; f.state.matchReplaceDirty = false;
   for (const [key, value] of Object.entries({ Scope: 'request', Target: 'any', Search: '', Replace: '' })) f.els[`matchReplace${key}`] = { value };

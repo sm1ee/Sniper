@@ -1286,6 +1286,47 @@ code {
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 
+/* No tab: below the strip, one line on how to start one. */
+.replay-empty {
+  grid-row: 2 / -1;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 14px;
+  padding: 24px;
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+  text-align: center;
+}
+
+.replay-empty p {
+  margin: 0;
+}
+
+.replay-empty-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* An editor with nothing to edit centres one line on how to start. */
+.panel-card > .panel-empty {
+  grid-row: 1 / -1;
+  align-self: center;
+  justify-self: center;
+  margin: 0;
+  padding: 0 24px;
+  color: var(--text-dim);
+  font-size: var(--font-sm);
+  text-align: center;
+}
+
+/* A replace rule edited but not saved yet. */
+.mini-table .history-row.unsaved td:nth-child(2)::before {
+  content: "•";
+  margin-right: 5px;
+  color: var(--point);
+}
+
 /* Tools has no view strip either: its one workbench fills the shell, however
    short the outputs are. */
 .tools-shell {
@@ -7841,7 +7882,8 @@ button.utility-button.replay-tab-add {
   margin: 0;
 }
 
-.shortcut-group kbd {
+.shortcut-group kbd,
+.replay-empty kbd {
   display: inline-block;
   padding: 1px 6px;
   border: 1px solid var(--line);

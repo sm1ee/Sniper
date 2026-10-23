@@ -23,7 +23,8 @@ function fixture(kind) {
     'sessionQueryPath', 'saveTargetScope', 'postRuntimeSettings', 'saveMatchReplaceRules', 'formatScopePatternsText', 'jsonArray',
     'syncMatchReplaceEditor', 'getSelectedMatchReplaceRule', 'flushTargetScopeDraft', 'flushMatchReplaceDraft',
     'loadTargetSiteMap', 'syncTargetScopeDraft', 'deleteSelectedMatchReplaceRule', 'canLeaveSessionAfterDraftPreflight',
-    'preserveActiveHttpReplayDraftBeforeSessionChange', 'getRenderedHttpReplayDraftOwner'], {
+    'preserveActiveHttpReplayDraftBeforeSessionChange', 'getRenderedHttpReplayDraftOwner', 'saveMatchReplaceSwitch',
+    'matchReplaceRuleUnsaved'], {
     state, els, workspaceStateGeneration: 0, workspaceSaveConflictPending: false, URLSearchParams,
     workspaceLoaded: false, renderedHttpReplayDraftOwner: null, getActiveReplayTab: () => null,
     requireOkResponse: async response => { if (!response.ok) throw response.error; },
@@ -156,6 +157,7 @@ test('scope: optional unchanged read permits normal canonicalization and success
 function bindSaveButton(f, kind) {
   f.els.saveTargetScopeButton = { classList: { remove() {}, toggle() {} } }; f.els.saveMatchReplaceRuleButton = {};
   f.context.onClickWithProgress = (_, handler) => { f.clickSave = handler; };
+  f.context.updateMatchReplaceSaveState = () => {};
   const start = kind === 'scope' ? '  onClickWithProgress(els.saveTargetScopeButton, () =>' : '  onClickWithProgress(els.saveMatchReplaceRuleButton, () => {';
   const end = kind === 'scope' ? '  els.targetScopeEditor.addEventListener' : '  els.addMatchReplaceRuleButton.addEventListener';
   const binding = appSource.slice(appSource.indexOf(start)); vm.runInContext(binding.slice(0, binding.indexOf(end)), f.context);
@@ -236,6 +238,7 @@ test('rules: new-rule construction advances version without changing dirty or au
 });
 test('rules: actual checkbox callback versions mutations but keeps no-op and dirty semantics', async () => {
   const f = fixture('rules'); f.state.matchReplaceDirty = false; let callback, saves = 0;
+  f.state.matchReplaceSavedRules = [{ ...f.rule }];
   const toggle = { checked: false, dataset: { ruleToggle: f.rule.id }, addEventListener(_, listener) { callback = listener; } };
   f.els.matchReplaceTableBody = { querySelectorAll: () => [toggle] };
   // Structural UI counter test only: no enabled definition is persisted or run.

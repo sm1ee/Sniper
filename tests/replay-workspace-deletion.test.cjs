@@ -46,19 +46,18 @@ test("closing an inactive tab preserves current unsynced CodeMirror text and foc
   assert.deepEqual(f.renders.map(render => render.kind), ["strip"]);
 });
 
-test("closing the last saved HTTP tab makes a fresh local draft with monotonic sequence", async () => {
+test("closing the last saved HTTP tab elsewhere leaves Replay empty with a monotonic sequence", async () => {
   const f = fixture(), a = f.tab("last");
   f.state.replayTabSequence = 93;
   f.seed([a]);
   await f.adopt(f.remote([]));
-  const fresh = f.state.replayTabs[0];
-  assert.notEqual(fresh.id, a.id);
-  assert.equal(fresh.sequence, 94);
-  assert.equal(f.state.replayTabSequence, 94);
+  assert.equal(f.state.replayTabs.length, 0);
+  assert.equal(f.state.activeReplayTabId, null);
+  assert.equal(f.state.replayTabSequence, 93);
   assert.equal(f.context.workspaceSaveCommittedSnapshot.replay.tabs.length, 0);
   await f.adopt(f.remote([], 12));
-  assert.equal(f.state.replayTabs[0], fresh, "uncommitted replacement must not be mistaken for an external deletion");
-  assert.equal(f.state.replayTabSequence, 94);
+  assert.equal(f.state.replayTabs.length, 0);
+  assert.equal(f.state.replayTabSequence, 93);
   assert.equal(f.context.snapshotWorkspaceState().replay.tabs.some(tab => tab.id === a.id), false);
 });
 
@@ -311,22 +310,24 @@ test("a dirty inactive deletion preserves every current editor and leaves clean 
   assert.equal(f.renders.length, 0);
 });
 
-test("the existing local close-last flow also preserves tab sequence and generates a new ID", async () => {
+// The server refuses an empty workspace only when its sequence is zero, the mark
+// of a client that never loaded; a deliberate close of the last tab keeps it.
+test("the existing local close-last flow saves no tabs and keeps the tab sequence", async () => {
   const f = fixture(), last = f.tab("last");
   f.state.replayTabSequence = 80; f.seed([last]);
   const closing = f.context.closeRepeaterTab(last.id);
   assert.equal(f.requests.length, 1);
   const payload = JSON.parse(f.requests[0].options.body);
-  assert.equal(payload.replay.tab_sequence, 81);
-  assert.equal(payload.replay.tabs[0].sequence, 81);
-  assert.notEqual(payload.replay.tabs[0].id, last.id);
+  assert.equal(payload.replay.tab_sequence, 80);
+  assert.deepEqual(payload.replay.tabs, []);
   f.succeed(0, { session_id: "session-a", revision: 11 }); await closing;
-  assert.equal(f.state.replayTabSequence, 81);
+  assert.equal(f.state.replayTabSequence, 80);
+  assert.equal(f.context.createReplayTab().sequence, 81);
 });
 
 
 for (const closeLocally of [false, true]) {
-  test(`${closeLocally ? "local" : "external"} close preserves a legacy tab sequence ahead of its counter`, async () => {
+  test(`${closeLocally ? "local" : "external"} close keeps a legacy tab sequence ahead of its counter`, async () => {
     const f = fixture(), last = f.tab("legacy");
     last.sequence = 50; f.state.replayTabSequence = 1; f.seed([last]);
     if (closeLocally) {
@@ -335,7 +336,8 @@ for (const closeLocally of [false, true]) {
     } else {
       await f.adopt(f.remote([]));
     }
-    assert.equal(f.state.replayTabs[0].sequence, 51); assert.equal(f.state.replayTabSequence, 51);
+    assert.equal(f.state.replayTabs.length, 0); assert.equal(f.state.replayTabSequence, 50);
+    assert.equal(f.context.createReplayTab().sequence, 51);
   });
 }
 
