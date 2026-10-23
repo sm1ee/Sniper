@@ -122,24 +122,69 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 
 All captured from Sniper v0.3.2 with synthetic example.com traffic.
 
-<table>
-  <tr>
-    <td width="50%"><a href="docs/assets/sniper-v0.3.2-session.jpg"><img src="docs/assets/sniper-v0.3.2-session.jpg" alt="The Session screen: three sessions with their size, requests and findings, and the selected session's scope, busiest hosts, pinned Replay tab, Replace rules, manual scan and findings" /></a><br /><b>Session</b> — what every session holds before you open it: size, requests, findings, scope, pins, rules and scans.</td>
-    <td width="50%"><a href="docs/assets/sniper-v0.3.2-replay.jpg"><img src="docs/assets/sniper-v0.3.2-replay.jpg" alt="Replay with a pinned tab named Cart total check: a POST /v1/cart request on the left and its 201 JSON response on the right" /></a><br /><b>Replay</b> — edit a captured request, send it again and read the answer beside it.</td>
-  </tr>
-  <tr>
-    <td width="50%"><a href="docs/assets/sniper-v0.3.2-scan.jpg"><img src="docs/assets/sniper-v0.3.2-scan.jpg" alt="Scan, Active Scan: 14,035 Nuclei templates imported, a finished manual scan of admin.example.com with two matches, and the matched /actuator/env request and response" /></a><br /><b>Scan ▸ Active Scan</b> — run Nuclei templates against targets you name; a match opens with the exchange that proved it.</td>
-    <td width="50%"><a href="docs/assets/sniper-v0.3.2-intercept.jpg"><img src="docs/assets/sniper-v0.3.2-intercept.jpg" alt="Intercept holding a POST /v1/cart request in the request queue, with its headers and JSON body open for editing and Drop and Forward buttons" /></a><br /><b>Intercept</b> — hold a request on its way out, edit it, then forward or drop it.</td>
-  </tr>
-  <tr>
-    <td width="50%"><a href="docs/assets/sniper-v0.3.2-fuzzer.jpg"><img src="docs/assets/sniper-v0.3.2-fuzzer.jpg" alt="The Fuzzer with a marked page parameter, twelve payloads, and results with 200, 400 and 500 statuses and their lengths" /></a><br /><b>Fuzzer</b> — send payload lists at marked positions and compare status, length and timing.</td>
-    <td width="50%"><a href="docs/assets/sniper-v0.3.2-findings.jpg"><img src="docs/assets/sniper-v0.3.2-findings.jpg" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" /></a><br /><b>Findings</b> — passive checks and template matches, each with its evidence highlighted.</td>
-  </tr>
-  <tr>
-    <td width="50%"><a href="docs/assets/sniper-v0.3.2-flow.jpg"><img src="docs/assets/sniper-v0.3.2-flow.jpg" alt="Map, Flow: the client, www.example.com, api.example.com and cdn.example.net as lanes, with each page load's requests drawn in time order" /></a><br /><b>Map ▸ Flow</b> — one origin's requests in time order, page load by page load.</td>
-    <td width="50%"><a href="docs/assets/sniper-v0.3.2-tools.jpg"><img src="docs/assets/sniper-v0.3.2-tools.jpg" alt="Tools with a JWT pasted in: the JWT tool opened by itself, with the decoded header and claims and alg none variants" /></a><br /><b>Tools</b> — a pasted JWT opens the JWT tool: header and claims decoded, <code>alg: none</code> variants ready.</td>
-  </tr>
-</table>
+### Session
+
+What every session holds before you open it: size, requests, findings, scope, pins, rules and scans.
+
+<p align="center">
+  <img src="docs/assets/sniper-v0.3.2-session.jpg" width="800" alt="The Session screen: three sessions with their size, requests and findings, and the selected session's scope, busiest hosts, pinned Replay tab, Replace rules, manual scan and findings" />
+</p>
+
+### Replay
+
+Edit a captured request, send it again and read the answer beside it.
+
+<p align="center">
+  <img src="docs/assets/sniper-v0.3.2-replay.jpg" width="800" alt="Replay with a pinned tab named Cart total check: a POST /v1/cart request on the left and its 201 JSON response on the right" />
+</p>
+
+### Scan ▸ Active Scan
+
+Run Nuclei templates against targets you name; a match opens with the exchange that proved it.
+
+<p align="center">
+  <img src="docs/assets/sniper-v0.3.2-scan.jpg" width="800" alt="Scan, Active Scan: 14,035 Nuclei templates imported, a finished manual scan of admin.example.com with two matches, and the matched /actuator/env request and response" />
+</p>
+
+### Intercept
+
+Hold a request on its way out, edit it, then forward or drop it.
+
+<p align="center">
+  <img src="docs/assets/sniper-v0.3.2-intercept.jpg" width="800" alt="Intercept holding a POST /v1/cart request in the request queue, with its headers and JSON body open for editing and Drop and Forward buttons" />
+</p>
+
+### Fuzzer
+
+Send payload lists at marked positions and compare status, length and timing.
+
+<p align="center">
+  <img src="docs/assets/sniper-v0.3.2-fuzzer.jpg" width="800" alt="The Fuzzer with a marked page parameter and its results sorted by status: quote payloads answered 500, others 400" />
+</p>
+
+### Findings
+
+Passive checks and template matches, each with its evidence highlighted.
+
+<p align="center">
+  <img src="docs/assets/sniper-v0.3.2-findings.jpg" width="800" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" />
+</p>
+
+### Map ▸ Flow
+
+One origin's requests in time order, page load by page load.
+
+<p align="center">
+  <img src="docs/assets/sniper-v0.3.2-flow.jpg" width="800" alt="Map, Flow: the client, www.example.com, api.example.com and cdn.example.net as lanes, with each page load's requests drawn in time order" />
+</p>
+
+### Tools
+
+A pasted JWT opens the JWT tool: header and claims decoded, <code>alg: none</code> variants ready.
+
+<p align="center">
+  <img src="docs/assets/sniper-v0.3.2-tools.jpg" width="800" alt="Tools with a JWT pasted in: the JWT tool opened by itself, with the decoded header and claims and alg none variants" />
+</p>
 
 ## Wired browsers
 
