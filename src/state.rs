@@ -1366,40 +1366,53 @@ impl AppState {
             }
         }
 
-        match tokio::time::timeout(APP_VERSION_FETCH_TIMEOUT, self.fetch_latest_release_info())
-            .await
-        {
-            Ok(Ok(info)) => {
-                *self.app_version_cache.write().await =
-                    Some(CachedAppVersionInfo::new(info.clone()));
-                info
-            }
-            _ => cached
+        match self.check_app_version_now().await {
+            Ok(info) => info,
+            Err(_) => cached
                 .map(|cached| cached.info)
                 .unwrap_or_else(AppVersionInfo::current_only),
         }
     }
 
+    /// Asks GitHub now, past the cache, and returns a failure instead of reading
+    /// it as "no update". Check for Updates… calls this directly: an answer up to
+    /// half an hour old is not a check, and a failure reported as no update is
+    /// what hid a release until the app restarted.
+    pub async fn check_app_version_now(&self) -> Result<AppVersionInfo> {
+        let info =
+            tokio::time::timeout(APP_VERSION_FETCH_TIMEOUT, self.fetch_latest_release_info())
+                .await
+                .map_err(|_| anyhow::anyhow!("GitHub did not answer in time."))??;
+        *self.app_version_cache.write().await = Some(CachedAppVersionInfo::new(info.clone()));
+        Ok(info)
+    }
+
+    // The error messages are shown to the operator who asked, so they name the
+    // cause and nothing else: no URL, and no proxy address from the environment.
     async fn fetch_latest_release_info(&self) -> Result<AppVersionInfo> {
-        let client = app_release_http_client("failed to build GitHub releases client")?;
+        let client = app_release_http_client("Sniper could not set up a connection to GitHub.")?;
 
         let response = client
             .get(APP_LATEST_RELEASE_API_URL)
             .send()
             .await
-            .context("failed to query GitHub latest release")?;
+            .context("Could not reach GitHub.")?;
 
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(AppVersionInfo::current_only());
         }
 
-        let response = response
-            .error_for_status()
-            .context("GitHub latest release query failed")?;
+        let remaining = response
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok());
+        if let Some(reason) = release_query_failure(response.status(), remaining) {
+            anyhow::bail!(reason);
+        }
         let release = response
             .json::<GitHubRelease>()
             .await
-            .context("failed to decode GitHub latest release response")?;
+            .context("GitHub's answer could not be read.")?;
 
         let mut info = AppVersionInfo::current_only();
         let update_available = release_update_available(&info.current_version, &release);
@@ -2016,6 +2029,21 @@ fn select_release_dmg_asset<'a>(
                 .filter(|asset| release_asset_version_matches(&asset.name, release_tag))
                 .find(|asset| is_universal_dmg(&asset.name))
         })
+}
+
+/// Why GitHub's answer to the latest-release query is not a release. Without a
+/// token the API allows 60 requests an hour per address, which a shared office
+/// address can use up; GitHub then answers 403 with none remaining, or 429.
+fn release_query_failure(status: StatusCode, rate_limit_remaining: Option<&str>) -> Option<String> {
+    if status.is_success() {
+        return None;
+    }
+    if status == StatusCode::TOO_MANY_REQUESTS
+        || (status == StatusCode::FORBIDDEN && rate_limit_remaining == Some("0"))
+    {
+        return Some("GitHub's request limit was reached. Try again later.".to_string());
+    }
+    Some(format!("GitHub answered {status}."))
 }
 
 fn release_update_available(current_version: &str, release: &GitHubRelease) -> bool {
@@ -2820,8 +2848,8 @@ mod tests {
         native_release_asset_arch, open_self_update_installer_log, parse_codesign_team_identifier,
         parse_hdiutil_attach_output, proxy_url_targets_loopback,
         release_asset_archs_match_binary_archs, release_asset_matches_arch,
-        release_proxy_env_targets_loopback, release_update_available, select_release_dmg_asset,
-        self_update_bundle_is_writable, self_update_installer_log_path,
+        release_proxy_env_targets_loopback, release_query_failure, release_update_available,
+        select_release_dmg_asset, self_update_bundle_is_writable, self_update_installer_log_path,
         signing_team_update_verdict, update_installer_script, validate_downloaded_update_size,
         validate_self_update_app_bundle_path, AppState, GitHubAsset, GitHubRelease,
         UpdateArtifactGuard, CODESIGN_PATH, DITTO_PATH, HDIUTIL_PATH, LIPO_PATH, PLIST_BUDDY_PATH,
@@ -3153,6 +3181,31 @@ mod tests {
             "0.2.4",
             &release("v0.2.5", vec![asset("Sniper-0.2.5-universal.dmg")])
         ));
+    }
+
+    #[test]
+    fn a_release_check_github_refused_says_why() {
+        use reqwest::StatusCode;
+
+        let limit = Some("GitHub's request limit was reached. Try again later.".to_string());
+        assert_eq!(release_query_failure(StatusCode::OK, Some("59")), None);
+        assert_eq!(
+            release_query_failure(StatusCode::FORBIDDEN, Some("0")),
+            limit
+        );
+        assert_eq!(
+            release_query_failure(StatusCode::TOO_MANY_REQUESTS, None),
+            limit
+        );
+        // A 403 with requests left is a refusal for some other reason.
+        assert_eq!(
+            release_query_failure(StatusCode::FORBIDDEN, Some("12")).as_deref(),
+            Some("GitHub answered 403 Forbidden.")
+        );
+        assert_eq!(
+            release_query_failure(StatusCode::BAD_GATEWAY, None).as_deref(),
+            Some("GitHub answered 502 Bad Gateway.")
+        );
     }
 
     #[test]

@@ -1177,6 +1177,12 @@ async function init() {
     loadTargetSiteMap(),
   ];
   loadAppVersionInfo().catch((error) => console.error(error));
+  // Checked again every hour, not only at launch: an app left open for days
+  // never heard of a release made after it started. The server asks GitHub at
+  // most every half hour, inside the 60 an hour GitHub allows without a token.
+  window.setInterval(() => {
+    loadAppVersionInfo().catch((error) => console.error(error));
+  }, 60 * 60 * 1000);
   const results = await Promise.allSettled(loads);
   for (const result of results) {
     if (result.status === "rejected") {
@@ -3005,16 +3011,26 @@ async function _applySettings(response) {
   renderDashboard();
 }
 
-async function loadAppVersionInfo() {
-  const response = await fetch("/api/app-version");
+// The hourly check and Check for Updates… can overlap, so reads are numbered
+// and a slow one cannot replace a newer one's answer.
+let appVersionReadGeneration = 0;
+
+async function loadAppVersionInfo({ refresh = false } = {}) {
+  const generation = ++appVersionReadGeneration;
+  const response = await fetch(refresh ? "/api/app-version?refresh=true" : "/api/app-version");
   if (!response.ok) {
     throw new Error(await response.text());
   }
 
-  state.appVersion = await response.json();
+  const info = await response.json();
+  if (generation !== appVersionReadGeneration) return info;
+  state.appVersion = info;
   els.appVersionLabel.textContent = `v${state.appVersion.current_version}`;
   els.appVersionLabel.title = `Current version ${state.appVersion.current_version}`;
 
+  // An update in progress owns the button: a check landing mid-download must
+  // not hide it or replace the percentage in its tooltip.
+  if (els.openUpdateButton.classList.contains("is-updating")) return info;
   if (state.appVersion.update_available) {
     els.openUpdateButton.title = state.appVersion.latest_version
       ? `Update to ${state.appVersion.latest_version}`
@@ -3023,7 +3039,29 @@ async function loadAppVersionInfo() {
   } else {
     els.openUpdateButton.classList.add("hidden");
   }
+  return info;
 }
+
+// The Sniper menu's Check for Updates…. It skips the server's cached answer,
+// and it says what it found: a check that fails quietly reads exactly like
+// "no update". A found release is offered in a dialog, because a toast would
+// sit over the Update button it points to.
+async function checkForUpdatesNow() {
+  try {
+    const info = await loadAppVersionInfo({ refresh: true });
+    if (info.update_available) {
+      showConfirmDialog(`Sniper ${info.latest_version} is available. You have v${info.current_version}.`, performSelfUpdate, {
+        title: "Update available", confirmLabel: "Update", cancelLabel: "Later", confirmClass: "primary-action",
+      });
+    } else {
+      showToast(`Sniper v${info.current_version} is up to date.`, "success", 5000);
+    }
+  } catch (error) {
+    showToast(`Couldn't check for updates. ${error.message}`, "error", 5000);
+  }
+}
+
+window.__sniperCheckForUpdates = checkForUpdatesNow;
 
 // The steps the server reports that the button reacts to. It sends others meant
 // for logs, such as where the installer's log file is; those are ignored here, so an
@@ -9653,7 +9691,7 @@ function closeSessionContextMenu() {
 document.addEventListener("click", () => closeSessionContextMenu());
 document.addEventListener("contextmenu", () => closeSessionContextMenu());
 
-function showConfirmDialog(message, onConfirm, { title = "Confirm", confirmLabel = "Delete" } = {}) {
+function showConfirmDialog(message, onConfirm, { title = "Confirm", confirmLabel = "Delete", cancelLabel = "Cancel", confirmClass = "danger-action" } = {}) {
   compareLoadGeneration += 1;
   activeConfirmDialog?.close();
   const returnFocus = document.activeElement;
@@ -9668,8 +9706,8 @@ function showConfirmDialog(message, onConfirm, { title = "Confirm", confirmLabel
         <p id="confirm-dialog-message" style="margin:0; white-space: pre-line; color: var(--text-dim);">${escapeHtml(message)}</p>
       </div>
       <div style="display:flex; justify-content:flex-end; gap:8px; padding: 12px 20px; border-top: 1px solid var(--line);">
-        <button class="secondary-action confirm-dialog-cancel" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">Cancel</button>
-        <button class="danger-action confirm-dialog-ok" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">${escapeHtml(confirmLabel)}</button>
+        <button class="secondary-action confirm-dialog-cancel" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">${escapeHtml(cancelLabel)}</button>
+        <button class="${escapeHtml(confirmClass)} confirm-dialog-ok" type="button" style="min-height:34px; padding:0 14px; font-size:var(--font-xs);">${escapeHtml(confirmLabel)}</button>
       </div>
     </div>
   `;

@@ -3001,8 +3001,23 @@ async fn get_settings(State(state): State<Arc<AppState>>) -> Json<crate::state::
     Json(state.runtime_info().await)
 }
 
-async fn get_app_version(State(state): State<Arc<AppState>>) -> Json<crate::state::AppVersionInfo> {
-    Json(state.app_version_info().await)
+#[derive(Debug, Deserialize)]
+struct AppVersionQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
+async fn get_app_version(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AppVersionQuery>,
+) -> Response {
+    if !query.refresh {
+        return Json(state.app_version_info().await).into_response();
+    }
+    match state.check_app_version_now().await {
+        Ok(info) => Json(info).into_response(),
+        Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
+    }
 }
 
 async fn self_update(
