@@ -44,3 +44,17 @@ traffic for example.com, example.net and example.org hosts: a local script
 sent it through an isolated instance, and a local mock server answered it.
 No third-party traffic or user data was captured. The earlier images are
 retained for existing direct links.
+
+
+sniper-v0.3.2-*.jpg, and web/screenshot.png and web/screenshot-map.png
+Screenshots of the real Sniper v0.3.2 web interface, built from commit
+f5fc9e7 (the release differs from it only in a test), captured on 2026-10-23
+in Chromium at 1440x900 CSS pixels and
+device scale 2; the JPEGs are scaled to 2304x1440. The sessions hold
+synthetic traffic for example.com, example.net and example.org hosts: a local
+script sent it through an isolated instance, a local mock server answered it,
+and the template scan and Fuzzer attack shown were sent only to that mock.
+No third-party traffic or user data was captured. One change was made: on the
+Session screen the session folder's path, which named the isolated
+instance's scratch directory, was replaced with the default ~/.sniper
+location. The v0.3.1 images are retained for existing direct links.

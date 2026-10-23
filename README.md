@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="web/screenshot-map.png" width="800" alt="The Map tool on the same traffic: the clients, the origins they reached with the servers and libraries each one names, and an API origin's endpoints and bearer JWT in the inspector" />
+  <img src="web/screenshot-map.png" width="800" alt="The Map tool on the same traffic: the browser and curl clients, the shop's origins with the servers, frameworks and sign-in each one shows, and www.example.com's endpoints in the inspector" />
 </p>
 
 <p align="center">
@@ -117,6 +117,29 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 | **Themes** | 12 themes: 7 dark, 5 light |
 | **CLI** | `sniper-cli`, JSON-first automation for scripting |
 | **AI Skills** | Claude Code and Codex skill templates built on `sniper-cli` |
+
+## Screenshots
+
+All captured from Sniper v0.3.2 with synthetic example.com traffic.
+
+<table>
+  <tr>
+    <td width="50%"><a href="docs/assets/sniper-v0.3.2-session.jpg"><img src="docs/assets/sniper-v0.3.2-session.jpg" alt="The Session screen: three sessions with their size, requests and findings, and the selected session's scope, busiest hosts, pinned Replay tab, Replace rules, manual scan and findings" /></a><br /><b>Session</b> — what every session holds before you open it: size, requests, findings, scope, pins, rules and scans.</td>
+    <td width="50%"><a href="docs/assets/sniper-v0.3.2-replay.jpg"><img src="docs/assets/sniper-v0.3.2-replay.jpg" alt="Replay with a pinned tab named Cart total check: a POST /v1/cart request on the left and its 201 JSON response on the right" /></a><br /><b>Replay</b> — edit a captured request, send it again and read the answer beside it.</td>
+  </tr>
+  <tr>
+    <td width="50%"><a href="docs/assets/sniper-v0.3.2-scan.jpg"><img src="docs/assets/sniper-v0.3.2-scan.jpg" alt="Scan, Active Scan: 14,035 Nuclei templates imported, a finished manual scan of admin.example.com with two matches, and the matched /actuator/env request and response" /></a><br /><b>Scan ▸ Active Scan</b> — run Nuclei templates against targets you name; a match opens with the exchange that proved it.</td>
+    <td width="50%"><a href="docs/assets/sniper-v0.3.2-intercept.jpg"><img src="docs/assets/sniper-v0.3.2-intercept.jpg" alt="Intercept holding a POST /v1/cart request in the request queue, with its headers and JSON body open for editing and Drop and Forward buttons" /></a><br /><b>Intercept</b> — hold a request on its way out, edit it, then forward or drop it.</td>
+  </tr>
+  <tr>
+    <td width="50%"><a href="docs/assets/sniper-v0.3.2-fuzzer.jpg"><img src="docs/assets/sniper-v0.3.2-fuzzer.jpg" alt="The Fuzzer with a marked page parameter, twelve payloads, and results with 200, 400 and 500 statuses and their lengths" /></a><br /><b>Fuzzer</b> — send payload lists at marked positions and compare status, length and timing.</td>
+    <td width="50%"><a href="docs/assets/sniper-v0.3.2-findings.jpg"><img src="docs/assets/sniper-v0.3.2-findings.jpg" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" /></a><br /><b>Findings</b> — passive checks and template matches, each with its evidence highlighted.</td>
+  </tr>
+  <tr>
+    <td width="50%"><a href="docs/assets/sniper-v0.3.2-flow.jpg"><img src="docs/assets/sniper-v0.3.2-flow.jpg" alt="Map, Flow: the client, www.example.com, api.example.com and cdn.example.net as lanes, with each page load's requests drawn in time order" /></a><br /><b>Map ▸ Flow</b> — one origin's requests in time order, page load by page load.</td>
+    <td width="50%"><a href="docs/assets/sniper-v0.3.2-tools.jpg"><img src="docs/assets/sniper-v0.3.2-tools.jpg" alt="Tools with a JWT pasted in: the JWT tool opened by itself, with the decoded header and claims and alg none variants" /></a><br /><b>Tools</b> — a pasted JWT opens the JWT tool: header and claims decoded, <code>alg: none</code> variants ready.</td>
+  </tr>
+</table>
 
 ## Wired browsers
 

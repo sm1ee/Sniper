@@ -70,6 +70,11 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; fo
 .preview-image img { width: 100%; }
 .product-preview figcaption { display: flex; justify-content: space-between; gap: 18px; margin-top: 13px; color: var(--muted); font-size: .7rem; }
 .product-preview figcaption > span:first-child { font-size: .62rem; letter-spacing: .11em; font-weight: 650; }
+.tour { padding-bottom: 0; }
+.tour-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 48px 32px; margin-top: 52px; }
+.tour-grid figure { margin: 0; }
+.tour-grid figcaption { margin-top: 13px; color: var(--muted); font-size: .82rem; line-height: 1.5; }
+.tour-grid figcaption strong { display: block; margin-bottom: 3px; color: var(--ink); font-weight: 650; }
 .workflow, .ai-workflow, .docs-section { display: grid; grid-template-columns: 1fr 1.12fr; gap: 100px; }
 .section-intro h2 { margin-top: 20px; }
 .section-intro > p:not(.eyebrow) { margin-top: 24px; max-width: 355px; color: var(--muted); }
@@ -146,6 +151,7 @@ pre { max-width: 100%; overflow-x: auto; padding: 16px 18px; margin: 22px 0; bor
 }
 @media (max-width: 700px) {
   .wrap { width: calc(100% - 40px); }
+  .tour-grid { grid-template-columns: 1fr; gap: 36px; }
   .site-header { min-height: 82px; gap: 20px; }
   .site-header .wordmark { font-size: 1.3rem; }
   .site-header nav { font-size: .75rem; gap: 17px; }
