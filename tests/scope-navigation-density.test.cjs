@@ -71,8 +71,10 @@ test('Map strip keeps compact height and adds no vertical padding', () => {
 // gold text over a thin gold line: one mark, not a filled pill with a bar.
 test('every tab strip uses one medium tab size and marks the active tab with a thin line', () => {
   assert.match(css, /\n\.sub-tab \{\n  padding: 6px 12px;/);
-  const short = css.slice(css.indexOf('@media (max-height: 920px)'));
-  assert.doesNotMatch(short.slice(0, short.indexOf('\n}\n')), /\.sub-tab\s*\{/);
+  for (const height of ['920px', '760px']) {
+    const short = css.slice(css.indexOf(`@media (max-height: ${height})`));
+    assert.doesNotMatch(short.slice(0, short.indexOf('\n}\n')), /\.(?:sub|view)-tab\s*\{/, height);
+  }
   const indicator = css.match(/\n\.tab-indicator \{([^}]+)\}/)?.[1] || '';
   assert.match(indicator, /background: transparent;/);
   // The Pretty / Raw / Hex views of a message pane are tabs like any other.
