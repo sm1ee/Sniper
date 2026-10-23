@@ -69,7 +69,7 @@ test("a genuinely empty session list remains valid", async () => {
 function dashboardFixture(sessions, selectedSessionId) {
   const state = { sessions, activeSession: sessions.find(s => s.active) || null, selectedSessionId };
   const els = new Proxy({}, { get: (obj, key) => obj[key] ||= { querySelectorAll: () => [] } });
-  const context = loadFunctions(["renderDashboard"], {
+  const context = loadFunctions(["renderDashboard", "sessionFindingCount", "formatSize"], {
     state, els, document: { getElementById: () => null }, getSortedSessions: () => sessions,
     formatCappedCount: value => String(value ?? 0), retainedTransactionsCap() {}, retainedEntriesCap() {},
     formatTimestamp: () => "-", escapeHtml: value => String(value),

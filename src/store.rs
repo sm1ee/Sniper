@@ -2986,6 +2986,12 @@ impl TransactionStore {
         task.await.ok()
     }
 
+    /// What the records in memory say about the session, read in place.
+    pub async fn traffic_overview(&self) -> crate::session::TrafficOverview {
+        let inner = self.inner.read().await;
+        crate::session::TrafficOverview::from_records(inner.entries.iter())
+    }
+
     pub async fn site_map_records(&self) -> Vec<SiteMapRecord> {
         let inner = self.inner.read().await;
         inner

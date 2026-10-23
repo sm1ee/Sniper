@@ -17,7 +17,7 @@ function setup() {
   f.reloads = []; f.errors = []; f.warnings = [];
   f.els.dashboardCreateSessionName = { value: 'New stored session' };
   for (const key of ['dashboardCurrentSessionName', 'dashboardCurrentSessionStorage', 'dashboardCurrentSessionPath',
-    'dashboardSessionsBody']) f.els[key] = { querySelectorAll: () => [] };
+    'dashboardSessionsBody', 'dashboardTiles', 'dashboardDetail']) f.els[key] = { querySelectorAll: () => [] };
   Object.assign(f.context, {
     sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
     requireOkResponse: async response => { if (!response.ok) throw new Error('Synthetic session read failed'); },
@@ -33,7 +33,7 @@ function setup() {
     console: { error() {}, warn: (...args) => f.warnings.push(args) },
   });
   for (const name of ['createSession', 'activateSessionById', 'deleteSessionById', 'loadSessions',
-    'reconcileSessionsAfterActionError', 'renderDashboard', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
+    'reconcileSessionsAfterActionError', 'renderDashboard', 'sessionFindingCount', 'formatSize', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
     const source = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'));
     // Keep the fixture behavioral: baseline handlers do not yet use this helper.
     if (!source && name === 'reconcileSessionsAfterActionError') continue;

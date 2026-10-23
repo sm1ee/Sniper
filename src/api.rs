@@ -47,7 +47,7 @@ use crate::{
     runtime_state::{self, RuntimeStateSnapshot},
     scanner::{scanner_config_token, validate_scanner_config, ScannerConfigSnapshot},
     sequence::{self, SequenceDefinition},
-    session::{SessionContext, SessionSummary},
+    session::{SessionContext, SessionListing},
     state::AppState,
     store::{BodySearchRequest, BodySearchSides, ListFilters, TransactionListPage},
     target::{TargetHostNode, TargetPathNode},
@@ -3031,8 +3031,8 @@ async fn self_update(
     })
 }
 
-async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
-    Json(state.list_sessions().await)
+async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionListing>> {
+    Json(state.list_session_listings().await)
 }
 
 async fn create_session(

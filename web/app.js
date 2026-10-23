@@ -633,6 +633,8 @@ const els = {
   dashboardCurrentSessionName: document.getElementById("dashboardCurrentSessionName"),
   dashboardCurrentSessionPath: document.getElementById("dashboardCurrentSessionPath"),
   dashboardCurrentSessionStorage: document.getElementById("dashboardCurrentSessionStorage"),
+  dashboardTiles: document.getElementById("dashboardTiles"),
+  dashboardDetail: document.getElementById("dashboardDetail"),
   dashboardOpenStorageBtn: document.getElementById("dashboardOpenStorageBtn"),
   dashboardCreateSessionName: document.getElementById("dashboardCreateSessionName"),
   dashboardCreateSessionButton: document.getElementById("dashboardCreateSessionButton"),
@@ -9412,6 +9414,78 @@ function renderDashboard() {
   // nothing to name. Its counts are the row's own.
   els.dashboardCurrentSessionStorage.hidden = !current;
 
+  // What every session adds up to, and what the selected one holds: enough to
+  // know a session and what was done in it without opening it.
+  const SEVERITIES = ["critical", "high", "medium", "low", "info"];
+  const severityLine = (findings) => SEVERITIES.filter((name) => findings?.[name])
+    .map((name) => `${Number(findings[name]).toLocaleString()} ${name}`).join(" · ");
+  const more = (shown, total) => (total > shown ? ` +${total - shown}` : "");
+  const sessionIdentity = (overview) => {
+    const scope = overview?.scope || [];
+    if (scope.length) return scope.slice(0, 2).join(", ") + more(Math.min(2, scope.length), overview.scope_count || scope.length);
+    const hosts = (overview?.top_hosts || []).map((entry) => entry.host);
+    return hosts.slice(0, 2).join(", ") + more(Math.min(2, hosts.length), hosts.length);
+  };
+  const tile = (label, value, note) => `<div class="dashboard-tile"><div class="dashboard-tile-value">${value}</div>`
+    + `<div class="dashboard-tile-label">${label}</div>${note ? `<div class="dashboard-tile-note">${note}</div>` : ""}</div>`;
+  const totals = { bytes: 0, requests: 0, websockets: 0, findings: {}, latest: null };
+  for (const session of state.sessions) {
+    totals.bytes += Number(session.storage_bytes) || 0;
+    totals.requests += Number(session.request_count) || 0;
+    totals.websockets += Number(session.websocket_count) || 0;
+    for (const name of SEVERITIES) {
+      totals.findings[name] = (totals.findings[name] || 0) + (Number(session.overview?.findings?.[name]) || 0);
+    }
+    const at = session.overview?.last_captured_at;
+    if (at && (!totals.latest || new Date(at) > new Date(totals.latest.at))) totals.latest = { at, name: session.name };
+  }
+  const sessionCount = state.sessions.length;
+  const findingTotal = SEVERITIES.reduce((sum, name) => sum + totals.findings[name], 0);
+  els.dashboardTiles.innerHTML = sessionCount ? [
+    tile("On disk", formatSize(totals.bytes), `${sessionCount} session${sessionCount === 1 ? "" : "s"}`),
+    tile("Requests", totals.requests.toLocaleString(),
+      totals.websockets ? `and ${totals.websockets.toLocaleString()} WebSocket session${totals.websockets === 1 ? "" : "s"}` : ""),
+    tile("Findings", findingTotal.toLocaleString(), severityLine(totals.findings)),
+    tile("Last capture", totals.latest ? escapeHtml(formatTimestamp(totals.latest.at)) : "None yet",
+      totals.latest ? escapeHtml(totals.latest.name) : ""),
+  ].join("") : "";
+  const largest = Math.max(1, ...state.sessions.map((session) => Number(session.storage_bytes) || 0));
+
+  const overview = current?.overview || {};
+  const section = (title, body) => (body ? `<section><h4>${title}</h4>${body}</section>` : "");
+  const list = (items) => (items.length ? `<ul>${items.map((item) => `<li>${item}</li>`).join("")}</ul>` : "");
+  const scopeBody = (overview.scope || []).length
+    ? `<div class="dashboard-chips">${overview.scope.map((pattern) => `<span class="dashboard-chip">${escapeHtml(pattern)}</span>`).join("")}`
+      + `${more(overview.scope.length, overview.scope_count)}</div>`
+    : "";
+  const excludedBody = (overview.excluded_scope || []).length
+    ? `<p class="dashboard-dim">Excluded: ${escapeHtml(overview.excluded_scope.join(", "))}${more(overview.excluded_scope.length, overview.excluded_scope_count)}</p>`
+    : "";
+  const kept = [
+    overview.marked_requests ? `${Number(overview.marked_requests).toLocaleString()} marked in HTTP history` : "",
+    overview.pinned_replay_count ? `Pinned in Replay: ${escapeHtml(overview.pinned_replays.join(", "))}${more(overview.pinned_replays.length, overview.pinned_replay_count)}` : "",
+    overview.replace_rule_count ? `Replace: ${escapeHtml(overview.replace_rules.join(", "))}${more(overview.replace_rules.length, overview.replace_rule_count)}` : "",
+  ].filter(Boolean);
+  const KINDS = { "manual scan": "Manual scan", "auto scan": "Auto scan", recon: "Recon" };
+  const scans = (overview.activity || []).map((entry) => [
+    KINDS[entry.kind] || escapeHtml(entry.kind), escapeHtml(entry.target),
+    entry.matched != null ? `${Number(entry.matched).toLocaleString()} matched` : "",
+    escapeHtml(formatTimestamp(entry.started_at)),
+  ].filter(Boolean).join(" · "));
+  const findingBadges = SEVERITIES.filter((name) => overview.findings?.[name])
+    .map((name) => `<span class="dashboard-severity"><span class="severity-badge severity-${name}">${name.toUpperCase()}</span>${Number(overview.findings[name]).toLocaleString()}</span>`)
+    .join("");
+  const sections = [
+    section("Scope", scopeBody + excludedBody),
+    section("Hosts", list((overview.top_hosts || []).map((entry) => `${escapeHtml(entry.host)} <span class="dashboard-dim">${Number(entry.requests).toLocaleString()}</span>`))),
+    section("Marked and kept", list(kept)),
+    section("Scans", list(scans) + (overview.activity_count > scans.length ? `<p class="dashboard-dim">${more(scans.length, overview.activity_count).trim()} earlier</p>` : "")),
+    section("Findings", findingBadges ? `<div class="dashboard-severities">${findingBadges}</div>` : ""),
+  ].join("");
+  els.dashboardDetail.innerHTML = current
+    ? `<h3>${escapeHtml(current.name)}</h3>${sections ? `<div class="dashboard-detail-grid">${sections}</div>` : '<p class="dashboard-dim">Nothing recorded in this session yet.</p>'}`
+    : "";
+
   // Sort sessions
   const sortedSessions = getSortedSessions();
 
@@ -9434,13 +9508,13 @@ function renderDashboard() {
     ? sortedSessions
         .map((session) => `
           <tr class="${["history-row", session.id === state.selectedSessionId && "selected", session.active && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
-            <td>${escapeHtml(session.name)}</td>
+            <td><div class="session-name">${escapeHtml(session.name)}</div>${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+            <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
-            <td>${formatCappedCount(session.event_count, retainedEntriesCap())}</td>
-            <td>${session.rule_count}</td>
+            <td class="dashboard-findings${SEVERITIES.find((name) => session.overview?.findings?.[name]) ? ` severity-text-${SEVERITIES.find((name) => session.overview?.findings?.[name])}` : ""}">${sessionFindingCount(session).toLocaleString()}</td>
+            <td>${session.overview?.last_captured_at ? escapeHtml(formatTimestamp(session.overview.last_captured_at)) : "-"}</td>
             <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
-            <td>${escapeHtml(formatTimestamp(session.last_opened_at))}</td>
             <td>
               ${session.active ? "" : `<div class="session-actions">
                 <button class="secondary-action session-open-button" type="button">Open</button>
@@ -9637,18 +9711,26 @@ function moveSessionSelection(offset) {
   if (selectedRow) selectedRow.scrollIntoView({ block: "nearest" });
 }
 
+// A session's findings, all severities together.
+function sessionFindingCount(session) {
+  return Object.values(session?.overview?.findings || {}).reduce((sum, count) => sum + (Number(count) || 0), 0);
+}
+
 function getSortedSessions() {
   return [...state.sessions].sort((a, b) => {
     const key = state.sessionSortKey || "created_at";
     const dir = state.sessionSortDir || "desc";
-    let va = a[key], vb = b[key];
+    // Findings and the last capture live in the session's overview.
+    const value = (session) => key === "finding_count" ? sessionFindingCount(session)
+      : key === "last_captured_at" ? session.overview?.last_captured_at : session[key];
+    let va = value(a), vb = value(b);
     if (key === "name") {
       va = (va || "").toLowerCase();
       vb = (vb || "").toLowerCase();
       const cmp = va < vb ? -1 : va > vb ? 1 : 0;
       return dir === "asc" ? cmp : -cmp;
     }
-    if (key === "last_opened_at" || key === "created_at") {
+    if (key === "last_opened_at" || key === "created_at" || key === "last_captured_at") {
       va = va ? new Date(va).getTime() : 0;
       vb = vb ? new Date(vb).getTime() : 0;
     }

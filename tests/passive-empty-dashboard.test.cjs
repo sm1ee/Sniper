@@ -6,7 +6,7 @@ const session = (id, active = false) => ({ id, name: `Saved ${id}`, active });
 function fixture(sessions, activeSession, selectedSessionId) {
   const state = { sessions, activeSession, selectedSessionId };
   const els = new Proxy({}, { get: (object, key) => object[key] ||= { querySelectorAll: () => [] } });
-  const c = loadFunctions(["renderDashboard"], {
+  const c = loadFunctions(["renderDashboard", "sessionFindingCount", "formatSize"], {
     state, els, document: { getElementById: () => null }, getSortedSessions: () => sessions,
     formatCappedCount: value => String(value ?? 0), retainedTransactionsCap() {}, retainedEntriesCap() {},
     formatTimestamp: () => "-", escapeHtml: value => String(value),

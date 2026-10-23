@@ -445,15 +445,15 @@ test('HTTP session counts remain exact at/above the legacy global limit; non-HTT
   ];
   const state = { sessions, activeSession: sessions[0], settings: { max_transaction_entries: 250000, max_entries: 250 } };
   const els = new Proxy({}, { get: (obj, key) => obj[key] ||= { querySelectorAll: () => [] } });
-  const context = loadFunctions(['renderDashboard', 'formatCappedCount', 'retainedEntriesCap'], {
+  const context = loadFunctions(['renderDashboard', 'sessionFindingCount', 'formatSize', 'formatCappedCount', 'retainedEntriesCap'], {
     state, els, document: { getElementById: () => null }, getSortedSessions: () => sessions,
     formatTimestamp: () => '-', escapeHtml: String,
   });
   context.renderDashboard();
-  assert.match(els.dashboardSessionsBody.innerHTML, /<td>250000<\/td>\s*<td>250\+<\/td>\s*<td>250\+<\/td>/);
+  assert.match(els.dashboardSessionsBody.innerHTML, /<td>250000<\/td>\s*<td>250\+<\/td>/);
   assert.match(els.dashboardSessionsBody.innerHTML, /<td>500001<\/td>/);
   assert.doesNotMatch(els.dashboardSessionsBody.innerHTML, /250000\+|500001\+/);
-  assert.match(els.dashboardSessionsBody.innerHTML, /<td>500001<\/td>\s*<td>251\+<\/td>\s*<td>300\+<\/td>/);
+  assert.match(els.dashboardSessionsBody.innerHTML, /<td>500001<\/td>\s*<td>251\+<\/td>/);
 });
 
 test('global capture/settings information only reports body preview size, never a legacy HTTP retention limit', async () => {

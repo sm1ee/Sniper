@@ -537,37 +537,69 @@ impl AppState {
 
     pub async fn list_sessions(&self) -> Vec<SessionSummary> {
         let mut summaries = self.sessions.summaries();
-        let mut live_counts = HashMap::new();
-
-        let active = self.session().await;
-        live_counts.insert(active.id(), session_live_counts(&active).await);
-
-        let writable_contexts: Vec<_> = {
-            let contexts = self.session_contexts.lock().await;
-            contexts.values().cloned().collect()
-        };
-        for session in writable_contexts {
-            if self.sessions.contains_session(session.id()) {
-                live_counts.insert(session.id(), session_live_counts(&session).await);
-            }
-        }
-
-        let read_only_contexts: Vec<_> = {
-            let contexts = self.read_only_session_contexts.lock().await;
-            contexts.values().cloned().collect()
-        };
-        for session in read_only_contexts {
-            if self.sessions.contains_session(session.id()) {
-                live_counts.insert(session.id(), session_live_counts(&session).await);
-            }
-        }
-
+        let loaded = self.loaded_listed_sessions().await;
         for summary in &mut summaries {
-            if let Some(counts) = live_counts.get(&summary.id) {
-                apply_live_session_counts(summary, *counts);
+            if let Some(session) = loaded.get(&summary.id) {
+                apply_live_session_counts(summary, session_live_counts(session).await);
             }
         }
         summaries
+    }
+
+    /// Sessions as the Session screen lists them: a loaded session's counts
+    /// and overview come from its live state, and every size from disk.
+    pub async fn list_session_listings(&self) -> Vec<crate::session::SessionListing> {
+        let mut listings = self.sessions.listings();
+        let loaded = self.loaded_listed_sessions().await;
+        for listing in &mut listings {
+            if let Some(session) = loaded.get(&listing.summary.id) {
+                apply_live_session_counts(&mut listing.summary, session_live_counts(session).await);
+                listing.overview = session.overview().await;
+            }
+        }
+        let dirs: Vec<std::path::PathBuf> = listings
+            .iter()
+            .map(|listing| std::path::PathBuf::from(&listing.summary.storage_path))
+            .collect();
+        if let Ok(sizes) = tokio::task::spawn_blocking(move || {
+            dirs.iter()
+                .map(|dir| crate::session::directory_bytes(dir))
+                .collect::<Vec<_>>()
+        })
+        .await
+        {
+            for (listing, bytes) in listings.iter_mut().zip(sizes) {
+                listing.storage_bytes = bytes;
+            }
+        }
+        listings
+    }
+
+    /// The loaded context of each session the registry still lists. A
+    /// read-only context stands in for a writable one of the same session.
+    async fn loaded_listed_sessions(&self) -> HashMap<uuid::Uuid, Arc<SessionContext>> {
+        let active = self.session().await;
+        let mut loaded = HashMap::from([(active.id(), active)]);
+        let writable: Vec<_> = self
+            .session_contexts
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        let read_only: Vec<_> = self
+            .read_only_session_contexts
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        for session in writable.into_iter().chain(read_only) {
+            if self.sessions.contains_session(session.id()) {
+                loaded.insert(session.id(), session);
+            }
+        }
+        loaded
     }
 
     pub async fn active_session_summary(&self) -> SessionSummary {
@@ -3494,6 +3526,64 @@ mod tests {
             drop(restarted);
             std::fs::remove_dir_all(data_dir).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn listed_sessions_report_their_size_and_the_loaded_one_its_live_overview() {
+        let (data_dir, state) = rename_session_test_state();
+        let context = state.session().await;
+        let message = crate::model::MessageRecord {
+            headers: Vec::new(),
+            body_preview: String::new(),
+            body_encoding: crate::model::BodyEncoding::Utf8,
+            body_size: 0,
+            decoded_body_size: None,
+            preview_truncated: false,
+            content_type: None,
+            content_decoded: false,
+        };
+        let mut record = crate::model::TransactionRecord::http(
+            chrono::Utc::now(),
+            "GET".into(),
+            "https".into(),
+            "app.example.com".into(),
+            "/".into(),
+            Some(200),
+            1,
+            message.clone(),
+            Some(message),
+            Vec::new(),
+            None,
+            None,
+        );
+        record.color_tag = Some("red".into());
+        context.store.insert(record).await;
+        state.persist_active_session().await.unwrap();
+        // Set after the save, so only the live state holds it.
+        context
+            .runtime
+            .update(crate::runtime::RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["*.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let listed = state.list_session_listings().await;
+        let listing = listed
+            .iter()
+            .find(|listing| listing.summary.active)
+            .unwrap();
+        assert!(listing.storage_bytes > 0);
+        assert_eq!(listing.overview.top_hosts[0].host, "app.example.com");
+        assert_eq!(listing.overview.marked_requests, 1);
+        assert_eq!(listing.overview.scope, ["*.example.com"]);
+        // The saved.v1 contract fixes a summary's fields; the overview stays out.
+        let summary = serde_json::to_value(&state.list_sessions().await[0]).unwrap();
+        assert!(summary.get("overview").is_none() && summary.get("storage_bytes").is_none());
+        drop(context);
+        drop(state);
+        std::fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[tokio::test]

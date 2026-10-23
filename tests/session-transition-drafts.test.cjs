@@ -41,7 +41,7 @@ function setup({ rendered = true } = {}) {
     'resetOastUiState', 'resetScannerConfigUiState', 'resetFindingsUiState', 'clearFuzzerAttackRecord',
     'clearCompareState', 'renderHistory', 'renderEmptyDetail', 'renderWebsocketSessions', 'hideFrameDetail',
     'renderEventLog', 'renderMatchReplaceRules', 'renderTarget', 'renderFindings', 'renderFuzzer',
-    'renderSequencePanel', 'renderReplayResponseView', 'updateReplaySearchPane', 'renderDashboard',
+    'renderSequencePanel', 'renderReplayResponseView', 'updateReplaySearchPane', 'renderDashboard', 'sessionFindingCount', 'formatSize',
     'renderProxyPanels', 'refreshReplayTabLabel', 'renderReplayEmptyResponse', 'bindHexByteHandlers',
     'renderWsReplay', 'setReplaySending',
   ]) f.context[name] = () => {};

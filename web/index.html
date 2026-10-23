@@ -86,23 +86,25 @@
                 </details>
               </div>
             </header>
+            <div class="dashboard-tiles" id="dashboardTiles"></div>
             <div class="history-table-shell">
               <table class="history-table session-table" id="dashboardSessionsTable">
                 <thead>
                   <tr>
                     <th data-sort-key="name">Name</th>
+                    <th data-sort-key="storage_bytes">Size</th>
                     <th data-sort-key="request_count">Requests</th>
                     <th data-sort-key="websocket_count">WebSockets</th>
-                    <th data-sort-key="event_count">Events</th>
-                    <th data-sort-key="rule_count">Rules</th>
+                    <th data-sort-key="finding_count">Findings</th>
+                    <th data-sort-key="last_captured_at">Last capture</th>
                     <th data-sort-key="created_at">Created</th>
-                    <th data-sort-key="last_opened_at">Last opened</th>
                     <th>Action</th>
                   </tr>
                 </thead>
                 <tbody id="dashboardSessionsBody"></tbody>
               </table>
             </div>
+            <section class="dashboard-detail" id="dashboardDetail" aria-label="Selected session"></section>
           </section>
         </section>
 

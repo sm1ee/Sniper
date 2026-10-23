@@ -71,7 +71,7 @@ function fixture({ render = true } = {}) {
   };
   const clearTimeout = id => timers.delete(id);
   const context = loadFunctions([
-    "renderDashboard", "getSortedSessions", "revealSessionFolder", "requireOkResponse", "readApiErrorMessage",
+    "renderDashboard", "sessionFindingCount", "formatSize", "getSortedSessions", "revealSessionFolder", "requireOkResponse", "readApiErrorMessage",
     "onClickWithProgress", "withButtonProgress", "showSessionContextMenu", "closeSessionContextMenu",
     "activateSessionById", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "currentSessionId",
     "canReloadWorkspaceAfterSessionAction", "canLeaveSessionAfterDraftPreflight", "hasPendingWorkspaceStateSave",

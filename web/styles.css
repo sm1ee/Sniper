@@ -1060,9 +1060,11 @@ code {
   overflow: hidden;
 }
 
+/* Session reads top to bottom (totals, sessions, the selected one) and scrolls
+   as one page, rather than squeezing the table between the others. */
 .dashboard-shell {
   display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: minmax(100%, auto);
   gap: 12px;
   padding: 12px;
   overflow: auto;
@@ -1147,6 +1149,137 @@ code {
   border-radius: 6px;
   background: var(--panel-code);
   color: var(--text);
+}
+
+.dashboard-shell > .panel-card {
+  grid-template-rows: none;
+  align-content: start;
+}
+
+.dashboard-shell .history-table-shell {
+  height: auto;
+}
+
+.dashboard-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  padding: 4px 18px 14px;
+}
+
+.dashboard-tile {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-code);
+}
+
+.dashboard-tile-value {
+  color: var(--text);
+  font-size: calc(var(--font-lg) + 5px);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.dashboard-tile-label {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+}
+
+.dashboard-tile-note {
+  margin-top: 6px;
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+}
+
+.dashboard-tile > div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The selected session: what was set up and done in it. */
+.dashboard-detail {
+  margin: 14px 18px 18px;
+}
+
+.dashboard-detail h3 {
+  margin: 0 0 12px;
+  font-size: var(--font-md);
+  font-weight: 600;
+}
+
+.dashboard-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px 28px;
+}
+
+.dashboard-detail section {
+  min-width: 0;
+}
+
+.dashboard-detail h4 {
+  margin: 0 0 6px;
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.dashboard-detail ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dashboard-detail :is(li, p) {
+  color: var(--text-soft);
+  font-size: var(--font-sm);
+  overflow-wrap: anywhere;
+}
+
+.dashboard-detail p {
+  margin: 6px 0 0;
+}
+
+.dashboard-detail .dashboard-dim {
+  color: var(--text-dim);
+}
+
+.dashboard-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+}
+
+.dashboard-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--text-soft);
+  font-family: var(--mono);
+}
+
+.dashboard-severities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.dashboard-severity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 .replay-shell {
@@ -4683,7 +4816,7 @@ button.utility-button.replay-tab-add {
 
 /* The session in use carries a dot; the others offer Open and Delete where
    the pointer, the keyboard or the selection is. */
-.session-table .history-row td:first-child::before {
+.session-table .session-name::before {
   content: "";
   display: inline-block;
   width: 7px;
@@ -4693,8 +4826,51 @@ button.utility-button.replay-tab-add {
   vertical-align: middle;
 }
 
-.session-table .session-active td:first-child::before {
+.session-table .session-active .session-name::before {
   background: var(--point);
+}
+
+/* Under the name, what the session is about: its scope, or the hosts it saw. */
+.session-table .session-identity {
+  margin: 2px 0 0 15px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-table .session-size {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-table .session-size-bar {
+  flex: none;
+  width: 44px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.session-table .session-size-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--point);
+}
+
+/* A session's worst finding tints its count when it calls for attention; theme
+   tokens keep it readable on light themes, where the badge colours wash out. */
+.severity-text-critical,
+.severity-text-high {
+  color: var(--danger);
+}
+
+.severity-text-medium {
+  color: var(--warning);
 }
 
 .session-table .session-actions {
