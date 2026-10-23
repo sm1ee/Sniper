@@ -28886,11 +28886,50 @@ function changeReplayMethod(newMethod, tabId = state.activeReplayTabId) {
   const text = cv
     ? cv.getContent()
     : (isActiveTab && els.replayRequestEditor ? els.replayRequestEditor.value : tab.requestText) || "";
-  const updated = text.replace(/^[A-Z]+(\s)/i, newMethod + "$1");
-  tab.requestText = updated;
+  tab.requestText = requestTextWithMethod(text, newMethod);
   clearReplayResponseForDraftChange(tab);
   syncReplayRequestEditorForTab(tab);
   scheduleWorkspaceStateSave();
+}
+
+// GET and HEAD carry no body with a defined meaning (RFC 9110 §9.3.1). As Burp's
+// "Change request method" does, switching to one moves a form body into the
+// query and drops any other body (the editor's undo brings it back), and
+// switching from one to POST moves the query into a form body. Any other change
+// only renames the method.
+function requestTextWithMethod(text, method) {
+  const renamed = () => String(text ?? "").replace(/^[A-Z]+(\s)/i, `${method}$1`);
+  const { head, body } = splitRawHttpMessage(text);
+  const [requestLine, ...headers] = head.split("\n");
+  const line = requestLine.match(/^(\S+)(\s+)(\S+)(.*)$/);
+  if (!line) return renamed();
+  const [, current, gap, target, version] = line;
+  const content = body.replace(/[\r\n]+$/, "");
+  const bodiless = (name) => /^(GET|HEAD)$/i.test(name);
+  const otherHeaders = headers.filter((header) => !/^\s*content-(type|length)\s*:/i.test(header));
+  if (bodiless(method) && content) {
+    const type = headers.find((header) => /^\s*content-type\s*:/i.test(header)) || "";
+    // A form body can hold spaces, '#' or non-ASCII text that a request line cannot.
+    const query = /^[^:]*:\s*application\/x-www-form-urlencoded\s*(;|$)/i.test(type)
+      ? content.replace(/[^\x21-\x7e]|#/gu, (char) => Array.from(new TextEncoder().encode(char),
+        (byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`).join(""))
+      : "";
+    const nextTarget = query ? `${target}${target.includes("?") ? "&" : "?"}${query}` : target;
+    return [`${method}${gap}${nextTarget}${version}`, ...otherHeaders].join("\n");
+  }
+  const queryStart = target.indexOf("?");
+  const query = queryStart === -1 ? "" : target.slice(queryStart + 1);
+  if (/^POST$/i.test(method) && bodiless(current) && !content && query) {
+    return [
+      `${method}${gap}${target.slice(0, queryStart)}${version}`,
+      ...otherHeaders,
+      "Content-Type: application/x-www-form-urlencoded",
+      `Content-Length: ${editableRequestBodyLength(query, "utf8")}`,
+      "",
+      query,
+    ].join("\n");
+  }
+  return renamed();
 }
 
 function replayRequestToCurl(tab = getActiveReplayTab()) {
