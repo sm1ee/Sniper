@@ -28278,11 +28278,11 @@ async function loadInterceptForMenu(interceptId) {
 }
 
 function runInterceptMenuAction(action, interceptId, clipboardOwner = createRecordClipboardOwner()) {
-  const isCopyAction = action === "copy-url" || action.startsWith("copy-as-");
-  if (isCopyAction && !clipboardOwner?.()) return;
+  // The captured session owner also owns the destination of a Replay draft.
+  if (!clipboardOwner?.()) return;
   loadInterceptForMenu(interceptId)
     .then((intercept) => {
-      if (isCopyAction && !clipboardOwner()) return;
+      if (!clipboardOwner()) return;
       if (action === "send-to-replay") {
         // Deliberately no sourceTransactionId: the id belongs to the intercept
         // queue, and replay would reject a send that cites it as a capture.
@@ -28317,7 +28317,7 @@ function runInterceptMenuAction(action, interceptId, clipboardOwner = createReco
       return null;
     })
     .catch((error) => {
-      if (!isCopyAction || clipboardOwner()) handleClipboardActionError(error);
+      if (clipboardOwner()) handleClipboardActionError(error);
     });
 }
 
