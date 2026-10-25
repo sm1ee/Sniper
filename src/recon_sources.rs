@@ -1113,6 +1113,27 @@ struct Tag {
     body: Option<(usize, usize)>,
 }
 
+fn can_inherit_form_action(tag: &Tag) -> bool {
+    // Explicit owners can refer elsewhere or to no form. This static parser
+    // must not substitute the enclosing form without resolving that ownership.
+    if tag.attrs.contains_key("disabled") || tag.attrs.contains_key("form") {
+        return false;
+    }
+    let kind = tag
+        .attrs
+        .get("type")
+        .map(|value| value.to_ascii_lowercase());
+    match tag.name.as_str() {
+        "input" => matches!(kind.as_deref(), Some("submit" | "image")),
+        "button" => match kind.as_deref() {
+            Some("submit") => true,
+            Some("button" | "reset") => false,
+            _ => !tag.attrs.contains_key("command") && !tag.attrs.contains_key("commandfor"),
+        },
+        _ => false,
+    }
+}
+
 fn attributes(source: &str, cancel: Option<&AtomicBool>) -> HashMap<String, String> {
     static ATTR: OnceLock<Regex> = OnceLock::new();
     let regex = ATTR.get_or_init(|| {
@@ -1529,11 +1550,16 @@ fn extract_document_inner(
                 }
             }
         }
-        if let Some(action) = tag
-            .attrs
-            .get("formaction")
-            .and_then(|s| resolve(&document_base, s))
-        {
+        let action = match tag.attrs.get("formaction") {
+            Some(action) => resolve(&document_base, action),
+            None if tag.attrs.contains_key("formmethod") && can_inherit_form_action(&tag) => {
+                current_form
+                    .as_ref()
+                    .and_then(|(action, _, _)| action.clone())
+            }
+            None => None,
+        };
+        if let Some(action) = action {
             let verb = tag
                 .attrs
                 .get("formmethod")
@@ -2201,6 +2227,59 @@ mod tests {
             vec![
                 ("/explicit-post".into(), "POST"),
                 ("/post-override".into(), "POST")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+    }
+
+    #[test]
+    fn html_formmethod_only_overrides_inherit_the_parent_action_without_submission() {
+        let body = r#"
+            <form method="dialog" action="/dialog-submit">
+                <button formmethod="POST">Post</button>
+            </form>
+            <form method="POST" action="/post-submit">
+                <button formmethod="get">Get</button>
+            </form>
+            <form method="dialog" action="/input-submit">
+                <input type="SuBmIt" formmethod="POST">
+                <input type="image" formmethod="GET">
+            </form>
+            <form id="different" method="POST" action="/different-owner"></form>
+            <form method="dialog" action="/no-submit">
+                <button type="button" formmethod="POST">Button</button>
+                <button type="reset" formmethod="POST">Reset</button>
+                <button commandfor="menu" formmethod="POST">Command</button>
+                <button disabled formmethod="POST">Disabled</button>
+                <button form="missing" formmethod="POST">Missing owner</button>
+                <button form="different" formmethod="GET">Different owner</button>
+                <input type="text" formmethod="POST">
+                <div formmethod="POST"></div>
+            </form>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        let mut methods = found
+            .iter()
+            .map(|item| {
+                (
+                    Url::parse(&item.url).unwrap().path().to_string(),
+                    item.method.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![
+                ("/dialog-submit".into(), "POST"),
+                ("/different-owner".into(), "POST"),
+                ("/input-submit".into(), "GET"),
+                ("/input-submit".into(), "POST"),
+                ("/post-submit".into(), "GET"),
+                ("/post-submit".into(), "POST")
             ]
         );
         assert!(found

@@ -74,7 +74,7 @@ def main():
                 ).encode()
             elif self.path == "/forms":
                 content_type = "text/html"
-                body = b'''<form method="post" action="/form-fixture/save">
+                body = b'''<form id="save-form" method="post" action="/form-fixture/save">
                   <button formaction="/form-fixture/close" formmethod="DiAlOg">Close</button>
                   <button formaction="/form-fixture/invalid" formmethod="DELETE">Invalid</button>
                   <button formaction="/form-fixture/empty" formmethod="">Empty</button>
@@ -86,6 +86,15 @@ def main():
                   <button formaction="/form-fixture/dialog-close">Close</button>
                 </form><form method="post" action="javascript:void(0)">
                   <button formaction="/form-fixture/post-override">Post</button>
+                </form><form method="dialog" action="/form-fixture/dialog-submit">
+                  <button formmethod="POST">Post</button>
+                </form><form method="POST" action="/form-fixture/post-submit">
+                  <button formmethod="GET">Get</button>
+                </form><form method="dialog" action="/form-fixture/no-submit">
+                  <button type="button" formmethod="POST">Button</button>
+                  <button form="missing" formmethod="POST">Missing owner</button>
+                  <button form="save-form" formmethod="GET">Different owner</button>
+                  <input type="text" formmethod="POST">
                 </form>'''
             elif self.path == "/slow":
                 slow_started.set()
@@ -187,7 +196,10 @@ def main():
         expected_forms = sorted([("/form-fixture/save", "POST"), ("/form-fixture/invalid", "GET"),
                                  ("/form-fixture/empty", "GET"), ("/form-fixture/inherited", "POST"),
                                  ("/form-fixture/explicit-post", "POST"),
-                                 ("/form-fixture/post-override", "POST")])
+                                 ("/form-fixture/post-override", "POST"),
+                                 ("/form-fixture/dialog-submit", "POST"),
+                                 ("/form-fixture/post-submit", "GET"),
+                                 ("/form-fixture/post-submit", "POST")])
         assert forms == expected_forms, forms
         assert set(requested[offset:]) == {"/forms", "/robots.txt", "/sitemap.xml"}
         assert all(item["evidence"][0]["kind"] == "candidate" for item in form_snapshot["endpoints"]
