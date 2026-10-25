@@ -870,11 +870,13 @@ async fn crawl(
             {
                 if let Ok(mut next) = url.join(location) {
                     next.set_fragment(None);
-                    if scope.contains(&next) && redirects < 5 {
+                    let in_scope = scope.contains(&next);
+                    if in_scope && redirects < 5 {
                         if scheduled.insert(next.to_string()) {
                             queue.push_front((next, depth, redirects + 1));
                         }
                     } else {
+                        report.truncated |= in_scope && !scheduled.contains(next.as_str());
                         let warning = "A redirect was not followed because it left scope or exceeded five hops.";
                         if !report.warnings.iter().any(|item| item == warning) {
                             report.warnings.push(warning.into());
@@ -1457,6 +1459,82 @@ mod tests {
         let _ = server.await;
         // The debounced writer may still own this isolated directory; unlike a
         // real session it is left for the OS temporary-directory cleanup.
+    }
+
+    #[tokio::test]
+    async fn in_scope_redirect_hop_exhaustion_is_partial_but_scope_rejection_is_not() {
+        use axum::{routing::get, Router};
+        for exhaust_hops in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let requested = Arc::new(Mutex::new(Vec::new()));
+            let captured = requested.clone();
+            let router = Router::new().fallback(get(move |uri: axum::http::Uri| {
+                captured.lock().unwrap().push(uri.path().to_string());
+                async move {
+                    let redirect = if uri.path() == "/outside-redirect" {
+                        Some(format!("http://localhost:{}/outside", address.port()))
+                    } else {
+                        uri.path()
+                            .strip_prefix("/redirect/")
+                            .and_then(|part| part.parse::<usize>().ok())
+                            .filter(|hop| *hop < 7)
+                            .map(|hop| format!("/redirect/{}", hop + 1))
+                    };
+                    (
+                        if redirect.is_some() {
+                            StatusCode::FOUND
+                        } else {
+                            StatusCode::OK
+                        },
+                        [(axum::http::header::LOCATION, redirect.unwrap_or_default())],
+                        "",
+                    )
+                }
+            }));
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let dir =
+                std::env::temp_dir().join(format!("sniper-recon-redirect-{}", Uuid::new_v4()));
+            let (_, session) =
+                crate::session::SessionRegistry::load_or_create(&dir, 32, 32).unwrap();
+            let path = if exhaust_hops {
+                "/redirect/0"
+            } else {
+                "/outside-redirect"
+            };
+            let request: StartRecon = serde_json::from_value(serde_json::json!({
+                "session_id":session.id(),"target_url":format!("http://{address}{path}"),"sources":["crawler"]
+            })).unwrap();
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let report = crawl(
+                &session,
+                Uuid::new_v4(),
+                &request,
+                &validate(&request).unwrap(),
+                &client,
+                &AtomicBool::new(false),
+            )
+            .await;
+            assert_eq!(report.truncated, exhaust_hops);
+            assert!(report.error.is_none());
+            assert!(report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("redirect")));
+            let paths = requested.lock().unwrap();
+            if exhaust_hops {
+                assert!(paths.iter().any(|path| path == "/redirect/5"));
+                assert!(!paths.iter().any(|path| path == "/redirect/6"));
+            }
+            assert!(!paths.iter().any(|path| path == "/outside"));
+            drop(paths);
+            server.abort();
+            let _ = server.await;
+        }
     }
 
     async fn crawl_static_fixture(

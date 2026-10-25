@@ -540,6 +540,10 @@ async fn read_urlscan(
         }
         scanned += results.len();
         let more = urlscan_has_more(&data, results.len(), scanned, size);
+        if more && limit_reached(max_pages, page_index) {
+            report.truncated = true;
+            report.warn("urlscan search page limit reached");
+        }
         let mut checkpoint = Vec::new();
         let mut detail_urls = Vec::new();
         for result in results {
@@ -2505,6 +2509,77 @@ mod tests {
                 vec!["urlscan search history is limited to the past 30 days for this account"]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn urlscan_search_page_exhaustion_is_partial_while_its_detail_is_pending() {
+        use std::sync::{Arc, Mutex};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            sync::oneshot,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (waiting, detail_started) = oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            connection.read(&mut request).await.unwrap();
+            let body = json!({"has_more":true,"results":[{
+                "_id":"11111111-1111-4111-8111-111111111111",
+                "page":{"url":"https://example.com/one"},"sort":[1]
+            }]})
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            connection.write_all(response.as_bytes()).await.unwrap();
+            drop(connection);
+            let (mut connection, _) = listener.accept().await.unwrap();
+            connection.read(&mut request).await.unwrap();
+            waiting.send(()).unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), connection.read(&mut request))
+                .await
+                .unwrap();
+        });
+        let report = Arc::new(Mutex::new((0, false, Vec::new())));
+        let saved_report = report.clone();
+        let reader = tokio::spawn(async move {
+            let client = Client::builder().no_proxy().build().unwrap();
+            read_urlscan(
+                &client,
+                &base(),
+                false,
+                1,
+                0,
+                &AtomicBool::new(false),
+                |_, report| {
+                    *saved_report.lock().unwrap() =
+                        (report.requests, report.truncated, report.warnings.clone());
+                },
+                &None,
+                |_, _, _, _| Url::parse(&format!("http://{address}/search")).unwrap(),
+                |_| Some(Url::parse(&format!("http://{address}/detail")).unwrap()),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), detail_started)
+            .await
+            .unwrap()
+            .unwrap();
+        reader.abort();
+        assert!(reader.await.unwrap_err().is_cancelled());
+        fixture.await.unwrap();
+        assert_eq!(
+            *report.lock().unwrap(),
+            (
+                2,
+                true,
+                vec!["urlscan search page limit reached".to_string()]
+            )
+        );
     }
 
     #[tokio::test]

@@ -33,6 +33,8 @@ Select an endpoint and use **Copy URL** to copy its normalized URL, preserving q
 
 urlscan retains the in-scope summaries from each completed search page before requesting its detail documents. If an explicit result budget fills on those summaries, they take priority and no further detail request is sent; the source is marked partial.
 
+Redirect chains stop after five hops; an unvisited in-scope destination left behind by that limit marks the crawl partial. A known urlscan search-page limit is reported while that page's detail requests are still pending, not only after they finish.
+
 Without budgets nothing caps a job, so a broad or growing target can use a lot of memory and disk. Set a budget or use Stop.
 
 ## What each source collects
@@ -158,6 +160,7 @@ cargo test --locked --release
 node --check web/recon.js
 node --test tests/recon_ui.test.cjs
 python3 tests/recon_discovery_smoke.py target/release
+python3 tests/recon_partial_state_smoke.py target/release
 python3 tests/recon_cli_smoke.py target/release
 ```
 
