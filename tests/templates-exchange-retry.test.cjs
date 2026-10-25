@@ -14,7 +14,7 @@ async function select(f, index = 0) {
 }
 async function setup(intercept, status = 'completed', twoRows = false) {
   const f = await fixture(), job = scan('retained-job', 'session-a', status);
-  job.sent = 1; job.matched = 1; job.recent = twoRows ? [row(), row('record-b')] : [row()];
+  job.sent = 1; job.matched = 1; job.recent = twoRows ? [row('record-b'), row()] : [row()]; // newest request appears first
   f.jobs.set('session-a', [job]); f.intercept(intercept);
   await f.controller.syncSession();
   f.get('ScanJobs').dispatch('click', { target: inside(f.get('ScanJobs').children[0]) }); await settle();
@@ -94,6 +94,8 @@ for (const boundary of ['row', 'job', 'session', 'hide', 'dispose']) for (const 
       if (count === 2) return outcome === 'error-body' ? { ok: false, status: 503, text: () => body.promise } : late.promise;
       return captured('record-a', '/reentered');
     }, 'completed', true);
+    assert.equal(count, 1, 'the initial selected transaction read must have failed');
+    assert.match(text(f), /Synthetic exchange failure/);
     await select(f); assert.equal(count, 2, 'the delayed response belongs to the retry');
     if (boundary === 'row') await select(f, 1);
     if (boundary === 'job') {
