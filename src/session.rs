@@ -638,6 +638,8 @@ pub struct SessionContext {
     #[cfg(test)]
     snapshot_gate: std::sync::Mutex<Option<SnapshotTestGate>>,
     #[cfg(test)]
+    state_persist_gate: std::sync::Mutex<Option<SnapshotTestGate>>,
+    #[cfg(test)]
     snapshot_capture_gate: std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
@@ -809,6 +811,8 @@ impl SessionContext {
             workspace_commit_gate: std::sync::Mutex::new(None),
             #[cfg(test)]
             snapshot_gate: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            state_persist_gate: std::sync::Mutex::new(None),
             #[cfg(test)]
             snapshot_capture_gate: std::sync::Mutex::new(None),
         }
@@ -1316,6 +1320,20 @@ impl SessionContext {
     }
 
     #[cfg(test)]
+    fn pause_next_state_write(&self) -> (oneshot::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, ready) = oneshot::channel();
+        let (resume, release) = mpsc::channel();
+        *self.state_persist_gate.lock().unwrap() = Some(SnapshotTestGate {
+            phase: SnapshotTestPhase::Prepared,
+            gate: WorkspaceCommitGate {
+                entered,
+                resume: release,
+            },
+        });
+        (ready, resume)
+    }
+
+    #[cfg(test)]
     pub(crate) fn pause_next_snapshot(
         &self,
         phase: SnapshotTestPhase,
@@ -1395,10 +1413,14 @@ impl SessionContext {
             .build_state_snapshot(self.workspace.snapshot().await)
             .await;
         let storage_dir = self.storage_dir.clone();
+        #[cfg(test)]
+        let mut state_gate = self.state_persist_gate.lock().unwrap().take();
         // Recon inventories can be several MiB; keep fsync and serialization off
         // the async runtime, while retaining the permit through publication.
         tokio::task::spawn_blocking(move || {
             let _persist_guard = persist_guard;
+            #[cfg(test)]
+            wait_snapshot_gate(&mut state_gate, SnapshotTestPhase::Prepared);
             ensure_existing_private_session_dir(&storage_dir)?;
             write_json(&state_path(&storage_dir), &state)
         })
@@ -5271,6 +5293,105 @@ mod tests {
         },
         ws_replay::WsReplayFrame,
     };
+
+    #[tokio::test]
+    async fn scheduled_state_writes_stay_bounded_behind_a_blocked_writer() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        let references = std::sync::Arc::strong_count(&session);
+        let writer = session.persist_lock.clone().lock_owned().await;
+        let mut pending_references = Vec::new();
+        for step in 0..4 {
+            session
+                .runtime
+                .update(RuntimeSettingsUpdate {
+                    scope_patterns: Some(vec![format!("step-{step}.example.com")]),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            session.schedule_state_persist();
+            // The writer lock is the barrier; this only advances the existing
+            // debounce, not a disk-speed or scheduler-throughput assertion.
+            tokio::time::sleep(
+                super::STATE_PERSIST_DEBOUNCE + std::time::Duration::from_millis(50),
+            )
+            .await;
+            pending_references.push(std::sync::Arc::strong_count(&session) - references);
+        }
+        drop(writer);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let state = std::fs::read(super::state_path(session.storage_dir()))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                if state.is_some_and(|state| {
+                    state["runtime"]["scope_patterns"] == serde_json::json!(["step-3.example.com"])
+                }) && std::sync::Arc::strong_count(&session) == references
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the latest state did not persist after releasing the writer");
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            pending_references.iter().all(|count| *count <= 2),
+            "at most one writer and one coalesced pending task, not an accumulating queue: {pending_references:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_state_write_keeps_changes_after_its_snapshot_was_captured() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        let references = std::sync::Arc::strong_count(&session);
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["before.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (entered, resume) = session.pause_next_state_write();
+        session.schedule_state_persist();
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+            .await
+            .expect("the state-only writer did not reach its capture barrier")
+            .unwrap();
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["late.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session.schedule_state_persist();
+        resume.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let state = std::fs::read(super::state_path(session.storage_dir()))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                if state.is_some_and(|state| {
+                    state["runtime"]["scope_patterns"] == serde_json::json!(["late.example.com"])
+                }) && std::sync::Arc::strong_count(&session) == references
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a state change during the prior write was not checkpointed");
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn peer_capture_eligibility_matches_status_after_runtime_and_gate_changes() {
