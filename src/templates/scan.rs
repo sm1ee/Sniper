@@ -1464,6 +1464,9 @@ fn remember_cookies(
 impl Run {
     fn update(&self, change: impl FnOnce(&mut ScanJob)) {
         self.session.template_scans.update(self.job, change);
+        // Unmatched requests may never enter HTTP history, but their
+        // completed progress still needs the coalesced state checkpoint.
+        self.session.schedule_state_persist();
     }
 
     /// Whether a request may go to a host: for the auto scan, one in Scope or

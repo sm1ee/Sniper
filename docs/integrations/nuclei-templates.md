@@ -190,6 +190,10 @@ tagged `dos` are never sent.
   template, matcher and endpoint. **Rescan** keeps them.
 - The session keeps at most ten scans, each with up to 1,000 results, its
   counts and its warnings. Auto scan jobs give way first.
+- Completed progress is saved through debounced state checkpoints, even with
+  matched-only history. After a crash, an interrupted job retains the latest
+  written checkpoint and never resumes sending automatically; work within
+  the debounce or pending disk-write window can still be lost.
 
 ### Auto scan
 
