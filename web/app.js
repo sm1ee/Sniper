@@ -16709,9 +16709,9 @@ function renderFuzzerSetup() {
   const errors = (model.errors || []).filter((message) => !message.startsWith("Mark at least one position") && message !== "Fuzzer needs at least one payload.");
   const running = state.fuzzerAttackRecord?.running ? state.fuzzerAttackRecord : null;
   // A start that failed says so here, beside Start, until the draft changes.
-  const failed = !busy && state.fuzzerNoticeError && state.fuzzerNotice ? state.fuzzerNotice : "";
-  notice.textContent = busy ? (running ? `Sending… ${running.results.length} of ${running.planned || model.requestCount}` : "Starting…")
-    : failed || errors[0] || (!model.markerCount ? "Select a value to replace." : !model.payloadCount ? "Add payloads." : "");
+  const failed = state.fuzzerNoticeError && state.fuzzerNotice ? state.fuzzerNotice : "";
+  notice.textContent = failed || (busy ? (running ? `Sending… ${running.results.length} of ${running.planned || model.requestCount}` : "Starting…")
+    : errors[0] || (!model.markerCount ? "Select a value to replace." : !model.payloadCount ? "Add payloads." : ""));
   notice.classList?.toggle("fuzzer-notice-error", !!failed || (!busy && !!errors[0]));
   if (!notice.textContent && authorityMayChange) {
     notice.textContent = "Request authority or framing may change. Check Preview.";
@@ -17457,17 +17457,46 @@ const FUZZER_POLL_MS = 700;
 // Reads a running attack until it ends, showing each read in place so the
 // selected result stays selected. Null when `owns` says the view moved on.
 async function followFuzzerAttack(recordId, sessionId, owns) {
+  let readErrorNotice = "";
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, FUZZER_POLL_MS));
     if (!owns()) return null;
-    const response = await fetch(sessionQueryPath(`/api/fuzzer/attacks/${encodeURIComponent(recordId)}`, sessionId));
-    if (!owns()) return null;
-    await requireOkResponse(response, "Could not read the running attack.");
-    const record = normalizeFuzzerAttackRecord(await response.json());
-    if (!owns()) return null;
-    if (!record?.running) return record;
-    if (state.fuzzerAttackRecord?.id === record.id) state.fuzzerAttackRecord = record;
-    renderFuzzer();
+    try {
+      const response = await fetch(sessionQueryPath(`/api/fuzzer/attacks/${encodeURIComponent(recordId)}`, sessionId));
+      if (!owns()) return null;
+      if (response.status === 404) {
+        if (state.fuzzerAttackRecord?.id === recordId) {
+          state.fuzzerAttackRecord = { ...state.fuzzerAttackRecord, running: false, status: "unavailable" };
+          state.fuzzerNotice = "Attack is no longer available. Last received results are shown.";
+          state.fuzzerNoticeError = true;
+        }
+        if (state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
+        renderFuzzer();
+        return null;
+      }
+      await requireOkResponse(response, "Could not read the running attack.");
+      const record = normalizeFuzzerAttackRecord(await response.json());
+      if (!owns()) return null;
+      if (!record || record.id !== recordId) throw new Error("The running-attack response did not match this run.");
+      if (readErrorNotice && state.fuzzerNotice === readErrorNotice) {
+        state.fuzzerNotice = "";
+        state.fuzzerNoticeError = false;
+      }
+      readErrorNotice = "";
+      if (!record.running) return record;
+      if (state.fuzzerAttackRecord?.id === record.id) state.fuzzerAttackRecord = record;
+      renderFuzzer();
+    } catch (error) {
+      if (!owns()) return null;
+      // A read failure does not stop the server's attack. Keep its last rows
+      // and Stop control while polling again, rather than clearing the run.
+      if (state.fuzzerAttackRecord?.id === recordId) {
+        readErrorNotice = `${error?.message || "Could not read the running attack."} Retrying…`;
+        state.fuzzerNotice = readErrorNotice;
+        state.fuzzerNoticeError = true;
+        renderFuzzer();
+      }
+    }
   }
 }
 
