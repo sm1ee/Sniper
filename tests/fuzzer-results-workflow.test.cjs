@@ -602,8 +602,8 @@ for (const [label, payloads, indexes, expected] of [
 ]) test(`Reuse explicitly confirms a safe partial Sniper subset: ${label}`, async () => {
   const f = fixture(); await prepareReuse(f, sniperSavedRun(payloads, indexes));
   assert.equal(f.confirmations.length, 1);
-  assert.match(f.confirmations[0].message, /Only 2 of 3 original payload slots are available/);
-  assert.match(f.confirmations[0].message, /missing payloads will not be restored/);
+  assert.match(f.confirmations[0].message, /Only 2 of 3 original payload slots remain/);
+  assert.match(f.confirmations[0].message, /Missing payloads will not be restored/);
   f.confirmations[0].confirm();
   assert.deepEqual(reusedPayloads(f), expected);
   assert.equal(f.requests.length, 1);
@@ -619,6 +619,8 @@ const invalidSniperMetadata = [
   ['string marker count', saved => saved.marker_count = '2'],
   ['zero marker count', saved => saved.marker_count = 0],
   ['fractional marker count', saved => saved.marker_count = 1.5],
+  ['oversized marker count', saved => saved.marker_count = 129],
+  ['plan exceeds existing request cap', saved => { saved.payload_count = 5000; saved.marker_count = 11; }],
   ['absent index', saved => delete saved.results[0].index],
   ['string index', saved => saved.results[0].index = '0'],
   ['negative index', saved => saved.results[0].index = -1],
@@ -661,4 +663,13 @@ for (const boundary of ['draft', 'picker', 'session']) test(`partial-subset conf
   if (boundary === 'picker') f.pick('other-run');
   if (boundary === 'session') { f.resetSession('session-b'); f.resetSession('session-a'); }
   const before = draft(f.state); f.confirmations[0].confirm(); assert.equal(draft(f.state), before);
+});
+
+
+test('legacy Battering ram Reuse still accepts missing slot metadata and literal duplicates', async () => {
+  const f = fixture(), saved = run('legacy-run', [{ payload: 'same' }, { payload: 'same' }, { payload: '' }]);
+  delete saved.payload_count; delete saved.marker_count; delete saved.attack_type;
+  await prepareReuse(f, saved); assert.equal(f.confirmations.length, 1);
+  assert.doesNotMatch(f.confirmations[0].message, /original payload slots remain/);
+  f.confirmations[0].confirm(); assert.deepEqual(reusedPayloads(f), ['same', 'same', '']);
 });
