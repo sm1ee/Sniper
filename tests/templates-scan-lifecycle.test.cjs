@@ -136,3 +136,26 @@ test('reopening Scan reloads a selected exchange whose earlier read was invalida
   assert.doesNotMatch(detail, /Loading|stale/);
   f.controller.dispose();
 });
+
+test('a start response does not replace a scan the operator chose while it was pending', async () => {
+  const f = await fixture(), pending = deferred();
+  const chosen = scan('chosen-job', 'session-a', 'completed'); f.jobs.set('session-a', [chosen]);
+  await f.controller.syncSession();
+  f.intercept((request) => request.url === '/api/templates/scans' && !request.body.preview ? pending.promise : undefined);
+  f.get('ScanStart').dispatch('click'); await settle();
+  f.get('ScanJobs').dispatch('click', { target: inside(f.get('ScanJobs').children[0]) }); await settle();
+  pending.resolve(response(scan('just-started'))); await settle();
+  assert.match(f.get('ResultsTitle').textContent, /chosen-job/);
+  assert.doesNotMatch(f.get('ResultsTitle').textContent, /just-started/);
+  f.controller.dispose();
+});
+
+test('a start response respects an explicit return to the template list', async () => {
+  const f = await fixture(), pending = deferred();
+  f.intercept((request) => request.url === '/api/templates/scans' && !request.body.preview ? pending.promise : undefined);
+  f.get('ScanStart').dispatch('click'); await settle();
+  f.get('Views').dispatch('click', { target: inside({ dataset: { templatesView: 'templates' } }) });
+  pending.resolve(response(scan('just-started'))); await settle();
+  assert.equal(f.get('ResultsTable').classList.contains('hidden'), true);
+  f.controller.dispose();
+});

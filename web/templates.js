@@ -384,6 +384,7 @@
     let listRequest = 0;
     // The list of templates, or the open scan's requests.
     let view = "templates";
+    let viewRequest = 0;
     // The box ticked last, where a Shift-click range starts.
     let rangeAnchor = null;
 
@@ -851,6 +852,7 @@
       els.ResultsRows.replaceChildren(...rows);
     }
     function showResults(job) {
+      ++viewRequest;
       if (job && job.id !== openJob?.id) {
         openResult = null;
         exchange = null;
@@ -1250,12 +1252,13 @@
     on(els.EnableShown, "click", () => setMany(bulkRequest(filters(), true), bulkRequest(filters(), true)));
     on(els.DisableShown, "click", () => setMany(bulkRequest(filters(), false), bulkRequest(filters(), false)));
     on(els.ScanStart, "click", () => scanAct(async (_owner, current) => {
+      const watching = viewRequest;
       const job = await json(await fetcher("/api/templates/scans", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(startBody()),
       }), "Could not start the scan");
       // A response for a session that was left must not open here.
       if (!current()) return;
-      showResults(job);
+      if (watching === viewRequest) showResults(job);
       scanNotice("");
     }));
     for (const control of [els.ScanTargets, els.ScanRate, els.ScanConcurrency, els.ScanMaxRequests]) on(control, "input", schedulePlan);
@@ -1289,6 +1292,7 @@
         showResults(openJob || scanJobs[0] || null);
         void refreshScans();
       } else {
+        ++viewRequest;
         view = "templates";
         renderStatus();
         renderList();
