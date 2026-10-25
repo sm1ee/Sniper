@@ -751,10 +751,25 @@
     }
     function clearScanTimer() { if (scanTimer !== null) unschedule(scanTimer); scanTimer = null; }
 
+    function runningManualScan() {
+      return scanJobs.some((job) => job.status === "running" && job.auto !== true);
+    }
+    function canStartScan() {
+      return scansLoaded && !scanBusy && !!status?.library && !runningManualScan();
+    }
+    function validScanSummary(job) {
+      return !!job && typeof job.id === "string" && job.id.trim().length > 0
+        && ["running", "completed", "cancelled", "interrupted"].includes(job.status)
+        && (job.auto === undefined || typeof job.auto === "boolean")
+        && (job.targets === undefined || (Array.isArray(job.targets) && job.targets.every((value) => typeof value === "string")))
+        && (job.warnings === undefined || (Array.isArray(job.warnings) && job.warnings.every((value) => typeof value === "string")));
+    }
     function renderScan() {
-      const running = scanJobs.some((job) => job.status === "running");
+      // The server pauses an auto job for a manual scan; only another
+      // manual job prevents this explicit Start.
+      const running = runningManualScan();
       // The click is the consent; the plan above it says what it sends.
-      els.ScanStart.disabled = scanBusy || running || !scansLoaded || !status?.library;
+      els.ScanStart.disabled = !canStartScan();
       els.ScanStart.textContent = running ? "A scan is running" : "Start scan";
       const nodes = [];
       for (const job of scanJobs) {
@@ -1010,7 +1025,7 @@
         const query = `session_id=${encodeURIComponent(sessionId)}`;
         const listed = await json(await fetcher(`/api/templates/scans?${query}`), "Could not list the scans");
         if (!current()) return;
-        if (listed?.session_id !== sessionId || !Array.isArray(listed.jobs)) {
+        if (listed?.session_id !== sessionId || !Array.isArray(listed.jobs) || !listed.jobs.every(validScanSummary)) {
           throw new Error("Could not read the scans for this session.");
         }
         scanJobs = listed.jobs;
@@ -1283,7 +1298,7 @@
     on(els.DisableShown, "click", () => setMany(bulkRequest(filters(), false), bulkRequest(filters(), false)));
     on(els.ScanStart, "click", () => {
       syncScanSession();
-      if (!scansLoaded || scanBusy || scanJobs.some((job) => job.status === "running")) return;
+      if (!canStartScan()) return;
       return scanAct(async (_owner, current) => {
         const watching = viewRequest;
         const job = await json(await fetcher("/api/templates/scans", {
