@@ -249,6 +249,8 @@ struct RunningScan {
 pub struct TemplateScanStore {
     snapshot: Mutex<TemplateScanSnapshot>,
     running: Mutex<Option<RunningScan>>,
+    #[cfg(test)]
+    stores_started: AtomicUsize,
     /// Held while the auto scan starts its next origin, so two starts do not
     /// race for the one slot.
     pump: tokio::sync::Mutex<()>,
@@ -266,6 +268,8 @@ impl TemplateScanStore {
         Self {
             snapshot: Mutex::new(snapshot),
             running: Mutex::new(None),
+            #[cfg(test)]
+            stores_started: AtomicUsize::new(0),
             pump: tokio::sync::Mutex::new(()),
         }
     }
@@ -2243,6 +2247,11 @@ impl Run {
     /// Puts an exchange in history, noted with its template and job and with
     /// what else is said of it.
     async fn store(&self, template_id: &str, mut record: TransactionRecord, also: Option<String>) {
+        #[cfg(test)]
+        self.session
+            .template_scans
+            .stores_started
+            .fetch_add(1, Ordering::SeqCst);
         record
             .notes
             .push(format!("Template {template_id}, job {}.", self.job));
@@ -3382,17 +3391,7 @@ mod tests {
             .await;
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if session
-                    .template_scans
-                    .snapshot()
-                    .jobs
-                    .iter()
-                    .find(|job| job.id == id)
-                    .unwrap()
-                    .recent
-                    .iter()
-                    .any(|entry| entry.matched)
-                {
+                if session.template_scans.stores_started.load(Ordering::SeqCst) > 0 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -3891,6 +3890,146 @@ mod tests {
             (1, 0, 1)
         );
         assert!(interrupted.recent[0].url.ends_with("/first"));
+    }
+
+    async fn checkpoint_while_match_storage_waits(oast: bool) {
+        let (address, log, server) = site(1, false).await;
+        let state = scan_state_with("matched-checkpoint", &[], OAST_TEMPLATES).await;
+        let session = state.session().await;
+        if oast {
+            session
+                .oast
+                .pretend_interactsh("https://oast.example.com", &"c".repeat(20))
+                .await;
+        }
+        let store = session.store.owned_persistence_mutation_guard().await;
+        let started = start(
+            State(Arc::clone(&state)),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [format!("http://{address}")],
+                    "ids": [if oast { "example-oast-hit" } else { "example-plain" }],
+                    "history": "matched", "acknowledged": true, "rate": 50,
+                }),
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        if oast {
+            let correlation = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(value) = log.lock().unwrap().iter().find_map(|seen| {
+                        seen.header
+                            .strip_prefix("http://")
+                            .and_then(|rest| rest.split('.').next())
+                            .map(str::to_string)
+                    }) {
+                        break value;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the local OAST request did not arrive");
+            session
+                .oast
+                .push(OastCallback {
+                    id: Uuid::new_v4(),
+                    received_at: Utc::now(),
+                    protocol: "http".into(),
+                    remote_addr: "192.0.2.10".into(),
+                    raw_data: "GET /x HTTP/1.1\r\n\r\n".into(),
+                    correlation_id: correlation,
+                })
+                .await;
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while session.template_scans.stores_started.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the decided match did not reach storage");
+        assert_eq!(session.store.len().await, 0);
+        // Require a checkpoint captured after the match entered storage,
+        // not the earlier sent counter before its matcher was evaluated.
+        session
+            .template_scans
+            .update(id, |job| job.warn("storage checkpoint boundary".into()));
+        session.schedule_state_persist();
+        let file = session.storage_dir().join("state.json");
+        let before_storage = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let saved = std::fs::read(&file)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|value| {
+                        serde_json::from_value::<TemplateScanSnapshot>(
+                            value.get("template_scans")?.clone(),
+                        )
+                        .ok()
+                    });
+                if let Some(job) = saved.and_then(|snapshot| {
+                    snapshot.jobs.into_iter().find(|job| {
+                        job.id == id
+                            && job
+                                .warnings
+                                .iter()
+                                .any(|warning| warning == "storage checkpoint boundary")
+                    })
+                }) {
+                    break job;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the checkpoint did not pass the storage boundary");
+        drop(store);
+        wait_for("the stored matched log", || {
+            session.template_scans.snapshot().jobs.iter().any(|job| {
+                job.id == id
+                    && job.matched == 1
+                    && job
+                        .recent
+                        .iter()
+                        .any(|entry| entry.matched && entry.record_id.is_some())
+            })
+        })
+        .await;
+        session.template_scans.stop(Some(id)).await;
+        server.abort();
+        let saved = session.template_scans.snapshot();
+        let job = saved.jobs.iter().find(|job| job.id == id).unwrap();
+        assert_eq!(job.results.len(), 1);
+        let record = job.results[0].record_id;
+        assert!(session.store.get(record).await.is_some());
+        assert!(job
+            .recent
+            .iter()
+            .any(|entry| entry.record_id == Some(record)));
+        assert_eq!(before_storage.sent, 1);
+        assert!(before_storage.results.is_empty());
+        assert!(
+            before_storage
+                .recent
+                .iter()
+                .all(|entry| entry.record_id.is_none()),
+            "a checkpoint published an exchange reference before its transaction was stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_matched_only_checkpoint_waits_for_its_exchange_to_be_stored() {
+        checkpoint_while_match_storage_waits(false).await;
+    }
+
+    #[tokio::test]
+    async fn an_oast_checkpoint_waits_for_its_exchange_to_be_stored() {
+        checkpoint_while_match_storage_waits(true).await;
     }
 
     #[tokio::test]
