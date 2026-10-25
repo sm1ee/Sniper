@@ -296,6 +296,13 @@ that row in Replay. **Copy OpenAPI JSON** and **Open in Swagger Editor** export
 the document. At most 500 operations are listed; `info.description` says what was
 left out.
 
+An operation has `x-sniper-parameter-cap-truncated: true` when a contributing
+method/path-template tally dropped parameter entries at its 200-entry cap
+(each entry is a location and name). The flag survives merged path variants,
+even if another variant supplies a dropped name; it is not a count of distinct
+missing fields. Its absence does not mean complete coverage: parameter sampling
+still reads each variant's newest 20 rows within the existing body-read bounds.
+
 ```bash
 sniper-cli scope service-map openapi --session-id <active-session-uuid> --origin https://api.example.com > api.json
 ```

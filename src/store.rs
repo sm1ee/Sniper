@@ -2977,7 +2977,9 @@ impl TransactionStore {
                         );
                     }
                     operation.json_types = tally.json_types();
-                    operation.parameters = tally.finish().0;
+                    let (parameters, omitted_parameters) = tally.finish();
+                    operation.parameters = parameters;
+                    operation.parameter_cap_truncated = omitted_parameters > 0;
                     (key, operation)
                 })
                 .collect();
