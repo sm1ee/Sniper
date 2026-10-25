@@ -1479,6 +1479,26 @@ impl Run {
         }
     }
 
+    async fn may_send_hop(&self, authority: &str, target_index: usize, redirect: bool) -> bool {
+        if self.may_send(authority).await {
+            return true;
+        }
+        if redirect {
+            self.update(|job| job.redirects_not_followed += 1);
+        } else if !self.skipped[target_index].swap(true, Ordering::Relaxed) {
+            self.update(|job| {
+                job.blocked += 1;
+                job.skipped_targets
+                    .push(self.targets[target_index].label.clone());
+                job.warn(format!(
+                    "{} left Scope; its remaining requests were not sent.",
+                    self.targets[target_index].label
+                ));
+            });
+        }
+        false
+    }
+
     fn warn(&self, warning: String) {
         self.update(|job| job.warn(warning));
     }
@@ -1731,21 +1751,11 @@ impl Run {
             .timeout
             .unwrap_or(crate::proxy::TEMPLATE_SCAN_REQUEST_TIMEOUT);
         loop {
-            if hops.is_empty() {
-                // Scope may have narrowed since the scan started.
-                if !self.may_send(&authority).await {
-                    if !self.skipped[target_index].swap(true, Ordering::Relaxed) {
-                        self.update(|job| {
-                            job.blocked += 1;
-                            job.skipped_targets.push(target.label.clone());
-                            job.warn(format!(
-                                "{} left Scope; its remaining requests were not sent.",
-                                target.label
-                            ));
-                        });
-                    }
-                    break;
-                }
+            if !self
+                .may_send_hop(&authority, target_index, !hops.is_empty())
+                .await
+            {
+                break;
             }
             // A block that turns cookies off neither sends nor keeps them,
             // though earlier blocks filled the run's jar.
@@ -1766,6 +1776,14 @@ impl Run {
             tokio::select! {
                 _ = self.pace() => {}
                 _ = cancel.wait_for(|stop| *stop) => break,
+            }
+            // Scope can narrow while this request waits for its rate slot,
+            // including a redirect whose destination was allowed earlier.
+            if !self
+                .may_send_hop(&authority, target_index, !hops.is_empty())
+                .await
+            {
+                break;
             }
             let started = std::time::Instant::now();
             let send = tokio::time::timeout(
@@ -3446,6 +3464,86 @@ mod tests {
         }
         server.abort();
         assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_auto_scan_rechecks_scope_after_waiting_for_its_rate_slot() {
+        let (address, log, server) = site(1, false).await;
+        let state = scan_state("paced-scope", &["127.0.0.1"]).await;
+        let session = state.session().await;
+        let (metas, _) = state
+            .templates
+            .active_selection(&["example-config".into()], None);
+        let template = Arc::new(state.templates.compile_active(&metas[0]).unwrap());
+        let target = parse_target(&format!("http://{address}")).unwrap();
+        let job = Uuid::new_v4();
+        session
+            .template_scans
+            .snapshot
+            .lock()
+            .unwrap()
+            .jobs
+            .push(ScanJob {
+                id: job,
+                status: "running".into(),
+                ..ScanJob::default()
+            });
+        let run = Arc::new(Run {
+            state: Arc::clone(&state),
+            session: Arc::clone(&session),
+            job,
+            library: String::new(),
+            oast: None,
+            templates: vec![template],
+            targets: vec![target],
+            extra_hosts: Some(Vec::new()),
+            keep_all: true,
+            client: crate::proxy::build_template_scan_client(false, &Default::default()).unwrap(),
+            apply_match_replace: false,
+            max_requests: 10,
+            concurrency: 1,
+            gap: Duration::from_millis(1),
+            next_slot: tokio::sync::Mutex::new(Instant::now()),
+            sent: AtomicUsize::new(0),
+            limit_reached: AtomicBool::new(false),
+            failures: vec![AtomicUsize::new(0)],
+            skipped: vec![AtomicBool::new(false)],
+        });
+        // Hold the rate limiter until the request has passed its first
+        // scope check and reserved a budget slot. No wall-clock race.
+        let slot = run.next_slot.lock().await;
+        let (_cancel, cancelled) = watch::channel(false);
+        let worker = Arc::clone(&run);
+        let task = tokio::spawn(async move { worker.template_on_target(0, 0, cancelled).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while run.sent.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the request did not reach its rate slot");
+        session
+            .runtime
+            .update(crate::runtime::RuntimeSettingsUpdate {
+                excluded_scope_patterns: Some(vec!["127.0.0.1".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        drop(slot);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the scoped-out request did not finish")
+            .unwrap();
+        server.abort();
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "a host excluded while pacing must receive no request"
+        );
+        assert_eq!(session.store.len().await, 0);
+        let saved = session.template_scans.snapshot();
+        assert_eq!(saved.jobs[0].sent, 0);
+        assert_eq!(saved.jobs[0].blocked, 1);
     }
 
     #[tokio::test]
