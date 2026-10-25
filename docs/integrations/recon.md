@@ -57,6 +57,8 @@ Other extracted URL attributes remain candidates with their tag and attribute pr
 
 **Scope → Site map** includes the active session's Recon inventory, read-only. Rows mark captured and discovered evidence and keep the Recon source and evidence kind. A row that was also captured keeps its HTTP status and capture metrics, and `request_count` counts captured traffic only. Discovered endpoints do not become proxy transactions, so a Recon-only row has no request to open or replay. The inventory is saved with its session and stays in the map after a restart.
 
+Refreshes do not replace a newer accepted runtime/site-map result. Unsaved scope edits owned by the current session are kept when refreshing or returning to Scope; **Save** still applies them explicitly.
+
 ## Local API
 
 - `GET /api/recon?session_id=<UUID>` returns the session ID, jobs and inventory.

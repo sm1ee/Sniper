@@ -5623,18 +5623,28 @@ async function postRuntimeSettings(path, body) {
 
 async function loadRuntimeSettings() {
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
   const writes = state._runtimeWrites || 0;
-  const response = await fetch(sessionQueryPath("/api/runtime", sessionId));
-  await requireOkResponse(response, "Failed to load runtime settings.");
-  const runtime = await response.json();
-  if (sessionId !== currentSessionId() || writes !== (state._runtimeWrites || 0)) {
-    return;
+  const readVersion = state._runtimeReadVersion = (state._runtimeReadVersion || 0) + 1;
+  const ownsRead = () => sessionId === currentSessionId()
+    && workspaceGeneration === workspaceStateGeneration && writes === (state._runtimeWrites || 0);
+  try {
+    const response = await fetch(sessionQueryPath("/api/runtime", sessionId));
+    await requireOkResponse(response, "Failed to load runtime settings.");
+    const runtime = await response.json();
+    // Both runtime readers share this watermark. A newer pending/failed read
+    // does not invalidate useful data; only a newer accepted result does.
+    if (!ownsRead() || readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
+    state._runtimeReadAcceptedVersion = readVersion;
+    state.runtime = runtime;
+    if (typeof templatesController !== "undefined") templatesController?.scopeChanged?.();
+    renderInterceptStatus();
+    renderProxySettings();
+  } catch (error) {
+    if (!ownsRead() || readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    throw error;
   }
-  if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
-  state.runtime = runtime;
-  if (typeof templatesController !== "undefined") templatesController?.scopeChanged?.();
-  renderInterceptStatus();
-  renderProxySettings();
 }
 
 function currentSessionId() {
@@ -7878,36 +7888,85 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
   // for Scope, where it is shown, never for the Map tool.
   const loadPaths = state.activeTool === "target";
   const writes = state._runtimeWrites || 0;
-  const [runtimeResponse, siteMapResponse] = await Promise.all([
-    fetch(sessionQueryPath("/api/runtime", sessionId)),
-    loadPaths ? fetch(sessionQueryPath("/api/target/site-map", sessionId)) : null,
-  ]);
-  await requireOkResponse(runtimeResponse, "Failed to load runtime settings.");
-  if (siteMapResponse) await requireOkResponse(siteMapResponse, "Failed to load target site map.");
-  const runtime = await runtimeResponse.json();
-  const siteMap = siteMapResponse ? jsonArray(await siteMapResponse.json()) : null;
-  if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return false;
-  if (writes !== (state._runtimeWrites || 0)) return false;
-  // A save's follow-up read must not overwrite a newer editor before the
-  // waiting save caller gets its chance to check ownership again.
-  if (saveContext && (saveContext.sessionId !== sessionId
-    || saveContext.workspaceGeneration !== workspaceGeneration
-    || saveContext.draftVersion !== (state.targetScopeDraftVersion || 0)
-    || saveContext.saveToken !== state.targetScopeSaveToken
-    || saveContext.scopeDraft !== state.targetScopeDraft
-    || saveContext.excludeDraft !== state.targetScopeExcludeDraft
-    || saveContext.scopeText !== els.targetScopeEditor.value
-    || saveContext.excludeText !== els.targetScopeExcludeEditor?.value)) return false;
-  if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
-  state.runtime = runtime;
-  if (siteMap) state.targetSiteMap = siteMap;
-  if (typeof targetServiceMapController !== "undefined" && state.activeTool === "map") {
-    targetServiceMapController?.refresh();
+  const readVersion = state._runtimeReadVersion = (state._runtimeReadVersion || 0) + 1;
+  const editorDraft = {
+    owner: state.targetScopeEditorSessionId,
+    version: state.targetScopeDraftVersion || 0,
+    dirty: state.targetScopeDirty,
+    fields: [
+      { key: "targetScopeDraft", node: "targetScopeEditor", value: state.targetScopeDraft, text: els.targetScopeEditor.value },
+      { key: "targetScopeExcludeDraft", node: "targetScopeExcludeEditor", value: state.targetScopeExcludeDraft, text: els.targetScopeExcludeEditor?.value },
+    ],
+  };
+  const ownsRead = () => sessionId === currentSessionId() && workspaceGeneration === workspaceStateGeneration
+    && writes === (state._runtimeWrites || 0)
+    // Keep save ownership separate from harmless read supersession. In
+    // particular, a DOM-only edit still invalidates the older save's refresh.
+    && (!saveContext || (saveContext.sessionId === sessionId
+      && saveContext.workspaceGeneration === workspaceGeneration
+      && saveContext.draftVersion === (state.targetScopeDraftVersion || 0)
+      && saveContext.saveToken === state.targetScopeSaveToken
+      && saveContext.scopeDraft === state.targetScopeDraft
+      && saveContext.excludeDraft === state.targetScopeExcludeDraft
+      && saveContext.scopeText === els.targetScopeEditor.value
+      && saveContext.excludeText === els.targetScopeExcludeEditor?.value));
+  try {
+    const [runtimeResponse, siteMapResponse] = await Promise.all([
+      fetch(sessionQueryPath("/api/runtime", sessionId)),
+      loadPaths ? fetch(sessionQueryPath("/api/target/site-map", sessionId)) : null,
+    ]);
+    await requireOkResponse(runtimeResponse, "Failed to load runtime settings.");
+    if (siteMapResponse) await requireOkResponse(siteMapResponse, "Failed to load target site map.");
+    const runtime = await runtimeResponse.json();
+    const siteMap = siteMapResponse ? jsonArray(await siteMapResponse.json()) : null;
+    if (!ownsRead()) return false;
+    // Reject the whole compound result: old paths carry old scope badges.
+    // This is a successful no-op, not a failed acknowledged scope save.
+    if (readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
+    state._runtimeReadAcceptedVersion = readVersion;
+    state.runtime = runtime;
+    if (siteMap) state.targetSiteMap = siteMap;
+    if (typeof targetServiceMapController !== "undefined" && state.activeTool === "map") {
+      targetServiceMapController?.refresh();
+    }
+    const ownedBeforeRead = editorDraft.owner === sessionId;
+    // A user can acquire this editor while the initial read is pending. Protect
+    // that new edit, but do not adopt an unchanged previous session's draft.
+    const draftChanged = state.targetScopeEditorSessionId === sessionId
+      && (editorDraft.version !== (state.targetScopeDraftVersion || 0)
+        || (!editorDraft.dirty && state.targetScopeDirty)
+        || editorDraft.fields.some((field) => state[field.key] !== field.value || els[field.node]?.value !== field.text)
+        || (ownedBeforeRead && (editorDraft.dirty || state.targetScopeDirty
+          || editorDraft.fields.some((field) => field.text !== field.value))));
+    if (draftChanged) {
+      let unversionedEdit = false;
+      for (const field of editorDraft.fields) {
+        const modelChanged = state[field.key] !== field.value;
+        const textChanged = els[field.node]?.value !== field.text;
+        const priorDrift = field.text !== field.value;
+        // A new visible edit wins; otherwise retain a newer model edit. For
+        // pre-existing ambiguous drift, keep the text the user can see.
+        if (textChanged || (!modelChanged && priorDrift)) state[field.key] = els[field.node]?.value ?? "";
+        unversionedEdit ||= modelChanged || textChanged || priorDrift;
+      }
+      if (unversionedEdit && editorDraft.version === (state.targetScopeDraftVersion || 0)) {
+        state.targetScopeDraftVersion = editorDraft.version + 1;
+      }
+      // renderTarget also derives clean drafts from runtime, so preserving the
+      // fields requires retaining their dirty ownership before any render.
+      state.targetScopeDirty = true;
+    } else {
+      syncTargetScopeDraft(forceScopeSync);
+    }
+    renderInterceptStatus();
+    renderProxySettings();
+    renderTarget();
+  } catch (error) {
+    if (!ownsRead()) return false;
+    if (readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    throw error;
   }
-  syncTargetScopeDraft(forceScopeSync);
-  renderInterceptStatus();
-  renderProxySettings();
-  renderTarget();
 }
 
 async function pollAuxiliaryData() {

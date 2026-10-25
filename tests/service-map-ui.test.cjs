@@ -352,6 +352,7 @@ for (const tool of ['target', 'map']) test(`${tool} loader only requests legacy 
   const requests = [], state = { activeTool: tool, activeTargetView: 'service-map', targetScopeDraftVersion: 0, targetScopeSaveToken: 0, targetScopeDirty: false };
   const ctx = loadFunctions(['loadTargetSiteMap'], {
     state, currentSessionId: () => 'session-one', workspaceStateGeneration: 0,
+    els: { targetScopeEditor: { value: '' }, targetScopeExcludeEditor: { value: '' } },
     sessionQueryPath: (path, id) => `${path}?session_id=${id}`,
     fetch: async url => { requests.push(url); return response(url.startsWith('/api/runtime') ? {} : []); },
     requireOkResponse: async () => {}, jsonArray: value => value, syncTargetScopeDraft() {}, renderInterceptStatus() {}, renderProxySettings() {}, renderTarget() {},

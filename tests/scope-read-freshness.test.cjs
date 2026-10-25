@@ -299,3 +299,29 @@ for (const mode of ['http', 'json', 'network']) {
     });
   }
 }
+for (const initialOwner of [null, 'previous-session']) {
+  for (const field of ['include', 'exclude']) {
+    test(`newly acquired ${initialOwner} editor preserves a pending ${field} edit`, async () => {
+      const f = fixture(); f.state.targetScopeEditorSessionId = initialOwner;
+      const reading = f.start('scope', true);
+      f.state.targetScopeEditorSessionId = 'session-a';
+      if (field === 'include') f.edit('unsaved.example.com');
+      else { f.state.targetScopeExcludeDraft = f.els.targetScopeExcludeEditor.value = 'unsaved.example.com';
+        f.state.targetScopeDraftVersion++; f.state.targetScopeDirty = true; }
+      f.reply(reading, true, { runtime: runtime(true, 'server.example.com') }); await successful(reading);
+      const key = field === 'include' ? 'targetScopeDraft' : 'targetScopeExcludeDraft';
+      const node = field === 'include' ? f.els.targetScopeEditor : f.els.targetScopeExcludeEditor;
+      assert.equal(f.state[key], 'unsaved.example.com'); assert.equal(node.value, 'unsaved.example.com');
+      assert.equal(f.state.targetScopeDirty, true); assert.equal(f.state.scopeSaveHidden, false);
+      assert.equal(f.state.targetScopeEditorSessionId, 'session-a'); assert.equal(f.state.targetScopeDraftVersion, 1);
+    });
+  }
+  test(`claiming an ${initialOwner} stale editor without edits still permits forced recovery`, async () => {
+    const f = fixture(); f.state.targetScopeEditorSessionId = initialOwner; f.state.targetScopeDirty = true;
+    f.state.targetScopeDraft = f.els.targetScopeEditor.value = 'previous.example.com';
+    const reading = f.start('scope', true); f.state.targetScopeEditorSessionId = 'session-a';
+    f.reply(reading, true, { runtime: runtime(true, 'server.example.com') }); await successful(reading);
+    assert.equal(f.state.targetScopeDraft, 'server.example.com'); assert.equal(f.els.targetScopeEditor.value, 'server.example.com');
+    assert.equal(f.state.targetScopeDirty, false);
+  });
+}
