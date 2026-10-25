@@ -108,16 +108,26 @@ pub(crate) fn build(
     });
     let mut phases = fold_rows(rows);
     // The newest steps are the ones being looked at; drop from the oldest.
-    let mut total: usize = phases.iter().map(|phase| phase.steps.len()).sum();
-    while total > MAX_STEPS {
+    let total: usize = phases.iter().map(|phase| phase.steps.len()).sum();
+    if total > MAX_STEPS {
         stopped_by.insert("steps_limit".into());
-        let excess = total - MAX_STEPS;
-        if phases[0].steps.len() <= excess {
-            total -= phases.remove(0).steps.len();
-        } else {
-            phases[0].steps.drain(..excess);
-            total -= excess;
+        let mut excess = total - MAX_STEPS;
+        let mut whole_phases = 0;
+        for phase in &mut phases {
+            if excess == 0 {
+                break;
+            }
+            let count = phase.steps.len();
+            if count > excess {
+                phase.steps.drain(..excess);
+                break;
+            }
+            excess -= count;
+            whole_phases += 1;
         }
+        // Removing each old page separately shifts every later page each time.
+        // Keep the partial page's context, then move the retained suffix once.
+        phases.drain(..whole_phases);
     }
     let flow_rows = phases
         .iter()
