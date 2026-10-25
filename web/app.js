@@ -9490,7 +9490,8 @@ function renderDashboard() {
   ].filter(Boolean);
   const KINDS = { "manual scan": "Manual scan", "auto scan": "Auto scan", recon: "Recon" };
   const scans = (overview.activity || []).map((entry) => [
-    KINDS[entry.kind] || escapeHtml(entry.kind), escapeHtml(entry.target),
+    KINDS[entry.kind] || escapeHtml(entry.kind),
+    entry.status && entry.status !== "completed" ? escapeHtml(entry.status) : "", escapeHtml(entry.target),
     entry.matched != null ? `${Number(entry.matched).toLocaleString()} matched` : "",
     escapeHtml(formatTimestamp(entry.started_at)),
   ].filter(Boolean).join(" · "));
