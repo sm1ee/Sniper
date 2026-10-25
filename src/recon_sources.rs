@@ -1105,6 +1105,21 @@ fn resolve(base: &Url, literal: &str) -> Option<String> {
     matches!(url.scheme(), "http" | "https" | "ws" | "wss").then(|| url.to_string())
 }
 
+fn resolve_form_action(document: &Url, document_base: &Url, literal: &str) -> Option<String> {
+    if literal.is_empty() {
+        // An explicit empty submitter action targets the document, not its
+        // parent's action or a different URL selected by base[href].
+        return Some(document.to_string());
+    }
+    let trimmed = literal.trim();
+    if trimmed.starts_with('#') && !trimmed.chars().any(char::is_control) {
+        // A same-resource form may still supply a distinct submission method.
+        // Keep its raw fragment evidence without changing crawl-link filtering.
+        return resolve(document_base, document_base.join(trimmed).ok()?.as_str());
+    }
+    resolve(document_base, literal)
+}
+
 #[derive(Debug)]
 struct Tag {
     name: String,
@@ -1644,7 +1659,7 @@ fn extract_document_inner(
                 .get("action")
                 .filter(|action| !action.trim().is_empty())
             {
-                Some(literal) => resolve(&document_base, literal),
+                Some(literal) => resolve_form_action(base, &document_base, literal),
                 None => Some(base.to_string()),
             };
             // A submit button can replace an unsupported parent action while
@@ -1685,7 +1700,16 @@ fn extract_document_inner(
             }
         }
         let action = match tag.attrs.get("formaction") {
-            Some(action) => resolve(&document_base, action),
+            Some(action)
+                if (action.is_empty() || action.trim().starts_with('#'))
+                    && (current_form.is_none() || !can_inherit_form_action(&tag)) =>
+            {
+                // Newly supported self-targets need the same recognized owner
+                // and submitter context as a method-only override. Preserve the
+                // existing passive handling of ordinary explicit URL literals.
+                None
+            }
+            Some(action) => resolve_form_action(base, &document_base, action),
             None if tag.attrs.contains_key("formmethod") && can_inherit_form_action(&tag) => {
                 current_form
                     .as_ref()
