@@ -167,3 +167,20 @@ for(const stage of ['fetch','JSON'])for(const outcome of ['success','missing','f
   }
   assert.equal(f.created.length,0);assert.equal(f.saved.length,0);
 });
+for(const route of ['menu','keyboard']) {
+  test(`${route} current cached action keeps captured provenance without a read`,async()=>{
+    const f=fixture(true);f.start(route);await tick();assertCurrent(f,'success');assert.equal(f.requests.length,0);
+  });
+  test(`${route} current cached tunnel remains rejected`,async()=>{
+    const f=fixture(true);f.state.selectedRecord={...record,kind:'tunnel'};f.start(route);await tick();
+    assertCurrent(f,'failure');assert.match(f.errors[0],/Tunnel records cannot be sent to Replay/);assert.equal(f.requests.length,0);
+  });
+  for(const stage of ['fetch','JSON'])for(const value of ['missing','tunnel'])test(`${route} current ${stage} ${value} remains an error`,async()=>{
+    const f=fixture();f.start(route);assert.equal(f.requests.length,1);
+    const body=deferred();if(stage==='JSON'){f.requests[0].resolve({ok:true,json:()=>body.promise});await tick();}
+    const returned=value==='missing'?null:{...record,kind:'tunnel'};
+    if(stage==='fetch')f.requests[0].resolve({ok:true,json:async()=>returned});else body.resolve(returned);
+    await tick();assertCurrent(f,'failure');
+    assert.match(f.errors[0],value==='missing'?/Selected transaction could not be loaded/:/Tunnel records cannot be sent to Replay/);
+  });
+}
