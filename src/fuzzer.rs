@@ -118,8 +118,8 @@ pub struct FuzzerAttackRecord {
     pub planned: usize,
     #[serde(default = "one")]
     pub concurrency: usize,
-    /// Still sending. Never on disk: a restart does not resume an attack, so a
-    /// running one is left out of the session state until it ends.
+    /// Still sending. Checkpoints keep its results as a stopped attack: a
+    /// restart must neither discard completed work nor resume network traffic.
     #[serde(default, skip_serializing_if = "is_false")]
     pub running: bool,
     /// Stopped before every request was sent.
@@ -252,15 +252,25 @@ impl FuzzerStore {
             .cloned()
     }
 
-    /// The attacks the session state keeps: a running one waits until it ends.
+    /// Checkpoint running attacks without changing the live worker. Restoring
+    /// this snapshot keeps completed results but never resumes the requests.
     pub async fn snapshot(&self, limit: Option<usize>) -> Vec<FuzzerAttackRecord> {
-        self.attacks
+        let records: Vec<_> = self
+            .attacks
             .read()
             .await
             .iter()
-            .filter(|attack| !attack.running)
             .take(limit.unwrap_or(self.max_entries).min(self.max_entries))
             .cloned()
+            .collect();
+        records
+            .into_iter()
+            .map(|mut attack| {
+                if attack.running {
+                    end_record(&mut attack, true);
+                }
+                attack
+            })
             .collect()
     }
 
@@ -502,6 +512,7 @@ pub async fn start_attack(
         cancel,
         task,
     });
+    session.schedule_state_persist();
     Ok(record)
 }
 
@@ -537,6 +548,7 @@ impl AttackRun {
                             .fuzzer
                             .update(run.id, |record| record.results.push(result))
                             .await;
+                        run.session.schedule_state_persist();
                     }
                 }
             })
@@ -1282,6 +1294,214 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn running_attack_checkpoint_keeps_partial_results_without_stopping_the_worker() {
+        let store = FuzzerStore::new(4);
+        let started_at = Utc::now();
+        let id = Uuid::new_v4();
+        let transaction_id = Uuid::new_v4();
+        let record = FuzzerAttackRecord {
+            id,
+            started_at,
+            completed_at: started_at,
+            status: FuzzerAttackStatus::Completed,
+            template: local_template("127.0.0.1:1".parse().unwrap(), "/$payload$"),
+            payload_count: 3,
+            marker_count: 1,
+            results: vec![
+                FuzzerAttackResult {
+                    index: 1,
+                    payload: "invalid".to_string(),
+                    transaction_id: None,
+                    status: None,
+                    duration_ms: None,
+                    response_bytes: 0,
+                    note: Some("Not sent: synthetic invalid request".to_string()),
+                    position: None,
+                },
+                FuzzerAttackResult {
+                    index: 0,
+                    payload: "ok".to_string(),
+                    transaction_id: Some(transaction_id),
+                    status: Some(200),
+                    duration_ms: Some(1),
+                    response_bytes: 2,
+                    note: None,
+                    position: None,
+                },
+            ],
+            notes: Vec::new(),
+            attack_type: FuzzerAttackType::BatteringRam,
+            url_encode: true,
+            planned: 3,
+            concurrency: 2,
+            running: true,
+            stopped: false,
+        };
+        store.insert(record).await;
+        assert!(store.snapshot(Some(0)).await.is_empty());
+        let checkpoint = store.snapshot(None).await;
+        assert_eq!(
+            checkpoint.len(),
+            1,
+            "completed partial work must not be omitted"
+        );
+        let saved = &checkpoint[0];
+        assert_eq!(saved.id, id);
+        assert!(!saved.running);
+        assert!(saved.stopped);
+        assert_eq!(saved.planned, 3);
+        assert_eq!(saved.results.len(), 2);
+        assert_eq!(saved.results[0].transaction_id, Some(transaction_id));
+        assert_eq!(saved.results[1].index, 1);
+        assert_eq!(saved.status, FuzzerAttackStatus::Failed);
+        assert_eq!(saved.notes, ["Not sent: synthetic invalid request"]);
+
+        let live = store.get(id).await.unwrap();
+        assert!(live.running, "checkpointing must not cancel a live attack");
+        assert!(!live.stopped);
+        assert_eq!(live.results[0].index, 1, "only the checkpoint is sorted");
+        assert!(live.notes.is_empty());
+
+        let bytes = serde_json::to_vec(&checkpoint).unwrap();
+        let restored = FuzzerStore::from_attacks(4, serde_json::from_slice(&bytes).unwrap());
+        assert!(!restored.is_running());
+        let restored = restored.get(id).await.unwrap();
+        assert!(!restored.running);
+        assert!(restored.stopped);
+        assert_eq!(restored.results[0].transaction_id, Some(transaction_id));
+    }
+
+    #[tokio::test]
+    #[ignore = "synthetic checkpoint allocation and timing qualification"]
+    async fn large_running_attack_checkpoint_qualification() {
+        let count = 16_384;
+        let mut record: FuzzerAttackRecord = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(),
+            "started_at": Utc::now(),
+            "completed_at": Utc::now(),
+            "status": "completed",
+            "template": local_template("127.0.0.1:1".parse().unwrap(), "/$payload$"),
+            "running": true,
+            "planned": count + 1
+        }))
+        .unwrap();
+        record.results = (0..count)
+            .rev()
+            .map(|index| FuzzerAttackResult {
+                index,
+                payload: "x".repeat(1024),
+                transaction_id: None,
+                status: Some(200),
+                duration_ms: Some(1),
+                response_bytes: 2,
+                note: None,
+                position: None,
+            })
+            .collect();
+        let store = FuzzerStore::new(1);
+        store.insert(record).await;
+        let start = std::time::Instant::now();
+        let checkpoint = store.snapshot(None).await;
+        let snapshot_ms = start.elapsed().as_millis();
+        let start = std::time::Instant::now();
+        let bytes = serde_json::to_vec(&checkpoint).unwrap();
+        println!(
+            "checkpoint results={count} payload_bytes={} serialized_bytes={} snapshot_ms={snapshot_ms} serialize_ms={}",
+            count * 1024,
+            bytes.len(),
+            start.elapsed().as_millis()
+        );
+        assert_eq!(checkpoint[0].results.len(), count);
+        assert_eq!(checkpoint[0].results[0].index, 0);
+        assert!(checkpoint[0].stopped);
+        assert!(store.get(checkpoint[0].id).await.unwrap().running);
+    }
+
+    #[tokio::test]
+    async fn completed_fuzzer_results_are_checkpointed_before_the_next_request_finishes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (second_started, second_waiting) = tokio::sync::oneshot::channel();
+        let upstream = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 1024];
+            first.read(&mut buffer).await.unwrap();
+            first
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .await
+                .unwrap();
+            drop(first);
+            let (mut second, _) = listener.accept().await.unwrap();
+            second.read(&mut buffer).await.unwrap();
+            second_started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (state, session, data_dir) = scratch_state("checkpoint-restart").await;
+        let config = state.config.clone();
+        let started = start_attack(
+            Arc::clone(&state),
+            Arc::clone(&session),
+            local_template(addr, "/$payload$"),
+            vec!["completed".to_string(), "waiting".to_string()],
+            None,
+            None,
+            None,
+            FuzzerAttackOptions {
+                attack_type: FuzzerAttackType::BatteringRam,
+                url_encode: true,
+                concurrency: 1,
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), second_waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let state_path = session.storage_dir().join("state.json");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(bytes) = std::fs::read(&state_path) {
+                    let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    if saved["fuzzer_attacks"][0]["results"]
+                        .as_array()
+                        .is_some_and(|results| results.len() == 1)
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the completed result should be saved while the next request is waiting");
+        assert!(session.fuzzer.get(started.id).await.unwrap().running);
+
+        // No graceful stop/final save: model a worker lost after its checkpoint.
+        let running = session.fuzzer.running.lock().unwrap().take().unwrap();
+        running.task.abort();
+        let _ = running.task.await;
+        upstream.abort();
+        let _ = upstream.await;
+        drop(session);
+        drop(state);
+        let reopened = AppState::new(config).unwrap();
+        let restored_session = reopened.session().await;
+        let restored = restored_session.fuzzer.get(started.id).await.unwrap();
+        assert!(!restored.running);
+        assert!(restored.stopped);
+        assert_eq!(restored.planned, 2);
+        assert_eq!(restored.results.len(), 1);
+        assert_eq!(restored.results[0].payload, "completed");
+        let transaction_id = restored.results[0].transaction_id.unwrap();
+        assert!(restored_session.store.get(transaction_id).await.is_some());
+        assert!(!restored_session.fuzzer.is_running());
+        drop(restored_session);
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
     async fn sniper_runs_in_the_background_and_ends_with_each_position_in_order() {
         let addr = upstream(Duration::ZERO).await;
         let (state, session, data_dir) = scratch_state("sniper").await;
@@ -1304,10 +1524,10 @@ mod tests {
         .unwrap();
         assert!(started.running);
         assert_eq!(started.planned, 4);
-        assert!(
-            session.fuzzer.snapshot(None).await.is_empty(),
-            "a running attack stays out of the session state"
-        );
+        let checkpoint = session.fuzzer.snapshot(None).await;
+        assert_eq!(checkpoint.len(), 1);
+        assert!(!checkpoint[0].running);
+        assert!(checkpoint[0].stopped);
 
         let attack = wait_for_end(&session, started.id).await;
         assert_eq!(attack.status, FuzzerAttackStatus::Completed);
