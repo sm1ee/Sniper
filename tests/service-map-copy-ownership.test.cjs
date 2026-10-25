@@ -78,11 +78,19 @@ function fixture({ modern = true } = {}) {
     externalKinds(kinds) { context.state.serviceMapHiddenLinkKinds = kinds; controller.displayChanged(); },
     async changeFlowOrigin(next) { controller.selectOrigin(next); nodes.get('serviceMapFlow').dispatch('click'); requests.at(-1).resolve(response(flow('origin-change', next))); await tick(); },
     async loadFlow(label = 'old-flow') {
-      const pending = controller.refresh(); requests.at(-1).resolve(response(map())); await pending;
+      // Restoration may already have a pending filter/scope read. Explicitly
+      // own and await the new map instead of refresh() returning early as busy.
+      const pending = controller.refresh({ force: true }); requests.at(-1).resolve(response(map())); await pending;
       controller.selectOrigin(origin);
       nodes.get('serviceMapFlow').dispatch('click');
       assert.match(requests.at(-1).url, /\/flow\?/);
       requests.at(-1).resolve(response(flow(label))); await tick();
+      assert.ok(controller.getState().flow);
+    },
+    async revalidateFlow() {
+      const pending = controller.refresh(); requests.at(-1).resolve(response(map())); await pending;
+      assert.match(requests.at(-1).url, /\/flow\?/);
+      requests.at(-1).resolve(response(flow('old-flow'))); await tick();
       assert.ok(controller.getState().flow);
     },
     copyFlow() { nodes.get('serviceMapFlowMermaid').dispatch('click'); },
@@ -121,7 +129,7 @@ const boundaries = [
   ['pagehide and pageshow', async f => { f.page('pagehide'); f.page('pageshow'); await f.loadFlow(); }],
   ['hidden request-kind ABA', f => { f.toggleKind(); f.toggleKind(); }],
   ['external request-kind ABA', f => { f.externalKinds(['api']); f.externalKinds([]); }],
-  ['Flow re-read with identical data', f => f.loadFlow()],
+  ['Flow re-read with identical data', f => f.revalidateFlow()],
   ['Flow origin away and back', async f => { await f.changeFlowOrigin('https://other.example.com'); await f.changeFlowOrigin(origin); }],
 ];
 for (const [name, boundary] of boundaries) for (const outcome of ['success', 'rejected']) {
@@ -203,10 +211,12 @@ for (const action of ['copyDocs', 'editDocs']) {
 for (const [name, bounce] of [
   ['page', f => { f.page('pagehide'); f.page('pageshow'); }],
   ['document', f => { f.visibility(true); f.visibility(false); }],
-]) {
-  test(`OpenAPI ${name} lifecycle bounce cannot revive a pending copy`, async () => {
+]) for (const outcome of ['success', 'rejected']) {
+  test(`OpenAPI ${name} lifecycle bounce cannot revive pending copy ${outcome}`, async () => {
     const f = fixture(); await f.openDocs(); f.copyDocs(); bounce(f);
-    f.writes[0].reject(new Error('Synthetic clipboard denial')); await tick();
+    if (outcome === 'success') f.resolveWrite(0);
+    else f.writes[0].reject(new Error('Synthetic clipboard denial'));
+    await tick();
     assert.deepEqual(f.fallback, []); assert.deepEqual(f.toasts, []); f.controller.destroy();
   });
 }
@@ -214,5 +224,29 @@ test('unrelated Flow kind changes do not retire a current OpenAPI copy', async (
   const f = fixture(); await f.loadFlow(); await f.openDocs(); f.copyDocs(); f.toggleKind(); f.toggleKind();
   f.writes[0].reject(new Error('Synthetic clipboard denial')); await tick();
   assert.deepEqual(f.fallback, [f.writes[0].text]); assert.deepEqual(f.toasts, [['Copied OpenAPI']]); f.controller.destroy();
+});
+
+for (const newerOutcome of ['modern success', 'fallback failure']) for (const olderOutcome of ['success', 'rejected']) {
+  test(`newer Flow callback ${newerOutcome} supersedes pending OpenAPI callback ${olderOutcome}`, async () => {
+    const f = fixture(); await f.loadFlow(); await f.openDocs(); f.copyDocs();
+    // Exercise both real dispatch callbacks against the same sink, without
+    // claiming browser pointer reachability through a modal from this VM.
+    f.copyFlow(); assert.equal(f.writes.length, 2);
+    if (newerOutcome === 'modern success') f.resolveWrite(1);
+    else { f.setFallbackResult(false); f.writes[1].reject(new Error('Synthetic newer denial')); }
+    await tick();
+    const fallback = [...f.fallback], toasts = [...f.toasts];
+    if (olderOutcome === 'success') f.resolveWrite(0);
+    else f.writes[0].reject(new Error('Synthetic older denial'));
+    await tick();
+    assert.deepEqual(f.fallback, fallback); assert.deepEqual(f.toasts, toasts);
+    f.controller.destroy();
+  });
+}
+test('unrelated Map read starts without retiring the current OpenAPI fallback', async () => {
+  const f = fixture(); await f.loadFlow(); await f.openDocs(); f.copyDocs(); f.controller.refresh();
+  f.writes[0].reject(new Error('Synthetic clipboard denial')); await tick();
+  assert.deepEqual(f.fallback, [f.writes[0].text]); assert.deepEqual(f.toasts, [['Copied OpenAPI']]);
+  f.controller.destroy();
 });
 
