@@ -78,10 +78,10 @@ pub(crate) fn build(
 ) -> Result<ServiceMapFlow, scope::ScopeWorkLimit> {
     let MetadataSnapshot {
         rows: window,
+        considered_rows,
         stopped_by: window_stops,
         ..
     } = snapshot;
-    let considered_rows = window.len();
     let mut scope = BoundedScope::new(include, exclude)?;
     let mut rows = Vec::new();
     for row in window {
@@ -98,8 +98,6 @@ pub(crate) fn build(
             row.sequence.parse::<u64>().unwrap_or(u64::MAX),
         )
     });
-    let flow_rows = rows.len();
-
     let mut phases: Vec<FlowPhase> = Vec::new();
     for row in rows {
         if row.request_kind == "navigation" {
@@ -164,6 +162,11 @@ pub(crate) fn build(
             total -= excess;
         }
     }
+    let flow_rows = phases
+        .iter()
+        .flat_map(|phase| &phase.steps)
+        .map(|step| step.count)
+        .sum();
     Ok(ServiceMapFlow {
         schema_version: 1,
         session_id,

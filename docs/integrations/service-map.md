@@ -151,6 +151,9 @@ follow that origin. The lane headers stay at the top while the flow scrolls.
 **Copy Mermaid**, at the end of the legend, copies the flow as a Mermaid
 sequence diagram. Its source keeps the row counts, stop reasons and hidden
 request kinds; a truncated flow also carries a visible **Partial flow** note.
+`considered_rows` counts the newest-row window before display filters;
+`flow_rows` counts the rows represented by the returned steps after the
+300-step cap, including folded repeats.
 
 The view reads the newest 50,000 rows; the CLI reads 10,000 unless told
 otherwise:

@@ -2950,3 +2950,100 @@ fn flow_orders_an_origins_requests_by_page_load_and_folds_repeats() {
         ("https://www.example.com", "/callback")
     );
 }
+
+#[test]
+fn flow_counts_the_row_window_before_display_filters() {
+    let session = Uuid::from_u128(102);
+    let store = TransactionStore::from_records(vec![
+        filter_fixture(
+            "www.example.com",
+            "/config",
+            200,
+            "application/json",
+            None,
+            1,
+        ),
+        filter_fixture("www.example.com", "/logo.png", 200, "image/png", None, 2),
+        filter_fixture("www.example.com", "/icon.png", 200, "image/png", None, 3),
+    ]);
+    let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
+        session,
+        DEFAULT_MAX_RECORDS,
+        technology::CatalogVersion::V2,
+        &crate::store::ListFilters {
+            hidden_extensions: vec!["png".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!((snapshot.considered_rows, snapshot.rows.len()), (3, 1));
+    let flow = crate::service_map_flow::build(
+        session,
+        snapshot,
+        "https://www.example.com",
+        false,
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert_eq!((flow.considered_rows, flow.flow_rows), (3, 1));
+    assert!(flow.complete, "a display filter is not truncation");
+}
+
+#[test]
+fn flow_counts_only_rows_represented_after_the_step_cap() {
+    use crate::service_map_flow::MAX_STEPS;
+    let session = Uuid::from_u128(103);
+    // Both removing whole phases and trimming within a phase must update the
+    // count. The repeated API call also proves that rows are not step counts.
+    for navigation in [false, true] {
+        let mut records: Vec<_> = (0..MAX_STEPS + 2)
+            .map(|index| {
+                let record = filter_fixture(
+                    "www.example.com",
+                    &format!("/step-{index}"),
+                    200,
+                    "application/json",
+                    None,
+                    index as u64 + 1,
+                );
+                with_request_headers(
+                    record,
+                    &[(
+                        "Sec-Fetch-Dest",
+                        if navigation { "document" } else { "empty" },
+                    )],
+                )
+            })
+            .collect();
+        if !navigation {
+            let mut repeat = records.last().unwrap().clone();
+            repeat.id = Uuid::from_u128(1000);
+            repeat.sequence += 1;
+            records.push(repeat);
+        }
+        let considered = records.len();
+        let store = TransactionStore::from_records(records);
+        let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
+            session,
+            DEFAULT_MAX_RECORDS,
+            technology::CatalogVersion::V2,
+            &crate::store::ListFilters::default(),
+        );
+        let flow = crate::service_map_flow::build(
+            session,
+            snapshot,
+            "https://www.example.com",
+            false,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let steps: Vec<_> = flow.phases.iter().flat_map(|phase| &phase.steps).collect();
+        assert_eq!(steps.len(), MAX_STEPS);
+        assert_eq!(flow.considered_rows, considered);
+        assert_eq!(flow.flow_rows, steps.iter().map(|step| step.count).sum());
+        assert_eq!(flow.flow_rows, MAX_STEPS + usize::from(!navigation));
+        assert!(!flow.complete);
+        assert!(flow.stopped_by.iter().any(|reason| reason == "steps_limit"));
+    }
+}
