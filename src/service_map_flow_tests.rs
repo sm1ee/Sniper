@@ -203,3 +203,184 @@ fn indexed_folding_matches_linear_sequences_with_delimiter_like_values() {
     let phases = fold_rows(vec![duplicate.clone(), duplicate]);
     assert_eq!(phases[0].steps[0].evidence, ["evidence-1", "evidence-1"]);
 }
+
+// Keep the pre-optimization cap loop independent: compare the entire response,
+// including page context, evidence order, weighted rows and partial reasons.
+fn compare_trim_with_previous(mut rows: Vec<ServiceMapRow>, reasons: &[&str]) -> ServiceMapFlow {
+    let origin = "https://www.example.com";
+    let session_id = Uuid::from_u128(20001);
+    let considered_rows = rows.len() + 7;
+    let initial: BTreeSet<String> = reasons.iter().map(|reason| (*reason).into()).collect();
+    let snapshot = MetadataSnapshot {
+        generation: Uuid::nil(),
+        captured_at: row(1).started_at,
+        first_retained_started_at: None,
+        last_retained_started_at: None,
+        oldest_considered_at: None,
+        latest_considered_at: None,
+        retained_rows: considered_rows,
+        considered_rows,
+        non_http_rows: 0,
+        filtered_rows: 7,
+        omitted_rows: 0,
+        stopped_by: initial.clone(),
+        rows: rows.clone(),
+        favicons: Default::default(),
+    };
+    rows.sort_by_key(|row| {
+        (
+            row.started_at,
+            row.sequence.parse::<u64>().unwrap_or(u64::MAX),
+        )
+    });
+    let mut phases = linear_fold(rows);
+    let mut stopped_by = initial;
+    // This is the cap implementation at ed17f15, before bulk prefix removal.
+    let mut total: usize = phases.iter().map(|phase| phase.steps.len()).sum();
+    while total > MAX_STEPS {
+        stopped_by.insert("steps_limit".into());
+        let excess = total - MAX_STEPS;
+        if phases[0].steps.len() <= excess {
+            total -= phases.remove(0).steps.len();
+        } else {
+            phases[0].steps.drain(..excess);
+            total -= excess;
+        }
+    }
+    let expected = ServiceMapFlow {
+        schema_version: 1,
+        session_id,
+        origin: origin.into(),
+        lanes: vec![origin.into()],
+        flow_rows: phases.iter().flat_map(|p| &p.steps).map(|s| s.count).sum(),
+        phases,
+        considered_rows,
+        complete: stopped_by.is_empty(),
+        stopped_by: stopped_by.into_iter().collect(),
+    };
+    let actual = build(session_id, snapshot, origin, false, &[], &[]).unwrap();
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    actual
+}
+
+#[test]
+fn trimming_preserves_complete_responses_at_global_step_boundaries() {
+    for navigation in [false, true] {
+        for count in [0, 1, MAX_STEPS - 1, MAX_STEPS, MAX_STEPS + 1, 2_000] {
+            let rows = (1..=count)
+                .rev()
+                .map(|sequence| {
+                    let mut item = row(sequence as u64);
+                    item.path = format!("/endpoint-{sequence}");
+                    if navigation {
+                        item.request_kind = "navigation";
+                    }
+                    item
+                })
+                .collect();
+            let flow = compare_trim_with_previous(rows, &[]);
+            assert_eq!(flow.considered_rows, count + 7);
+            assert_eq!(flow.flow_rows, count.min(MAX_STEPS));
+            assert_eq!(flow.complete, count <= MAX_STEPS);
+            if count > MAX_STEPS {
+                assert_eq!(flow.stopped_by, ["steps_limit"]);
+                assert_eq!(
+                    flow.phases[0].steps[0].record_id,
+                    row((count - MAX_STEPS + 1) as u64).record_id
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn trimming_keeps_partial_page_context_and_folded_evidence() {
+    for last_phase_calls in [297, 299] {
+        let mut rows = Vec::new();
+        let mut add = |path: &str, navigation: bool| {
+            let mut item = row(rows.len() as u64 + 1);
+            item.path = path.into();
+            if navigation {
+                item.request_kind = "navigation";
+            }
+            rows.push(item);
+        };
+        add("/page-a", true);
+        add("/a-first", false);
+        add("/a-last", false);
+        add("/page-b", true);
+        add("/b-first", false);
+        add("/b-repeat", false);
+        add("/b-repeat", false);
+        add("/b-last", false);
+        add("/page-c", true);
+        for i in 0..last_phase_calls {
+            add(&format!("/c-endpoint-{i}"), false);
+        }
+        let flow = compare_trim_with_previous(rows, &["max_records"]);
+        assert_eq!(flow.stopped_by, ["max_records", "steps_limit"]);
+        assert_eq!(
+            flow.phases.iter().map(|p| p.steps.len()).sum::<usize>(),
+            MAX_STEPS
+        );
+        if last_phase_calls == 297 {
+            assert_eq!(flow.phases.len(), 2);
+            assert_eq!(flow.phases[0].page.as_ref().unwrap().path, "/page-b");
+            assert_eq!(flow.phases[0].steps.len(), 2);
+            let retained = &flow.phases[0].steps[0];
+            assert_eq!(retained.path, "/b-repeat");
+            assert_eq!(retained.count, 2);
+            assert_eq!(retained.evidence, ["evidence-6", "evidence-7"]);
+            assert_eq!(retained.record_id, row(7).record_id);
+            assert_eq!(flow.flow_rows, 301);
+        } else {
+            assert_eq!(flow.phases.len(), 1);
+            assert_eq!(flow.phases[0].page.as_ref().unwrap().path, "/page-c");
+            assert_eq!(flow.phases[0].steps[0].path, "/page-c");
+            assert_eq!(flow.flow_rows, 300);
+        }
+    }
+}
+
+#[test]
+fn trimming_does_not_promote_an_old_step_when_its_request_repeats_late() {
+    let mut rows: Vec<_> = (1..=302)
+        .map(|sequence| {
+            let mut item = row(sequence);
+            item.path = format!("/endpoint-{sequence}");
+            item
+        })
+        .collect();
+    let mut repeat = row(303);
+    repeat.path = "/endpoint-1".into();
+    rows.push(repeat);
+    let flow = compare_trim_with_previous(rows, &[]);
+    assert_eq!(flow.flow_rows, 300);
+    assert_eq!(flow.phases[0].steps[0].path, "/endpoint-3");
+    assert_eq!(flow.phases[0].steps.last().unwrap().path, "/endpoint-302");
+    assert!(flow.phases[0].steps.iter().all(|step| step.count == 1));
+}
+
+#[test]
+fn trimming_matches_previous_responses_across_mixed_page_loads() {
+    for seed in 0..32usize {
+        let rows = (0..850usize)
+            .rev()
+            .map(|i| {
+                let mut item = row(i as u64 + 1);
+                if i % (seed % 17 + 3) == 0 {
+                    item.request_kind = "navigation";
+                    item.path = format!("/page-{i}");
+                } else {
+                    item.path = format!("/endpoint-{}", (i / (seed % 3 + 1)) % 9);
+                }
+                item
+            })
+            .collect();
+        let reasons: &[&str] = if seed % 2 == 0 { &["max_records"] } else { &[] };
+        compare_trim_with_previous(rows, reasons);
+    }
+}
