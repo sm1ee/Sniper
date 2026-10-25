@@ -13382,7 +13382,11 @@ mod tests {
         first.request.body_preview = "synthetic retained body".into();
         first.request.body_size = first.request.body_preview.len();
         session.store.insert(first).await;
-        let before = session.persist().await.unwrap();
+        let mut before = session.persist().await.unwrap();
+        // A nonzero cached WebSocket count must survive without starting a
+        // transport or replacing the count from this empty state-only snapshot.
+        before.websocket_count = 3;
+        session.replace_metadata(before.clone());
         registry.update_metadata(before.clone()).unwrap();
         // Later live traffic must not become a partial new traffic snapshot
         // just because an unrelated state component was saved.

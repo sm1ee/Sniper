@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Owned loopback metadata-only probe; no proxy/capture/scanner/provider requests."""
-import argparse, hashlib, json, os, pathlib, signal, subprocess, sys, time, traceback, urllib.error, urllib.request
+import argparse, hashlib, json, os, pathlib, shutil, signal, subprocess, sys, tempfile, time, traceback, urllib.error, urllib.request
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary-dir', type=pathlib.Path, required=True)
 parser.add_argument('--source-dir', type=pathlib.Path, required=True)
@@ -30,7 +30,7 @@ def save(name,value):
     with (OUT/name).open('x',encoding='utf-8') as f: json.dump(value,f,indent=2,sort_keys=True); f.write('\n')
 def pins():
     return {'head':git('rev-parse','HEAD'),'tree':git('rev-parse','HEAD^{tree}'),'status':git('status','--porcelain'),'binary_sha256':sha(BINARY),'source_sha256':{p:sha(SOURCE/p) for p in FILES}}
-child=None; log=None; runtime=None; starts=0
+child=None; log=None; runtime=None; starts=0; data=None
 calls=[]; processes=[]; observations={}; controls=[]
 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def check(name,condition):
@@ -121,7 +121,7 @@ try:
     initial=pins()
     check('sealed source pins',initial['head']==HEAD and initial['tree']==TREE and initial['status']=='')
     check('sealed server hash',initial['binary_sha256']==BINARY_SHA)
-    data=OUT/'owned-runtime-data'; data.mkdir(mode=0o700)
+    data=pathlib.Path(tempfile.mkdtemp(prefix='sniper-session-overview-'))
     rows=start(data)
     check('one initial session',len(rows)==1 and rows[0]['active'])
     a=rows[0]['id']
@@ -165,10 +165,14 @@ try:
         check(stage+' apparent bytes positive',all(v['storage_bytes']>0 for v in observations[stage].values()))
     stop()
     final=pins(); check('source and binary unchanged',initial==final)
-    expected=observations['restarted_unopened']['A']['overview']['scope']==['example.com']
+    freshness_checks={
+        'ordinary_save_registry_current':observations['stored_before_shutdown']['A']['registry_overview']['scope']==['example.com'],
+        'shutdown_did_not_rewrite_inactive_snapshot':not observations['inactive_A_shutdown_fullsave_signal']['snapshot_changed'],
+        'unopened_restart_scope_current':observations['restarted_unopened']['A']['overview']['scope']==['example.com']}
+    expected=all(freshness_checks.values())
     status='PASS' if expected else 'PRODUCT_EXPECTATION_RED'
     exit_code=0 if expected else 1
-    observations['expectation']={'name':'acknowledged inactive scope appears in unopened listing after restart','expected':['example.com'],
+    observations['expectation']={'name':'ordinary save refreshes inactive Scope overview without relying on shutdown or read repair','checks':freshness_checks,'expected':['example.com'],
        'actual':observations['restarted_unopened']['A']['overview']['scope'],'pass':expected}
 except BaseException:
     observations['error']=traceback.format_exc()
@@ -178,6 +182,16 @@ finally:
         if child is not None: stop()
     except BaseException:
         observations['cleanup_error']=traceback.format_exc(); status='SETUP_OR_FIXTURE_FAILURE'; exit_code=2
+    if data is not None:
+        if child is None or child.poll() is not None:
+            try:
+                shutil.rmtree(data) # Only the exact root created above, after owned processes stop.
+                observations['owned_data_removed']=not data.exists()
+            except BaseException:
+                observations['data_cleanup_error']=traceback.format_exc(); status='SETUP_OR_FIXTURE_FAILURE'; exit_code=2
+        else:
+            observations['data_cleanup_error']='owned process not confirmed stopped; temporary data retained'
+            status='SETUP_OR_FIXTURE_FAILURE'; exit_code=2
     final=pins()
     if initial is not None and final!=initial:
         status='SOURCE_OR_BINARY_CHANGED'; exit_code=2
