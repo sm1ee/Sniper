@@ -405,7 +405,12 @@ pub(crate) fn plan_attack(
         return Err(anyhow!("Fuzzer needs at least one payload"));
     }
     validate_fuzzer_payloads(&payloads)?;
-    validate_fuzzer_expanded_request_budget(template, &payloads, options.url_encode)?;
+    validate_fuzzer_expanded_request_budget(
+        template,
+        &payloads,
+        options.attack_type,
+        options.url_encode,
+    )?;
     let requests = plan_requests(options.attack_type, positions, payloads.len());
     if requests.len() > MAX_FUZZER_REQUESTS {
         return Err(anyhow!(
@@ -739,58 +744,110 @@ fn validate_fuzzer_payloads(payloads: &[String]) -> Result<()> {
 fn validate_fuzzer_expanded_request_budget(
     template: &EditableRequest,
     payloads: &[String],
+    attack_type: FuzzerAttackType,
     url_encode: bool,
 ) -> Result<()> {
+    let budget = RequestExpansionBudget::new(template, url_encode);
     for (index, payload) in payloads.iter().enumerate() {
-        let request_bytes = expanded_request_size(template, payload.len(), url_encode);
+        let request_bytes = budget.max_size(payload.len(), attack_type);
         if request_bytes > MAX_FUZZER_EXPANDED_REQUEST_BYTES {
             return Err(anyhow!(
-                "Fuzzer payload {index} expands the request to {request_bytes} bytes, above the {MAX_FUZZER_EXPANDED_REQUEST_BYTES} byte limit"
+                "Fuzzer payload {index} expands the request to an estimated {request_bytes} bytes, above the {MAX_FUZZER_EXPANDED_REQUEST_BYTES} byte limit"
             ));
         }
     }
     Ok(())
 }
 
-fn expanded_request_size(
-    template: &EditableRequest,
-    payload_len: usize,
-    url_encode: bool,
-) -> usize {
-    let path_payload_len = if url_encode {
-        payload_len.saturating_mul(3)
-    } else {
-        payload_len
-    };
-    let host_bytes = if has_literal_host_header(template) {
-        template.host.len()
-    } else {
-        expanded_value_len(&template.host, payload_len)
-    };
-    let mut bytes = expanded_value_len(&template.scheme, payload_len)
-        .saturating_add(host_bytes)
-        .saturating_add(expanded_value_len(&template.method, payload_len))
-        .saturating_add(expanded_value_len(&template.path, path_payload_len))
-        .saturating_add(expanded_value_len(&template.body, payload_len));
-
-    for header in &template.headers {
-        bytes = bytes
-            .saturating_add(expanded_value_len(&header.name, payload_len))
-            .saturating_add(expanded_value_len(&header.value, payload_len));
-    }
-    bytes
+// Admission estimates keep the legacy pre-normalization field accounting and
+// conservative 3x URL allowance. Host/Content-Length normalization can change
+// that size; build_request checks the actual normalized fields before sending.
+struct RequestExpansionBudget {
+    unmarked: usize,
+    originals: usize,
+    positions: Vec<(usize, usize)>, // original UTF-8 bytes, payload multiplier
 }
 
-fn expanded_value_len(value: &str, payload_len: usize) -> usize {
-    let (count, marked) = MARKER_REGEX
-        .find_iter(value)
-        .fold((0usize, 0usize), |(count, marked), found| {
-            (count + 1, marked + found.len())
-        });
-    value
-        .len()
-        .saturating_sub(marked)
-        .saturating_add(count.saturating_mul(payload_len))
+impl RequestExpansionBudget {
+    fn new(template: &EditableRequest, url_encode: bool) -> Self {
+        let mut budget = Self {
+            // Scheme is literal: the renderer never fills its markers.
+            unmarked: template.scheme.len(),
+            originals: 0,
+            positions: Vec::new(),
+        };
+        let mut field = |value: &str, multiplier| {
+            let mut unmarked = value.len();
+            for captures in MARKER_REGEX.captures_iter(value) {
+                unmarked -= captures.get(0).unwrap().len();
+                let original = captures.get(1).map_or(0, |found| found.len());
+                budget.originals = budget.originals.saturating_add(original);
+                budget.positions.push((original, multiplier));
+            }
+            budget.unmarked = budget.unmarked.saturating_add(unmarked);
+        };
+        // Keep the renderer's position order, excluding authority positions
+        // when a literal Host header takes precedence.
+        field(&template.method, 1);
+        field(&template.path, if url_encode { 3 } else { 1 });
+        let literal_host = has_literal_host_header(template);
+        if !literal_host {
+            field(&template.host, 1);
+        }
+        for header in &template.headers {
+            field(&header.name, 1);
+            field(&header.value, 1);
+        }
+        field(&template.body, 1);
+        if literal_host {
+            budget.unmarked = budget.unmarked.saturating_add(template.host.len());
+        }
+        budget
+    }
+
+    fn size(&self, payload_len: usize, position: Option<usize>) -> usize {
+        if let Some(position) = position {
+            let (original, multiplier) = self.positions[position];
+            self.unmarked
+                .saturating_add(self.originals.saturating_sub(original))
+                .saturating_add(payload_len.saturating_mul(multiplier))
+        } else {
+            self.positions
+                .iter()
+                .fold(self.unmarked, |bytes, (_, multiplier)| {
+                    bytes.saturating_add(payload_len.saturating_mul(*multiplier))
+                })
+        }
+    }
+
+    fn max_size(&self, payload_len: usize, attack_type: FuzzerAttackType) -> usize {
+        match attack_type {
+            FuzzerAttackType::BatteringRam => self.size(payload_len, None),
+            // A replacement can shrink every original. Do not clamp this max
+            // to the unchanged template or a valid shrink-to-fit attack fails.
+            FuzzerAttackType::Sniper => (0..self.positions.len())
+                .map(|position| self.size(payload_len, Some(position)))
+                .max()
+                .unwrap_or(self.unmarked),
+        }
+    }
+}
+
+fn rendered_request_size(request: &EditableRequest) -> usize {
+    request.headers.iter().fold(
+        request
+            .scheme
+            .len()
+            .saturating_add(request.host.len())
+            .saturating_add(request.method.len())
+            .saturating_add(request.path.len())
+            .saturating_add(request.body.len()),
+        |bytes, header| {
+            bytes
+                .saturating_add(header.name.len())
+                .saturating_add(header.value.len())
+        },
+    )
 }
 
 #[cfg(test)]
@@ -848,6 +905,14 @@ pub(crate) fn build_request(
         request.host = host;
     }
     request.normalize_content_length();
+    // Count the UTF-8 model fields, including encoded body text, not decoded
+    // body or wire bytes. Match and Replace runs later in the proxy.
+    let request_bytes = rendered_request_size(&request);
+    if request_bytes > MAX_FUZZER_EXPANDED_REQUEST_BYTES {
+        return Err(anyhow!(
+            "Rendered Fuzzer request is {request_bytes} bytes, above the {MAX_FUZZER_EXPANDED_REQUEST_BYTES} byte field limit"
+        ));
+    }
     Ok(request)
 }
 
@@ -1103,12 +1168,15 @@ mod tests {
         assert!(marker_count <= MAX_FUZZER_MARKERS_PER_REQUEST);
         request.body = "$payload$".repeat(marker_count);
         let payloads = vec!["x".repeat(MAX_FUZZER_PAYLOAD_BYTES)];
-        assert!(
-            validate_fuzzer_expanded_request_budget(&request, &payloads, false)
-                .unwrap_err()
-                .to_string()
-                .contains("expands the request")
-        );
+        assert!(validate_fuzzer_expanded_request_budget(
+            &request,
+            &payloads,
+            FuzzerAttackType::BatteringRam,
+            false
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("expands the request"));
     }
 
     #[tokio::test]
@@ -1187,8 +1255,13 @@ mod tests {
         };
 
         let payload = "d".repeat(MAX_FUZZER_PAYLOAD_BYTES);
-        validate_fuzzer_expanded_request_budget(&request, std::slice::from_ref(&payload), false)
-            .unwrap();
+        validate_fuzzer_expanded_request_budget(
+            &request,
+            std::slice::from_ref(&payload),
+            FuzzerAttackType::BatteringRam,
+            false,
+        )
+        .unwrap();
         let applied = apply_payload_to_request(&request, &payload).unwrap();
 
         assert!(applied.host.starts_with("header-dddd"));
@@ -1941,7 +2014,8 @@ mod tests {
                 .unwrap();
             // This is the current mode-blind estimator. The fix must select
             // Sniper semantics here rather than weaken the rendered-size bound.
-            let estimate = expanded_request_size(&template, payload.len(), encoded);
+            let estimate = RequestExpansionBudget::new(&template, encoded)
+                .max_size(payload.len(), FuzzerAttackType::Sniper);
             assert!(
                 estimate >= actual_max,
                 "estimated {estimate}, rendered {actual_max}, encoded={encoded}"
@@ -1956,7 +2030,10 @@ mod tests {
         let rendered = build_request(&template, "x", Some(0), false).unwrap();
         assert_eq!(rendered.scheme, template.scheme);
         assert_eq!(count_request_markers(&template), 1);
-        assert!(expanded_request_size(&template, 1, false) >= sizing_fields(&rendered));
+        assert!(
+            RequestExpansionBudget::new(&template, false).max_size(1, FuzzerAttackType::Sniper)
+                >= sizing_fields(&rendered)
+        );
     }
 
     #[test]
@@ -1966,6 +2043,16 @@ mod tests {
         let overhead = sizing_fields(&sizing_template(String::new()));
         let padding = MAX_FUZZER_EXPANDED_REQUEST_BYTES - overhead - 64 * payload.len();
         template.body.push_str(&"p".repeat(padding));
+        plan_attack(
+            &template,
+            vec![payload.clone()],
+            FuzzerAttackOptions {
+                attack_type: FuzzerAttackType::BatteringRam,
+                url_encode: false,
+                concurrency: 1,
+            },
+        )
+        .unwrap();
         let rendered = build_request(&template, &payload, None, false).unwrap();
         assert_eq!(sizing_fields(&rendered), MAX_FUZZER_EXPANDED_REQUEST_BYTES);
         drop(rendered);
@@ -2008,5 +2095,175 @@ mod tests {
             sizing_fields(&rendered),
             20 + 4 + "Content-Length".len() + 1
         );
+    }
+
+    #[test]
+    fn sizing_selected_positions_follow_renderer_order_and_allow_shrinking() {
+        let mut template = sizing_template("§body©§".to_string());
+        template.method = "§GET§".to_string();
+        template.path = "/§pathé§".to_string();
+        template.host = "§example.com§".to_string();
+        template.headers.push(HeaderRecord {
+            name: "§X-Test§".to_string(),
+            value: "§value😀§".to_string(),
+        });
+        for encoded in [false, true] {
+            let budget = RequestExpansionBudget::new(&template, encoded);
+            for position in 0..6 {
+                let rendered = build_request(&template, "x", Some(position), encoded).unwrap();
+                // The encoded estimate deliberately charges 3 bytes for "x".
+                let extra = if encoded && position == 1 { 2 } else { 0 };
+                assert_eq!(
+                    budget.size(1, Some(position)),
+                    sizing_fields(&rendered) + extra,
+                    "position {position}"
+                );
+            }
+        }
+        // Every replacement shrinks. A max initialized to the originals would
+        // over-reject this exact-limit request despite its only position fitting.
+        let mut template = sizing_template(format!(
+            "{}§long-original§",
+            "x".repeat(MAX_FUZZER_EXPANDED_REQUEST_BYTES - 21)
+        ));
+        let options = FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::Sniper,
+            url_encode: false,
+            concurrency: 1,
+        };
+        plan_attack(&template, vec!["x".to_string()], options).unwrap();
+        let rendered = build_request(&template, "x", Some(0), false).unwrap();
+        assert_eq!(sizing_fields(&rendered), MAX_FUZZER_EXPANDED_REQUEST_BYTES);
+        drop(rendered);
+        template.body.push('x');
+        assert!(plan_attack(&template, vec!["x".to_string()], options).is_err());
+        assert!(build_request(&template, "x", Some(0), false).is_err());
+    }
+
+    #[test]
+    fn sizing_preserved_originals_reject_overlimit_sniper_but_not_battering_ram() {
+        let template = sizing_template(format!(
+            "$payload$§{}§",
+            "r".repeat(MAX_FUZZER_EXPANDED_REQUEST_BYTES)
+        ));
+        let mut options = FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::Sniper,
+            url_encode: false,
+            concurrency: 1,
+        };
+        assert!(plan_attack(&template, vec!["x".to_string()], options).is_err());
+        options.attack_type = FuzzerAttackType::BatteringRam;
+        plan_attack(&template, vec!["x".to_string()], options).unwrap();
+        assert_eq!(
+            sizing_fields(&build_request(&template, "x", None, false).unwrap()),
+            22
+        );
+    }
+
+    #[test]
+    fn sizing_dynamic_host_is_checked_after_legacy_admission_accounting() {
+        let mut template = sizing_template(String::new());
+        template.headers.push(HeaderRecord {
+            name: "$payload$".to_string(),
+            value: "other.example.com".to_string(),
+        });
+        let budget = RequestExpansionBudget::new(&template, false)
+            .max_size(4, FuzzerAttackType::BatteringRam);
+        template.body = "x".repeat(MAX_FUZZER_EXPANDED_REQUEST_BYTES - budget);
+        plan_attack(
+            &template,
+            vec!["Host".to_string()],
+            FuzzerAttackOptions {
+                attack_type: FuzzerAttackType::BatteringRam,
+                url_encode: false,
+                concurrency: 1,
+            },
+        )
+        .unwrap();
+        let error = build_request(&template, "Host", None, false).unwrap_err();
+        assert!(error.to_string().contains("byte field limit"));
+    }
+
+    #[tokio::test]
+    async fn sizing_final_guard_returns_not_sent_without_connecting_then_allows_valid_control() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (state, session, data_dir) = scratch_state("sizing-final-guard").await;
+        let mut template = local_template(addr, "/");
+        template.method = "POST".to_string();
+        template.headers.push(HeaderRecord {
+            name: "$payload$".to_string(),
+            value: "0".to_string(),
+        });
+        let payload = "Content-Length".to_string();
+        let budget = RequestExpansionBudget::new(&template, false)
+            .max_size(payload.len(), FuzzerAttackType::BatteringRam);
+        template.body = "x".repeat(MAX_FUZZER_EXPANDED_REQUEST_BYTES - budget);
+        let options = FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::BatteringRam,
+            url_encode: false,
+            concurrency: 1,
+        };
+        plan_attack(&template, vec![payload.clone()], options)
+            .expect("legacy pre-normalization admission fits exactly");
+        // Content-Length normalization adds six digits. The complete request is
+        // otherwise runnable; only the final field-byte cap must stop this send.
+        let mut normalized = template.clone();
+        normalized.headers[0].name = payload.clone();
+        normalized.normalize_content_length();
+        assert_eq!(
+            sizing_fields(&normalized),
+            MAX_FUZZER_EXPANDED_REQUEST_BYTES + 6
+        );
+        sendable(&normalized, None).unwrap();
+        drop(normalized);
+        let mut run = AttackRun {
+            state,
+            session: Arc::clone(&session),
+            id: Uuid::new_v4(),
+            template,
+            payloads: vec![payload],
+            source_transaction_id: None,
+            http_version: None,
+            target: None,
+            url_encode: false,
+        };
+        let (_cancel, mut cancellation) = watch::channel(false);
+        let result = run.send(0, None, 0, &mut cancellation).await.unwrap();
+        assert!(!*cancellation.borrow());
+        assert_eq!(result.transaction_id, None);
+        assert_eq!(result.status, None);
+        assert_eq!(result.note.as_deref(), Some("Not sent: Rendered Fuzzer request is 4194310 bytes, above the 4194304 byte field limit"));
+        assert_eq!(session.store.len().await, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "oversized request must never connect"
+        );
+
+        run.template.body = "small".to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            assert!(n > 0);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .await
+                .unwrap();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run.send(1, None, 0, &mut cancellation),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.status, Some(200));
+        assert!(result.transaction_id.is_some());
+        assert_eq!(session.store.len().await, 1);
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }
