@@ -75,3 +75,9 @@ test('a lane-less payload is rejected, and an empty direct helper call never nam
   assert.match(output, /Note over C: Partial flow/);
   assert.doesNotMatch(output, /undefined/);
 });
+
+test('missing link and redirect metadata remains visible in copied Flow coverage', () => {
+  const output = map.flowMermaid(flow({ complete: false, stopped_by: ['ambiguous_origin_header', 'ambiguous_location_headers'] }));
+  assert.deepEqual(metadata(output).stopped_by, ['ambiguous_origin_header', 'ambiguous_location_headers']);
+  assert.match(output, /Partial flow: ambiguous Origin headers · ambiguous redirect headers/);
+});

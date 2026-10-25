@@ -154,6 +154,8 @@ request kinds; a truncated flow also carries a visible **Partial flow** note.
 `considered_rows` counts the newest-row window before display filters;
 `flow_rows` counts the rows represented by the returned steps after the
 300-step cap, including folded repeats.
+Unread or ambiguous request links and redirects also make coverage partial;
+technology-only metadata limits do not.
 
 The view reads the newest 50,000 rows; the CLI reads 10,000 unless told
 otherwise:

@@ -4726,7 +4726,7 @@ fn service_map_flow_output_schema() -> Value {
     }));
     flow["properties"]["stopped_by"] = json!({
         "type":"array","items":string,
-        "description":"Why the flow is incomplete: the row window, lanes_limit (more than five linked origins) or steps_limit (the oldest steps were dropped)."
+        "description":"Why the flow is incomplete: the row window, lanes_limit (more than five linked origins), steps_limit (the oldest steps were dropped), or incomplete request-link or redirect metadata."
     });
     flow["description"] = json!("One origin's retained requests and those of the origins it links to directly, in time order, one phase per page load. A step's count folds the same request in one page load; evidence holds its first and newest rows, and record_id the newest.");
     flow

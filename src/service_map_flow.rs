@@ -84,12 +84,20 @@ pub(crate) fn build(
     } = snapshot;
     let mut scope = BoundedScope::new(include, exclude)?;
     let mut rows = Vec::new();
+    let mut stopped_by: BTreeSet<String> = window_stops;
     for row in window {
         if !row.is_websocket && (!in_scope_only || scope.contains(&row.scope_host)?) {
+            // A suppressed header link can hide a neighbour, so inspect these
+            // reasons before choosing lanes, not only in the rows they retain.
+            stopped_by.extend(
+                row.omitted
+                    .iter()
+                    .filter(|reason| affects_flow(&row, reason))
+                    .cloned(),
+            );
             rows.push(row);
         }
     }
-    let mut stopped_by: BTreeSet<String> = window_stops;
     let lanes = lanes(&rows, origin, &mut stopped_by);
     rows.retain(|row| lanes.contains(&row.origin));
     rows.sort_by_key(|row| {
@@ -178,6 +186,27 @@ pub(crate) fn build(
         complete: stopped_by.is_empty(),
         stopped_by: stopped_by.into_iter().collect(),
     })
+}
+
+fn affects_flow(row: &ServiceMapRow, reason: &str) -> bool {
+    match reason {
+        "request_header_scan_limit"
+        | "request_header_value_limit"
+        | "ambiguous_origin_header"
+        | "ambiguous_referer_header"
+        | "ambiguous_location_headers"
+        | "unsupported_location" => true,
+        "header_scan_limit" | "header_value_limit" => {
+            row.redirect.is_none()
+                && row
+                    .status
+                    .is_some_and(|status| matches!(status, 300 | 301 | 302 | 303 | 307 | 308))
+        }
+        // Technology, content-type and unnamed-signal omissions do not change
+        // Flow's lanes or arrows. A known redirect also survives an unrelated
+        // oversized response header, such as Content-Security-Policy.
+        _ => false,
+    }
 }
 
 /// The selected origin, then the origins its rows link to directly by an

@@ -3064,3 +3064,105 @@ fn flow_counts_only_rows_represented_after_the_step_cap() {
         assert!(flow.stopped_by.iter().any(|reason| reason == "steps_limit"));
     }
 }
+
+#[test]
+fn flow_reports_unproven_links_before_selecting_lanes() {
+    let session = Uuid::from_u128(104);
+    let origin = "https://www.example.com";
+    let store = TransactionStore::from_records(vec![
+        filter_fixture("www.example.com", "/", 200, "text/html", None, 1),
+        with_request_headers(
+            filter_fixture(
+                "api.example.com",
+                "/config",
+                200,
+                "application/json",
+                None,
+                2,
+            ),
+            &[("Origin", origin), ("Origin", "https://other.example.com")],
+        ),
+    ]);
+    let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
+        session,
+        DEFAULT_MAX_RECORDS,
+        technology::CatalogVersion::V2,
+        &crate::store::ListFilters::default(),
+    );
+    assert!(snapshot.stopped_by.is_empty());
+    assert!(snapshot
+        .rows
+        .iter()
+        .any(|row| row.omitted.contains(&"ambiguous_origin_header".into())));
+    let all =
+        crate::service_map_flow::build(session, snapshot.clone(), origin, false, &[], &[]).unwrap();
+    assert_eq!(all.lanes, [origin]);
+    assert_eq!(all.flow_rows, 1);
+    assert!(
+        !all.complete,
+        "the suppressed link may hide a neighboring lane"
+    );
+    assert_eq!(all.stopped_by, ["ambiguous_origin_header"]);
+    let scoped = crate::service_map_flow::build(
+        session,
+        snapshot,
+        origin,
+        true,
+        &["www.example.com".into()],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        scoped.complete,
+        "excluded rows cannot affect scoped Flow coverage"
+    );
+}
+
+#[test]
+fn flow_distinguishes_missing_redirects_from_unrelated_metadata_limits() {
+    let session = Uuid::from_u128(105);
+    let origin = "https://www.example.com";
+    let mut ambiguous = filter_fixture("www.example.com", "/login", 302, "text/html", None, 1);
+    ambiguous.response.as_mut().unwrap().headers.extend([
+        HeaderRecord {
+            name: "Location".into(),
+            value: "/first".into(),
+        },
+        HeaderRecord {
+            name: "Location".into(),
+            value: "/second".into(),
+        },
+    ]);
+    let mut unrelated = filter_fixture("www.example.com", "/login", 302, "text/html", None, 2);
+    unrelated.response.as_mut().unwrap().headers.extend([
+        HeaderRecord {
+            name: "Location".into(),
+            value: "/next".into(),
+        },
+        HeaderRecord {
+            name: "Content-Security-Policy".into(),
+            value: "x".repeat(MAX_HEADER_VALUE_BYTES + 1),
+        },
+    ]);
+    for (record, expected) in [
+        (ambiguous, Some("ambiguous_location_headers")),
+        (unrelated, None),
+    ] {
+        let store = TransactionStore::from_records(vec![record]);
+        let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
+            session,
+            DEFAULT_MAX_RECORDS,
+            technology::CatalogVersion::V2,
+            &crate::store::ListFilters::default(),
+        );
+        assert!(!snapshot.rows[0].metadata_complete);
+        let flow =
+            crate::service_map_flow::build(session, snapshot, origin, false, &[], &[]).unwrap();
+        assert_eq!(flow.complete, expected.is_none());
+        assert_eq!(flow.stopped_by, expected.into_iter().collect::<Vec<_>>());
+        assert_eq!(
+            flow.phases[0].steps[0].redirect.is_some(),
+            expected.is_none()
+        );
+    }
+}

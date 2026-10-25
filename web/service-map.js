@@ -1226,7 +1226,11 @@
   // The Flow view: the selected origin's requests and those of the origins it
   // links to, in time order, a band per page load, the client on the left.
   const FLOW = Object.freeze({ gutter: 64, clientX: 136, laneWidth: 220, laneBox: 180, top: 12, header: 46, kicker: 30, step: 42, padding: 20 });
-  const FLOW_STOPS = Object.freeze({ max_records: "older rows left out", metadata_bytes: "metadata read limit reached", lanes_limit: "more origins link here; the five with the most rows are shown", steps_limit: "older steps left out" });
+  const FLOW_STOPS = Object.freeze({ max_records: "older rows left out", metadata_bytes: "metadata read limit reached", lanes_limit: "more origins link here; the five with the most rows are shown", steps_limit: "older steps left out",
+    request_header_scan_limit: "request-header read limit reached", request_header_value_limit: "oversized request headers left links unproven",
+    ambiguous_origin_header: "ambiguous Origin headers", ambiguous_referer_header: "ambiguous Referer headers",
+    header_scan_limit: "response-header read limit reached", header_value_limit: "oversized response headers left redirects unproven",
+    ambiguous_location_headers: "ambiguous redirect headers", unsupported_location: "unsupported redirect target" });
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const hostOf = (origin) => { try { return new URL(origin).host; } catch { return String(origin); } };
   const flowStepLabel = (step) => `${step.method} ${step.path}${step.count > 1 ? ` ×${step.count}` : ""}${step.status == null ? "" : ` ${step.status}`}`;
