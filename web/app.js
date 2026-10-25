@@ -6127,7 +6127,8 @@ async function selectHistoryTransaction(id, options = {}) {
   return loadTransactionDetail(state.selectedId);
 }
 
-async function loadSelectedTransactionRecord() {
+async function loadSelectedTransactionRecord(isCurrent = () => true) {
+  if (!isCurrent()) return null;
   const id = state.selectedId;
   if (!id) {
     return null;
@@ -6137,6 +6138,8 @@ async function loadSelectedTransactionRecord() {
   }
 
   const record = await loadTransactionRecordById(id);
+  // An action-owned read must not publish detail before its caller can retire it.
+  if (!isCurrent()) return null;
   if (!record) {
     if (state.selectedId === id) {
       renderEmptyDetail();
@@ -19187,16 +19190,22 @@ function switchInterceptQueueTab(tab) {
 }
 
 async function openReplayFromSelection() {
-  const record = await loadSelectedTransactionRecord();
+  const isCurrent = createRecordClipboardOwner();
+  try {
+    const record = await loadSelectedTransactionRecord(isCurrent);
+    if (!isCurrent()) return;
 
-  if (!record) {
-    throw new Error("Selected transaction could not be loaded.");
-  }
-  if (record.kind === "tunnel") {
-    throw new Error("Tunnel records cannot be sent to Replay.");
-  }
+    if (!record) {
+      throw new Error("Selected transaction could not be loaded.");
+    }
+    if (record.kind === "tunnel") {
+      throw new Error("Tunnel records cannot be sent to Replay.");
+    }
 
-  openTransactionRecordInReplay(record);
+    openTransactionRecordInReplay(record);
+  } catch (error) {
+    if (isCurrent()) throw error;
+  }
 }
 
 function resetReplay() {
@@ -28940,6 +28949,13 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
       closeContextMenu();
       return;
     }
+    const isReplayOwnerCurrent = action === "send-to-replay"
+      ? createRecordClipboardOwner(targetSessionId, target?.clipboardSessionGeneration)
+      : null;
+    if (isReplayOwnerCurrent && !isReplayOwnerCurrent()) {
+      closeContextMenu();
+      return;
+    }
     state.selectedId = targetId;
     closeContextMenu();
     const loadTargetRecord = () => loadMenuTargetRecord(target)
@@ -28947,11 +28963,14 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
     if (action === "send-to-replay") {
       loadTargetRecord()
         .then((record) => {
+          if (!isReplayOwnerCurrent()) return;
           if (!record) throw new Error("Selected transaction could not be loaded.");
           if (record.kind === "tunnel") throw new Error("Tunnel records cannot be sent to Replay.");
           openTransactionRecordInReplay(record);
         })
-        .catch(handleSendActionError);
+        .catch((error) => {
+          if (isReplayOwnerCurrent()) handleSendActionError(error);
+        });
     } else if (action === "send-to-fuzzer") {
       openFuzzerFromRecordLoader(loadTargetRecord)
         .catch(handleSendActionError);
