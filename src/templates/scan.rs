@@ -1471,7 +1471,20 @@ impl Run {
     /// named, so a redirect cannot carry it to a host they did not.
     async fn may_send(&self, authority: &str) -> bool {
         match &self.extra_hosts {
-            Some(hosts) => reaches(&self.session, authority, hosts).await,
+            Some(_) => {
+                // Settings can narrow the auto scan's permission while it
+                // runs. Copy only the live list, not its jobs or results.
+                let hosts = self
+                    .session
+                    .template_scans
+                    .snapshot
+                    .lock()
+                    .unwrap()
+                    .auto
+                    .hosts
+                    .clone();
+                reaches(&self.session, authority, &hosts).await
+            }
             None => self
                 .targets
                 .iter()

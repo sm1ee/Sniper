@@ -204,6 +204,9 @@ Auto scan**, after turning templates on in the list's On column.
 - An origin is sent to when it is in a non-empty Scope or on the auto scan's
   own host list (patterns as Scope takes them), and never when Scope excludes
   it or it is Sniper itself. Its `{{BaseURL}}` is the origin.
+  Changes to Scope and the auto host list apply to later requests, including
+  those waiting for a rate slot. Manual scans still use their explicitly
+  named targets.
 - One host goes at a time, at the auto scan's pace, as a scan of its own
   marked Auto. Templates with risk tags are left out, and those that need
   Interactsh are left out where the session has none. A scan you start comes
