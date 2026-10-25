@@ -3144,10 +3144,58 @@ fn flow_distinguishes_missing_redirects_from_unrelated_metadata_limits() {
             value: "x".repeat(MAX_HEADER_VALUE_BYTES + 1),
         },
     ]);
-    for (record, expected) in [
-        (ambiguous, Some("ambiguous_location_headers")),
-        (unrelated, None),
-    ] {
+    let mut cases = vec![
+        (ambiguous, Some("ambiguous_location_headers"), false, false),
+        (unrelated, None, true, false),
+    ];
+    // Fully scanning unrelated oversized values still proves there was no
+    // Location. A 3xx status alone does not make that absence an omission.
+    for name in ["Content-Security-Policy", "Access-Control-Allow-Origin"] {
+        let mut no_location =
+            filter_fixture("www.example.com", "/login", 302, "text/html", None, 3);
+        no_location
+            .response
+            .as_mut()
+            .unwrap()
+            .headers
+            .push(HeaderRecord {
+                name: name.into(),
+                value: "x".repeat(MAX_HEADER_VALUE_BYTES + 1),
+            });
+        cases.push((no_location, None, false, false));
+    }
+    for status in [302, 200] {
+        let mut unread = filter_fixture("www.example.com", "/login", status, "text/html", None, 4);
+        unread
+            .response
+            .as_mut()
+            .unwrap()
+            .headers
+            .push(HeaderRecord {
+                name: "lOcAtIoN".into(),
+                value: "x".repeat(MAX_HEADER_VALUE_BYTES + 1),
+            });
+        let is_redirect = status == 302;
+        cases.push((
+            unread,
+            is_redirect.then_some("header_value_limit"),
+            false,
+            is_redirect,
+        ));
+    }
+    let mut incomplete_scan =
+        filter_fixture("www.example.com", "/login", 302, "text/html", None, 5);
+    incomplete_scan
+        .response
+        .as_mut()
+        .unwrap()
+        .headers
+        .extend((0..MAX_HEADERS).map(|_| HeaderRecord {
+            name: "Content-Security-Policy".into(),
+            value: "default-src 'none'".into(),
+        }));
+    cases.push((incomplete_scan, Some("header_scan_limit"), false, false));
+    for (record, expected, redirected, value_omitted) in cases {
         let store = TransactionStore::from_records(vec![record]);
         let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
             session,
@@ -3156,13 +3204,16 @@ fn flow_distinguishes_missing_redirects_from_unrelated_metadata_limits() {
             &crate::store::ListFilters::default(),
         );
         assert!(!snapshot.rows[0].metadata_complete);
+        assert_eq!(snapshot.rows[0].redirect_value_omitted, value_omitted);
+        assert!(serde_json::to_value(&snapshot.rows[0])
+            .unwrap()
+            .get("redirect_value_omitted")
+            .is_none());
         let flow =
-            crate::service_map_flow::build(session, snapshot, origin, false, &[], &[]).unwrap();
+            crate::service_map_flow::build(session, snapshot.clone(), origin, false, &[], &[])
+                .unwrap();
         assert_eq!(flow.complete, expected.is_none());
         assert_eq!(flow.stopped_by, expected.into_iter().collect::<Vec<_>>());
-        assert_eq!(
-            flow.phases[0].steps[0].redirect.is_some(),
-            expected.is_none()
-        );
+        assert_eq!(flow.phases[0].steps[0].redirect.is_some(), redirected);
     }
 }

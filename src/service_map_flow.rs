@@ -196,15 +196,16 @@ fn affects_flow(row: &ServiceMapRow, reason: &str) -> bool {
         | "ambiguous_referer_header"
         | "ambiguous_location_headers"
         | "unsupported_location" => true,
-        "header_scan_limit" | "header_value_limit" => {
+        "header_scan_limit" => {
             row.redirect.is_none()
                 && row
                     .status
                     .is_some_and(|status| matches!(status, 300 | 301 | 302 | 303 | 307 | 308))
         }
+        "header_value_limit" => row.redirect_value_omitted,
         // Technology, content-type and unnamed-signal omissions do not change
-        // Flow's lanes or arrows. A known redirect also survives an unrelated
-        // oversized response header, such as Content-Security-Policy.
+        // Flow's lanes or arrows. An unrelated oversized response header says
+        // nothing about whether a Location was present or could be read.
         _ => false,
     }
 }
