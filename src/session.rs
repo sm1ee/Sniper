@@ -623,9 +623,11 @@ pub struct SessionContext {
     mutation_lock: Arc<AsyncMutex<()>>,
     persist_lock: Arc<AsyncMutex<()>>,
     confirmed_transaction_compaction_sequence: Arc<AtomicU64>,
-    /// Set while a state-only persist is already queued, so a burst of small
-    /// changes costs one write instead of one write each.
+    /// Held through the write, not just the debounce: a slow disk must not
+    /// accumulate a new context-owning task every debounce interval.
     state_persist_scheduled: AtomicBool,
+    /// A change since the current worker started taking its snapshot.
+    state_persist_dirty: AtomicBool,
     #[cfg(test)]
     workspace_write_fault: std::sync::Mutex<Option<WorkspaceWriteFault>>,
     #[cfg(test)]
@@ -639,6 +641,9 @@ pub struct SessionContext {
     snapshot_gate: std::sync::Mutex<Option<SnapshotTestGate>>,
     #[cfg(test)]
     state_persist_gate: std::sync::Mutex<Option<SnapshotTestGate>>,
+    #[cfg(test)]
+    state_persist_handoff_gate:
+        std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     #[cfg(test)]
     snapshot_capture_gate: std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
@@ -801,6 +806,7 @@ impl SessionContext {
             persist_lock: Arc::new(AsyncMutex::new(())),
             confirmed_transaction_compaction_sequence: Arc::new(AtomicU64::new(0)),
             state_persist_scheduled: AtomicBool::new(false),
+            state_persist_dirty: AtomicBool::new(false),
             #[cfg(test)]
             workspace_write_fault: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -813,6 +819,8 @@ impl SessionContext {
             snapshot_gate: std::sync::Mutex::new(None),
             #[cfg(test)]
             state_persist_gate: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            state_persist_handoff_gate: std::sync::Mutex::new(None),
             #[cfg(test)]
             snapshot_capture_gate: std::sync::Mutex::new(None),
         }
@@ -827,17 +835,39 @@ impl SessionContext {
     /// state when it runs, so anything that changes meanwhile is either included
     /// or queues the next one.
     pub fn schedule_state_persist(self: &Arc<Self>) {
+        self.state_persist_dirty.store(true, Ordering::SeqCst);
         if self.state_persist_scheduled.swap(true, Ordering::SeqCst) {
             return;
         }
         let session = Arc::clone(self);
         tokio::spawn(async move {
-            tokio::time::sleep(STATE_PERSIST_DEBOUNCE).await;
-            session
-                .state_persist_scheduled
-                .store(false, Ordering::SeqCst);
-            if let Err(error) = session.persist_state_only().await {
-                warn!(?error, session_id = %session.id, "failed to persist session state");
+            loop {
+                tokio::time::sleep(STATE_PERSIST_DEBOUNCE).await;
+                session.state_persist_dirty.store(false, Ordering::SeqCst);
+                if let Err(error) = session.persist_state_only().await {
+                    warn!(?error, session_id = %session.id, "failed to persist session state");
+                }
+                // Release ownership before checking for later changes. A caller
+                // either leaves dirty work for this worker to reclaim, or owns
+                // the next worker itself. Keeping the flag set while returning
+                // would lose that caller's wakeup; clearing it before the write
+                // would let blocked writers accumulate without a bound.
+                session
+                    .state_persist_scheduled
+                    .store(false, Ordering::SeqCst);
+                #[cfg(test)]
+                {
+                    let gate = session.state_persist_handoff_gate.lock().unwrap().take();
+                    if let Some((entered, resume)) = gate {
+                        let _ = entered.send(());
+                        let _ = resume.await;
+                    }
+                }
+                if !session.state_persist_dirty.load(Ordering::SeqCst)
+                    || session.state_persist_scheduled.swap(true, Ordering::SeqCst)
+                {
+                    break;
+                }
             }
         });
     }
@@ -1330,6 +1360,14 @@ impl SessionContext {
                 resume: release,
             },
         });
+        (ready, resume)
+    }
+
+    #[cfg(test)]
+    fn pause_next_state_handoff(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, ready) = oneshot::channel();
+        let (resume, release) = oneshot::channel();
+        *self.state_persist_handoff_gate.lock().unwrap() = Some((entered, release));
         (ready, resume)
     }
 
@@ -5391,6 +5429,112 @@ mod tests {
         drop(session);
         drop(registry);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scheduled_state_write_hands_off_to_a_new_caller_without_losing_its_change() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        let references = std::sync::Arc::strong_count(&session);
+        let (entered, resume) = session.pause_next_state_handoff();
+        session.schedule_state_persist();
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+            .await
+            .expect("the first writer did not release its scheduler ownership")
+            .unwrap();
+        assert!(!session
+            .state_persist_scheduled
+            .load(std::sync::atomic::Ordering::SeqCst));
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["handoff.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session.schedule_state_persist();
+        assert_eq!(std::sync::Arc::strong_count(&session) - references, 2);
+        resume.send(()).unwrap();
+        wait_scheduled_scope(&session, references, "handoff.example.com").await;
+        drop(session);
+        drop(registry);
+        let (registry, session) = SessionRegistry::load_or_create(&root, 32, 32).unwrap();
+        assert_eq!(
+            session.runtime.snapshot().await.scope_patterns,
+            vec!["handoff.example.com"]
+        );
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scheduled_state_write_releases_ownership_after_error_and_retries_a_later_change() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        let references = std::sync::Arc::strong_count(&session);
+        let path = super::state_path(session.storage_dir());
+        // An owned fixture directory at the destination makes atomic rename
+        // fail, without changing permissions or depending on disk capacity.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let (entered, resume) = session.pause_next_state_handoff();
+        session.schedule_state_persist();
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+            .await
+            .expect("the failed writer did not release its scheduler ownership")
+            .unwrap();
+        assert!(
+            path.is_dir(),
+            "the deliberately failing destination remains"
+        );
+        assert!(!session
+            .state_persist_scheduled
+            .load(std::sync::atomic::Ordering::SeqCst));
+        resume.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while std::sync::Arc::strong_count(&session) != references {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("an unchanged failed write must not spin or retain a worker");
+        std::fs::remove_dir(&path).unwrap();
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["retry.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session.schedule_state_persist();
+        wait_scheduled_scope(&session, references, "retry.example.com").await;
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn wait_scheduled_scope(
+        session: &std::sync::Arc<super::SessionContext>,
+        references: usize,
+        scope: &str,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let state = std::fs::read(super::state_path(session.storage_dir()))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                if state.is_some_and(|state| {
+                    state["runtime"]["scope_patterns"] == serde_json::json!([scope])
+                }) && std::sync::Arc::strong_count(session) == references
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the latest scheduled state did not persist and release its worker");
     }
 
     #[tokio::test]
