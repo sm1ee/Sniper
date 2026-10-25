@@ -3381,6 +3381,17 @@ function readFuzzerWorkspace(fuzzerWS) {
 // `keepShownRun` leaves a run already on screen in place rather than loading it again.
 function applyFuzzerWorkspace(fields, sessionId, { keepShownRun = false } = {}) {
   const { legacyAttackRecord, fuzzerAttackRecordId, ...rest } = fields;
+  if (state._fuzzerFileGeneration) {
+    // An accepted workspace draft supersedes an earlier file choice, including
+    // a change back to its original values. Status and shown-run metadata do
+    // not replace the draft; normalize cloned request/target objects as saved.
+    const draft = (source) => ({
+      ...snapshotFuzzerWorkspace(source), notice: "", attack_record_id: null,
+    });
+    if (workspaceSnapshotValueChanged(draft(state), draft({ ...state, ...rest }))) {
+      state._fuzzerFileGeneration += 1;
+    }
+  }
   Object.assign(state, rest);
   if (keepShownRun && !legacyAttackRecord && fuzzerAttackRecordId === (state.fuzzerAttackRecordId || null)) return;
   setFuzzerAttackRecord(legacyAttackRecord);
