@@ -1600,26 +1600,47 @@ mod tests {
         body: &str,
         path: &str,
     ) -> (SourceReport, ReconSnapshot, Vec<String>) {
+        crawl_wire_fixture(content_type, body.as_bytes(), &[], path).await
+    }
+
+    async fn crawl_wire_fixture(
+        content_type: &str,
+        body: &[u8],
+        encodings: &[&str],
+        path: &str,
+    ) -> (SourceReport, ReconSnapshot, Vec<String>) {
         use axum::{routing::get, Router};
         let requested = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured = requested.clone();
-        let content_type = content_type.to_string();
-        let body = body.to_string();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            content_type.parse().unwrap(),
+        );
+        for encoding in encodings {
+            headers.append(
+                axum::http::header::CONTENT_ENCODING,
+                encoding.parse().unwrap(),
+            );
+        }
+        let body = body.to_vec();
         let fixture_path = path.to_string();
         let router = Router::new().fallback(get(move |uri: axum::http::Uri| {
             let captured = captured.clone();
-            let content_type = content_type.clone();
+            let headers = headers.clone();
             let body = body.clone();
             let fixture_path = fixture_path.clone();
             async move {
                 captured.lock().unwrap().push(uri.path().to_string());
                 if uri.path() == fixture_path {
-                    ([(axum::http::header::CONTENT_TYPE, content_type)], body)
+                    (headers, body)
                 } else {
-                    (
-                        [(axum::http::header::CONTENT_TYPE, "text/plain".into())],
-                        String::new(),
-                    )
+                    let mut plain = axum::http::HeaderMap::new();
+                    plain.insert(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/plain".parse().unwrap(),
+                    );
+                    (plain, Vec::new())
                 }
             }
         }));
@@ -1654,6 +1675,191 @@ mod tests {
         server.abort();
         let _ = server.await;
         (report, snapshot, paths)
+    }
+
+    fn encoded_fixture_gzip(body: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(body).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    async fn encoded_body_fixture(
+        status: u16,
+        encodings: &[&str],
+        body: &[u8],
+    ) -> Result<String, &'static str> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut response = format!(
+            "HTTP/1.1 {status} Fixture\r\nContent-Type: text/html\r\nConnection: close\r\n"
+        );
+        if status != 204 {
+            response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        for encoding in encodings {
+            response.push_str(&format!("Content-Encoding: {encoding}\r\n"));
+        }
+        response.push_str("\r\n");
+        let mut response = response.into_bytes();
+        response.extend_from_slice(body);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let mut bytes = [0; 1024];
+                let read = socket.read(&mut bytes).await.unwrap();
+                assert!(read > 0 && request.len() < 8192);
+                request.extend_from_slice(&bytes[..read]);
+            }
+            socket.write_all(&response).await.unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get_all(reqwest::header::CONTENT_ENCODING)
+                .iter()
+                .count(),
+            encodings.len()
+        );
+        let result = read_body(response).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn recon_encoded_body_preserves_identity_and_bodyless_responses() {
+        let raw = b"unchanged\xffidentity";
+        for encodings in [vec![], vec!["identity"], vec![""], vec![" , identity, "]] {
+            assert_eq!(
+                encoded_body_fixture(200, &encodings, raw).await.unwrap(),
+                String::from_utf8_lossy(raw)
+            );
+        }
+        for status in [204, 205] {
+            assert_eq!(
+                encoded_body_fixture(status, &["gzip"], b"").await.unwrap(),
+                ""
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recon_encoded_body_decodes_gzip_aliases_without_altering_static_text() {
+        let raw =
+            b"<a href='/found?q=1&amp;q=2'>link</a><form method='POST' action='/form'></form>";
+        let encoded = encoded_fixture_gzip(raw);
+        for encoding in ["gzip", "GZip", "x-gzip", " identity , gzip , "] {
+            assert_eq!(
+                encoded_body_fixture(200, &[encoding], &encoded)
+                    .await
+                    .unwrap()
+                    .as_bytes(),
+                raw,
+                "{encoding}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recon_encoded_body_keeps_stacked_fields_and_all_concatenated_members() {
+        let raw = b"<a href='/first'>first</a><a href='/second'>second</a>";
+        let stacked = encoded_fixture_gzip(&encoded_fixture_gzip(raw));
+        for encodings in [vec!["gzip, gzip"], vec!["gzip", "x-gzip"]] {
+            assert_eq!(
+                encoded_body_fixture(200, &encodings, &stacked)
+                    .await
+                    .unwrap()
+                    .as_bytes(),
+                raw
+            );
+        }
+        let mut concatenated = encoded_fixture_gzip(&raw[..24]);
+        concatenated.extend(encoded_fixture_gzip(&raw[24..]));
+        assert_eq!(
+            encoded_body_fixture(200, &["gzip"], &concatenated)
+                .await
+                .unwrap()
+                .as_bytes(),
+            raw
+        );
+    }
+
+    #[tokio::test]
+    async fn recon_encoded_body_rejects_incomplete_or_unsupported_content_without_raw_fallback() {
+        let raw = b"<a href='/must-not-follow'>wire bytes</a>";
+        let encoded = encoded_fixture_gzip(raw);
+        let mut trailing = encoded.clone();
+        trailing.extend_from_slice(b"not-a-member");
+        let mut bad_crc = encoded.clone();
+        let crc = bad_crc.len() - 8;
+        bad_crc[crc] ^= 1;
+        for body in [
+            Vec::new(),
+            raw.to_vec(),
+            encoded[..encoded.len() - 2].to_vec(),
+            trailing,
+            bad_crc,
+        ] {
+            assert!(encoded_body_fixture(200, &["gzip"], &body).await.is_err());
+        }
+        for encodings in [
+            vec!["br"],
+            vec!["deflate"],
+            vec!["zstd"],
+            vec!["gzip, unknown"],
+            vec!["gzip;level=1"],
+        ] {
+            assert!(
+                encoded_body_fixture(200, &encodings, raw).await.is_err(),
+                "{encodings:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn crawl_encoded_body_marks_partial_and_retains_live_response_without_false_links() {
+        let (report, snapshot, paths) = crawl_wire_fixture(
+            "text/html",
+            b"<a href='/must-not-follow'>not gzip</a>",
+            &["gzip"],
+            "/encoded",
+        )
+        .await;
+        assert!(report.truncated, "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.to_ascii_lowercase().contains("decod")),
+            "{report:?}"
+        );
+        assert_eq!(report.requests, 3);
+        assert!(report.error.is_none());
+        assert!(!paths.iter().any(|path| path == "/must-not-follow"));
+        assert!(snapshot
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.url.ends_with("/encoded")
+                && endpoint
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == "live" && evidence.status == Some(200))));
+        assert!(snapshot.endpoints.iter().all(|endpoint| endpoint
+            .evidence
+            .iter()
+            .all(|evidence| evidence.kind == "live")));
     }
 
     #[tokio::test]
