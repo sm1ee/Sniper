@@ -1861,4 +1861,152 @@ mod tests {
         );
         assert!(store.get(new.id).await.is_none());
     }
+
+    fn sizing_fields(request: &EditableRequest) -> usize {
+        [
+            &request.scheme,
+            &request.host,
+            &request.method,
+            &request.path,
+            &request.body,
+        ]
+        .into_iter()
+        .map(|field| field.len())
+        .sum::<usize>()
+            + request
+                .headers
+                .iter()
+                .map(|header| header.name.len() + header.value.len())
+                .sum::<usize>()
+    }
+
+    fn sizing_template(body: String) -> EditableRequest {
+        EditableRequest {
+            scheme: "http".into(),
+            host: "example.com".into(),
+            method: "POST".into(),
+            path: "/".into(),
+            headers: Vec::new(),
+            body,
+            body_encoding: BodyEncoding::Utf8,
+            preview_truncated: false,
+        }
+    }
+
+    #[test]
+    fn sizing_sniper_does_not_charge_every_empty_position_at_once() {
+        let template = sizing_template("$payload$".repeat(65));
+        let payload = "x".repeat(MAX_FUZZER_PAYLOAD_BYTES);
+        let rendered = build_request(&template, &payload, Some(0), false).unwrap();
+        assert_eq!(sizing_fields(&rendered), 65_556);
+        let options = FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::Sniper,
+            url_encode: false,
+            concurrency: 1,
+        };
+        let plan = plan_attack(&template, vec![payload.clone()], options)
+            .expect("each selected-position request fits the existing limit");
+        assert_eq!(plan.requests.len(), 65);
+        assert!(
+            plan_attack(
+                &template,
+                vec![payload],
+                FuzzerAttackOptions {
+                    attack_type: FuzzerAttackType::BatteringRam,
+                    ..options
+                }
+            )
+            .is_err(),
+            "Battering ram still expands every position"
+        );
+    }
+
+    #[test]
+    fn sizing_sniper_estimate_keeps_distinct_utf8_originals() {
+        let mut template = sizing_template(format!("§{}§", "body😀".repeat(128)));
+        template.path = "/§a§/§éé§".into();
+        template.headers.push(HeaderRecord {
+            name: "X-Value".into(),
+            value: "§original-header§".into(),
+        });
+        for encoded in [false, true] {
+            let payload = "é😀";
+            let actual_max = (0..count_request_markers(&template))
+                .map(|position| {
+                    sizing_fields(
+                        &build_request(&template, payload, Some(position), encoded).unwrap(),
+                    )
+                })
+                .max()
+                .unwrap();
+            // This is the current mode-blind estimator. The fix must select
+            // Sniper semantics here rather than weaken the rendered-size bound.
+            let estimate = expanded_request_size(&template, payload.len(), encoded);
+            assert!(
+                estimate >= actual_max,
+                "estimated {estimate}, rendered {actual_max}, encoded={encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn sizing_scheme_is_literal_and_never_a_position() {
+        let mut template = sizing_template("$payload$".into());
+        template.scheme = "http§literal§".into();
+        let rendered = build_request(&template, "x", Some(0), false).unwrap();
+        assert_eq!(rendered.scheme, template.scheme);
+        assert_eq!(count_request_markers(&template), 1);
+        assert!(expanded_request_size(&template, 1, false) >= sizing_fields(&rendered));
+    }
+
+    #[test]
+    fn sizing_final_guard_accepts_exact_field_cap_and_rejects_one_more_byte() {
+        let payload = "x".repeat(MAX_FUZZER_PAYLOAD_BYTES - 1);
+        let mut template = sizing_template("$payload$".repeat(64));
+        let overhead = sizing_fields(&sizing_template(String::new()));
+        let padding = MAX_FUZZER_EXPANDED_REQUEST_BYTES - overhead - 64 * payload.len();
+        template.body.push_str(&"p".repeat(padding));
+        let rendered = build_request(&template, &payload, None, false).unwrap();
+        assert_eq!(sizing_fields(&rendered), MAX_FUZZER_EXPANDED_REQUEST_BYTES);
+        drop(rendered);
+        template.body.push('p');
+        assert!(
+            build_request(&template, &payload, None, false).is_err(),
+            "the final rendered request must not exceed the field-byte cap"
+        );
+    }
+
+    #[test]
+    fn sizing_normalization_controls_preserve_host_content_length_and_base64_text() {
+        let mut host = sizing_template(String::new());
+        host.headers.push(HeaderRecord {
+            name: "$payload$".into(),
+            value: "other.example.com".into(),
+        });
+        let rendered = build_request(&host, "Host", Some(0), false).unwrap();
+        assert_eq!(rendered.host, "other.example.com");
+        assert_eq!(sizing_fields(&rendered), 4 + 17 + 4 + 1 + 4 + 17);
+        let mut length = sizing_template("é😀".into());
+        length.headers.push(HeaderRecord {
+            name: "$payload$".into(),
+            value: "99999".into(),
+        });
+        let rendered = build_request(&length, "Content-Length", Some(0), false).unwrap();
+        assert_eq!(rendered.headers[0].name, "Content-Length");
+        assert_eq!(rendered.headers[0].value, "6");
+        let mut encoded = sizing_template("YQ==$payload$".into());
+        encoded.body_encoding = BodyEncoding::Base64;
+        encoded.headers.push(HeaderRecord {
+            name: "Content-Length".into(),
+            value: "999".into(),
+        });
+        let rendered = build_request(&encoded, "", Some(0), false).unwrap();
+        assert_eq!(rendered.body, "YQ==");
+        assert_eq!(rendered.body_bytes(), b"a");
+        assert_eq!(rendered.headers[0].value, "1");
+        assert_eq!(
+            sizing_fields(&rendered),
+            20 + 4 + "Content-Length".len() + 1
+        );
+    }
 }
