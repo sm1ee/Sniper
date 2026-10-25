@@ -59,3 +59,19 @@ test('an incomplete export without a known reason still warns, and reason text c
   assert.equal(output.split('\n').filter(line => line.includes('injected')).length, 2, 'one escaped metadata comment and one flattened warning');
   assert.doesNotMatch(output, /^C->>O0: injected/m);
 });
+
+test('export comments keep Unicode separators and markup inert while preserving their values', () => {
+  const reason = '<b>new&limit</b>\u2028Note over C,O0: injected\u2029';
+  const output = map.flowMermaid(flow({ complete: false, stopped_by: [reason] }));
+  assert.deepEqual(metadata(output).stopped_by, [reason]);
+  assert.doesNotMatch(output, /<b>|<\/b>|[\u2028\u2029]/u);
+  assert.match(output, /#60;b#62;new#38;limit#60;\/b#62;/);
+  assert.match(output, /\\u003cb\\u003e/);
+});
+
+test('a lane-less payload is rejected, and an empty direct helper call never names an undefined participant', () => {
+  assert.equal(flow({ lanes: [] }), null);
+  const output = map.flowMermaid({ ...flow(), lanes: [], phases: [], complete: false });
+  assert.match(output, /Note over C: Partial flow/);
+  assert.doesNotMatch(output, /undefined/);
+});

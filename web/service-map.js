@@ -1356,26 +1356,29 @@
     return Math.max(0, (viewportTop - flowTop) / (scale || 1));
   }
 
-  // Mermaid sequence diagram text; ";" and "#" would end or escape a message.
+  // Mermaid entity codes preserve label text without introducing markup or
+  // ending a message. Line separators stay on the same statement.
   function flowMermaid(flow, hiddenKinds = []) {
     const hidden = new Set(hiddenKinds);
     const ids = new Map(flow.lanes.map((origin, index) => [origin, `O${index}`]));
-    const text = (value) => String(value).replace(/[;#\r\n]/g, " ");
+    const text = (value) => String(value).replace(/[\r\n\u2028\u2029]/g, " ").replace(/[&<>;#]/g, (character) => `#${character.charCodeAt(0)};`);
     const shown = flow.phases.flatMap((phase) => phase.steps).filter((step) => !hidden.has(step.kind));
     // A copied diagram must not turn a bounded or filtered view into apparent
     // full coverage. Keep exact bounds in the source, and truncation visible.
     const provenance = { origin: flow.origin, considered_rows: flow.consideredRows, flow_rows: flow.flowRows, complete: flow.complete,
       stopped_by: flow.stoppedBy, hidden_request_kinds: [...hidden], shown_steps: shown.length, shown_rows: shown.reduce((sum, step) => sum + step.count, 0) };
-    const lines = ["sequenceDiagram", `  %% Sniper Flow: ${JSON.stringify(provenance)}`, "  participant C as Client", ...flow.lanes.map((origin) => `  participant ${ids.get(origin)} as ${text(hostOf(origin))}`)];
+    const metadata = JSON.stringify(provenance).replace(/[&<>\u2028\u2029]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    const lines = ["sequenceDiagram", `  %% Sniper Flow: ${metadata}`, "  participant C as Client", ...flow.lanes.map((origin) => `  participant ${ids.get(origin)} as ${text(hostOf(origin))}`)];
     const last = ids.get(flow.lanes.at(-1));
+    const span = last ? `C,${last}` : "C";
     if (!flow.complete || flow.stoppedBy.length) {
       const reasons = flow.stoppedBy.map((reason) => FLOW_STOPS[reason] || reason).join(" · ");
-      lines.push(`  Note over C,${last}: ${text(`Partial flow${reasons ? `: ${reasons}` : ""}`)}`);
+      lines.push(`  Note over ${span}: ${text(`Partial flow${reasons ? `: ${reasons}` : ""}`)}`);
     }
     for (const phase of flow.phases) {
       const steps = phase.steps.filter((step) => !hidden.has(step.kind));
       if (!steps.length) continue;
-      lines.push(`  Note over C,${last}: ${text(flowPageLabel(phase))}`);
+      lines.push(`  Note over ${span}: ${text(flowPageLabel(phase))}`);
       for (const step of steps) {
         lines.push(`  C->>${ids.get(step.origin)}: ${text(flowStepLabel(step))}`);
         if (step.redirect) lines.push(`  ${ids.get(step.origin)}-->>C: ${text(flowRedirectLabel(step))}`);
