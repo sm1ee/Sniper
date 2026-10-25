@@ -971,7 +971,9 @@ fn decode_single_content_encoding(
 ) -> Option<Vec<u8>> {
     match encoding {
         "gzip" | "x-gzip" => {
-            let mut decoder = flate2::read::GzDecoder::new(body);
+            // A valid first member is not a complete entity: later members must
+            // also decode and share the same output limit before publishing it.
+            let mut decoder = flate2::read::MultiGzDecoder::new(body);
             read_limited_to_end(&mut decoder, max_decoded_bytes)
         }
         "deflate" => {
