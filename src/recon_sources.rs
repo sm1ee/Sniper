@@ -1112,6 +1112,7 @@ struct Tag {
     attrs: HashMap<String, String>,
     body: Option<(usize, usize)>,
     html_context: bool,
+    in_template: bool,
 }
 
 fn html_url_attribute_label(tag: &Tag, attribute: &str) -> Option<&'static str> {
@@ -1205,6 +1206,36 @@ fn self_closing_foreign_root(source: &str, cancel: Option<&AtomicBool>) -> bool 
     true
 }
 
+fn html_name_delimiter(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r' | b'/' | b'>')
+}
+
+fn template_context_raw_end(
+    lower_body: &str,
+    cursor: usize,
+    name: &str,
+    cancel: Option<&AtomicBool>,
+) -> usize {
+    let prefix = format!("</{name}");
+    let mut search_at = cursor;
+    while let Some(offset) = lower_body[search_at..].find(&prefix) {
+        if is_cancelled(cancel) {
+            break;
+        }
+        let start = search_at + offset;
+        let after = start + prefix.len();
+        if lower_body
+            .as_bytes()
+            .get(after)
+            .is_some_and(|byte| html_name_delimiter(*byte))
+        {
+            return start;
+        }
+        search_at = after;
+    }
+    lower_body.len()
+}
+
 /// A literal tokenizer, not a browser DOM parser. It skips comments
 /// and raw-text elements so fake tags inside scripts cannot become crawl links.
 fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
@@ -1213,6 +1244,8 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
     let mut tags = Vec::new();
     let mut cursor = 0;
     let mut foreign_roots = Vec::new();
+    let mut template_depth = 0usize;
+    let mut template_raw_end = 0;
     while cursor < bytes.len() {
         if is_cancelled(cancel) {
             break;
@@ -1245,6 +1278,9 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
             continue;
         }
         let name = body[name_start..index].to_ascii_lowercase();
+        let exact_name = bytes
+            .get(index)
+            .is_some_and(|byte| html_name_delimiter(*byte));
         let attr_start = index;
         let mut quote = None;
         while index < bytes.len() {
@@ -1274,6 +1310,34 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
         };
         let html_context =
             foreign_roots.is_empty() && foreign_root.is_none() && !name.contains(':');
+        // Base selection needs literal template boundaries, not a new DOM parser.
+        // Keep raw-body extraction unchanged; only ignore fake context markers
+        // there. HTML template is non-void even when its start tag ends in '/>'.
+        if html_context && exact_name && start >= template_raw_end {
+            if name == "template" {
+                template_depth = if closing {
+                    template_depth.saturating_sub(1)
+                } else {
+                    template_depth.saturating_add(1)
+                };
+            } else if !closing && name == "plaintext" {
+                template_raw_end = bytes.len();
+            } else if !closing
+                && matches!(
+                    name.as_str(),
+                    "script"
+                        | "style"
+                        | "textarea"
+                        | "title"
+                        | "iframe"
+                        | "xmp"
+                        | "noembed"
+                        | "noframes"
+                )
+            {
+                template_raw_end = template_context_raw_end(&lower_body, cursor, &name, cancel);
+            }
+        }
         if let Some(root) = foreign_root {
             if closing {
                 if foreign_roots.last() == Some(&root) {
@@ -1289,6 +1353,7 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
             attrs: attributes(&body[attr_start..index], cancel),
             body: None,
             html_context,
+            in_template: template_depth > 0,
         };
         if !closing && matches!(tag.name.as_str(), "script" | "style" | "textarea" | "title") {
             let end_prefix = format!("</{}", tag.name);
@@ -1519,7 +1584,12 @@ fn extract_document_inner(
     let tags = html_tags(body, cancel);
     let document_base = tags
         .iter()
-        .filter(|tag| tag.html_context && !tag.closing && tag.name == "base")
+        .filter(|tag| {
+            tag.html_context
+                && !tag.closing
+                && tag.name == "base"
+                && (!tag.in_template || content_type == "application/xhtml+xml")
+        })
         .find_map(|tag| tag.attrs.get("href"))
         .and_then(|href| resolve(base, href))
         .and_then(|href| Url::parse(&href).ok())
@@ -2012,6 +2082,14 @@ mod tests {
             "<iframe><base href='/existing-raw/'></iframe>",
             "/existing-raw",
         );
+        assert_template_base(
+            "<template><plaintext></template><base href='/plaintext/'>",
+            "/folder",
+        );
+        assert_template_base(
+            "<plaintext><template></plaintext><base href='/existing-raw/'>",
+            "/existing-raw",
+        );
     }
 
     #[test]
@@ -2047,6 +2125,10 @@ mod tests {
         assert!(!clipped);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].url, "https://example.com/existing/outside");
+        let (fallback, clipped) = extract_document(&base(), "", body);
+        assert!(!clipped);
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].url, "https://example.com/folder/outside");
         assert_template_base(body, "/folder");
     }
 

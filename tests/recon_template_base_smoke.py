@@ -78,8 +78,10 @@ def main():
         for key in ("SNIPER_API_ADDR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
                     "http_proxy", "https_proxy", "all_proxy"):
             env.pop(key, None)
-        try:
-            process = subprocess.Popen([str(binaries / "sniper")], env=env,
+        def launch():
+            nonlocal process
+            suffix = ".exe" if os.name == "nt" else ""
+            process = subprocess.Popen([str(binaries / ("sniper" + suffix))], env=env,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             def ready():
@@ -90,7 +92,19 @@ def main():
                 except (OSError, ValueError):
                     return None
 
-            ui = "http://" + eventually(ready)["ui_addr"]
+            return "http://" + eventually(ready)["ui_addr"]
+
+        def stop():
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+        try:
+            ui = launch()
 
             def api(path, payload=None):
                 request = urllib.request.Request(ui + path,
@@ -158,14 +172,36 @@ def main():
             }
             print(json.dumps({"isolation": isolation}), flush=True)
             assert all(isolation.values()), "Literal template base affects outside-link resolution"
+
+            site_map = api("/api/target/site-map?session_id=" + sid)
+            paths = {item["path"]: item for host in site_map for item in host["paths"]}
+            assert paths["/kept-candidate"]["recon_kinds"] == ["candidate"]
+            assert set(paths["/kept-resource"]["recon_kinds"]) == {"observed", "live"}
+            assert all(not item["captured"] and item["discovered"] and item["status"] is None
+                       for item in paths.values())
+            assert all(host["request_count"] == 0 for host in site_map)
+
+            def persisted():
+                for state_file in data.rglob("state.json"):
+                    if state_file.parent.name == sid:
+                        try:
+                            saved = json.loads(state_file.read_text())["recon"]
+                            return saved == {"jobs": snapshot["jobs"], "endpoints": snapshot["endpoints"]}
+                        except (OSError, ValueError, KeyError):
+                            pass
+                return False
+
+            eventually(persisted)
+            request_count = len(requested)
+            stop()
+            ui = launch()
+            assert api("/api/recon?session_id=" + sid) == snapshot
+            assert api("/api/target/site-map?session_id=" + sid) == site_map
+            assert api("/api/transactions?session_id=" + sid) == []
+            assert len(requested) == request_count
+            print("Document-base resolution and unchanged URL evidence survived disk reload and restart.", flush=True)
         finally:
-            if process and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            stop()
             upstream.shutdown()
             upstream.server_close()
 

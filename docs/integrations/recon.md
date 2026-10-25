@@ -49,7 +49,9 @@ Within the parsed enclosing form/action context, form candidates apply [HTML sub
 
 HTML URL attributes use conservative [static element/attribute recognition](https://html.spec.whatwg.org/multipage/indices.html#attributes-3): `href` on `a`, `area`, or `link`; `src` on `audio`, `embed`, `iframe`, `img`, `script`, `track`, or `video`, and image-type `input`; `video[poster]`; and `object[data]`. Parsed HTML `base[href]` sets relative-URL resolution and is not itself fetched.
 
-Other extracted URL attributes remain candidates with their tag and attribute provenance, including custom/prefixed elements, unresolved `source[src]` media-parent context, and literal SVG/MathML subtrees (including `foreignObject` children). A candidate and a recognized link to the same URL retain separate evidence. Custom-component runtime, namespace integration points, template/inert DOM contexts and malformed-markup recovery are not interpreted: this is source extraction, not browser execution or full HTML conformance.
+For HTML (including the empty-content-type fallback), a base inside a literal [`template`](https://html.spec.whatwg.org/multipage/scripting.html#the-template-element) does not set the document base. This limited nesting guard ignores template-like text in comments and recognized raw-text bodies; an unclosed template remains open, including a self-closing-looking HTML `<template/>`. Other extracted template URLs keep their existing evidence and followability. XHTML base handling is unchanged. This does not reinterpret ordinary non-template raw-text base selection.
+
+Other extracted URL attributes remain candidates with their tag and attribute provenance, including custom/prefixed elements, unresolved `source[src]` media-parent context, and literal SVG/MathML subtrees (including `foreignObject` children). A candidate and a recognized link to the same URL retain separate evidence. Custom-component runtime, namespace integration points, general template/inert DOM behavior and malformed-markup recovery are not interpreted: this is source extraction, not browser execution or full HTML conformance.
 
 ## Scope site map
 
