@@ -2049,13 +2049,18 @@ function bindEvents() {
       }
       if (action === "copy-url") copyMenuTargetUrl(target);
       else if (action === "send-to-replay") {
+        const isCurrent = createRecordClipboardOwner(target.sessionId, target.clipboardSessionGeneration);
+        if (!isCurrent()) return;
         loadMenuTargetRecord(target)
           .then((record) => {
+            if (!isCurrent()) return;
             if (!record) throw new Error("Selected transaction could not be loaded.");
             if (record.kind === "tunnel") throw new Error("Tunnel records cannot be sent to Replay.");
             openTransactionRecordInReplay(record);
           })
-          .catch(handleSendActionError);
+          .catch((error) => {
+            if (isCurrent()) handleSendActionError(error);
+          });
       } else if (action === "send-to-fuzzer") {
         openFuzzerFromRecordLoader(() => loadMenuTargetRecord(target))
           .catch(handleSendActionError);
