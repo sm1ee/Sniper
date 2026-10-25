@@ -16216,8 +16216,9 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
       state.fuzzerRunningAttackId = attackRecord.id;
       renderFuzzer();
       const ended = await followFuzzerAttack(recordId, expectedSessionId, ownsLoad);
+      if (!ownsLoad()) return;
       if (state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
-      if (ended && ownsLoad()) state.fuzzerAttackRecord = ended;
+      if (ended) state.fuzzerAttackRecord = ended;
     }
     renderFuzzer();
   } catch (error) {
