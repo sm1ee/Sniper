@@ -767,6 +767,17 @@ fn checkpoint_provider_batch(
         session
             .recon
             .merge_with_cancel(id, scope, source, findings.to_vec(), limit, Some(cancel));
+    checkpoint_source_progress(session, id, source, report, added, truncated);
+}
+
+fn checkpoint_source_progress(
+    session: &Arc<SessionContext>,
+    id: Uuid,
+    source: &str,
+    report: &SourceReport,
+    added: usize,
+    truncated: bool,
+) {
     session.recon.update_source(id, source, |s| {
         s.requests = report.requests;
         s.discovered += added;
@@ -829,6 +840,9 @@ async fn crawl(
             break;
         }
         report.requests += 1;
+        // Stop aborts the worker at await points. Retain completed work and
+        // known limits before waiting for another response or its body.
+        checkpoint_source_progress(session, id, "crawler", &report, 0, false);
         let response = match client.get(url.clone()).send().await {
             Ok(response) => response,
             Err(_) => {
@@ -858,10 +872,7 @@ async fn crawl(
             Some(cancel),
         );
         report.truncated |= truncated;
-        session.recon.update_source(id, "crawler", |s| {
-            s.requests = report.requests;
-            s.discovered += added;
-        });
+        checkpoint_source_progress(session, id, "crawler", &report, added, truncated);
         if response.status().is_redirection() {
             if let Some(location) = response
                 .headers()
@@ -953,10 +964,7 @@ async fn crawl(
             Some(cancel),
         );
         report.truncated |= truncated;
-        session
-            .recon
-            .update_source(id, "crawler", |s| s.discovered += added);
-        session.schedule_state_persist();
+        checkpoint_source_progress(session, id, "crawler", &report, added, truncated);
         // Deliberately sequential and paced; forms and JS guesses are retained
         // as candidates only, never automatically executed.
         tokio::time::sleep(Duration::from_millis(100)).await;

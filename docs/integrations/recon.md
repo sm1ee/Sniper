@@ -35,6 +35,8 @@ urlscan retains the in-scope summaries from each completed search page before re
 
 Redirect chains stop after five hops; an unvisited in-scope destination left behind by that limit marks the crawl partial. A known urlscan search-page limit is reported while that page's detail requests are still pending, not only after they finish.
 
+Completed crawler responses and known partial-state warnings are checkpointed before the next network wait, including redirects and non-text responses. Stop keeps those checkpoints and the attempted-request count; the unfinished response or body may still be absent.
+
 Without budgets nothing caps a job, so a broad or growing target can use a lot of memory and disk. Set a budget or use Stop.
 
 ## What each source collects
