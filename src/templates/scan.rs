@@ -1538,21 +1538,24 @@ impl Run {
     }
 
     async fn execute(self: Arc<Self>, cancel: watch::Receiver<bool>) {
-        // Callbacks are heard from before the first request goes out.
+        // Keep the listener in this future: aborting a scan after its stop
+        // grace period must drop a callback blocked in storage as well.
         let (enough, listening) = watch::channel(false);
-        let listener = self.oast.is_some().then(|| {
-            let heard = self.session.oast.subscribe();
-            tokio::spawn(Arc::clone(&self).listen(heard, listening))
-        });
-        let pairs: Vec<(usize, usize)> = (0..self.templates.len())
-            .flat_map(|template| (0..self.targets.len()).map(move |target| (template, target)))
-            .collect();
-        futures_util::stream::iter(pairs)
-            .for_each_concurrent(self.concurrency, |(template, target)| {
-                self.template_on_target(template, target, cancel.clone())
-            })
-            .await;
-        if let Some(listener) = listener {
+        let heard = self.oast.as_ref().map(|_| self.session.oast.subscribe());
+        let listener = async {
+            if let Some(heard) = heard {
+                Arc::clone(&self).listen(heard, listening).await;
+            }
+        };
+        let requests = async {
+            let pairs: Vec<(usize, usize)> = (0..self.templates.len())
+                .flat_map(|template| (0..self.targets.len()).map(move |target| (template, target)))
+                .collect();
+            futures_util::stream::iter(pairs)
+                .for_each_concurrent(self.concurrency, |(template, target)| {
+                    self.template_on_target(template, target, cancel.clone())
+                })
+                .await;
             // As Nuclei does, the last requests' callbacks get time to come:
             // two polls of the session's server.
             if self.oast.as_ref().is_some_and(OastWatch::waiting) && !*cancel.borrow() {
@@ -1564,8 +1567,8 @@ impl Run {
                 }
             }
             let _ = enough.send(true);
-            let _ = listener.await;
-        }
+        };
+        tokio::join!(requests, listener);
         let cancelled = *cancel.borrow();
         let mut counts = (0, 0, 0);
         self.update(|job| {
@@ -3298,6 +3301,106 @@ mod tests {
     // A manual scan keeps every exchange in history, as Fuzzer does, so each
     // line of its log opens what was sent and what came back. Told to, it keeps
     // only the matched ones, as the auto scan always does.
+    #[tokio::test]
+    async fn stopping_an_oast_scan_owns_its_callback_worker_until_it_exits() {
+        let (address, log, server) = site(1, false).await;
+        let state = scan_state_with("oast-stop", &["127.0.0.1"], OAST_TEMPLATES).await;
+        let session = state.session().await;
+        session
+            .oast
+            .pretend_interactsh("https://oast.example.com", &"c".repeat(20))
+            .await;
+        let started = start(
+            State(Arc::clone(&state)),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [format!("http://{address}")],
+                    "ids": ["example-oast-hit"],
+                    "acknowledged": true,
+                    "history": "matched",
+                }),
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        let correlation = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let answered = session
+                    .template_scans
+                    .snapshot()
+                    .jobs
+                    .iter()
+                    .find(|job| job.id == id)
+                    .is_some_and(|job| !job.recent.is_empty());
+                if answered {
+                    if let Some(value) = log.lock().unwrap().iter().find_map(|seen| {
+                        seen.header
+                            .strip_prefix("http://")
+                            .and_then(|rest| rest.split('.').next())
+                            .map(str::to_string)
+                    }) {
+                        break value;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the local request did not finish");
+        // Stall a matched callback's storage, not its HTTP request. Stop's
+        // grace period must not leave this worker detached behind the lock.
+        let store = session.store.owned_persistence_mutation_guard().await;
+        session
+            .oast
+            .push(OastCallback {
+                id: Uuid::new_v4(),
+                received_at: Utc::now(),
+                protocol: "http".into(),
+                remote_addr: "192.0.2.10".into(),
+                raw_data: "GET /x HTTP/1.1\r\n\r\n".into(),
+                correlation_id: correlation,
+            })
+            .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if session
+                    .template_scans
+                    .snapshot()
+                    .jobs
+                    .iter()
+                    .find(|job| job.id == id)
+                    .unwrap()
+                    .recent
+                    .iter()
+                    .any(|entry| entry.matched)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the callback did not reach storage");
+        assert!(session.template_scans.stop(Some(id)).await);
+        drop(store);
+        // The mutex is FIFO: any detached insertion already waiting would
+        // finish before this guard can be acquired.
+        drop(session.store.owned_persistence_mutation_guard().await);
+        server.abort();
+        assert_eq!(
+            session.store.len().await,
+            0,
+            "a stopped callback wrote after Stop returned"
+        );
+        assert_eq!(
+            session.template_scans.snapshot().jobs[0].status,
+            "cancelled"
+        );
+    }
+
     #[tokio::test]
     async fn a_manual_scan_keeps_every_exchange_unless_told_to_keep_only_matches() {
         let (address, _log, server) = site(1, false).await;
