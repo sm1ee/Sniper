@@ -82,6 +82,10 @@ def main():
                 </form><form method="dialog" action="/form-fixture/dialog">
                   <button formaction="/form-fixture/inherited-dialog">Close</button>
                   <button formaction="/form-fixture/explicit-post" formmethod="POST">Post</button>
+                </form><form method="dialog" action="javascript:void(0)">
+                  <button formaction="/form-fixture/dialog-close">Close</button>
+                </form><form method="post" action="javascript:void(0)">
+                  <button formaction="/form-fixture/post-override">Post</button>
                 </form>'''
             elif self.path == "/slow":
                 slow_started.set()
@@ -182,7 +186,8 @@ def main():
                        for item in form_snapshot["endpoints"] if "/form-fixture/" in item["url"])
         expected_forms = sorted([("/form-fixture/save", "POST"), ("/form-fixture/invalid", "GET"),
                                  ("/form-fixture/empty", "GET"), ("/form-fixture/inherited", "POST"),
-                                 ("/form-fixture/explicit-post", "POST")])
+                                 ("/form-fixture/explicit-post", "POST"),
+                                 ("/form-fixture/post-override", "POST")])
         assert forms == expected_forms, forms
         assert set(requested[offset:]) == {"/forms", "/robots.txt", "/sitemap.xml"}
         assert all(item["evidence"][0]["kind"] == "candidate" for item in form_snapshot["endpoints"]

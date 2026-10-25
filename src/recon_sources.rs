@@ -1437,14 +1437,17 @@ fn extract_document_inner(
         .and_then(|href| resolve(base, href))
         .and_then(|href| Url::parse(&href).ok())
         .unwrap_or_else(|| base.clone());
-    let mut current_form: Option<(String, String, Vec<String>)> = None;
-    let flush_form = |form: (String, String, Vec<String>),
+    let mut current_form: Option<(Option<String>, String, Vec<String>)> = None;
+    let flush_form = |form: (Option<String>, String, Vec<String>),
                       out: &mut Vec<Discovery>,
                       seen: &mut HashSet<(String, String, String)>| {
-        let (mut url, verb, names) = form;
+        let (url, verb, names) = form;
         if verb == "DIALOG" {
             return true;
         }
+        let Some(mut url) = url else {
+            return true;
+        };
         if verb == "GET" && !names.is_empty() {
             if let Ok(mut parsed) = Url::parse(&url) {
                 for name in &names {
@@ -1484,12 +1487,11 @@ fn extract_document_inner(
                 .get("action")
                 .filter(|action| !action.trim().is_empty())
             {
-                Some(literal) => match resolve(&document_base, literal) {
-                    Some(url) => url,
-                    None => continue,
-                },
-                None => base.to_string(),
+                Some(literal) => resolve(&document_base, literal),
+                None => Some(base.to_string()),
             };
+            // A submit button can replace an unsupported parent action while
+            // still inheriting the form's submission method.
             let verb = html_form_method(tag.attrs.get("method").map(String::as_str));
             current_form = Some((action, verb.into(), Vec::new()));
         }
@@ -2169,6 +2171,41 @@ mod tests {
             .all(|item| item.kind == "candidate" && !is_followable(item)));
         // Observed provider traffic is not restricted to HTML submission methods.
         assert_eq!(method(Some("DELETE")), "DELETE");
+    }
+
+    #[test]
+    fn html_formmethod_inheritance_survives_an_unsupported_parent_action() {
+        let body = r#"
+            <form method="dialog" action="javascript:void(0)">
+                <button formaction="/dialog-close">Close</button>
+                <button formaction="/explicit-post" formmethod="POST">Post</button>
+            </form>
+            <form method="post" action="javascript:void(0)">
+                <button formaction="/post-override">Post</button>
+            </form>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        let mut methods = found
+            .iter()
+            .map(|item| {
+                (
+                    Url::parse(&item.url).unwrap().path().to_string(),
+                    item.method.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![
+                ("/explicit-post".into(), "POST"),
+                ("/post-override".into(), "POST")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
     }
 
     #[test]
