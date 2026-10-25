@@ -952,6 +952,7 @@
       ++scanReadRequest;
       ++autoReadRequest;
       ++exchangeRequest;
+      if (exchange?.loading) exchange = null;
       ++planRequest;
       if (planTimer !== null) unschedule(planTimer);
       planTimer = null;
@@ -1005,7 +1006,11 @@
           // A newer selection owns its detail, even within the same refresh.
           if (job?.id === jobId && openJob?.id === jobId) {
             openJob = job;
-            if (view === "results") renderDetail();
+            if (view === "results") {
+              const entry = currentResult();
+              if (entry?.record_id && exchange?.key !== openResult) void loadExchange(entry);
+              renderDetail();
+            }
           }
         }
       } catch (error) {

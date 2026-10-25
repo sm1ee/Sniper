@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { fixture, deferred, response, scan, settle } = require('./templates-lifecycle-fixture.cjs');
+const { fixture, deferred, response, scan, settle, inside } = require('./templates-lifecycle-fixture.cjs');
 
 test('a manual start belongs to its session even if its response arrives after switching', async () => {
   const f = await fixture(), pending = deferred();
@@ -111,5 +111,28 @@ test('an earlier auto-scan read cannot overwrite a newer read', async () => {
   first.resolve(response({ session_id: 'session-a', enabled: false, hosts: ['old.example.com'], rate: 10, templates: 1 })); await old;
   assert.equal(f.get('AutoHosts').value, 'new.example.com');
   assert.equal(f.get('AutoToggle').getAttribute('aria-checked'), 'true');
+  f.controller.dispose();
+});
+
+
+test('reopening Scan reloads a selected exchange whose earlier read was invalidated', async () => {
+  const f = await fixture(), first = deferred(), second = deferred(); let reads = 0;
+  const job = scan('selected-job', 'session-a', 'completed');
+  job.recent = [{ at: '2026-10-25T00:00:00Z', template_id: 'example-template', method: 'GET', url: 'https://app.example.com/result', record_id: 'record-a', status: 200, ms: 1 }];
+  f.jobs.set('session-a', [job]);
+  f.intercept((request) => request.url.startsWith('/api/transactions/') ? (++reads === 1 ? first.promise : second.promise) : undefined);
+  await f.controller.syncSession();
+  f.get('ScanJobs').dispatch('click', { target: inside(f.get('ScanJobs').children[0]) }); await settle();
+  f.get('ResultsRows').dispatch('click', { target: inside(f.get('ResultsRows').children[0]) }); await settle();
+  assert.equal(reads, 1);
+  f.controller.setVisible(false); f.controller.setVisible(true); await settle();
+  assert.equal(reads, 2, 'the selected exchange automatically reloads on reentry');
+  first.resolve(response({ method: 'GET', path: '/stale', status: 200 })); await settle();
+  f.get('ResultsRows').dispatch('click', { target: inside(f.get('ResultsRows').children[0]) }); await settle();
+  assert.equal(reads, 2, 'clicking the same row shares its replacement read');
+  second.resolve(response({ method: 'GET', path: '/current', status: 200 })); await settle();
+  const detail = f.get('Detail').children.map((node) => node.textContent).join(' ');
+  assert.match(detail, /GET \/current/);
+  assert.doesNotMatch(detail, /Loading|stale/);
   f.controller.dispose();
 });
