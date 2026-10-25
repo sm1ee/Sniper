@@ -2012,8 +2012,8 @@ mod tests {
                 })
                 .max()
                 .unwrap();
-            // This is the current mode-blind estimator. The fix must select
-            // Sniper semantics here rather than weaken the rendered-size bound.
+            // Distinct retained originals must be counted for each selected
+            // position; the all-position estimate misses this rendered bound.
             let estimate = RequestExpansionBudget::new(&template, encoded)
                 .max_size(payload.len(), FuzzerAttackType::Sniper);
             assert!(
@@ -2229,7 +2229,13 @@ mod tests {
             url_encode: false,
         };
         let (_cancel, mut cancellation) = watch::channel(false);
-        let result = run.send(0, None, 0, &mut cancellation).await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run.send(0, None, 0, &mut cancellation),
+        )
+        .await
+        .expect("the rendered-size guard must reject before waiting on the upstream")
+        .unwrap();
         assert!(!*cancellation.borrow());
         assert_eq!(result.transaction_id, None);
         assert_eq!(result.status, None);
