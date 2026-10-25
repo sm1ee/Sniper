@@ -24,7 +24,7 @@ function fixture() {
   const els = { targetScopeEditor: { value: 'same.example.com' }, targetScopeExcludeEditor: { value: '' },
     targetTree: { innerHTML: '', dataset: {}, querySelectorAll: () => [] },
     targetShell: { classList: { contains: () => false } },
-    saveTargetScopeButton: { classList: { toggle() {} } } };
+    saveTargetScopeButton: { classList: { toggle(name, hidden) { if (name === 'hidden') state.scopeSaveHidden = hidden; } } } };
   const context = loadFunctions(['currentSessionId', 'expectedActiveSessionIdForWrite', 'sessionQueryPath',
     'postRuntimeSettings', 'formatScopePatternsText', 'syncTargetScopeDraft', 'loadRuntimeSettings',
     'loadTargetSiteMap', 'saveTargetScope', 'renderTarget'], {
@@ -220,6 +220,8 @@ for (const field of ['include', 'exclude']) {
       await successful(reading);
       assert.equal(f.state[key], 'unsaved.example.com'); assert.equal(node.value, 'unsaved.example.com');
       assert.equal(f.state.targetScopeDirty, true);
+      assert.equal(f.state.targetScopeDraftVersion, 1, 'Unversioned edits gain ownership without double-versioning input edits');
+      assert.equal(f.state.targetScopeEditorSessionId, 'session-a'); assert.equal(f.state.scopeSaveHidden, false);
       assert.equal(f.state.runtime.scope_patterns[0], 'server.example.com');
       assert.equal(f.state.targetSiteMap[0].host, 'new.example.com');
       assert.match(f.els.targetTree.innerHTML, /new.example.com/);
@@ -237,11 +239,13 @@ test('hide and return forced Scope read retains an already-owned dirty draft', a
   assert.equal(f.state.targetScopeDirty, true); assert.equal(f.state.targetScopeEditorSessionId, 'session-a');
   assert.match(f.els.targetTree.innerHTML, /new.example.com/);
 });
-test('an owned DOM/model drift already present at dispatch remains editable', async () => {
+test('pre-existing owned DOM/model drift explicitly prefers the visible editor text', async () => {
   const f = fixture(); f.els.targetScopeEditor.value = 'unsaved.example.com';
+  f.state.targetScopeDraft = 'different-model.example.com';
   const reading = f.start('scope', true); f.reply(reading, true); await successful(reading);
   assert.equal(f.state.targetScopeDraft, 'unsaved.example.com'); assert.equal(f.els.targetScopeEditor.value, 'unsaved.example.com');
-  assert.equal(f.state.targetScopeDirty, true);
+  assert.equal(f.state.targetScopeDirty, true); assert.equal(f.state.targetScopeDraftVersion, 1);
+  assert.equal(f.state.scopeSaveHidden, false);
 });
 for (const owner of ['clean-current', 'stale-different-session']) {
   test(`forced Scope read still reconciles ${owner} editor`, async () => {
@@ -256,3 +260,14 @@ for (const owner of ['clean-current', 'stale-different-session']) {
     assert.equal(f.state.targetScopeDirty, false); assert.equal(f.state.targetScopeEditorSessionId, 'session-a');
   });
 }
+test('adopting an unversioned visible edit prevents an older pending save from settling it', async () => {
+  const f = fixture(), saving = f.start('save', { skipReload: true });
+  const reading = f.start('scope', true); f.edit('unsaved.example.com', 'dom');
+  f.reply(reading, true); await successful(reading);
+  assert.equal(f.state.targetScopeDraftVersion, 1);
+  f.reply(saving);
+  const result = await saving.settled;
+  assert.equal(result.error, undefined); assert.equal(result.value, false);
+  assert.equal(f.state.targetScopeDraft, 'unsaved.example.com'); assert.equal(f.els.targetScopeEditor.value, 'unsaved.example.com');
+  assert.equal(f.state.targetScopeDirty, true); assert.equal(f.state.scopeSaveHidden, false);
+});
