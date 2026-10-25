@@ -25,6 +25,8 @@ Entries are deduplicated by normalized URL plus method. The query string is kept
 - history: a past urlscan or Wayback observation
 - candidate: a JavaScript URL literal, a form action and its fields, or a robots rule; never visited automatically
 
+Select an endpoint and use **Copy URL** to copy its normalized URL, preserving query order and encoding. Copying does not visit the URL or create a captured request.
+
 ## Budgets
 
 `max_requests`, `max_depth`, `max_endpoints` and `max_pages` default to 0, which means no limit; a positive value limits one job. `max_endpoints` counts new entries the job adds; existing entries can still gain evidence. `max_pages` applies to each history source separately. A job that stops at a budget with work left is reported as partial. `max_depth=0` used to mean the seed only; it now means no limit.

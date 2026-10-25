@@ -130,6 +130,7 @@
     // The endpoints the page shows, which ↑/↓ move through.
     let pageItems = [];
     let selectedKey = null;
+    let copyEpoch = 0;
     let inventoryTruncated = false;
     let disposed = false;
     const listeners = [];
@@ -225,6 +226,7 @@
       list.append(element("dt", "", label), element("dd", "", value || "—"));
     }
     function renderDetail() {
+      copyEpoch += 1;
       const selected = endpoints.find((item) => endpointKey(item) === selectedKey);
       const title = element("h3", "", "Endpoint details");
       title.id = "reconDetailTitle";
@@ -232,6 +234,12 @@
       if (!selected) {
         nodes.push(element("p", "recon-help", "Select an endpoint to inspect its raw URLs and provenance."));
       } else {
+        if (options.copyText) {
+          const copy = element("button", "secondary-action", "Copy URL");
+          copy.type = "button";
+          copy.dataset.copyEndpoint = selectedKey;
+          nodes.push(copy);
+        }
         const fields = element("dl", "recon-detail-fields");
         addDetailField(fields, "Method", selected.method || "UNKNOWN");
         addDetailField(fields, "Normalized URL", selected.url);
@@ -422,6 +430,7 @@
       visible = !!next;
       syncSession();
       if (!visible) {
+        if (changed) copyEpoch += 1;
         clearTimer();
         // Reads belong to this view; pending start/stop requests still own their result.
         if (read) { read.controller.abort(); read = null; }
@@ -442,6 +451,20 @@
       if (!row) return;
       selectedKey = row.dataset.endpointKey;
       renderInventory();
+    });
+    on(els.Detail, "click", (event) => {
+      const button = event.target.closest("[data-copy-endpoint]");
+      if (!visible || !options.copyText || !button || !els.Detail.contains(button)) return;
+      const key = button.dataset.copyEndpoint;
+      const selected = endpoints.find((item) => endpointKey(item) === key);
+      if (selectedKey !== key || !selected) return;
+      const token = guard.capture();
+      if (!canUse(token)) return;
+      const epoch = ++copyEpoch;
+      const isCurrent = () => canUse(token) && visible && epoch === copyEpoch && selectedKey === key;
+      const failed = () => { if (isCurrent()) setAction("Could not copy URL.", true); };
+      try { Promise.resolve(options.copyText(selected.url, "Copied URL", isCurrent)).catch(failed); }
+      catch (_) { failed(); }
     });
     on(els.Head, "click", (event) => {
       if (event.target.closest(".table-col-resize")) return;

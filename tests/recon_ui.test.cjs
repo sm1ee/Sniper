@@ -145,14 +145,15 @@ class NodeFixture {
   append(...children) { for (const child of children) { if (child.tagName === "FRAGMENT") this.append(...child.childNodes); else this.childNodes.push(child); } }
   replaceChildren(...children) { this.childNodes = []; this._text = ""; this.append(...children); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  contains(node) { return this === node || this.childNodes.some(child => child.contains(node)); }
   querySelectorAll() { return []; }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
   removeEventListener(name) { this.listeners.delete(name); }
   emit(name, event = {}) { this.listeners.get(name)?.({ target: this, preventDefault() {}, ...event }); }
-  closest(selector) { return selector === "[data-stop-job]" && this.dataset.stopJob || selector === "[data-endpoint-key]" && this.dataset.endpointKey || selector === "[data-sort]" && this.dataset.sort ? this : null; }
+  closest(selector) { return selector === "[data-stop-job]" && this.dataset.stopJob || selector === "[data-endpoint-key]" && this.dataset.endpointKey || selector === "[data-sort]" && this.dataset.sort || selector === "[data-copy-endpoint]" && this.dataset.copyEndpoint ? this : null; }
 }
 
-function controllerFixture() {
+function controllerFixture(overrides = {}) {
   const nodes = new Map();
   const document = Object.assign(new NodeFixture("document"), { createElement: tag => new NodeFixture(tag), createDocumentFragment: () => new NodeFixture("fragment") });
   const root = new NodeFixture(); root.ownerDocument = document;
@@ -200,7 +201,7 @@ function controllerFixture() {
     return response(snapshot);
   };
   fixture.controller = recon.createController({ root, getSessionId: () => fixture.session, getSessionGeneration: () => fixture.generation, fetch: fetcher, arrowStep: () => fixture.step,
-    setTimeout(callback, delay) { fixture.timers.set(++fixture.nextTimer, { callback, delay }); return fixture.nextTimer; }, clearTimeout(id) { fixture.timers.delete(id); } });
+    setTimeout(callback, delay) { fixture.timers.set(++fixture.nextTimer, { callback, delay }); return fixture.nextTimer; }, clearTimeout(id) { fixture.timers.delete(id); }, ...overrides });
   fixture.switchTo = session => { fixture.controller.reset(); fixture.session = session; fixture.generation += 1; fixture.controller.syncSession(); };
   fixture.controller.setVisible(true);
   return fixture;
@@ -466,6 +467,47 @@ test("controller renders bounded pages, search and text-only provenance", async 
   f.controller.dispose();
 });
 
+test("the selected Recon endpoint can be copied without creating or sending a request", async () => {
+  const copies = [];
+  const f = controllerFixture({ copyText: (...args) => { copies.push(args); } }); await settled();
+  f.snapshots.a.endpoints[0].url = "https://example.com/endpoint?b=2&a=%2F";
+  await f.controller.refresh();
+  f.node("Endpoints").emit("click", { target: f.node("Endpoints").childNodes[0] });
+  const copy = descendants(f.node("Detail")).find(node => node.dataset.copyEndpoint);
+  assert.ok(copy);
+  assert.equal(copy.textContent, "Copy URL");
+  const calls = f.calls.length;
+  f.node("Detail").emit("click", { target: copy });
+  assert.equal(copies.length, 1);
+  assert.equal(copies[0][0], "https://example.com/endpoint?b=2&a=%2F");
+  assert.equal(copies[0][1], "Copied URL");
+  assert.equal(copies[0][2](), true);
+  assert.equal(f.calls.length, calls);
+  f.controller.dispose();
+});
+
+for (const transition of ["selection", "filter", "hide/reopen", "session ABA", "refresh", "new copy", "dispose"]) {
+  test(`a pending endpoint copy loses ownership after ${transition}`, async () => {
+    const copies = [];
+    const f = controllerFixture({ copyText: (...args) => { copies.push(args); } }); await settled();
+    f.node("Endpoints").emit("click", { target: f.node("Endpoints").childNodes[0] });
+    const copy = descendants(f.node("Detail")).find(node => node.dataset.copyEndpoint);
+    assert.ok(copy);
+    f.node("Detail").emit("click", { target: copy });
+    const ownsCopy = copies[0][2];
+    assert.equal(ownsCopy(), true);
+    if (transition === "selection") f.node("Endpoints").emit("click", { target: f.node("Endpoints").childNodes[1] });
+    else if (transition === "filter") { f.node("Search").value = "api/110"; f.node("Search").emit("input"); }
+    else if (transition === "hide/reopen") { f.controller.setVisible(false); f.controller.setVisible(true); await settled(); }
+    else if (transition === "session ABA") { f.switchTo("b"); f.switchTo("a"); await settled(); }
+    else if (transition === "refresh") await f.controller.refresh();
+    else if (transition === "new copy") f.node("Detail").emit("click", { target: copy });
+    else f.controller.dispose();
+    assert.equal(ownsCopy(), false);
+    f.controller.dispose();
+  });
+}
+
 test("endpoints sort by a column, ties keeping the order they came in", () => {
   const list = [
     { method: "POST", url: "https://example.com/b", evidence: [{ source: "wayback", kind: "history" }] },
@@ -691,6 +733,27 @@ function loadAppFunctions(names, globals) {
     vm.runInContext(match[0], context, { filename: `web/app.js:${name}` });
   }
   return context;
+}
+
+for (const outcome of ["success", "failure"]) {
+  test(`Recon clipboard integration ignores a late ${outcome} after ownership changes`, async () => {
+    let current = true, finish, clipboardGuard;
+    const toasts = [];
+    const context = loadAppFunctions(["copyReconEndpointUrl"], {
+      copyTextToClipboard(text, { isCurrent }) {
+        assert.equal(text, "https://example.com/selected");
+        clipboardGuard = isCurrent;
+        return new Promise((resolve, reject) => { finish = () => outcome === "success" ? resolve() : reject(new Error("Clipboard unavailable")); });
+      },
+      showToast: (...args) => toasts.push(args),
+    });
+    const pending = context.copyReconEndpointUrl("https://example.com/selected", "Copied URL", () => current);
+    assert.equal(clipboardGuard(), true);
+    current = false;
+    finish(); await pending;
+    assert.equal(clipboardGuard(), false);
+    assert.deepEqual(toasts, []);
+  });
 }
 
 function panelsFixture(extra = {}) {

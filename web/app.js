@@ -1274,6 +1274,12 @@ function setActiveProxyTab(tab, options = {}) {
   return state.activeProxyTab;
 }
 
+function copyReconEndpointUrl(text, label, isCurrent) {
+  return copyTextToClipboard(text, { isCurrent })
+    .then(() => { if (isCurrent()) showToast(label); })
+    .catch(() => { if (isCurrent()) showToast("Failed to copy", "error"); });
+}
+
 function bindEvents() {
   initializeTargetWorkspace();
   if (window.SniperRecon && els.reconShell) {
@@ -1282,6 +1288,7 @@ function bindEvents() {
       getSessionId: currentSessionId,
       getSessionGeneration: () => workspaceStateGeneration,
       arrowStep: tableArrowStep,
+      copyText: copyReconEndpointUrl,
     });
   }
   if (window.SniperTemplates && els.templatesShell) {
