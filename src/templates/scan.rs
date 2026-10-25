@@ -2114,23 +2114,24 @@ impl Run {
             if self.keep_all {
                 self.store(&template_id, hop.record.clone(), None).await;
             }
-            self.update(|job| {
-                job.log(ScanLogEntry {
-                    at: Utc::now(),
-                    template_id,
-                    method: hop.request.method.clone(),
-                    url: hop.url(),
-                    status: hop.record.status,
-                    ms: hop.record.duration_ms,
-                    matched: found,
-                    error: None,
-                    record_id: (self.keep_all || found).then_some(hop.record.id),
-                })
-            });
+            let entry = ScanLogEntry {
+                at: Utc::now(),
+                template_id,
+                method: hop.request.method.clone(),
+                url: hop.url(),
+                status: hop.record.status,
+                ms: hop.record.duration_ms,
+                matched: found,
+                error: None,
+                record_id: (self.keep_all || found).then_some(hop.record.id),
+            };
             if found {
                 matched = true;
                 self.keep(&template.blocks[block], hop, results, None).await;
             }
+            // A checkpoint must not publish an exchange reference while
+            // matched-only history is still waiting to store that exchange.
+            self.update(|job| job.log(entry));
         }
         Judged {
             matched,
@@ -2218,23 +2219,21 @@ impl Run {
             return;
         }
         let hop = waiting.hop.clone();
-        self.update(|job| {
-            job.log(ScanLogEntry {
-                at: Utc::now(),
-                template_id: waiting.template.blocks[waiting.block]
-                    .template
-                    .info
-                    .id
-                    .clone(),
-                method: hop.request.method.clone(),
-                url: hop.url(),
-                status: hop.record.status,
-                ms: hop.record.duration_ms,
-                matched: true,
-                error: None,
-                record_id: Some(hop.record.id),
-            })
-        });
+        let entry = ScanLogEntry {
+            at: Utc::now(),
+            template_id: waiting.template.blocks[waiting.block]
+                .template
+                .info
+                .id
+                .clone(),
+            method: hop.request.method.clone(),
+            url: hop.url(),
+            status: hop.record.status,
+            ms: hop.record.duration_ms,
+            matched: true,
+            error: None,
+            record_id: Some(hop.record.id),
+        };
         self.keep(
             &waiting.template.blocks[waiting.block],
             hop,
@@ -2242,6 +2241,7 @@ impl Run {
             Some(&callback),
         )
         .await;
+        self.update(|job| job.log(entry));
     }
 
     /// Puts an exchange in history, noted with its template and job and with
