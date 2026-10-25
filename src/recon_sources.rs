@@ -2383,6 +2383,7 @@ mod tests {
             <form method="POST" action="/parent">
                 <button formaction="">Empty inherited POST</button>
                 <button formaction="#send">Fragment inherited POST</button>
+                <input type="submit" formaction="#input">
                 <button formaction="" formmethod="dialog">No submission</button>
                 <button formaction="#close" formmethod="dialog">No submission</button>
             </form>
@@ -2403,6 +2404,7 @@ mod tests {
             vec![
                 ("POST", "https://example.com/current?doc=1"),
                 ("POST", "https://example.com/current?doc=1#send"),
+                ("POST", "https://example.com/current?doc=1#input"),
                 ("POST", "https://example.com/parent")
             ]
         );
@@ -2411,6 +2413,30 @@ mod tests {
             .all(|item| item.kind == "candidate" && !is_followable(item)));
         assert_eq!(resolve(&document, ""), None);
         assert_eq!(resolve(&document, "#navigation"), None);
+    }
+
+    #[test]
+    fn html_form_actions_do_not_invent_unresolved_submitter_context() {
+        let body = r##"
+            <button formaction="" formmethod="POST">No enclosing owner</button>
+            <button formaction="#outside" formmethod="POST">No enclosing owner</button>
+            <form method="dialog" action="/parent">
+                <button type="button" formaction="" formmethod="POST">Not submit</button>
+                <button type="reset" formaction="#reset" formmethod="POST">Reset</button>
+                <button disabled formaction="#disabled" formmethod="POST">Disabled</button>
+                <button form="missing" formaction="" formmethod="POST">Unknown owner</button>
+                <button form="different" formaction="#other" formmethod="POST">Other owner</button>
+                <button commandfor="menu" formaction="#command" formmethod="POST">Command</button>
+                <input type="text" formaction="#text" formmethod="POST">
+                <div formaction="" formmethod="POST"></div>
+                <div formaction="#div" formmethod="POST"></div>
+                <button formaction=" " formmethod="POST">Unchanged nonempty whitespace</button>
+                <button formaction="#bad&#10;inside" formmethod="POST">Control character</button>
+            </form>
+        "##;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]
