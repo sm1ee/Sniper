@@ -133,3 +133,22 @@ for (const reason of ['session_changed', 'scope_changed', 'history_changed']) te
   old.resolve(response(payload())); await tick();
   assert.equal(f.state.flow, null); assert.equal(f.state.flowLoading, false);
 });
+
+test('an origin outside the newest-row window keeps its coverage and does not blame request-kind toggles', async () => {
+  const f = fixture(); await f.load(); const current = await f.flow(false);
+  current.resolve(response({ ...payload(), phases: [], flow_rows: 0, considered_rows: 50000, complete: false, stopped_by: ['max_records'] })); await tick();
+  assert.match(f.els.canvas.innerHTML, /No matching requests in this row window/);
+  assert.doesNotMatch(f.els.canvas.innerHTML, /Turn more kinds on/);
+  assert.match(f.els.graphBounds.textContent, /0 of the newest 50000 rows/);
+  assert.match(f.els.graphBounds.textContent, /older rows left out/);
+  f.els.flowMermaid.dispatch('click');
+  assert.equal(f.copied.length, 1); assert.match(f.copied[0], /Partial flow/);
+});
+
+test('a flow whose returned requests are hidden points to the kind toggles and keeps coverage', async () => {
+  const f = fixture(); await f.load(); const current = await f.flow(false);
+  const value = payload(); value.phases[0].steps[0].request_kind = 'static';
+  current.resolve(response(value)); await tick();
+  assert.match(f.els.canvas.innerHTML, /Turn more kinds on under Requests/);
+  assert.match(f.els.graphBounds.textContent, /1 of the newest 1 rows/);
+});

@@ -2226,11 +2226,16 @@
       const flow = state.flow;
       const layout = flow && flowLayout(flow, hiddenLinkKinds());
       const shown = layout ? layout.arrows.filter((arrow) => !arrow.redirect).length : 0;
+      const steps = flow ? flow.phases.reduce((sum, phase) => sum + phase.steps.length, 0) : 0;
+      const coverage = flow ? [`${flow.flowRows} of the newest ${flow.consideredRows} rows`,
+        ...flow.stoppedBy.map((reason) => FLOW_STOPS[reason] || `stopped by ${reason}`)].join(" · ") : "";
       if (!shown) {
         currentLayout = null;
-        const message = !flow ? state.flowError || "Reading the flow…" : "No requests of the kinds shown. Turn more kinds on under Requests.";
+        const message = !flow ? state.flowError || "Reading the flow…" : steps
+          ? "No requests of the kinds shown. Turn more kinds on under Requests."
+          : "No matching requests in this row window.";
         replace(els.canvas, `<div class="service-map-empty"><span class="service-map-empty-symbol" aria-hidden="true">◎</span><h3>${escape(message)}</h3></div>`);
-        els.graphBounds.textContent = "";
+        els.graphBounds.textContent = coverage;
         if (els.graphDiagnostics) els.graphDiagnostics.textContent = "";
         updateZoomControls();
         return;
@@ -2239,9 +2244,7 @@
       replace(els.canvas, `<div class="service-map-scaled"><div class="service-map-layout">${flowMarkup(layout)}</div></div>`);
       applyGraphScale();
       pinFlowHeads();
-      const steps = flow.phases.reduce((sum, phase) => sum + phase.steps.length, 0);
-      els.graphBounds.textContent = [`${shown} / ${steps} steps in ${layout.bands.length} page loads`, `${flow.flowRows} of the newest ${flow.consideredRows} rows`,
-        ...flow.stoppedBy.map((reason) => FLOW_STOPS[reason] || `stopped by ${reason}`)].join(" · ");
+      els.graphBounds.textContent = `${shown} / ${steps} steps in ${layout.bands.length} page loads · ${coverage}`;
       if (els.graphDiagnostics) els.graphDiagnostics.textContent = "";
     }
     function focusSelection() {
