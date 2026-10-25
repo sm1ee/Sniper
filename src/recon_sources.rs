@@ -2310,6 +2310,110 @@ mod tests {
     }
 
     #[test]
+    fn html_form_actions_keep_fragment_targets_and_submission_methods() {
+        let document = Url::parse("https://example.com/current?b=2&a=1#old").unwrap();
+        let body = r##"
+            <form method="post" action="#save"></form>
+            <form method="DELETE" action="#invalid"></form>
+            <form method="GET" action="#search"><input name="q" value="private"></form>
+        "##;
+        let (found, clipped) = extract_document(&document, "text/html", body);
+        assert!(!clipped);
+        let actual = found
+            .iter()
+            .map(|item| (item.method.as_str(), item.url.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("POST", "https://example.com/current?b=2&a=1#save"),
+                ("GET", "https://example.com/current?b=2&a=1#invalid"),
+                ("GET", "https://example.com/current?b=2&a=1&q=#search")
+            ]
+        );
+        assert!(found.iter().all(|item| item.kind == "candidate"
+            && !is_followable(item)
+            && item.location.starts_with(&format!("form: {document}"))
+            && !item.url.contains("private")
+            && !item.location.contains("private")));
+    }
+
+    #[test]
+    fn html_form_actions_distinguish_empty_document_from_fragment_base_targets() {
+        // The selected action is resolved by the submission algorithm, not by
+        // navigation-link filtering. Empty uses the document; fragments use base.
+        // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-algorithm
+        let document = Url::parse("https://example.com/current?doc=1#old").unwrap();
+        let body = r##"
+            <base href="/assets/?base=2">
+            <form method="post"></form>
+            <form method="post" action=""></form>
+            <form method="post" action="save?x=1#kept"></form>
+            <form method="dialog" action="/parent?owner=1">
+                <button formaction="" formmethod="GET">Document</button>
+                <button formaction="#send" formmethod="POST">Base</button>
+                <button formmethod="POST">Parent</button>
+            </form>
+        "##;
+        let (found, clipped) = extract_document(&document, "text/html", body);
+        assert!(!clipped);
+        let actual = found
+            .iter()
+            .map(|item| (item.method.as_str(), item.url.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("POST", "https://example.com/current?doc=1#old"),
+                ("POST", "https://example.com/assets/save?x=1#kept"),
+                ("GET", "https://example.com/current?doc=1#old"),
+                ("POST", "https://example.com/assets/?base=2#send"),
+                ("POST", "https://example.com/parent?owner=1")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+    }
+
+    #[test]
+    fn html_form_actions_keep_inheritance_dialog_and_link_fragment_policies() {
+        let document = Url::parse("https://example.com/current?doc=1").unwrap();
+        let body = r##"
+            <form method="POST" action="/parent">
+                <button formaction="">Empty inherited POST</button>
+                <button formaction="#send">Fragment inherited POST</button>
+                <button formaction="" formmethod="dialog">No submission</button>
+                <button formaction="#close" formmethod="dialog">No submission</button>
+            </form>
+            <form method="dialog" action="#close"></form>
+            <form method="post" action="javascript:void(0)"></form>
+            <form method="post" action="data:text/plain,ignored"></form>
+            <a href="#navigation">Not a new crawl URL</a>
+            <script>fetch("#literal")</script>
+        "##;
+        let (found, clipped) = extract_document(&document, "text/html", body);
+        assert!(!clipped);
+        let actual = found
+            .iter()
+            .map(|item| (item.method.as_str(), item.url.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("POST", "https://example.com/current?doc=1"),
+                ("POST", "https://example.com/current?doc=1#send"),
+                ("POST", "https://example.com/parent")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+        assert_eq!(resolve(&document, ""), None);
+        assert_eq!(resolve(&document, "#navigation"), None);
+    }
+
+    #[test]
     fn quoted_greater_than_and_raw_text_do_not_break_html_tokenization() {
         let (found, _) = extract_document(&base(), "text/html", "<a title='x > y' href='/good'>link</a><textarea name='text'><a href='/bad'></textarea><a href='/after'>ok</a>");
         assert!(found.iter().any(|d| d.url.ends_with("/good")));

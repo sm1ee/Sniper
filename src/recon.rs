@@ -1146,6 +1146,56 @@ mod tests {
     }
 
     #[test]
+    fn inventory_form_actions_normalize_fragments_without_losing_raw_evidence() {
+        let store = ReconStore::from_snapshot(ReconSnapshot::default());
+        let document = Url::parse("https://example.com/form?b=2&a=1").unwrap();
+        let scope = ReconScope::new(document.as_str(), false).unwrap();
+        let (found, clipped) = crate::recon_sources::extract_document(
+            &document,
+            "text/html",
+            r##"<form method="POST" action="#one"></form>
+                <form method="POST" action="#two"></form>
+                <form method="DELETE" action="#get"></form>"##,
+        );
+        assert!(!clipped);
+        assert_eq!(
+            store.merge(Uuid::new_v4(), &scope, "crawler", found, 0),
+            (2, false)
+        );
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.endpoints.len(), 2);
+        let post = snapshot
+            .endpoints
+            .iter()
+            .find(|item| item.method == "POST")
+            .unwrap();
+        let get = snapshot
+            .endpoints
+            .iter()
+            .find(|item| item.method == "GET")
+            .unwrap();
+        assert_eq!(post.url, "https://example.com/form?b=2&a=1");
+        assert_eq!(get.url, post.url);
+        assert_eq!(
+            post.raw_urls,
+            [
+                "https://example.com/form?b=2&a=1#one",
+                "https://example.com/form?b=2&a=1#two"
+            ]
+        );
+        assert_eq!(get.raw_urls, ["https://example.com/form?b=2&a=1#get"]);
+        assert!(snapshot
+            .endpoints
+            .iter()
+            .all(|item| item.evidence.iter().all(|e| {
+                e.source == "crawler"
+                    && e.kind == "candidate"
+                    && e.status.is_none()
+                    && e.location == format!("form: {document}")
+            })));
+    }
+
+    #[test]
     fn a_jobs_endpoint_limit_counts_its_own_finds_not_the_inventory() {
         let store = ReconStore::from_snapshot(ReconSnapshot::default());
         let scope = ReconScope::new("https://example.com", false).unwrap();
