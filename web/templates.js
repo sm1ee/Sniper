@@ -1135,7 +1135,7 @@
       const sessionId = owner.sessionId;
       const request = ++autoReadRequest;
       const current = () => ownsScan(owner) && request === autoReadRequest && visible;
-      if (!visible || !sessionId || disposed) return;
+      if (!visible || !sessionId || disposed || autoBusy) return;
       try {
         const read = await json(await fetcher(`/api/templates/auto?session_id=${encodeURIComponent(sessionId)}`), "Could not read the auto scan");
         if (!current() || read.session_id !== sessionId) return;

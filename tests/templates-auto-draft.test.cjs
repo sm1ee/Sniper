@@ -56,3 +56,15 @@ test('editing hosts while enabling auto scan keeps the pending enabled choice', 
   second.resolve(response({ session_id: 'session-a', enabled: true, hosts: ['changed.example.com'], rate: 10, templates: 1 })); await settle();
   f.controller.dispose();
 });
+
+test('polling does not read auto-scan settings while a save is pending', async () => {
+  const f = await fixture(), pending = deferred();
+  f.intercept((request) => request.url === '/api/templates/auto' && request.method === 'POST' ? pending.promise : undefined);
+  edit(f, 'saving.example.com'); await settle();
+  const count = f.requests.filter((r) => r.url.startsWith('/api/templates/auto?')).length;
+  await f.controller.syncSession();
+  assert.equal(f.requests.filter((r) => r.url.startsWith('/api/templates/auto?')).length, count, 'pre-save state must not race the pending settings');
+  pending.resolve(saved(['saving.example.com'])); await settle();
+  assert.ok(f.requests.filter((r) => r.url.startsWith('/api/templates/auto?')).length > count, 'the saved settings are reread after completion');
+  f.controller.dispose();
+});
