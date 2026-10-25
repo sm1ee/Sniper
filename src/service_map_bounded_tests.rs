@@ -3041,7 +3041,10 @@ fn flow_counts_only_rows_represented_after_the_step_cap() {
         let steps: Vec<_> = flow.phases.iter().flat_map(|phase| &phase.steps).collect();
         assert_eq!(steps.len(), MAX_STEPS);
         assert_eq!(flow.considered_rows, considered);
-        assert_eq!(flow.flow_rows, steps.iter().map(|step| step.count).sum());
+        assert_eq!(
+            flow.flow_rows,
+            steps.iter().map(|step| step.count).sum::<usize>()
+        );
         assert_eq!(flow.flow_rows, MAX_STEPS + usize::from(!navigation));
         assert!(!flow.complete);
         assert!(flow.stopped_by.iter().any(|reason| reason == "steps_limit"));
