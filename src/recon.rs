@@ -2207,6 +2207,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recon_encoded_body_rejects_known_unsupported_headers_before_body_wait() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let mut bytes = [0; 1024];
+                let count = socket.read(&mut bytes).await.unwrap();
+                assert!(count > 0 && request.len() < 8192);
+                request.extend_from_slice(&bytes[..count]);
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: unknown\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.unwrap();
+            release_rx.await.unwrap();
+            let _ = socket.write_all(b"body").await;
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        // send() returning proves response headers were received; body remains held.
+        let result = tokio::time::timeout(Duration::from_millis(300), read_body(response)).await;
+        release_tx.send(()).unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            result.unwrap(),
+            Err(ReconDecodeError::Unsupported.warning())
+        );
+    }
+
+    #[tokio::test]
+    async fn crawl_encoded_body_does_not_claim_extraction_failure_for_binary_content() {
+        let (report, snapshot, paths) = crawl_wire_fixture(
+            "application/octet-stream",
+            b"<a href='/must-not-follow'>binary</a>",
+            &["unknown"],
+            "/binary",
+        )
+        .await;
+        assert!(!report.truncated, "{report:?}");
+        assert!(!report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Content-Encoding")));
+        assert_eq!(paths.len(), 3);
+        assert!(snapshot.endpoints.iter().all(|endpoint| endpoint
+            .evidence
+            .iter()
+            .all(|evidence| evidence.kind == "live")));
+    }
+
+    #[tokio::test]
     async fn recon_encoded_body_preserves_identity_and_bodyless_responses() {
         let raw = b"unchanged\xffidentity";
         for encodings in [vec![], vec!["identity"], vec![""], vec![" , identity, "]] {

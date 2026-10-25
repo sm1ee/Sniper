@@ -33,6 +33,7 @@ def main():
     requests, violations, wire_sizes = [], [], []
     mode = 'identity'
     seed_started, seed_release = threading.Event(), threading.Event()
+    body_started, body_release = threading.Event(), threading.Event()
     robots_started, robots_release = threading.Event(), threading.Event()
     padding = ''.join(hashlib.sha256(f'encoding-fixture-{index}'.encode()).hexdigest() for index in range(64))
 
@@ -45,15 +46,17 @@ def main():
                 violations.append('Unexpected credentials')
             requests.append({'mode': mode, 'method': self.command, 'path': self.path,
                              'host': self.headers.get('Host'), 'accept_encoding': self.headers.get('Accept-Encoding')})
-            if mode == 'stopped' and self.path == '/page':
+            if mode in ('stopped', 'header-stopped') and self.path == '/page':
                 seed_started.set()
                 if not seed_release.wait(20):
                     violations.append('Seed barrier timed out')
-            if mode == 'stopped' and self.path == '/robots.txt':
+            if mode in ('stopped', 'header-stopped') and self.path == '/robots.txt':
                 robots_started.set()
                 if not robots_release.wait(20):
                     violations.append('Robots barrier timed out')
             body, mime = bodies.get(self.path, (b'', 'text/plain'))
+            if mode == 'binary':
+                mime = 'application/octet-stream'
             encodings = []
             status = 204 if self.path == '/robots.txt' else 200
             if status == 204:
@@ -76,7 +79,7 @@ def main():
                     body = encoded
                 elif mode in ('malformed', 'stopped'):
                     encodings = ['gzip']  # Deliberately plain bytes, never a decoded fallback.
-                elif mode == 'unsupported':
+                elif mode in ('unsupported', 'binary', 'header-stopped'):
                     encodings = ['secret-unsupported']
                 elif mode == 'empty':
                     body, encodings = b'', ['gzip']
@@ -87,6 +90,11 @@ def main():
             for encoding in encodings:
                 self.send_header('Content-Encoding', encoding)
             self.end_headers()
+            if mode == 'header-stopped' and self.path == '/page':
+                self.wfile.flush()
+                body_started.set()
+                if not body_release.wait(20):
+                    violations.append('Body barrier timed out')
             try:
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
@@ -179,27 +187,39 @@ def main():
 
             retained = {}
             reference = None
-            for mode in ('identity', 'gzip', 'stacked', 'members', 'malformed', 'unsupported', 'empty', 'stopped'):
+            for mode in ('identity', 'gzip', 'stacked', 'members', 'malformed', 'unsupported', 'empty', 'binary', 'stopped', 'header-stopped'):
+                for event in (seed_started, seed_release, robots_started, robots_release, body_started, body_release):
+                    event.clear()
                 sid = api('/api/sessions', {'name': 'Synthetic encoding ' + mode})['id']
                 offset = len(requests)
                 job = api('/api/recon/jobs', {'session_id': sid, 'target_url': origin + '/page',
                           'sources': ['crawler'], 'max_requests': 8, 'max_endpoints': 32})
-                if mode == 'stopped':
+                if mode in ('stopped', 'header-stopped'):
                     assert seed_started.wait(10)
                     eventually(lambda: current_job(disk(sid), job['id']))
                     seed_release.set()
+                    if mode == 'header-stopped':
+                        assert body_started.wait(10)
+                        eventually(lambda: any(item['url'] == origin + '/page' and any(e['kind'] == 'live' for e in item['evidence'])
+                                               for item in api('/api/recon?session_id=' + sid)['endpoints']))
+                        assert not body_release.is_set()
                     assert robots_started.wait(10)
                     current = current_job(api('/api/recon?session_id=' + sid), job['id'])
                     assert current['status'] == 'running' and current['sources'][0]['truncated'], current
+                    warning_fragment = ('Unsupported or invalid Content-Encoding' if mode == 'header-stopped'
+                                        else 'could not be decoded completely')
                     def checkpointed():
                         snapshot = disk(sid)
                         saved = current_job(snapshot, job['id'])
                         return (saved and saved['sources'][0]['truncated']
-                                and any('could not be decoded completely' in warning for warning in saved['sources'][0]['warnings'])
+                                and any(warning_fragment in warning for warning in saved['sources'][0]['warnings'])
                                 and any(item['url'] == origin + '/page' and any(e['kind'] == 'live' for e in item['evidence'])
                                         for item in snapshot['endpoints']))
                     eventually(checkpointed)
                     assert api('/api/recon/jobs/' + job['id'] + '/stop', {'session_id': sid})['stopped']
+                    if mode == 'header-stopped':
+                        assert not body_release.is_set()
+                        body_release.set()
                     robots_release.set()
                 else:
                     def complete():
@@ -209,7 +229,7 @@ def main():
                 snapshot, site_map = inventory(sid)
                 current = current_job(snapshot, job['id'])
                 source = current['sources'][0]
-                assert current['status'] == ('cancelled' if mode == 'stopped' else 'completed'), current
+                assert current['status'] == ('cancelled' if mode in ('stopped', 'header-stopped') else 'completed'), current
                 actual = requests[offset:]
                 assert source['requests'] == len(actual) <= 8, (source, actual)
                 assert all(item['host'] == authority and item['method'] == 'GET' for item in actual)
@@ -228,17 +248,21 @@ def main():
                     if reference is None:
                         reference = evidence
                     assert evidence == reference, (mode, evidence, reference)
+                elif mode == 'binary':
+                    assert not source['truncated'] and not evidence, (source, evidence)
+                    assert not any('Content-Encoding' in warning for warning in source['warnings'])
+                    assert len(actual) == 3, actual
                 else:
                     assert source['truncated'] and not evidence, (source, evidence)
                     assert any('static extraction was skipped' in warning for warning in source['warnings']), source
                     assert all('secret-unsupported' not in warning for warning in source['warnings'])
-                    assert len(actual) == (2 if mode == 'stopped' else 3), actual
+                    assert len(actual) == (2 if mode in ('stopped', 'header-stopped') else 3), actual
                 retained[sid] = (snapshot, site_map)
                 print(json.dumps({'case': mode, 'status': current['status'], 'partial': source['truncated'],
                                   'requests': len(actual), 'evidence_count': len(evidence), 'warnings': source['warnings'],
-                                  'checkpoint_before_stop': mode == 'stopped'}), flush=True)
+                                  'checkpoint_before_stop': mode in ('stopped', 'header-stopped')}), flush=True)
             assert not violations, violations
-            assert len(requests) == 35, requests
+            assert len(requests) == 40, requests
             assert all(item['accept_encoding'] is None for item in requests), 'Request headers must stay unchanged'
             eventually(lambda: all(disk(sid) == {'jobs': snap['jobs'], 'endpoints': snap['endpoints']}
                                    for sid, (snap, _) in retained.items()))
@@ -248,13 +272,14 @@ def main():
                 assert api('/api/recon?session_id=' + sid) == snapshot
                 assert api('/api/target/site-map?session_id=' + sid) == site_map
                 assert api('/api/transactions?session_id=' + sid) == []
-            assert not violations and len(requests) == 35, (violations, requests)
+            assert not violations and len(requests) == 40, (violations, requests)
             print(json.dumps({'parity': 'HTML/JS/sitemap identity, gzip, stacked and concatenated members',
                               'wire_sizes': wire_sizes, 'total_gets': len(requests), 'captures': 0,
                               'submissions': 0, 'off_scope_requests': 0, 'disk_and_graceful_restart': 'PASS'}), flush=True)
             stop()
     finally:
         seed_release.set()
+        body_release.set()
         robots_release.set()
         if process and process.poll() is None:
             process.terminate()
