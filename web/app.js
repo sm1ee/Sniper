@@ -571,6 +571,7 @@ const state = {
   fuzzerConcurrency: 4,
   // The attack this session runs now, so Stop can reach it.
   fuzzerRunningAttackId: null,
+  fuzzerStopRequest: null,
   fuzzerNoticeError: false,
   fuzzerDraftVersion: 0,
   fuzzerRunToken: 0,
@@ -5287,6 +5288,8 @@ function resetSessionScopedUiState() {
   state.replayRenamingTabId = null;
   state.fuzzerRunToken = (state.fuzzerRunToken || 0) + 1;
   state.fuzzerRunning = false;
+  state.fuzzerRunningAttackId = null;
+  state.fuzzerStopRequest = null;
   state.fuzzerBaseRequest = null;
   state.fuzzerSourceTransactionId = null;
   state.fuzzerTarget = null;
@@ -15591,6 +15594,8 @@ function renderFuzzer() {
   }
   if (els.stopFuzzerButton) {
     els.stopFuzzerButton.classList.toggle("hidden", !state.fuzzerRunningAttackId);
+    els.stopFuzzerButton.disabled = state.fuzzerStopRequest?.sessionId === state.activeSession?.id
+      && state.fuzzerStopRequest?.id === state.fuzzerRunningAttackId;
   }
   if (els.resetFuzzerButton) {
     els.resetFuzzerButton.disabled = !!state.fuzzerRunning;
@@ -17470,19 +17475,31 @@ async function stopFuzzerAttack() {
   const id = state.fuzzerRunningAttackId;
   const sessionId = currentSessionId();
   if (!id || !sessionId) return;
-  if (els.stopFuzzerButton) els.stopFuzzerButton.disabled = true;
+  if (state.fuzzerStopRequest?.id === id && state.fuzzerStopRequest?.sessionId === sessionId) return;
+  const request = { id, sessionId };
+  state.fuzzerStopRequest = request;
+  const ownsRequest = () => state.fuzzerStopRequest === request
+    && currentSessionId() === sessionId && state.fuzzerRunningAttackId === id;
+  renderFuzzer();
   try {
     const response = await fetch(`/api/fuzzer/attacks/${encodeURIComponent(id)}/stop`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ session_id: sessionId }),
     });
+    if (!ownsRequest()) return;
     // 404: it ended on its own meanwhile; the run reads its end either way.
     if (!response.ok && response.status !== 404) {
-      showToast(await readApiErrorMessage(response, "Could not stop the attack."), "error", 4000);
+      const message = await readApiErrorMessage(response, "Could not stop the attack.");
+      if (ownsRequest()) showToast(message, "error", 4000);
     }
+  } catch (error) {
+    if (ownsRequest()) showToast(error?.message || "Could not stop the attack.", "error", 4000);
   } finally {
-    if (els.stopFuzzerButton) els.stopFuzzerButton.disabled = false;
+    if (state.fuzzerStopRequest === request) {
+      state.fuzzerStopRequest = null;
+      renderFuzzer();
+    }
   }
 }
 
