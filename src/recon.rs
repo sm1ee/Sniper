@@ -2,11 +2,12 @@
 //! not proxy transactions: archived and static candidates never imply liveness.
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    io::{self, BufRead, Read},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -791,7 +792,213 @@ fn checkpoint_source_progress(
     session.schedule_state_persist();
 }
 
+// These limits apply only to newly supported compressed response work, not to
+// Recon's existing raw body reader or its request/endpoint collection budgets.
+const RECON_DECODED_STAGE_LIMIT: usize = 16 * 1024 * 1024;
+const RECON_DECODE_TIMEOUT: Duration = Duration::from_secs(15);
+const RECON_DECODE_WORKERS: usize = 2;
+const RECON_DECODE_INPUT_CHUNK: usize = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReconCoding {
+    Gzip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReconDecodeError {
+    Unsupported,
+    Malformed,
+    Limit,
+    Timeout,
+    Cancelled,
+    Worker,
+}
+
+impl ReconDecodeError {
+    fn warning(self) -> &'static str {
+        match self {
+            Self::Unsupported => "Unsupported or invalid Content-Encoding; static extraction was skipped.",
+            Self::Malformed => "Compressed response could not be decoded completely; static extraction was skipped.",
+            Self::Limit => "Compressed response exceeded the 16 MiB decoded-stage limit; static extraction was skipped.",
+            Self::Timeout => "Compressed response decoding exceeded 15 seconds; static extraction was skipped.",
+            Self::Cancelled => "Compressed response decoding was cancelled; static extraction was skipped.",
+            Self::Worker => "Compressed response decoding could not finish; static extraction was skipped.",
+        }
+    }
+}
+
+fn recon_content_codings(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Vec<ReconCoding>, ReconDecodeError> {
+    let mut codings = Vec::new();
+    for value in headers.get_all(reqwest::header::CONTENT_ENCODING) {
+        let value = value.to_str().map_err(|_| ReconDecodeError::Unsupported)?;
+        for coding in value.split(',') {
+            let coding = coding.trim_matches([' ', '\t']);
+            if coding.is_empty() || coding.eq_ignore_ascii_case("identity") {
+                continue;
+            }
+            if coding.eq_ignore_ascii_case("gzip") || coding.eq_ignore_ascii_case("x-gzip") {
+                codings.push(ReconCoding::Gzip);
+            } else {
+                return Err(ReconDecodeError::Unsupported);
+            }
+        }
+    }
+    Ok(codings)
+}
+
+#[derive(Clone)]
+struct ReconDecodeControl {
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+impl ReconDecodeControl {
+    fn check(&self) -> Result<(), ReconDecodeError> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(ReconDecodeError::Cancelled)
+        } else if Instant::now() >= self.deadline {
+            Err(ReconDecodeError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_io(&self) -> io::Result<()> {
+        self.check().map_err(|error| {
+            io::Error::new(
+                if error == ReconDecodeError::Timeout {
+                    io::ErrorKind::TimedOut
+                } else {
+                    io::ErrorKind::Other
+                },
+                "Recon decoding stopped",
+            )
+        })
+    }
+}
+
+struct ReconDecodeOwner {
+    cancelled: Arc<AtomicBool>,
+    abort: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for ReconDecodeOwner {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(abort) = &self.abort {
+            // Prevent queued work from starting; running blocking work exits
+            // cooperatively and retains its permit until the worker returns.
+            abort.abort();
+        }
+    }
+}
+
+struct ReconDecodeInput {
+    bytes: io::Cursor<Vec<u8>>,
+    control: ReconDecodeControl,
+}
+
+impl Read for ReconDecodeInput {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.control.check_io()?;
+        let length = output.len().min(RECON_DECODE_INPUT_CHUNK);
+        self.bytes.read(&mut output[..length])
+    }
+}
+
+impl BufRead for ReconDecodeInput {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.control.check_io()?;
+        let bytes = self.bytes.fill_buf()?;
+        Ok(&bytes[..bytes.len().min(RECON_DECODE_INPUT_CHUNK)])
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.bytes.consume(amount);
+    }
+}
+
+fn decode_recon_stages(
+    mut bytes: Vec<u8>,
+    codings: &[ReconCoding],
+    limit: usize,
+    control: &ReconDecodeControl,
+) -> Result<Vec<u8>, ReconDecodeError> {
+    for coding in codings.iter().rev() {
+        control.check()?;
+        let input = ReconDecodeInput {
+            bytes: io::Cursor::new(bytes),
+            control: control.clone(),
+        };
+        let mut decoder = match coding {
+            ReconCoding::Gzip => flate2::bufread::MultiGzDecoder::new(input),
+        };
+        let mut decoded = Vec::new();
+        let mut chunk = [0; 8 * 1024];
+        loop {
+            control.check()?;
+            let count = decoder
+                .read(&mut chunk)
+                .map_err(|_| control.check().err().unwrap_or(ReconDecodeError::Malformed))?;
+            if count == 0 {
+                break;
+            }
+            if count > limit.saturating_sub(decoded.len()) {
+                return Err(ReconDecodeError::Limit);
+            }
+            decoded.extend_from_slice(&chunk[..count]);
+        }
+        bytes = decoded;
+    }
+    control.check()?;
+    Ok(bytes)
+}
+
+async fn dispatch_recon_decode<F>(
+    permits: Arc<tokio::sync::Semaphore>,
+    timeout: Duration,
+    work: F,
+) -> Result<Vec<u8>, ReconDecodeError>
+where
+    F: FnOnce(ReconDecodeControl) -> Result<Vec<u8>, ReconDecodeError> + Send + 'static,
+{
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let control = ReconDecodeControl {
+        cancelled: cancelled.clone(),
+        deadline: Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now),
+    };
+    let mut owner = ReconDecodeOwner {
+        cancelled,
+        abort: None,
+    };
+    match tokio::time::timeout(timeout, async {
+        let permit = permits
+            .acquire_owned()
+            .await
+            .map_err(|_| ReconDecodeError::Worker)?;
+        control.check()?;
+        let worker = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            control.check()?;
+            work(control)
+        });
+        owner.abort = Some(worker.abort_handle());
+        worker.await.map_err(|_| ReconDecodeError::Worker)?
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(ReconDecodeError::Timeout),
+    }
+}
+
 async fn read_body(mut response: reqwest::Response) -> Result<String, &'static str> {
+    let bodyless_status = matches!(response.status().as_u16(), 204 | 205);
+    let codings = recon_content_codings(response.headers());
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -799,6 +1006,23 @@ async fn read_body(mut response: reqwest::Response) -> Result<String, &'static s
         .map_err(|_| "Response body could not be read.")?
     {
         bytes.extend_from_slice(&chunk);
+    }
+    if bodyless_status && bytes.is_empty() {
+        // Metadata on an empty 204/205 is not malformed gzip. Nonempty raw
+        // responses retain the existing reader behavior, even for status 205.
+        return Ok(String::new());
+    }
+    let codings = codings.map_err(ReconDecodeError::warning)?;
+    if !codings.is_empty() {
+        static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+        let permits = PERMITS
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(RECON_DECODE_WORKERS)))
+            .clone();
+        bytes = dispatch_recon_decode(permits, RECON_DECODE_TIMEOUT, move |control| {
+            decode_recon_stages(bytes, &codings, RECON_DECODED_STAGE_LIMIT, &control)
+        })
+        .await
+        .map_err(ReconDecodeError::warning)?;
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -918,6 +1142,7 @@ async fn crawl(
                 if !report.warnings.iter().any(|item| item == error) {
                     report.warnings.push(error.into());
                 }
+                checkpoint_source_progress(session, id, "crawler", &report, 0, false);
                 continue;
             }
         };
@@ -1684,6 +1909,249 @@ mod tests {
         encoder.finish().unwrap()
     }
 
+    fn decode_test_control() -> ReconDecodeControl {
+        ReconDecodeControl {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now() + Duration::from_secs(5),
+        }
+    }
+
+    #[test]
+    fn recon_decode_limits_apply_to_each_compressed_stage_and_all_members_only() {
+        assert_eq!(RECON_DECODED_STAGE_LIMIT, 16 * 1024 * 1024);
+        assert_eq!(RECON_DECODE_WORKERS, 2);
+        assert_eq!(RECON_DECODE_TIMEOUT, Duration::from_secs(15));
+        let decode = |bytes, codings: &[ReconCoding]| {
+            decode_recon_stages(bytes, codings, 64, &decode_test_control())
+        };
+        let gzip = [ReconCoding::Gzip];
+        assert_eq!(
+            decode(encoded_fixture_gzip(&[7; 64]), &gzip).unwrap(),
+            vec![7; 64]
+        );
+        assert_eq!(
+            decode(encoded_fixture_gzip(&[7; 65]), &gzip),
+            Err(ReconDecodeError::Limit)
+        );
+        let members = |second| {
+            [
+                encoded_fixture_gzip(&[1; 32]),
+                encoded_fixture_gzip(&vec![2; second]),
+            ]
+            .concat()
+        };
+        assert_eq!(decode(members(32), &gzip).unwrap().len(), 64);
+        assert_eq!(decode(members(33), &gzip), Err(ReconDecodeError::Limit));
+        let raw: Vec<u8> = (0..64).collect();
+        let inner = encoded_fixture_gzip(&raw);
+        assert!(inner.len() > 64);
+        assert_eq!(
+            decode(encoded_fixture_gzip(&inner), &[ReconCoding::Gzip; 2]),
+            Err(ReconDecodeError::Limit)
+        );
+        // The existing raw/identity reader has no decoded-body limit.
+        assert_eq!(decode(vec![9; 65], &[]).unwrap(), vec![9; 65]);
+        // Even an empty member must validate its trailer and true stream EOF.
+        assert_eq!(
+            decode(encoded_fixture_gzip(b""), &gzip).unwrap(),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn recon_decode_header_lists_are_local_strict_and_do_not_echo_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::CONTENT_ENCODING,
+            " GZip, identity,".parse().unwrap(),
+        );
+        headers.append(reqwest::header::CONTENT_ENCODING, "x-gzip".parse().unwrap());
+        assert_eq!(
+            recon_content_codings(&headers).unwrap(),
+            vec![ReconCoding::Gzip; 2]
+        );
+        for value in [b"secret-custom".as_slice(), b"gzip; secret", b"\xff"] {
+            headers.insert(
+                reqwest::header::CONTENT_ENCODING,
+                reqwest::header::HeaderValue::from_bytes(value).unwrap(),
+            );
+            assert_eq!(
+                recon_content_codings(&headers),
+                Err(ReconDecodeError::Unsupported)
+            );
+            assert!(!ReconDecodeError::Unsupported.warning().contains("secret"));
+        }
+    }
+
+    #[test]
+    fn recon_decode_guard_bounds_input_and_uses_non_retriable_cancellation() {
+        let control = decode_test_control();
+        let mut input = ReconDecodeInput {
+            bytes: io::Cursor::new(vec![0; 40_000]),
+            control: control.clone(),
+        };
+        assert_eq!(input.fill_buf().unwrap().len(), RECON_DECODE_INPUT_CHUNK);
+        let mut buffer = [0; 40_000];
+        assert_eq!(input.read(&mut buffer).unwrap(), RECON_DECODE_INPUT_CHUNK);
+        control.cancelled.store(true, Ordering::Release);
+        assert_eq!(
+            input.read(&mut buffer).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(
+            decode_recon_stages(
+                encoded_fixture_gzip(b"small"),
+                &[ReconCoding::Gzip],
+                64,
+                &control
+            ),
+            Err(ReconDecodeError::Cancelled)
+        );
+        let expired = ReconDecodeControl {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now(),
+        };
+        assert_eq!(
+            decode_recon_stages(
+                encoded_fixture_gzip(b"small"),
+                &[ReconCoding::Gzip],
+                64,
+                &expired
+            ),
+            Err(ReconDecodeError::Timeout)
+        );
+    }
+
+    #[tokio::test]
+    async fn recon_decode_queued_owner_drop_and_timeout_never_start_work() {
+        for timed_out in [false, true] {
+            let permits = Arc::new(tokio::sync::Semaphore::new(1));
+            let occupied = permits.clone().acquire_owned().await.unwrap();
+            let started = Arc::new(AtomicBool::new(false));
+            let observed = started.clone();
+            let worker_permits = permits.clone();
+            let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                waiting_tx.send(()).unwrap();
+                dispatch_recon_decode(worker_permits, Duration::from_millis(30), move |_| {
+                    observed.store(true, Ordering::Release);
+                    Ok(vec![])
+                })
+                .await
+            });
+            // The spawned future has polled through to the held semaphore.
+            waiting_rx.await.unwrap();
+            if timed_out {
+                assert_eq!(task.await.unwrap(), Err(ReconDecodeError::Timeout));
+            } else {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+            drop(occupied);
+            tokio::task::yield_now().await;
+            assert_eq!(permits.available_permits(), 1);
+            assert!(!started.load(Ordering::Acquire));
+        }
+    }
+
+    #[tokio::test]
+    async fn recon_decode_running_owner_keeps_permit_until_exit_without_late_publication() {
+        for timed_out in [false, true] {
+            let permits = Arc::new(tokio::sync::Semaphore::new(1));
+            let worker_permits = permits.clone();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+            let published = Arc::new(AtomicBool::new(false));
+            let late_publication = published.clone();
+            let task = tokio::spawn(async move {
+                let result =
+                    dispatch_recon_decode(worker_permits, Duration::from_secs(2), move |control| {
+                        ready_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        let checked = control.check();
+                        observed_tx.send(checked).unwrap();
+                        checked?;
+                        Ok(vec![1])
+                    })
+                    .await;
+                if result.is_ok() {
+                    late_publication.store(true, Ordering::Release);
+                }
+                result
+            });
+            tokio::time::timeout(Duration::from_secs(1), ready_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            if timed_out {
+                assert_eq!(task.await.unwrap(), Err(ReconDecodeError::Timeout));
+            } else {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+            // A dropped awaiting task must not release a still-running worker's slot.
+            assert_eq!(permits.available_permits(), 0);
+            release_tx.send(()).unwrap();
+            assert_eq!(observed_rx.await.unwrap(), Err(ReconDecodeError::Cancelled));
+            let permit =
+                tokio::time::timeout(Duration::from_secs(2), permits.clone().acquire_owned())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            drop(permit);
+            assert_eq!(permits.available_permits(), 1);
+            assert!(!published.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn recon_decode_blocking_pool_queued_task_is_aborted_before_work() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let occupied = tokio::task::spawn_blocking(move || {
+                ready_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+            ready_rx.await.unwrap();
+            let permits = Arc::new(tokio::sync::Semaphore::new(1));
+            let started = Arc::new(AtomicBool::new(false));
+            let observed = started.clone();
+            let task = tokio::spawn(dispatch_recon_decode(
+                permits.clone(),
+                Duration::from_secs(2),
+                move |_| {
+                    observed.store(true, Ordering::Release);
+                    Ok(vec![])
+                },
+            ));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while permits.available_permits() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            release_tx.send(()).unwrap();
+            occupied.await.unwrap();
+            let permit =
+                tokio::time::timeout(Duration::from_secs(2), permits.clone().acquire_owned())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            drop(permit);
+            assert!(!started.load(Ordering::Acquire));
+        });
+    }
+
     async fn encoded_body_fixture(
         status: u16,
         encodings: &[&str],
@@ -1744,6 +2212,12 @@ mod tests {
         for encodings in [vec![], vec!["identity"], vec![""], vec![" , identity, "]] {
             assert_eq!(
                 encoded_body_fixture(200, &encodings, raw).await.unwrap(),
+                String::from_utf8_lossy(raw)
+            );
+        }
+        for encodings in [vec![], vec!["identity"]] {
+            assert_eq!(
+                encoded_body_fixture(205, &encodings, raw).await.unwrap(),
                 String::from_utf8_lossy(raw)
             );
         }

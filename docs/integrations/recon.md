@@ -37,7 +37,15 @@ Redirect chains stop after five hops; an unvisited in-scope destination left beh
 
 Completed crawler responses and known partial-state warnings are checkpointed before the next network wait, including redirects and non-text responses. Stop keeps those checkpoints and the attempted-request count; the unfinished response or body may still be absent.
 
-Without budgets nothing caps a job, so a broad or growing target can use a lot of memory and disk. Set a budget or use Stop.
+Collection budgets do not cap raw response-body bytes, so a broad or growing target can use a lot of memory and disk. Set a budget or use Stop.
+
+## Compressed crawler responses
+
+The crawler decodes `gzip` and `x-gzip` before static extraction, including repeated/comma-separated encoding fields, stacked gzip layers in reverse order, and concatenated gzip members. Every member must finish with a valid checksum and no trailing non-member bytes. Identity/no-encoding reading is unchanged; request headers and provider/capture decoders are unchanged.
+
+Unsupported or invalid encodings, malformed/truncated streams, and decoding-limit failures skip extraction for that body and mark collection partial with a fixed warning. Compressed bytes are never treated as decoded text. Already observed live responses remain in the inventory, and known partial warnings are checkpointed before the next wait so Stop retains them. Empty 204/205 responses do not require a gzip stream.
+
+New compressed-work safety limits are 16 MiB decoded output per stage (across all members), two decoding workers, and 15 seconds for queueing plus decoding after the raw body has been read. Worker slots remain occupied until cancelled work actually exits. These are not additional API collection budgets, a new identity/raw-body cap, or a bound on all queued raw-body memory. Stop cancels awaiting work and cooperatively stops running decoding; it does not publish late worker results.
 
 ## What each source collects
 
@@ -175,6 +183,7 @@ node --check web/recon.js
 node --test tests/recon_ui.test.cjs
 python3 tests/recon_discovery_smoke.py target/release
 python3 tests/recon_partial_state_smoke.py target/release
+python3 tests/recon_content_encoding_smoke.py target/release
 python3 tests/recon_html_attributes_smoke.py target/release
 python3 tests/recon_cli_smoke.py target/release
 ```
