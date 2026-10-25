@@ -673,3 +673,21 @@ test('legacy Battering ram Reuse still accepts missing slot metadata and literal
   assert.doesNotMatch(f.confirmations[0].message, /original payload slots remain/);
   f.confirmations[0].confirm(); assert.deepEqual(reusedPayloads(f), ['same', 'same', '']);
 });
+
+for (const planned of [undefined, 0]) test(`valid Sniper slot metadata does not require legacy planned=${planned}`, async () => {
+  const f = fixture(), saved = sniperSavedRun(['A', 'B', 'C'], [0, 2, 3, 4, 5]);
+  if (planned === undefined) delete saved.planned; else saved.planned = planned;
+  await prepareReuse(f, saved); assert.equal(f.confirmations.length, 1);
+  f.confirmations[0].confirm(); assert.deepEqual(reusedPayloads(f), ['A', 'B', 'C']);
+});
+
+test('Sniper Reuse still refuses multiline payloads after slot recovery', async () => {
+  const f = fixture(); await prepareReuse(f, sniperSavedRun(['one\ntwo', 'B', 'C']));
+  assert.equal(f.confirmations.length, 0); assert.match(f.els.fuzzerSavedRunNotice.textContent, /line break/);
+});
+
+test('Sniper slot recovery still enforces payload editor byte limits before confirmation', async () => {
+  const f = fixture(), saved = sniperSavedRun(['x'.repeat(4 * 1024 * 1024), 'B', 'C']);
+  await prepareReuse(f, saved);
+  assert.equal(f.confirmations.length, 0); assert.match(f.els.fuzzerSavedRunNotice.textContent, /editor limits/);
+});

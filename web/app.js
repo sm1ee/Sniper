@@ -15975,6 +15975,34 @@ async function refreshFuzzerSavedRuns() {
   }
 }
 
+// Concurrent Sniper requests may finish across positions before Stop. Retained
+// row order is not the original payload list, so recover slots from the plan's
+// index/position metadata, never by deduplicating payload text.
+function reusableSniperPayloads(record) {
+  const invalid = () => new Error("This saved Sniper run has invalid payload metadata. View results instead.");
+  const count = record.payload_count, markers = record.marker_count;
+  if (!Number.isSafeInteger(count) || count < 1 || count > 5000
+    || !Number.isSafeInteger(markers) || markers < 1 || markers > 128
+    || count * markers > 50000 || !Array.isArray(record.results)
+    || record.results.length > count * markers) throw invalid();
+  const slots = new Map(), indexes = new Set();
+  for (const row of record.results) {
+    if (!row || typeof row.payload !== "string"
+      || !Number.isSafeInteger(row.index) || row.index < 0 || row.index >= count * markers
+      || !Number.isSafeInteger(row.position) || row.position < 0 || row.position >= markers
+      || row.position !== Math.floor(row.index / count) || indexes.has(row.index)) throw invalid();
+    const slot = row.index % count;
+    if (slots.has(slot) && slots.get(slot) !== row.payload) throw invalid();
+    indexes.add(row.index);
+    slots.set(slot, row.payload);
+  }
+  if (!slots.size) throw new Error("No saved payloads are available to reuse. View results instead.");
+  return {
+    payloads: [...slots.entries()].sort(([left], [right]) => left - right).map(([, payload]) => payload),
+    originalCount: count,
+  };
+}
+
 async function readFuzzerSavedRun(action) {
   const workflow = fuzzerResultsWorkflowState();
   const recordId = workflow.selectedRunId;
@@ -15997,7 +16025,8 @@ async function readFuzzerSavedRun(action) {
       return;
     }
     await requireOkResponse(response, "Failed to load saved fuzzer run.");
-    const record = normalizeFuzzerAttackRecord(await response.json());
+    const savedRecord = await response.json();
+    const record = normalizeFuzzerAttackRecord(savedRecord);
     if (!ownsSelection()) return;
     if (!record || record.id !== recordId) throw new Error("Saved-run response did not match the selected run.");
     if (action === "view") {
@@ -16007,16 +16036,17 @@ async function readFuzzerSavedRun(action) {
       renderFuzzer();
     } else {
       if (!record.template || typeof record.template !== "object") throw new Error("This run has no reusable request template.");
+      // Validate raw Sniper counts before the display normalizer's legacy
+      // defaults/coercions can turn absent metadata into plausible values.
+      const recovered = record.attack_type === "sniper" ? reusableSniperPayloads(savedRecord) : null;
       if (record.results.some((result) => /[\r\n]/.test(String(result.payload ?? "")))) {
         throw new Error("A saved payload contains a line break and cannot be restored into the one-payload-per-line editor.");
       }
       const requestText = buildEditableRawRequest(record.template);
-      // Sniper sends the whole list at its first position before the next, so
-      // its first payload_count results are the list, repeats included.
-      const listed = record.attack_type === "sniper"
-        ? record.results.slice(0, record.payload_count || record.results.length)
-        : record.results;
-      const payloads = listed.map((result) => String(result.payload ?? ""));
+      const payloads = recovered?.payloads || record.results.map((result) => String(result.payload ?? ""));
+      const partialNotice = recovered && payloads.length < recovered.originalCount
+        ? `\n\nOnly ${payloads.length} of ${recovered.originalCount} original payload slots remain. Missing payloads will not be restored.`
+        : "";
       const payloadsText = payloads.join("\n") + (payloads.at(-1) === "" ? "\n" : "");
       if (new TextEncoder().encode(requestText).length > 2 * 1024 * 1024
         || new TextEncoder().encode(payloadsText).length > 4 * 1024 * 1024 || payloads.length > 5000) {
@@ -16024,7 +16054,7 @@ async function readFuzzerSavedRun(action) {
       }
       workflow.notice = "Reuse requires confirmation. Original source and transport overrides are not retained.";
       showConfirmDialog(
-        "Replace the current request and payload draft with this retained run?\n\nThe request is reconstructed from its saved template; original raw formatting, source transaction and target override are unavailable. Any current source and target override will be cleared. A saved template HTTP version is kept when present; otherwise the draft uses HTTP/1.1. The original separate HTTP-version override cannot be recovered. Review the destination and HTTP version before starting. Reuse does not send requests.",
+        "Replace the current request and payload draft with this retained run?\n\nThe request is reconstructed from its saved template; original raw formatting, source transaction and target override are unavailable. Any current source and target override will be cleared. A saved template HTTP version is kept when present; otherwise the draft uses HTTP/1.1. The original separate HTTP-version override cannot be recovered. Review the destination and HTTP version before starting. Reuse does not send requests." + partialNotice,
         () => {
           if (!ownsSelection()) return;
           const template = cloneEditableRequest(record.template);

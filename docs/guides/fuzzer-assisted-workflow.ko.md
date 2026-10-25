@@ -24,6 +24,7 @@
 
 - `View results`: 현재 요청, payload, 연결 대상을 그대로 두고 저장된 결과만 본다.
 - `Reuse setup`: 확인을 받은 뒤 요청과 payload 초안, 공격 방식, URL 인코딩, 동시 요청 수를 바꾼다. 저장된 실행에는 원래 원문 포맷, source transaction, target override가 없어 복구하지 않는다. 현재 초안에 있던 무관한 source와 target도 지운다. HTTP 버전은 저장된 template 버전이 있으면 그 값을, 없으면 HTTP/1.1을 쓴다. 실행 전에 대상과 버전을 다시 확인한다.
+- 중단된 Sniper 실행은 결과의 index와 position으로 남아 있는 원래 payload 순서를 복구한다. 서로 다른 목록 위치의 같은 문자열이나 빈 값은 그대로 남긴다. 일부 위치가 없으면 확인 창에 남은 개수와 원래 개수를 알리고, 확인한 부분 목록만 재사용한다. 없는 payload는 만들지 않는다. 위치 정보가 없거나 서로 모순되면 재사용하지 않으며 `View results`는 그대로 쓸 수 있다.
 - 줄바꿈이 든 API payload나 편집기 한도를 넘는 실행은 초안으로 복원하지 않는다. `View results`로는 볼 수 있다.
 
 ## 연결이나 실행이 중단되었을 때
