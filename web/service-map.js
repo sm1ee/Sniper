@@ -1631,7 +1631,11 @@
     let peerMatchesAbort = null;
     let htmlGeneratorsAbort = null;
     let parametersAbort = null;
-    let apiDocsCopyId = 0;
+    // Both exports target the same clipboard. Latest intent wins even when
+    // that write fails; an older fallback must not revive afterward.
+    let copyActionId = 0;
+    let flowCopyKindsVersion = 0;
+    let flowCopyKindsSignature = JSON.stringify(hiddenLinkKinds());
     let replayActionId = 0;
     let apiDocsReturnFocus = null;
     let detailRender = null;
@@ -1677,6 +1681,7 @@
       }, AUTO_REFRESH_MS);
     }
     function suspendRefresh() {
+      copyActionId += 1;
       clearRefreshTimer();
       state.requestId += 1;
       abort?.abort();
@@ -2162,6 +2167,26 @@
         && state.flowOrigin === flowBinding.origin && state.scopeOnly === flowBinding.scopeOnly
         && JSON.stringify(getFilterQuery()) === flowBinding.filterSignature;
     }
+    function syncFlowCopyKinds() {
+      const signature = JSON.stringify(hiddenLinkKinds());
+      if (signature !== flowCopyKindsSignature) {
+        flowCopyKindsSignature = signature;
+        flowCopyKindsVersion += 1;
+      }
+      return signature;
+    }
+    function copyFlow() {
+      if (!flowIsCurrent()) return;
+      const flow = state.flow, binding = flowBinding, requestId = state.flowRequestId;
+      const kinds = syncFlowCopyKinds(), kindsVersion = flowCopyKindsVersion;
+      const copyId = ++copyActionId;
+      // Native writes already issued cannot be canceled. Own only the JS
+      // fallback and feedback, without tying them to unrelated Map polling.
+      const isCurrent = () => syncFlowCopyKinds() === kinds && kindsVersion === flowCopyKindsVersion
+        && copyId === copyActionId && flow === state.flow && binding === flowBinding
+        && requestId === state.flowRequestId && flowIsCurrent();
+      copyText?.(flowMermaid(flow, hiddenLinkKinds()), "Copied the flow as a Mermaid sequence diagram", isCurrent);
+    }
     function resumeFlow() {
       if (canRefresh() && state.view === "service-map" && state.snapshot && state.flowOrigin && !state.flow && !state.flowLoading
         && !state.loading && !state.stale && !state.error) loadFlow();
@@ -2588,10 +2613,13 @@
       sendToReplay?.(id, isCurrent);
     }
     function copyApiDocs(label) {
-      const apiDocs = state.apiDocs, sessionId = getSessionId(), copyId = ++apiDocsCopyId;
-      if (!apiDocs?.document) return;
-      const isCurrent = () => state.apiDocs === apiDocs && getSessionId() === sessionId && apiDocsCopyId === copyId;
+      const apiDocs = state.apiDocs;
+      if (!canRefresh() || !apiDocs?.document || apiDocs.sessionId !== getSessionId()) return false;
+      const copyId = ++copyActionId, requestId = state.apiDocsRequestId;
+      const isCurrent = () => canRefresh() && state.apiDocs === apiDocs && apiDocs.sessionId === getSessionId()
+        && requestId === state.apiDocsRequestId && copyActionId === copyId;
       copyText?.(JSON.stringify(apiDocs.document, null, 2), label, isCurrent);
+      return true;
     }
     function renderApiDocs(opening = false) {
       if (!els.apiDocs) return;
@@ -3261,6 +3289,7 @@
     }
     function renderGraph() {
       if (destroyed) return;
+      syncFlowCopyKinds();
       if (state.flowOrigin) return renderFlow();
       const selected = selectedOrigin();
       const direct = directNeighborhood();
@@ -3983,8 +4012,7 @@
       // Swagger Editor cannot fetch the document from this app, so the click
       // copies it to paste there. Nothing is sent to the site.
       else if (data.apiDocsEditor !== undefined && state.apiDocs?.document) {
-        copyApiDocs("Copied OpenAPI; paste it into Swagger Editor");
-        openUrl?.(SWAGGER_EDITOR_URL);
+        if (copyApiDocs("Copied OpenAPI; paste it into Swagger Editor")) openUrl?.(SWAGGER_EDITOR_URL);
       }
       else if (data.apiDocsReplay) sendApiDocsToReplay(data.apiDocsReplay);
     });
@@ -4071,9 +4099,7 @@
     listen(els.allOrigins, "click", () => setMapMode(false));
     listen(els.directRelations, "click", () => setMapMode(!state.anchorOrigin));
     listen(els.flow, "click", () => setFlowMode(state.selectedOrigin));
-    listen(els.flowMermaid, "click", () => {
-      if (flowIsCurrent()) copyText?.(flowMermaid(state.flow, hiddenLinkKinds()), "Copied the flow as a Mermaid sequence diagram");
-    });
+    listen(els.flowMermaid, "click", copyFlow);
     listen(els.focusSelection, "click", focusSelection);
     listen(els.search, "input", () => { replayActionId += 1; state.query = els.search.value; state.page = 0; state.pageAnchor = null; render(); });
     listen(els.scope, "click", () => {
