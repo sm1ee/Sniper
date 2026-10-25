@@ -971,6 +971,9 @@
         view = "templates";
         auto = null;
         autoDraft = false;
+        autoQueuedSave = null;
+        autoPendingEnabled = null;
+        ++autoDraftVersion;
         els.AutoHosts.value = "";
         els.AutoRate.value = "10";
         scanNotice("");
@@ -1093,6 +1096,9 @@
     let autoBusy = false;
     // The operator is editing the host list or pace: a refresh leaves it.
     let autoDraft = false;
+    let autoDraftVersion = 0;
+    let autoQueuedSave = null;
+    let autoPendingEnabled = null;
 
     function autoNotice(message, error = false) {
       els.AutoNotice.textContent = message;
@@ -1133,31 +1139,44 @@
       }
       renderAuto();
     }
-    async function saveAuto(enabled) {
+    async function saveAuto(enabled, draft = null) {
       if (disposed) return;
       syncScanSession();
-      if (autoBusy) return;
+      const submission = draft || { enabled, values: autoValues(), version: autoDraftVersion };
+      if (autoBusy) {
+        // Keep the last blur, not whatever may be typed after it.
+        autoQueuedSave = submission;
+        return;
+      }
       const owner = scanOwner();
       // An earlier read cannot put back the setting being changed now.
       ++autoReadRequest;
       autoBusy = true;
+      autoPendingEnabled = submission.enabled;
       renderAuto();
       try {
-        const body = autoRequest(autoValues(), owner.sessionId, enabled);
+        const body = autoRequest(submission.values, owner.sessionId, submission.enabled);
         const saved = await json(await fetcher("/api/templates/auto", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         }), "Could not save the auto scan");
         if (!ownsScan(owner) || saved.session_id !== owner.sessionId) return;
         auto = saved;
-        autoDraft = false;
+        if (submission.version === autoDraftVersion) autoDraft = false;
         autoNotice("");
       } catch (error) {
-        if (ownsScan(owner)) autoNotice(error.message || "The request failed.", true);
+        if (ownsScan(owner) && !autoQueuedSave) autoNotice(error.message || "The request failed.", true);
       } finally {
         if (ownsScan(owner)) {
           autoBusy = false;
-          renderAuto();
-          await refreshScans();
+          const queued = autoQueuedSave;
+          autoQueuedSave = null;
+          if (queued) {
+            await saveAuto(queued.enabled, queued);
+          } else {
+            autoPendingEnabled = null;
+            renderAuto();
+            await refreshScans();
+          }
         }
       }
     }
@@ -1165,8 +1184,8 @@
     on(els.AutoToggle, "click", () => saveAuto(!auto?.enabled));
     // The hosts and pace save when the field is left.
     for (const control of [els.AutoHosts, els.AutoRate]) {
-      on(control, "input", () => { autoDraft = true; });
-      on(control, "change", () => { if (autoDraft) void saveAuto(!!auto?.enabled); });
+      on(control, "input", () => { autoDraft = true; ++autoDraftVersion; });
+      on(control, "change", () => { if (autoDraft) void saveAuto(autoPendingEnabled ?? !!auto?.enabled); });
     }
 
     // What the installed library follows: main, or the releases (an imported
@@ -1359,6 +1378,8 @@
           invalidateScanReads();
           scanBusy = false;
           autoBusy = false;
+          autoQueuedSave = null;
+          autoPendingEnabled = null;
         }
       } else if (changed) {
         // The CLI or another window may have changed Scope while Scan was
