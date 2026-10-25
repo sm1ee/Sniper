@@ -1929,6 +1929,122 @@ mod tests {
             .any(|d| d.url.contains("fake-link") && is_followable(d)));
     }
 
+    fn assert_template_base(body: &str, expected: &str) {
+        let body = format!("{body}<a href='outside'>Outside</a>");
+        let (found, clipped) = extract_document(&base(), "text/html", &body);
+        assert!(!clipped, "{body}");
+        let link = found
+            .iter()
+            .find(|item| item.url.ends_with("/outside"))
+            .unwrap();
+        assert_eq!(
+            link.url,
+            format!("https://example.com{expected}/outside"),
+            "{body}"
+        );
+        assert_eq!(link.kind, "observed", "{body}");
+        assert_eq!(link.location, format!("link: {}", base()), "{body}");
+        assert!(is_followable(link), "{body}");
+    }
+
+    #[test]
+    fn html_template_base_keeps_document_order_and_literal_nesting() {
+        for (body, expected) in [
+            ("", "/folder"),
+            ("<base href='/document/'>", "/document"),
+            ("<template><base href='/template/'></template>", "/folder"),
+            ("<template><base href='/template/'></template><base href='/document/'>", "/document"),
+            ("<base href='/document/'><template><base href='/template/'></template>", "/document"),
+            ("<template><template><base href='/inner/'></template><base href='/outer/'></template><base href='/document/'>", "/document"),
+            ("</template><TeMpLaTe><base href='/template/'></tEmPlAtE><base href='/document/'>", "/document"),
+            ("<template><base href='/unclosed/'>", "/folder"),
+            ("<template/><base href='/self-closing/'>", "/folder"),
+            ("<template data-x='v'/><base href='/self-closing/'>", "/folder"),
+            ("<template data-x=/><base href='/slash-value/'>", "/folder"),
+            ("<template><div data-x='</template>'></div><base href='/quoted/'></template>", "/folder"),
+            ("<template><base href='/template/'></template/ ><base href='/document/'>", "/document"),
+        ] {
+            assert_template_base(body, expected);
+        }
+    }
+
+    #[test]
+    fn html_template_base_requires_exact_html_tag_name_boundaries() {
+        for suffix in [".foo", "_foo", "é", "-foo", ":foo", "=x", "\u{b}", "\u{a0}"] {
+            assert_template_base(
+                &format!("<template{suffix}><base href='/document/'>"),
+                "/document",
+            );
+            assert_template_base(
+                &format!("<template></template{suffix}><base href='/template/'></template>"),
+                "/folder",
+            );
+        }
+        for spacing in [" ", "\t", "\n", "\u{c}", "\r"] {
+            assert_template_base(&format!("<template{spacing}><base href='/template/'></template{spacing}><base href='/document/'>"), "/document");
+        }
+    }
+
+    #[test]
+    fn html_template_base_ignores_fake_context_markers_in_raw_text_and_comments() {
+        for raw in [
+            "script", "style", "textarea", "title", "iframe", "xmp", "noembed", "noframes",
+        ] {
+            assert_template_base(&format!("<template><{raw}></template></{raw}><base href='/template/'></template><base href='/document/'>"), "/document");
+            assert_template_base(
+                &format!("<{raw}><template></{raw}><base href='/document/'>"),
+                "/document",
+            );
+            assert_template_base(&format!("<template><{raw}></{raw}_fake></template></{raw}><base href='/template/'></template>"), "/folder");
+            assert_template_base(&format!("<template><{raw}></{raw}\u{b}></template></{raw}><base href='/template/'></template>"), "/folder");
+        }
+        assert_template_base("<!-- <template> --><base href='/document/'>", "/document");
+        assert_template_base(
+            "<template><!-- </template> --><base href='/template/'></template>",
+            "/folder",
+        );
+        assert_template_base(
+            "<template><iframe></template><base href='/raw-unclosed/'>",
+            "/folder",
+        );
+    }
+
+    #[test]
+    fn html_template_base_preserves_foreign_and_existing_url_evidence() {
+        assert_template_base(
+            "<svg><template><base href='/foreign/'></svg><base href='/document/'>",
+            "/document",
+        );
+        assert_template_base(
+            "<template><math></template></math><base href='/template/'></template>",
+            "/folder",
+        );
+        let body = "<template><a href='/kept-link'></a><div src='/kept-candidate'></div><iframe><img src='/kept-raw'></iframe></template>";
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        assert_eq!(found.len(), 3);
+        for (path, kind, label) in [
+            ("/kept-link", "observed", "link"),
+            ("/kept-candidate", "candidate", "attribute div[src]"),
+            ("/kept-raw", "observed", "resource"),
+        ] {
+            let item = found.iter().find(|item| item.url.ends_with(path)).unwrap();
+            assert_eq!(item.kind, kind);
+            assert_eq!(item.location, format!("{label}: {}", base()));
+            assert_eq!(is_followable(item), kind == "observed");
+        }
+    }
+
+    #[test]
+    fn html_template_base_guard_does_not_reinterpret_xhtml() {
+        let body = "<template/><base href='/existing/'><a href='outside'>Outside</a>";
+        let (found, clipped) = extract_document(&base(), "application/xhtml+xml", body);
+        assert!(!clipped);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].url, "https://example.com/existing/outside");
+        assert_template_base(body, "/folder");
+    }
+
     #[test]
     fn html_url_attributes_follow_only_recognized_static_combinations() {
         // https://html.spec.whatwg.org/multipage/indices.html#attributes-3
