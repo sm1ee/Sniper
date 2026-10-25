@@ -45,6 +45,8 @@ Without budgets nothing caps a job, so a broad or growing target can use a lot o
 - Wayback: CDX records without status or MIME filters, so error responses and old resources appear too.
 - Crawler: HTML links, resources and base URLs; GET and POST form actions and field names; URL literals in inline and external JavaScript; robots hints; and sitemap indexes and URLs. It does not render pages, log in, look for source maps, evaluate JavaScript, expand wildcards or infer dynamic routes.
 
+Form candidates follow [HTML submission-method defaults](https://html.spec.whatwg.org/dev/form-control-infrastructure.html#form-submission-attributes): invalid methods use GET, omitted overrides inherit the form's method, and dialog submissions do not create HTTP endpoints. These rules do not alter methods in observed provider traffic.
+
 ## Scope site map
 
 **Scope → Site map** includes the active session's Recon inventory, read-only. Rows mark captured and discovered evidence and keep the Recon source and evidence kind. A row that was also captured keeps its HTTP status and capture metrics, and `request_count` counts captured traffic only. Discovered endpoints do not become proxy transactions, so a Recon-only row has no request to open or replay. The inventory is saved with its session and stays in the map after a restart.

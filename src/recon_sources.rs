@@ -251,6 +251,15 @@ fn method(value: Option<&str>) -> String {
     }
 }
 
+fn html_form_method(value: Option<&str>) -> &'static str {
+    // HTML submission methods are enumerated, unlike observed HTTP methods.
+    match value {
+        Some(value) if value.eq_ignore_ascii_case("post") => "POST",
+        Some(value) if value.eq_ignore_ascii_case("dialog") => "DIALOG",
+        _ => "GET",
+    }
+}
+
 fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
     cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
@@ -1433,6 +1442,9 @@ fn extract_document_inner(
                       out: &mut Vec<Discovery>,
                       seen: &mut HashSet<(String, String, String)>| {
         let (mut url, verb, names) = form;
+        if verb == "DIALOG" {
+            return true;
+        }
         if verb == "GET" && !names.is_empty() {
             if let Ok(mut parsed) = Url::parse(&url) {
                 for name in &names {
@@ -1478,11 +1490,7 @@ fn extract_document_inner(
                 },
                 None => base.to_string(),
             };
-            let verb = match tag.attrs.get("method").map(|s| s.to_ascii_lowercase()) {
-                Some(value) if value == "post" => "POST",
-                Some(value) if value == "dialog" => continue,
-                _ => "GET",
-            };
+            let verb = html_form_method(tag.attrs.get("method").map(String::as_str));
             current_form = Some((action, verb.into(), Vec::new()));
         }
         if matches!(
@@ -1529,12 +1537,15 @@ fn extract_document_inner(
                 .get("formmethod")
                 .map(String::as_str)
                 .or_else(|| current_form.as_ref().map(|(_, m, _)| m.as_str()));
-            truncated |= !push_discovery(
-                &mut out,
-                &mut seen,
-                static_discovery(action, method(verb), "candidate", "form", base),
-                0,
-            );
+            let verb = html_form_method(verb);
+            if verb != "DIALOG" {
+                truncated |= !push_discovery(
+                    &mut out,
+                    &mut seen,
+                    static_discovery(action, verb.into(), "candidate", "form", base),
+                    0,
+                );
+            }
         }
         if tag.name == "script" {
             if let Some((start, end)) = tag.body {
@@ -2082,6 +2093,82 @@ mod tests {
         assert!(found[0].location.contains(&long_name));
         assert!(!found[0].location.contains("private-value"));
         assert!(!found[0].url.contains("private-value"));
+    }
+
+    #[test]
+    fn html_formmethod_dialog_does_not_invent_network_candidates() {
+        // https://html.spec.whatwg.org/dev/form-control-infrastructure.html#form-submission-attributes
+        let body = r#"
+            <form method="post" action="/save">
+                <button formaction="/close" formmethod="DiAlOg">Close</button>
+            </form>
+            <form method="dialog" action="/dialog">
+                <button formaction="/inherited-dialog">Close</button>
+                <button formaction="/explicit-post" formmethod="POST">Save</button>
+            </form>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        let mut methods = found
+            .iter()
+            .map(|item| {
+                (
+                    Url::parse(&item.url).unwrap().path().to_string(),
+                    item.method.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![("/explicit-post".into(), "POST"), ("/save".into(), "POST")]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+    }
+
+    #[test]
+    fn html_formmethod_invalid_defaults_and_inheritance_are_html_specific() {
+        let body = r#"
+            <form method="pOsT" action="/save">
+                <button formaction="/inherited">Save</button>
+                <button formaction="/invalid" formmethod="DELETE">Delete</button>
+                <button formaction="/empty" formmethod="">Empty</button>
+                <button formaction="/spaced" formmethod=" post ">Spaced</button>
+                <button formaction="/get" formmethod="gEt">Get</button>
+            </form>
+            <form method="DELETE" action="/invalid-form"></form>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        let mut methods = found
+            .iter()
+            .map(|item| {
+                (
+                    Url::parse(&item.url).unwrap().path().to_string(),
+                    item.method.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![
+                ("/empty".into(), "GET"),
+                ("/get".into(), "GET"),
+                ("/inherited".into(), "POST"),
+                ("/invalid".into(), "GET"),
+                ("/invalid-form".into(), "GET"),
+                ("/save".into(), "POST"),
+                ("/spaced".into(), "GET")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+        // Observed provider traffic is not restricted to HTML submission methods.
+        assert_eq!(method(Some("DELETE")), "DELETE");
     }
 
     #[test]
