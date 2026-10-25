@@ -674,6 +674,9 @@
     let scanJobs = [];
     let openJob = null;
     let scanBusy = false;
+    let scansLoaded = false;
+    let scanNoticeSource = null;
+    let autoNoticeSource = null;
     let scanGeneration = 0;
     let scanReadRequest = 0;
     let autoReadRequest = 0;
@@ -687,7 +690,9 @@
     let planTimer = null;
     let planRequest = 0;
 
-    function scanNotice(message, error = false) {
+    function scanNotice(message, error = false, source = "action") {
+      if (source === "read" && scanNoticeSource === "action" && els.ScanNotice.textContent) return;
+      scanNoticeSource = message ? source : null;
       els.ScanNotice.textContent = message;
       els.ScanNotice.classList.toggle("hidden", !message);
       els.ScanNotice.classList.toggle("recon-error", error);
@@ -749,7 +754,7 @@
     function renderScan() {
       const running = scanJobs.some((job) => job.status === "running");
       // The click is the consent; the plan above it says what it sends.
-      els.ScanStart.disabled = scanBusy || running || !status?.library;
+      els.ScanStart.disabled = scanBusy || running || !scansLoaded || !status?.library;
       els.ScanStart.textContent = running ? "A scan is running" : "Start scan";
       const nodes = [];
       for (const job of scanJobs) {
@@ -967,6 +972,7 @@
         ++scanGeneration;
         invalidateScanReads();
         scanBusy = false;
+        scansLoaded = false;
         autoBusy = false;
         scanJobs = [];
         openJob = null;
@@ -996,12 +1002,20 @@
       const sessionId = owner.sessionId;
       const request = ++scanReadRequest;
       const current = () => ownsScan(owner) && request === scanReadRequest && visible;
-      if (!visible || !sessionId) return;
+      if (!visible || !sessionId || scanBusy) return;
+      let failed = false;
+      let listedCurrentJobs = false;
       try {
         const query = `session_id=${encodeURIComponent(sessionId)}`;
         const listed = await json(await fetcher(`/api/templates/scans?${query}`), "Could not list the scans");
-        if (!current() || listed.session_id !== sessionId) return;
-        scanJobs = Array.isArray(listed.jobs) ? listed.jobs : [];
+        if (!current()) return;
+        if (listed?.session_id !== sessionId || !Array.isArray(listed.jobs)) {
+          throw new Error("Could not read the scans for this session.");
+        }
+        scanJobs = listed.jobs;
+        scansLoaded = true;
+        listedCurrentJobs = true;
+        if (scanNoticeSource === "read") scanNotice("");
         if (openJob) {
           const jobId = openJob.id;
           const job = await json(await fetcher(`/api/templates/scans/${encodeURIComponent(jobId)}?${query}`), "Could not read the scan");
@@ -1018,13 +1032,17 @@
         }
       } catch (error) {
         if (!current()) return;
-        scanNotice(error.message, true);
+        failed = true;
+        if (!listedCurrentJobs) scansLoaded = false;
+        scanNotice(error.message, true, "read");
       }
       if (!current()) return;
       renderScan();
-      await refreshAuto();
-      // An auto job can start at any moment while the auto scan is on.
-      if (current() && (scanJobs.some((job) => job.status === "running") || auto?.enabled)) scanTimer = schedule(refreshScans, 2000);
+      const autoRead = await refreshAuto();
+      // Retry reads only; a failed start or stop is never sent again here.
+      if (current() && (failed || autoRead === false || scanJobs.some((job) => job.status === "running") || auto?.enabled)) {
+        scanTimer = schedule(refreshScans, 2000);
+      }
     }
 
     async function scanAct(work) {
@@ -1033,6 +1051,9 @@
       if (scanBusy) return;
       const owner = scanOwner();
       scanBusy = true;
+      scansLoaded = false;
+      ++scanReadRequest;
+      clearScanTimer();
       renderScan();
       try {
         await work(owner, () => ownsScan(owner));
@@ -1108,7 +1129,9 @@
     let autoQueuedSave = null;
     let autoPendingEnabled = null;
 
-    function autoNotice(message, error = false) {
+    function autoNotice(message, error = false, source = "action") {
+      if (source === "read" && autoNoticeSource === "action" && els.AutoNotice.textContent) return;
+      autoNoticeSource = message ? source : null;
       els.AutoNotice.textContent = message;
       els.AutoNotice.classList.toggle("hidden", !message);
       els.AutoNotice.classList.toggle("recon-error", error);
@@ -1139,13 +1162,18 @@
       if (!visible || !sessionId || disposed || autoBusy) return;
       try {
         const read = await json(await fetcher(`/api/templates/auto?session_id=${encodeURIComponent(sessionId)}`), "Could not read the auto scan");
-        if (!current() || read.session_id !== sessionId) return;
+        if (!current()) return;
+        if (read?.session_id !== sessionId) throw new Error("Could not read the auto scan for this session.");
         auto = read;
+        if (autoNoticeSource === "read") autoNotice("");
       } catch (error) {
         if (!current()) return;
-        autoNotice(error.message, true);
+        autoNotice(error.message, true, "read");
+        renderAuto();
+        return false;
       }
       renderAuto();
+      return true;
     }
     async function saveAuto(enabled, draft = null) {
       if (disposed) return;
@@ -1252,16 +1280,20 @@
     on(els.Next, "click", () => { page += 1; void loadList(); });
     on(els.EnableShown, "click", () => setMany(bulkRequest(filters(), true), bulkRequest(filters(), true)));
     on(els.DisableShown, "click", () => setMany(bulkRequest(filters(), false), bulkRequest(filters(), false)));
-    on(els.ScanStart, "click", () => scanAct(async (_owner, current) => {
-      const watching = viewRequest;
-      const job = await json(await fetcher("/api/templates/scans", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(startBody()),
-      }), "Could not start the scan");
-      // A response for a session that was left must not open here.
-      if (!current()) return;
-      if (watching === viewRequest) showResults(job);
-      scanNotice("");
-    }));
+    on(els.ScanStart, "click", () => {
+      syncScanSession();
+      if (!scansLoaded || scanBusy || scanJobs.some((job) => job.status === "running")) return;
+      return scanAct(async (_owner, current) => {
+        const watching = viewRequest;
+        const job = await json(await fetcher("/api/templates/scans", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(startBody()),
+        }), "Could not start the scan");
+        // A response for a session that was left must not open here.
+        if (!current()) return;
+        if (watching === viewRequest) showResults(job);
+        scanNotice("");
+      });
+    });
     for (const control of [els.ScanTargets, els.ScanRate, els.ScanConcurrency, els.ScanMaxRequests]) on(control, "input", schedulePlan);
     for (const control of [els.ScanSelection, els.ScanMatchReplace, els.ScanRisks, els.ScanKeepAll]) on(control, "change", schedulePlan);
     // The search and severity choose what a scan sends.
@@ -1387,6 +1419,8 @@
           ++scanGeneration;
           invalidateScanReads();
           scanBusy = false;
+          scansLoaded = false;
+          renderScan();
           autoBusy = false;
           autoQueuedSave = null;
           autoPendingEnabled = null;
