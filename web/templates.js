@@ -850,7 +850,8 @@
       }
       if (!rows.length) {
         const row = element("tr");
-        const cell = element("td", "recon-empty", job?.status === "running" ? "No requests yet." : "No requests.");
+        const cell = element("td", "recon-empty", matchedOnly ? "No matches in the recent request log."
+          : job?.status === "running" ? "No requests yet." : "No requests.");
         cell.colSpan = 6;
         row.append(cell);
         rows.push(row);
