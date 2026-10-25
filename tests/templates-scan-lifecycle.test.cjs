@@ -159,3 +159,28 @@ test('a start response respects an explicit return to the template list', async 
   assert.equal(f.get('ResultsTable').classList.contains('hidden'), true);
   f.controller.dispose();
 });
+
+test('selecting a template while Start waits keeps that newer template detail open', async () => {
+  const f = await fixture(), pending = deferred();
+  f.intercept((request) => request.url === '/api/templates/scans' && !request.body.preview ? pending.promise
+    : request.url === '/api/templates/example-selected' ? response({ id: 'example-selected', name: 'Selected template', yaml: '' }) : undefined);
+  f.get('ScanStart').dispatch('click'); await settle();
+  f.get('Rows').dispatch('click', { target: inside({ dataset: { templateId: 'example-selected' } }) }); await settle();
+  pending.resolve(response(scan('just-started'))); await settle();
+  assert.equal(f.get('ResultsTable').classList.contains('hidden'), true);
+  assert.equal(f.get('Detail').children[0].textContent, 'Selected template');
+  f.controller.dispose();
+});
+
+test('refreshing a template after its On change does not cancel the pending start view', async () => {
+  const f = await fixture(), pending = deferred();
+  f.intercept((request) => request.url === '/api/templates/scans' && !request.body.preview ? pending.promise
+    : request.url === '/api/templates/example-selected' ? response({ id: 'example-selected', name: 'Selected template', yaml: '' }) : undefined);
+  f.get('Rows').dispatch('click', { target: inside({ dataset: { templateId: 'example-selected' } }) }); await settle();
+  f.get('ScanStart').dispatch('click'); await settle();
+  f.get('Rows').dispatch('click', { target: inside({ dataset: { templateToggle: 'example-selected' }, checked: true }) }); await settle();
+  pending.resolve(response(scan('just-started'))); await settle();
+  assert.equal(f.get('ResultsTable').classList.contains('hidden'), false);
+  assert.match(f.get('ResultsTitle').textContent, /just-started/);
+  f.controller.dispose();
+});

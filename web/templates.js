@@ -644,7 +644,8 @@
 
     // Shows the row selected at once and its detail when it arrives; an older
     // request still on its way, as ↑/↓ leave behind, is dropped.
-    async function open(id, { reveal = false } = {}) {
+    async function open(id, { reveal = false, navigate = true } = {}) {
+      if (navigate) ++viewRequest;
       const request = ++openRequest;
       pendingId = id;
       renderList();
@@ -1068,7 +1069,7 @@
         // The count is in the library summary; what it does not say is that
         // traffic already captured waits for a Rescan.
         notice(body.enabled ? "Checks new traffic. Rescan in Findings checks what is already captured." : "");
-        if (selected && Array.isArray(body.ids) && body.ids.includes(selected.id)) await open(selected.id);
+        if (selected && Array.isArray(body.ids) && body.ids.includes(selected.id)) await open(selected.id, { navigate: false });
       });
     }
 
