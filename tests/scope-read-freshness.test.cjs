@@ -53,9 +53,10 @@ function fixture() {
       json: () => options.delay && index === options.delayIndex ? options.delay.promise
         : Promise.resolve(request.url.startsWith('/api/target/site-map') ? map : value) }));
   }
-  function fail(batch, mode, error = new Error(`Synthetic ${mode} failure`)) {
+  function fail(batch, mode, error = new Error(`Synthetic ${mode} failure`), failedIndex = 0) {
     batch.requests.forEach((request, index) => {
-      if (index !== 0) request.resolve({ ok: true, json: async () => paths('unused') });
+      if (index !== failedIndex) request.resolve({ ok: true,
+        json: async () => request.url.startsWith('/api/target/site-map') ? paths('unused') : runtime() });
       else if (mode === 'network') request.reject(error);
       else request.resolve({ ok: mode !== 'http', error,
         json: async () => { throw error; } });
@@ -271,3 +272,30 @@ test('adopting an unversioned visible edit prevents an older pending save from s
   assert.equal(f.state.targetScopeDraft, 'unsaved.example.com'); assert.equal(f.els.targetScopeEditor.value, 'unsaved.example.com');
   assert.equal(f.state.targetScopeDirty, true); assert.equal(f.state.scopeSaveHidden, false);
 });
+for (const ownership of ['dom', 'generation']) {
+  for (const mode of ['http', 'json', 'network']) {
+    test(`obsolete ${mode} error does not mask save ownership loss: ${ownership}`, async () => {
+      const f = fixture(), { saving, followup } = await beginSavedRefresh(f);
+      const poll = f.start('scope'); f.reply(poll, true); await successful(poll);
+      if (ownership === 'generation') f.context.workspaceStateGeneration++;
+      else f.edit('unsaved.example.com', 'dom');
+      const accepted = f.state.runtime, text = f.els.targetScopeEditor.value;
+      f.fail(followup, mode);
+      const result = await saving.settled;
+      assert.equal(result.error, undefined); assert.equal(result.value, false);
+      assert.equal(f.state.runtime, accepted); assert.equal(f.els.targetScopeEditor.value, text);
+      assert.equal(f.toasts.length, ownership === 'generation' ? 0 : 1);
+    });
+  }
+}
+for (const mode of ['http', 'json', 'network']) {
+  for (const obsolete of [false, true]) {
+    test(`Scope paths ${mode} error is ${obsolete ? 'obsolete after acceptance' : 'a genuine current failure'}`, async () => {
+      const f = fixture(), old = f.start('scope');
+      if (obsolete) { const newer = f.start('scope'); f.reply(newer, true); await successful(newer); }
+      const error = f.fail(old, mode, new Error('Synthetic path failure'), 1);
+      if (obsolete) { await successful(old); assert.equal(f.state.targetSiteMap[0].host, 'new.example.com'); }
+      else assert.equal((await old.settled).error, error);
+    });
+  }
+}
