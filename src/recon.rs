@@ -2209,39 +2209,48 @@ mod tests {
     #[tokio::test]
     async fn recon_encoded_body_rejects_known_unsupported_headers_before_body_wait() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                let mut bytes = [0; 1024];
-                let count = socket.read(&mut bytes).await.unwrap();
-                assert!(count > 0 && request.len() < 8192);
-                request.extend_from_slice(&bytes[..count]);
-            }
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: unknown\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.unwrap();
-            release_rx.await.unwrap();
-            let _ = socket.write_all(b"body").await;
-        });
-        let response = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap()
-            .get(format!("http://{address}/"))
-            .send()
-            .await
-            .unwrap();
-        // send() returning proves response headers were received; body remains held.
-        let result = tokio::time::timeout(Duration::from_millis(300), read_body(response)).await;
-        release_tx.send(()).unwrap();
-        server.await.unwrap();
-        assert_eq!(
-            result.unwrap(),
-            Err(ReconDecodeError::Unsupported.warning())
-        );
+        for status in [200, 205] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let mut bytes = [0; 1024];
+                    let count = socket.read(&mut bytes).await.unwrap();
+                    assert!(count > 0 && request.len() < 8192);
+                    request.extend_from_slice(&bytes[..count]);
+                }
+                let prefix = if status == 205 { "b" } else { "" };
+                let response = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: text/html\r\nContent-Encoding: unknown\r\nContent-Length: 4\r\nConnection: close\r\n\r\n{prefix}");
+                socket.write_all(response.as_bytes()).await.unwrap();
+                release_rx.await.unwrap();
+                let _ = socket
+                    .write_all(if status == 205 { b"ody" } else { b"body" })
+                    .await;
+            });
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            // Headers are received. A 205 additionally has one byte available,
+            // proving it is nonempty, while the remaining body stays held.
+            let result =
+                tokio::time::timeout(Duration::from_millis(300), read_body(response)).await;
+            release_tx.send(()).unwrap();
+            server.await.unwrap();
+            assert_eq!(
+                result.unwrap(),
+                Err(ReconDecodeError::Unsupported.warning()),
+                "{status}"
+            );
+        }
     }
 
     #[tokio::test]
