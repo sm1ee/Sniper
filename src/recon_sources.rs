@@ -435,18 +435,47 @@ pub async fn urlscan(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
+    on_progress: impl Fn(&[Discovery], usize) + Send + Sync,
+) -> (Vec<Discovery>, SourceReport) {
+    let key = match api_key() {
+        Ok(key) => key,
+        Err(e) => {
+            let mut report = SourceReport::default();
+            report.fail(e);
+            return (Vec::new(), report);
+        }
+    };
+    read_urlscan(
+        client,
+        target,
+        include_subdomains,
+        max_pages,
+        max_results,
+        cancel,
+        on_progress,
+        &key,
+        urlscan_search_url,
+        result_url,
+    )
+    .await
+}
+
+async fn read_urlscan(
+    client: &Client,
+    target: &Url,
+    include_subdomains: bool,
+    max_pages: usize,
+    max_results: usize,
+    cancel: &AtomicBool,
+    on_progress: impl Fn(&[Discovery], usize) + Send + Sync,
+    key: &Option<HeaderValue>,
+    search_url: impl Fn(&str, bool, usize, Option<&str>) -> Url,
+    scan_url: impl Fn(&str) -> Option<Url>,
 ) -> (Vec<Discovery>, SourceReport) {
     let mut out = Vec::new();
     let mut report = SourceReport::default();
     let host = match provider_host(target) {
         Ok(host) => host,
-        Err(e) => {
-            report.fail(e);
-            return (out, report);
-        }
-    };
-    let key = match api_key() {
-        Ok(key) => key,
         Err(e) => {
             report.fail(e);
             return (out, report);
@@ -461,9 +490,9 @@ pub async fn urlscan(
     let mut page_index = 0usize;
     loop {
         page_index += 1;
-        let url = urlscan_search_url(host, include_subdomains, size, after.as_deref());
+        let url = search_url(host, include_subdomains, size, after.as_deref());
         let text = match fetch_text(
-            authenticated(client.get(url), &key),
+            authenticated(client.get(url), key),
             cancel,
             &mut report,
             true,
@@ -504,7 +533,7 @@ pub async fn urlscan(
                 break;
             }
             let uuid = text_at(result, &["/task/uuid", "/_id"]);
-            let full_url = uuid.and_then(result_url);
+            let full_url = uuid.and_then(&scan_url);
             let location = full_url
                 .as_ref()
                 .map(Url::as_str)
@@ -521,15 +550,19 @@ pub async fn urlscan(
                 report.fail("Cancelled");
                 break;
             }
+            let mut checkpoint = Vec::new();
             for item in summary {
                 if cancel.load(Ordering::Relaxed) {
                     report.fail("Cancelled");
                     break;
                 }
-                if !push_discovery(&mut out, &mut seen, item, max_results) {
+                if !push_discovery(&mut out, &mut seen, item.clone(), max_results) {
                     report.truncated = true;
+                } else {
+                    checkpoint.push(item);
                 }
             }
+            on_progress(&checkpoint, report.requests);
             if limit_reached(max_results, out.len()) {
                 report.truncated = true;
                 break;
@@ -545,7 +578,7 @@ pub async fn urlscan(
                 continue;
             }
             let text = match fetch_text(
-                authenticated(client.get(full_url.clone()), &key),
+                authenticated(client.get(full_url.clone()), key),
                 cancel,
                 &mut report,
                 true,
@@ -585,15 +618,19 @@ pub async fn urlscan(
                 report.fail("Cancelled");
                 break;
             }
+            let mut checkpoint = Vec::new();
             for item in found {
                 if cancel.load(Ordering::Relaxed) {
                     report.fail("Cancelled");
                     break;
                 }
-                if !push_discovery(&mut out, &mut seen, item, max_results) {
+                if !push_discovery(&mut out, &mut seen, item.clone(), max_results) {
                     report.truncated = true;
+                } else {
+                    checkpoint.push(item);
                 }
             }
+            on_progress(&checkpoint, report.requests);
             if limit_reached(max_results, out.len()) {
                 report.truncated = true;
                 break;
@@ -745,6 +782,7 @@ pub async fn wayback(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
+    on_progress: impl Fn(&[Discovery], usize) + Send + Sync,
 ) -> (Vec<Discovery>, SourceReport) {
     read_wayback(
         client,
@@ -753,6 +791,7 @@ pub async fn wayback(
         max_pages,
         max_results,
         cancel,
+        on_progress,
         wayback_url,
     )
     .await
@@ -765,6 +804,7 @@ async fn read_wayback(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
+    on_progress: impl Fn(&[Discovery], usize) + Send + Sync,
     page_url: impl Fn(&str, bool, usize, Option<&str>) -> Url,
 ) -> (Vec<Discovery>, SourceReport) {
     let mut out = Vec::new();
@@ -804,7 +844,9 @@ async fn read_wayback(
                 break;
             }
         };
+        let previous = out.len();
         out.extend(found);
+        on_progress(&out[previous..], report.requests);
         if cancel.load(Ordering::Relaxed) {
             report.fail("Cancelled");
             break;
@@ -2102,9 +2144,9 @@ mod tests {
         .await;
         assert!(matches!(result, Err(FetchError::Cancelled)));
         assert_eq!(report.requests, 0);
-        let (_, report) = urlscan(&client, &base(), false, 0, 0, &cancel).await;
+        let (_, report) = urlscan(&client, &base(), false, 0, 0, &cancel, |_, _| {}).await;
         assert_eq!(report.requests, 0);
-        let (_, report) = wayback(&client, &base(), false, 0, 0, &cancel).await;
+        let (_, report) = wayback(&client, &base(), false, 0, 0, &cancel, |_, _| {}).await;
         assert_eq!(report.requests, 0);
     }
 
@@ -2192,6 +2234,7 @@ mod tests {
             max_pages,
             max_results,
             &cancel,
+            |_, _| {},
             |host, subdomains, limit, resume| {
                 let production = wayback_url(host, subdomains, limit, resume);
                 let mut local = Url::parse(&format!("http://{address}/fixture")).unwrap();
@@ -2215,6 +2258,116 @@ mod tests {
             rows.push(json!([cursor]));
         }
         serde_json::to_string(&rows).unwrap()
+    }
+
+    #[tokio::test]
+    async fn completed_provider_batches_are_checkpointed_before_a_stalled_next_request() {
+        use std::sync::{Arc, Mutex};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            sync::oneshot,
+        };
+        for source in ["wayback", "urlscan"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (waiting, next_request) = oneshot::channel();
+            let fixture = tokio::spawn(async move {
+                let bodies = if source == "wayback" {
+                    vec![
+                        cdx_page(&["one".into()], Some("next")),
+                        cdx_page(&["two".into()], Some("last")),
+                    ]
+                } else {
+                    vec![
+                        json!({"results":[{"_id":"11111111-1111-4111-8111-111111111111", "page":{"url":"https://example.com/one"}, "sort":[1]}], "has_more":true}).to_string(),
+                        json!({"page":{"url":"https://example.com/one","status":204},"lists":{"urls":["https://example.com/two"]}}).to_string(),
+                    ]
+                };
+                for body in bodies {
+                    let (mut connection, _) = listener.accept().await.unwrap();
+                    let mut request = [0u8; 4096];
+                    connection.read(&mut request).await.unwrap();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    connection.write_all(response.as_bytes()).await.unwrap();
+                }
+                let (mut connection, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                connection.read(&mut request).await.unwrap();
+                waiting.send(()).unwrap();
+                // Aborting local work must close this request, not discard the
+                // two complete documents that were already delivered.
+                let _ = tokio::time::timeout(Duration::from_secs(5), connection.read(&mut request))
+                    .await
+                    .unwrap();
+            });
+            let checkpoints = Arc::new(Mutex::new(Vec::new()));
+            let retained = checkpoints.clone();
+            let reader = tokio::spawn(async move {
+                let client = Client::builder().no_proxy().build().unwrap();
+                let cancel = AtomicBool::new(false);
+                let progress = move |batch: &[Discovery], requests| {
+                    retained.lock().unwrap().push((
+                        batch
+                            .iter()
+                            .map(|item| (item.url.clone(), item.status))
+                            .collect::<Vec<_>>(),
+                        requests,
+                    ));
+                };
+                if source == "wayback" {
+                    read_wayback(
+                        &client,
+                        &base(),
+                        false,
+                        0,
+                        0,
+                        &cancel,
+                        progress,
+                        |_, _, _, _| Url::parse(&format!("http://{address}/page")).unwrap(),
+                    )
+                    .await
+                } else {
+                    read_urlscan(
+                        &client,
+                        &base(),
+                        false,
+                        0,
+                        0,
+                        &cancel,
+                        progress,
+                        &None,
+                        |_, _, _, _| Url::parse(&format!("http://{address}/search")).unwrap(),
+                        |_| Some(Url::parse(&format!("http://{address}/result")).unwrap()),
+                    )
+                    .await
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), next_request)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!reader.is_finished());
+            let mut second = vec![("https://example.com/two".to_string(), None)];
+            if source == "urlscan" {
+                second.insert(0, ("https://example.com/one".to_string(), Some(204)));
+            }
+            assert_eq!(
+                *checkpoints.lock().unwrap(),
+                vec![
+                    (vec![("https://example.com/one".to_string(), None)], 1),
+                    (second, 2),
+                ],
+                "{source} must publish each completed batch before awaiting another request"
+            );
+            reader.abort();
+            assert!(reader.await.unwrap_err().is_cancelled());
+            assert_eq!(checkpoints.lock().unwrap().len(), 2);
+            fixture.await.unwrap();
+        }
     }
 
     #[tokio::test]

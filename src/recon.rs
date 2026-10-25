@@ -656,31 +656,58 @@ async fn run(
         let report = if source == "crawler" {
             crawl(&session, id, &request, &scope, &crawler, &cancel).await
         } else {
-            let (findings, mut report) = match source.as_str() {
-                "urlscan" => recon_sources::urlscan(&provider, &scope.target, request.include_subdomains,
-                    request.max_pages, request.max_endpoints, &cancel).await,
-                "urlscan_submit" => recon_sources::submit_urlscan(&provider, &scope.target, request.include_subdomains,
-                    request.scan_visibility.as_deref().unwrap_or("private"), request.max_endpoints, &cancel,
-                    |result_url| {
-                        session.recon.update_source(id, source, |s| s.warnings.push(format!("Accepted scan result: {result_url}. Stop cancels local polling only.")));
-                        session.schedule_state_persist();
-                    }).await,
-                _ => recon_sources::wayback(&provider, &scope.target, request.include_subdomains,
-                    request.max_pages, request.max_endpoints, &cancel).await,
+            // A provider can have many completed pages before its final return.
+            // Commit each batch before the next await so Stop cannot discard it.
+            let checkpoint = |findings: &[Discovery], requests| {
+                checkpoint_provider_batch(
+                    &session,
+                    id,
+                    &scope,
+                    source,
+                    findings,
+                    requests,
+                    request.max_endpoints,
+                    &cancel,
+                );
             };
-            let (added, truncated) = session.recon.merge_with_cancel(
-                id,
-                &scope,
-                source,
-                findings,
-                request.max_endpoints,
-                Some(&cancel),
-            );
-            report.truncated |= truncated;
-            session
-                .recon
-                .update_source(id, source, |s| s.discovered += added);
-            report
+            match source.as_str() {
+                "urlscan" => {
+                    recon_sources::urlscan(
+                        &provider,
+                        &scope.target,
+                        request.include_subdomains,
+                        request.max_pages,
+                        request.max_endpoints,
+                        &cancel,
+                        checkpoint,
+                    )
+                    .await
+                    .1
+                }
+                "urlscan_submit" => {
+                    let (findings, report) = recon_sources::submit_urlscan(&provider, &scope.target, request.include_subdomains,
+                        request.scan_visibility.as_deref().unwrap_or("private"), request.max_endpoints, &cancel,
+                        |result_url| {
+                            session.recon.update_source(id, source, |s| s.warnings.push(format!("Accepted scan result: {result_url}. Stop cancels local polling only.")));
+                            session.schedule_state_persist();
+                        }).await;
+                    checkpoint(&findings, report.requests);
+                    report
+                }
+                _ => {
+                    recon_sources::wayback(
+                        &provider,
+                        &scope.target,
+                        request.include_subdomains,
+                        request.max_pages,
+                        request.max_endpoints,
+                        &cancel,
+                        checkpoint,
+                    )
+                    .await
+                    .1
+                }
+            }
         };
         failed |= report.error.is_some();
         session.recon.update_source(id, source, |s| {
@@ -719,6 +746,28 @@ async fn run(
                 Some("One or more sources failed; retained results may be incomplete.".into());
         }
     }
+    session.schedule_state_persist();
+}
+
+fn checkpoint_provider_batch(
+    session: &Arc<SessionContext>,
+    id: Uuid,
+    scope: &ReconScope,
+    source: &str,
+    findings: &[Discovery],
+    requests: usize,
+    limit: usize,
+    cancel: &AtomicBool,
+) {
+    let (added, truncated) =
+        session
+            .recon
+            .merge_with_cancel(id, scope, source, findings.to_vec(), limit, Some(cancel));
+    session.recon.update_source(id, source, |s| {
+        s.requests = requests;
+        s.discovered += added;
+        s.truncated |= truncated;
+    });
     session.schedule_state_persist();
 }
 
@@ -1229,6 +1278,92 @@ mod tests {
         );
         assert_eq!(store.snapshot().jobs[0].status, "cancelled");
         assert!(!store.is_running());
+    }
+
+    #[tokio::test]
+    async fn stopped_provider_checkpoints_keep_counts_evidence_and_restart_state() {
+        let dir = std::env::temp_dir().join(format!("sniper-recon-checkpoint-{}", Uuid::new_v4()));
+        let (registry, session) =
+            crate::session::SessionRegistry::load_or_create(&dir, 32, 32).unwrap();
+        let id = Uuid::new_v4();
+        session.recon.snapshot.lock().unwrap().jobs.push(ReconJob {
+            id,
+            target_url: "https://example.com/".into(),
+            status: "running".into(),
+            started_at: Utc::now(),
+            finished_at: None,
+            error: None,
+            sources: vec![ReconSource {
+                source: "wayback".into(),
+                status: "running".into(),
+                requests: 0,
+                discovered: 0,
+                truncated: false,
+                warnings: vec![],
+            }],
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let worker_session = session.clone();
+        let (checkpointed, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let scope = ReconScope::new("https://example.com/", false).unwrap();
+            let found = |path: &str, page: &str| Discovery {
+                url: format!("https://example.com/{path}"),
+                method: "GET".into(),
+                kind: "history".into(),
+                location: page.into(),
+                timestamp: None,
+                status: Some(404),
+            };
+            checkpoint_provider_batch(
+                &worker_session,
+                id,
+                &scope,
+                "wayback",
+                &[
+                    found("retained", "page one"),
+                    found("over-budget", "page one"),
+                ],
+                1,
+                1,
+                &worker_cancel,
+            );
+            checkpoint_provider_batch(
+                &worker_session,
+                id,
+                &scope,
+                "wayback",
+                &[found("retained", "page two")],
+                2,
+                1,
+                &worker_cancel,
+            );
+            checkpointed.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        *session.recon.running.lock().unwrap() = Some(RunningJob { id, cancel, task });
+        ready.await.unwrap();
+        assert!(session.recon.stop(Some(id)).await);
+        session.persist_state_only().await.unwrap();
+        let restored = registry.load_context(session.id()).unwrap();
+        let snapshot = restored.recon.snapshot();
+        assert_eq!(snapshot.jobs[0].status, "cancelled");
+        assert_eq!(snapshot.jobs[0].sources[0].status, "cancelled");
+        assert_eq!(snapshot.jobs[0].sources[0].requests, 2);
+        assert_eq!(snapshot.jobs[0].sources[0].discovered, 1);
+        assert!(snapshot.jobs[0].sources[0].truncated);
+        assert_eq!(snapshot.endpoints.len(), 1);
+        assert_eq!(snapshot.endpoints[0].url, "https://example.com/retained");
+        assert_eq!(snapshot.endpoints[0].evidence.len(), 2);
+        assert!(snapshot.endpoints[0]
+            .evidence
+            .iter()
+            .all(|item| item.kind == "history"));
+        assert_eq!(
+            restored.recon.site_map_endpoints()[0].kinds,
+            vec!["history"]
+        );
     }
 
     #[tokio::test]
