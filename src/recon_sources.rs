@@ -2007,6 +2007,11 @@ mod tests {
             "<template><iframe></template><base href='/raw-unclosed/'>",
             "/folder",
         );
+        // Protect template boundaries without broadening raw-text extraction.
+        assert_template_base(
+            "<iframe><base href='/existing-raw/'></iframe>",
+            "/existing-raw",
+        );
     }
 
     #[test]
