@@ -3022,6 +3022,9 @@ fn flow_counts_only_rows_represented_after_the_step_cap() {
             records.push(repeat);
         }
         let considered = records.len();
+        // All fixture timestamps tie, so preserve their explicit sequence order.
+        // The store accepts newest-first records and repairs reversed sequences.
+        records.reverse();
         let store = TransactionStore::from_records(records);
         let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
             session,
@@ -3029,6 +3032,8 @@ fn flow_counts_only_rows_represented_after_the_step_cap() {
             technology::CatalogVersion::V2,
             &crate::store::ListFilters::default(),
         );
+        assert_eq!(snapshot.rows[0].sequence, considered.to_string());
+        assert_eq!(snapshot.rows[0].path, format!("/step-{}", MAX_STEPS + 1));
         let flow = crate::service_map_flow::build(
             session,
             snapshot,
@@ -3040,6 +3045,15 @@ fn flow_counts_only_rows_represented_after_the_step_cap() {
         .unwrap();
         let steps: Vec<_> = flow.phases.iter().flat_map(|phase| &phase.steps).collect();
         assert_eq!(steps.len(), MAX_STEPS);
+        assert_eq!(steps[0].path, "/step-2");
+        assert_eq!(
+            steps[MAX_STEPS - 1].path,
+            format!("/step-{}", MAX_STEPS + 1)
+        );
+        assert_eq!(steps[MAX_STEPS - 1].count, 1 + usize::from(!navigation));
+        if !navigation {
+            assert_eq!(steps[MAX_STEPS - 1].record_id, Uuid::from_u128(1000));
+        }
         assert_eq!(flow.considered_rows, considered);
         assert_eq!(
             flow.flow_rows,
