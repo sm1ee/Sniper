@@ -1621,6 +1621,7 @@
     Object.defineProperty(state, "bodyReferenceOverlay", { get: () => state.relationLayers.at(-1) || null });
     let abort = null;
     let flowAbort = null;
+    let flowBinding = null;
     let evidenceAbort = null;
     let bodyReferencesAbort = null;
     let peerMatchesAbort = null;
@@ -1678,6 +1679,7 @@
       abort = null;
       state.loading = false;
       state.backgroundLoading = false;
+      cancelFlow();
     }
     function onVisibilityChange() {
       if (!canRefresh()) suspendRefresh();
@@ -1685,6 +1687,7 @@
         if (historyPresentationPending) render();
         else renderStatus();
         historyPresentationPending = false;
+        resumeFlow();
         scheduleAutomaticRefresh();
       }
     }
@@ -2138,10 +2141,26 @@
       state.modeNotice = "";
       render();
     }
-    function leaveFlow() {
+    function cancelFlow() {
       flowAbort?.abort();
+      flowAbort = null;
+      flowBinding = null;
       state.flowRequestId += 1;
-      Object.assign(state, { flowOrigin: null, flow: null, flowLoading: false, flowError: "" });
+      Object.assign(state, { flow: null, flowLoading: false, flowError: "" });
+    }
+    function leaveFlow() {
+      cancelFlow();
+      state.flowOrigin = null;
+    }
+    function flowIsCurrent() {
+      return canRefresh() && state.view === "service-map" && state.flow && !state.flowLoading && !state.error && flowBinding
+        && state.sessionId === getSessionId() && flowBinding.sessionId === getSessionId()
+        && state.flowOrigin === flowBinding.origin && state.scopeOnly === flowBinding.scopeOnly
+        && JSON.stringify(getFilterQuery()) === flowBinding.filterSignature;
+    }
+    function resumeFlow() {
+      if (canRefresh() && state.view === "service-map" && state.snapshot && state.flowOrigin && !state.flow && !state.flowLoading
+        && !state.loading && !state.stale && !state.error) loadFlow();
     }
     // Flow follows one origin: the selected one, or a lane clicked in a flow.
     function setFlowMode(origin) {
@@ -2153,15 +2172,19 @@
     }
     async function loadFlow() {
       const origin = state.flowOrigin, sessionId = getSessionId();
-      if (!origin) return;
+      if (!origin || !canRefresh() || state.view !== "service-map" || state.sessionId !== sessionId) return;
       flowAbort?.abort();
       flowAbort = new AbortController();
+      flowBinding = null;
       const requestId = ++state.flowRequestId;
-      state.flowLoading = true;
+      const scopeOnly = state.scopeOnly, filterQuery = getFilterQuery(), filterSignature = JSON.stringify(filterQuery);
+      // Same-context polling may keep its diagram in place. Destructive
+      // boundaries clear it through cancelFlow; neither can act until verified.
+      Object.assign(state, { flowError: "", flowLoading: true });
       render();
       // The newest rows the server reads at most: a flow shows what happened
       // lately, and only a row window keeps the rows' order.
-      const params = new URLSearchParams({ ...getFilterQuery(), session_id: sessionId, origin, in_scope_only: String(state.scopeOnly), max_records: "50000" });
+      const params = new URLSearchParams({ ...filterQuery, session_id: sessionId, origin, in_scope_only: String(scopeOnly), max_records: "50000" });
       let flow = null, error = "";
       try {
         const response = await request(`/api/target/service-map/flow?${params}`, { signal: flowAbort.signal });
@@ -2172,7 +2195,13 @@
         if (failure?.name === "AbortError") return;
         error = "The flow could not be read.";
       }
-      if (destroyed || requestId !== state.flowRequestId || state.flowOrigin !== origin || sessionId !== getSessionId()) return;
+      if (!canRefresh() || state.view !== "service-map" || requestId !== state.flowRequestId || state.flowOrigin !== origin || sessionId !== getSessionId()
+        || scopeOnly !== state.scopeOnly || filterSignature !== JSON.stringify(getFilterQuery())) {
+        if (requestId === state.flowRequestId) { cancelFlow(); render(); }
+        return;
+      }
+      flowAbort = null;
+      flowBinding = flow ? { sessionId, origin, scopeOnly, filterSignature } : null;
       Object.assign(state, { flow, flowError: error, flowLoading: false });
       render();
     }
@@ -2186,6 +2215,7 @@
       if (els.directRelations) els.directRelations.disabled = !state.snapshot || !state.anchorOrigin && !selected;
       if (els.flow) els.flow.disabled = !state.snapshot || !flow && !selected;
       els.flowMermaid?.classList.toggle("hidden", !flow || !state.flow);
+      if (els.flowMermaid) els.flowMermaid.disabled = !flowIsCurrent();
       els.linkKinds?.parentElement?.classList.toggle("flow-active", flow);
     }
     function renderFlow() {
@@ -2664,6 +2694,7 @@
       // not erase an explicit inspection or continually abort its pending read.
       if (force) {
         replayActionId += 1;
+        cancelFlow();
         cancelParameters();
         clearOverlay("Temporary body references cleared by Reload. Inspect and show references again when ready.");
         closeApiDocs();
@@ -2710,6 +2741,7 @@
           && filterSignature === state.filterSignature
           && state.kindSignature === JSON.stringify(hiddenLinkKinds())
           && state.siteDisplaySignature === JSON.stringify(siteDisplay())
+          && !(state.flowOrigin && !state.flow)
           && !(state.endpointSelection && state.parametersKey === null)
           && JSON.stringify(snapshot) === JSON.stringify(state.snapshot)) {
           // Reusing serialized cache bytes must not rebuild the graph or disturb
@@ -2791,6 +2823,7 @@
         state.loading = false;
         cancelPeerMatches();
         if (failure?.status === 409) {
+          cancelFlow();
           cancelEvidence();
           closeApiDocs();
           cancelParameters();
@@ -3843,7 +3876,12 @@
       replayActionId += 1;
       const flowHit = event.target.closest?.("[data-service-flow-record], [data-service-flow-lane]");
       const flowRecord = flowHit?.dataset?.serviceFlowRecord, flowLane = flowHit?.dataset?.serviceFlowLane;
-      if ((flowRecord || flowLane) && els.panel.contains(flowHit)) return flowRecord ? openInHistory?.(flowRecord) : setFlowMode(flowLane);
+      if ((flowRecord || flowLane) && els.panel.contains(flowHit)) {
+        if (!flowIsCurrent()) return;
+        if (flowRecord && state.flow.phases.some((phase) => phase.steps.some((step) => step.recordId === flowRecord))) return openInHistory?.(flowRecord);
+        if (flowLane && state.flow.lanes.includes(flowLane)) return setFlowMode(flowLane);
+        return;
+      }
       const hit = event.target.closest?.("[data-service-edge]");
       if (hit?.dataset?.serviceEdge !== undefined && els.panel.contains(hit)) return selectEdge(currentLayout?.edges[Number(hit.dataset.serviceEdge)]);
       const button = event.target.closest("button");
@@ -4027,11 +4065,12 @@
     listen(els.directRelations, "click", () => setMapMode(!state.anchorOrigin));
     listen(els.flow, "click", () => setFlowMode(state.selectedOrigin));
     listen(els.flowMermaid, "click", () => {
-      if (state.flow) copyText?.(flowMermaid(state.flow, hiddenLinkKinds()), "Copied the flow as a Mermaid sequence diagram");
+      if (flowIsCurrent()) copyText?.(flowMermaid(state.flow, hiddenLinkKinds()), "Copied the flow as a Mermaid sequence diagram");
     });
     listen(els.focusSelection, "click", focusSelection);
     listen(els.search, "input", () => { replayActionId += 1; state.query = els.search.value; state.page = 0; state.pageAnchor = null; render(); });
     listen(els.scope, "click", () => {
+      cancelFlow();
       state.scopeOnly = !state.scopeOnly;
       els.scope.classList.toggle("active", state.scopeOnly);
       els.scope.setAttribute("aria-pressed", String(state.scopeOnly));
@@ -4051,6 +4090,7 @@
       // The Service Map filter changes which rows count, as the scope filter
       // does, so it drops inspections the same way; the read re-ranks the cards.
       filterChanged() {
+        cancelFlow();
         state.refreshPaused = false;
         clearOverlay("Temporary body references cleared because the Service Map filter changed.");
         state.requestId += 1;
@@ -4110,6 +4150,7 @@
         if (state.sessionId !== getSessionId()) reset();
         render();
         historyPresentationPending = false;
+        resumeFlow();
         scheduleAutomaticRefresh();
       },
       destroy() {
@@ -4133,6 +4174,7 @@
       setViewChange(callback) { onViewChange = callback; },
       disconnect() {
         replayActionId += 1;
+        cancelFlow();
         clearOverlay("Temporary body references cleared because the session event connection was lost.");
         state.requestId += 1;
         state.historyVersion += 1;
@@ -4154,15 +4196,18 @@
         replayActionId += 1;
         state.historyVersion += 1;
         state.stale = true;
+        const flowChanged = !!state.flow || state.flowLoading;
+        cancelFlow();
         const graphChanged = clearOverlay("Shown inspections cleared because automatic cleanup removed retained history.");
         closeApiDocs();
         cancelEvidence();
         cancelParameters();
-        renderHistoryChange(graphChanged);
+        renderHistoryChange(graphChanged || flowChanged);
         scheduleAutomaticRefresh();
       },
       invalidate() {
         replayActionId += 1;
+        cancelFlow();
         clearOverlay("Temporary body references cleared because history or scope was invalidated.");
         state.requestId += 1;
         state.historyVersion += 1;
