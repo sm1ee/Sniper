@@ -492,6 +492,71 @@ mod tests {
         encoder.finish().unwrap()
     }
 
+    #[test]
+    fn gzip_members_body_rule_matches_later_member_in_both_directions() {
+        let compressed = [gzip(b"alpha=one;"), gzip(b"beta=two;")].concat();
+        let rule = MatchReplaceRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            description: "later gzip member".to_string(),
+            scope: MatchReplaceScope::Response,
+            target: MatchReplaceTarget::Body,
+            search: "two".to_string(),
+            replace: "changed".to_string(),
+            regex: false,
+            case_sensitive: true,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "gzip".parse().unwrap());
+        headers.insert(
+            "content-length",
+            compressed.len().to_string().parse().unwrap(),
+        );
+        let request = EditableRequest {
+            scheme: "http".to_string(),
+            host: "example.com".to_string(),
+            method: "POST".to_string(),
+            path: "/fixture".to_string(),
+            headers: vec![
+                HeaderRecord {
+                    name: "content-encoding".to_string(),
+                    value: "gzip".to_string(),
+                },
+                HeaderRecord {
+                    name: "content-length".to_string(),
+                    value: compressed.len().to_string(),
+                },
+            ],
+            body: STANDARD.encode(&compressed),
+            body_encoding: BodyEncoding::Base64,
+            preview_truncated: false,
+        };
+        let response = apply_response_rules(headers, Bytes::from(compressed), vec![rule.clone()]);
+        assert_eq!(response.body.as_ref(), b"alpha=one;beta=changed;");
+        assert!(!response.headers.contains_key("content-encoding"));
+        assert_eq!(response.headers["content-length"], "23");
+        let request = apply_request_rules(
+            request,
+            vec![MatchReplaceRule {
+                scope: MatchReplaceScope::Request,
+                ..rule
+            }],
+        );
+        assert_eq!(request.request.body_bytes(), b"alpha=one;beta=changed;");
+        assert!(!request
+            .request
+            .headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("content-encoding")));
+        assert!(request
+            .request
+            .headers
+            .iter()
+            .any(
+                |header| header.name.eq_ignore_ascii_case("content-length") && header.value == "23"
+            ));
+    }
+
     fn zlib_deflate(body: &[u8]) -> Vec<u8> {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(body).unwrap();
