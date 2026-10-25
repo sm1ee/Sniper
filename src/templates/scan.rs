@@ -3649,6 +3649,234 @@ mod tests {
         assert_eq!(saved.jobs[0].blocked, 1);
     }
 
+    async fn paced_auto_host_update(
+        scope: &[&str],
+        hosts: &[&str],
+        excluded: bool,
+        expected_sent: usize,
+    ) {
+        let (address, log, server) = site(1, false).await;
+        let state = scan_state("paced-host-list", scope).await;
+        let session = state.session().await;
+        {
+            let mut snapshot = session.template_scans.snapshot.lock().unwrap();
+            snapshot.auto.enabled = true;
+            snapshot.auto.hosts = vec!["127.0.0.1".into()];
+        }
+        let (metas, _) = state
+            .templates
+            .active_selection(&["example-config".into()], None);
+        let template = Arc::new(state.templates.compile_active(&metas[0]).unwrap());
+        let target = parse_target(&format!("http://{address}")).unwrap();
+        let job = Uuid::new_v4();
+        session
+            .template_scans
+            .snapshot
+            .lock()
+            .unwrap()
+            .jobs
+            .push(ScanJob {
+                id: job,
+                status: "running".into(),
+                ..ScanJob::default()
+            });
+        let run = Arc::new(Run {
+            state: Arc::clone(&state),
+            session: Arc::clone(&session),
+            job,
+            library: String::new(),
+            oast: None,
+            templates: vec![template],
+            targets: vec![target],
+            extra_hosts: Some(vec!["127.0.0.1".into()]),
+            keep_all: true,
+            client: crate::proxy::build_template_scan_client(false, &Default::default()).unwrap(),
+            apply_match_replace: false,
+            max_requests: 10,
+            concurrency: 1,
+            gap: Duration::from_millis(1),
+            next_slot: tokio::sync::Mutex::new(Instant::now()),
+            sent: AtomicUsize::new(0),
+            limit_reached: AtomicBool::new(false),
+            failures: vec![AtomicUsize::new(0)],
+            skipped: vec![AtomicBool::new(false)],
+        });
+        // Hold the rate limiter until the request has passed its first
+        // scope check and reserved a budget slot. No wall-clock race.
+        let slot = run.next_slot.lock().await;
+        let (_cancel, cancelled) = watch::channel(false);
+        let worker = Arc::clone(&run);
+        let task = tokio::spawn(async move { worker.template_on_target(0, 0, cancelled).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while run.sent.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the request did not reach its rate slot");
+        turn_auto(
+            &state,
+            serde_json::json!({"enabled": true, "acknowledged": true, "hosts": hosts}),
+        )
+        .await;
+        if excluded {
+            session
+                .runtime
+                .update(crate::runtime::RuntimeSettingsUpdate {
+                    excluded_scope_patterns: Some(vec!["127.0.0.1".into()]),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        drop(slot);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("the removed host request did not finish")
+            .unwrap();
+        server.abort();
+        assert_eq!(
+            log.lock().unwrap().len(),
+            expected_sent,
+            "auto scan must use the current host list and Scope before sending"
+        );
+        assert_eq!(session.store.len().await, expected_sent);
+        let saved = session.template_scans.snapshot();
+        assert_eq!(saved.jobs[0].sent, expected_sent);
+        assert_eq!(saved.jobs[0].blocked, usize::from(expected_sent == 0));
+    }
+
+    #[tokio::test]
+    async fn an_auto_scan_rechecks_its_current_host_list_before_sending() {
+        paced_auto_host_update(&[], &[], false, 0).await;
+    }
+
+    #[tokio::test]
+    async fn an_auto_scan_keeps_a_removed_host_when_scope_still_allows_it() {
+        paced_auto_host_update(&["127.0.0.1"], &[], false, 1).await;
+    }
+
+    #[tokio::test]
+    async fn an_auto_scan_scope_exclusion_overrides_both_current_host_lists() {
+        paced_auto_host_update(&["127.0.0.1"], &["127.0.0.1"], true, 0).await;
+    }
+
+    #[tokio::test]
+    async fn no_match_scan_progress_is_checkpointed_before_the_next_request_finishes() {
+        let (first, first_gate) = watch::channel(false);
+        let (second, second_gate) = watch::channel(false);
+        let (second_seen, mut at_second) = watch::channel(false);
+        let router = Router::new().fallback(any(move |uri: Uri| {
+            let mut gate = if uri.path() == "/first" {
+                first_gate.clone()
+            } else {
+                let _ = second_seen.send(true);
+                second_gate.clone()
+            };
+            async move {
+                let _ = gate.wait_for(|ready| *ready).await;
+                "clean response"
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let templates = [("progress", "id: example-progress\ninfo: {}\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/first', '{{BaseURL}}/second']\n    matchers:\n      - type: word\n        words: ['never-present']\n")];
+        let state = scan_state_with("no-match-checkpoint", &[], &templates).await;
+        let session = state.session().await;
+        let started = start(
+            State(Arc::clone(&state)),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [format!("http://{address}")],
+                    "ids": ["example-progress"], "history": "matched",
+                    "acknowledged": true, "rate": 50, "concurrency": 1,
+                }),
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        let file = session.storage_dir().join("state.json");
+        let read = || -> Option<TemplateScanSnapshot> {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).ok()?).ok()?;
+            serde_json::from_value(value.get("template_scans")?.clone()).ok()
+        };
+        // Let the initial debounced checkpoint finish while the first
+        // request is held, so it cannot incidentally save later progress.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if read().is_some_and(|saved| {
+                    saved
+                        .jobs
+                        .iter()
+                        .any(|job| job.id == id && job.status == "running" && job.sent == 0)
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the initial job checkpoint was not written");
+        first.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), at_second.wait_for(|seen| *seen))
+            .await
+            .expect("the second local request did not arrive")
+            .unwrap();
+        let live = session
+            .template_scans
+            .snapshot()
+            .jobs
+            .into_iter()
+            .find(|job| job.id == id)
+            .unwrap();
+        assert_eq!(live.status, "running");
+        assert_eq!((live.sent, live.matched, live.recent.len()), (1, 0, 1));
+        assert_eq!(
+            session.store.len().await,
+            0,
+            "matched-only history must not incidentally persist the job"
+        );
+        let saved = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(snapshot) = read() {
+                    if snapshot
+                        .jobs
+                        .iter()
+                        .any(|job| job.id == id && job.sent == 1 && job.recent.len() == 1)
+                    {
+                        break snapshot;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        // Capture the checkpoint before Stop schedules its final save.
+        assert!(session.template_scans.stop(Some(id)).await);
+        drop(second);
+        server.abort();
+        let saved = saved.expect(
+            "completed no-match progress was not checkpointed while the next request was blocked",
+        );
+        let restored = TemplateScanStore::from_snapshot(saved).snapshot();
+        let interrupted = restored.jobs.iter().find(|job| job.id == id).unwrap();
+        assert_eq!(interrupted.status, "interrupted");
+        assert_eq!(
+            (
+                interrupted.sent,
+                interrupted.matched,
+                interrupted.recent.len()
+            ),
+            (1, 0, 1)
+        );
+        assert!(interrupted.recent[0].url.ends_with("/first"));
+    }
+
     #[tokio::test]
     async fn stop_ends_a_scan_without_waiting_for_its_requests() {
         let (address, log, server) = site(1, true).await;
