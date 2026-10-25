@@ -1226,7 +1226,7 @@
   // The Flow view: the selected origin's requests and those of the origins it
   // links to, in time order, a band per page load, the client on the left.
   const FLOW = Object.freeze({ gutter: 64, clientX: 136, laneWidth: 220, laneBox: 180, top: 12, header: 46, kicker: 30, step: 42, padding: 20 });
-  const FLOW_STOPS = Object.freeze({ lanes_limit: "more origins link here; the five with the most rows are shown", steps_limit: "older steps left out" });
+  const FLOW_STOPS = Object.freeze({ max_records: "older rows left out", metadata_bytes: "metadata read limit reached", lanes_limit: "more origins link here; the five with the most rows are shown", steps_limit: "older steps left out" });
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const hostOf = (origin) => { try { return new URL(origin).host; } catch { return String(origin); } };
   const flowStepLabel = (step) => `${step.method} ${step.path}${step.count > 1 ? ` ×${step.count}` : ""}${step.status == null ? "" : ` ${step.status}`}`;
@@ -1361,8 +1361,17 @@
     const hidden = new Set(hiddenKinds);
     const ids = new Map(flow.lanes.map((origin, index) => [origin, `O${index}`]));
     const text = (value) => String(value).replace(/[;#\r\n]/g, " ");
-    const lines = ["sequenceDiagram", "  participant C as Client", ...flow.lanes.map((origin) => `  participant ${ids.get(origin)} as ${text(hostOf(origin))}`)];
+    const shown = flow.phases.flatMap((phase) => phase.steps).filter((step) => !hidden.has(step.kind));
+    // A copied diagram must not turn a bounded or filtered view into apparent
+    // full coverage. Keep exact bounds in the source, and truncation visible.
+    const provenance = { origin: flow.origin, considered_rows: flow.consideredRows, flow_rows: flow.flowRows, complete: flow.complete,
+      stopped_by: flow.stoppedBy, hidden_request_kinds: [...hidden], shown_steps: shown.length, shown_rows: shown.reduce((sum, step) => sum + step.count, 0) };
+    const lines = ["sequenceDiagram", `  %% Sniper Flow: ${JSON.stringify(provenance)}`, "  participant C as Client", ...flow.lanes.map((origin) => `  participant ${ids.get(origin)} as ${text(hostOf(origin))}`)];
     const last = ids.get(flow.lanes.at(-1));
+    if (!flow.complete || flow.stoppedBy.length) {
+      const reasons = flow.stoppedBy.map((reason) => FLOW_STOPS[reason] || reason).join(" · ");
+      lines.push(`  Note over C,${last}: ${text(`Partial flow${reasons ? `: ${reasons}` : ""}`)}`);
+    }
     for (const phase of flow.phases) {
       const steps = phase.steps.filter((step) => !hidden.has(step.kind));
       if (!steps.length) continue;

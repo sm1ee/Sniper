@@ -149,7 +149,8 @@ count. The request kinds toggled under **Requests** and the Service Map filter
 apply. Click an arrow to open its newest row in HTTP history, or another lane to
 follow that origin. The lane headers stay at the top while the flow scrolls.
 **Copy Mermaid**, at the end of the legend, copies the flow as a Mermaid
-sequence diagram.
+sequence diagram. Its source keeps the row counts, stop reasons and hidden
+request kinds; a truncated flow also carries a visible **Partial flow** note.
 
 The view reads the newest 50,000 rows; the CLI reads 10,000 unless told
 otherwise:
