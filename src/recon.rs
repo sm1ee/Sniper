@@ -999,12 +999,24 @@ where
 async fn read_body(mut response: reqwest::Response) -> Result<String, &'static str> {
     let bodyless_status = matches!(response.status().as_u16(), 204 | 205);
     let codings = recon_content_codings(response.headers());
+    if !bodyless_status {
+        if let Err(error) = &codings {
+            return Err(error.warning());
+        }
+    }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|_| "Response body could not be read.")?
     {
+        if !chunk.is_empty() {
+            // A nonempty 204/205 no longer qualifies for the empty-body
+            // exemption. Reject a known coding error before another wait.
+            if let Err(error) = &codings {
+                return Err(error.warning());
+            }
+        }
         bytes.extend_from_slice(&chunk);
     }
     if bodyless_status && bytes.is_empty() {
