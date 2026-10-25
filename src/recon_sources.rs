@@ -1111,6 +1111,31 @@ struct Tag {
     closing: bool,
     attrs: HashMap<String, String>,
     body: Option<(usize, usize)>,
+    html_context: bool,
+}
+
+fn html_url_attribute_label(tag: &Tag, attribute: &str) -> Option<&'static str> {
+    if !tag.html_context {
+        return None;
+    }
+    match (attribute, tag.name.as_str()) {
+        ("href", "a" | "area" | "link") => Some("link"),
+        ("src", "script") => Some("script"),
+        ("src", "audio" | "embed" | "iframe" | "img" | "track" | "video")
+        | ("poster", "video")
+        | ("data", "object") => Some("resource"),
+        ("src", "input")
+            if tag
+                .attrs
+                .get("type")
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("image")) =>
+        {
+            Some("resource")
+        }
+        // source[src] depends on a media parent, which this tokenizer does not
+        // resolve. Keep it and other unknown combinations as passive evidence.
+        _ => None,
+    }
 }
 
 fn can_inherit_form_action(tag: &Tag) -> bool {
@@ -1157,6 +1182,29 @@ fn attributes(source: &str, cancel: Option<&AtomicBool>) -> HashMap<String, Stri
     attrs
 }
 
+fn self_closing_foreign_root(source: &str, cancel: Option<&AtomicBool>) -> bool {
+    if !source.ends_with('/') || is_cancelled(cancel) {
+        return false;
+    }
+    // The slash must immediately precede '>' and be outside an unquoted
+    // attribute value. HTML attribute spacing is ASCII, not Unicode whitespace.
+    static ATTR: OnceLock<Regex> = OnceLock::new();
+    let regex = ATTR.get_or_init(|| {
+        Regex::new(r#"(?s)([^\t\n\x0c\r =/>]+)(?:[\t\n\x0c\r ]*=[\t\n\x0c\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\x0c\r >]+)))?"#)
+            .expect("foreign root attribute pattern")
+    });
+    for capture in regex.captures_iter(source) {
+        if is_cancelled(cancel)
+            || capture
+                .get(4)
+                .is_some_and(|value| value.end() == source.len())
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// A literal tokenizer, not a browser DOM parser. It skips comments
 /// and raw-text elements so fake tags inside scripts cannot become crawl links.
 fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
@@ -1164,6 +1212,7 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
     let lower_body = body.to_ascii_lowercase();
     let mut tags = Vec::new();
     let mut cursor = 0;
+    let mut foreign_roots = Vec::new();
     while cursor < bytes.len() {
         if is_cancelled(cancel) {
             break;
@@ -1218,11 +1267,28 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
             break;
         }
         cursor = index + 1;
+        let foreign_root = match name.as_str() {
+            "svg" => Some("svg"),
+            "math" => Some("math"),
+            _ => None,
+        };
+        let html_context =
+            foreign_roots.is_empty() && foreign_root.is_none() && !name.contains(':');
+        if let Some(root) = foreign_root {
+            if closing {
+                if foreign_roots.last() == Some(&root) {
+                    foreign_roots.pop();
+                }
+            } else if !self_closing_foreign_root(&body[attr_start..index], cancel) {
+                foreign_roots.push(root);
+            }
+        }
         let mut tag = Tag {
             name,
             closing,
             attrs: attributes(&body[attr_start..index], cancel),
             body: None,
+            html_context,
         };
         if !closing && matches!(tag.name.as_str(), "script" | "style" | "textarea" | "title") {
             let end_prefix = format!("</{}", tag.name);
@@ -1453,7 +1519,7 @@ fn extract_document_inner(
     let tags = html_tags(body, cancel);
     let document_base = tags
         .iter()
-        .filter(|tag| !tag.closing && tag.name == "base")
+        .filter(|tag| tag.html_context && !tag.closing && tag.name == "base")
         .find_map(|tag| tag.attrs.get("href"))
         .and_then(|href| resolve(base, href))
         .and_then(|href| Url::parse(&href).ok())
@@ -1496,7 +1562,7 @@ fn extract_document_inner(
             }
             continue;
         }
-        if tag.name == "base" {
+        if tag.html_context && tag.name == "base" {
             continue;
         }
         if tag.name == "form" {
@@ -1534,19 +1600,17 @@ fn extract_document_inner(
             }
             if let Some(literal) = tag.attrs.get(attr) {
                 if let Some(url) = resolve(&document_base, literal) {
-                    let label = if tag.name == "script" {
-                        "script"
-                    } else if attr == "href" {
-                        "link"
-                    } else {
-                        "resource"
+                    let item = match html_url_attribute_label(&tag, attr) {
+                        Some(label) => static_discovery(url, "GET".into(), "observed", label, base),
+                        None => static_discovery(
+                            url,
+                            "GET".into(),
+                            "candidate",
+                            &format!("attribute {}[{attr}]", tag.name),
+                            base,
+                        ),
                     };
-                    truncated |= !push_discovery(
-                        &mut out,
-                        &mut seen,
-                        static_discovery(url, "GET".into(), "observed", label, base),
-                        0,
-                    );
+                    truncated |= !push_discovery(&mut out, &mut seen, item, 0);
                 }
             }
         }
@@ -1863,6 +1927,161 @@ mod tests {
         assert!(!found
             .iter()
             .any(|d| d.url.contains("fake-link") && is_followable(d)));
+    }
+
+    #[test]
+    fn html_url_attributes_follow_only_recognized_static_combinations() {
+        // https://html.spec.whatwg.org/multipage/indices.html#attributes-3
+        for (tag, attribute, extra, observed) in [
+            ("a", "href", "", true),
+            ("area", "href", "", true),
+            ("link", "href", "rel='stylesheet'", true),
+            ("audio", "src", "", true),
+            ("embed", "src", "", true),
+            ("iframe", "src", "", true),
+            ("img", "src", "", true),
+            ("script", "src", "", true),
+            ("track", "src", "", true),
+            ("video", "src", "", true),
+            ("video", "poster", "", true),
+            ("object", "data", "", true),
+            ("input", "src", "type='ImAgE'", true),
+            ("div", "href", "", false),
+            ("div", "src", "", false),
+            ("div", "poster", "", false),
+            ("span", "src", "", false),
+            ("custom-widget", "src", "", false),
+            ("img", "href", "", false),
+            ("a", "src", "", false),
+            ("script", "href", "", false),
+            ("img", "poster", "", false),
+            ("style", "src", "", false),
+            ("source", "src", "", false),
+            ("input", "src", "", false),
+            ("input", "src", "type='text'", false),
+            ("svg:image", "href", "", false),
+        ] {
+            let body = format!("<{tag} {attribute}='/kept?x=1&amp;x=2' {extra}></{tag}>");
+            let (found, clipped) = extract_document(&base(), "text/html", &body);
+            assert!(!clipped, "{body}");
+            assert_eq!(found.len(), 1, "{body}");
+            assert_eq!(found[0].url, "https://example.com/kept?x=1&x=2", "{body}");
+            assert_eq!(
+                found[0].kind,
+                if observed { "observed" } else { "candidate" },
+                "{body}"
+            );
+            assert_eq!(is_followable(&found[0]), observed, "{body}");
+            if !observed {
+                assert!(
+                    found[0]
+                        .location
+                        .starts_with(&format!("attribute {tag}[{attribute}]:")),
+                    "{body}"
+                );
+            }
+        }
+        assert!(
+            extract_document(&base(), "text/html", "<div data='/not-a-resource'>")
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn html_attribute_candidates_keep_provenance_when_a_real_link_shares_the_url() {
+        for body in [
+            "<div src='/same'></div><img src='/same'>",
+            "<img src='/same'><div src='/same'></div>",
+        ] {
+            let (found, clipped) = extract_document(&base(), "text/html", body);
+            assert!(!clipped);
+            assert_eq!(found.len(), 2);
+            assert_eq!(
+                found.iter().filter(|item| item.kind == "candidate").count(),
+                1
+            );
+            assert_eq!(found.iter().filter(|item| is_followable(item)).count(), 1);
+            assert!(found
+                .iter()
+                .all(|item| item.url == "https://example.com/same"));
+        }
+    }
+
+    #[test]
+    fn foreign_literal_subtrees_keep_candidates_without_changing_later_html_context() {
+        let body = r#"
+            <svg data-fixture='/'>
+                <base href='/foreign-base/'/>
+                <image href='/svg-image'/><a href='/svg-link'></a>
+                <foreignObject><img src='/foreign-html'></foreignObject>
+                <math><script src='/nested-script'></script></math>
+            </svg>
+            <base href='/html-base/'>
+            <img src='normal-image'>
+            <svg/><img src='/after-svg'>
+            <math/><script src='/after-math'></script>
+            <video><source src='/media-source'></video>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        for path in [
+            "/foreign-base/",
+            "/svg-image",
+            "/svg-link",
+            "/foreign-html",
+            "/nested-script",
+            "/media-source",
+        ] {
+            let item = found
+                .iter()
+                .find(|item| item.url == format!("https://example.com{path}"))
+                .unwrap();
+            assert_eq!(item.kind, "candidate", "{path}");
+            assert!(!is_followable(item), "{path}");
+        }
+        for path in ["/html-base/normal-image", "/after-svg", "/after-math"] {
+            let item = found
+                .iter()
+                .find(|item| item.url == format!("https://example.com{path}"))
+                .unwrap();
+            assert_eq!(item.kind, "observed", "{path}");
+            assert!(is_followable(item), "{path}");
+        }
+        assert_eq!(found.len(), 9);
+    }
+
+    #[test]
+    fn foreign_root_self_close_requires_a_delimiter_outside_attribute_values() {
+        for opening in [
+            "<svg data-x=/>",
+            "<svg data-x= />",
+            "<svg data-x=abc/>",
+            "<svg/ >",
+            "<svg data-x='v'/ >",
+            "<svg data-x=a\u{a0}/>",
+        ] {
+            let body = format!("{opening}<a href='/foreign'></a></svg><img src='/after'>");
+            let (found, clipped) = extract_document(&base(), "text/html", &body);
+            assert!(!clipped, "{opening}");
+            assert_eq!(found.len(), 2, "{opening}");
+            assert_eq!(found[0].kind, "candidate", "{opening}");
+            assert!(!is_followable(&found[0]), "{opening}");
+            assert!(is_followable(&found[1]), "{opening}");
+        }
+        for opening in [
+            "<svg/>",
+            "<svg />",
+            "<svg data-x='v'/>",
+            "<svg data-x=\"é\"/>",
+            "<svg data-x=a />",
+        ] {
+            let body = format!("{opening}<img src='/after'>");
+            let (found, clipped) = extract_document(&base(), "text/html", &body);
+            assert!(!clipped, "{opening}");
+            assert_eq!(found.len(), 1, "{opening}");
+            assert!(is_followable(&found[0]), "{opening}");
+        }
     }
 
     #[test]

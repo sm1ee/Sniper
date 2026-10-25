@@ -23,7 +23,7 @@ Entries are deduplicated by normalized URL plus method. The query string is kept
 - live: the crawler received an HTTP response, including an error response
 - observed: a literal reference in a page, or a result of a urlscan scan you submitted; the URL may not be available now
 - history: a past urlscan or Wayback observation
-- candidate: a JavaScript URL literal, a form action and its fields, or a robots rule; never visited automatically
+- candidate: a JavaScript URL literal, form action and fields, robots rule, or unrecognized URL attribute; never visited automatically
 
 Select an endpoint and use **Copy URL** to copy its normalized URL, preserving query order and encoding. Copying does not visit the URL or create a captured request.
 
@@ -46,6 +46,10 @@ Without budgets nothing caps a job, so a broad or growing target can use a lot o
 - Crawler: HTML links, resources and base URLs; GET and POST form actions and field names; URL literals in inline and external JavaScript; robots hints; and sitemap indexes and URLs. It does not render pages, log in, look for source maps, evaluate JavaScript, expand wildcards or infer dynamic routes.
 
 Within the parsed enclosing form/action context, form candidates apply [HTML submission-method defaults](https://html.spec.whatwg.org/dev/form-control-infrastructure.html#form-submission-attributes): invalid methods use GET, omitted overrides inherit the form's method, and dialog submissions do not create HTTP endpoints. Explicit `form=id` ownership and runtime DOM changes are not resolved. These rules do not alter methods in observed provider traffic.
+
+HTML URL attributes use conservative [static element/attribute recognition](https://html.spec.whatwg.org/multipage/indices.html#attributes-3): `href` on `a`, `area`, or `link`; `src` on `audio`, `embed`, `iframe`, `img`, `script`, `track`, or `video`, and image-type `input`; `video[poster]`; and `object[data]`. Parsed HTML `base[href]` sets relative-URL resolution and is not itself fetched.
+
+Other extracted URL attributes remain candidates with their tag and attribute provenance, including custom/prefixed elements, unresolved `source[src]` media-parent context, and literal SVG/MathML subtrees (including `foreignObject` children). A candidate and a recognized link to the same URL retain separate evidence. Custom-component runtime, namespace integration points, template/inert DOM contexts and malformed-markup recovery are not interpreted: this is source extraction, not browser execution or full HTML conformance.
 
 ## Scope site map
 
@@ -165,6 +169,7 @@ node --check web/recon.js
 node --test tests/recon_ui.test.cjs
 python3 tests/recon_discovery_smoke.py target/release
 python3 tests/recon_partial_state_smoke.py target/release
+python3 tests/recon_html_attributes_smoke.py target/release
 python3 tests/recon_cli_smoke.py target/release
 ```
 
