@@ -7,12 +7,15 @@
   const ACTIVE_STATUSES = new Set(["running", "queued", "stopping"]);
 
   function parseTarget(value) {
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) throw new Error("Remove control characters from the target URL.");
     let target;
     try { target = new URL(value.trim()); } catch (_) { throw new Error("Enter a complete HTTP or HTTPS target URL."); }
     if (!["http:", "https:"].includes(target.protocol) || !target.hostname) {
       throw new Error("Only HTTP and HTTPS targets are supported.");
     }
     if (target.username || target.password) throw new Error("Remove credentials from the target URL.");
+    if (target.hostname.includes("*")) throw new Error("Target hostname cannot contain wildcard characters.");
+    if (target.port === "0") throw new Error("Use a target port between 1 and 65535.");
     target.hash = "";
     return target;
   }
@@ -28,6 +31,9 @@
   function buildJobRequest(values, sessionId) {
     if (!sessionId) throw new Error("Wait for the session to finish loading.");
     const target = parseTarget(values.target);
+    if (values.includeSubdomains && (target.hostname.startsWith("[") || /^\d+(?:\.\d+){3}$/.test(target.hostname))) {
+      throw new Error("Subdomain scope is only available for DNS names.");
+    }
     const sources = ["crawler", "urlscan", "wayback", "urlscan_submit"].filter((source) => !!values[source]);
     if (!sources.length) throw new Error("Select at least one discovery source.");
     const history = sources.some((source) => source === "urlscan" || source === "wayback");
@@ -35,7 +41,8 @@
       throw new Error("Allow domain sharing with the selected history services before starting.");
     }
     const submission = sources.includes("urlscan_submit");
-    if (submission && (target.search || new URL(values.target.trim()).hash)) throw new Error("Remove query strings and fragments before sharing a new scan URL with urlscan.io.");
+    // URL.search/hash are empty for bare delimiters; the server rejects those too.
+    if (submission && /[?#]/.test(new URL(values.target.trim()).href)) throw new Error("Remove query strings and fragments before sharing a new scan URL with urlscan.io.");
     if (submission && !values.scanAcknowledged) throw new Error("Allow the new urlscan.io scan and its visibility before starting.");
     if (submission && !["private", "unlisted", "public"].includes(values.scanVisibility)) throw new Error("Choose a valid urlscan.io scan visibility.");
     return {

@@ -36,6 +36,22 @@ test("targets require an explicit HTTP(S) URL and reject embedded credentials", 
   assert.equal(recon.parseTarget("http://example.com:8080/a?b=2").href, "http://example.com:8080/a?b=2");
 });
 
+test("target validation matches the server before URL normalization can change the input", () => {
+  for (const target of ["https://*.example.com/", "https://%2A.example.com/", "https://example.com:0/",
+    "https://exam\nple.com/", "https://example.com/\tpath", "https://example.com/?value=\u0085"]) {
+    assert.throws(() => recon.parseTarget(target), undefined, target);
+  }
+  assert.equal(recon.parseTarget(" https://example.com/path ").href, "https://example.com/path");
+});
+
+test("subdomain discovery requires a DNS hostname rather than an IP literal", () => {
+  for (const target of ["https://127.0.0.1/", "http://2130706433/", "http://[::1]/"]) {
+    assert.throws(() => recon.buildJobRequest(values({ target, includeSubdomains: true }), "session-a"), /DNS/);
+    assert.doesNotThrow(() => recon.buildJobRequest(values({ target, includeSubdomains: false }), "session-a"));
+  }
+  assert.equal(recon.buildJobRequest(values({ target: "https://example.com/", includeSubdomains: true }), "session-a").include_subdomains, true);
+});
+
 test("a session and at least one explicit source are required", () => {
   assert.throws(() => recon.buildJobRequest(values(), null), /session/);
   assert.throws(() => recon.buildJobRequest(values({ crawler: false }), "session-a"), /source/);
@@ -126,9 +142,11 @@ test("a reset rejects same-session responses and unbound sessions", () => {
 });
 
 test("new scans reject query strings and fragments before transmitting", () => {
-  for (const target of ["https://example.com/?token=value", "https://example.com/#value"]) {
+  for (const target of ["https://example.com/?token=value", "https://example.com/#value", "https://example.com/?", "https://example.com/#"]) {
     assert.throws(() => recon.buildJobRequest(values({ target, urlscan_submit: true, scanAcknowledged: true, scanVisibility: "private" }), "session-a"), /query strings and fragments/);
   }
+  const target = "https://example.com/path%3Fpart%23literal";
+  assert.equal(recon.buildJobRequest(values({ target, urlscan_submit: true, scanAcknowledged: true, scanVisibility: "private" }), "session-a").target_url, target);
 });
 
 // A small DOM fixture keeps controller race tests runnable with stock Node.
