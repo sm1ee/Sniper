@@ -100,12 +100,23 @@ async fn fetch_text(
     report: &mut SourceReport,
     retry_rate_limit: bool,
 ) -> Result<String, FetchError> {
+    fetch_text_with_progress(request, cancel, report, retry_rate_limit, |_| {}).await
+}
+
+async fn fetch_text_with_progress(
+    request: RequestBuilder,
+    cancel: &AtomicBool,
+    report: &mut SourceReport,
+    retry_rate_limit: bool,
+    on_progress: impl Fn(&SourceReport),
+) -> Result<String, FetchError> {
     for attempt in 0..=2u32 {
         if cancel.load(Ordering::Relaxed) {
             return Err(FetchError::Cancelled);
         }
         let current = request.try_clone().ok_or(FetchError::Transport)?;
         report.requests += 1;
+        on_progress(report);
         let mut response = tokio::select! {
             _ = cancelled(cancel) => return Err(FetchError::Cancelled),
             result = current.timeout(REQUEST_TIMEOUT).send() => result.map_err(|_| FetchError::Transport)?,
@@ -120,6 +131,7 @@ async fn fetch_text(
                 .unwrap_or(1 << attempt)
                 .clamp(1, 10);
             report.warn("Provider rate-limited a request; retried with bounded backoff");
+            on_progress(report);
             drop(response);
             pause(Duration::from_secs(retry_after), cancel).await?;
             continue;
@@ -435,7 +447,7 @@ pub async fn urlscan(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
-    on_progress: impl Fn(&[Discovery], usize) + Send + Sync,
+    on_progress: impl Fn(&[Discovery], &SourceReport) + Send + Sync,
 ) -> (Vec<Discovery>, SourceReport) {
     let key = match api_key() {
         Ok(key) => key,
@@ -467,7 +479,7 @@ async fn read_urlscan(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
-    on_progress: impl Fn(&[Discovery], usize) + Send + Sync,
+    on_progress: impl Fn(&[Discovery], &SourceReport) + Send + Sync,
     key: &Option<HeaderValue>,
     search_url: impl Fn(&str, bool, usize, Option<&str>) -> Url,
     scan_url: impl Fn(&str) -> Option<Url>,
@@ -491,11 +503,12 @@ async fn read_urlscan(
     loop {
         page_index += 1;
         let url = search_url(host, include_subdomains, size, after.as_deref());
-        let text = match fetch_text(
+        let text = match fetch_text_with_progress(
             authenticated(client.get(url), key),
             cancel,
             &mut report,
             true,
+            |report| on_progress(&[], report),
         )
         .await
         {
@@ -527,6 +540,8 @@ async fn read_urlscan(
         }
         scanned += results.len();
         let more = urlscan_has_more(&data, results.len(), scanned, size);
+        let mut checkpoint = Vec::new();
+        let mut detail_urls = Vec::new();
         for result in results {
             if cancel.load(Ordering::Relaxed) {
                 report.fail("Cancelled");
@@ -550,7 +565,6 @@ async fn read_urlscan(
                 report.fail("Cancelled");
                 break;
             }
-            let mut checkpoint = Vec::new();
             for item in summary {
                 if cancel.load(Ordering::Relaxed) {
                     report.fail("Cancelled");
@@ -562,11 +576,6 @@ async fn read_urlscan(
                     checkpoint.push(item);
                 }
             }
-            on_progress(&checkpoint, report.requests);
-            if limit_reached(max_results, out.len()) {
-                report.truncated = true;
-                break;
-            }
             let Some(full_url) = full_url else {
                 report.warn(
                     "A urlscan result had no valid scan UUID; its detail document was skipped",
@@ -574,14 +583,26 @@ async fn read_urlscan(
                 report.truncated = true;
                 continue;
             };
-            if !scan_ids.insert(full_url.to_string()) {
-                continue;
+            if scan_ids.insert(full_url.to_string()) {
+                detail_urls.push(full_url);
             }
-            let text = match fetch_text(
+        }
+        if limit_reached(max_results, out.len()) {
+            report.truncated = true;
+        }
+        // The entire search page has arrived. Retain its summaries before any
+        // detail request can stall; explicit budgets give this page priority.
+        on_progress(&checkpoint, &report);
+        if report.error.is_some() || limit_reached(max_results, out.len()) {
+            break;
+        }
+        for full_url in detail_urls {
+            let text = match fetch_text_with_progress(
                 authenticated(client.get(full_url.clone()), key),
                 cancel,
                 &mut report,
                 true,
+                |report| on_progress(&[], report),
             )
             .await
             {
@@ -630,9 +651,11 @@ async fn read_urlscan(
                     checkpoint.push(item);
                 }
             }
-            on_progress(&checkpoint, report.requests);
             if limit_reached(max_results, out.len()) {
                 report.truncated = true;
+            }
+            on_progress(&checkpoint, &report);
+            if limit_reached(max_results, out.len()) {
                 break;
             }
         }
@@ -782,7 +805,7 @@ pub async fn wayback(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
-    on_progress: impl Fn(&[Discovery], usize) + Send + Sync,
+    on_progress: impl Fn(&[Discovery], &SourceReport) + Send + Sync,
 ) -> (Vec<Discovery>, SourceReport) {
     read_wayback(
         client,
@@ -804,7 +827,7 @@ async fn read_wayback(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
-    on_progress: impl Fn(&[Discovery], usize) + Send + Sync,
+    on_progress: impl Fn(&[Discovery], &SourceReport) + Send + Sync,
     page_url: impl Fn(&str, bool, usize, Option<&str>) -> Url,
 ) -> (Vec<Discovery>, SourceReport) {
     let mut out = Vec::new();
@@ -824,13 +847,18 @@ async fn read_wayback(
         let limit = batch_size(max_results, out.len(), 1000);
         let url = page_url(host, include_subdomains, limit, resume.as_deref());
         // Deliberately never attach urlscan's key to Archive.org requests.
-        let text = match fetch_text(client.get(url), cancel, &mut report, true).await {
-            Ok(text) => text,
-            Err(e) => {
-                report.fail(e.to_string());
-                break;
-            }
-        };
+        let text =
+            match fetch_text_with_progress(client.get(url), cancel, &mut report, true, |report| {
+                on_progress(&[], report)
+            })
+            .await
+            {
+                Ok(text) => text,
+                Err(e) => {
+                    report.fail(e.to_string());
+                    break;
+                }
+            };
         let remaining = max_results.saturating_sub(out.len());
         let (found, cursor, clipped) = match parse_cdx_filtered(
             &text,
@@ -846,14 +874,20 @@ async fn read_wayback(
         };
         let previous = out.len();
         out.extend(found);
-        on_progress(&out[previous..], report.requests);
-        if cancel.load(Ordering::Relaxed) {
-            report.fail("Cancelled");
-            break;
-        }
         report.truncated |= clipped;
         if clipped {
             report.warn("Some CDX rows were malformed or exceeded the result limit");
+        }
+        if cursor.is_some()
+            && (limit_reached(max_results, out.len()) || limit_reached(max_pages, page))
+        {
+            report.truncated = true;
+            report.warn("Wayback result or page limit reached");
+        }
+        on_progress(&out[previous..], &report);
+        if cancel.load(Ordering::Relaxed) {
+            report.fail("Cancelled");
+            break;
         }
         let Some(cursor) = cursor else {
             break;
@@ -2309,13 +2343,16 @@ mod tests {
             let reader = tokio::spawn(async move {
                 let client = Client::builder().no_proxy().build().unwrap();
                 let cancel = AtomicBool::new(false);
-                let progress = move |batch: &[Discovery], requests| {
+                let progress = move |batch: &[Discovery], report: &SourceReport| {
+                    if batch.is_empty() {
+                        return;
+                    }
                     retained.lock().unwrap().push((
                         batch
                             .iter()
                             .map(|item| (item.url.clone(), item.status))
                             .collect::<Vec<_>>(),
-                        requests,
+                        report.requests,
                     ));
                 };
                 if source == "wayback" {
@@ -2367,6 +2404,106 @@ mod tests {
             assert!(reader.await.unwrap_err().is_cancelled());
             assert_eq!(checkpoints.lock().unwrap().len(), 2);
             fixture.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn urlscan_checkpoints_all_search_summaries_limits_and_warnings_before_details() {
+        use std::sync::{Arc, Mutex};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            sync::oneshot,
+        };
+        for budget in [0, 2] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (waiting, detail_started) = oneshot::channel();
+            let fixture = tokio::spawn(async move {
+                let (mut connection, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                connection.read(&mut request).await.unwrap();
+                let body = json!({"search_date_limit_days":30,"has_more":false,"results":[
+                    {"_id":"11111111-1111-4111-8111-111111111111","page":{"url":"https://outside.example.com/not-in-scope"}},
+                    {"_id":"22222222-2222-4222-8222-222222222222","page":{"url":"https://example.com/one"}},
+                    {"_id":"33333333-3333-4333-8333-333333333333","page":{"url":"https://example.com/two"}}
+                ]}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                connection.write_all(response.as_bytes()).await.unwrap();
+                drop(connection);
+                let (mut connection, _) = listener.accept().await.unwrap();
+                connection.read(&mut request).await.unwrap();
+                waiting.send(()).unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(5), connection.read(&mut request))
+                    .await
+                    .unwrap();
+            });
+            let retained = Arc::new(Mutex::new((
+                Vec::<String>::new(),
+                0,
+                false,
+                Vec::<String>::new(),
+            )));
+            let saved = retained.clone();
+            let reader = tokio::spawn(async move {
+                let client = Client::builder().no_proxy().build().unwrap();
+                read_urlscan(
+                    &client,
+                    &base(),
+                    false,
+                    0,
+                    budget,
+                    &AtomicBool::new(false),
+                    |batch, report| {
+                        let mut saved = saved.lock().unwrap();
+                        saved.0.extend(batch.iter().map(|item| item.url.clone()));
+                        saved.1 = report.requests;
+                        saved.2 |= report.truncated;
+                        for warning in &report.warnings {
+                            if !saved.3.contains(warning) {
+                                saved.3.push(warning.clone());
+                            }
+                        }
+                    },
+                    &None,
+                    |_, _, _, _| Url::parse(&format!("http://{address}/search")).unwrap(),
+                    |uuid| Some(Url::parse(&format!("http://{address}/result/{uuid}")).unwrap()),
+                )
+                .await
+            });
+            if budget == 0 {
+                tokio::time::timeout(Duration::from_secs(5), detail_started)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!reader.is_finished());
+                reader.abort();
+                assert!(reader.await.unwrap_err().is_cancelled());
+                fixture.await.unwrap();
+            } else {
+                let (found, report) = tokio::time::timeout(Duration::from_secs(5), reader)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(found.len(), 2);
+                assert_eq!(report.requests, 1, "completed-page summaries consume the explicit budget before any detail request");
+                fixture.abort();
+                let _ = fixture.await;
+            }
+            let saved = retained.lock().unwrap();
+            assert_eq!(
+                saved.0,
+                vec!["https://example.com/one", "https://example.com/two"]
+            );
+            assert_eq!(saved.1, if budget == 0 { 2 } else { 1 });
+            assert!(saved.2);
+            assert_eq!(
+                saved.3,
+                vec!["urlscan search history is limited to the past 30 days for this account"]
+            );
         }
     }
 

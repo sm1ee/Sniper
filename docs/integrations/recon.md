@@ -29,6 +29,8 @@ Entries are deduplicated by normalized URL plus method. The query string is kept
 
 `max_requests`, `max_depth`, `max_endpoints` and `max_pages` default to 0, which means no limit; a positive value limits one job. `max_endpoints` counts new entries the job adds; existing entries can still gain evidence. `max_pages` applies to each history source separately. A job that stops at a budget with work left is reported as partial. `max_depth=0` used to mean the seed only; it now means no limit.
 
+urlscan retains the in-scope summaries from each completed search page before requesting its detail documents. If an explicit result budget fills on those summaries, they take priority and no further detail request is sent; the source is marked partial.
+
 Without budgets nothing caps a job, so a broad or growing target can use a lot of memory and disk. Set a budget or use Stop.
 
 ## What each source collects

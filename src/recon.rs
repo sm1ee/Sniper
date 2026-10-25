@@ -658,14 +658,14 @@ async fn run(
         } else {
             // A provider can have many completed pages before its final return.
             // Commit each batch before the next await so Stop cannot discard it.
-            let checkpoint = |findings: &[Discovery], requests| {
+            let checkpoint = |findings: &[Discovery], report: &SourceReport| {
                 checkpoint_provider_batch(
                     &session,
                     id,
                     &scope,
                     source,
                     findings,
-                    requests,
+                    report,
                     request.max_endpoints,
                     &cancel,
                 );
@@ -691,7 +691,7 @@ async fn run(
                             session.recon.update_source(id, source, |s| s.warnings.push(format!("Accepted scan result: {result_url}. Stop cancels local polling only.")));
                             session.schedule_state_persist();
                         }).await;
-                    checkpoint(&findings, report.requests);
+                    checkpoint(&findings, &report);
                     report
                 }
                 _ => {
@@ -719,7 +719,11 @@ async fn run(
             .into();
             s.requests = report.requests;
             s.truncated |= report.truncated;
-            s.warnings.extend(report.warnings);
+            for warning in report.warnings {
+                if !s.warnings.contains(&warning) {
+                    s.warnings.push(warning);
+                }
+            }
             if let Some(error) = report.error {
                 s.warnings.push(error);
             }
@@ -755,7 +759,7 @@ fn checkpoint_provider_batch(
     scope: &ReconScope,
     source: &str,
     findings: &[Discovery],
-    requests: usize,
+    report: &SourceReport,
     limit: usize,
     cancel: &AtomicBool,
 ) {
@@ -764,9 +768,14 @@ fn checkpoint_provider_batch(
             .recon
             .merge_with_cancel(id, scope, source, findings.to_vec(), limit, Some(cancel));
     session.recon.update_source(id, source, |s| {
-        s.requests = requests;
+        s.requests = report.requests;
         s.discovered += added;
-        s.truncated |= truncated;
+        s.truncated |= truncated || report.truncated;
+        for warning in &report.warnings {
+            if !s.warnings.contains(warning) {
+                s.warnings.push(warning.clone());
+            }
+        }
     });
     session.schedule_state_persist();
 }
@@ -1325,7 +1334,12 @@ mod tests {
                     found("retained", "page one"),
                     found("over-budget", "page one"),
                 ],
-                1,
+                &SourceReport {
+                    requests: 1,
+                    truncated: true,
+                    warnings: vec!["Known provider limit".into()],
+                    ..SourceReport::default()
+                },
                 1,
                 &worker_cancel,
             );
@@ -1335,7 +1349,10 @@ mod tests {
                 &scope,
                 "wayback",
                 &[found("retained", "page two")],
-                2,
+                &SourceReport {
+                    requests: 2,
+                    ..SourceReport::default()
+                },
                 1,
                 &worker_cancel,
             );
@@ -1353,6 +1370,10 @@ mod tests {
         assert_eq!(snapshot.jobs[0].sources[0].requests, 2);
         assert_eq!(snapshot.jobs[0].sources[0].discovered, 1);
         assert!(snapshot.jobs[0].sources[0].truncated);
+        assert!(snapshot.jobs[0].sources[0]
+            .warnings
+            .iter()
+            .any(|warning| warning == "Known provider limit"));
         assert_eq!(snapshot.endpoints.len(), 1);
         assert_eq!(snapshot.endpoints[0].url, "https://example.com/retained");
         assert_eq!(snapshot.endpoints[0].evidence.len(), 2);
