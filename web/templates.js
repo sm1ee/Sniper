@@ -890,7 +890,9 @@
       renderResults();
       if (reveal) Array.from(els.ResultsRows.children).find((row) => row.dataset.resultKey === key)?.scrollIntoView?.({ block: "nearest" });
       const entry = currentResult();
-      if (entry?.record_id && exchange?.key !== key) void loadExchange(entry);
+      // An explicit selection can retry a failed read; pending and healthy
+      // exchanges remain shared. Background scan polling does not retry errors.
+      if (entry?.record_id && (exchange?.key !== key || exchange?.error)) void loadExchange(entry);
       renderDetail();
     }
     async function loadExchange(entry) {
@@ -976,7 +978,7 @@
       ++scanReadRequest;
       ++autoReadRequest;
       ++exchangeRequest;
-      if (exchange?.loading) exchange = null;
+      if (exchange?.loading || exchange?.error) exchange = null;
       ++planRequest;
       if (planTimer !== null) unschedule(planTimer);
       planTimer = null;
