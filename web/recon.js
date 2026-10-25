@@ -163,10 +163,14 @@
       showNotice(els.ActionStatus, message, error);
     }
     function renderControls() {
-      els.Start.disabled = !sessionId || !!mutation || jobs.some((job) => ACTIVE_STATUSES.has(job.status));
+      els.Start.disabled = !canStart();
       els.Start.textContent = mutation?.type === "start" ? "Starting…" : "Start discovery";
       els.Refresh.disabled = !sessionId || !!read || !!mutation;
       showNotice(els.ActionStatus, actionMessage, actionError);
+    }
+    function canStart() {
+      return !!sessionId && loaded && !loadError && !read && !mutation
+        && !jobs.some((job) => ACTIVE_STATUSES.has(job.status));
     }
     function updateScope({ revokeConsent = false } = {}) {
       if (revokeConsent) { els.HistoryConsent.checked = false; els.ScanConsent.checked = false; }
@@ -341,7 +345,7 @@
         maxRequests: els.MaxRequests.value, maxDepth: els.MaxDepth.value, maxEndpoints: els.MaxEndpoints.value, maxPages: els.MaxPages.value };
     }
     async function mutate(type, id) {
-      if (disposed || mutation || !sessionId || (type === "start" && jobs.some((job) => ACTIVE_STATUSES.has(job.status)))) return;
+      if (disposed || mutation || !sessionId || (type === "start" && !canStart())) return;
       const token = guard.capture();
       if (!canUse(token)) return;
       let body;

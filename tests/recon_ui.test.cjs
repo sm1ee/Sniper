@@ -623,6 +623,45 @@ test("failed mutations are never automatically repeated", async () => {
   f.controller.dispose();
 });
 
+test("discovery cannot start before the current session's jobs have loaded", async () => {
+  const f = controllerFixture();
+  f.node("Target").value = "https://example.com/";
+  assert.equal(f.node("Start").disabled, true);
+  f.node("Form").emit("submit");
+  assert.equal(f.calls.filter(call => call.method === "POST").length, 0);
+  await settled();
+  assert.equal(f.node("Start").disabled, false);
+  f.controller.dispose();
+});
+
+test("an uncertain start cannot be repeated until a fresh snapshot reconciles the jobs", async () => {
+  const f = controllerFixture(); await settled();
+  f.node("Target").value = "https://example.com/";
+  f.respondNext = () => {
+    // The server accepted and finished the job, but its response was lost.
+    f.snapshots.a.jobs = [{ id: "accepted-job", status: "completed", target_url: "https://example.com/", sources: [] }];
+    f.failNext = "GET";
+    throw new Error("Response lost");
+  };
+  f.node("Form").emit("submit"); await settled();
+  assert.match(f.node("ActionStatus").textContent, /confirm the current state/);
+  assert.match(f.node("LoadStatus").textContent, /status may be out of date/);
+  assert.equal(f.node("Start").disabled, true);
+  f.node("Form").emit("submit"); await settled();
+  assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
+
+  const pending = deferredResponse(f, "json");
+  const read = f.controller.refresh(); await settled();
+  f.node("Form").emit("submit");
+  assert.equal(f.node("Start").disabled, true);
+  assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
+  pending.succeed(f.snapshots.a); await read;
+  assert.match(f.node("Jobs").textContent, /completed/);
+  assert.equal(f.node("LoadStatus").textContent, "");
+  assert.equal(f.node("Start").disabled, false);
+  f.controller.dispose();
+});
+
 test("late stop responses cannot change a newer session's job controls", async () => {
   const f = controllerFixture(); await settled();
   f.node("Target").value = "https://example.com/";
