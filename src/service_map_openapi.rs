@@ -15,6 +15,10 @@ use crate::{
     service_map_parameters::{body_parameter_location, EndpointParameter},
 };
 
+#[cfg(test)]
+#[path = "service_map_openapi_coverage_tests.rs"]
+mod coverage_tests;
+
 /// Operations described per origin, the most recently used first.
 pub const MAX_OPERATIONS: usize = 500;
 /// Each operation's newest rows whose parameters are read.
