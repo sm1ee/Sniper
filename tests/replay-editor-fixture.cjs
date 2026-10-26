@@ -80,7 +80,9 @@ function editorFixture() {
   const fieldsStart = appSource.indexOf("const setSearchQuery = CM.StateEffect.define();");
   const fieldsEnd = appSource.indexOf("function buildChangedLineDecorations", fieldsStart);
   vm.runInContext(appSource.slice(fieldsStart, fieldsEnd), f.context);
+  const packetFieldsStart = appSource.indexOf("const setPacketEvidenceRanges = CM.StateEffect.define();");
   const classStart = appSource.indexOf("class SniperCodeView {");
+  vm.runInContext(appSource.slice(packetFieldsStart, classStart), f.context);
   const classEnd = appSource.indexOf("// CodeMirror-based code pane instances", classStart);
   vm.runInContext(appSource.slice(classStart, classEnd), f.context);
   f.cv = () => f.context.getCMView("replayReq");

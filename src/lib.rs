@@ -30,6 +30,7 @@ pub mod sequence;
 pub mod service_map;
 pub mod service_map_auth;
 pub mod service_map_body;
+pub mod service_map_packet;
 pub mod service_map_clients;
 pub mod service_map_flow;
 pub mod service_map_html;

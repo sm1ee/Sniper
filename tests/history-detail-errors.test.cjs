@@ -50,7 +50,7 @@ function fixture() {
     "selectHistoryTransaction", "loadTransactionDetail", "canReuseSelectedHistoryRecord", "historyRecordSummarySignature",
     "currentSessionId", "transactionPath", "sessionQueryPath", "getHistoryItem", "rebuildHistoryItemIndex", "updateHistorySelection",
     "cancelHistoryDetailLoading", "scheduleHistoryDetailLoading", "renderDetail", "renderEmptyDetail", "renderLoadingDetail",
-    "renderMessagePanes", "renderViewTabs", "normalizedHeaders", "renderSummaryRows", "renderHeaderList", "renderProtocolStrip",
+    "renderMessagePanes", "renderViewTabs", "getHistoryPacketViewer", "createPacketViewerController", "normalizedHeaders", "renderSummaryRows", "renderHeaderList", "renderProtocolStrip",
     "inferProtocolState", "formatTimestamp", "formatSize", "escapeHtml", "buildMessagePresentation", "buildRawRequest",
     "buildRawRequestHead", "buildRawResponse", "buildRawResponseHead", "renderBody", "mergeHeaders", "headerNameEquals",
     "clearHttpHistorySelectionPreview", "clearHttpHistoryLoadedRowsForPendingQuery", "adjustHistoryPagingAfterLocalRemoval",
@@ -62,7 +62,8 @@ function fixture() {
     DEFAULT_HISTORY_COLUMN_ORDER: [], DETAIL_LOADING_DELAY_MS: 180,
     createDefaultHistoryColumnWidths: () => ({}), createDefaultWsColumnWidths: () => ({}),
     _historyDetailGeneration: 0, _historyDetailLoadingTimer: null, viewTabs: [],
-    document: { querySelectorAll: () => [] },
+    historyPacketViewer: null,
+    document: { querySelectorAll: () => [], getElementById: () => null },
     window: { setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; }, clearTimeout(id) { timers.delete(id); } },
     fetch(url, options) {
       assert.equal(options, undefined, "only passive reads are allowed");

@@ -1057,6 +1057,8 @@ let workspaceSaveLoopPromise = null;
 let workspaceSaveConflictPending = false;
 let workspaceStateGeneration = 0;
 let renderedHttpReplayDraftOwner = null;
+let historyPacketViewer = null;
+let paneMenuOpen = null;
 const workspacePendingReplayCloses = new Map();
 const workspaceReplayMetadataEdits = new WeakMap();
 let workspaceExternalLoadGeneration = 0;
@@ -1493,6 +1495,7 @@ function bindEvents() {
     clearHttpHistorySelectionPreview();
     scheduleRefresh({ resetScroll: true });
   });
+
 
   els.requestSearchInput.addEventListener("input", () => {
     state.messageSearch.request = els.requestSearchInput.value;
@@ -2020,15 +2023,23 @@ function bindEvents() {
   const paneCtx = document.getElementById("paneContextMenu");
   if (paneCtx) {
     let paneContextMenuTarget = null;
+    paneMenuOpen = (event, target) => {
+      paneContextMenuTarget = target;
+      for (const button of paneCtx.querySelectorAll?.("[data-pane-action]") || []) {
+        const reason = target.kind === "retained-packet" ? packetActionReason(target, button.dataset.paneAction) : "";
+        button.disabled = !!reason;
+        button.title = reason;
+      }
+      paneCtx.classList.remove("hidden");
+      paneCtx.style.left = `${Math.min(event.clientX, window.innerWidth - paneCtx.offsetWidth - 8)}px`;
+      paneCtx.style.top = `${Math.min(event.clientY, window.innerHeight - paneCtx.offsetHeight - 8)}px`;
+    };
     [els.requestView, els.responseView, els.requestViewCM, els.responseViewCM].forEach((view) => {
       if (!view) return;
       view.addEventListener("contextmenu", (e) => {
         if (!state.selectedId) return;
         e.preventDefault();
-        paneContextMenuTarget = createTransactionRecordMenuTarget(
-          state.selectedId,
-          currentSessionId(),
-        );
+        paneMenuOpen(e, createTransactionRecordMenuTarget(state.selectedId, currentSessionId()));
         paneCtx.classList.remove("hidden");
         const mw = paneCtx.offsetWidth, mh = paneCtx.offsetHeight;
         paneCtx.style.left = `${Math.min(e.clientX, window.innerWidth - mw - 8)}px`;
@@ -2042,10 +2053,14 @@ function bindEvents() {
     paneCtx.addEventListener("click", (e) => {
       const btn = e.target.closest("[data-pane-action]");
       const target = paneContextMenuTarget;
-      if (!btn || !target?.id) return;
+      if (!btn || btn.disabled || !target || !target.id && target.kind !== "retained-packet") return;
       const action = btn.dataset.paneAction;
       paneCtx.classList.add("hidden");
       paneContextMenuTarget = null;
+      if (target.kind === "retained-packet") {
+        runPacketMenuAction(target, action).catch(error => { if (target.isCurrent()) handleSendActionError(error); });
+        return;
+      }
       if (target.sessionId !== currentSessionId()) {
         showToast("The selected session changed. Open the menu again.", "error");
         return;
@@ -12813,6 +12828,114 @@ function renderLoadingDetail(message = "Loading selected transaction...") {
   renderMessagePanes();
 }
 
+// One controller for read-only HTTP panes. History supplies its existing DOM;
+// exact retained Map packets supply the same pane/control structure and adapter.
+function createPacketViewerController({ panes, bindControls = true, onMode, onVariant, onSearch, onMenu, isCurrent = () => true }) {
+  const disposers = [];
+  let destroyed = false;
+  const listen = (element, event, callback) => {
+    if (!element?.addEventListener) return;
+    element.addEventListener(event, callback);
+    disposers.push(() => element.removeEventListener(event, callback));
+  };
+  for (const [side, pane] of bindControls ? Object.entries(panes) : []) {
+    for (const tab of pane.column?.querySelectorAll?.(".view-tab[data-view]") || []) listen(tab, "click", () => {
+      if (!destroyed && isCurrent()) onMode?.(side, tab.dataset.view);
+    });
+    for (const button of pane.column?.querySelectorAll?.(".mr-btn[data-mr]") || []) listen(button, "click", () => {
+      if (!destroyed && isCurrent()) onVariant?.(side, button.dataset.mr === "original");
+    });
+    listen(pane.search, "input", () => { if (!destroyed && isCurrent()) onSearch?.(side, pane.search.value); });
+    listen(pane.meta, "click", event => {
+      if (!event.target.closest?.(".search-hit-count") || destroyed || !isCurrent()) return;
+      getCMView(pane.key)?.nextSearchMatch();
+    });
+    if (onMenu) listen(pane.column, "contextmenu", event => { if (!destroyed && isCurrent()) onMenu(event, side); });
+  }
+  return {
+    update(side, text, { mode = "raw", query = "", owner, changedRanges = [], evidenceRanges = [], renderSubject = null, notice = "" } = {}) {
+      if (destroyed || !isCurrent()) return null;
+      const pane = panes[side];
+      const cmMode = mode === "hex" ? "hex" : mode === "diff" ? "diff" : "http";
+      const result = pane.cm ? updateCodePaneCM(pane.key, pane.cm, text, { mode: cmMode, search: query, owner, changedRanges, evidenceRanges })
+        : pane.legacy && pane.lines ? updateCodePane(pane.legacy, pane.lines, text, mode, side) : null;
+      if (pane.search && pane.search.value !== query) pane.search.value = query;
+      if (pane.meta) pane.meta.innerHTML = buildSearchMeta(result?.lineCount || 0, result?.matchCount || 0);
+      for (const tab of pane.column?.querySelectorAll?.(".view-tab[data-view]") || []) tab.classList.toggle("active", tab.dataset.view === mode);
+      if (pane.notice) { pane.notice.textContent = notice; pane.notice.classList.toggle("hidden", !notice); }
+      if (side === "response") renderResponsePreview({ view: pane.render, editor: pane.cm?.closest?.(".editor-shell"), search: pane.search }, mode === "render", renderSubject || { note: "No response selected." });
+      return result;
+    },
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      for (const dispose of disposers) dispose();
+      for (const pane of Object.values(panes)) {
+        if (pane.render) { pane.render.replaceChildren(); delete pane.render.dataset.renderKey; }
+        if (_cmViews[pane.key]) { _cmViews[pane.key].destroy(); delete _cmViews[pane.key]; }
+      }
+    },
+  };
+}
+
+function getHistoryPacketViewer() {
+  if (!historyPacketViewer) historyPacketViewer = createPacketViewerController({
+    bindControls: false,
+    panes: {
+      request: { key: "request", column: document.getElementById("requestColumn"), cm: els.requestViewCM, legacy: els.requestView, lines: els.requestLines, search: els.requestSearchInput, meta: els.requestSearchMeta },
+      response: { key: "response", column: document.getElementById("responseColumn"), cm: els.responseViewCM, legacy: els.responseView, lines: els.responseLines, search: els.responseSearchInput, meta: els.responseSearchMeta, render: els.responseRenderView },
+    },
+    onMode(side, mode) { state.messageViews[side] = mode; renderViewTabs(); renderMessagePanes(); },
+    onVariant(side, original) { state.showOriginal[side] = original; renderViewTabs(); renderMessagePanes(); },
+    onSearch(side, query) { state.messageSearch[side] = query; updateMessagePaneSearch(side); },
+  });
+  return historyPacketViewer;
+}
+
+function packetViewerMarkup(responseTools = "") {
+  return `<div class="packet-viewer lower-workbench">${["request", "response"].map(side => `<section class="message-column ${side}-column" data-packet-pane="${side}">
+    <header class="pane-header"><span class="pane-title-group"><strong>${side === "request" ? "Request" : "Response"}</strong></span><div class="view-tabs">${["pretty", "raw", "hex", ...(side === "response" ? ["render"] : [])].map(mode => `<button type="button" class="view-tab ${mode === "raw" ? "active" : ""}" data-view="${mode}">${mode[0].toUpperCase() + mode.slice(1)}</button>`).join("")}</div>${side === "response" ? responseTools : ""}</header>
+    <div class="editor-shell"><div class="cm-container"></div></div>${side === "response" ? '<div class="render-view hidden"></div>' : ""}
+    <p class="packet-notice hidden" role="status"></p><footer class="pane-footer"><label class="pane-search" aria-label="Search ${side}"><input type="search" placeholder="Search ${side}" /></label><span class="packet-search-meta"></span></footer></section>`).join("")}</div>`;
+}
+
+function mountServiceMapPacketViewer(container, { packet, row, isCurrent }) {
+  const owner = {}, sessionOwner = createRecordClipboardOwner();
+  let alive = true;
+  const current = () => alive && container.isConnected && sessionOwner() && isCurrent();
+  const modes = { request: "raw", response: "raw" }, searches = { request: "", response: "" };
+  const panes = Object.fromEntries(["request", "response"].map(side => {
+    const column = container.querySelector(`[data-packet-pane="${side}"]`);
+    return [side, { key: `mapPacket-${side}`, column, cm: column.querySelector(".cm-container"), search: column.querySelector("input[type=search]"), meta: column.querySelector(".packet-search-meta"), notice: column.querySelector(".packet-notice"), render: column.querySelector(".render-view") }];
+  }));
+  const controller = createPacketViewerController({ panes, isCurrent: current,
+    onMode(side, mode) { modes[side] = mode; draw(side); },
+    onSearch(side, query) { searches[side] = query; const result = getCMView(panes[side].key)?.applySearch(query); if (result) panes[side].meta.innerHTML = buildSearchMeta(getCMView(panes[side].key).view.state.doc.lines, result.matchCount); },
+    onMenu(event) {
+      event.preventDefault();
+      // This typed snapshot never consults History or reloads an ID.
+      paneMenuOpen?.(event, { kind: "retained-packet", packet, isCurrent: current });
+    },
+  });
+  function draw(side) {
+    if (!current()) return;
+    const message = packet[side]?.message, raw = buildPacketMessagePresentation(message, side), mode = modes[side];
+    let text = raw.text;
+    if (mode === "pretty" && message?.body.available && message.body.body_encoding === "utf8") text = prettyFormat(text, message.body);
+    else if (mode === "hex") text = message?.body.available ? toHexDumpFromHttpParts(raw.head, message.body) : toHexDump(text);
+    const marks = side === "response" && packet.variant === "current" && mode === "raw" && message
+      ? packetEvidenceRanges(message, row.technology_observations, raw) : [];
+    const request = packet.request?.message;
+    const url = packet.variant === "current" && packetRequestTarget(request)
+      ? `${request.scheme}://${request.authority}${request.path}` : null;
+    const renderSubject = message?.body.available ? { response: message.body, key: `${packet.evidence_id}:${packet.variant}`, url, isCurrent: current }
+      : { note: message ? "Response body unavailable" : "Response not retained", isCurrent: current };
+    controller.update(side, text, { mode, query: searches[side], owner, evidenceRanges: marks, notice: raw.notice, renderSubject });
+  }
+  draw("request"); draw("response");
+  return { destroy() { alive = false; controller.destroy(); } };
+}
+
 function renderMessagePanes() {
   const record = state.selectedRecord;
   const detailLoading = Boolean(state.selectedId && state.loadingDetailId === state.selectedId);
@@ -12863,39 +12986,13 @@ function renderMessagePanes() {
       }))
     : [];
 
-  const requestPane = els.requestViewCM
-    ? updateCodePaneCM("request", els.requestViewCM, requestText, { mode: cmMode(reqMode), search: state.messageSearch.request, changedRanges: requestChanged })
-    : (els.requestView && els.requestLines ? updateCodePane(els.requestView, els.requestLines, requestText, reqMode, "request") : null);
-  const responsePane = els.responseViewCM
-    ? updateCodePaneCM("response", els.responseViewCM, responseText, { mode: cmMode(resMode), search: state.messageSearch.response, changedRanges: responseChanged })
-    : (els.responseView && els.responseLines ? updateCodePane(els.responseView, els.responseLines, responseText, resMode, "response") : null);
-  if (els.requestSearchInput.value !== state.messageSearch.request) {
-    els.requestSearchInput.value = state.messageSearch.request;
-  }
-  if (els.responseSearchInput.value !== state.messageSearch.response) {
-    els.responseSearchInput.value = state.messageSearch.response;
-  }
-  els.requestSearchMeta.innerHTML = requestPane
-    ? buildSearchMeta(requestPane.lineCount, requestPane.matchCount)
-    : buildSearchMeta(0, 0);
-  els.responseSearchMeta.innerHTML = responsePane
-    ? buildSearchMeta(responsePane.lineCount, responsePane.matchCount)
-    : buildSearchMeta(0, 0);
-  renderResponsePreview(
-    {
-      view: els.responseRenderView,
-      editor: els.responseViewCM?.closest(".editor-shell"),
-      search: els.responseSearchInput,
-    },
-    resMode === "render",
-    responseRecord
-      ? {
-          response: responseRecord.response || null,
-          key: `${responseRecord.id}:${state.showOriginal.response}`,
-          url: recordPageUrl(responseRecord),
-        }
-      : { note: state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected.") },
-  );
+  const viewer = getHistoryPacketViewer();
+  viewer.update("request", requestText, { mode: reqMode, query: state.messageSearch.request, changedRanges: requestChanged });
+  viewer.update("response", responseText, { mode: resMode, query: state.messageSearch.response, changedRanges: responseChanged,
+    renderSubject: responseRecord ? { response: responseRecord.response || null,
+      key: `${responseRecord.id}:${state.showOriginal.response}`, url: recordPageUrl(responseRecord) }
+      : { note: state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected.") } });
+
 }
 
 // Render: the response drawn inside its own pane, the way Burp's Render tab and
@@ -12903,6 +13000,7 @@ function renderMessagePanes() {
 // place of the pane's editor instead of sitting inside it: the history editor's
 // grid keeps it full width only while it is its shell's only child.
 function renderResponsePreview({ view, editor, search }, active, subject) {
+  if (subject?.isCurrent && !subject.isCurrent()) return;
   if (!view) return;
   editor?.classList.toggle("hidden", active);
   view.classList.toggle("hidden", !active);
@@ -12966,7 +13064,7 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
       const fetcher = createRenderResourceFetcher(currentSessionId());
       sandboxedResponseDocumentWithResources(model.html, subject.url, fetcher)
         .then((doc) => {
-          if (view.dataset.renderKey !== key || !frame.isConnected) return;
+          if (view.dataset.renderKey !== key || !frame.isConnected || subject.isCurrent && !subject.isCurrent()) return;
           frame.srcdoc = doc;
           const failed = fetcher.failures();
           if (failed) {
@@ -12975,7 +13073,7 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
             status.remove();
           }
         })
-        .catch((error) => console.error(error));
+        .catch((error) => { if (!subject.isCurrent || subject.isCurrent()) console.error(error); });
     } else if (RENDER_RESOURCE_REFERENCE.test(model.html)) {
       banner("Images, styles and fonts are not loaded. Settings ▸ Display ▸ Render can load them.");
     }
@@ -15470,6 +15568,8 @@ function initializeTargetWorkspace() {
       scheduleUiSettingsSave();
     },
     request: (path, options) => fetch(path, options),
+    packetViewerMarkup,
+    mountPacketViewer: mountServiceMapPacketViewer,
     onApiDocsOpen: () => { compareLoadGeneration += 1; },
     isActiveModal: (modal) => getActiveModalAction()?.modal === modal,
     restoreFocus: (previous) => restoreModalFocus(previous, document.querySelector("[data-target-view].active")),
@@ -15600,7 +15700,7 @@ function renderTarget() {
                   <div class="target-path-meta">${requestCount} captured request${requestCount === 1 ? "" : "s"} · ${paths.length} path${paths.length === 1 ? "" : "s"} · ${escapeHtml(schemes.join(", ") || "http")}</div>
                 </div>
                 <div class="target-host-actions">
-                  ${host.in_scope ? "" : '<span class="detail-chip none">Out of scope</span>'}
+                  ${host.in_scope ? '<span class="detail-chip ok">In scope</span>' : '<span class="detail-chip none">Out of scope</span>'}
                   <span class="target-host-chevron" aria-hidden="true">▾</span>
                 </div>
               </button>
@@ -17217,7 +17317,7 @@ async function openFuzzerFromReplay() {
   renderToolPanels();
 }
 
-async function openFuzzerFromRecordLoader(loadRecord, sourceIsCurrent = () => true) {
+async function openFuzzerFromRecordLoader(loadRecord, sourceIsCurrent = () => true, applySource = openFuzzerFromRecord) {
   if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   const generation = state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
   const sessionId = currentSessionId();
@@ -17237,7 +17337,7 @@ async function openFuzzerFromRecordLoader(loadRecord, sourceIsCurrent = () => tr
   }
   if (!ownsImport()) return false;
   if (!record) throw new Error("Selected transaction could not be loaded.");
-  openFuzzerFromRecord(record);
+  applySource(record);
   return true;
 }
 
@@ -23663,6 +23763,185 @@ function buildRawResponseHead(record) {
   const httpVer = record.response_http_version || record.http_version || "HTTP/1.1";
   const statusLine = `${httpVer} ${record.status ?? 0}`;
   return headers ? `${statusLine}\n${headers}` : statusLine;
+}
+
+// Packet adapters preserve retained fields; the shared viewer owns display modes,
+// search and rendering. These offsets describe displayed text, never wire bytes.
+function packetDisplayText(value) {
+  return String(value ?? "").replace(/\r\n?/g, "\n");
+}
+
+function buildPacketMessagePresentation(message, side) {
+  if (!message) return { text: "", head: "", notice: "Not retained", headerValues: [] };
+  const request = side === "request";
+  const knownLine = request ? typeof message.method === "string" && typeof message.path === "string" && typeof message.http_version === "string"
+    : typeof message.http_version === "string" && Number.isInteger(message.status_code);
+  let text = knownLine ? (request ? `${message.method} ${message.path} ${message.http_version}` : `${message.http_version} ${message.status_code}`) : "";
+  text = packetDisplayText(text);
+  const headerValues = [];
+  for (const header of message.headers) {
+    text += `${text ? "\n" : ""}${packetDisplayText(header.name)}: `;
+    headerValues.push({ from: text.length, value: header.value });
+    text += packetDisplayText(header.value);
+  }
+  const head = text;
+  const body = message.body;
+  let notice = knownLine ? "" : "Start line not retained";
+  if (!body.available) notice = [notice, "Body unavailable"].filter(Boolean).join(" · ");
+  else if (body.body_encoding === "base64") notice = [notice, "Binary preview"].filter(Boolean).join(" · ");
+  else if (body.body_preview.length) text += `\n\n${packetDisplayText(body.body_preview)}`;
+  if (body.preview_truncated) notice = [notice, "Captured preview is truncated"].filter(Boolean).join(" · ");
+  return { text, head, notice, headerValues };
+}
+
+function packetUtf8Span(value, span) {
+  if (!span || !Number.isSafeInteger(span.start) || !Number.isSafeInteger(span.end) || span.start < 0 || span.end <= span.start) return null;
+  let bytes = 0, chars = 0, start = null, end = null;
+  for (const point of value) {
+    if (bytes === span.start) start = chars;
+    if (bytes === span.end) end = chars;
+    bytes += new TextEncoder().encode(point).length;
+    chars += point.length;
+    if (bytes > span.end) break;
+  }
+  if (bytes === span.end) end = chars;
+  if (start === null || end === null) return null;
+  // A boundary inside CRLF would not refer to a boundary in CodeMirror's text.
+  if (value[start - 1] === "\r" && value[start] === "\n" || value[end - 1] === "\r" && value[end] === "\n") return null;
+  return { from: packetDisplayText(value.slice(0, start)).length, to: packetDisplayText(value.slice(0, end)).length, literal: value.slice(start, end) };
+}
+
+function packetEvidenceRanges(message, observations, presentation) {
+  const ranges = [];
+  for (const item of observations || []) {
+    const catalog = SniperServiceMap.technologyLiteral(item.product_id);
+    const header = message.headers[item.header_index], mapped = presentation.headerValues[item.header_index];
+    if (!catalog || !Number.isSafeInteger(item.header_index) || !header || !mapped
+      || header.name.toLowerCase() !== item.header_name || !catalog.headers.includes(item.header_name)
+      || item.offset_basis !== "retained_header_value_utf8") continue;
+    const product = packetUtf8Span(header.value, item.product_span);
+    const version = item.version_span ? packetUtf8Span(header.value, item.version_span) : null;
+    if (!product || product.literal.replace(/[A-Z]/g, c => c.toLowerCase()) !== catalog.literal.replace(/[A-Z]/g, c => c.toLowerCase())
+      || item.version_span && (!version || version.literal !== item.reported_version)) continue;
+    for (const span of [product, version].filter(Boolean)) ranges.push({ from: mapped.from + span.from, to: mapped.from + span.to });
+  }
+  return ranges;
+}
+
+function packetRequestTarget(message) {
+  if (!message || !["http", "https"].includes(message.scheme) || typeof message.authority !== "string" || !message.authority
+    || typeof message.method !== "string" || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(message.method)
+    || message.method.toUpperCase() === "CONNECT" || typeof message.path !== "string" || !/^\/[^\s\u0000-\u001f\u007f#]*$/.test(message.path)
+    || /[\s\u0000-\u001f\u007f/@?#\\]/.test(message.authority)) return null;
+  try {
+    const target = new URL(`${message.scheme}://${message.authority}`);
+    return target.hostname && !target.username && !target.password && target.pathname === "/" ? target : null;
+  } catch (_) { return null; }
+}
+
+function packetRequestForAction(message) {
+  const fail = reason => ({ request: null, reason });
+  const target = packetRequestTarget(message);
+  if (!target || !/^HTTP\/[0-9]+(?:\.[0-9]+)?$/.test(message.http_version) || !normalizeReplayHttpVersion(message.http_version)) return fail("Retained request target or start line is unavailable");
+  if (!message.body?.available) return fail("Request body is unavailable");
+  const body = message.body;
+  if (body.preview_truncated || body.body_encoding !== "utf8" || body.content_decoded || typeof body.body_preview !== "string") return fail("Only complete reusable retained requests can be transferred");
+  const length = new TextEncoder().encode(body.body_preview).length;
+  if (body.body_size !== length) return fail("Retained body is incomplete");
+  const headers = message.headers;
+  if (!Array.isArray(headers) || headers.some(header => typeof header.name !== "string" || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(header.name)
+    || typeof header.value !== "string" || /[\u0000-\u0008\u000a-\u001f\u007f]/.test(header.value))) return fail("Retained headers are unsupported");
+  if (headers.some(header => ["transfer-encoding", "upgrade"].includes(header.name.toLowerCase())
+    || header.name.toLowerCase() === "content-encoding" && header.value.trim().toLowerCase() !== "identity")) return fail("Retained request framing is unsupported");
+  const hosts = headers.filter(header => header.name.toLowerCase() === "host");
+  if (hosts.length !== 1) return fail("Retained Host header is unavailable or ambiguous");
+  try {
+    const host = new URL(`${message.scheme}://${hosts[0].value}`);
+    if (host.host !== target.host || host.username || host.password || host.pathname !== "/" || host.search || host.hash) return fail("Retained Host does not match the target");
+    validateRawHttpBodyFraming(headers, length, [length]);
+  } catch (_) { return fail("Retained request framing is inconsistent"); }
+  return { reason: "", request: { scheme: message.scheme, host: message.authority, method: message.method, path: message.path,
+    http_version: message.http_version, headers: headers.map(header => ({ ...header })), body: body.body_preview,
+    body_encoding: body.body_encoding, preview_truncated: body.preview_truncated } };
+}
+
+function packetRequestText(request) {
+  const head = `${request.method} ${request.path} ${request.http_version}\n${request.headers.map(header => `${header.name}: ${header.value}`).join("\n")}`;
+  return `${head}\n\n${request.body}`;
+}
+
+function packetActionReason(target, action) {
+  if (!["copy-url", "copy-as-curl", "copy-as-python", "copy-as-fetch", "copy-as-powershell", "send-to-replay", "send-to-fuzzer", "copy-response-headers", "copy-response-body", "copy-response-raw"].includes(action)) return "Unsupported packet action";
+  const packet = target.packet;
+  if (!target.isCurrent()) return "The selected source changed";
+  if (action === "copy-url") return packetRequestTarget(packet.request?.message) ? "" : "Retained request target is unavailable";
+  if (action.startsWith("copy-response-")) {
+    const message = packet.response?.message;
+    if (!message) return "Response not retained";
+    if (action !== "copy-response-body" && (!message.http_version || !Number.isInteger(message.status_code))) return "Response start line not retained";
+    if (action !== "copy-response-headers" && !message.body.available) return "Response body unavailable";
+    if (action !== "copy-response-headers" && message.body.body_encoding !== "utf8") return "Binary preview cannot be copied as text";
+    return "";
+  }
+  return packetRequestForAction(packet.request?.message).reason;
+}
+
+async function runPacketMenuAction(target, action) {
+  const reason = packetActionReason(target, action);
+  if (reason) { if (target.isCurrent()) showToast(reason, "error"); return Promise.resolve(false); }
+  const isCurrent = target.isCurrent;
+  const request = packetRequestForAction(target.packet.request?.message).request;
+  if (action === "send-to-replay") {
+    if (state.replayTabs.length >= MAX_REPLAY_TABS) throw new Error("Close a Replay tab before opening another request.");
+    if (!preserveActiveHttpReplayDraftBeforeSessionChange("opening a retained packet")) return Promise.resolve(false);
+    if (!isCurrent()) return Promise.resolve(false);
+    const tab = createReplayTab({ baseRequest: request, sourceTransactionId: null, requestText: packetRequestText(request),
+      httpVersionMode: normalizeReplayHttpVersion(request.http_version) });
+    state.replayTabs.push(tab);
+    state.activeReplayTabId = tab.id;
+    setActiveTool("replay");
+    scheduleWorkspaceStateSave();
+    renderToolPanels();
+    return Promise.resolve(true);
+  }
+  if (action === "send-to-fuzzer") return openFuzzerFromPacket(target, request);
+  let text, label = "Copied";
+  if (action === "copy-url") { const message = target.packet.request.message; text = `${message.scheme}://${message.authority}${message.path}`; }
+  else if (action.startsWith("copy-as-")) {
+    const format = action.slice(8), parsed = parseRequestForExport(packetRequestText(request), request.scheme, request.host, "");
+    const blocked = requestFormatExportBlockedReason(parsed, format);
+    if (blocked) { showToast(blocked, "error"); return Promise.resolve(false); }
+    text = ({ curl: requestToCurl, python: requestToPython, fetch: requestToFetch, powershell: requestToPowerShell })[format]?.(parsed);
+  } else if (action.startsWith("copy-response-")) {
+    const message = target.packet.response.message, body = message.body;
+    if (action === "copy-response-body") { text = body.body_preview; label = body.preview_truncated ? "Copied response preview" : "Copied body"; }
+    else {
+      text = `${message.http_version} ${message.status_code}\r\n${message.headers.map(header => `${header.name}: ${header.value}`).join("\r\n")}\r\n`;
+      if (action === "copy-response-raw") { text += `\r\n${body.body_preview}`; if (body.preview_truncated) label = "Copied response preview"; }
+    }
+  }
+  if (typeof text !== "string") return Promise.resolve(false);
+  return copyTextToClipboard(text, { isCurrent }).then(() => { if (isCurrent()) showToast(label); return true; })
+    .catch(error => { if (isCurrent()) handleClipboardActionError(error); return false; });
+}
+
+function openFuzzerFromPacket(target, request) {
+  return openFuzzerFromRecordLoader(() => request, target.isCurrent, () => {
+  invalidateFuzzerRun();
+  state.fuzzerBaseRequest = request;
+  state.fuzzerSourceTransactionId = null;
+  state.fuzzerTarget = null;
+  state.fuzzerTargetRequestText = null;
+  state.fuzzerNotice = "";
+  state.fuzzerRequestText = packetRequestText(request);
+  state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+  clearFuzzerAttackRecord();
+  state._selectedFuzzerResultKey = null;
+  hideFuzzerDetailPanel();
+  setActiveTool("fuzzer");
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
+  });
 }
 
 function buildFindingsRawMessage(record, side) {
@@ -31540,6 +31819,22 @@ function buildChangedLineDecorations(doc, ranges) {
 }
 
 /** Reusable CodeMirror wrapper for Sniper code views. */
+const setPacketEvidenceRanges = CM.StateEffect.define();
+const packetEvidenceField = CM.StateField.define({
+  create() { return CM.Decoration.none; },
+  update(decorations, transaction) {
+    if (transaction.docChanged) decorations = CM.Decoration.none;
+    for (const effect of transaction.effects) if (effect.is(setPacketEvidenceRanges)) {
+      const ranges = effect.value || [];
+      const valid = ranges.filter(range => Number.isSafeInteger(range.from) && Number.isSafeInteger(range.to)
+        && range.from >= 0 && range.to > range.from && range.to <= transaction.state.doc.length);
+      decorations = CM.Decoration.set(valid.map(range => CM.Decoration.mark({ class: "tok-finding-evidence-hit" }).range(range.from, range.to)), true);
+    }
+    return decorations;
+  },
+  provide: field => CM.EditorView.decorations.from(field),
+});
+
 class SniperCodeView {
   constructor(container, options = {}) {
     this._options = options;
@@ -31548,7 +31843,7 @@ class SniperCodeView {
       state: CM.EditorState.create({
         // Initial content is a baseline, not an undoable edit from an empty pane.
         doc: options.content || "",
-        extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField],
+        extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField, packetEvidenceField],
       }),
       parent: container,
     });
@@ -31557,6 +31852,10 @@ class SniperCodeView {
   /** Tint the given character ranges as changed lines. Call after setContent. */
   applyChangedLines(ranges) {
     this.view.dispatch({ effects: setChangedRanges.of(ranges || []) });
+  }
+
+  applyEvidenceRanges(ranges) {
+    this.view.dispatch({ effects: setPacketEvidenceRanges.of(ranges || []) });
   }
 
   setContent(text) {
@@ -31660,7 +31959,7 @@ function updateCodePaneCM(key, container, text, options = {}) {
   // Undo history belongs to one document owner. Tab/session replacement must
   // retire it even when the new document has the same text or persisted ID.
   if (_cmViews[key] && (_cmViews[key]._hlMode !== mode || !!_cmViews[key]._editable !== editable
-    || _cmViews[key]._owner !== options.owner)) {
+    || _cmViews[key]._owner !== options.owner || _cmViews[key]._container && _cmViews[key]._container !== container)) {
     restoreFocus = _cmViews[key]._hlMode === mode && !!_cmViews[key]._editable === editable
       && _cmViews[key].view.hasFocus;
     _cmViews[key].destroy();
@@ -31678,6 +31977,7 @@ function updateCodePaneCM(key, container, text, options = {}) {
     _cmViews[key]._hlMode = mode;
     _cmViews[key]._editable = editable;
     _cmViews[key]._owner = options.owner;
+    _cmViews[key]._container = container;
   }
   const cv = _cmViews[key];
   if (editable && options.onChange && !cv._onChangeWired) {
@@ -31693,6 +31993,7 @@ function updateCodePaneCM(key, container, text, options = {}) {
   // Changed-line highlights (Modified view). Applied after setContent, which
   // clears them, so this is the authoritative re-apply for the new text.
   cv.applyChangedLines(options.changedRanges);
+  if (options.evidenceRanges !== undefined) cv.applyEvidenceRanges(options.evidenceRanges);
   // Keyboard tab cycling can leave focus inside the editor being replaced.
   // Do not claim focus when a toolbar field or tab button owns it instead.
   if (restoreFocus) cv.view.focus();

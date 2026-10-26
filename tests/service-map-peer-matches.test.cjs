@@ -163,7 +163,7 @@ test('outside-default-map origin is captured in this inspection, with only match
   assert.equal(await f.controller.loadPeerEvidence(SAMPLE.replace(REVISION, ROW), MATCH), false); assert.equal(await f.controller.loadPeerEvidence(SAMPLE, OTHER), false); assert.equal(f.requests.length, count);
   const task = f.controller.loadPeerEvidence(SAMPLE, MATCH); const request = f.requests.at(-1); assert.equal(request.options.redirect, 'error'); assert.match(request.url, /include_socket_peer=true/);
   request.resolve(response(evidence(SAMPLE, MATCH))); assert.equal(await task, true); assert.equal(f.state.evidence.sequence, String(SEQUENCE + 1n));
-  assert.match(f.els.detail.innerHTML, /Verified retained source/); assert.equal(f.requests.length, count + 1);
+  assert.match(f.els.detail.innerHTML, /Capture info/); assert.equal(f.requests.length, count + 1);
 });
 for (const [label, change] of [
   ['UUID', v => { v.row.record_id = REVISION; }], ['full token', v => { v.row.evidence_id = TOKEN; }], ['sequence', v => { v.row.sequence = String(SEQUENCE); }],
@@ -343,13 +343,13 @@ for (const reason of ['invalid_evidence_id', 'session_mismatch', 'record_changed
   const f = fixture(); await f.show(); assert.equal(f.state.peerEvidenceBinding, null); assert.ok(f.state.evidence); assert.ok(f.state.socketPeer);
   const task = f.controller.loadPeerMatches(); f.requests.at(-1).resolve(response(unavailable(reason))); assert.equal(await task, true);
   for (const key of ['evidence', 'socketPeer', 'bodyReferenceOverlay', 'bodyReferences', 'linkDeclarations', 'htmlGenerators', 'peerMatches', 'peerMatchesSource']) assert.equal(f.state[key], null, key);
-  assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source|Upstream socket peer/); assert.match(f.els.detail.innerHTML, /Source unavailable/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /Capture info|Upstream socket peer/); assert.match(f.els.detail.innerHTML, /Source unavailable/);
 });
 for (const reason of ['invalid_evidence_id', 'session_mismatch', 'record_changed', 'record_missing', 'stale_generation', 'session_source_changed']) test(`authoritative ${reason} before Show invalidates the source without needing an overlay`, async () => {
   const f = fixture(); await f.load(); await f.verify(); assert.equal(f.state.bodyReferenceOverlay, null);
   const task = f.controller.loadPeerMatches(); f.requests.at(-1).resolve(response(unavailable(reason))); assert.equal(await task, true);
   assert.equal(f.state.evidence, null); assert.equal(f.state.socketPeer, null); assert.equal(f.state.peerMatches, null); assert.equal(f.state.bodyReferenceOverlay, null);
-  assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source|Upstream socket peer/); assert.match(f.els.detail.innerHTML, /Source unavailable/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /Capture info|Upstream socket peer/); assert.match(f.els.detail.innerHTML, /Source unavailable/);
 });
 test('only three-sample omissions cannot claim projection_byte_limit even with very little budget remaining', () => {
   const value = byteLimitedMatches(); value.origins.pop();
@@ -368,7 +368,7 @@ test('peer-only exact sample offers no supplementary reads it cannot make', asyn
   assert.equal(await f.controller.loadBodyReferences(), false); assert.equal(await f.controller.loadHtmlGenerators(), false);
   f.controller.setRelationshipKind('link'); assert.equal(await f.controller.loadLinkDeclarations(), false); assert.equal(f.requests.length, count);
   assert.doesNotMatch(f.els.detail.innerHTML, /data-service-(?:body-references|link-declarations|html-generators)="inspect"/);
-  assert.match(f.els.detail.innerHTML, /Verified retained source/); assert.match(f.els.detail.innerHTML, /Upstream socket peer/); assert.match(f.els.detail.innerHTML, /Find matching recorded peer/);
+  assert.match(f.els.detail.innerHTML, /Capture info/); assert.match(f.els.detail.innerHTML, /Recorded peer/); assert.equal(f.state.socketPeer.status, 'observed'); assert.ok(f.els.detail.innerHTML.includes(f.state.socketPeer.ip)); assert.match(f.els.detail.innerHTML, /Find matching peer/);
 });
 test('scope work limit is a fixed unavailable reason with a fully empty result', () => {
   const value = unavailable('scope_work_limit');
@@ -397,7 +397,7 @@ for (const kind of ['before Show', 'same shown source', 'unrelated shown source'
   assert.equal(f.requests.length, count + 1); assert.equal(f.state.evidence, source); assert.equal(f.state.socketPeer, peer); assert.equal(f.state.bodyReferenceOverlay, overlay); assert.equal(f.els.canvas.innerHTML, canvas);
   assert.equal(f.state.peerMatches.status, 'unavailable'); assert.equal(f.controller.showPeerMatchesOnMap(), false); assert.equal(f.requests.length, count + 1);
   assert.match(f.els.detail.innerHTML, /Scope matching reached the inspection work limit\. Narrow the scope rules or use a smaller latest-row window in the CLI\./);
-  assert.match(f.els.detail.innerHTML, /Verified retained source/); assert.match(f.els.detail.innerHTML, /Upstream socket peer/);
+  assert.match(f.els.detail.innerHTML, /Capture info/); assert.match(f.els.detail.innerHTML, /Recorded peer/); assert.equal(f.state.socketPeer.status, 'observed'); assert.ok(f.els.detail.innerHTML.includes(f.state.socketPeer.ip));
   assert.equal(f.state.evidenceError, ''); assert.ok(f.requests.every(request => request.options.redirect === 'error' && !request.options.method));
 });
 

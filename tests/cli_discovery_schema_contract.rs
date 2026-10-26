@@ -777,7 +777,7 @@ mod history_fixture {
             "/api/transactions" | "/api/transactions-page" => {
                 Json(state.payload.lock().unwrap().clone()).into_response()
             }
-            "/api/target/service-map" | "/api/target/service-map/evidence" | "/api/target/service-map/body-references" | "/api/target/service-map/html-generators" | "/api/target/service-map/link-declarations" | "/api/target/service-map/socket-peer-matches" => {
+            "/api/target/service-map" | "/api/target/service-map/evidence" | "/api/target/service-map/body-references" | "/api/target/service-map/packet" | "/api/target/service-map/html-generators" | "/api/target/service-map/link-declarations" | "/api/target/service-map/socket-peer-matches" => {
                 let status = StatusCode::from_u16(*state.read_status.lock().unwrap()).unwrap();
                 let payload = state.payload.lock().unwrap().clone();
                 let mut response = if *state.stalled_payload.lock().unwrap() {
@@ -5369,6 +5369,215 @@ mod history_fixture {
                 &[("evidence_id", BODY_REFERENCE_TOKEN)],
             );
         }
+    }
+
+    fn retained_packet_payload(variant: &str) -> Value {
+        let original = variant == "original";
+        json!({
+            "schema_version":1,"session_id":Uuid::nil(),"evidence_id":BODY_REFERENCE_TOKEN,"variant":variant,
+            "available":true,"status":"available","reason":null,
+            "source":{"record_id":Uuid::nil(),"sequence":"9007199254740993","started_at":"2026-10-26T07:00:00Z"},
+            "limits":{"packet_bytes":2097152,"serialized_row_bytes":2097152},"originals":{"request":true,"response":false},
+            "request":{"status":"retained","message":{
+                "method":"POST","scheme":if original {Value::Null} else {json!("https")},
+                "authority":if original {Value::Null} else {json!("example.com:443")},"path":"/resource?q=one",
+                "http_version":if original {Value::Null} else {json!("HTTP/1.1")},"status_code":null,
+                "headers":[{"name":"X-Example","value":"first"},{"name":"X-Example","value":"second"}],
+                "body":{"available":true,"reason":null,"body_preview":"","body_encoding":"utf8","body_size":20,
+                    "decoded_body_size":0,"preview_truncated":false,"content_decoded":true,"content_type":null}
+            }},"response":{"status":"not_retained","message":null}
+        })
+    }
+
+    #[test]
+    fn retained_packet_discovery_schema_is_closed_and_preserves_explicit_nulls() {
+        let operation = "target.service_map.packet.get";
+        let spec = super::spec(operation);
+        let schema = output_schema(operation);
+        assert_eq!(spec["side_effect"], "read");
+        assert_eq!(spec["requires_confirmation"], false);
+        assert_eq!(
+            spec["input_schema"]["required"],
+            json!(["session_id", "evidence_id", "variant"])
+        );
+        assert_eq!(spec["input_schema"]["additionalProperties"], false);
+        for variant in ["current", "original"] {
+            let payload = retained_packet_payload(variant);
+            assert_schema(&payload, &schema);
+            for pointer in [
+                "/reason",
+                "/source",
+                "/originals",
+                "/request",
+                "/response",
+                "/request/message/http_version",
+                "/request/message/body/body_preview",
+            ] {
+                let mut changed = payload.clone();
+                *changed.pointer_mut(pointer).unwrap() = json!(true);
+                assert!(!super::matches_schema(&changed, &schema), "{pointer}");
+            }
+            let mut extra = payload.clone();
+            extra["user_note"] = json!("SYNTHETIC_PRIVATE_VALUE");
+            assert!(!super::matches_schema(&extra, &schema));
+            let mut missing = payload.clone();
+            missing["request"]["message"]
+                .as_object_mut()
+                .unwrap()
+                .remove("http_version");
+            assert!(!super::matches_schema(&missing, &schema));
+            let input = json!({"session_id":Uuid::nil(),"evidence_id":BODY_REFERENCE_TOKEN,"variant":variant}).to_string();
+            let preview = super::cli(&["--dry-run", "call", operation, "--input", &input], 0);
+            assert_eq!(preview["data"]["api"]["method"], "GET");
+            assert!(preview["data"]["api"]["path"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("variant={variant}")));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retained_packet_direct_and_call_reads_preserve_variants_and_refuse_stale_or_invented_source(
+    ) {
+        let mock = MockApi::new().await;
+        let session = Uuid::nil().to_string();
+        for variant in ["current", "original"] {
+            let payload = retained_packet_payload(variant);
+            *mock.state.payload.lock().unwrap() = payload.clone();
+            let args = [
+                "scope",
+                "service-map",
+                "packet",
+                "--session-id",
+                &session,
+                "--evidence-id",
+                BODY_REFERENCE_TOKEN,
+                "--variant",
+                variant,
+            ];
+            let direct = mock.command(&args).await;
+            assert_eq!(direct, payload);
+            mock.assert_reads(
+                "/api/target/service-map/packet",
+                &[("evidence_id", BODY_REFERENCE_TOKEN), ("variant", variant)],
+            );
+            let input =
+                json!({"session_id":session,"evidence_id":BODY_REFERENCE_TOKEN,"variant":variant})
+                    .to_string();
+            let called = mock
+                .command(&["call", "target.service_map.packet.get", "--input", &input])
+                .await;
+            assert_eq!(called["data"], payload);
+            mock.assert_reads(
+                "/api/target/service-map/packet",
+                &[("evidence_id", BODY_REFERENCE_TOKEN), ("variant", variant)],
+            );
+            for (pointer, value) in [
+                ("/source/record_id", json!(Uuid::nil())),
+                ("/source/sequence", json!("9007199254740994")),
+                ("/variant", json!("unknown")),
+                (
+                    "/request/message/body/reason",
+                    json!("SYNTHETIC_PRIVATE_VALUE"),
+                ),
+            ] {
+                let mut bad = payload.clone();
+                *bad.pointer_mut(pointer).unwrap() = value;
+                *mock.state.payload.lock().unwrap() = bad;
+                let result = mock.command_with_code(&args, 5).await;
+                assert_eq!(result["error"]["code"], "INVALID_RESPONSE");
+                assert!(!result.to_string().contains("SYNTHETIC_PRIVATE_VALUE"));
+                mock.assert_reads(
+                    "/api/target/service-map/packet",
+                    &[("evidence_id", BODY_REFERENCE_TOKEN), ("variant", variant)],
+                );
+            }
+        }
+        let mut unavailable = retained_packet_payload("current");
+        unavailable["available"] = json!(false);
+        unavailable["status"] = json!("unavailable");
+        unavailable["reason"] = json!("packet_view_limit");
+        for field in ["source", "originals", "request", "response"] {
+            unavailable[field] = Value::Null;
+        }
+        *mock.state.payload.lock().unwrap() = unavailable.clone();
+        let result = mock
+            .command(&[
+                "scope",
+                "service-map",
+                "packet",
+                "--session-id",
+                &session,
+                "--evidence-id",
+                BODY_REFERENCE_TOKEN,
+                "--variant",
+                "current",
+            ])
+            .await;
+        assert_eq!(result, unavailable);
+        mock.assert_reads(
+            "/api/target/service-map/packet",
+            &[
+                ("evidence_id", BODY_REFERENCE_TOKEN),
+                ("variant", "current"),
+            ],
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retained_packet_cli_bounds_encoded_response_and_never_falls_back_on_unsupported_api() {
+        let mock = MockApi::new().await;
+        let session = Uuid::nil().to_string();
+        let args = [
+            "scope",
+            "service-map",
+            "packet",
+            "--session-id",
+            &session,
+            "--evidence-id",
+            BODY_REFERENCE_TOKEN,
+            "--variant",
+            "current",
+        ];
+        let mut payload = retained_packet_payload("current");
+        // No packet mini-limit: retained large header text is accepted if the whole envelope fits.
+        payload["request"]["message"]["headers"][0]["value"] = json!("x".repeat(5000));
+        *mock.state.payload.lock().unwrap() = payload.clone();
+        assert_eq!(mock.command(&args).await, payload);
+        mock.assert_reads(
+            "/api/target/service-map/packet",
+            &[
+                ("evidence_id", BODY_REFERENCE_TOKEN),
+                ("variant", "current"),
+            ],
+        );
+        payload["request"]["message"]["headers"][0]["value"] = json!("x".repeat(2 * 1024 * 1024));
+        for chunked in [false, true] {
+            *mock.state.chunked_payload.lock().unwrap() = chunked;
+            *mock.state.payload.lock().unwrap() = payload.clone();
+            let invalid = mock.command_with_code(&args, 5).await;
+            assert_eq!(invalid["error"]["code"], "INVALID_RESPONSE");
+            mock.assert_reads(
+                "/api/target/service-map/packet",
+                &[
+                    ("evidence_id", BODY_REFERENCE_TOKEN),
+                    ("variant", "current"),
+                ],
+            );
+        }
+        *mock.state.chunked_payload.lock().unwrap() = false;
+        *mock.state.read_status.lock().unwrap() = 404;
+        *mock.state.payload.lock().unwrap() = json!({"error":"SYNTHETIC_PRIVATE_VALUE"});
+        let absent = mock.command_with_code(&args, 5).await;
+        assert_eq!(absent["error"]["code"], "UNSUPPORTED_FEATURE");
+        assert!(!absent.to_string().contains("SYNTHETIC_PRIVATE_VALUE"));
+        mock.assert_reads(
+            "/api/target/service-map/packet",
+            &[
+                ("evidence_id", BODY_REFERENCE_TOKEN),
+                ("variant", "current"),
+            ],
+        );
     }
 
     fn body_references_payload(status: &str) -> Value {

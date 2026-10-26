@@ -8839,3 +8839,29 @@ button.utility-button.replay-tab-add {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* Exact retained packets use the same message panes as HTTP history. The map
+   inspector stacks them until there is room for two readable editors. */
+.service-map-detail-body { container-type: inline-size; }
+.packet-source { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.packet-source > span:not(.mr-toggle) { min-width: 0; overflow-wrap: anywhere; font-size: var(--font-xs); color: var(--text-dim); }
+.packet-source select, .packet-inspect select { max-width: 100%; min-height: var(--control-h); font: inherit; }
+.packet-viewer.lower-workbench { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-height: 0; }
+.packet-viewer .message-column { min-width: 0; min-height: 250px; display: flex; flex-direction: column; }
+.packet-viewer .editor-shell { min-height: 190px; height: 280px; overflow: hidden; flex: 1; }
+.packet-viewer .cm-container { height: 100%; }
+.packet-viewer .pane-header { flex-wrap: wrap; gap: 4px; }
+.packet-viewer .pane-footer { flex-wrap: wrap; }
+.packet-viewer .render-view { height: 280px; }
+.packet-notice { margin: 4px 8px; font-size: var(--font-xs); color: var(--text-dim); }
+.packet-capture-info { margin-left: auto; font-size: var(--font-xs); }
+.packet-capture-info dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; }
+.packet-capture-info dd { margin: 0; overflow-wrap: anywhere; }
+.packet-inspect { display: flex; justify-content: flex-end; margin-top: 8px; }
+.packet-inspection { margin-top: 12px; font-size: var(--font-xs); }
+.packet-inspection header { display: flex; align-items: center; gap: 8px; }
+.packet-inspection ul { padding-left: 20px; overflow-wrap: anywhere; }
+.packet-inspection details { margin-top: 8px; color: var(--text-dim); }
+@container (min-width: 780px) {
+  .packet-viewer.lower-workbench { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}

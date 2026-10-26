@@ -132,6 +132,8 @@ function fixture() {
     'getActiveModalAction', 'isModalVisible', 'isEditableTarget', 'trapModalFocus', 'restoreModalFocus',
     'openCompareModal',
   ], {
+    // This modal/clipboard fixture never mounts retained packets.
+    packetViewerMarkup: null, mountServiceMapPacketViewer: null,
     window, document, Element, HTMLElement: Element, URL, URLSearchParams, AbortController, state, els,
     mainTabs: [mainTab], targetServiceMapController: null, activeConfirmDialog: null,
     compareBaseId: 'base', compareBaseSessionId: 'session-one', compareLoadGeneration: 0,

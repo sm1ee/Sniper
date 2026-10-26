@@ -46,6 +46,8 @@ function fixture({ modern = true } = {}) {
     },
   };
   const context = loadFunctions(['copyTextToClipboard', 'initializeTargetWorkspace', 'getActiveModalAction', 'isModalVisible'], {
+    // This modal/clipboard fixture never mounts retained packets.
+    packetViewerMarkup: null, mountServiceMapPacketViewer: null,
     document, window: { ...events(windowEvents), document, open(...args) { opened.push(args); } },
     URL, URLSearchParams, AbortController,
     navigator: modern ? { clipboard: { writeText(text) { const write = { text, ...deferred() }; writes.push(write); return write.promise; } } } : {},

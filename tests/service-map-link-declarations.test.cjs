@@ -153,7 +153,7 @@ test('only explicit Link Inspect issues one exact GET without catalog headers; p
   assert.equal(url.pathname, '/api/target/service-map/link-declarations'); assert.equal(url.searchParams.get('evidence_id'), TOKEN);
   assert.deepEqual([...url.searchParams.keys()], ['session_id', 'evidence_id']);
   request.resolve(result(linkScan())); await read;
-  assert.match(f.els.detail.innerHTML, /Retained relationships/); assert.equal((f.els.detail.innerHTML.match(/<select /g) || []).length, 1);
+  assert.match(f.els.detail.innerHTML, /<h4>Link references<\/h4>/); assert.doesNotMatch(f.els.detail.innerHTML, /data-service-relationship-kind/);
   assert.match(f.els.detail.innerHTML, /Sequence 18446744073709551615/); assert.match(f.els.detail.innerHTML, /Response Link headers · Complete inspection/);
   assert.doesNotMatch(f.els.detail.innerHTML, /Response Link header index/, 'no byte positions in the list');
   assert.doesNotMatch(f.els.detail.innerHTML, /PRIVATE_TOKEN|private-path|private-query|<a\s/);
@@ -243,6 +243,12 @@ test('32 target observations obey 23-neighbor display cap and independent query 
   assert.equal((f.els.canvas.innerHTML.match(/class="service-map-card /g) || []).length, 24);
   assert.match(f.els.graphBounds.textContent, /23 \/ 32 known direct neighbors shown/); assert.match(f.els.graphBounds.textContent, /9 omitted by 24-card cap/);
   assert.match(f.els.graphDiagnostics.textContent, /Link declaration typed arrows: 23 \/ 32 shown · 9 outside displayed cards · 0 omitted by arrow cap/);
+  const count = f.requests.length, selected = f.state.selectedOrigin;
+  const tab = { dataset: { serviceDetailTab: 'apis' } };
+  const contains = f.els.panel.contains; f.els.panel.contains = element => element === tab;
+  f.els.panel.dispatch('click', { target: { closest: () => tab } });
+  f.els.panel.contains = contains; assert.equal(f.state.detailTab, 'apis');
+  assert.equal(f.requests.length, count); assert.equal(f.state.selectedOrigin, selected);
   assert.match(f.els.detail.innerHTML, /2 additional relationship declarations omitted from this pane/);
   f.els.search.value = 'target-1.'; f.els.search.dispatch('input');
   assert.match(f.els.graphBounds.textContent, /31 hidden by query/); assert.doesNotMatch(f.els.graphBounds.textContent, /omitted by 24-card cap/);
