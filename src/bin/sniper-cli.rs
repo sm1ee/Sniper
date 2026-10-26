@@ -19200,6 +19200,36 @@ mod label_rule_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_replace_typed_input_preserves_legacy_disabled_annotation_wire() {
+        for active in [false, true] {
+            let rule = serde_json::json!({
+                "id": uuid::Uuid::new_v4(), "enabled": true, "annotation_only_enabled": active,
+                "description": "", "scope": "response", "target": "body", "search": "flag",
+                "replace": "", "regex": false, "case_sensitive": true,
+                "annotation_note": "literal", "annotation_color": "yellow"
+            });
+            for input in [
+                serde_json::json!([rule.clone()]),
+                serde_json::json!({"rules": [rule.clone()]}),
+            ] {
+                let parsed: super::AutoReplaceInput = serde_json::from_value(input).unwrap();
+                let rules = match parsed {
+                    super::AutoReplaceInput::Rules(rules) => rules,
+                    super::AutoReplaceInput::Payload(payload) => payload.rules,
+                };
+                let wire = serde_json::to_value(super::MatchReplaceRulesPayload {
+                    session_id: None,
+                    rules,
+                })
+                .unwrap();
+                assert_eq!(wire["rules"][0]["enabled"], false);
+                assert_eq!(wire["rules"][0]["annotation_only_enabled"], active);
+                assert_eq!(wire["rules"][0]["annotation_note"], "literal");
+            }
+        }
+    }
+
     use super::validate_saved_response_binding;
     use super::{
         active_session_id_from_summaries, adopt_target_scheme_for_uncaptured_request,

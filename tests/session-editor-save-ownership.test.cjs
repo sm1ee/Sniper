@@ -18,18 +18,19 @@ function fixture(kind) {
   const input = value => ({ value, listeners: {}, addEventListener(name, callback) { this.listeners[name] = callback; } });
   const els = { targetScopeEditor: input('example.com'), targetScopeExcludeEditor: input(''), saveTargetScopeButton: { classList: { remove() {}, toggle() {} } },
     matchReplaceScope: input('request'), matchReplaceTarget: input('any'), matchReplaceSearch: input(''),
-    matchReplaceReplace: input(''), matchReplaceRegex: { checked: false }, matchReplaceCaseSensitive: { checked: false } };
+    matchReplaceReplace: input(''), matchReplaceReplaceEnabled: { checked: true },
+    matchReplaceAnnotationNote: input(''), matchReplaceAnnotationColor: input(''), matchReplaceRegex: { checked: false }, matchReplaceCaseSensitive: { checked: false } };
   const context = loadFunctions(['currentSessionId', 'expectedActiveSessionIdForWrite', 'sessionWritePath',
     'sessionQueryPath', 'saveTargetScope', 'postRuntimeSettings', 'saveMatchReplaceRules', 'formatScopePatternsText', 'jsonArray',
-    'syncMatchReplaceEditor', 'getSelectedMatchReplaceRule', 'flushTargetScopeDraft', 'flushMatchReplaceDraft',
+    'syncMatchReplaceEditor', 'matchReplaceRuleActivity', 'setMatchReplaceRuleActivity', 'canonicalMatchReplaceRule', 'matchReplaceRulesPayload', 'matchReplaceRuleActions', 'matchReplaceRuleTitle', 'getMatchReplaceSaveOwner', 'beginMatchReplaceWrite', 'matchReplaceWriteIsCurrent', 'acknowledgeMatchReplaceRules', 'finishMatchReplaceWrite', 'getSelectedMatchReplaceRule', 'flushTargetScopeDraft', 'flushMatchReplaceDraft',
     'loadTargetSiteMap', 'syncTargetScopeDraft', 'deleteSelectedMatchReplaceRule', 'canLeaveSessionAfterDraftPreflight',
     'preserveActiveHttpReplayDraftBeforeSessionChange', 'getRenderedHttpReplayDraftOwner', 'saveMatchReplaceSwitch',
     'matchReplaceRuleUnsaved'], {
-    state, els, workspaceStateGeneration: 0, workspaceSaveConflictPending: false, URLSearchParams,
+    state, els, TextEncoder, HTTP_COLOR_TAG_OPTIONS: new Set(['red', 'orange', 'yellow', 'green', 'blue', 'purple']), workspaceStateGeneration: 0, workspaceSaveConflictPending: false, URLSearchParams,
     workspaceLoaded: false, renderedHttpReplayDraftOwner: null, getActiveReplayTab: () => null,
     requireOkResponse: async response => { if (!response.ok) throw response.error; },
     showToast: (...args) => toasts.push(args), console: { error() {} },
-    renderMatchReplaceRules: () => renders.push('rules'), renderTarget: () => renders.push('scope'),
+    updateMatchReplaceSaveState() {}, renderMatchReplaceRules: () => renders.push('rules'), renderTarget: () => renders.push('scope'),
     renderInterceptStatus() {}, renderProxySettings() {}, invalidateVisibleEntriesCache() {}, scheduleRefresh() {},
     fetch(url, options) { const request = { url, options, ...deferred() }; requests.push(request); return request.promise; },
   });
@@ -78,27 +79,55 @@ for (const kind of ['scope', 'rules']) {
     const f = fixture(kind), saving = f.save(); f.success(0); assert.notEqual(await saving, false);
     assert.equal(f.dirty(), false); assert.equal(f.toasts.length, 0);
   });
-  test(`${kind}: a newer accepted identical save supersedes older response settlement`, async () => {
-    const f = fixture(kind), older = f.save(), latest = f.save();
-    f.success(1); assert.notEqual(await latest, false);
-    const before = { rules: f.state.matchReplaceRules, runtime: f.state.runtime, renders: f.renders.length };
-    f.success(0); assert.equal(await older, false);
-    assert.equal(f.state.matchReplaceRules, before.rules); assert.equal(f.state.runtime, before.runtime);
-    assert.equal(f.renders.length, before.renders); assert.equal(f.dirty(), false);
-  });
-  for (const pending of [true, false]) test(`${kind}: newer ${pending ? 'pending' : 'failed'} identical attempt conservatively supersedes older settlement`, async () => {
-    const f = fixture(kind), older = f.save(), error = new Error('Synthetic failure');
-    const latest = f.save().then(value => value, caught => caught);
-    if (!pending) { f.requests[1].reject(error); assert.equal(await latest, error); }
-    f.success(0); assert.equal(await older, false); assert.equal(f.dirty(), true); assert.equal(f.toasts.length, 1);
-    if (pending) { f.success(1); assert.notEqual(await latest, false); }
-  });
-  test(`${kind}: older response cannot replace newer acknowledged edits or make them dirty`, async () => {
-    const f = fixture(kind), older = f.save(); f.edit(newer); const latest = f.save();
-    const response = kind === 'scope' ? { scope_patterns: [newer], excluded_scope_patterns: [] } : [{ ...f.rule, case_sensitive: true }];
-    f.success(1, response); assert.notEqual(await latest, false); assert.equal(f.dirty(), false);
-    f.success(0); assert.equal(await older, false); assert.equal(f.draft(), newer); assert.equal(f.dirty(), false);
-  });
+  if (kind === 'scope') {
+    test(`${kind}: a newer accepted identical save supersedes older response settlement`, async () => {
+      const f = fixture(kind), older = f.save(), latest = f.save();
+      f.success(1); assert.notEqual(await latest, false);
+      const before = { rules: f.state.matchReplaceRules, runtime: f.state.runtime, renders: f.renders.length };
+      f.success(0); assert.equal(await older, false);
+      assert.equal(f.state.matchReplaceRules, before.rules); assert.equal(f.state.runtime, before.runtime);
+      assert.equal(f.renders.length, before.renders); assert.equal(f.dirty(), false);
+    });
+    for (const pending of [true, false]) test(`${kind}: newer ${pending ? 'pending' : 'failed'} identical attempt conservatively supersedes older settlement`, async () => {
+      const f = fixture(kind), older = f.save(), error = new Error('Synthetic failure');
+      const latest = f.save().then(value => value, caught => caught);
+      if (!pending) { f.requests[1].reject(error); assert.equal(await latest, error); }
+      f.success(0); assert.equal(await older, false); assert.equal(f.dirty(), true); assert.equal(f.toasts.length, 1);
+      if (pending) { f.success(1); assert.notEqual(await latest, false); }
+    });
+    test(`${kind}: older response cannot replace newer acknowledged edits or make them dirty`, async () => {
+      const f = fixture(kind), older = f.save(); f.edit(newer); const latest = f.save();
+      const response = kind === 'scope' ? { scope_patterns: [newer], excluded_scope_patterns: [] } : [{ ...f.rule, case_sensitive: true }];
+      f.success(1, response); assert.notEqual(await latest, false); assert.equal(f.dirty(), false);
+      f.success(0); assert.equal(await older, false); assert.equal(f.draft(), newer); assert.equal(f.dirty(), false);
+    });
+  } else {
+    test('rules: a second identical full Save waits, then a fresh explicit Save sends current edits', async () => {
+      const f = fixture(kind), first = f.save(); await assert.rejects(f.save(), /still saving/);
+      assert.equal(f.requests.length, 1); f.success(0); assert.equal(await first, true);
+      f.edit(newer); const next = f.save(); assert.equal(f.requests.length, 2);
+      assert.equal(JSON.parse(f.requests[1].options.body).rules[0].case_sensitive, newer);
+      f.success(1, [{ ...f.rule, case_sensitive: newer }]); assert.equal(await next, true);
+      assert.equal(f.draft(), newer); assert.equal(f.dirty(), false);
+    });
+    for (const failed of [false, true]) test(`rules: blocked Save retains newer draft through first ${failed ? 'failure' : 'success'}`, async () => {
+      const f = fixture(kind), error = new Error('Synthetic failure'), first = f.save().then(value => value, caught => caught);
+      f.edit(newer); await assert.rejects(f.save(), /still saving/); assert.equal(f.requests.length, 1);
+      if (failed) f.requests[0].reject(error); else f.success(0);
+      assert.equal(await first, failed ? error : false); assert.equal(f.draft(), newer); assert.equal(f.dirty(), true);
+      assert.equal(f.requests.length, 1, 'settlement never resends');
+      const next = f.save(); assert.equal(JSON.parse(f.requests[1].options.body).rules[0].case_sensitive, newer);
+      f.success(1, [{ ...f.rule, case_sensitive: newer }]); assert.equal(await next, true);
+      assert.equal(f.draft(), newer); assert.equal(f.dirty(), false);
+    });
+    test('rules: blocked full Save does not erase edit/revert ownership, fresh Save acknowledges it', async () => {
+      const f = fixture(kind), first = f.save(); f.edit(newer); f.edit(original);
+      await assert.rejects(f.save(), /still saving/); assert.equal(f.requests.length, 1);
+      f.success(0); assert.equal(await first, false); assert.equal(f.draft(), original); assert.equal(f.dirty(), true);
+      const next = f.save(); assert.equal(JSON.parse(f.requests[1].options.body).rules[0].case_sensitive, original);
+      f.success(1); assert.equal(await next, true); assert.equal(f.draft(), original); assert.equal(f.dirty(), false);
+    });
+  }
   test(`${kind}: newer edit while response JSON is pending is checked after decoding`, async () => {
     const f = fixture(kind), body = deferred(), saving = f.save();
     f.requests[0].resolve({ ok: true, json: () => body.promise }); await tick(); f.edit(newer);

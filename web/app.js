@@ -937,6 +937,9 @@ const els = {
   matchReplaceTarget: document.getElementById("matchReplaceTarget"),
   matchReplaceSearch: document.getElementById("matchReplaceSearch"),
   matchReplaceReplace: document.getElementById("matchReplaceReplace"),
+  matchReplaceReplaceEnabled: document.getElementById("matchReplaceReplaceEnabled"),
+  matchReplaceAnnotationNote: document.getElementById("matchReplaceAnnotationNote"),
+  matchReplaceAnnotationColor: document.getElementById("matchReplaceAnnotationColor"),
   matchReplaceRegex: document.getElementById("matchReplaceRegex"),
   matchReplaceCaseSensitive: document.getElementById("matchReplaceCaseSensitive"),
   saveMatchReplaceRuleButton: document.getElementById("saveMatchReplaceRuleButton"),
@@ -2120,6 +2123,9 @@ function bindEvents() {
     els.matchReplaceTarget,
     els.matchReplaceSearch,
     els.matchReplaceReplace,
+    els.matchReplaceReplaceEnabled,
+    els.matchReplaceAnnotationNote,
+    els.matchReplaceAnnotationColor,
     els.matchReplaceRegex,
     els.matchReplaceCaseSensitive,
   ].forEach((element) => {
@@ -5292,6 +5298,7 @@ function resetSessionScopedUiState() {
   resetEventLogUiState();
   state.matchReplaceRules = [];
   state.matchReplaceSavedRules = [];
+  state.matchReplaceSaveOwner = null;
   state.selectedMatchReplaceRuleId = null;
   state.matchReplaceDirty = false;
   state.matchReplaceEditorSessionId = null;
@@ -7786,13 +7793,19 @@ async function clearEventLog() {
 
 async function loadMatchReplaceRules() {
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const owner = getMatchReplaceSaveOwner();
+  const saveToken = state.matchReplaceSaveToken || 0;
+  const acknowledgedToken = owner.acknowledgedToken;
+  if (owner.pendingWriteCount) return;
   if (state.matchReplaceDirty && state.matchReplaceEditorSessionId === sessionId) {
     return;
   }
   const response = await fetch(sessionQueryPath("/api/match-replace", sessionId));
   await requireOkResponse(response, "Failed to load match-replace rules.");
   const rules = jsonArray(await response.json());
-  if (sessionId !== currentSessionId()) {
+  if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration
+    || saveToken !== (state.matchReplaceSaveToken || 0) || acknowledgedToken !== owner.acknowledgedToken) {
     return;
   }
   if (state.matchReplaceDirty && state.matchReplaceEditorSessionId === sessionId) {
@@ -7810,47 +7823,46 @@ async function loadMatchReplaceRules() {
 
 async function saveMatchReplaceRules(options = {}) {
   const sessionId = options.sessionId || currentSessionId();
-  if (!sessionId) {
-    return;
-  }
-  if (
-    state.matchReplaceDirty
-    && state.matchReplaceEditorSessionId
-    && state.matchReplaceEditorSessionId !== sessionId
-  ) {
+  if (!sessionId) return;
+  if (state.matchReplaceDirty && state.matchReplaceEditorSessionId
+    && state.matchReplaceEditorSessionId !== sessionId) {
     throw new Error("Match/Replace editor changed sessions. Review the rule and save again.");
   }
-  const workspaceGeneration = workspaceStateGeneration;
+  if (getMatchReplaceSaveOwner().pendingWriteCount) {
+    throw new Error("A rule is still saving. Save again after it finishes.");
+  }
   const draftVersion = state.matchReplaceDraftVersion || 0;
-  const saveToken = state.matchReplaceSaveToken = (state.matchReplaceSaveToken || 0) + 1;
   const submittedRules = JSON.stringify(state.matchReplaceRules);
-  const response = await fetch(sessionWritePath("/api/match-replace", sessionId, options), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ session_id: sessionId, rules: JSON.parse(submittedRules) }),
-  });
-  await requireOkResponse(response, "Failed to save match-replace rules.");
-  const rules = jsonArray(await response.json());
-  if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return false;
-  // An acknowledgement belongs to its dispatched draft, not to edits made
-  // while it was pending (including edit/revert and a newer save attempt).
-  if (draftVersion !== (state.matchReplaceDraftVersion || 0)
-    || saveToken !== state.matchReplaceSaveToken
-    || submittedRules !== JSON.stringify(state.matchReplaceRules)) {
-    showToast("An earlier save completed. Your current draft is unchanged; review it before continuing.", "error", 7000);
-    return false;
+  const payload = matchReplaceRulesPayload(JSON.parse(submittedRules));
+  const write = beginMatchReplaceWrite(payload);
+  try {
+    const response = await fetch(sessionWritePath("/api/match-replace", sessionId, options), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, rules: payload }),
+    });
+    await requireOkResponse(response, "Failed to save match-replace rules.");
+    const rules = jsonArray(await response.json());
+    if (sessionId !== currentSessionId() || !matchReplaceWriteIsCurrent(write)) return false;
+    acknowledgeMatchReplaceRules(write, rules);
+    // Acknowledged server state is distinct from a newer unsaved editor draft.
+    if (draftVersion !== (state.matchReplaceDraftVersion || 0)
+      || write.token !== state.matchReplaceSaveToken
+      || submittedRules !== JSON.stringify(state.matchReplaceRules)) {
+      showToast("An earlier save completed. Your current draft is unchanged; review it before continuing.", "error", 7000);
+      return false;
+    }
+    state.matchReplaceRules = rules;
+    if (!state.matchReplaceRules.some((rule) => rule.id === state.selectedMatchReplaceRuleId)) {
+      state.selectedMatchReplaceRuleId = state.matchReplaceRules[0]?.id ?? null;
+    }
+    state.matchReplaceDirty = false;
+    state.matchReplaceEditorSessionId = sessionId;
+    renderMatchReplaceRules();
+    return true;
+  } finally {
+    finishMatchReplaceWrite(write, payload);
   }
-  state.matchReplaceRules = rules;
-  state.matchReplaceSavedRules = rules.map((rule) => ({ ...rule }));
-  if (!state.matchReplaceRules.some((rule) => rule.id === state.selectedMatchReplaceRuleId)) {
-    state.selectedMatchReplaceRuleId = state.matchReplaceRules[0]?.id ?? null;
-  }
-  state.matchReplaceDirty = false;
-  state.matchReplaceEditorSessionId = sessionId;
-  renderMatchReplaceRules();
-  return true;
 }
 
 async function flushMatchReplaceDraft(options = {}) {
@@ -15330,11 +15342,11 @@ function renderMatchReplaceRules() {
           const active = rule.id === state.selectedMatchReplaceRuleId ? "selected" : "";
           return `
             <tr class="history-row ${active}" data-id="${rule.id}">
-              <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${rule.enabled ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
+              <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${matchReplaceRuleActivity(rule) ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
               <td>${escapeHtml(rule.scope)}</td>
               <td>${escapeHtml(rule.target)}</td>
               <td class="text-truncate" title="${escapeHtml(rule.search || "")}">${escapeHtml(rule.search || "—")}</td>
-              <td class="text-truncate" title="${escapeHtml(rule.replace || "")}">${escapeHtml(rule.replace || "—")}</td>
+              <td class="text-truncate" title="${escapeHtml(matchReplaceRuleActions(rule))}">${escapeHtml(matchReplaceRuleActions(rule))}</td>
               <td>${rule.regex ? "✓" : ""}</td>
               <td>${rule.case_sensitive ? "✓" : ""}</td>
             </tr>
@@ -15365,14 +15377,19 @@ function renderMatchReplaceRules() {
       event.stopPropagation();
       const rule = state.matchReplaceRules.find((r) => r.id === toggle.dataset.ruleToggle);
       if (rule) {
-        if (rule.enabled !== toggle.checked) {
+        if (matchReplaceRuleActivity(rule) !== toggle.checked) {
           state.matchReplaceDraftVersion = (state.matchReplaceDraftVersion || 0) + 1;
         }
-        rule.enabled = toggle.checked;
-        saveMatchReplaceSwitch(rule.id, rule.enabled).catch((error) => {
+        setMatchReplaceRuleActivity(rule, toggle.checked);
+        state.matchReplaceDirty = true;
+        state.matchReplaceEditorSessionId = currentSessionId();
+        updateMatchReplaceSaveState();
+        const sessionId = currentSessionId();
+        const workspaceGeneration = workspaceStateGeneration;
+        saveMatchReplaceSwitch(rule.id, toggle.checked).catch((error) => {
+          if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return;
           console.error(error);
           showToast(error?.message || "Failed to save rule", "error");
-          loadMatchReplaceRules().catch(console.error);
         });
       }
     });
@@ -15387,14 +15404,16 @@ function renderMatchReplaceRules() {
   updateMatchReplaceSaveState();
   if (!selected) return;
 
-  const isNew = !state.matchReplaceSavedRules.some((rule) => rule.id === selected.id);
   els.matchReplaceEditorPath.textContent = `${selected.scope} / ${selected.target}`;
-  els.matchReplaceEditorTitle.textContent = isNew ? "New rule"
-    : selected.search ? `${selected.search} → ${selected.replace || "∅"}` : "Edit rule";
+  els.matchReplaceEditorTitle.textContent = matchReplaceRuleTitle(selected);
   els.matchReplaceScope.value = selected.scope;
   els.matchReplaceTarget.value = selected.target;
   els.matchReplaceSearch.value = selected.search;
   els.matchReplaceReplace.value = selected.replace;
+  els.matchReplaceReplaceEnabled.checked = selected.annotation_only_enabled == null;
+  els.matchReplaceReplace.disabled = !els.matchReplaceReplaceEnabled.checked;
+  els.matchReplaceAnnotationNote.value = selected.annotation_note ?? "";
+  els.matchReplaceAnnotationColor.value = selected.annotation_color ?? "";
   els.matchReplaceRegex.checked = Boolean(selected.regex);
   els.matchReplaceCaseSensitive.checked = Boolean(selected.case_sensitive);
 }
@@ -16487,6 +16506,114 @@ function hideFuzzerDetailPanel() {
   state._fuzzerDetailRecord = null;
 }
 
+// Only one bounded configuration is in flight per editor owner. Full Save
+// waits for settlement; switches preserve its submitted fields and membership.
+function getMatchReplaceSaveOwner() {
+  const current = state.matchReplaceSaveOwner;
+  if (current?.sessionId === currentSessionId() && current.generation === workspaceStateGeneration) return current;
+  return state.matchReplaceSaveOwner = {
+    sessionId: currentSessionId(), generation: workspaceStateGeneration,
+    pendingWriteCount: 0, acknowledgedToken: 0, rules: null, activity: [],
+  };
+}
+
+function beginMatchReplaceWrite(rules) {
+  const owner = getMatchReplaceSaveOwner();
+  if (!owner.pendingWriteCount) {
+    owner.rules = rules.map((rule) => ({ ...rule }));
+    owner.activity = rules.map(() => ({ off: 0, on: 0, lastOffToken: 0 }));
+  }
+  const token = state.matchReplaceSaveToken = (state.matchReplaceSaveToken || 0) + 1;
+  rules.forEach((rule, index) => {
+    const activity = owner.activity[index];
+    if (matchReplaceRuleActivity(rule)) activity.on += 1;
+    else {
+      activity.off += 1;
+      activity.on = 0; // A new Off retires older On composition, not its request.
+      activity.lastOffToken = token;
+    }
+  });
+  owner.pendingWriteCount += 1;
+  return { owner, token };
+}
+
+function matchReplaceWriteIsCurrent(write) {
+  return state.matchReplaceSaveOwner === write.owner
+    && write.owner.sessionId === currentSessionId()
+    && write.owner.generation === workspaceStateGeneration;
+}
+
+function acknowledgeMatchReplaceRules(write, rules) {
+  if (!matchReplaceWriteIsCurrent(write) || write.token <= write.owner.acknowledgedToken) return;
+  write.owner.acknowledgedToken = write.token;
+  state.matchReplaceSavedRules = rules.map((rule) => ({ ...rule }));
+}
+
+function finishMatchReplaceWrite(write, rules) {
+  rules.forEach((rule, index) => {
+    const activity = write.owner.activity[index];
+    if (!matchReplaceRuleActivity(rule)) activity.off -= 1;
+    else if (write.token > activity.lastOffToken) activity.on -= 1;
+  });
+  write.owner.pendingWriteCount -= 1;
+  if (!write.owner.pendingWriteCount) {
+    write.owner.rules = null;
+    write.owner.activity = [];
+  }
+}
+
+function matchReplaceRuleActivity(rule) {
+  return rule.annotation_only_enabled == null ? Boolean(rule.enabled) : rule.annotation_only_enabled === true;
+}
+
+function setMatchReplaceRuleActivity(rule, enabled) {
+  rule.enabled = rule.annotation_only_enabled == null ? enabled : false;
+  if (rule.annotation_only_enabled != null) rule.annotation_only_enabled = enabled;
+}
+
+function canonicalMatchReplaceRule(rule) {
+  const canonical = { ...rule };
+  if (canonical.annotation_only_enabled == null) delete canonical.annotation_only_enabled;
+  else canonical.enabled = false; // An older server must never replace annotation-only traffic.
+  if (canonical.annotation_note == null || canonical.annotation_note === "") delete canonical.annotation_note;
+  if (canonical.annotation_color == null || canonical.annotation_color === "") delete canonical.annotation_color;
+  return canonical;
+}
+
+function matchReplaceRulesPayload(rules) {
+  if (rules.length > 500) throw new Error("At most 500 rules can be saved.");
+  let noteBytes = 0;
+  return rules.map((rule) => {
+    if (rule.annotation_only_enabled != null && typeof rule.annotation_only_enabled !== "boolean") {
+      throw new Error("Invalid rule activity.");
+    }
+    const note = rule.annotation_note ?? "";
+    if (typeof note !== "string" || (note && !note.trim())) throw new Error("Rule notes cannot be blank whitespace.");
+    const bytes = new TextEncoder().encode(note).length;
+    if (bytes > 1024) throw new Error("Rule notes must be at most 1,024 UTF-8 bytes.");
+    noteBytes += bytes;
+    if (noteBytes > 32768) throw new Error("Rule notes must total at most 32,768 UTF-8 bytes.");
+    if (rule.annotation_color != null && rule.annotation_color !== "" && !HTTP_COLOR_TAG_OPTIONS.has(rule.annotation_color)) {
+      throw new Error("Invalid rule color.");
+    }
+    return canonicalMatchReplaceRule(rule);
+  });
+}
+
+function matchReplaceRuleTitle(rule) {
+  if (!state.matchReplaceSavedRules.some((saved) => saved.id === rule.id)) return "New rule";
+  if (!rule.search) return "Edit rule";
+  return rule.annotation_only_enabled == null ? `${rule.search} → ${rule.replace || "∅"}` : rule.search;
+}
+
+function matchReplaceRuleActions(rule) {
+  const actions = [];
+  if (rule.annotation_only_enabled == null) actions.push(rule.replace || "∅");
+  if (rule.annotation_note) actions.push(rule.annotation_note);
+  if (rule.annotation_color) actions.push(rule.annotation_color);
+  return actions.join(" · ") || "—";
+}
+
 function createNewMatchReplaceRule() {
   const rule = {
     id: generateUuid(),
@@ -16510,10 +16637,13 @@ function getSelectedMatchReplaceRule() {
 }
 
 // A rule the server does not have yet, or one edited since it was saved.
-function matchReplaceRuleUnsaved(rule) {
-  const saved = state.matchReplaceSavedRules.find((item) => item.id === rule.id);
-  return !saved || ["enabled", "scope", "target", "search", "replace", "regex", "case_sensitive"]
-    .some((field) => (saved[field] ?? false) !== (rule[field] ?? false));
+function matchReplaceRuleUnsaved(rule, savedRules) {
+  const saved = (Array.isArray(savedRules) ? savedRules : state.matchReplaceSavedRules).find((item) => item.id === rule.id);
+  if (!saved) return true;
+  const current = canonicalMatchReplaceRule(rule), previous = canonicalMatchReplaceRule(saved);
+  return ["enabled", "scope", "target", "search", "replace", "regex", "case_sensitive",
+    "annotation_only_enabled", "annotation_note", "annotation_color"]
+    .some((field) => (previous[field] ?? null) !== (current[field] ?? null));
 }
 
 // Save is on when something is unsaved and the rule on screen has a search
@@ -16533,26 +16663,65 @@ function updateMatchReplaceSaveState() {
 // The selected rule when it is new and nothing has been typed into it.
 function untouchedNewMatchReplaceRule() {
   const rule = getSelectedMatchReplaceRule();
-  return rule && !rule.search && !rule.replace
+  return rule && !rule.search && !rule.replace && !rule.annotation_note && !rule.annotation_color
+    && rule.annotation_only_enabled == null
     && !state.matchReplaceSavedRules.some((item) => item.id === rule.id) ? rule : null;
 }
 
 // The On switch saves that switch alone: edits in the editor stay unsaved until
 // Save. With nothing else unsaved, the ordinary save does the same.
 async function saveMatchReplaceSwitch(ruleId, enabled) {
-  const saved = state.matchReplaceSavedRules.find((rule) => rule.id === ruleId);
-  if (saved) saved.enabled = enabled; // a second switch builds on this one
-  if (!state.matchReplaceRules.some(matchReplaceRuleUnsaved)) return saveMatchReplaceRules();
-  if (!saved) return;
-  const sessionId = currentSessionId();
-  const response = await fetch(sessionWritePath("/api/match-replace", sessionId), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, rules: state.matchReplaceSavedRules }),
+  const owner = getMatchReplaceSaveOwner();
+  const base = owner.rules || state.matchReplaceSavedRules;
+  const index = base.findIndex((rule) => rule.id === ruleId);
+  const draft = state.matchReplaceRules.find((rule) => rule.id === ruleId);
+  if (index < 0 || !draft) return;
+  const sameMode = (base[index].annotation_only_enabled == null) === (draft.annotation_only_enabled == null);
+  // Activation never bypasses an unsaved mode or a still-pending safety Off.
+  // Off is immediate; there is no queued activation or automatic resend.
+  if (enabled && (!sameMode || owner.activity[index]?.off)) return;
+  const nextRules = base.map((rule, i) => {
+    const next = { ...rule }, saved = state.matchReplaceSavedRules[i];
+    if (saved?.id === rule.id && (saved.annotation_only_enabled == null) === (rule.annotation_only_enabled == null)) {
+      setMatchReplaceRuleActivity(next, matchReplaceRuleActivity(saved));
+    }
+    const activity = owner.activity[i];
+    if (activity?.off) setMatchReplaceRuleActivity(next, false);
+    else if (activity?.on) setMatchReplaceRuleActivity(next, true);
+    return next;
   });
-  await requireOkResponse(response, "Failed to save match-replace rules.");
-  const rules = jsonArray(await response.json());
-  if (sessionId === currentSessionId()) state.matchReplaceSavedRules = rules.map((rule) => ({ ...rule }));
+  setMatchReplaceRuleActivity(nextRules[index], enabled);
+  const payload = matchReplaceRulesPayload(nextRules);
+  if (!owner.pendingWriteCount && !state.matchReplaceRules.some((rule) => matchReplaceRuleUnsaved(rule, nextRules))) {
+    state.matchReplaceDirty = false;
+    try { return await saveMatchReplaceRules(); }
+    catch (error) {
+      if (owner === state.matchReplaceSaveOwner) state.matchReplaceDirty = state.matchReplaceRules.some(matchReplaceRuleUnsaved);
+      throw error;
+    }
+  }
+  const write = beginMatchReplaceWrite(payload);
+  try {
+    const response = await fetch(sessionWritePath("/api/match-replace", owner.sessionId), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_id: owner.sessionId, rules: payload }),
+    });
+    await requireOkResponse(response, "Failed to save match-replace rules.");
+    const rules = jsonArray(await response.json());
+    if (!matchReplaceWriteIsCurrent(write)) return false;
+    acknowledgeMatchReplaceRules(write, rules);
+    state.matchReplaceDirty = state.matchReplaceRules.some(matchReplaceRuleUnsaved);
+    updateMatchReplaceSaveState();
+    return true;
+  } catch (error) {
+    if (!matchReplaceWriteIsCurrent(write) || write.token !== state.matchReplaceSaveToken) return false;
+    state.matchReplaceDirty = state.matchReplaceRules.some(matchReplaceRuleUnsaved);
+    updateMatchReplaceSaveState();
+    throw error;
+  } finally {
+    finishMatchReplaceWrite(write, payload);
+  }
 }
 
 function syncMatchReplaceEditor() {
@@ -16561,7 +16730,13 @@ function syncMatchReplaceEditor() {
     return;
   }
 
+  const replaceEnabled = els.matchReplaceReplaceEnabled.checked;
+  const activity = matchReplaceRuleActivity(rule);
   const next = {
+    enabled: replaceEnabled ? activity : false,
+    annotation_only_enabled: replaceEnabled ? null : activity,
+    annotation_note: els.matchReplaceAnnotationNote.value || null,
+    annotation_color: els.matchReplaceAnnotationColor.value || null,
     description: "",
     scope: els.matchReplaceScope.value,
     target: els.matchReplaceTarget.value,
@@ -16570,15 +16745,21 @@ function syncMatchReplaceEditor() {
     regex: els.matchReplaceRegex.checked,
     case_sensitive: els.matchReplaceCaseSensitive.checked,
   };
-  const changed = rule.description !== next.description
+  const changed = rule.enabled !== next.enabled
+    || (rule.annotation_only_enabled ?? null) !== next.annotation_only_enabled
+    || (rule.annotation_note || null) !== next.annotation_note
+    || (rule.annotation_color || null) !== next.annotation_color
+    || rule.description !== next.description
     || rule.scope !== next.scope
     || rule.target !== next.target
     || rule.search !== next.search
     || rule.replace !== next.replace
     || Boolean(rule.regex) !== next.regex
     || Boolean(rule.case_sensitive) !== next.case_sensitive;
-  Object.assign(rule, next);
+  els.matchReplaceReplace.disabled = !replaceEnabled;
   if (changed) {
+    Object.assign(rule, next);
+    if (els.matchReplaceEditorTitle) els.matchReplaceEditorTitle.textContent = matchReplaceRuleTitle(rule);
     state.matchReplaceDraftVersion = (state.matchReplaceDraftVersion || 0) + 1;
     state.matchReplaceDirty = true;
     state.matchReplaceEditorSessionId = currentSessionId();

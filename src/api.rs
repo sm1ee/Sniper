@@ -2602,6 +2602,33 @@ pub(crate) fn validate_sequence_definition(
 }
 
 fn validate_match_replace_rules(rules: &[MatchReplaceRule]) -> std::result::Result<(), String> {
+    let mut annotation_note_bytes = 0usize;
+    for rule in rules {
+        if rule.enabled && rule.annotation_only_enabled.is_some() {
+            return Err("annotation-only rules must set enabled to false".to_string());
+        }
+        if let Some(note) = &rule.annotation_note {
+            validate_text_field(
+                "rule annotation note",
+                note,
+                crate::match_replace::MAX_RULE_ANNOTATION_NOTE_BYTES,
+            )?;
+            if !note.is_empty() && note.trim().is_empty() {
+                return Err("rule annotation note cannot contain only whitespace".to_string());
+            }
+            annotation_note_bytes = annotation_note_bytes.saturating_add(note.len());
+        }
+        if rule
+            .annotation_color
+            .as_ref()
+            .is_some_and(|color| !ALLOWED_COLOR_TAGS.contains(&color.as_str()))
+        {
+            return Err("unsupported rule annotation color".to_string());
+        }
+    }
+    if annotation_note_bytes > crate::match_replace::MAX_RULE_ANNOTATION_NOTES_BYTES {
+        return Err("rule annotation notes exceed the configured byte limit".to_string());
+    }
     validate_serialized_size(&rules, "match-replace rules", MAX_MATCH_REPLACE_RULES_BYTES)?;
     if rules.len() > MAX_MATCH_REPLACE_RULES {
         return Err(format!(
@@ -11570,8 +11597,45 @@ mod tests {
     }
 
     #[test]
+    fn match_replace_annotation_validation_checks_raw_authority_and_byte_limits() {
+        let raw = serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "enabled": true, "annotation_only_enabled": true,
+            "description": "", "scope": "response", "target": "body", "search": "flag",
+            "replace": "", "regex": false, "case_sensitive": true,
+            "annotation_note": "flag 탐지", "annotation_color": "yellow"
+        });
+        let mut rule: MatchReplaceRule = serde_json::from_value(raw.clone()).unwrap();
+        assert!(validate_match_replace_rules(&[rule.clone()])
+            .unwrap_err()
+            .contains("enabled"));
+        rule.enabled = false;
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_ok());
+        rule.annotation_note = Some("é".repeat(512));
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_ok());
+        rule.annotation_note.as_mut().unwrap().push('x');
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_err());
+        rule.annotation_note = Some("x".repeat(1024));
+        rule.annotation_only_enabled = Some(false);
+        assert!(validate_match_replace_rules(&vec![rule.clone(); 32]).is_ok());
+        assert!(validate_match_replace_rules(&vec![rule.clone(); 33]).is_err());
+        rule.annotation_note = Some("  ".into());
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_err());
+        rule.annotation_note = Some(String::new());
+        rule.annotation_color = None;
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_ok());
+        rule.annotation_color = Some("arbitrary".into());
+        assert!(validate_match_replace_rules(&[rule]).is_err());
+        let mut bad_type = raw;
+        bad_type["annotation_only_enabled"] = "true".into();
+        assert!(serde_json::from_value::<MatchReplaceRule>(bad_type).is_err());
+    }
+
+    #[test]
     fn match_replace_validation_rejects_invalid_regex_search() {
         let mut rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: uuid::Uuid::new_v4(),
             enabled: true,
             description: "bad regex".to_string(),
@@ -11591,6 +11655,9 @@ mod tests {
     #[test]
     fn match_replace_validation_rejects_oversized_rule_sets() {
         let rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: uuid::Uuid::new_v4(),
             enabled: true,
             description: "large".to_string(),
@@ -11607,6 +11674,9 @@ mod tests {
 
         let rules = (0..=super::MAX_MATCH_REPLACE_RULES)
             .map(|_| MatchReplaceRule {
+                annotation_only_enabled: None,
+                annotation_note: None,
+                annotation_color: None,
                 id: uuid::Uuid::new_v4(),
                 enabled: true,
                 description: "rule".to_string(),
@@ -11651,6 +11721,9 @@ mod tests {
             Json(MatchReplaceRulesPayload {
                 session_id: None,
                 rules: vec![MatchReplaceRule {
+                    annotation_only_enabled: None,
+                    annotation_note: None,
+                    annotation_color: None,
                     id: Uuid::new_v4(),
                     enabled: true,
                     description: "invalid regex".to_string(),
@@ -15443,6 +15516,9 @@ mod tests {
         assert!(original.scanner.get_config().await.enabled);
 
         let match_rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: Uuid::new_v4(),
             enabled: true,
             description: "stale".to_string(),
@@ -19259,6 +19335,9 @@ mod tests {
         inactive.persist().await.unwrap();
 
         let match_rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: Uuid::new_v4(),
             enabled: true,
             description: "inactive only".to_string(),
@@ -19691,6 +19770,9 @@ mod tests {
         let inactive_id = inactive.id();
 
         let match_rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: Uuid::new_v4(),
             enabled: true,
             description: "body pinned inactive".to_string(),

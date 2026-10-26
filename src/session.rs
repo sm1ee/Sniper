@@ -253,7 +253,7 @@ impl SessionOverview {
         let rules: Vec<_> = state
             .match_replace_rules
             .iter()
-            .filter(|rule| rule.enabled)
+            .filter(|rule| rule.is_enabled())
             .collect();
         let mut activity: Vec<_> = state
             .template_scans
@@ -437,6 +437,7 @@ struct StoredSessionSnapshot {
     transaction_event_sequence: u64,
     websockets: Vec<WebSocketSessionRecord>,
     event_log: Vec<EventLogEntry>,
+    #[serde(default, deserialize_with = "deserialize_restored_match_replace_rules")]
     match_replace_rules: Vec<MatchReplaceRule>,
     #[serde(alias = "intruder_attacks")]
     fuzzer_attacks: Vec<FuzzerAttackRecord>,
@@ -536,6 +537,21 @@ enum WebSocketJournalCommand {
     Clear {
         ack: mpsc::Sender<io::Result<()>>,
     },
+}
+
+// Normalize raw saved contradictions before any snapshot serialization can
+// mask legacy enabled and accidentally turn them into active annotation rules.
+fn deserialize_restored_match_replace_rules<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<MatchReplaceRule>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut rules = Vec::<MatchReplaceRule>::deserialize(deserializer)?;
+    for rule in &mut rules {
+        rule.normalize_restored_activation();
+    }
+    Ok(rules)
 }
 
 fn deserialize_workspace_state_lossy<'de, D>(
@@ -5318,6 +5334,38 @@ fn sync_directory(path: &Path, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_annotation_rules_normalize_raw_before_snapshot_serialization() {
+        for mode in [serde_json::Value::Null, false.into(), true.into()] {
+            for legacy_enabled in [false, true] {
+                let raw = serde_json::json!({
+                    "match_replace_rules": [{"id": uuid::Uuid::new_v4(), "enabled": legacy_enabled,
+                        "annotation_only_enabled": mode, "annotation_note": "literal", "annotation_color": "yellow",
+                        "description": "", "scope": "response", "target": "body", "search": "flag",
+                        "replace": "", "regex": false, "case_sensitive": true}],
+                    "runtime": {"scope_patterns": ["example.com"]}
+                });
+                let restored: super::StoredSessionSnapshot = serde_json::from_value(raw).unwrap();
+                let rule = &restored.match_replace_rules[0];
+                let expected = if mode.is_null() {
+                    legacy_enabled
+                } else {
+                    !legacy_enabled && mode == true
+                };
+                assert_eq!(rule.is_enabled(), expected);
+                if !mode.is_null() && legacy_enabled {
+                    assert_eq!(rule.annotation_only_enabled, Some(false));
+                }
+                assert_eq!(restored.runtime.scope_patterns, ["example.com"]);
+                let reloaded: super::StoredSessionSnapshot =
+                    serde_json::from_value(serde_json::to_value(&restored).unwrap()).unwrap();
+                assert_eq!(reloaded.match_replace_rules[0].is_enabled(), expected);
+                let overview = super::SessionOverview::new(Default::default(), &restored);
+                assert_eq!(overview.replace_rule_count, usize::from(expected));
+            }
+        }
+    }
+
     use std::collections::{HashMap, HashSet, VecDeque};
 
     use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -9855,6 +9903,9 @@ mod tests {
             .expect("snapshot should deserialize");
         snapshot.match_replace_rules = (0..=crate::match_replace::MAX_MATCH_REPLACE_RULES)
             .map(|index| MatchReplaceRule {
+                annotation_only_enabled: None,
+                annotation_note: None,
+                annotation_color: None,
                 id: Uuid::new_v4(),
                 enabled: true,
                 description: format!("rule {index}"),
@@ -13149,6 +13200,9 @@ mod tests {
         ];
         let rule =
             |description: &str, enabled: bool, target: MatchReplaceTarget| MatchReplaceRule {
+                annotation_only_enabled: None,
+                annotation_note: None,
+                annotation_color: None,
                 id: Uuid::new_v4(),
                 enabled,
                 description: description.into(),
@@ -13613,6 +13667,9 @@ mod tests {
             .replace_all(
                 (0..7)
                     .map(|_| MatchReplaceRule {
+                        annotation_only_enabled: None,
+                        annotation_note: None,
+                        annotation_color: None,
                         id: Uuid::new_v4(),
                         enabled: true,
                         description: "Rule ".repeat(30),
