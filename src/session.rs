@@ -172,8 +172,10 @@ pub struct ActivityEntry {
 
 /// What tells sessions apart without opening them: the scope set, where the
 /// traffic went, what the operator marked, pinned, rewrote and scanned, and
-/// what was found. Stored with the counts on a full save; a loaded session
-/// reports live values. Labels are the operator's own (a pinned tab's name, a
+/// what was found. Ordinary state-mutation saves refresh state-derived fields;
+/// full saves also refresh the traffic fields. A loaded session reports live
+/// values. Background state-only and workspace-only saves do not refresh this
+/// registry overview. Labels are the operator's own (a pinned tab's name, a
 /// rule's description) or a method, host and path without its query, so no
 /// captured value or rule text is copied into the registry.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1491,6 +1493,17 @@ impl SessionContext {
         metadata.event_count = state.event_log.len();
         metadata.fuzzer_count = state.fuzzer_attacks.len();
         metadata.rule_count = state.match_replace_rules.len();
+        // Reuse the last full save's traffic summary rather than traversing
+        // history for a small-component write. Derive the other fields from
+        // the exact state being acknowledged, not a later live snapshot.
+        metadata.overview = SessionOverview::new(
+            TrafficOverview {
+                top_hosts: metadata.overview.top_hosts.clone(),
+                last_captured_at: metadata.overview.last_captured_at,
+                marked_requests: metadata.overview.marked_requests,
+            },
+            &state,
+        );
         let storage_dir = self.storage_dir.clone();
         tokio::task::spawn_blocking(move || {
             let _persist_guard = persist_guard;
