@@ -5473,7 +5473,10 @@ mod history_fixture {
                 &[("evidence_id", BODY_REFERENCE_TOKEN), ("variant", variant)],
             );
             for (pointer, value) in [
-                ("/source/record_id", json!(Uuid::nil())),
+                (
+                    "/source/record_id",
+                    json!(Uuid::from_u128(0x44444444444444444444444444444444)),
+                ),
                 ("/source/sequence", json!("9007199254740994")),
                 ("/variant", json!("unknown")),
                 (
@@ -5481,6 +5484,7 @@ mod history_fixture {
                     json!("SYNTHETIC_PRIVATE_VALUE"),
                 ),
             ] {
+                assert_ne!(payload.pointer(pointer).unwrap(), &value);
                 let mut bad = payload.clone();
                 *bad.pointer_mut(pointer).unwrap() = value;
                 *mock.state.payload.lock().unwrap() = bad;
