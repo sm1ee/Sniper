@@ -990,13 +990,11 @@ fn install_platform_app_menu(proxy: EventLoopProxy<DesktopUserEvent>) {
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
 fn app_menu_target(proxy: EventLoopProxy<DesktopUserEvent>) -> cocoa::base::id {
-    use cocoa::base::id;
+    use cocoa::base::{id, selector};
     use objc::{
-        class,
         declare::ClassDecl,
-        msg_send,
-        runtime::{Object, Sel},
-        sel, sel_impl,
+        runtime::{Class, Object, Sel},
+        Message,
     };
     use std::sync::{Mutex, OnceLock};
 
@@ -1008,22 +1006,25 @@ fn app_menu_target(proxy: EventLoopProxy<DesktopUserEvent>) -> cocoa::base::id {
     }
 
     let _ = PROXY.set(Mutex::new(proxy));
+    // objc's class!, sel! and msg_send! macros test a `cargo-clippy` cfg this
+    // crate does not declare, so each use warns; these are the calls they wrap.
+    let superclass = Class::get("NSObject").expect("NSObject is always registered");
     // install_platform_app_menu returns early once the menu exists, so the class
     // is declared once per process.
-    let mut decl = ClassDecl::new("SniperAppMenuTarget", class!(NSObject))
-        .expect("app menu target declared once");
+    let mut decl =
+        ClassDecl::new("SniperAppMenuTarget", superclass).expect("app menu target declared once");
     // SAFETY: the function takes the receiver, the selector and the sending menu
     // item and returns nothing, which is the signature `checkForUpdates:` has.
     unsafe {
         decl.add_method(
-            sel!(checkForUpdates:),
+            selector("checkForUpdates:"),
             check_for_updates as extern "C" fn(&Object, Sel, id),
         );
     }
     let class = decl.register();
     // SAFETY: +new returns an owned instance. It is never released: a menu item
     // does not retain its target, and the menu lasts as long as the app.
-    unsafe { msg_send![class, new] }
+    unsafe { class.send_message(selector("new"), ()) }.expect("NSObject subclasses answer +new")
 }
 
 #[cfg(not(target_os = "macos"))]
