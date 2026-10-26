@@ -13626,13 +13626,19 @@ mod tests {
                     .collect(),
             )
             .await;
-        session
-            .scanner
-            .replace_all(vec![
-                overview_finding(Severity::High),
-                overview_finding(Severity::Low),
-            ])
-            .await;
+        // The store groups by issue, not UUID or severity. Seed two distinct
+        // synthetic issues so both severity assertions exercise saved metadata.
+        let mut high = overview_finding(Severity::High);
+        high.rule_id = "overview-fixture-high".into();
+        high.title = "Synthetic high issue".into();
+        let mut low = overview_finding(Severity::Low);
+        low.rule_id = "overview-fixture-low".into();
+        low.title = "Synthetic low issue".into();
+        session.scanner.replace_all(vec![high, low]).await;
+        assert_eq!(session.scanner.count().await, 2);
+        let seeded = super::SeverityCounts::count(&session.scanner.snapshot(None).await);
+        assert_eq!(seeded.high, 1);
+        assert_eq!(seeded.low, 1);
         let metadata = {
             let _guard = session.mutation_guard().await;
             session.persist_state_mutation_locked().await.unwrap()
