@@ -164,11 +164,11 @@ class NodeFixture {
   replaceChildren(...children) { this.childNodes = []; this._text = ""; this.append(...children); }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   contains(node) { return this === node || this.childNodes.some(child => child.contains(node)); }
-  querySelectorAll() { return []; }
+  querySelectorAll(selector) { return selector === "[data-open-replay]" ? descendants(this).filter(node => node.dataset.openReplay) : []; }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
   removeEventListener(name) { this.listeners.delete(name); }
   emit(name, event = {}) { this.listeners.get(name)?.({ target: this, preventDefault() {}, ...event }); }
-  closest(selector) { return selector === "[data-stop-job]" && this.dataset.stopJob || selector === "[data-endpoint-key]" && this.dataset.endpointKey || selector === "[data-sort]" && this.dataset.sort || selector === "[data-copy-endpoint]" && this.dataset.copyEndpoint ? this : null; }
+  closest(selector) { return selector === "[data-stop-job]" && this.dataset.stopJob || selector === "[data-endpoint-key]" && this.dataset.endpointKey || selector === "[data-sort]" && this.dataset.sort || selector === "[data-copy-endpoint]" && this.dataset.copyEndpoint || selector === "[data-open-replay]" && this.dataset.openReplay ? this : null; }
 }
 
 function controllerFixture(overrides = {}) {
@@ -1435,3 +1435,95 @@ for (const outcome of ["resolve", "reject"]) {
     });
   }
 }
+
+
+// New passive draft handoff; baseline failures mean feature absence, not lost traffic.
+function replayAction(f) {
+  return descendants(f.node("Detail")).find(node => node.dataset.openReplay);
+}
+for (const method of ["GET", "POST", "custom-METHOD"]) {
+  test(`Recon Replay handoff offers one selected ${method} unsent draft`, async () => {
+    const opened = [];
+    const f = controllerFixture({ openInReplay: (...args) => { opened.push(args); } }); await settled();
+    const endpoint = f.snapshots.a.endpoints[0]; endpoint.method = method;
+    endpoint.url = "https://example.com:443/a/../b?x=&x=%2F&b=2?";
+    await f.controller.refresh(); selectEndpoint(f, endpoint);
+    const action = replayAction(f); assert.ok(action, "new Open in Replay action must exist");
+    assert.equal(action.textContent, "Open in Replay"); assert.equal(action.disabled, false);
+    const before = f.calls.length; f.node("Detail").emit("click", { target: action });
+    assert.equal(opened.length, 1); assert.equal(opened[0][0].method, method);
+    assert.equal(opened[0][0].url, endpoint.url); assert.equal(opened[0][1](), true);
+    assert.equal(f.calls.length, before, "handoff itself issues no fetch"); f.controller.dispose();
+  });
+}
+for (const change of ["detached", "selection", "hide", "reset", "session ABA", "unsynced generation", "read", "error", "mutation"]) {
+  test(`Recon Replay handoff rejects stale or unavailable ${change}`, async () => {
+    const opened=[]; const f=controllerFixture({openInReplay:(...args)=>opened.push(args)});await settled();
+    selectEndpoint(f,f.snapshots.a.endpoints[0]);const old=replayAction(f);assert.ok(old,"new action must exist");
+    if(change==="detached")await f.controller.refresh();
+    if(change==="selection")selectEndpoint(f,f.snapshots.a.endpoints[1]);
+    if(change==="hide")f.controller.setVisible(false);
+    if(change==="reset")f.controller.reset();
+    if(change==="session ABA"){f.switchTo("b");f.switchTo("a");await settled();}
+    if(change==="unsynced generation")f.generation++;
+    if(change==="read"){f.hold="GET";void f.controller.refresh();}
+    if(change==="error"){f.failNext="GET";await f.controller.refresh();}
+    if(change==="mutation"){f.node("Target").value="https://example.com/";f.hold="POST";f.node("Form").emit("submit");}
+    f.node("Detail").emit("click",{target:old});assert.equal(opened.length,0);
+    f.controller.dispose();f.held?.();await settled();
+  });
+}
+test("Recon Replay handoff refusal stays retryable; accepted navigation retires old action",async()=>{
+  let calls=0;const f=controllerFixture({openInReplay:()=>{calls++;if(calls===1)return false;f.controller.setVisible(false);return true;}});await settled();
+  selectEndpoint(f,f.snapshots.a.endpoints[0]);const action=replayAction(f);assert.ok(action,"new action must exist");
+  f.node("Detail").emit("click",{target:action});assert.equal(calls,1);
+  f.node("Detail").emit("click",{target:action});assert.equal(calls,2);
+  f.node("Detail").emit("click",{target:action});assert.equal(calls,2);f.controller.dispose();
+});
+
+for (const phase of ["read", "mutation", "error"]) test(`Recon Replay current action is disabled during ${phase}`, async()=>{
+  const opened=[];const f=controllerFixture({openInReplay:(...args)=>opened.push(args)});await settled();
+  selectEndpoint(f,f.snapshots.a.endpoints[0]);
+  if(phase==="read"){f.hold="GET";void f.controller.refresh();}
+  if(phase==="mutation"){f.node("Target").value="https://example.com/";f.hold="POST";f.node("Form").emit("submit");}
+  if(phase==="error"){f.failNext="GET";await f.controller.refresh();}
+  const current=replayAction(f);assert.ok(current);assert.equal(f.node("Detail").contains(current),true);assert.equal(current.disabled,true);
+  f.node("Detail").emit("click",{target:current});assert.equal(opened.length,0);f.controller.dispose();f.held?.();await settled();
+});
+test("Recon Replay initial and unsupported callback states offer no usable action",async()=>{
+  const f=controllerFixture({openInReplay:()=>assert.fail("unloaded handoff")});
+  assert.equal(replayAction(f),undefined);f.controller.dispose();await settled();
+  const ordinary=controllerFixture();await settled();selectEndpoint(ordinary,ordinary.snapshots.a.endpoints[0]);assert.equal(replayAction(ordinary),undefined);ordinary.controller.dispose();
+});
+
+// Join the real mounted controller, callback, append admission and navigation.
+// Only the unrelated panel leaf renderers and persistence sink are inert.
+for (const first of ["accepted", "invalid target"]) test(`Recon controller to actual app navigation: ${first} then retired action`,async()=>{
+  const w=require('./replay-workspace-fixture.cjs').fixture(),c=w.context,old=w.tab('existing');w.seed([old]);
+  w.state.activeSession={id:'a'};w.state.activeTool='recon';w.state._recordClipboardSessionGeneration=0;
+  const saves=[],uiSaves=[];
+  Object.assign(c,{window:{...c.window,SniperRecon:recon},mainTabs:[],IMPLEMENTED_TOOLS:new Set(['recon','replay']),
+    closeScannerSettings(){},invalidateFindingNavigation(){},scheduleUiSettingsSave:()=>uiSaves.push(true),
+    scheduleWorkspaceStateSave:()=>saves.push(true),fetch:()=>assert.fail('handoff must not send or load')});
+  for(const name of ['dashboard','proxy','replay','tools','fuzzer','sequence','target','logger','recon'])w.els[`${name}Shell`]=new NodeFixture();
+  for(const name of ['createRecordClipboardOwner','appendUnsentReplayDraft','openReconEndpointInReplay','setActiveTool','sanitizeActiveTool','renderToolPanels']){
+    const match=appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`,'m'));assert.ok(match,name);vm.runInContext(match[0],c);
+  }
+  let capturedOwner;
+  const f=controllerFixture({getSessionId:()=>w.state.activeSession.id,getSessionGeneration:()=>c.workspaceStateGeneration,
+    openInReplay:(endpoint,isCurrent)=>{capturedOwner=isCurrent;return c.openReconEndpointInReplay(endpoint,isCurrent);}});
+  c.reconController=f.controller;await settled();f.snapshots.a.endpoints[0].method='M-SEARCH';await f.controller.refresh();
+  selectEndpoint(f,f.snapshots.a.endpoints[0]);const action=replayAction(f);assert.ok(action);const reads=f.calls.length;
+  if(first==='invalid target'){
+    c.renderedHttpReplayDraftOwner={tab:old,sessionId:'a',generation:c.workspaceStateGeneration};w.els.replayHostInput.value='bad host';
+    f.node('Detail').emit('click',{target:action});assert.equal(w.state.replayTabs.length,1);assert.equal(w.state.activeTool,'recon');
+    assert.equal(capturedOwner(),true);assert.equal(saves.length,0);w.syncDom();
+  }
+  f.node('Detail').emit('click',{target:action});assert.equal(w.state.replayTabs.length,2);assert.equal(w.state.activeTool,'replay');
+  const tab=w.state.replayTabs.at(-1);assert.equal(tab.httpVersionMode,'HTTP/1.1');assert.ok(tab.requestText.startsWith('M-SEARCH /api/0 HTTP/1.1\n'));
+  assert.equal(tab.sourceTransactionId,null);assert.equal(tab.responseRecord,null);assert.deepEqual(w.plain(tab.historyEntries),[]);
+  assert.equal(w.els.reconShell.classList.contains('hidden'),true);assert.equal(w.els.replayShell.classList.contains('hidden'),false);
+  assert.equal(capturedOwner(),false,'accepted navigation retires its source without rolling back the append');
+  f.node('Detail').emit('click',{target:action});assert.equal(w.state.replayTabs.length,2);assert.equal(saves.length,1);assert.equal(uiSaves.length,1);
+  assert.equal(f.calls.length,reads);assert.equal(w.requests.length,0);f.controller.dispose();
+});

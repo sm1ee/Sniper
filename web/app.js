@@ -1294,6 +1294,7 @@ function bindEvents() {
       getSessionGeneration: () => workspaceStateGeneration,
       arrowStep: tableArrowStep,
       copyText: copyReconEndpointUrl,
+      openInReplay: openReconEndpointInReplay,
     });
   }
   if (window.SniperTemplates && els.templatesShell) {
@@ -20192,6 +20193,32 @@ async function followRedirect() {
   }
 }
 
+function appendUnsentReplayDraft(seed, isCurrent, action) {
+  if (!isCurrent()) return false;
+  if (state.replayTabs.length >= MAX_REPLAY_TABS) throw new Error("Close a Replay tab before opening another request.");
+  if (!preserveActiveHttpReplayDraftBeforeSessionChange(action)) return false;
+  if (!isCurrent()) return false;
+  const tab = createReplayTab(seed);
+  state.replayTabs.push(tab);
+  state.activeReplayTabId = tab.id;
+  setActiveTool("replay");
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
+  return true;
+}
+
+function openReconEndpointInReplay(endpoint, sourceIsCurrent = () => false) {
+  if (!workspaceLoaded || !currentSessionId() || !sourceIsCurrent()) return false;
+  const ownsSession = createRecordClipboardOwner();
+  const { request, notice } = window.SniperRecon.buildReplayDraft(endpoint);
+  // This is a constructed inventory draft, not a retained packet. Keep the
+  // selected method/target/authority literal; HTTP/1.1 is an editing default.
+  const requestText = `${request.method} ${request.path} HTTP/1.1\nHost: ${request.host}`;
+  if (new TextEncoder().encode(requestText).length > 2 * 1024 * 1024) throw new Error("This discovery exceeds Replay draft limits. The inventory is unchanged.");
+  return appendUnsentReplayDraft({ baseRequest: request, requestText, notice, sourceTransactionId: null, httpVersionMode: "HTTP/1.1" },
+    () => sourceIsCurrent() && ownsSession(), "opening a Recon draft");
+}
+
 function openBlankReplayTab() {
   if (!preserveActiveHttpReplayDraftBeforeNavigation(getActiveReplayTab(), "opening a new tab")) return;
   const tab = createReplayTab();
@@ -23892,17 +23919,8 @@ async function runPacketMenuAction(target, action) {
   const isCurrent = target.isCurrent;
   const request = packetRequestForAction(target.packet.request?.message).request;
   if (action === "send-to-replay") {
-    if (state.replayTabs.length >= MAX_REPLAY_TABS) throw new Error("Close a Replay tab before opening another request.");
-    if (!preserveActiveHttpReplayDraftBeforeSessionChange("opening a retained packet")) return Promise.resolve(false);
-    if (!isCurrent()) return Promise.resolve(false);
-    const tab = createReplayTab({ baseRequest: request, sourceTransactionId: null, requestText: packetRequestText(request),
-      httpVersionMode: normalizeReplayHttpVersion(request.http_version) });
-    state.replayTabs.push(tab);
-    state.activeReplayTabId = tab.id;
-    setActiveTool("replay");
-    scheduleWorkspaceStateSave();
-    renderToolPanels();
-    return Promise.resolve(true);
+    return appendUnsentReplayDraft({ baseRequest: request, sourceTransactionId: null, requestText: packetRequestText(request),
+      httpVersionMode: normalizeReplayHttpVersion(request.http_version) }, isCurrent, "opening a retained packet");
   }
   if (action === "send-to-fuzzer") return openFuzzerFromPacket(target, request);
   let text, label = "Copied";

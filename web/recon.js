@@ -225,6 +225,57 @@
     return result;
   }
 
+  // Match workspace admission, not collection limits. Count before escaping
+  // large strings; URL parsing is only authority validation, never target repair.
+  function buildReplayDraft(endpoint) {
+    const limit = 2 * 1024 * 1024;
+    const invalid = () => { throw new Error("This discovery cannot form a safe HTTP Replay draft."); };
+    const tooLarge = () => { throw new Error("This discovery exceeds Replay draft limits. The inventory is unchanged."); };
+    const url = endpoint?.url, method = endpoint?.method;
+    if (typeof url !== "string" || typeof method !== "string") invalid();
+    if (url.length > limit || method.length > limit) tooLarge();
+    if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(method) || /^(UNKNOWN|CONNECT)$/i.test(method)
+      || /[\s\u0000-\u001f\u007f-\u009f\\#]/u.test(url)) invalid();
+    const match = url.match(/^(https?):\/\/([^/?#]+)([/?][^#]*)?$/i);
+    if (!match) invalid();
+    const authority = match[2], scheme = match[1].toLowerCase();
+    if (authority.length > 4096) tooLarge();
+    if (authority.includes("@") || authority.includes("*")
+      || !(authority.startsWith("[") ? /^\[[^\]]+\](?::[0-9]+)?$/.test(authority) : /^[^:]+(?::[0-9]+)?$/.test(authority))) invalid();
+    let parsed;
+    try { parsed = new URL(`${scheme}://${authority}/`); } catch (_) { invalid(); }
+    if (!parsed.hostname || parsed.hostname.includes("*") || parsed.username || parsed.password || parsed.port === "0") invalid();
+    const path = !match[3] ? "/" : match[3].startsWith("?") ? `/${match[3]}` : match[3];
+    function stringBytes(value, escaped = false) {
+      let count = 0;
+      for (const char of value) {
+        const code = char.codePointAt(0);
+        if (code >= 0xd800 && code <= 0xdfff) invalid();
+        count += escaped && (char === '"' || char === "\\") ? 2 : code < 128 ? 1 : code < 2048 ? 2 : code < 65536 ? 3 : 4;
+        if (count > limit) tooLarge();
+      }
+      return count;
+    }
+    const authorityBytes = stringBytes(authority);
+    if (authorityBytes > 4096) tooLarge();
+    const requestBytes = stringBytes(method) + stringBytes(path) + authorityBytes + "  HTTP/1.1\nHost: ".length;
+    // Fixed keys, punctuation, empty body and enums mirror EditableRequest.
+    const empty = { scheme: "", host: "", method: "", path: "", headers: [{ name: "Host", value: "" }], body: "", body_encoding: "utf8", preview_truncated: false };
+    const serializedBytes = JSON.stringify(empty).length + stringBytes(scheme, true) + stringBytes(authority, true) * 2 + stringBytes(method, true) + stringBytes(path, true);
+    if (requestBytes > limit || serializedBytes > limit) tooLarge();
+    const request = { ...empty, scheme, host: authority, method, path, headers: [{ name: "Host", value: authority }] };
+    if (new TextEncoder().encode(JSON.stringify(request)).length !== serializedBytes) invalid();
+    const sources = new Set(), kinds = new Set(); let unknownSources = 0, unknownKinds = 0;
+    if (endpoint.evidence !== undefined && !Array.isArray(endpoint.evidence)) invalid();
+    for (const observation of endpoint.evidence || []) {
+      if (typeof observation?.source === "string" && Object.hasOwn(SOURCE_NAMES, observation.source)) sources.add(observation.source); else unknownSources += 1;
+      if (typeof observation?.kind === "string" && Object.hasOwn(KIND_NAMES, observation.kind)) kinds.add(observation.kind); else unknownKinds += 1;
+    }
+    const summary = (labels, found, unknown) => [...Object.keys(labels).filter(key => found.has(key)).map(key => labels[key]), ...(unknown ? [`Unknown (${unknown})`] : [])].join(", ") || "Unknown";
+    const notice = `Constructed from Recon; headers/body were not captured and availability is unknown. Sources: ${summary(SOURCE_NAMES, sources, unknownSources)}. Evidence: ${summary(KIND_NAMES, kinds, unknownKinds)}. Review before sending.`;
+    return { request, notice };
+  }
+
   function createSessionGuard(getSessionId, getGeneration = () => 0) {
     let epoch = 0;
     return {
@@ -305,7 +356,15 @@
         && canUse(token) && token.generation === sessionGeneration
         && endpoints.some((endpoint) => matchesEndpoint(endpoint, term, els.Kind.value));
     }
-    function renderCopyControl() { els.CopyJson.disabled = !canCopyJson(); }
+    function canOpenReplay() {
+      const token = guard.capture();
+      return visible && !!options.openInReplay && loaded && !loadError && !read && !mutation
+        && canUse(token) && token.generation === sessionGeneration;
+    }
+    function renderCopyControl() {
+      els.CopyJson.disabled = !canCopyJson();
+      for (const button of els.Detail.querySelectorAll("[data-open-replay]")) button.disabled = !canOpenReplay();
+    }
     function retireBulkCopy() { bulkContext += 1; }
     function renderControls() {
       els.Start.disabled = !canStart();
@@ -384,6 +443,13 @@
           copy.type = "button";
           copy.dataset.copyEndpoint = selectedKey;
           nodes.push(copy);
+        }
+        if (options.openInReplay) {
+          const open = element("button", "secondary-action", "Open in Replay");
+          open.type = "button";
+          open.dataset.openReplay = selectedKey;
+          open.disabled = !canOpenReplay();
+          nodes.push(open);
         }
         const fields = element("dl", "recon-detail-fields");
         addDetailField(fields, "Method", selected.method || "UNKNOWN");
@@ -603,6 +669,17 @@
       renderInventory();
     });
     on(els.Detail, "click", (event) => {
+      const open = event.target.closest("[data-open-replay]");
+      if (open) {
+        if (open.disabled || !els.Detail.contains(open) || !canOpenReplay() || selectedKey !== open.dataset.openReplay) return;
+        const selected = endpoints.find(item => endpointKey(item) === selectedKey);
+        if (!selected) return;
+        const token = guard.capture(), key = selectedKey;
+        const isCurrent = () => canOpenReplay() && canUse(token) && selectedKey === key && els.Detail.contains(open);
+        try { options.openInReplay(selected, isCurrent); }
+        catch (error) { if (isCurrent()) setAction(error.message || "Could not open Replay draft.", true); }
+        return;
+      }
       const button = event.target.closest("[data-copy-endpoint]");
       if (!visible || !options.copyText || !button || !els.Detail.contains(button)) return;
       const key = button.dataset.copyEndpoint;
@@ -675,7 +752,7 @@
     return { setVisible, syncSession, refresh, reset, dispose() { reset(); disposed = true; listeners.forEach((remove) => remove()); } };
   }
 
-  const api = { COPY_JSON_LIMIT, serializeFilteredExport, createController, buildJobRequest, parseTarget, filterEndpoints, sortEndpoints, pageEndpoints, endpointKey, createSessionGuard };
+  const api = { COPY_JSON_LIMIT, serializeFilteredExport, buildReplayDraft, createController, buildJobRequest, parseTarget, filterEndpoints, sortEndpoints, pageEndpoints, endpointKey, createSessionGuard };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperRecon = api;
 })(typeof window !== "undefined" ? window : globalThis);
