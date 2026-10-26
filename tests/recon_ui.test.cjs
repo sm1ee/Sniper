@@ -1117,3 +1117,139 @@ for (const phase of ["fetch", "json", "error body"]) {
     });
   }
 }
+
+// Filtered JSON is a local, click-owned export of the retained inventory.
+async function bulkFixture() {
+  const copies = [];
+  const f = controllerFixture({ copyText: (text, label, current) => { copies.push({ text, label, current }); } });
+  await settled();
+  return { f, copies, copy() { f.node("CopyJson").emit("click"); } };
+}
+function selectedUrlCopy(f) {
+  f.node("Endpoints").emit("click", { target: f.node("Endpoints").childNodes[0] });
+  const button = descendants(f.node("Detail")).find(node => node.dataset.copyEndpoint);
+  f.node("Detail").emit("click", { target: button });
+}
+
+test("filtered JSON has one contextual initially disabled toolbar action", () => {
+  const markup = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/index.html"), "utf8");
+  const button = markup.match(/<button[^>]*id="reconCopyJson"[^>]*>[^<]*<\/button>/g);
+  assert.equal(button?.length, 1);
+  assert.match(button[0], /disabled/);
+  assert.match(button[0], />Copy filtered JSON</);
+});
+
+test("filtered JSON copies all matching pages in the current stable sort, not the selected row", async () => {
+  const { f, copies, copy } = await bulkFixture();
+  f.node("Search").value = "api/"; f.node("Search").emit("input");
+  f.node("Kind").value = "candidate"; f.node("Kind").emit("change");
+  const header = new NodeFixture(); header.dataset.sort = "url";
+  f.node("Head").emit("click", { target: header });
+  f.node("Next").emit("click");
+  selectedUrlCopy(f);
+  const calls = f.calls.length;
+  const before = Date.now(); copy(); const after = Date.now();
+  assert.equal(copies.length, 2, "the explicit bulk action copies once after the individual action");
+  const payload = JSON.parse(copies[1].text);
+  assert.equal(payload.schema_version, 1); assert.equal(payload.session_id, "a");
+  assert.ok(Date.parse(payload.copied_at) >= before && Date.parse(payload.copied_at) <= after);
+  assert.equal(Object.hasOwn(payload, "loaded_at"), false);
+  assert.deepEqual(payload.filters, { query: "api/", kind: "candidate" });
+  assert.deepEqual(payload.sort, { key: "url", direction: "asc" });
+  assert.equal(payload.inventory_count, 111); assert.equal(payload.matched_count, 111);
+  assert.deepEqual(payload.endpoints, recon.sortEndpoints(f.snapshots.a.endpoints, { key: "url", direction: "asc" }));
+  assert.equal(f.calls.length, calls, "copy adds no API request or scan");
+  assert.equal(copies[0].current(), false, "bulk copy retires the older URL intent");
+  assert.equal(copies[1].current(), true); f.controller.dispose();
+});
+
+test("filtered JSON retains whole matching evidence but excludes unrelated fields and global diagnostics", async () => {
+  const { f, copies, copy } = await bulkFixture();
+  f.snapshots.a.endpoints = [{ method: "POST", url: "https://example.com/a?token=chosen&b=2", raw_urls: ["/a#chosen"], first_seen: "first", last_seen: "last", transaction_id: "NEVER", body: "NEVER", evidence: [
+    { source: "crawler", kind: "candidate", location: "chosen.js", timestamp: null, status: null, headers: "NEVER" },
+    { source: "wayback", kind: "history", location: "chosen archive", timestamp: "then", status: 404 },
+  ] }, { method: "GET", url: "https://example.com/a?token=chosen&b=2", raw_urls: [], evidence: [{ source: "orphan", kind: "candidate", location: "chosen.js" }] }];
+  f.snapshots.a.jobs = [{ status: "completed", target_url: "NEVER", error: "NEVER", sources: [{ source: "crawler", status: "completed", truncated: true, warnings: ["NEVER"] }] }, { status: "SECRET_STATUS", sources: [{ source: "SECRET_SOURCE", status: "SECRET_STATUS", warnings: ["NEVER", "NEVER"] }] }];
+  f.snapshots.a.truncated = true;
+  await f.controller.refresh();
+  f.node("Kind").value = "candidate"; f.node("Kind").emit("change"); copy();
+  assert.equal(copies.length, 1);
+  const p = JSON.parse(copies[0].text);
+  assert.equal(p.endpoints.length, 2); assert.equal(p.endpoints[0].evidence.length, 2);
+  assert.equal(p.endpoints[0].url, f.snapshots.a.endpoints[0].url);
+  assert.deepEqual(p.endpoints[0].evidence[0], { source: "crawler", kind: "candidate", location: "chosen.js", timestamp: null, status: null });
+  assert.equal(p.endpoints[1].evidence[0].source, "orphan");
+  assert.equal(p.coverage.scope, "session"); assert.equal(p.coverage.endpoint_job_attribution, "unavailable");
+  assert.equal(p.coverage.raw_job_diagnostics_included, false);
+  assert.equal(p.coverage.inventory_truncated, true);
+  assert.equal(p.coverage.job_status_counts.completed, 1); assert.equal(p.coverage.job_status_counts.unknown, 1);
+  assert.equal(p.coverage.source_counts.crawler, 1); assert.equal(p.coverage.source_counts.unknown, 1);
+  assert.equal(p.coverage.source_status_counts.unknown, 1); assert.equal(p.coverage.truncated_source_count, 1);
+  assert.equal(p.coverage.warning_count, 3);
+  assert.doesNotMatch(copies[0].text, /NEVER|SECRET_|transaction_id|complete":true|loaded_at/);
+  f.controller.dispose();
+});
+
+for (const change of ["page", "selection", "refresh success", "refresh failure", "failed refresh retry"]) {
+  test(`filtered JSON immutable click survives ${change}`, async () => {
+    const { f, copies, copy } = await bulkFixture(); copy();
+    assert.equal(copies.length, 1); const original = copies[0].text;
+    if (change === "page") f.node("Next").emit("click");
+    else if (change === "selection") f.node("Endpoints").emit("click", { target: f.node("Endpoints").childNodes[1] });
+    else {
+      f.snapshots.a.endpoints = [];
+      if (change !== "refresh success") f.failNext = "GET";
+      await f.controller.refresh();
+      if (change === "failed refresh retry") await f.controller.refresh();
+    }
+    assert.equal(copies[0].text, original); assert.equal(copies[0].current(), true);
+    f.controller.dispose();
+  });
+}
+for (const change of ["filter ABA", "sort ABA", "mutation", "hide/reopen", "reset", "session ABA", "new bulk", "new URL", "dispose"]) {
+  test(`filtered JSON click retires after ${change}`, async () => {
+    const { f, copies, copy } = await bulkFixture(); copy(); assert.equal(copies.length, 1);
+    if (change === "filter ABA") { f.node("Search").value = "other"; f.node("Search").emit("input"); f.node("Search").value = ""; f.node("Search").emit("input"); }
+    else if (change === "sort ABA") { const h = new NodeFixture(); h.dataset.sort = "url"; for (let i = 0; i < 3; i++) f.node("Head").emit("click", { target: h }); }
+    else if (change === "mutation") { f.node("Target").value = "https://example.com/"; f.hold = "POST"; f.node("Form").emit("submit"); }
+    else if (change === "hide/reopen") { f.controller.setVisible(false); f.controller.setVisible(true); await settled(); }
+    else if (change === "reset") f.controller.reset();
+    else if (change === "session ABA") { f.switchTo("b"); f.switchTo("a"); await settled(); }
+    else if (change === "new bulk") copy();
+    else if (change === "new URL") selectedUrlCopy(f);
+    else f.controller.dispose();
+    assert.equal(copies[0].current(), false);
+    f.held?.(); await settled(); f.controller.dispose();
+  });
+}
+for (const disabled of ["initial read", "pending read", "load error", "empty matches", "hidden", "mutation", "wrong generation"]) {
+  test(`filtered JSON cannot begin from ${disabled}`, async () => {
+    const { f, copies, copy } = await bulkFixture();
+    let pending;
+    if (disabled === "initial read") { f.controller.reset(); f.hold = "GET"; f.controller.syncSession(); }
+    else if (disabled === "pending read") { f.hold = "GET"; pending = f.controller.refresh(); }
+    else if (disabled === "load error") { f.failNext = "GET"; await f.controller.refresh(); }
+    else if (disabled === "empty matches") { f.node("Search").value = "nothing matches"; f.node("Search").emit("input"); }
+    else if (disabled === "hidden") f.controller.setVisible(false);
+    else if (disabled === "mutation") { f.node("Target").value = "https://example.com/"; f.hold = "POST"; f.node("Form").emit("submit"); }
+    else f.generation += 1;
+    copy(); assert.equal(copies.length, 0);
+    if (disabled !== "wrong generation") assert.equal(f.node("CopyJson").disabled, true);
+    f.held?.(); if (pending) await pending; await settled(); f.controller.dispose();
+  });
+}
+
+test("filtered JSON disabled invocation preserves a previously accepted bulk intent", async () => {
+  const { f, copies, copy } = await bulkFixture(); copy(); assert.equal(copies.length, 1);
+  f.failNext = "GET"; await f.controller.refresh(); copy();
+  assert.equal(copies.length, 1); assert.equal(copies[0].current(), true);
+  await f.controller.refresh(); copy(); assert.equal(copies.length, 2); assert.equal(copies[0].current(), false);
+  f.controller.dispose();
+});
+
+test("filtered JSON preserves individual URL's existing selection and refresh fences", async () => {
+  const { f, copies } = await bulkFixture(); selectedUrlCopy(f); assert.equal(copies.length, 1);
+  f.node("Endpoints").emit("click", { target: f.node("Endpoints").childNodes[1] }); assert.equal(copies[0].current(), false);
+  selectedUrlCopy(f); await f.controller.refresh(); assert.equal(copies[1].current(), false);
+  f.controller.dispose();
+});
