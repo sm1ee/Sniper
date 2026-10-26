@@ -1208,9 +1208,11 @@ for (const change of ["page", "selection", "refresh success", "refresh failure",
 }
 for (const change of ["filter ABA", "sort ABA", "mutation", "hide/reopen", "reset", "session ABA", "new bulk", "new URL", "dispose"]) {
   test(`filtered JSON click retires after ${change}`, async () => {
-    const { f, copies, copy } = await bulkFixture(); copy(); assert.equal(copies.length, 1);
+    const { f, copies, copy } = await bulkFixture();
+    if (change === "sort ABA") { const h = new NodeFixture(); h.dataset.sort = "url"; f.node("Head").emit("click", { target: h }); }
+    copy(); assert.equal(copies.length, 1);
     if (change === "filter ABA") { f.node("Search").value = "other"; f.node("Search").emit("input"); f.node("Search").value = ""; f.node("Search").emit("input"); }
-    else if (change === "sort ABA") { const h = new NodeFixture(); h.dataset.sort = "url"; for (let i = 0; i < 3; i++) f.node("Head").emit("click", { target: h }); }
+    else if (change === "sort ABA") { const h = new NodeFixture(); h.dataset.sort = "url"; for (let i = 0; i < 2; i++) f.node("Head").emit("click", { target: h }); }
     else if (change === "mutation") { f.node("Target").value = "https://example.com/"; f.hold = "POST"; f.node("Form").emit("submit"); }
     else if (change === "hide/reopen") { f.controller.setVisible(false); f.controller.setVisible(true); await settled(); }
     else if (change === "reset") f.controller.reset();
@@ -1253,3 +1255,183 @@ test("filtered JSON preserves individual URL's existing selection and refresh fe
   selectedUrlCopy(f); await f.controller.refresh(); assert.equal(copies[1].current(), false);
   f.controller.dispose();
 });
+
+function exportInput(overrides = {}) {
+  return { sessionId: "a", copiedAt: "2026-10-26T01:00:00.000Z", query: "", kind: "", sort: { key: "", direction: "asc" }, inventoryCount: 1, inventoryTruncated: false, jobs: [],
+    endpoints: [{ method: "GET", url: "https://example.com/", raw_urls: [], evidence: [] }], ...overrides };
+}
+
+for (const value of [String.fromCharCode(...Array.from({ length: 32 }, (_, i) => i), 0x7f, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xffff), "plain/slash", '"\\\b\t\n\f\r\u0000\u000b\u001f', "é雪😀\u2028\u2029", "\ud800", "\udfff", "\ud800x\udfff", "\ud800\ud800\udc00\udc00", ""]) {
+  test(`filtered JSON exact escaped UTF-8 size for ${JSON.stringify(value)}`, () => {
+    const input = exportInput();
+    input.endpoints[0].raw_urls = [value, value];
+    input.endpoints[0].evidence = [{ source: value, kind: "candidate", location: value, timestamp: null, status: 65535 }, { timestamp: value, status: null }];
+    input.endpoints[0].first_seen = value; input.endpoints[0].last_seen = value;
+    input.query = value;
+    const text = recon.serializeFilteredExport(input);
+    const bytes = Buffer.byteLength(text, "utf8");
+    assert.equal(recon.serializeFilteredExport(input, bytes), text);
+    assert.throws(() => recon.serializeFilteredExport(input, bytes - 1), /copy limit/);
+    assert.deepEqual(JSON.parse(text).endpoints, input.endpoints);
+    assert.equal(JSON.parse(text).filters.query, value);
+  });
+}
+
+test("filtered JSON exact 2 MiB boundary is copy-only and refuses one more ASCII byte", () => {
+  assert.equal(recon.COPY_JSON_LIMIT, 2 * 1024 * 1024);
+  const input = exportInput(); const initial = Buffer.byteLength(recon.serializeFilteredExport(input));
+  input.endpoints[0].url += "a".repeat(recon.COPY_JSON_LIMIT - initial);
+  assert.equal(Buffer.byteLength(recon.serializeFilteredExport(input)), recon.COPY_JSON_LIMIT);
+  input.endpoints[0].url += "a";
+  assert.throws(() => recon.serializeFilteredExport(input), /copy limit/);
+});
+
+for (const place of ["leaf", "many evidence", "many endpoints"]) {
+  test(`filtered JSON preflight refuses ${place} before constructing or stringifying export leaves`, () => {
+    const fs = require("node:fs"), vm = require("node:vm");
+    const context = vm.createContext({ module: { exports: {} }, TextEncoder });
+    vm.runInContext(fs.readFileSync(require("node:path").join(__dirname, "../web/recon.js"), "utf8"), context);
+    vm.runInContext('JSON.stringify = () => { throw new Error("serialization began before preflight refusal"); }', context);
+    const input = exportInput();
+    if (place === "leaf") input.endpoints[0].url = "x".repeat(10000);
+    else if (place === "many evidence") input.endpoints[0].evidence = Array.from({ length: 50 }, () => ({ source: "crawler", kind: "candidate", location: "x".repeat(30) }));
+    else input.endpoints = Array.from({ length: 50 }, () => input.endpoints[0]);
+    input.endpoints.push(Object.defineProperty({}, "url", { get() { throw new Error("walk continued beyond known over-limit data"); } }));
+    assert.throws(() => context.module.exports.serializeFilteredExport(input, 1200), /copy limit/);
+  });
+}
+
+for (const [name, corrupt] of Object.entries({
+  "nonstring URL": input => { input.endpoints[0].url = { toJSON() { throw new Error("must not execute"); } }; },
+  "nonstring method": input => { input.endpoints[0].method = []; },
+  "raw URLs object": input => { input.endpoints[0].raw_urls = {}; },
+  "raw URL object": input => { input.endpoints[0].raw_urls = [{}]; },
+  "sparse raw URLs": input => { input.endpoints[0].raw_urls = Array(1); },
+  "evidence object": input => { input.endpoints[0].evidence = {}; },
+  "null evidence member": input => { input.endpoints[0].evidence = [null]; },
+  "nested evidence location": input => { input.endpoints[0].evidence = [{ location: {} }]; },
+  "invalid timestamp": input => { input.endpoints[0].evidence = [{ timestamp: 3 }]; },
+  "status over u16": input => { input.endpoints[0].evidence = [{ status: 65536 }]; },
+  "negative status": input => { input.endpoints[0].evidence = [{ status: -1 }]; },
+  "fractional status": input => { input.endpoints[0].evidence = [{ status: 1.2 }]; },
+  "NaN status": input => { input.endpoints[0].evidence = [{ status: NaN }]; },
+  "undefined evidence member": input => { input.endpoints[0].evidence = [undefined]; },
+  "warnings not array": input => { input.jobs = [{ sources: [{ warnings: "secret warning" }] }]; },
+  "warning not string": input => { input.jobs = [{ sources: [{ warnings: [{}] }] }]; },
+  "null source": input => { input.jobs = [{ sources: [null] }]; },
+  "truncated not boolean": input => { input.jobs = [{ sources: [{ truncated: "secret" }] }]; },
+})) {
+  test(`filtered JSON refuses malformed ${name} without coercing evidence`, () => {
+    const input = exportInput(); corrupt(input);
+    assert.throws(() => recon.serializeFilteredExport(input), /^Error: Could not copy this inventory as JSON\.$/);
+  });
+}
+
+test("filtered JSON keeps optional omissions/nulls, ignores unselected getters, and counts prototype-like labels generically", () => {
+  const input = exportInput({ jobs: ["__proto__", "constructor", "toString", "unknown"].map(label => ({ status: label, sources: [{ source: label, status: label, warnings: [], truncated: false }] })) });
+  input.endpoints[0].evidence = [{ timestamp: null, status: null }, { timestamp: undefined, status: undefined }, { status: 0 }];
+  Object.defineProperty(input.endpoints[0], "body", { get() { throw new Error("unselected field read"); } });
+  Object.defineProperty(input.jobs[0], "target_url", { get() { throw new Error("unrelated target read"); } });
+  const p = JSON.parse(recon.serializeFilteredExport(input));
+  assert.deepEqual(p.endpoints[0].evidence, [{ timestamp: null, status: null }, {}, { status: 0 }]);
+  assert.equal(p.coverage.job_status_counts.unknown, 4); assert.equal(p.coverage.source_counts.unknown, 4);
+  assert.equal(p.coverage.source_status_counts.unknown, 4);
+  assert.equal(Object.hasOwn(p.coverage.job_status_counts, "__proto__"), false);
+});
+
+for (const rejection of ["over limit", "invalid shape"]) {
+  test(`filtered JSON eligible ${rejection} retires an older URL intent without copying or leaking data`, async () => {
+    const { f, copies, copy } = await bulkFixture();
+    f.snapshots.a.endpoints = [{ url: "https://example.com/", method: "GET", raw_urls: [], evidence: [] }];
+    if (rejection === "over limit") f.snapshots.a.endpoints[0].raw_urls = ["SECRET".repeat(350000)];
+    else f.snapshots.a.endpoints[0].evidence = [{ location: { secret: "NEVER" } }];
+    await f.controller.refresh(); selectedUrlCopy(f); assert.equal(copies.length, 1);
+    copy(); assert.equal(copies.length, 1); assert.equal(copies[0].current(), false);
+    assert.match(f.node("ActionStatus").textContent, rejection === "over limit" ? /2 MiB copy limit/ : /Could not copy this inventory as JSON/);
+    assert.doesNotMatch(f.node("ActionStatus").textContent, /SECRET|NEVER/); f.controller.dispose();
+  });
+}
+
+for (const outcome of ["resolve", "reject", "throw"]) {
+  for (const retire of [false, true]) {
+    test(`filtered JSON ${outcome} clipboard notice is owned (retired=${retire})`, async () => {
+      let resolve, reject;
+      const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+      const f = controllerFixture({ copyText: () => { if (outcome === "throw") throw new Error("SECRET"); return promise; } }); await settled();
+      f.node("CopyJson").emit("click");
+      if (retire) { f.node("Search").value = "new"; f.node("Search").emit("input"); }
+      if (outcome === "reject") reject(new Error("SECRET")); else resolve();
+      await settled();
+      if (outcome === "throw" || (outcome === "reject" && !retire)) assert.match(f.node("ActionStatus").textContent, /Could not copy filtered JSON/);
+      else assert.equal(f.node("ActionStatus").textContent, "");
+      assert.doesNotMatch(f.node("ActionStatus").textContent, /SECRET/); f.controller.dispose();
+    });
+  }
+}
+
+for (const flag of [undefined, null, "false", false, true]) {
+  test(`filtered JSON response truncation is reported, not inferred (${String(flag)})`, async () => {
+    const { f, copies, copy } = await bulkFixture();
+    if (flag === undefined) delete f.snapshots.a.truncated; else f.snapshots.a.truncated = flag;
+    await f.controller.refresh(); copy();
+    assert.equal(JSON.parse(copies[0].text).coverage.inventory_truncated, typeof flag === "boolean" ? flag : null);
+    assert.equal(f.node("InventoryMeta").textContent.includes("Response truncated"), !!flag, "existing display normalization stays unchanged");
+    f.controller.dispose();
+  });
+}
+
+test("filtered JSON final encoded byte verification refuses an inconsistent encoder", () => {
+  const context = vm.createContext({ module: { exports: {} }, TextEncoder: class { encode() { return { length: 0 }; } } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../web/recon.js"), "utf8"), context);
+  assert.throws(() => context.module.exports.serializeFilteredExport(exportInput()), /Could not copy this inventory/);
+});
+
+test("filtered JSON traversal does not map or mutate the original endpoint/evidence arrays", () => {
+  const input = exportInput();
+  input.endpoints[0].evidence = [Object.freeze({ source: "crawler", kind: "candidate", location: "x", status: null })];
+  for (const array of [input.endpoints, input.endpoints[0].evidence, input.endpoints[0].raw_urls]) {
+    Object.defineProperty(array, "map", { get() { throw new Error("export array mapping"); } }); Object.freeze(array);
+  }
+  Object.freeze(input.endpoints[0]); Object.freeze(input);
+  assert.equal(JSON.parse(recon.serializeFilteredExport(input)).endpoints[0].evidence[0].location, "x");
+});
+
+for (const outcome of ["resolve", "reject"]) {
+  for (const change of ["none", "page", "selection", "refresh success", "refresh failure", "filter ABA", "sort ABA", "mutation", "hide", "reset", "session ABA", "new URL", "new JSON", "refused JSON"]) {
+    test(`filtered JSON actual clipboard ${outcome} after ${change}`, async () => {
+      const pending = [], fallback = [], attached = new Set(), toasts = [];
+      const app = loadAppFunctions(["copyTextToClipboard", "copyReconEndpointUrl"], {
+        navigator: { clipboard: { writeText(text) { return new Promise((resolve, reject) => pending.push({ text, resolve, reject })); } } },
+        document: {
+          body: { appendChild(node) { attached.add(node); } },
+          createElement(tag) { assert.equal(tag, "textarea"); return { value: "", style: {}, setAttribute() {}, select() {}, remove() { attached.delete(this); } }; },
+          execCommand(command) { assert.equal(command, "copy"); fallback.push([...attached][0].value); return true; },
+        }, showToast: (...args) => toasts.push(args),
+      });
+      const f = controllerFixture({ copyText: (...args) => app.copyReconEndpointUrl(...args) }); await settled();
+      const header = new NodeFixture(); header.dataset.sort = "url";
+      if (change === "sort ABA") f.node("Head").emit("click", { target: header });
+      f.node("CopyJson").emit("click"); assert.equal(pending.length, 1);
+      const original = pending[0].text;
+      if (change === "page") f.node("Next").emit("click");
+      else if (change === "selection") f.node("Endpoints").emit("click", { target: f.node("Endpoints").childNodes[1] });
+      else if (change.startsWith("refresh")) { f.snapshots.a.endpoints = []; if (change === "refresh failure") f.failNext = "GET"; await f.controller.refresh(); }
+      else if (change === "filter ABA") { for (const value of ["other", ""]) { f.node("Search").value = value; f.node("Search").emit("input"); } }
+      else if (change === "sort ABA") for (let i = 0; i < 2; i++) f.node("Head").emit("click", { target: header });
+      else if (change === "mutation") { f.node("Target").value = "https://example.com/"; f.hold = "POST"; f.node("Form").emit("submit"); }
+      else if (change === "hide") f.controller.setVisible(false);
+      else if (change === "reset") f.controller.reset();
+      else if (change === "session ABA") { f.switchTo("b"); f.switchTo("a"); await settled(); }
+      else if (change === "new URL") selectedUrlCopy(f);
+      else if (change === "new JSON") f.node("CopyJson").emit("click");
+      else if (change === "refused JSON") { f.snapshots.a.endpoints = [{ method: "GET", url: "https://example.com/", raw_urls: ["x".repeat(recon.COPY_JSON_LIMIT)], evidence: [] }]; await f.controller.refresh(); f.node("CopyJson").emit("click"); }
+      const retained = ["none", "page", "selection", "refresh success", "refresh failure"].includes(change);
+      if (outcome === "resolve") pending[0].resolve(); else pending[0].reject(new Error("synthetic unavailable"));
+      await settled();
+      assert.deepEqual(fallback, retained && outcome === "reject" ? [original] : []);
+      assert.deepEqual(toasts, retained ? [["Copied filtered JSON"]] : []);
+      assert.equal(attached.size, 0);
+      f.controller.dispose(); f.held?.(); for (const request of pending.slice(1)) request.resolve(); await settled();
+    });
+  }
+}

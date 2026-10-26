@@ -27,6 +27,12 @@ Entries are deduplicated by normalized URL plus method. The query string is kept
 
 Select an endpoint and use **Copy URL** to copy its normalized URL, preserving query order and encoding. Copying does not visit the URL or create a captured request.
 
+**Copy filtered JSON** copies every matching endpoint in the current sort order, across all pages, with its raw URLs and all retained evidence. It uses the loaded inventory without sending requests. Empty results, loading, pending mutations and failed refreshes disable the action. The copy is limited to 2 MiB of UTF-8 JSON, checked before constructing the export; oversized or malformed results are refused as a whole. Narrow the filter or use the full API/CLI inventory instead. This is a copy limit, not a collection or retained-inventory limit.
+
+The payload records the filters, sort, session and local click time (`copied_at`), not a server freshness time. Session-wide diagnostic counts use fixed status/source categories, with unknown labels counted generically; they do not attribute jobs to individual endpoints. Global job targets and raw warnings/errors are omitted. An absent response-truncation flag is `null` (unknown), not evidence of completeness. Selected URL/query/evidence values are copied faithfully and may be sensitive.
+
+A pending JSON copy keeps its click-time bytes through paging, row selection and background refreshes. Changing filters/sort, starting or stopping a job, hiding/resetting Recon, changing session, or making a newer eligible copy retires its fallback and notices. This cannot cancel a clipboard write already handed to the platform. Individual **Copy URL** keeps its existing selection/refresh ownership rules.
+
 ## Budgets
 
 `max_requests`, `max_depth`, `max_endpoints` and `max_pages` default to 0, which means no limit; a positive value limits one job. `max_endpoints` counts new entries the job adds; existing entries can still gain evidence. `max_pages` applies to each history source separately. A job that stops at a budget with work left is reported as partial. `max_depth=0` used to mean the seed only; it now means no limit.

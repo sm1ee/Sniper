@@ -64,14 +64,15 @@
   function evidenceOf(endpoint) { return Array.isArray(endpoint.evidence) ? endpoint.evidence : []; }
   function kindsOf(endpoint) { return [...new Set(evidenceOf(endpoint).map((item) => item.kind || "candidate"))]; }
   function sourcesOf(endpoint) { return [...new Set(evidenceOf(endpoint).map((item) => item.source || "unknown"))]; }
+  function matchesEndpoint(endpoint, term, kind) {
+    if (kind && !kindsOf(endpoint).includes(kind)) return false;
+    if (!term) return true;
+    return [endpoint.url, endpoint.method, ...(endpoint.raw_urls || []), ...evidenceOf(endpoint).flatMap((item) => [item.source, item.kind, item.location])]
+      .some((value) => String(value || "").toLowerCase().includes(term));
+  }
   function filterEndpoints(endpoints, query, kind) {
     const term = String(query || "").trim().toLowerCase();
-    return endpoints.filter((endpoint) => {
-      if (kind && !kindsOf(endpoint).includes(kind)) return false;
-      if (!term) return true;
-      return [endpoint.url, endpoint.method, ...(endpoint.raw_urls || []), ...evidenceOf(endpoint).flatMap((item) => [item.source, item.kind, item.location])]
-        .some((value) => String(value || "").toLowerCase().includes(term));
-    });
+    return endpoints.filter((endpoint) => matchesEndpoint(endpoint, term, kind));
   }
 
   // The text each column shows, which is what it sorts by.
@@ -101,6 +102,129 @@
     return { page, pages, items: endpoints.slice(page * pageSize, (page + 1) * pageSize) };
   }
 
+  const COPY_JSON_LIMIT = 2 * 1024 * 1024;
+  const COPY_LIMIT_ERROR = "Filtered JSON exceeds the 2 MiB copy limit. Narrow the filter or use the full API/CLI.";
+  const COPY_DATA_ERROR = "Could not copy this inventory as JSON.";
+  const JOB_STATUSES = ["queued", "running", "stopping", "completed", "cancelled", "interrupted", "failed", "unknown"];
+
+  function exportCoverage(jobs, truncated) {
+    const counts = (names) => Object.fromEntries(names.map((name) => [name, 0]));
+    const coverage = {
+      scope: "session", endpoint_job_attribution: "unavailable", raw_job_diagnostics_included: false,
+      inventory_truncated: typeof truncated === "boolean" ? truncated : null,
+      job_status_counts: counts(JOB_STATUSES), source_counts: counts([...Object.keys(SOURCE_NAMES), "unknown"]),
+      source_status_counts: counts(JOB_STATUSES), truncated_source_count: 0, warning_count: 0,
+    };
+    const increment = (bucket, name) => { bucket[typeof name === "string" && Object.hasOwn(bucket, name) ? name : "unknown"] += 1; };
+    for (const job of jobs) {
+      if (!job || typeof job !== "object" || Array.isArray(job)) throw new Error(COPY_DATA_ERROR);
+      increment(coverage.job_status_counts, job.status);
+      if (job.sources !== undefined && !Array.isArray(job.sources)) throw new Error(COPY_DATA_ERROR);
+      for (const source of job.sources || []) {
+        if (!source || typeof source !== "object" || Array.isArray(source)) throw new Error(COPY_DATA_ERROR);
+        increment(coverage.source_counts, source.source);
+        increment(coverage.source_status_counts, source.status);
+        if (source.truncated !== undefined && typeof source.truncated !== "boolean") throw new Error(COPY_DATA_ERROR);
+        if (source.truncated) coverage.truncated_source_count += 1;
+        if (source.warnings !== undefined && !Array.isArray(source.warnings)) throw new Error(COPY_DATA_ERROR);
+        for (const warning of source.warnings || []) if (typeof warning !== "string") throw new Error(COPY_DATA_ERROR);
+        coverage.warning_count += source.warnings?.length || 0;
+      }
+    }
+    return coverage;
+  }
+
+  function serializeFilteredExport(input, limit = COPY_JSON_LIMIT) {
+    if (!Number.isSafeInteger(limit) || limit < 0 || !Array.isArray(input.endpoints) || !Array.isArray(input.jobs)) throw new Error(COPY_DATA_ERROR);
+    // Only finite category counts are built before the original-record preflight.
+    // Global job targets and diagnostics can contain URLs unrelated to the filter.
+    const coverage = exportCoverage(input.jobs, input.inventoryTruncated);
+    let bytes = 0;
+    const add = (count) => { if (count > limit - bytes) throw new Error(COPY_LIMIT_ERROR); bytes += count; };
+    function countString(value) {
+      add(2);
+      for (let i = 0; i < value.length; i += 1) {
+        const code = value.charCodeAt(i);
+        if (code === 34 || code === 92 || code === 8 || code === 9 || code === 10 || code === 12 || code === 13) add(2);
+        else if (code < 32) add(6);
+        else if (code < 128) add(1);
+        else if (code < 2048) add(2);
+        else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) { add(4); i += 1; }
+        else if (code >= 0xd800 && code <= 0xdfff) add(6);
+        else add(3);
+      }
+    }
+    // The same fixed traversal measures first, then emits. No mapped endpoint
+    // tree or escaped large leaf exists until the complete whitelist fits.
+    function walk(raw, string) {
+      const text = (value, nullable = false) => {
+        if (nullable && value === null) raw("null");
+        else { if (typeof value !== "string") throw new Error(COPY_DATA_ERROR); string(value); }
+      };
+      const number = (value) => {
+        if (!Number.isSafeInteger(value) || value < 0) throw new Error(COPY_DATA_ERROR);
+        raw(String(value));
+      };
+      function object(fields) {
+        raw("{"); let first = true;
+        fields((key, emit) => { if (!first) raw(","); first = false; string(key); raw(":"); emit(); });
+        raw("}");
+      }
+      function array(items, emit) {
+        if (!Array.isArray(items)) throw new Error(COPY_DATA_ERROR);
+        raw("["); for (let i = 0; i < items.length; i += 1) { if (i) raw(","); emit(items[i]); } raw("]");
+      }
+      const record = (value) => { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(COPY_DATA_ERROR); };
+      function evidence(value) {
+        record(value);
+        object((field) => {
+          for (const key of ["source", "kind", "location", "timestamp"]) {
+            if (value[key] !== undefined) field(key, () => text(value[key], key === "timestamp"));
+          }
+          if (value.status !== undefined) field("status", () => {
+            if (value.status === null) raw("null");
+            else { if (value.status > 65535) throw new Error(COPY_DATA_ERROR); number(value.status); }
+          });
+        });
+      }
+      function endpoint(value) {
+        record(value);
+        object((field) => {
+          field("url", () => text(value.url)); field("method", () => text(value.method));
+          if (value.raw_urls !== undefined) field("raw_urls", () => array(value.raw_urls, (url) => text(url)));
+          if (value.evidence !== undefined) field("evidence", () => array(value.evidence, evidence));
+          for (const key of ["first_seen", "last_seen"]) if (value[key] !== undefined) field(key, () => text(value[key]));
+        });
+      }
+      object((field) => {
+        field("schema_version", () => number(1));
+        field("session_id", () => text(input.sessionId));
+        field("copied_at", () => text(input.copiedAt));
+        field("filters", () => object((f) => { f("query", () => text(input.query)); f("kind", () => text(input.kind)); }));
+        field("sort", () => object((f) => { f("key", () => text(input.sort.key)); f("direction", () => text(input.sort.direction)); }));
+        field("inventory_count", () => number(input.inventoryCount)); field("matched_count", () => number(input.endpoints.length));
+        field("coverage", () => object((f) => {
+          for (const key of ["scope", "endpoint_job_attribution"]) f(key, () => text(coverage[key]));
+          f("raw_job_diagnostics_included", () => raw("false"));
+          f("inventory_truncated", () => raw(coverage.inventory_truncated === null ? "null" : coverage.inventory_truncated ? "true" : "false"));
+          for (const key of ["job_status_counts", "source_counts", "source_status_counts"]) f(key, () => object((counter) => {
+            for (const [name, count] of Object.entries(coverage[key])) counter(name, () => number(count));
+          }));
+          for (const key of ["truncated_source_count", "warning_count"]) f(key, () => number(coverage[key]));
+        }));
+        field("endpoints", () => array(input.endpoints, endpoint));
+      });
+    }
+    walk((token) => add(token.length), countString);
+    const expectedBytes = bytes;
+    const chunks = [];
+    bytes = 0;
+    walk((token) => { add(token.length); chunks.push(token); }, (value) => { countString(value); chunks.push(JSON.stringify(value)); });
+    const result = chunks.join("");
+    if (new TextEncoder().encode(result).length !== expectedBytes || expectedBytes > limit) throw new Error(COPY_DATA_ERROR);
+    return result;
+  }
+
   function createSessionGuard(getSessionId, getGeneration = () => 0) {
     let epoch = 0;
     return {
@@ -118,7 +242,7 @@
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
     const guard = createSessionGuard(options.getSessionId, options.getSessionGeneration);
-    const ids = ["Form", "Target", "Subdomains", "Scope", "Crawler", "Urlscan", "Wayback", "HistoryConsentRow", "HistoryConsent", "HistoryConsentText", "UrlscanSubmit", "ScanOptions", "ScanVisibility", "ScanConsent", "ScanConsentText", "MaxRequests", "MaxDepth", "MaxEndpoints", "MaxPages", "Start", "Refresh", "ActionStatus", "Jobs", "JobsMeta", "Search", "Kind", "InventoryMeta", "LoadStatus", "Head", "Endpoints", "Detail", "PageMeta", "Previous", "Next"];
+    const ids = ["Form", "Target", "Subdomains", "Scope", "Crawler", "Urlscan", "Wayback", "HistoryConsentRow", "HistoryConsent", "HistoryConsentText", "UrlscanSubmit", "ScanOptions", "ScanVisibility", "ScanConsent", "ScanConsentText", "MaxRequests", "MaxDepth", "MaxEndpoints", "MaxPages", "Start", "Refresh", "ActionStatus", "Jobs", "JobsMeta", "Search", "Kind", "InventoryMeta", "LoadStatus", "Head", "Endpoints", "Detail", "PageMeta", "Previous", "Next", "CopyJson"];
     const els = Object.fromEntries(ids.map((id) => [id, shell.querySelector(`#recon${id}`)]));
     let visible = false;
     let sessionId = null;
@@ -138,7 +262,10 @@
     let pageItems = [];
     let selectedKey = null;
     let copyEpoch = 0;
+    let copyIntent = 0;
+    let bulkContext = 0;
     let inventoryTruncated = false;
+    let exportInventoryTruncated = null;
     let disposed = false;
     const listeners = [];
 
@@ -170,11 +297,22 @@
       actionError = error;
       showNotice(els.ActionStatus, message, error);
     }
+    function matchingEndpoints() { return sortEndpoints(filterEndpoints(endpoints, els.Search.value, els.Kind.value), sort); }
+    function canCopyJson() {
+      const token = guard.capture();
+      const term = String(els.Search.value || "").trim().toLowerCase();
+      return visible && !!options.copyText && loaded && !loadError && !read && !mutation
+        && canUse(token) && token.generation === sessionGeneration
+        && endpoints.some((endpoint) => matchesEndpoint(endpoint, term, els.Kind.value));
+    }
+    function renderCopyControl() { els.CopyJson.disabled = !canCopyJson(); }
+    function retireBulkCopy() { bulkContext += 1; }
     function renderControls() {
       els.Start.disabled = !canStart();
       els.Start.textContent = mutation?.type === "start" ? "Starting…" : "Start discovery";
       els.Refresh.disabled = !sessionId || !!read || !!mutation;
       showNotice(els.ActionStatus, actionMessage, actionError);
+      renderCopyControl();
     }
     function canStart() {
       return !!sessionId && loaded && !loadError && !read && !mutation
@@ -273,7 +411,7 @@
       els.Detail.replaceChildren(...nodes);
     }
     function renderInventory() {
-      const filtered = sortEndpoints(filterEndpoints(endpoints, els.Search.value, els.Kind.value), sort);
+      const filtered = matchingEndpoints();
       const current = pageEndpoints(filtered, page);
       page = current.page;
       pageItems = current.items;
@@ -305,6 +443,7 @@
       els.Next.disabled = page + 1 >= current.pages;
       showNotice(els.LoadStatus, loadError, true);
       renderDetail();
+      renderCopyControl();
     }
     function render() { renderControls(); renderJobs(); renderInventory(); }
     function scheduleRefresh() {
@@ -339,6 +478,7 @@
         jobs = [...snapshot.jobs].sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")));
         endpoints = snapshot.endpoints;
         inventoryTruncated = !!snapshot.truncated;
+        exportInventoryTruncated = typeof snapshot.truncated === "boolean" ? snapshot.truncated : null;
         loaded = true;
         loadError = "";
         render();
@@ -368,6 +508,7 @@
       catch (error) { setAction(error.message, true); return; }
       const request = { token, type, id, controller: new AbortController() };
       mutation = request;
+      retireBulkCopy();
       setAction("");
       renderControls();
       renderJobs();
@@ -399,6 +540,7 @@
       }
     }
     function reset() {
+      retireBulkCopy();
       guard.invalidate();
       clearTimer();
       if (read) read.controller.abort();
@@ -416,6 +558,7 @@
       selectedKey = null;
       page = 0;
       inventoryTruncated = false;
+      exportInventoryTruncated = null;
       els.Form.reset();
       els.Search.value = "";
       els.Kind.value = "";
@@ -437,7 +580,7 @@
       visible = !!next;
       syncSession();
       if (!visible) {
-        if (changed) copyEpoch += 1;
+        if (changed) { copyEpoch += 1; retireBulkCopy(); }
         clearTimer();
         // Reads belong to this view; pending start/stop requests still own their result.
         if (read) { read.controller.abort(); read = null; }
@@ -449,8 +592,8 @@
     on(els.Refresh, "click", () => { void refresh(); });
     on(els.Target, "input", () => updateScope({ revokeConsent: true }));
     for (const field of [els.Subdomains, els.Urlscan, els.Wayback, els.UrlscanSubmit, els.ScanVisibility]) on(field, "change", () => updateScope({ revokeConsent: true }));
-    on(els.Search, "input", () => { page = 0; renderInventory(); });
-    on(els.Kind, "change", () => { page = 0; renderInventory(); });
+    on(els.Search, "input", () => { retireBulkCopy(); page = 0; renderInventory(); });
+    on(els.Kind, "change", () => { retireBulkCopy(); page = 0; renderInventory(); });
     on(els.Previous, "click", () => { page -= 1; renderInventory(); });
     on(els.Next, "click", () => { page += 1; renderInventory(); });
     on(els.Endpoints, "click", (event) => {
@@ -468,15 +611,37 @@
       const token = guard.capture();
       if (!canUse(token)) return;
       const epoch = ++copyEpoch;
-      const isCurrent = () => canUse(token) && visible && epoch === copyEpoch && selectedKey === key;
+      const intent = ++copyIntent;
+      const isCurrent = () => canUse(token) && visible && intent === copyIntent && epoch === copyEpoch && selectedKey === key;
       const failed = () => { if (isCurrent()) setAction("Could not copy URL.", true); };
       try { Promise.resolve(options.copyText(selected.url, "Copied URL", isCurrent)).catch(failed); }
+      catch (_) { failed(); }
+    });
+    on(els.CopyJson, "click", () => {
+      if (!canCopyJson()) return;
+      const token = guard.capture();
+      const intent = ++copyIntent;
+      const context = bulkContext;
+      const copiedAt = new Date().toISOString();
+      const isCurrent = () => canUse(token) && visible && intent === copyIntent && context === bulkContext;
+      let text;
+      try {
+        text = serializeFilteredExport({ sessionId: token.sessionId, copiedAt,
+          query: els.Search.value, kind: els.Kind.value, sort, inventoryCount: endpoints.length,
+          inventoryTruncated: exportInventoryTruncated, jobs, endpoints: matchingEndpoints() });
+      } catch (error) {
+        if (isCurrent()) setAction(error.message === COPY_LIMIT_ERROR ? COPY_LIMIT_ERROR : COPY_DATA_ERROR, true);
+        return;
+      }
+      const failed = () => { if (isCurrent()) setAction("Could not copy filtered JSON.", true); };
+      try { Promise.resolve(options.copyText(text, "Copied filtered JSON", isCurrent)).catch(failed); }
       catch (_) { failed(); }
     });
     on(els.Head, "click", (event) => {
       if (event.target.closest(".table-col-resize")) return;
       const header = event.target.closest("[data-sort]");
       if (!header) return;
+      retireBulkCopy();
       sort = nextSort(sort, header.dataset.sort);
       for (const column of els.Head.querySelectorAll("[data-sort]")) {
         const active = column.dataset.sort === sort.key;
@@ -510,7 +675,7 @@
     return { setVisible, syncSession, refresh, reset, dispose() { reset(); disposed = true; listeners.forEach((remove) => remove()); } };
   }
 
-  const api = { createController, buildJobRequest, parseTarget, filterEndpoints, sortEndpoints, pageEndpoints, endpointKey, createSessionGuard };
+  const api = { COPY_JSON_LIMIT, serializeFilteredExport, createController, buildJobRequest, parseTarget, filterEndpoints, sortEndpoints, pageEndpoints, endpointKey, createSessionGuard };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperRecon = api;
 })(typeof window !== "undefined" ? window : globalThis);
