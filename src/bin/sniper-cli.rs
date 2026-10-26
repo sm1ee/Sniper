@@ -19630,6 +19630,7 @@ mod tests {
         data_dir_strings_match, process_path_strings_match, validate_sniper_settings_probe,
         SniperApiProbeExpectation,
     };
+    use super::{validate_service_map_packet_response, ServiceMapPacketArgs};
     use chrono::Utc;
     use clap::Parser;
     use serde_json::{json, Value};
