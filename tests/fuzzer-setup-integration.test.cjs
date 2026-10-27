@@ -8,7 +8,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const raw = 'POST /items?id=one&id=two%2Fthree HTTP/1.0\r\nHost: example.com\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 3\r\n\r\na=1';
 const parserNames = ['parseFuzzerRequestTemplate', 'parseEditableRawRequest', 'splitRawHttpMessage', 'editableRequestBodyLength', 'decodedBase64Length', 'parseReplayHttpVersionToken', 'normalizeReplayHttpVersion', 'headerValue', 'headerNameEquals', 'normalizedHeaders', 'validateRawHttpBodyFraming', 'buildEditableRawRequest', 'mergeHeaders', 'httpRequestAuthoritiesEquivalent', 'normalizeHttpRequestAuthority', 'createDefaultEditableRequest'];
-const names = [...parserNames, 'renderFuzzerSetup', 'fuzzerSetupNode', 'escapeHtml', 'initFuzzerSetupControls', 'fuzzerRequestTextForAction', 'fuzzerRawOffsetForEditorOffset', 'splitFuzzerPayloadLines', 'fuzzerPayloadCount', 'fuzzerPayloadTextWithinLimits', 'fuzzerSetupPreflight', 'markFuzzerPosition', 'markFuzzerEditorSelection', 'undoFuzzerMarker', 'applyFuzzerPayloadList', 'importFuzzerPayloadFile', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'invalidateFuzzerRun', 'openFuzzerFromRecord', 'openFuzzerFromReplay', 'runFuzzerAttack', 'followFuzzerAttack', 'isCurrentFuzzerRun', 'replayHttpVersionFromText', 'validateManualRepeaterTargetInput', 'normalizePortValue', 'isLikelyIpv6Literal', 'setReplayTargetInputValidity'];
+const names = [...parserNames, 'renderFuzzerSetup', 'fuzzerSetupNode', 'escapeHtml', 'initFuzzerSetupControls', 'fuzzerRequestTextForAction', 'fuzzerRawOffsetForEditorOffset', 'splitFuzzerPayloadLines', 'fuzzerPayloadCount', 'fuzzerPayloadTextWithinLimits', 'fuzzerSetupPreflight', 'markFuzzerPosition', 'markFuzzerEditorSelection', 'undoFuzzerMarker', 'clearFuzzerMarkers', 'applyFuzzerPayloadList', 'importFuzzerPayloadFile', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'invalidateFuzzerRun', 'openFuzzerFromRecord', 'openFuzzerFromReplay', 'runFuzzerAttack', 'followFuzzerAttack', 'isCurrentFuzzerRun', 'replayHttpVersionFromText', 'validateManualRepeaterTargetInput', 'normalizePortValue', 'isLikelyIpv6Literal', 'setReplayTargetInputValidity'];
 function fixture() {
   const state = { activeSession: { id: 'session-a' }, fuzzerBaseRequest: { scheme: 'https', host: 'example.com', method: 'POST', path: '/items', body: 'a=1', body_encoding: 'utf8', preview_truncated: false }, fuzzerRequestText: raw, fuzzerPayloadsText: 'x', fuzzerDraftVersion: 0, fuzzerRunToken: 0, fuzzerRunning: false, fuzzerSourceTransactionId: 'source-a' };
   const els = { fuzzerPayloadsEditor: { value: 'x' } };
@@ -192,13 +192,13 @@ test('a started attack is followed to its end with the chosen options, then show
 
 test('render enables exact candidates and recomputes safety when source flags change with identical raw text', () => {
   const f = fixture();
-  const ids = ['fuzzerPreflightSummary', 'fuzzerPreflightNotice', 'fuzzerPreviewSamples', 'fuzzerCandidateSelect', 'fuzzerUndoMarkerButton'];
+  const ids = ['fuzzerMarkSelectionButton', 'startFuzzerButton', 'fuzzerPreflightSummary', 'fuzzerPositionCount', 'fuzzerPayloadCount', 'fuzzerClearMarkersButton', 'fuzzerTargetSummary', 'fuzzerPreflightNotice', 'fuzzerPreviewSamples', 'fuzzerCandidateSelect', 'fuzzerUndoMarkerButton'];
   const nodes = Object.fromEntries(ids.map(id => [id, { value: '', textContent: '', innerHTML: '', disabled: true }]));
   f.c.document.getElementById = id => nodes[id] || null;
   f.c.renderFuzzerSetup();
   assert.equal(nodes.fuzzerCandidateSelect.disabled, false);
   assert.equal(nodes.fuzzerCandidateSelect._fuzzerCandidates.length, 3);
-  assert.match(nodes.fuzzerPreflightSummary.textContent, /1 payload.*0 planned requests.*0 positions/);
+  assert.match(nodes.fuzzerPreflightSummary.textContent, /1 payload.*0 planned requests/);
   f.state.fuzzerBaseRequest.preview_truncated = true;
   f.c.renderFuzzerSetup();
   assert.equal(nodes.fuzzerCandidateSelect._fuzzerCandidates.length, 2);
@@ -219,7 +219,7 @@ for (const outcome of ['success', 'error']) test(`rejected oversized replacement
 });
 
 function setupNodes(f) {
-  const ids = ['fuzzerPreflightSummary', 'fuzzerPreflightNotice', 'fuzzerPreviewSamples', 'fuzzerPreviewNotes', 'fuzzerCandidateSelect', 'fuzzerMarkCandidateButton'];
+  const ids = ['fuzzerMarkSelectionButton', 'startFuzzerButton', 'fuzzerPreflightSummary', 'fuzzerPositionCount', 'fuzzerPayloadCount', 'fuzzerClearMarkersButton', 'fuzzerTargetSummary', 'fuzzerPreflightNotice', 'fuzzerPreviewSamples', 'fuzzerPreviewNotes', 'fuzzerCandidateSelect', 'fuzzerMarkCandidateButton'];
   const nodes = Object.fromEntries(ids.map(id => [id, { value: '', textContent: '', innerHTML: '', disabled: true, listeners: {},
     addEventListener(name, callback) { this.listeners[name] = callback; } }]));
   f.c.document.getElementById = id => nodes[id] || null;
@@ -229,21 +229,23 @@ test('ready setup keeps target, count and protocol visible with details off the 
   const f = fixture(), nodes = setupNodes(f);
   f.state.fuzzerRequestText = raw.replace('one', '$payload$');
   f.c.renderFuzzerSetup();
-  assert.match(nodes.fuzzerPreflightSummary.textContent, /1 payload → 1 planned request.*1 position.*127\.0\.0\.1:8443.*HTTP\/1\.0/);
+  assert.match(nodes.fuzzerPreflightSummary.textContent, /1 payload → 1 planned request/);
+  assert.equal(nodes.fuzzerPositionCount.textContent, '1 position');
+  assert.match(nodes.fuzzerTargetSummary.textContent, /127\.0\.0\.1:8443.*HTTP\/1\.0/);
   assert.equal(nodes.fuzzerPreflightNotice.textContent, '');
   assert.match(nodes.fuzzerPreviewNotes.textContent, /Match and Replace/);
   f.state.fuzzerRequestText = raw.replace('one', '$payload$').replace('two%2Fthree', '$payload$');
   f.c.renderFuzzerSetup();
-  assert.match(nodes.fuzzerPreflightSummary.textContent, /1 payload → 2 planned requests · 2 positions \(one at a time\)/);
+  assert.match(nodes.fuzzerPreflightSummary.textContent, /1 payload → 2 planned requests/);
   f.state.fuzzerAttackType = 'battering_ram';
   f.c.renderFuzzerSetup();
-  assert.match(nodes.fuzzerPreflightSummary.textContent, /1 payload → 1 planned request · 2 positions \(shared payload\)/);
+  assert.match(nodes.fuzzerPreflightSummary.textContent, /1 payload → 1 planned request/);
 });
 test('empty setup gives one actionable next step; running state remains honest', () => {
   const f = fixture(), nodes = setupNodes(f);
   f.state.fuzzerRequestText = ''; f.state.fuzzerPayloadsText = '';
   f.c.renderFuzzerSetup();
-  assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Send a request from History or Replay.');
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Paste a raw HTTP request, or send one from History / Replay.');
   f.state.fuzzerRequestText = raw; f.c.renderFuzzerSetup();
   assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Select a value to replace.');
   f.state.fuzzerRequestText = raw.replace('one', '$payload$'); f.c.renderFuzzerSetup();
@@ -284,7 +286,104 @@ for (const rawHeader of ['$payload$: new.example.com', 'Host: $payload$']) test(
   f.state.fuzzerPayloadsText = rawHeader.startsWith('$payload$') ? 'Host' : 'new.example.com';
   f.c.activeFuzzerTargetForRequest = () => null;
   f.c.renderFuzzerSetup();
-  assert.match(nodes.fuzzerPreflightSummary.textContent, /Template target:/);
+  assert.match(nodes.fuzzerTargetSummary.textContent, /Template target:/);
   assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Request authority or framing may change. Check Preview.');
   assert.match(nodes.fuzzerPreviewSamples.innerHTML, /https:\/\/new\.example\.com:443/);
+});
+
+
+test('Start follows preflight validity and still respects the active attack ID', () => {
+  const f = fixture(), nodes = setupNodes(f);
+  for (const [text, payloads, expected] of [["", "x", true], [raw, "x", true], [raw.replace('one', '§one§'), "", true], [raw.replace('one', '§one§'), "x", false]]) {
+    f.state.fuzzerRequestText = text; f.state.fuzzerPayloadsText = payloads;
+    f.c.renderFuzzerSetup(); assert.equal(nodes.startFuzzerButton.disabled, expected);
+    assert.equal(nodes.fuzzerMarkSelectionButton.disabled, !text.trim());
+  }
+  f.state.fuzzerRunningAttackId = 'active-run';
+  f.c.renderFuzzerSetup(); assert.equal(nodes.startFuzzerButton.disabled, true);
+});
+
+test('Clear removes recognized delimiters only, keeps CRLF and original values, and Undo restores exact bytes', () => {
+  const f = fixture();
+  const before = raw.replace('one', '§one§').replace('two%2Fthree', '$payload$').replace('a=1', 'a=§1§&literal=§');
+  f.state.fuzzerRequestText = before;
+  f.c.clearFuzzerMarkers();
+  assert.equal(f.state.fuzzerRequestText, raw.replace('two%2Fthree', '').replace('a=1', 'a=1&literal=§'));
+  assert.equal(f.state.fuzzerPayloadsText, 'x');
+  f.c.undoFuzzerMarker(); assert.equal(f.state.fuzzerRequestText, before);
+  f.c.clearFuzzerMarkers();
+  const saves = f.saves; f.c.clearFuzzerMarkers(); assert.equal(f.saves, saves);
+});
+
+for (const fence of ['session', 'run', 'draft']) test(`Clear undo rejects changed ${fence} ownership`, () => {
+  const f = fixture(); f.state.fuzzerRequestText = raw.replace('one', '§one§');
+  f.c.clearFuzzerMarkers();
+  if (fence === 'session') f.state.activeSession.id = 'other';
+  if (fence === 'run') f.state.fuzzerRunToken++;
+  if (fence === 'draft') f.state.fuzzerRequestText += 'new';
+  const current = f.state.fuzzerRequestText;
+  assert.throws(() => f.c.undoFuzzerMarker(), /changed/);
+  assert.equal(f.state.fuzzerRequestText, current);
+});
+
+test('caret Add inserts an empty position and leaves the caret between markers after a CRLF header', () => {
+  const f = fixture(), at = raw.indexOf('a=1') + 2;
+  const visible = raw.replace(/\r\n?/g, '\n'), offset = raw.slice(0, at).replace(/\r\n?/g, '\n').length;
+  let selection, focused = 0;
+  f.setEditor({ getContent: () => visible, view: { state: { selection: { main: { empty: true, from: offset, to: offset } } }, dispatch(value) { selection = value.selection; }, focus() { focused++; } } });
+  f.c.markFuzzerEditorSelection();
+  assert.equal(f.state.fuzzerRequestText, raw.slice(0, at) + '§§' + raw.slice(at));
+  assert.deepEqual(plain(selection), { anchor: offset + 1, head: offset + 1 }); assert.equal(focused, 1);
+});
+
+test('Clear is disabled during a run and Add rejects a caret at an opaque body start', () => {
+  const f = fixture(); f.state.fuzzerRequestText = raw.replace('one', '§one§'); f.state.fuzzerRunning = true;
+  assert.throws(() => f.c.clearFuzzerMarkers(), /Wait/);
+  f.state.fuzzerRunning = false; f.state.fuzzerBaseRequest.preview_truncated = true;
+  const at = f.state.fuzzerRequestText.indexOf('a=1');
+  assert.throws(() => f.c.markFuzzerPosition(at, at), /complete UTF-8/);
+});
+
+
+test('Undo returns keyboard focus to the existing request editor', () => {
+  const f = fixture(); let focused = 0;
+  f.state.fuzzerRequestText = raw.replace('one', '§one§');
+  f.setEditor({ getContent: () => f.state.fuzzerRequestText.replace(/\r\n?/g, '\n'), view: { focus() { focused++; } } });
+  f.c.clearFuzzerMarkers(); assert.equal(focused, 1);
+  f.c.undoFuzzerMarker(); assert.equal(focused, 2);
+  assert.equal(f.state.fuzzerRequestText, raw.replace('one', '§one§'));
+});
+
+test('Clear never pairs literal section signs across different engine fields', () => {
+  const f = fixture(), nodes = setupNodes(f);
+  const text = 'GET /literal§ HTTP/1.1\r\nHost: example.com\r\nX-Note: lone§\r\n\r\n';
+  f.state.fuzzerRequestText = text;
+  f.c.renderFuzzerSetup(); assert.equal(nodes.fuzzerPositionCount.textContent, '0 positions');
+  assert.equal(nodes.fuzzerClearMarkersButton.disabled, true);
+  f.c.clearFuzzerMarkers(); assert.equal(f.state.fuzzerRequestText, text); assert.equal(f.saves, 0);
+});
+
+test('Clear preserves literal delimiters across header names, values and body while removing real positions', () => {
+  const f = fixture();
+  const text = 'GET /§kept§/literal§ HTTP/1.1\r\nHost: example.com\r\nX-§: lone§\r\n\r\nbody§';
+  f.state.fuzzerRequestText = text;
+  f.c.clearFuzzerMarkers(); assert.equal(f.state.fuzzerRequestText, text.replace('§kept§', 'kept'));
+  f.c.undoFuzzerMarker(); assert.equal(f.state.fuzzerRequestText, text);
+});
+
+test('Add cannot create a position spanning engine fields or invalid request syntax', () => {
+  const f = fixture();
+  assert.throws(() => f.c.markFuzzerPosition(raw.indexOf('two%2Fthree'), raw.indexOf('Host') + 4), /one request field/);
+  assert.throws(() => f.c.markFuzzerPosition(0, 4), /request line/);
+  assert.equal(f.state.fuzzerRequestText, raw); assert.equal(f.saves, 0);
+});
+
+test('restored active attack blocks Add, Clear and Undo even without local running flag', () => {
+  const f = fixture(), nodes = setupNodes(f);
+  f.state.fuzzerRequestText = raw.replace('one', '§one§');
+  f.c.clearFuzzerMarkers(); f.state.fuzzerRunningAttackId = 'restored-active';
+  assert.throws(() => f.c.clearFuzzerMarkers(), /Wait/);
+  assert.throws(() => f.c.markFuzzerPosition(raw.indexOf('one'), raw.indexOf('one') + 3), /Wait/);
+  assert.throws(() => f.c.undoFuzzerMarker(), /changed/);
+  f.c.renderFuzzerSetup(); assert.equal(nodes.fuzzerClearMarkersButton.disabled, true);
 });

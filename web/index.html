@@ -1180,14 +1180,22 @@
           <header class="panel-toolbar replay-header fuzzer-workflow-header">
             <div class="fuzzer-header-row">
               <h2>Fuzzer</h2>
+              <label class="compact-field fuzzer-mode-field" for="fuzzerAttackType">
+                <span>Attack</span>
+                <select id="fuzzerAttackType">
+                  <option value="sniper" selected>Sniper · one at a time</option>
+                  <option value="battering_ram">Battering ram · all positions</option>
+                </select>
+              </label>
+              <div id="fuzzerPreflightSummary" class="fuzzer-preflight-summary" role="status" aria-live="polite">No request selected.</div>
               <div class="toolbar-actions">
                 <button class="secondary-action" id="resetFuzzerButton" type="button">Reset</button>
                 <button class="secondary-action hidden" id="stopFuzzerButton" type="button">Stop</button>
-                <button class="primary-action" id="startFuzzerButton" type="button" aria-describedby="fuzzerPreflightSummary fuzzerPreflightNotice">Start</button>
+                <button class="primary-action" id="startFuzzerButton" type="button" aria-describedby="fuzzerPreflightSummary fuzzerTargetSummary fuzzerPreflightNotice">Start</button>
               </div>
             </div>
             <section class="fuzzer-preflight" aria-label="Review before running">
-              <div id="fuzzerPreflightSummary" class="fuzzer-preflight-summary" role="status" aria-live="polite">No request selected.</div>
+              <span id="fuzzerTargetSummary" class="fuzzer-target-summary"></span>
               <p id="fuzzerPreflightNotice" class="fuzzer-help" role="status" aria-live="polite"></p>
               <details class="fuzzer-disclosure fuzzer-preview-disclosure hidden" id="fuzzerPreviewDisclosure">
                 <summary>Preview &amp; details</summary>
@@ -1197,20 +1205,16 @@
                   <div id="fuzzerPreviewSamples" class="fuzzer-preview-samples">Add a request and payloads to preview.</div>
                 </div>
               </details>
-            </section>
-          </header>
-
-          <section class="fuzzer-layout">
-            <!-- Top row: Request template | resizer | Payloads -->
-            <div class="fuzzer-top-row">
-              <section class="panel-card fuzzer-template-card">
-                <header class="panel-toolbar">
-                  <h2 id="fuzzerRequestHeading">1. Request</h2>
-                  <div class="toolbar-actions">
-                    <button class="secondary-action" id="fuzzerMarkSelectionButton" type="button" title="Mark the selected text as a position">Mark selection</button>
-                    <button class="secondary-action" id="fuzzerUndoMarkerButton" type="button" disabled>Undo marker</button>
+              <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-options">
+                <summary>Options</summary>
+                <div class="fuzzer-disclosure-body">
+                  <div class="fuzzer-control-row fuzzer-attack-options">
+                    <label class="compact-field fuzzer-concurrency-field" for="fuzzerConcurrency">
+                      <span>Concurrent requests</span>
+                      <input id="fuzzerConcurrency" type="number" min="1" max="16" step="1" value="4" />
+                    </label>
+                    <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
                   </div>
-                </header>
                 <div class="fuzzer-control-row fuzzer-quick-controls hidden" id="fuzzerValueRow">
                   <label class="compact-field fuzzer-field-grow" for="fuzzerCandidateSelect">
                     <span>Value</span>
@@ -1218,45 +1222,6 @@
                   </label>
                   <button class="secondary-action" id="fuzzerMarkCandidateButton" type="button" disabled>Mark value</button>
                 </div>
-                <div class="editor-panel" role="group" aria-labelledby="fuzzerRequestHeading">
-                  <div id="fuzzerRequestCM" class="cm-container" style="height:100%"></div>
-                </div>
-              </section>
-              <div class="fuzzer-col-resizer" id="fuzzerColResizer"></div>
-              <section class="panel-card fuzzer-payloads-card">
-                <header class="panel-toolbar">
-                  <h2><label for="fuzzerPayloadsEditor">2. Payloads</label></h2>
-                  <div class="toolbar-actions">
-                    <input id="fuzzerPayloadFile" type="file" accept=".txt,text/plain" hidden aria-label="Payload text file" />
-                    <button class="secondary-action" id="fuzzerImportPayloadButton" type="button" aria-controls="fuzzerPayloadFile">Import file</button>
-                  </div>
-                </header>
-                <div class="fuzzer-control-row fuzzer-attack-options">
-                  <label class="compact-field" for="fuzzerAttackType">
-                    <span>Attack</span>
-                    <select id="fuzzerAttackType">
-                      <option value="sniper" selected>Sniper: one position at a time</option>
-                      <option value="battering_ram">Battering ram: every position at once</option>
-                    </select>
-                  </label>
-                  <label class="compact-field fuzzer-concurrency-field" for="fuzzerConcurrency">
-                    <span>At once</span>
-                    <input id="fuzzerConcurrency" type="number" min="1" max="16" step="1" value="4" />
-                  </label>
-                  <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
-                </div>
-                <details class="fuzzer-disclosure fuzzer-control-disclosure">
-                  <summary>More payload options</summary>
-                  <div class="fuzzer-disclosure-body">
-                    <div class="fuzzer-control-row">
-                      <label class="compact-field fuzzer-field-grow" for="fuzzerPayloadImportMode">
-                        <span>Add payloads</span>
-                        <select id="fuzzerPayloadImportMode">
-                          <option value="append" selected>Append to list</option>
-                          <option value="replace">Replace list</option>
-                        </select>
-                      </label>
-                    </div>
                     <div class="fuzzer-control-row">
                       <label class="compact-field fuzzer-field-grow" for="fuzzerPayloadPreset">
                         <span>Boundary preset</span>
@@ -1277,8 +1242,48 @@
                       <button class="secondary-action" id="fuzzerGenerateRangeButton" type="button">Generate range</button>
                     </fieldset>
                     <p class="fuzzer-help" id="fuzzerPayloadHelp">One payload per line. Spaces are preserved. Blank lines are empty payloads; a final line break is ignored.</p>
+                </div>
+              </details>
+            </section>
+          </header>
+
+          <section class="fuzzer-layout">
+            <div class="fuzzer-top-row">
+              <section class="panel-card fuzzer-template-card">
+                <header class="panel-toolbar">
+                  <h2 id="fuzzerRequestHeading">Request</h2>
+                  <span class="fuzzer-count" id="fuzzerPositionCount">0 positions</span>
+                  <div class="toolbar-actions">
+                    <button class="secondary-action" id="fuzzerMarkSelectionButton" type="button" title="Wrap selected text in § markers, or insert an empty position at the caret">Add §</button>
+                    <button class="secondary-action" id="fuzzerClearMarkersButton" type="button" title="Remove recognized position markers, keeping their original values">Clear §</button>
+                    <button class="secondary-action" id="fuzzerUndoMarkerButton" type="button" title="Undo the last Add or Clear markers action" disabled>Undo</button>
                   </div>
-                </details>
+                </header>
+                <p class="fuzzer-input-label" id="fuzzerRequestHelp">Raw HTTP request · select a value, then Add §</p>
+                <div class="editor-panel" role="group" aria-labelledby="fuzzerRequestHeading" aria-describedby="fuzzerRequestHelp">
+                  <div id="fuzzerRequestCM" class="cm-container" style="height:100%"></div>
+                </div>
+              </section>
+              <div class="fuzzer-col-resizer" id="fuzzerColResizer"></div>
+              <section class="panel-card fuzzer-payloads-card">
+                <header class="panel-toolbar">
+                  <h2><label for="fuzzerPayloadsEditor">Payloads</label></h2>
+                  <span class="fuzzer-count" id="fuzzerPayloadCount">0 payloads</span>
+                  <div class="toolbar-actions">
+                    <input id="fuzzerPayloadFile" type="file" accept=".txt,text/plain" hidden aria-label="Payload text file" />
+                    <button class="secondary-action" id="fuzzerImportPayloadButton" type="button" aria-controls="fuzzerPayloadFile">Import file</button>
+                  </div>
+                </header>
+                <div class="fuzzer-payload-input-bar">
+                  <span class="fuzzer-input-label">One per line</span>
+                  <label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">
+                    <span title="Applies to imported files, presets and generated ranges">On import</span>
+                    <select id="fuzzerPayloadImportMode">
+                      <option value="append" selected>Append to list</option>
+                      <option value="replace">Replace list</option>
+                    </select>
+                  </label>
+                </div>
                 <div class="editor-panel">
                   <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="Paste payloads, one per line" aria-describedby="fuzzerPayloadHelp"></textarea>
                 </div>
@@ -1290,7 +1295,7 @@
             <section class="panel-card fuzzer-results-card" style="display:flex;flex-direction:column;min-height:0">
               <header class="panel-toolbar">
                 <div>
-                  <h2>3. Results</h2>
+                  <h2>Results</h2>
                   <p class="inline-copy" id="fuzzerMeta">No results yet.</p>
                 </div>
                 <div class="toolbar-actions">

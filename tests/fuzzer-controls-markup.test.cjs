@@ -23,7 +23,7 @@ function values(id) {
   return [...contents.matchAll(/<option value="([^"]*)"/g)].map(([, value]) => value);
 }
 
-const buttons = ['resetFuzzerButton', 'stopFuzzerButton', 'startFuzzerButton', 'fuzzerMarkSelectionButton', 'fuzzerUndoMarkerButton',
+const buttons = ['resetFuzzerButton', 'stopFuzzerButton', 'startFuzzerButton', 'fuzzerMarkSelectionButton', 'fuzzerClearMarkersButton', 'fuzzerUndoMarkerButton',
   'fuzzerMarkCandidateButton', 'fuzzerImportPayloadButton', 'fuzzerApplyPresetButton', 'fuzzerGenerateRangeButton',
   'fuzzerCompareBaseButton', 'fuzzerCompareButton', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton'];
 const labeledControls = ['fuzzerCandidateSelect', 'fuzzerAttackType', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadImportMode', 'fuzzerPayloadPreset',
@@ -107,10 +107,10 @@ function disclosureDepthAt(id) {
   return [...prefix.matchAll(/<details\b[^>]*>|<\/details>/g)].reduce((depth, [tag]) => depth + (tag.startsWith('</') ? -1 : 1), 0);
 }
 test('common value and file actions are immediate while advanced options and explanations stay collapsed', () => {
-  for (const id of ['fuzzerCandidateSelect', 'fuzzerMarkCandidateButton', 'fuzzerMarkSelectionButton', 'fuzzerImportPayloadButton', 'startFuzzerButton']) {
+  for (const id of ['fuzzerPayloadImportMode', 'fuzzerMarkSelectionButton', 'fuzzerClearMarkersButton', 'fuzzerImportPayloadButton', 'startFuzzerButton']) {
     assert.equal(disclosureDepthAt(id), 0, `${id} should not require opening a disclosure`);
   }
-  for (const id of ['fuzzerPayloadImportMode', 'fuzzerPayloadPreset', 'fuzzerRangeStart', 'fuzzerPreviewNotes', 'fuzzerPayloadHelp']) {
+  for (const id of ['fuzzerCandidateSelect', 'fuzzerMarkCandidateButton', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadPreset', 'fuzzerRangeStart', 'fuzzerPreviewNotes', 'fuzzerPayloadHelp']) {
     assert.equal(disclosureDepthAt(id), 1, `${id} should remain in a closed disclosure`);
   }
   assert.doesNotMatch(fuzzer, /Send a captured request to Fuzzer, mark positions, load payloads/);

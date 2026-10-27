@@ -15836,6 +15836,8 @@ function renderFuzzer() {
       });
       // Wire onChange to sync state
       const newCv = getCMView("fuzzerReq");
+      newCv?.view?.contentDOM?.setAttribute("aria-label", "Raw HTTP request");
+      newCv?.view?.contentDOM?.setAttribute("aria-describedby", "fuzzerRequestHelp");
       if (newCv && !newCv._fuzzerOnChangeWired) {
         newCv._fuzzerOnChangeWired = true;
         addCMUpdateListener(newCv.view, (newText) => {
@@ -15854,6 +15856,7 @@ function renderFuzzer() {
     els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText;
   }
   const attackRunning = !!state.fuzzerRunning || !!state.fuzzerRunningAttackId;
+  els.fuzzerShell?.classList?.toggle("fuzzer-results-empty", !attackRunning && !state.fuzzerAttackRecord && !state.fuzzerAttackRecordId);
   if (els.startFuzzerButton) {
     els.startFuzzerButton.disabled = attackRunning;
   }
@@ -16344,7 +16347,8 @@ function renderFuzzerResultsVirtual() {
   renderFuzzerResultsWorkflow();
 
   const rowHeight = measuredFuzzerResultRowHeight || FUZZER_RESULT_ROW_HEIGHT;
-  const viewportHeight = shell.clientHeight || rowHeight;
+  const headerHeight = els.fuzzerResultsHead?.offsetHeight || 0;
+  const viewportHeight = Math.max(rowHeight, (shell.clientHeight || rowHeight) - headerHeight);
   const totalCount = results.length;
   const maxScrollTop = Math.max(0, totalCount * rowHeight - viewportHeight);
   const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
@@ -16388,13 +16392,17 @@ function renderFuzzerResultsVirtual() {
   }
 }
 
-function scrollFuzzerResultToIndex(rowIndex) {
+function scrollFuzzerResultToIndex(rowIndex, { nearest = false } = {}) {
   const shell = fuzzerResultsShell();
   if (!shell) {
     return;
   }
   const rowHeight = measuredFuzzerResultRowHeight || FUZZER_RESULT_ROW_HEIGHT;
-  shell.scrollTop = Math.max(0, rowIndex * rowHeight - shell.clientHeight / 2);
+  const viewportHeight = Math.max(rowHeight, shell.clientHeight - (els.fuzzerResultsHead?.offsetHeight || 0));
+  const top = rowIndex * rowHeight, bottom = top + rowHeight;
+  if (!nearest) shell.scrollTop = Math.max(0, top - viewportHeight / 2);
+  else if (top < shell.scrollTop) shell.scrollTop = top;
+  else if (bottom > shell.scrollTop + viewportHeight) shell.scrollTop = bottom - viewportHeight;
   renderFuzzerResultsVirtual();
 }
 
@@ -16427,6 +16435,9 @@ function selectFuzzerResultIndex(rowIndex, options = {}) {
     clearFuzzerResponsePane();
     if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
   }
+  // Detail activation can shrink the table after the click. Keep that row in
+  // view once, without snapping scroll on later polling or detail responses.
+  scrollFuzzerResultToIndex(rowIndex, { nearest: true });
   renderFuzzerResultsWorkflow();
 }
 
@@ -17133,7 +17144,9 @@ function renderFuzzerSetup() {
     select._fuzzerRaw = raw;
     select._fuzzerCandidates = candidates;
   }
-  const busy = !!state.fuzzerRunning;
+  const busy = !!state.fuzzerRunning || !!state.fuzzerRunningAttackId;
+  const startButton = fuzzerSetupNode("startFuzzerButton");
+  if (startButton) startButton.disabled = busy || !model?.valid;
   if (select) select.disabled = busy || candidates.length === 0;
   const attackType = fuzzerSetupNode("fuzzerAttackType");
   const urlEncode = fuzzerSetupNode("fuzzerUrlEncode");
@@ -17141,30 +17154,41 @@ function renderFuzzerSetup() {
   if (attackType) { attackType.value = state.fuzzerAttackType || "sniper"; attackType.disabled = busy; }
   if (urlEncode) { urlEncode.checked = state.fuzzerUrlEncode !== false; urlEncode.disabled = busy; }
   if (concurrency) { concurrency.value = String(state.fuzzerConcurrency || 4); concurrency.disabled = busy; }
-  for (const id of ["fuzzerMarkSelectionButton", "fuzzerMarkCandidateButton", "fuzzerImportPayloadButton", "fuzzerApplyPresetButton", "fuzzerGenerateRangeButton"]) {
+  for (const id of ["fuzzerMarkSelectionButton", "fuzzerClearMarkersButton", "fuzzerMarkCandidateButton", "fuzzerImportPayloadButton", "fuzzerApplyPresetButton", "fuzzerGenerateRangeButton"]) {
     const button = fuzzerSetupNode(id);
     if (button) button.disabled = busy;
   }
+  const addPosition = fuzzerSetupNode("fuzzerMarkSelectionButton");
+  if (addPosition) addPosition.disabled = busy || !raw.trim();
   const markCandidate = fuzzerSetupNode("fuzzerMarkCandidateButton");
   if (markCandidate) markCandidate.disabled = busy || !select?.value || candidates.length === 0;
   const undo = state._fuzzerMarkerUndo;
   const undoButton = fuzzerSetupNode("fuzzerUndoMarkerButton");
   if (undoButton) undoButton.disabled = busy || !undo || undo.after !== raw || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken;
+  const positions = fuzzerSetupNode("fuzzerPositionCount");
+  if (positions) positions.textContent = model ? `${model.markerCount} position${model.markerCount === 1 ? "" : "s"}` : raw.trim() ? "— positions" : "0 positions";
+  const payloadCount = fuzzerPayloadCount(state.fuzzerPayloadsText || "");
+  const payloadLabel = fuzzerSetupNode("fuzzerPayloadCount");
+  if (payloadLabel) payloadLabel.textContent = `${payloadCount} payload${payloadCount === 1 ? "" : "s"}`;
+  const clearButton = fuzzerSetupNode("fuzzerClearMarkersButton");
+  if (clearButton) clearButton.disabled = busy || SniperFuzzerWorkflow.clearRequestPositions(raw) === raw;
   const summary = fuzzerSetupNode("fuzzerPreflightSummary");
   const notice = fuzzerSetupNode("fuzzerPreflightNotice");
+  const targetSummary = fuzzerSetupNode("fuzzerTargetSummary");
+  if (targetSummary) targetSummary.textContent = "";
   const samples = fuzzerSetupNode("fuzzerPreviewSamples");
   const previewNotes = fuzzerSetupNode("fuzzerPreviewNotes");
   if (!model) {
     summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "No request selected.";
-    notice.textContent = raw.trim() ? error : "Send a request from History or Replay.";
+    notice.textContent = raw.trim() ? error : "Paste a raw HTTP request, or send one from History / Replay.";
     if (previewNotes) previewNotes.textContent = "";
     if (samples) samples.textContent = "Add a valid request and payloads to preview.";
     return;
   }
   const destination = typeof model.effectiveTarget === "string" ? model.effectiveTarget : JSON.stringify(model.effectiveTarget);
   const authorityMayChange = (model.warnings || []).some((message) => /^(Host markers|Header-name markers)/.test(message));
-  const sharing = model.attackType === "sniper" ? " (one at a time)" : " (shared payload)";
-  summary.textContent = `${model.payloadCount} payload${model.payloadCount === 1 ? "" : "s"} → ${model.requestCount} planned request${model.requestCount === 1 ? "" : "s"} · ${model.markerCount} position${model.markerCount === 1 ? "" : "s"}${model.markerCount > 1 ? sharing : ""} · ${authorityMayChange ? "Template target: " : ""}${destination || "Target unavailable"} · ${model.httpVersion || "Automatic HTTP"}`;
+  summary.textContent = `${model.payloadCount} payload${model.payloadCount === 1 ? "" : "s"} → ${model.requestCount} planned request${model.requestCount === 1 ? "" : "s"}`;
+  if (targetSummary) targetSummary.textContent = `${authorityMayChange ? "Template target: " : ""}${destination || "Target unavailable"} · ${model.httpVersion || "Automatic HTTP"}`;
   const errors = (model.errors || []).filter((message) => !message.startsWith("Mark at least one position") && message !== "Fuzzer needs at least one payload.");
   const running = state.fuzzerAttackRecord?.running ? state.fuzzerAttackRecord : null;
   // A start that failed says so here, beside Start, until the draft changes.
@@ -17205,16 +17229,17 @@ function fuzzerRawOffsetForEditorOffset(raw, offset) {
 }
 
 function markFuzzerPosition(start, end, expectedRaw = fuzzerRequestTextForAction()) {
-  if (state.fuzzerRunning) throw new Error("Wait for the current run to finish before changing positions.");
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
   const raw = fuzzerRequestTextForAction();
   if (raw !== expectedRaw) throw new Error("The request changed. Choose the value again.");
   const template = parseFuzzerRequestTemplate(raw);
   const boundary = /\r?\n\r?\n/.exec(raw);
   const bodyStart = boundary ? boundary.index + boundary[0].length : raw.length;
-  if (end > bodyStart && (template.body_encoding === "base64" || template.preview_truncated)) {
+  if (boundary && (end > bodyStart || start === bodyStart) && (template.body_encoding === "base64" || template.preview_truncated)) {
     throw new Error("Body positions require a complete UTF-8 request body. Header and query positions remain available.");
   }
-  const next = SniperFuzzerWorkflow.replaceSelection(raw, start, end);
+  const next = SniperFuzzerWorkflow.markRequestSelection(raw, start, end);
+  parseFuzzerRequestTemplate(next);
   state._fuzzerMarkerUndo = { before: raw, after: next, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
   updateFuzzerRequestText(next, { userEdit: true });
   scheduleWorkspaceStateSave();
@@ -17223,7 +17248,7 @@ function markFuzzerPosition(start, end, expectedRaw = fuzzerRequestTextForAction
   if (editor?.view) {
     const anchor = next.slice(0, start).replace(/\r\n?/g, "\n").length;
     const marked = next.slice(start, end + 2).replace(/\r\n?/g, "\n").length;
-    editor.view.dispatch({ selection: { anchor, head: anchor + marked }, scrollIntoView: true });
+    editor.view.dispatch({ selection: { anchor: start === end ? anchor + 1 : anchor, head: start === end ? anchor + 1 : anchor + marked }, scrollIntoView: true });
     editor.view.focus();
   }
 }
@@ -17233,24 +17258,38 @@ function markFuzzerEditorSelection() {
   const editor = getCMView("fuzzerReq");
   const selection = editor?.view?.state?.selection?.main;
   if (selection) {
-    if (selection.empty || selection.from === selection.to) throw new Error("Select the value in the request editor first.");
     markFuzzerPosition(fuzzerRawOffsetForEditorOffset(raw, selection.from), fuzzerRawOffsetForEditorOffset(raw, selection.to), raw);
   } else {
     const input = els.fuzzerRequestEditor;
-    if (!input || input.selectionStart === input.selectionEnd) throw new Error("Select the value in the request editor first.");
-    markFuzzerPosition(input.selectionStart, input.selectionEnd, raw);
+    if (!input) throw new Error("Place the caret or select a value in the request editor first.");
+    markFuzzerPosition(fuzzerRawOffsetForEditorOffset(raw, input.selectionStart), fuzzerRawOffsetForEditorOffset(raw, input.selectionEnd), raw);
   }
+}
+
+function clearFuzzerMarkers() {
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
+  const raw = fuzzerRequestTextForAction();
+  const next = SniperFuzzerWorkflow.clearRequestPositions(raw);
+  if (next === raw) return;
+  state._fuzzerMarkerUndo = { before: raw, after: next, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
+  updateFuzzerRequestText(next, { userEdit: true });
+  scheduleWorkspaceStateSave();
+  renderFuzzer();
+  getCMView("fuzzerReq")?.view?.focus();
 }
 
 function undoFuzzerMarker() {
   const undo = state._fuzzerMarkerUndo;
-  if (state.fuzzerRunning || !undo || undo.after !== fuzzerRequestTextForAction() || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken) {
-    throw new Error("The request changed after that position was added. Use the editor's undo instead.");
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId || !undo || undo.after !== fuzzerRequestTextForAction() || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken) {
+    throw new Error("The request changed after the marker action. Use the editor's undo instead.");
   }
   state._fuzzerMarkerUndo = null;
   updateFuzzerRequestText(undo.before, { userEdit: true });
   scheduleWorkspaceStateSave();
   renderFuzzer();
+  const editor = getCMView("fuzzerReq");
+  if (editor?.view) editor.view.focus();
+  else els.fuzzerRequestEditor?.focus();
 }
 
 function applyFuzzerPayloadList(payloads, mode = "append") {
@@ -17306,6 +17345,7 @@ function initFuzzerSetupControls() {
   });
   bind("fuzzerMarkSelectionButton", markFuzzerEditorSelection);
   bind("fuzzerUndoMarkerButton", undoFuzzerMarker);
+  bind("fuzzerClearMarkersButton", clearFuzzerMarkers);
   fuzzerSetupNode("fuzzerCandidateSelect")?.addEventListener("change", (event) => {
     const button = fuzzerSetupNode("fuzzerMarkCandidateButton");
     if (button) button.disabled = !!state.fuzzerRunning || !event.target.value;
@@ -17545,7 +17585,7 @@ function initFuzzerResizers() {
       rowHandle.classList.add("active");
       const onMove = (me) => {
         const delta = me.clientY - startY;
-        const newH = Math.max(120, Math.min(layoutH - 200, startH + delta));
+        const newH = Math.max(180, Math.min(layoutH - 360, startH + delta));
         topRow.style.height = `${newH}px`;
       };
       const onUp = () => {
@@ -17570,12 +17610,17 @@ function initFuzzerResizers() {
       e.preventDefault();
       const startY = e.clientY;
       const startH = detailPanel.offsetHeight;
-      const parentH = detailPanel.parentElement.offsetHeight;
+      const parent = detailPanel.parentElement;
+      const parentH = parent.offsetHeight;
+      const chromeH = Array.from(parent.children).filter((node) => node !== detailPanel
+        && !node.classList.contains("history-table-shell") && node !== detailHandle)
+        .reduce((height, node) => height + node.offsetHeight, 0);
+      const reservedH = chromeH + 132 + detailHandle.offsetHeight;
       document.body.classList.add("pane-resizing-y");
       detailHandle.classList.add("active");
       const onMove = (me) => {
         const delta = startY - me.clientY; // drag up = bigger detail
-        const newH = Math.max(100, Math.min(parentH - 100, startH + delta));
+        const newH = Math.max(140, Math.min(parentH - reservedH, startH + delta));
         detailPanel.style.flex = `0 0 ${newH}px`;
       };
       const onUp = () => {

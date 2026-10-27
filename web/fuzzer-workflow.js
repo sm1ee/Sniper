@@ -149,6 +149,8 @@
     const splitsCharacter = offset => offset > 0 && offset < raw.length
       && /[\uD800-\uDBFF]/.test(raw[offset - 1]) && /[\uDC00-\uDFFF]/.test(raw[offset]);
     if (splitsCharacter(start) || splitsCharacter(end)) throw new Error("Select a complete character.");
+    const splitsLineBreak = offset => raw[offset - 1] === "\r" && raw[offset] === "\n";
+    if (splitsLineBreak(start) || splitsLineBreak(end)) throw new Error("Select a value without splitting a line break.");
     for (const found of positions(raw)) {
       const index = found.index, after = index + found[0].length;
       if ((start < after && end > index) || (start === end && start > index && start < after)) {
@@ -158,7 +160,71 @@
     if (raw.slice(start, end).includes("§")) throw new Error("Select a value without §.");
     // The original stays between the marks: Sniper sends it while another
     // position takes the payload.
-    return `${raw.slice(0, start)}§${raw.slice(start, end)}§${raw.slice(end)}`;
+    const next = `${raw.slice(0, start)}§${raw.slice(start, end)}§${raw.slice(end)}`;
+    const added = positions(next);
+    if (!added.some(found => found.index === start && found[0].length === end - start + 2)
+      || added.length !== positions(raw).length + 1) {
+      throw new Error("An unmatched § would change this position. Remove it before adding markers.");
+    }
+    return next;
+  }
+
+  function clearPositions(raw) {
+    // Only recognized marker spans are syntax. A lone § is literal draft data.
+    return String(raw ?? "").replace(POSITION, (_, original) => original ?? "");
+  }
+
+  function requestFieldSpans(raw) {
+    // Locate raw spans only; the shared HTTP parser remains the validator.
+    // Matching separately matters: two literal § in different fields are not
+    // a position in the engine and must never be paired by an editor action.
+    const boundary = /\r?\n\r?\n/.exec(raw);
+    const headEnd = boundary ? boundary.index : raw.length;
+    const head = raw.slice(0, headEnd);
+    const spans = [];
+    let first = true;
+    for (const line of head.matchAll(/[^\r\n]+/g)) {
+      const offset = line.index, text = line[0];
+      if (first) {
+        first = false;
+        const request = /^(\S+)([ \t]+)(\S+)/.exec(text);
+        if (!request) continue;
+        spans.push([offset, offset + request[1].length]);
+        const start = offset + request[1].length + request[2].length;
+        const target = request[3], absolute = /^https?:\/\//i.exec(target);
+        if (absolute) {
+          const authorityStart = start + absolute[0].length;
+          const pathIndex = target.slice(absolute[0].length).search(/[/?]/);
+          const authorityEnd = pathIndex < 0 ? start + target.length : authorityStart + pathIndex;
+          spans.push([authorityStart, authorityEnd]);
+          if (authorityEnd < start + target.length) spans.push([authorityEnd, start + target.length]);
+        } else spans.push([start, start + target.length]);
+      } else {
+        const colon = text.indexOf(":");
+        if (colon < 0) continue;
+        spans.push([offset, offset + colon], [offset + colon + 1, offset + text.length]);
+      }
+    }
+    if (boundary) spans.push([boundary.index + boundary[0].length, raw.length]);
+    return spans;
+  }
+
+  function clearRequestPositions(raw) {
+    raw = String(raw ?? "");
+    let next = "", cursor = 0;
+    for (const [start, end] of requestFieldSpans(raw)) {
+      next += raw.slice(cursor, start) + clearPositions(raw.slice(start, end));
+      cursor = end;
+    }
+    return next + raw.slice(cursor);
+  }
+
+  function markRequestSelection(raw, start, end) {
+    raw = String(raw ?? "");
+    const field = requestFieldSpans(raw).find(([from, to]) => start >= from && end <= to);
+    if (!field) throw new Error("Select a value within one request field, not across headers or the request line.");
+    const [from, to] = field;
+    return raw.slice(0, from) + replaceSelection(raw.slice(from, to), start - from, end - from) + raw.slice(to);
   }
 
   const isHeader = (header, name) => header.name.toLowerCase() === name;
@@ -330,7 +396,7 @@
     };
   }
 
-  const api = Object.freeze({ MARKER, limits, presets, payloadLines, payloadText, validatePayloads, numericRange, candidates, replaceSelection, encodeUrlPayload, planRequests, expandTemplate, preflight });
+  const api = Object.freeze({ MARKER, limits, presets, payloadLines, payloadText, validatePayloads, numericRange, candidates, replaceSelection, clearPositions, clearRequestPositions, markRequestSelection, encodeUrlPayload, planRequests, expandTemplate, preflight });
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.SniperFuzzerWorkflow = api;
 })(typeof window !== "undefined" ? window : null);

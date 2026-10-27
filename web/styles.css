@@ -3230,15 +3230,15 @@ body.pane-resizing-y {
   display: flex;
   flex: 0 0 auto;
   min-height: 180px;
-  height: 40%;
+  height: 60%;
   gap: 0;
 }
 .fuzzer-template-card {
-  flex: var(--fuzzer-request-share, 0.72) 1 0px;
+  flex: var(--fuzzer-request-share, 0.65) 1 0px;
   min-width: 240px;
 }
 .fuzzer-payloads-card {
-  flex: calc(1 - var(--fuzzer-request-share, 0.72)) 1 0px;
+  flex: calc(1 - var(--fuzzer-request-share, 0.65)) 1 0px;
   min-width: 160px;
 }
 
@@ -3829,7 +3829,7 @@ body.pane-resizing-y {
 }
 
 .fuzzer-results-card {
-  flex: 1 0 240px;
+  flex: 1 0 180px;
   overflow: auto;
 }
 
@@ -6551,34 +6551,14 @@ button.utility-button.replay-tab-add {
   /* .split-panel and .split-panel-tight are deliberately not here. They are
      grids that fill a fixed-height pane, so height:auto left the Intercept and
      Replay panes' content bunched at the top with the rest of the pane empty.
-     flex-direction did nothing for them either — every selector below except
-     .fuzzer-top-row is display:grid. */
+     flex-direction did nothing for them either. Fuzzer has its own narrower
+     stacking breakpoint so laptop windows retain two usable inputs. */
   .dual-code-panel,
   .modal-grid,
-  .display-settings-grid,
-  .fuzzer-top-row {
+  .display-settings-grid {
     flex-direction: column;
     height: auto !important;
     min-height: 0;
-  }
-  .fuzzer-col-resizer,
-  .fuzzer-row-resizer {
-    display: none;
-  }
-  .fuzzer-template-card,
-  .fuzzer-payloads-card {
-    flex: none !important;
-    width: auto !important;
-    min-height: 220px;
-  }
-  .fuzzer-top-row {
-    gap: 10px;
-  }
-  .fuzzer-top-row .editor-panel {
-    min-height: 100px;
-  }
-  .fuzzer-results-card {
-    flex-basis: 320px;
   }
 
   .tools-workbench {
@@ -8884,3 +8864,81 @@ button.utility-button.replay-tab-add {
 @container (min-width: 780px) {
   .packet-viewer.lower-workbench { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
+
+/* Keep the two setup inputs together on laptop-sized windows. */
+.fuzzer-header-row { flex-wrap: wrap; gap: 8px 14px; }
+.fuzzer-header-row h2 { margin-right: 2px; }
+.fuzzer-mode-field { flex-direction: row; align-items: center; gap: 6px; }
+.fuzzer-mode-field select { max-width: 230px; }
+.fuzzer-header-row .fuzzer-preflight-summary { flex: 1 1 180px; font-weight: 600; }
+.fuzzer-preflight { align-items: flex-start; padding-top: 0; border-top: 0; gap: 0 12px; }
+.fuzzer-preflight > .fuzzer-preview-disclosure { flex-basis: auto; }
+.fuzzer-preview-disclosure { margin-top: 0; }
+.fuzzer-options { border-bottom: 0; }
+.fuzzer-preflight > details[open] { flex-basis: 100%; }
+.fuzzer-preflight > #fuzzerPreflightNotice { align-self: center; }
+.fuzzer-preflight > details > summary { padding: 3px 0; min-height: 24px; }
+.fuzzer-options .fuzzer-disclosure-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.fuzzer-options .fuzzer-quick-controls { padding: 0; border: 0; }
+.fuzzer-count { color: var(--text-soft); font-size: var(--font-xs); white-space: nowrap; }
+.fuzzer-top-row .toolbar-actions { margin-left: auto; }
+.fuzzer-input-label { margin: 0; padding: 7px 10px; color: var(--text-soft); font-size: var(--font-xs); }
+.fuzzer-template-card > .fuzzer-input-label { border-bottom: 1px solid var(--line); }
+.fuzzer-payload-input-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding-right: 10px; border-bottom: 1px solid var(--line); }
+.fuzzer-import-mode { flex-direction: row; align-items: center; gap: 6px; margin-left: auto; padding: 4px 0; }
+.fuzzer-import-mode > span { font-size: var(--font-xs); }
+.fuzzer-import-mode select { max-width: 140px; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-top-row { flex: 1 0 260px; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-row-resizer,
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card > .history-table-shell,
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card > .fuzzer-result-status,
+.fuzzer-shell.fuzzer-results-empty .fuzzer-result-filters,
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card > .panel-toolbar .toolbar-actions { display: none; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card { flex: 0 0 auto; min-height: 80px !important; margin-top: 10px; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card > .panel-toolbar { padding-bottom: 0; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-result-tools { border-bottom: 0; }
+@media (max-width: 900px) {
+  .fuzzer-top-row { flex-direction: column; height: auto !important; min-height: 0; }
+  .fuzzer-col-resizer,
+  .fuzzer-row-resizer {
+    display: none;
+  }
+  .fuzzer-template-card,
+  .fuzzer-payloads-card {
+    flex: none !important;
+    width: auto !important;
+    min-height: 220px;
+  }
+  .fuzzer-top-row {
+    gap: 10px;
+  }
+  .fuzzer-top-row .editor-panel {
+    min-height: 100px;
+  }
+  .fuzzer-results-card {
+    flex-basis: 320px;
+  }
+  .fuzzer-options .fuzzer-disclosure-body { grid-template-columns: 1fr; }
+  .fuzzer-shell.fuzzer-results-empty .fuzzer-top-row { flex: 0 0 auto; }
+}
+
+.fuzzer-target-summary { color: var(--text-soft); font: var(--font-xs) var(--mono); align-self: center; overflow-wrap: anywhere; }
+.fuzzer-target-summary:empty { display: none; }
+
+/* A retained run needs room for both row navigation and its selected message.
+   Never let the detail pane consume the table's entire viewport. Inline drag
+   sizes still win; a short window scrolls instead of hiding result rows. */
+.fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-top-row {
+  height: 32%;
+  min-height: 180px;
+}
+.fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-results-card {
+  flex: 1 0 360px;
+}
+.fuzzer-results-card > .history-table-shell {
+  min-height: 132px !important;
+}
+.fuzzer-detail-panel {
+  flex: 0 1 160px;
+}
+.fuzzer-import-mode > span { white-space: nowrap; }

@@ -333,3 +333,24 @@ test("helpers reject missing validated request models without exposing traffic i
   assert.throws(() => workflow.preflight({}, ["x"]), /validated by the request editor/);
   assert.throws(() => workflow.expandTemplate(request(), null), /Payload must be a string/);
 });
+
+
+test('marker edits preserve originals and reject malformed pairing, surrogate and CRLF splits', () => {
+  assert.equal(workflow.clearPositions('§original§/$payload$/§§/lone§'), 'original///lone§');
+  assert.equal(workflow.clearPositions('§$payload$§'), '$payload$');
+  assert.equal(workflow.replaceSelection('abc', 1, 1), 'a§§bc');
+  assert.throws(() => workflow.replaceSelection('§abc', 2, 3), /unmatched/);
+  assert.throws(() => workflow.replaceSelection('a\r\nb', 2, 2), /line break/);
+  assert.throws(() => workflow.replaceSelection('😀', 1, 1), /complete character/);
+  assert.throws(() => workflow.replaceSelection('§abc§', 2, 2), /overlaps/);
+});
+
+test('raw request marker editing is field bounded and preserves mixed line endings', () => {
+  const raw = 'GET /§a§/literal§ HTTP/1.1\nHost: example.com\r\nX-§: value§\n\n§line\r\nbody§';
+  assert.equal(workflow.clearRequestPositions(raw), 'GET /a/literal§ HTTP/1.1\nHost: example.com\r\nX-§: value§\n\nline\r\nbody');
+  const unmarked = 'GET /literal§ HTTP/1.1\r\nHost: example.com\r\nX-Note: value\r\n\r\n';
+  const at = unmarked.indexOf('value');
+  assert.equal(workflow.markRequestSelection(unmarked, at, at + 5), unmarked.replace('value', '§value§'));
+  assert.throws(() => workflow.markRequestSelection(raw, raw.indexOf('X-'), raw.indexOf('value') + 5), /one request field/);
+  assert.equal(workflow.clearRequestPositions('GET https://example.com/§a§ HTTP/1.1\r\n\r\n'), 'GET https://example.com/a HTTP/1.1\r\n\r\n');
+});
