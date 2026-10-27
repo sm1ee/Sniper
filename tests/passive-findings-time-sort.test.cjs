@@ -91,9 +91,14 @@ for (const direction of ["asc", "desc"]) {
       record("a", `${base}.500Z`, { title: "alpha", severity: "critical" }),
       record("c", `${base}.500001Z`, { title: "Alpha", severity: "critical" }),
     ];
+    const expected = {
+      title: direction === "asc" ? ["a", "c", "b"] : ["b", "a", "c"],
+      // By how severe: descending puts critical first, as newest-first is.
+      severity: direction === "asc" ? ["b", "a", "c"] : ["a", "c", "b"],
+    };
     for (const key of ["title", "severity"]) {
       const c = fixture(rows, direction, { findingsSortKey: key });
-      assert.deepEqual(ids(c.getFilteredFindings()), direction === "asc" ? ["a", "c", "b"] : ["b", "a", "c"]);
+      assert.deepEqual(ids(c.getFilteredFindings()), expected[key], key);
     }
   });
 }

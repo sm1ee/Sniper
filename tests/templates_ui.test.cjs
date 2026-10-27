@@ -745,6 +745,16 @@ test("a list sorted by a column asks the server for that order", () => {
   assert.deepEqual(templates.nextSort({ key: "name", direction: "desc" }, "severity"), { key: "severity", direction: "asc" });
 });
 
+// The API's asc puts the most severe and the enabled first, so those columns
+// show ↓ for it: the arrow describes the list as seen, as in HTTP history.
+test("Severity and On arrows describe the list as seen, not the API's direction", () => {
+  assert.equal(templates.shownSortDirection("severity", "asc"), "desc");
+  assert.equal(templates.shownSortDirection("severity", "desc"), "asc");
+  assert.equal(templates.shownSortDirection("on", "asc"), "desc");
+  assert.equal(templates.shownSortDirection("name", "asc"), "asc");
+  assert.equal(templates.shownSortDirection("name", "desc"), "desc");
+});
+
 test("a header sorts the list, and a click anywhere on a row or ↑/↓ selects", async () => {
   const items = ["example-a", "example-b", "example-c"].map((id) => ({ id, name: id, severity: "info", tags: [], active_supported: true }));
   let step = 0;

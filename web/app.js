@@ -10279,8 +10279,10 @@ function getFilteredFindings() {
   filtered.sort((a, b) => {
     let va, vb;
     if (findingsSortKey === "severity") {
-      va = SEVERITY_ORDER[a.severity] ?? 5;
-      vb = SEVERITY_ORDER[b.severity] ?? 5;
+      // By how severe, so descending (↓) puts critical on top, as newest-first
+      // is descending elsewhere. SEVERITY_ORDER ranks critical as 0.
+      va = -(SEVERITY_ORDER[a.severity] ?? 5);
+      vb = -(SEVERITY_ORDER[b.severity] ?? 5);
     } else if (findingsSortKey === "found_at") {
       va = timestampSortKey(a.found_at);
       vb = timestampSortKey(b.found_at);
@@ -10301,7 +10303,7 @@ function toggleFindingsSort(key) {
     findingsSortDir = findingsSortDir === "asc" ? "desc" : "asc";
   } else {
     findingsSortKey = key;
-    findingsSortDir = key === "severity" ? "asc" : (key === "found_at" ? "desc" : "asc");
+    findingsSortDir = key === "severity" || key === "found_at" ? "desc" : "asc";
   }
   updateFindingsSortHeaders();
   renderFindings();

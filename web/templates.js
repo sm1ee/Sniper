@@ -31,6 +31,13 @@
     return { key, direction: "asc" };
   }
 
+  // The API's asc puts the most severe and the enabled first. The arrow shows
+  // the list as seen, as every other table does: ↓ when the largest is on top.
+  function shownSortDirection(key, direction) {
+    if (key !== "severity" && key !== "on") return direction;
+    return direction === "asc" ? "desc" : "asc";
+  }
+
   // Turning on what the list shows sends the list's own filter to the passive
   // and the auto scan switches alike; each takes the templates it can run.
   function bulkRequest(filters, enabled) {
@@ -428,12 +435,13 @@
     }
 
     function renderSortHeaders() {
+      const shown = shownSortDirection(sort.key, sort.direction);
       for (const header of els.Head.querySelectorAll("[data-sort]")) {
         const active = header.dataset.sort === sort.key;
         header.classList.toggle("active", active);
-        header.setAttribute("aria-sort", active ? (sort.direction === "asc" ? "ascending" : "descending") : "none");
+        header.setAttribute("aria-sort", active ? (shown === "asc" ? "ascending" : "descending") : "none");
         const indicator = header.querySelector(".table-sort-indicator");
-        if (indicator) indicator.textContent = active ? (sort.direction === "asc" ? "↑" : "↓") : "↕";
+        if (indicator) indicator.textContent = active ? (shown === "asc" ? "↑" : "↓") : "↕";
       }
     }
 
@@ -1475,7 +1483,7 @@
     };
   }
 
-  const api = { createController, listQuery, nextSort, bulkRequest, narrowed, librarySummary, checkLine, progressOf, supportLabel, scanRequest, parseTargets,
+  const api = { createController, listQuery, nextSort, shownSortDirection, bulkRequest, narrowed, librarySummary, checkLine, progressOf, supportLabel, scanRequest, parseTargets,
     previewLine, jobLine, autoRequest, autoLine, yamlLines, RISKS, PAGE_SIZE };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperTemplates = api;

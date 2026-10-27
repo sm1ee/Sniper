@@ -2138,8 +2138,9 @@ code {
   color: var(--text);
 }
 
+/* The sorted column is gold here as in Findings, Scan, Recon and Fuzzer. */
 .sort-header.active {
-  color: var(--text);
+  color: var(--point);
 }
 
 /* An arrow shows on the sorted column and the one pointed at; on every
@@ -2156,7 +2157,7 @@ code {
 }
 
 .sort-header.active .sort-indicator {
-  color: var(--accent-strong);
+  color: inherit;
   opacity: 1;
 }
 
