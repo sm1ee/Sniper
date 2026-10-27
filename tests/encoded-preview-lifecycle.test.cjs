@@ -22,6 +22,22 @@ test("production ViewPlugin callback delays hover, renders inert text, and leave
   assert.match(visible(f).style.left, /^\d+px$/);
 });
 
+// Hovering shows the decoded value; one click on its layer copies it.
+test("each decoded layer has a Copy button that copies its text and keeps the preview open", async () => {
+  const f = fixture("hello%20world"); open(f);
+  const copied = [];
+  f.context.copyTextToClipboard = async value => { copied.push(value); };
+  const copy = visible(f).children[1].children.find(node => node.className === "encoded-preview-copy");
+  assert.ok(copy, "the layer's label carries a Copy button");
+  assert.equal(copy.textContent, "Copy");
+  f.document.fire("pointerdown", { target: copy });
+  copy.fire("click");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(copied, ["hello world"]);
+  assert.equal(copy.textContent, "Copied");
+  assert.ok(visible(f), "copying leaves the preview open");
+});
+
 test("mouse movement within a decoded token does not restart or replace an open tooltip", () => {
   const f = fixture(); open(f); const tooltip = visible(f);
   f.hover(4); f.hover(6);

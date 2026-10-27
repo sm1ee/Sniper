@@ -31694,6 +31694,19 @@ class EncodedPreviewController {
       const label = this.document.createElement("div");
       label.className = "encoded-preview-label";
       label.textContent = layer.encoding;
+      // Selecting the text inside a hover preview is fiddly; one click copies it.
+      const copy = this.document.createElement("button");
+      copy.type = "button";
+      copy.className = "encoded-preview-copy";
+      copy.textContent = "Copy";
+      copy.setAttribute("aria-label", `Copy the ${layer.encoding} decoded text`);
+      copy.addEventListener("click", () => {
+        copyTextToClipboard(layer.text).then(
+          () => { copy.textContent = "Copied"; },
+          () => { copy.textContent = "Copy failed"; },
+        );
+      });
+      label.appendChild(copy);
       const value = this.document.createElement("pre");
       value.textContent = layer.text;
       tooltip.appendChild(label);

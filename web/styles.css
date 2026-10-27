@@ -8826,7 +8826,18 @@ button.utility-button.replay-tab-add {
   user-select: text;
 }
 .encoded-preview-title { color: var(--text-soft); font-weight: 600; }
-.encoded-preview-label { margin-top: 8px; color: var(--point); font-size: 11px; }
+.encoded-preview-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; color: var(--point); font-size: 11px; }
+/* Matches the Decode button that opens the preview. */
+.encoded-preview-copy {
+  padding: 1px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-soft);
+  font: 11px var(--sans);
+  cursor: pointer;
+}
+.encoded-preview-copy:hover { border-color: var(--line-strong); color: var(--text); }
 .encoded-preview-tooltip pre {
   margin: 3px 0 0;
   white-space: pre-wrap;
@@ -8860,19 +8871,35 @@ button.utility-button.replay-tab-add {
   }
 }
 
-/* Exact retained packets use the same message panes as HTTP history. The map
-   inspector stacks them until there is room for two readable editors. */
+/* Exact retained packets use the same message panes as HTTP history. In the
+   map inspector the two panes split the space below the sample picker and
+   each scrolls inside its editor; a long packet must not lengthen the pane and
+   scroll the picker away. They stack, as the inspector is narrow, and sit side
+   by side only when each would still be wide. */
 .service-map-detail-body { container-type: inline-size; }
+.service-map-detail-body.packet-details { display: flex; flex-direction: column; flex: 1 1 0; }
+.service-map-detail-body.packet-details > [data-service-packet] { display: flex; flex: 1 0 0; min-height: 440px; }
 .packet-source { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .packet-source > span:not(.mr-toggle) { min-width: 0; overflow-wrap: anywhere; font-size: var(--font-xs); color: var(--text-dim); }
-.packet-source select, .packet-inspect select { max-width: 100%; min-height: var(--control-h); font: inherit; }
-.packet-viewer.lower-workbench { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-height: 0; }
-.packet-viewer .message-column { min-width: 0; min-height: 250px; display: flex; flex-direction: column; }
-.packet-viewer .editor-shell { min-height: 190px; height: 280px; overflow: hidden; flex: 1; }
+.packet-source select,
+.packet-inspect select {
+  max-width: 100%;
+  min-height: var(--control-h);
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background-color: var(--panel-code);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--font-xs);
+}
+.packet-viewer.lower-workbench { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; min-height: 0; }
+.packet-viewer .message-column { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.packet-viewer .editor-shell { flex: 1 1 0; min-height: 0; overflow: hidden; }
 .packet-viewer .cm-container { height: 100%; }
 .packet-viewer .pane-header { flex-wrap: wrap; gap: 4px; }
 .packet-viewer .pane-footer { flex-wrap: wrap; }
-.packet-viewer .render-view { height: 280px; }
+.packet-viewer .render-view { flex: 1 1 0; min-height: 0; }
 .packet-notice { margin: 4px 8px; font-size: var(--font-xs); color: var(--text-dim); }
 .packet-capture-info { margin-left: auto; font-size: var(--font-xs); }
 .packet-capture-info dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; }
@@ -8882,6 +8909,6 @@ button.utility-button.replay-tab-add {
 .packet-inspection header { display: flex; align-items: center; gap: 8px; }
 .packet-inspection ul { padding-left: 20px; overflow-wrap: anywhere; }
 .packet-inspection details { margin-top: 8px; color: var(--text-dim); }
-@container (min-width: 780px) {
-  .packet-viewer.lower-workbench { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+@container (min-width: 1100px) {
+  .packet-viewer.lower-workbench { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 }
