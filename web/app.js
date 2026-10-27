@@ -3083,16 +3083,32 @@ async function loadAppVersionInfo({ refresh = false } = {}) {
 // "no update". A found release is offered in a dialog, because a toast would
 // sit over the Update button it points to.
 async function checkForUpdatesNow() {
+  const pending = loadAppVersionInfo({ refresh: true });
+  const generation = appVersionReadGeneration;
   try {
-    const info = await loadAppVersionInfo({ refresh: true });
+    const info = await pending;
+    // The read fence also owns its announcement, not just the top-bar state.
+    if (generation !== appVersionReadGeneration) return;
     if (info.update_available) {
-      showConfirmDialog(`Sniper ${info.latest_version} is available. You have v${info.current_version}.`, performSelfUpdate, {
+      showConfirmDialog(`Sniper ${info.latest_version} is available. You have v${info.current_version}.`, () => {
+        // A background refresh may change the target while the offer is open.
+        // Identical metadata still permits the user's explicit update choice.
+        const matchesOffer = ["current_version", "latest_version", "update_available",
+          "self_update_supported", "latest_release_url", "releases_url"]
+          .every(key => state.appVersion?.[key] === info[key]);
+        if (!matchesOffer) {
+          showToast("Update information changed. Please check for updates again.", "info", 5000);
+          return;
+        }
+        performSelfUpdate();
+      }, {
         title: "Update available", confirmLabel: "Update", cancelLabel: "Later", confirmClass: "primary-action",
       });
     } else {
       showToast(`Sniper v${info.current_version} is up to date.`, "success", 5000);
     }
   } catch (error) {
+    if (generation !== appVersionReadGeneration) return;
     showToast(`Couldn't check for updates. ${error.message}`, "error", 5000);
   }
 }
