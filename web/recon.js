@@ -265,15 +265,9 @@
     if (requestBytes > limit || serializedBytes > limit) tooLarge();
     const request = { ...empty, scheme, host: authority, method, path, headers: [{ name: "Host", value: authority }] };
     if (new TextEncoder().encode(JSON.stringify(request)).length !== serializedBytes) invalid();
-    const sources = new Set(), kinds = new Set(); let unknownSources = 0, unknownKinds = 0;
-    if (endpoint.evidence !== undefined && !Array.isArray(endpoint.evidence)) invalid();
-    for (const observation of endpoint.evidence || []) {
-      if (typeof observation?.source === "string" && Object.hasOwn(SOURCE_NAMES, observation.source)) sources.add(observation.source); else unknownSources += 1;
-      if (typeof observation?.kind === "string" && Object.hasOwn(KIND_NAMES, observation.kind)) kinds.add(observation.kind); else unknownKinds += 1;
-    }
-    const summary = (labels, found, unknown) => [...Object.keys(labels).filter(key => found.has(key)).map(key => labels[key]), ...(unknown ? [`Unknown (${unknown})`] : [])].join(", ") || "Unknown";
-    const notice = `Constructed from Recon; headers/body were not captured and availability is unknown. Sources: ${summary(SOURCE_NAMES, sources, unknownSources)}. Evidence: ${summary(KIND_NAMES, kinds, unknownKinds)}. Review before sending.`;
-    return { request, notice };
+    // Replay shows a notice in its response header and body alike, so this one
+    // is as short as Replay's own. The evidence stays in Recon.
+    return { request, notice: "Draft from Recon. Not sent yet." };
   }
 
   function createSessionGuard(getSessionId, getGeneration = () => 0) {

@@ -19,13 +19,15 @@ for(const [url,scheme,host,path] of [
 ])for(const method of ['GET','POST','custom-METHOD'])test(`Recon draft preserves ${method} ${url}`,()=>{
  const input=endpoint({url,method}),before=JSON.stringify(input),{request,notice}=build(input);
  assert.deepEqual(request,{scheme,host,method,path,headers:[{name:'Host',value:host}],body:'',body_encoding:'utf8',preview_truncated:false});
- assert.match(notice,/Constructed from Recon/);assert.match(notice,/headers\/body were not captured/);assert.doesNotMatch(notice,/password|secret|DO_NOT_PARSE/);assert.equal(JSON.stringify(input),before);
+ assert.equal(notice,'Draft from Recon. Not sent yet.');assert.equal(JSON.stringify(input),before);
 });
 for(const method of [undefined,null,'','UNKNOWN','unknown','CONNECT','connect','G ET','GET\r\nHost:x','GET:','GÉT'])test(`Recon draft refuses invalid method ${JSON.stringify(method)}`,()=>assert.throws(()=>build(endpoint({method})),/safe HTTP/));
 for(const url of [undefined,null,'','example.com/a','//example.com/a','ftp://example.com/','ws://example.com/','https://user:pass@example.com/','https://@example.com/','https://*.example.com/','https://%2a.example.com/','https:///x','https://example.com:0/','https://example.com:/','https://example.com:65536/','https://example.com:abc/','https://::1/a','https://[invalid]/','https://example.com/#x','https://example.com/#','https://example.com/with space',' https://example.com/','https://example.com/\nX','https://example.com/\u0085','https://example.com/\u00a0','https://example.com/\\x','https://example.com/\ud800'])test(`Recon draft refuses unsafe URL ${JSON.stringify(url)}`,()=>assert.throws(()=>build(endpoint({url})),/safe HTTP/));
-test('Recon notice has finite known categories and generic unknowns, never raw diagnostics',()=>{
- const {notice}=build(endpoint({evidence:[{source:'wayback',kind:'history',location:'SECRET'},{source:'crawler',kind:'live'},{source:'__proto__',kind:'constructor'},{source:{},kind:[]},null],raw_urls:['SECRET'],jobs:[{target:'SECRET'}]}));
- assert.match(notice,/Wayback history/);assert.match(notice,/Static crawler/);assert.match(notice,/Unknown \(3\)/);assert.doesNotMatch(notice,/SECRET|__proto__|constructor|\[object/);assert.ok(notice.length<600);
+// Replay shows its notice in the response header and body alike, so it stays
+// as short as Replay's own; the evidence remains in Recon.
+test('Recon draft notice is fixed text whatever the evidence holds',()=>{
+ const {notice}=build(endpoint({evidence:[{source:'wayback',kind:'history',location:'SECRET'},{source:'__proto__',kind:'constructor'},{source:{},kind:[]},null],raw_urls:['SECRET'],jobs:[{target:'SECRET'}]}));
+ assert.equal(notice,'Draft from Recon. Not sent yet.');
 });
 test('Recon request serialized size accepts exact2MiB and refuses one byte over',()=>{
  const limit=2*1024*1024,small=build(endpoint({url:'https://example.com/'}));
