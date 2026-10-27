@@ -17,6 +17,22 @@ test("Details panes split the inspector, stacked, and scroll inside their editor
   assert.doesNotMatch(css, /\.packet-viewer[^{]*\{[^}]*height: 280px/);
 });
 
+// An inspection such as Body references once took its space from the panes.
+// The picker and panes now keep the inspector's visible height, never under
+// 560px, and inspections follow below them for the body to scroll to.
+test("the picker and panes keep the inspector's height, at least 560px, with inspections below", () => {
+  const block = rule(".packet-block");
+  for (const declaration of ["flex: none;", "height: 100%;", "min-height: 560px;"]) assert.ok(block.includes(declaration), declaration);
+  assert.match(rule(".packet-block > [data-service-packet]"), /flex: 1 1 0;/);
+});
+
+// The Response header carries Inspect after its view tabs; centred between
+// title and Inspect, the tabs no longer lined up with the Request pane's.
+test("view tabs sit at the right of each pane header, beside Inspect on Response", () => {
+  assert.match(rule(".packet-viewer .pane-header .view-tabs"), /margin-left: auto;/);
+  assert.match(rule(".packet-viewer .pane-header .packet-inspect"), /margin: 0 0 0 8px;/);
+});
+
 // Side by side, each pane would be too narrow for a packet in the usual
 // inspector width; they sit side by side only when the inspector is wide.
 test("Details panes sit side by side only in a wide inspector", () => {

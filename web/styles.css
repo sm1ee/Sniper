@@ -8878,7 +8878,10 @@ button.utility-button.replay-tab-add {
    by side only when each would still be wide. */
 .service-map-detail-body { container-type: inline-size; }
 .service-map-detail-body.packet-details { display: flex; flex-direction: column; flex: 1 1 0; }
-.service-map-detail-body.packet-details > [data-service-packet] { display: flex; flex: 1 0 0; min-height: 440px; }
+/* The picker and panes keep the inspector's visible height, never less than
+   560px; inspections and peers follow below and the body scrolls to them. */
+.packet-block { display: flex; flex-direction: column; flex: none; height: 100%; min-height: 560px; }
+.packet-block > [data-service-packet] { display: flex; flex: 1 1 0; min-height: 0; }
 .packet-source { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .packet-source > span:not(.mr-toggle) { min-width: 0; overflow-wrap: anywhere; font-size: var(--font-xs); color: var(--text-dim); }
 .packet-source select,
@@ -8898,6 +8901,9 @@ button.utility-button.replay-tab-add {
 .packet-viewer .editor-shell { flex: 1 1 0; min-height: 0; overflow: hidden; }
 .packet-viewer .cm-container { height: 100%; }
 .packet-viewer .pane-header { flex-wrap: wrap; gap: 4px; }
+/* Tabs at the right in both panes; Response's Inspect follows its tabs. */
+.packet-viewer .pane-header .view-tabs { margin-left: auto; }
+.packet-viewer .pane-header .packet-inspect { margin: 0 0 0 8px; }
 .packet-viewer .pane-footer { flex-wrap: wrap; }
 .packet-viewer .render-view { flex: 1 1 0; min-height: 0; }
 .packet-notice { margin: 4px 8px; font-size: var(--font-xs); color: var(--text-dim); }

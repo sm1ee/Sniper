@@ -2833,6 +2833,21 @@ function bindEvents() {
       return;
     }
 
+    // Cmd+R in Map ▸ Details sends the shown retained packet to Replay, as the
+    // packet menu that names the chord does.
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "r" &&
+      state.activeTool === "map" &&
+      serviceMapPacketMenuTarget?.isCurrent()
+    ) {
+      event.preventDefault();
+      runPacketMenuAction(serviceMapPacketMenuTarget, "send-to-replay").catch(handleSendActionError);
+      return;
+    }
+
     // Cmd+R on WebSocket tab — send selected frame to WS Replay
     if (
       (event.metaKey || event.ctrlKey) &&
@@ -12941,10 +12956,16 @@ function packetViewerMarkup(responseTools = "") {
     <p class="packet-notice hidden" role="status"></p><footer class="pane-footer"><label class="pane-search" aria-label="Search ${side}"><input type="search" placeholder="Search ${side}" /></label><span class="packet-search-meta"></span></footer></section>`).join("")}</div>`;
 }
 
+// The packet Map ▸ Details shows, for Cmd+R; null while none is mounted.
+let serviceMapPacketMenuTarget = null;
+
 function mountServiceMapPacketViewer(container, { packet, row, isCurrent }) {
   const owner = {}, sessionOwner = createRecordClipboardOwner();
   let alive = true;
   const current = () => alive && container.isConnected && sessionOwner() && isCurrent();
+  // This typed snapshot never consults History or reloads an ID.
+  const menuTarget = { kind: "retained-packet", packet, isCurrent: current };
+  serviceMapPacketMenuTarget = menuTarget;
   const modes = { request: "raw", response: "raw" }, searches = { request: "", response: "" };
   const panes = Object.fromEntries(["request", "response"].map(side => {
     const column = container.querySelector(`[data-packet-pane="${side}"]`);
@@ -12955,8 +12976,7 @@ function mountServiceMapPacketViewer(container, { packet, row, isCurrent }) {
     onSearch(side, query) { searches[side] = query; const result = getCMView(panes[side].key)?.applySearch(query); if (result) panes[side].meta.innerHTML = buildSearchMeta(getCMView(panes[side].key).view.state.doc.lines, result.matchCount); },
     onMenu(event) {
       event.preventDefault();
-      // This typed snapshot never consults History or reloads an ID.
-      paneMenuOpen?.(event, { kind: "retained-packet", packet, isCurrent: current });
+      paneMenuOpen?.(event, menuTarget);
     },
   });
   function draw(side) {
@@ -12975,7 +12995,13 @@ function mountServiceMapPacketViewer(container, { packet, row, isCurrent }) {
     controller.update(side, text, { mode, query: searches[side], owner, evidenceRanges: marks, notice: raw.notice, renderSubject });
   }
   draw("request"); draw("response");
-  return { destroy() { alive = false; controller.destroy(); } };
+  return {
+    destroy() {
+      alive = false;
+      if (serviceMapPacketMenuTarget === menuTarget) serviceMapPacketMenuTarget = null;
+      controller.destroy();
+    },
+  };
 }
 
 function renderMessagePanes() {

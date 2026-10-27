@@ -991,6 +991,9 @@ test('only the Details tab marks its body for the packet layout', async () => {
   assert.match(f.els.detail.innerHTML, /class="service-map-detail-body" id="serviceMapDetailBody"/);
   const pending = f.controller.loadEvidence('evidence-one'); f.requests.at(-1).resolve(response(evidence())); await pending;
   assert.match(f.els.detail.innerHTML, /class="service-map-detail-body packet-details" id="serviceMapDetailBody"/);
+  // The picker and the panes are one block, sized to the inspector; anything
+  // after it (inspections, peers) is below and scrolls.
+  assert.match(f.els.detail.innerHTML, /id="serviceMapDetailBody"[^>]*><div class="packet-block"><div class="packet-source">/);
 });
 
 test('body inspection is opt-in: map, source verification, tabs, filters and refresh never request bodies', async () => {
