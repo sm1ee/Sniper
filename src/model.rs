@@ -971,7 +971,9 @@ fn decode_single_content_encoding(
 ) -> Option<Vec<u8>> {
     match encoding {
         "gzip" | "x-gzip" => {
-            let mut decoder = flate2::read::GzDecoder::new(body);
+            // A valid first member is not a complete entity: later members must
+            // also decode and share the same output limit before publishing it.
+            let mut decoder = flate2::read::MultiGzDecoder::new(body);
             read_limited_to_end(&mut decoder, max_decoded_bytes)
         }
         "deflate" => {
@@ -1283,6 +1285,217 @@ mod tests {
         headers.insert(CONTENT_ENCODING, "gzip".parse().unwrap());
         headers.insert(CONTENT_LENGTH, compressed_len.to_string().parse().unwrap());
         headers
+    }
+
+    mod gzip_members {
+        use super::*;
+
+        fn members(parts: &[&[u8]]) -> Vec<u8> {
+            parts.iter().flat_map(|part| gzip(part)).collect()
+        }
+
+        fn invalid_later_members() -> Vec<Vec<u8>> {
+            let first = gzip(b"alpha=one;");
+            let second = gzip(b"beta=two;");
+            let mut bad_crc = second.clone();
+            let crc = bad_crc.len() - 8;
+            bad_crc[crc] ^= 1;
+            vec![
+                [first.clone(), bad_crc].concat(),
+                [first.clone(), second[..second.len() - 1].to_vec()].concat(),
+                [first.clone(), second.clone(), b"not a gzip member".to_vec()].concat(),
+                [first, second, vec![0]].concat(),
+            ]
+        }
+
+        #[test]
+        fn text_and_alias_decode_every_member_including_empty_boundaries() {
+            for encoding in ["gzip", "x-gzip"] {
+                for parts in [
+                    vec![b"alpha=one;".as_slice(), b"beta=two;".as_slice()],
+                    vec![b"".as_slice(), b"alpha=one;", b"", b"beta=two;", b""],
+                ] {
+                    let compressed = members(&parts);
+                    let mut headers = compressed_headers(compressed.len());
+                    headers.insert(CONTENT_ENCODING, encoding.parse().unwrap());
+                    assert_eq!(
+                        decode_content_encoding(&headers, &compressed),
+                        Some(b"alpha=one;beta=two;".to_vec()),
+                        "{encoding} with {} members",
+                        parts.len()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn binary_capture_preserves_all_decoded_bytes_and_wire_size() {
+            let compressed = members(&[&[0, 255], &[128, 10]]);
+            let mut headers = compressed_headers(compressed.len());
+            headers.insert(CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+            let record = MessageRecord::from_headers_and_body(&headers, &compressed, 1024);
+            assert_eq!(record.body_bytes(), vec![0, 255, 128, 10]);
+            assert_eq!(record.body_encoding, BodyEncoding::Base64);
+            assert_eq!(record.body_size, compressed.len());
+            assert_eq!(record.decoded_body_size, Some(4));
+            assert!(record.content_decoded);
+            assert!(!record.preview_truncated);
+        }
+
+        #[test]
+        fn preview_cap_and_reuse_metadata_apply_to_the_full_decoded_body() {
+            let compressed = members(&[b"abc", b"defghi"]);
+            let headers = compressed_headers(compressed.len());
+            let record = MessageRecord::from_headers_and_body(&headers, &compressed, 5);
+            assert_eq!(record.body_preview, "abcde");
+            assert_eq!(record.body_size, compressed.len());
+            assert_eq!(record.decoded_body_size, Some(9));
+            assert!(record.preview_truncated);
+            assert!(record.content_decoded);
+            let editable = EditableRequest::from_message_record(
+                "http",
+                "example.com",
+                "POST",
+                "/fixture",
+                &record,
+            );
+            assert_eq!(editable.body, "abcde");
+            assert!(editable.preview_truncated);
+            assert!(editable.headers.iter().all(|header| {
+                !header.name.eq_ignore_ascii_case("content-encoding")
+                    && !header.name.eq_ignore_ascii_case("content-length")
+            }));
+        }
+
+        #[test]
+        fn stacked_encoding_decodes_members_at_each_stage() {
+            let inner_members = members(&[b"alpha=one;", b"beta=two;"]);
+            let inner = gzip(b"alpha=one;beta=two;");
+            let split = inner.len() / 2;
+            for compressed in [
+                gzip(&inner_members),
+                members(&[&inner[..split], &inner[split..]]),
+            ] {
+                let mut headers = compressed_headers(compressed.len());
+                headers.insert(CONTENT_ENCODING, "gzip, gzip".parse().unwrap());
+                assert_eq!(
+                    decode_content_encoding(&headers, &compressed),
+                    Some(b"alpha=one;beta=two;".to_vec())
+                );
+            }
+        }
+
+        #[test]
+        fn aggregate_limit_rejects_later_member_output() {
+            let compressed = members(&[b"alpha", b"beta"]);
+            let headers = compressed_headers(compressed.len());
+            for limit in [5, 8] {
+                assert!(decode_content_encoding_limited(&headers, &compressed, limit).is_none());
+            }
+        }
+
+        #[test]
+        fn aggregate_limit_accepts_exact_total_and_empty_members() {
+            let compressed = members(&[b"alpha", b"", b"beta", b""]);
+            let headers = compressed_headers(compressed.len());
+            assert_eq!(
+                decode_content_encoding_limited(&headers, &compressed, 9),
+                Some(b"alphabeta".to_vec())
+            );
+            let empty = members(&[b"", b""]);
+            assert_eq!(
+                decode_content_encoding_limited(&headers, &empty, 0),
+                Some(Vec::new())
+            );
+        }
+
+        #[test]
+        fn aggregate_limit_applies_to_intermediate_stacked_stage() {
+            let inner = members(&[b"alpha", b"beta"]);
+            let split = inner.len() / 2;
+            let compressed = members(&[&inner[..split], &inner[split..]]);
+            let mut headers = compressed_headers(compressed.len());
+            headers.insert(CONTENT_ENCODING, "gzip, gzip".parse().unwrap());
+            assert!(
+                decode_content_encoding_limited(&headers, &compressed, inner.len() - 1).is_none()
+            );
+            assert_eq!(
+                decode_content_encoding_limited(&headers, &compressed, inner.len()),
+                Some(b"alphabeta".to_vec())
+            );
+        }
+
+        #[test]
+        fn corrupt_truncated_or_trailing_later_member_never_publishes_a_prefix() {
+            for compressed in invalid_later_members() {
+                let headers = compressed_headers(compressed.len());
+                assert!(decode_content_encoding(&headers, &compressed).is_none());
+            }
+        }
+
+        #[test]
+        fn invalid_later_member_preserves_opaque_body_and_entity_headers() {
+            for compressed in invalid_later_members() {
+                let headers = compressed_headers(compressed.len());
+                let record = MessageRecord::from_headers_and_body(&headers, &compressed, 1024);
+                assert!(!record.content_decoded);
+                assert_eq!(record.decoded_body_size, None);
+                assert_eq!(record.body_size, compressed.len());
+                assert!(!record.preview_truncated);
+                assert_eq!(record.body_bytes(), compressed);
+                let request = EditableRequest::from_headers_and_body(
+                    "http",
+                    "example.com",
+                    "POST",
+                    "/fixture",
+                    &headers,
+                    &compressed,
+                );
+                let response =
+                    EditableResponse::from_status_headers_body(200, &headers, &compressed);
+                let reused = EditableRequest::from_message_record(
+                    "http",
+                    "example.com",
+                    "POST",
+                    "/fixture",
+                    &record,
+                );
+                for (body, retained_headers) in [
+                    (request.body_bytes(), request.headers),
+                    (response.body_bytes(), response.headers),
+                    (reused.body_bytes(), reused.headers),
+                ] {
+                    assert_eq!(body, compressed);
+                    assert!(retained_headers.iter().any(|header| {
+                        header.name.eq_ignore_ascii_case("content-encoding")
+                            && header.value == "gzip"
+                    }));
+                    assert!(retained_headers.iter().any(|header| {
+                        header.name.eq_ignore_ascii_case("content-length")
+                            && header.value == compressed.len().to_string()
+                    }));
+                }
+            }
+        }
+
+        #[test]
+        fn ordinary_empty_and_invalid_first_member_controls_are_unchanged() {
+            for raw in [b"ordinary".as_slice(), b"".as_slice()] {
+                let compressed = gzip(raw);
+                let headers = compressed_headers(compressed.len());
+                assert_eq!(
+                    decode_content_encoding(&headers, &compressed),
+                    Some(raw.to_vec())
+                );
+            }
+            let compressed = gzip(b"ordinary");
+            let headers = compressed_headers(compressed.len());
+            assert!(
+                decode_content_encoding(&headers, &compressed[..compressed.len() - 1]).is_none()
+            );
+            assert!(decode_content_encoding(&headers, b"not gzip").is_none());
+            assert!(decode_content_encoding(&headers, b"").is_none());
+        }
     }
 
     #[test]

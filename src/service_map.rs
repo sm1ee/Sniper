@@ -452,6 +452,9 @@ pub struct ServiceMapRow {
     )]
     pub technology_observations: Option<Vec<TechnologyObservation>>,
     pub redirect: Option<RedirectTarget>,
+    /// A redirect's Location was too long to read, not an unrelated header.
+    #[serde(skip)]
+    pub(crate) redirect_value_omitted: bool,
     pub header_links: Vec<HeaderLinkSource>,
     pub metadata_complete: bool,
     pub omitted: Vec<String>,
@@ -873,6 +876,7 @@ pub(crate) fn project_record_for_catalog(
         technology_clues: vec![],
         technology_observations: Some(vec![]),
         redirect: None,
+        redirect_value_omitted: false,
         header_links: vec![],
         metadata_complete: true,
         omitted: vec![],
@@ -1089,6 +1093,7 @@ pub(crate) fn project_record_for_catalog(
         .status
         .is_some_and(|status| matches!(status, 300 | 301 | 302 | 303 | 307 | 308))
     {
+        row.redirect_value_omitted = unread_location;
         if locations.len() > 1 {
             row.omitted.push("ambiguous_location_headers".into());
         } else if let Some(location) = locations.first() {

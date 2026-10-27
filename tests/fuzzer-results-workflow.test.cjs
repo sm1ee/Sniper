@@ -288,7 +288,7 @@ test('Reuse waits for confirmation, clears unrelated transport/source and retain
 test('Reuse of a Sniper run restores its payload list once and its attack options', async () => {
   const f = fixture(), saved = run('run-b');
   // Two positions, each through the list [a, a]: the repeat is the operator's.
-  saved.results = [{ payload: 'a', position: 0 }, { payload: 'a', position: 0 }, { payload: 'a', position: 1 }, { payload: 'a', position: 1 }];
+  saved.results = [{ index: 0, payload: 'a', position: 0 }, { index: 1, payload: 'a', position: 0 }, { index: 2, payload: 'a', position: 1 }, { index: 3, payload: 'a', position: 1 }];
   Object.assign(saved, { attack_type: 'sniper', payload_count: 2, marker_count: 2, url_encode: false, concurrency: 8 });
   f.pick('run-b'); const read = f.reuse();
   f.requests.at(-1).resolve(response(saved)); await read;
@@ -549,4 +549,145 @@ test('clearing filters does not resurrect a filtered-away selection or its pendi
   assert.equal(f.state._fuzzerDetailRecord, null);
   assert.equal(f.els.fuzzerDetailPanel.classList.contains('hidden'), true);
   assert.equal(f.c.visibleFuzzerResults().length, 2);
+});
+
+
+// Exact synthetic Stop response captured from checkpoint07's immutable runtime:
+// one of six tiny loopback requests was held while the other five completed.
+const stoppedGapRecord = require('./fixtures/fuzzer-stopped-gap.json');
+function sniperSavedRun(payloads = ['A', 'B', 'C'], indexes = [0, 1, 2, 3, 4, 5]) {
+  const saved = structuredClone(stoppedGapRecord);
+  saved.payload_count = payloads.length;
+  saved.planned = payloads.length * 2;
+  saved.results = indexes.map(index => ({ ...result(index), payload: payloads[index % payloads.length], position: Math.floor(index / payloads.length) }));
+  return saved;
+}
+async function prepareReuse(f, saved) {
+  f.pick(saved.id);
+  const before = draft(f.state), serialized = JSON.stringify(saved);
+  const pending = f.reuse();
+  f.requests.at(-1).resolve(response(saved));
+  await pending;
+  assert.equal(draft(f.state), before, 'reading must never replace the draft');
+  assert.equal(JSON.stringify(saved), serialized, 'retained results remain unchanged');
+  assert.equal(f.requests.length, 1, 'only a mocked GET; never a new attack');
+}
+function reusedPayloads(f) { return Array.from(f.c.splitFuzzerPayloadLines(f.state.fuzzerPayloadsText)); }
+
+test('Reuse recovers every original Sniper payload from the actual interrupted runtime gap', async () => {
+  const f = fixture();
+  await prepareReuse(f, structuredClone(stoppedGapRecord));
+  assert.equal(f.confirmations.length, 1);
+  assert.doesNotMatch(f.confirmations[0].message, /Only \d+ of \d+ original payload slots/);
+  f.confirmations[0].confirm();
+  assert.deepEqual(reusedPayloads(f), ['A', 'B', 'C']);
+  assert.equal(f.state.fuzzerSourceTransactionId, null); assert.equal(f.state.fuzzerTarget, null);
+  assert.equal(f.requests.length, 1);
+});
+
+for (const [label, payloads, indexes] of [
+  ['complete out-of-order results', ['A', 'B', 'C'], [5, 2, 0, 4, 3, 1]],
+  ['intentional equal-text slots and trailing empty', ['A', 'A', ''], [0, 2, 3, 4, 5]],
+  ['all empty original slots', ['', '', ''], [0, 2, 3, 4, 5]],
+]) test(`Reuse preserves slot order for ${label}`, async () => {
+  const f = fixture(); await prepareReuse(f, sniperSavedRun(payloads, indexes));
+  assert.equal(f.confirmations.length, 1); f.confirmations[0].confirm();
+  assert.deepEqual(reusedPayloads(f), payloads);
+});
+
+for (const [label, payloads, indexes, expected] of [
+  ['missing middle slot', ['A', 'B', 'C'], [0, 2, 3, 5], ['A', 'C']],
+  ['equal text in two retained slots', ['A', 'A', 'C'], [0, 1, 3, 4], ['A', 'A']],
+  ['empty first and trailing slots', ['', 'B', ''], [0, 2, 3, 5], ['', '']],
+]) test(`Reuse explicitly confirms a safe partial Sniper subset: ${label}`, async () => {
+  const f = fixture(); await prepareReuse(f, sniperSavedRun(payloads, indexes));
+  assert.equal(f.confirmations.length, 1);
+  assert.match(f.confirmations[0].message, /Only 2 of 3 original payload slots remain/);
+  assert.match(f.confirmations[0].message, /Missing payloads will not be restored/);
+  f.confirmations[0].confirm();
+  assert.deepEqual(reusedPayloads(f), expected);
+  assert.equal(f.requests.length, 1);
+});
+
+const invalidSniperMetadata = [
+  ['absent payload count', saved => delete saved.payload_count],
+  ['string payload count', saved => saved.payload_count = '3'],
+  ['zero payload count', saved => saved.payload_count = 0],
+  ['fractional payload count', saved => saved.payload_count = 1.5],
+  ['oversized payload count', saved => saved.payload_count = Number.MAX_SAFE_INTEGER],
+  ['absent marker count', saved => delete saved.marker_count],
+  ['string marker count', saved => saved.marker_count = '2'],
+  ['zero marker count', saved => saved.marker_count = 0],
+  ['fractional marker count', saved => saved.marker_count = 1.5],
+  ['oversized marker count', saved => saved.marker_count = 129],
+  ['plan exceeds existing request cap', saved => { saved.payload_count = 5000; saved.marker_count = 11; }],
+  ['absent index', saved => delete saved.results[0].index],
+  ['string index', saved => saved.results[0].index = '0'],
+  ['negative index', saved => saved.results[0].index = -1],
+  ['fractional index', saved => saved.results[0].index = 0.5],
+  ['unsafe index', saved => saved.results[0].index = Number.MAX_SAFE_INTEGER + 1],
+  ['absent position', saved => delete saved.results[0].position],
+  ['string position', saved => saved.results[0].position = '0'],
+  ['negative position', saved => saved.results[0].position = -1],
+  ['fractional position', saved => saved.results[0].position = 0.5],
+  ['out-of-range position', saved => saved.results[0].position = 2],
+  ['position disagrees with index', saved => saved.results[0].position = 1],
+  ['index outside the original plan', saved => saved.results[0].index = 6],
+  ['missing payload', saved => delete saved.results[0].payload],
+  ['non-string payload', saved => saved.results[0].payload = 7],
+  ['conflicting copies of a slot', saved => saved.results[3].payload = 'different'],
+  ['duplicate result index', saved => saved.results.push({ ...saved.results[0] })],
+  ['null row', saved => saved.results.push(null)],
+  ['no retained slots', saved => saved.results = []],
+];
+for (const [label, mutate] of invalidSniperMetadata) test(`Reuse refuses ambiguous Sniper setup: ${label}`, async () => {
+  const f = fixture(), saved = sniperSavedRun(), visible = f.state.fuzzerAttackRecord;
+  mutate(saved); await prepareReuse(f, saved);
+  assert.equal(f.confirmations.length, 0, 'invalid metadata must not offer a replacement');
+  assert.equal(f.state.fuzzerAttackRecord, visible);
+  assert.match(f.els.fuzzerSavedRunNotice.textContent, /payload|metadata/i);
+});
+
+test('View still accepts an interrupted Sniper record whose setup cannot be recovered', async () => {
+  const f = fixture(), saved = sniperSavedRun(); delete saved.results[0].position;
+  f.pick(saved.id); const before = draft(f.state), pending = f.view();
+  f.requests.at(-1).resolve(response(saved)); await pending;
+  assert.equal(f.state.fuzzerAttackRecordId, saved.id); assert.equal(draft(f.state), before);
+  assert.equal(f.confirmations.length, 0); assert.equal(f.requests.length, 1);
+});
+
+for (const boundary of ['draft', 'picker', 'session']) test(`partial-subset confirmation keeps newer ${boundary} ownership`, async () => {
+  const f = fixture(); await prepareReuse(f, sniperSavedRun(['A', 'B', 'C'], [0, 2, 3, 5]));
+  assert.equal(f.confirmations.length, 1);
+  if (boundary === 'draft') f.c.updateFuzzerPayloadsText('newer-draft', { userEdit: true });
+  if (boundary === 'picker') f.pick('other-run');
+  if (boundary === 'session') { f.resetSession('session-b'); f.resetSession('session-a'); }
+  const before = draft(f.state); f.confirmations[0].confirm(); assert.equal(draft(f.state), before);
+});
+
+
+test('legacy Battering ram Reuse still accepts missing slot metadata and literal duplicates', async () => {
+  const f = fixture(), saved = run('legacy-run', [{ payload: 'same' }, { payload: 'same' }, { payload: '' }]);
+  delete saved.payload_count; delete saved.marker_count; delete saved.attack_type;
+  await prepareReuse(f, saved); assert.equal(f.confirmations.length, 1);
+  assert.doesNotMatch(f.confirmations[0].message, /original payload slots remain/);
+  f.confirmations[0].confirm(); assert.deepEqual(reusedPayloads(f), ['same', 'same', '']);
+});
+
+for (const planned of [undefined, 0]) test(`valid Sniper slot metadata does not require legacy planned=${planned}`, async () => {
+  const f = fixture(), saved = sniperSavedRun(['A', 'B', 'C'], [0, 2, 3, 4, 5]);
+  if (planned === undefined) delete saved.planned; else saved.planned = planned;
+  await prepareReuse(f, saved); assert.equal(f.confirmations.length, 1);
+  f.confirmations[0].confirm(); assert.deepEqual(reusedPayloads(f), ['A', 'B', 'C']);
+});
+
+test('Sniper Reuse still refuses multiline payloads after slot recovery', async () => {
+  const f = fixture(); await prepareReuse(f, sniperSavedRun(['one\ntwo', 'B', 'C']));
+  assert.equal(f.confirmations.length, 0); assert.match(f.els.fuzzerSavedRunNotice.textContent, /line break/);
+});
+
+test('Sniper slot recovery still enforces payload editor byte limits before confirmation', async () => {
+  const f = fixture(), saved = sniperSavedRun(['x'.repeat(4 * 1024 * 1024), 'B', 'C']);
+  await prepareReuse(f, saved);
+  assert.equal(f.confirmations.length, 0); assert.match(f.els.fuzzerSavedRunNotice.textContent, /editor limits/);
 });

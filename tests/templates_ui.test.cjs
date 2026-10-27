@@ -806,7 +806,7 @@ test("opening Scan rereads the scope, and its warning follows the scope it is to
   controller.dispose();
 });
 
-test("Start scan can be pressed once the library has loaded", async () => {
+test("Start scan can be pressed once the library and session jobs have loaded", async () => {
   const els = new Map();
   const shell = {
     ownerDocument: fakeDocument(() => fakeElement()),
@@ -814,8 +814,11 @@ test("Start scan can be pressed once the library has loaded", async () => {
   };
   const status = { state: "idle", library: { source: "import", verified: false }, templates: 1, passive_supported: 0, passive_enabled: 0 };
   const controller = templates.createController({
-    root: shell, getSessionId: () => null, getScopeIncludeCount: () => 1,
-    fetch: async (url) => ({ ok: true, json: async () => (String(url).includes("/library") ? status : { items: [], total: 0 }) }),
+    root: shell, getSessionId: () => "s-1", getScopeIncludeCount: () => 1,
+    fetch: async (url) => ({ ok: true, json: async () => String(url).includes("/library") ? status
+      : String(url).startsWith("/api/templates/scans?") ? { session_id: "s-1", jobs: [] }
+        : String(url).startsWith("/api/templates/auto?") ? { session_id: "s-1", enabled: false, hosts: [], rate: 10 }
+          : { items: [], total: 0 } }),
     setTimeout: () => 0, clearTimeout() {},
   });
   const start = els.get("#templatesScanStart");

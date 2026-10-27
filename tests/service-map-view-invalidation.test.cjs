@@ -43,6 +43,16 @@ function fixture() {
   };
   return f;
 }
+// Parameters intentionally live in APIs; use the real tab callback and prove it is local.
+function parametersHtml(f) {
+  const count = f.requests.length, reads = f.parameterRequests.length, endpoint = f.state.endpointSelection;
+  const aborts = f.parameterRequests.map(read => !!read.options?.signal?.aborted);
+  f.click({ serviceDetailTab: 'apis' });
+  assert.equal(f.requests.length, count); assert.equal(f.parameterRequests.length, reads);
+  assert.equal(f.state.endpointSelection, endpoint);
+  assert.deepEqual(f.parameterRequests.map(read => !!read.options?.signal?.aborted), aborts);
+  return f.els.detail.innerHTML;
+}
 const cards = f => [...f.els.canvas.innerHTML.matchAll(/data-service-origin="([^"]+)"/g)].map(match => match[1]);
 const bounds = f => `${f.els.graphBounds.textContent} ${f.els.graphDiagnostics.textContent}`;
 async function open(f) { await f.load(); f.controller.selectOrigin(A, 0); }
@@ -69,8 +79,8 @@ for (const reason of ['delete', 'event gap']) test(`${reason} invalidation disca
   f.requests.at(-1).resolve(response(snapshot())); await f.historyPending;
   assert.equal(f.parameterRequests.length, 2, 'same endpoint is read again without changing inspector');
   await f.completeParameters('surviving-value');
-  assert.match(f.els.detail.innerHTML, /surviving-value/);
-  assert.doesNotMatch(f.els.detail.innerHTML, /removed-value/);
+  assert.match(parametersHtml(f), /surviving-value/);
+  assert.doesNotMatch(parametersHtml(f), /removed-value/);
 });
 
 function clearHistoryAction(f, { success = true, confirm = true, beforeResponse = () => {} } = {}) {
@@ -95,11 +105,11 @@ test('confirmed Clear invalidates parameters immediately before its fresh map fi
   const f = fixture(); await open(f); await f.completeParameters('cleared-value');
   await clearHistoryAction(f);
   assert.equal(f.state.parameters, null); assert.equal(f.state.snapshot, null);
-  assert.equal(f.requests.length, 2); assert.doesNotMatch(f.els.detail.innerHTML, /cleared-value/);
+  assert.equal(f.requests.length, 2); assert.doesNotMatch(parametersHtml(f), /cleared-value/);
   f.requests.at(-1).resolve(response(snapshot([], 'generation-cleared'))); await tick();
   assert.equal(f.state.endpointSelection, null);
   await f.load(); f.controller.selectOrigin(A, 0); await f.completeParameters('new-capture');
-  assert.match(f.els.detail.innerHTML, /new-capture/);
+  assert.match(parametersHtml(f), /new-capture/);
 });
 
 for (const outcome of ['cancelled', 'failed', 'old session']) test(`${outcome} Clear cannot discard current parameter state`, async () => {
@@ -111,10 +121,10 @@ for (const outcome of ['cancelled', 'failed', 'old session']) test(`${outcome} C
 test('Reload immediately discards values and rereads the still-open endpoint after the map', async () => {
   const f = fixture(); await open(f); await f.completeParameters('before-reload');
   const pending = f.els.refresh.dispatch('click');
-  assert.equal(f.state.parameters, null); assert.doesNotMatch(f.els.detail.innerHTML, /before-reload/);
+  assert.equal(f.state.parameters, null); assert.doesNotMatch(parametersHtml(f), /before-reload/);
   f.requests.at(-1).resolve(response(snapshot())); await pending;
   assert.equal(f.parameterRequests.length, 2); await f.completeParameters('after-reload');
-  assert.match(f.els.detail.innerHTML, /after-reload/);
+  assert.match(parametersHtml(f), /after-reload/);
 });
 
 test('clear history snapshot discards completed values before the same endpoint can return', async () => {
@@ -123,14 +133,14 @@ test('clear history snapshot discards completed values before the same endpoint 
   assert.equal(f.state.parameters, null); assert.equal(f.state.parametersKey, null);
   await f.load(snapshot()); f.controller.selectOrigin(A, 0);
   assert.equal(f.parameterRequests.length, 2); await f.completeParameters('new-capture');
-  assert.doesNotMatch(f.els.detail.innerHTML, /cleared-value/); assert.match(f.els.detail.innerHTML, /new-capture/);
+  assert.doesNotMatch(parametersHtml(f), /cleared-value/); assert.match(parametersHtml(f), /new-capture/);
 });
 
 test('reopening an endpoint reads its newest rows even without a map generation change', async () => {
   const f = fixture(); await open(f); await f.completeParameters('older-row');
   f.controller.selectOrigin(A); f.controller.selectOrigin(A, 0);
   assert.equal(f.parameterRequests.length, 2);
-  await f.completeParameters('newest-row'); assert.match(f.els.detail.innerHTML, /newest-row/);
+  await f.completeParameters('newest-row'); assert.match(parametersHtml(f), /newest-row/);
 });
 
 const boundaries = {
@@ -153,7 +163,7 @@ for (const [name, change] of Object.entries(boundaries)) test(`late parameter va
   old.resolve(response(parameters('obsolete-value'))); await tick();
   assert.equal(f.state.parameters, null); assert.equal(f.state.parametersKey, null);
   assert.equal(f.state.parametersLoading, false); assert.equal(f.state.parametersError, '');
-  assert.doesNotMatch(f.els.detail.innerHTML, /obsolete-value/);
+  assert.doesNotMatch(parametersHtml(f), /obsolete-value/);
 });
 
 test('late parameter JSON and rejected reads cannot overwrite a newer successful read', async () => {
@@ -165,7 +175,7 @@ test('late parameter JSON and rejected reads cannot overwrite a newer successful
     await f.completeParameters('newer-value');
     if (reject) old.reject(new Error('obsolete failure')); else finish(parameters('obsolete-value'));
     await tick();
-    assert.match(f.els.detail.innerHTML, /newer-value/); assert.doesNotMatch(f.els.detail.innerHTML, /obsolete-value/);
+    assert.match(parametersHtml(f), /newer-value/); assert.doesNotMatch(parametersHtml(f), /obsolete-value/);
     assert.equal(f.state.parametersError, ''); assert.equal(f.state.parametersLoading, false);
   }
 });
@@ -184,7 +194,7 @@ test('new map generation rereads an open endpoint but an ordinary same-generatio
   await f.load(); assert.equal(f.parameterRequests.length, 1);
   await f.load(snapshot(undefined, 'generation-two'));
   assert.equal(f.parameterRequests.length, 2); assert.equal(f.state.parameters, null);
-  await f.completeParameters('new-generation'); assert.match(f.els.detail.innerHTML, /new-generation/);
+  await f.completeParameters('new-generation'); assert.match(parametersHtml(f), /new-generation/);
 });
 
 test('repeated clicks, same-source polling and local presentation changes preserve a pending read', async () => {
@@ -195,7 +205,7 @@ test('repeated clicks, same-source polling and local presentation changes preser
   f.click({ serviceHide: A }); f.click({ serviceUnhide: A });
   f.controller.setZoom(1.2);
   assert.equal(f.parameterRequests.length, 1); assert.equal(pending.options.signal.aborted, false);
-  await f.completeParameters(); assert.match(f.els.detail.innerHTML, /current-value/);
+  await f.completeParameters(); assert.match(parametersHtml(f), /current-value/);
 });
 
 // Every captured row marks the map dirty. The open endpoint keeps its values
@@ -205,13 +215,13 @@ test('a captured row keeps an open endpoint\'s parameters and starts no reread',
   const pending = f.controller.refresh(); f.controller.markDirty();
   f.requests.at(-1).resolve(response(snapshot())); await pending;
   await f.load(); f.controller.markDirty(); await f.load();
-  assert.equal(f.parameterRequests.length, 1); assert.match(f.els.detail.innerHTML, /current-value/);
+  assert.equal(f.parameterRequests.length, 1); assert.match(parametersHtml(f), /current-value/);
 });
 test('a captured row leaves a pending parameter read running', async () => {
   const f = fixture(); await open(f); const pending = f.parameterRequests[0];
   f.controller.markDirty(); await f.load();
   assert.equal(pending.options.signal.aborted, false); assert.equal(f.parameterRequests.length, 1);
-  await f.completeParameters(); assert.match(f.els.detail.innerHTML, /current-value/);
+  await f.completeParameters(); assert.match(parametersHtml(f), /current-value/);
 });
 
 test('filter change while hidden still cancels old parameters without starting hidden reads', async () => {
@@ -220,7 +230,7 @@ test('filter change while hidden still cancels old parameters without starting h
   assert.equal(f.requests.length, count); assert.equal(f.state.parametersKey, null);
   f.parameterRequests[0].resolve(response(parameters('old-filter'))); await tick();
   f.controller.setVisible(true); await f.load(); assert.equal(f.parameterRequests.length, 2);
-  await f.completeParameters('current-filter'); assert.doesNotMatch(f.els.detail.innerHTML, /old-filter/);
+  await f.completeParameters('current-filter'); assert.doesNotMatch(parametersHtml(f), /old-filter/);
 });
 
 test('a map response received while hidden never starts a parameter read', async () => {
@@ -243,7 +253,7 @@ test('parameter response must match session and exact origin, method and path', 
   for (const extra of [{ session_id: 'session-two' }, { origin: B }, { method: 'get' }, { path: '/Search' }]) {
     const f = fixture(); await open(f); await f.completeParameters('wrong-identity', extra);
     assert.equal(f.state.parameters, null); assert.equal(f.state.parametersError, 'Parameters unavailable.');
-    assert.doesNotMatch(f.els.detail.innerHTML, /wrong-identity/);
+    assert.doesNotMatch(parametersHtml(f), /wrong-identity/);
   }
 });
 
@@ -259,13 +269,13 @@ for (const hidden of [A, 'example.com']) test(`hiding pinned ${hidden === A ? 'o
   assert.deepEqual(cards(f), [B]); assert.equal(f.state.anchorOrigin, A); assert.equal(f.state.selectedOrigin, A);
   assert.equal(f.state.parameters, inspected); assert.equal(f.state.endpointSelection, identity);
   assert.equal(f.els.directRelations.attributes['aria-pressed'], 'true');
-  assert.match(f.els.detail.innerHTML, /Show .*on map/); assert.match(bounds(f), /Pinned anchor is hidden/);
+  assert.match(parametersHtml(f), /Show .*on map/); assert.match(bounds(f), /Pinned anchor is hidden/);
   assert.match(bounds(f), /1 \/ 1 known direct neighbors shown/);
   assert.doesNotMatch(f.els.canvas.innerHTML, /data-relationship=/);
   await f.load(relatedSnapshot()); assert.deepEqual(cards(f), [B], 'polling cannot unhide the pin');
   f.click({ serviceUnhide: hidden });
   assert.deepEqual(cards(f), [A, B]); assert.equal(f.state.anchorOrigin, A);
-  assert.match(f.els.detail.innerHTML, /Hide from map/); assert.doesNotMatch(bounds(f), /Pinned anchor is hidden/);
+  assert.match(parametersHtml(f), /Hide from map/); assert.doesNotMatch(bounds(f), /Pinned anchor is hidden/);
   assert.equal(f.parameterRequests.length, reads);
 });
 
@@ -298,10 +308,10 @@ for (const conflict of ['history_changed', 'session_changed', 'scope_changed']) 
     f.requests.at(-1).resolve({ ok: false, status: 409, headers: { get: () => conflict } }); await pending;
     if (!complete) await f.completeParameters('obsolete-value');
     assert.equal(f.state.parameters, null); assert.equal(f.state.parametersKey, null); assert.equal(f.state.parametersLoading, false);
-    assert.doesNotMatch(f.els.detail.innerHTML, /obsolete-value/); assert.equal(f.state.refreshPaused, true);
+    assert.doesNotMatch(parametersHtml(f), /obsolete-value/); assert.equal(f.state.refreshPaused, true);
     const reads = f.requests.length; await f.controller.refresh(); assert.equal(f.requests.length, reads);
     const retry = f.els.refresh.dispatch('click'); f.requests.at(-1).resolve(response(snapshot())); await retry;
-    assert.equal(f.parameterRequests.length, 2); await f.completeParameters('after-retry'); assert.match(f.els.detail.innerHTML, /after-retry/);
+    assert.equal(f.parameterRequests.length, 2); await f.completeParameters('after-retry'); assert.match(parametersHtml(f), /after-retry/);
   });
 }
 
@@ -310,7 +320,7 @@ for (const failure of [{ status: 429, tag: 'busy' }, { status: 500, tag: 'build_
   const pending = f.controller.refresh();
   f.requests.at(-1).resolve({ ok: false, status: failure.status, headers: { get: () => failure.tag } }); await pending;
   assert.equal(parametersRequest.options.signal.aborted, false); assert.equal(f.state.parametersLoading, true);
-  await f.completeParameters(); assert.match(f.els.detail.innerHTML, /current-value/);
+  await f.completeParameters(); assert.match(parametersHtml(f), /current-value/);
   // Busy only means another read is still running; the next poll asks again.
   const pauses = failure.tag !== 'busy';
   assert.equal(f.state.stale, pauses); assert.equal(f.state.refreshPaused, pauses);

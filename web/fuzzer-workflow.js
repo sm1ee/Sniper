@@ -236,19 +236,31 @@
 
   function requestBudget(template, urlEncode = false) {
     const hasHost = template.headers.some(header => isHeader(header, "host"));
-    const fields = [template.method, template.path, template.body];
-    if (!hasHost) fields.push(template.host);
-    for (const header of template.headers) fields.push(header.name, header.value);
-    const markers = fields.reduce((sum, value) => sum + markerCount(value), 0);
-    // Match expanded_request_size, including its scheme accounting and original
-    // host bytes when Host takes precedence. These are not outbound wire bytes.
-    // An encoded payload byte can take three in the path.
-    const unmarked = value => bytes(value) - positions(value).reduce((sum, found) => sum + bytes(found[0]), 0);
-    const counted = [...fields, template.scheme];
-    const base = counted.reduce((sum, value) => sum + unmarked(value), hasHost ? bytes(template.host) : 0);
-    const pathMarkers = markerCount(template.path);
-    const otherMarkers = counted.reduce((sum, value) => sum + markerCount(value), 0) - pathMarkers;
-    return { markers, size: payloadBytes => base + otherMarkers * payloadBytes + pathMarkers * payloadBytes * (urlEncode ? 3 : 1) };
+    // Parse once in renderer position order. Admission keeps legacy authority
+    // accounting before Host/Content-Length normalization; only the renderer's
+    // final field-byte check is authoritative. URL payloads retain the 3x bound.
+    const fields = [[template.method, 1], [template.path, urlEncode ? 3 : 1]];
+    if (!hasHost) fields.push([template.host, 1]);
+    for (const header of template.headers) fields.push([header.name, 1], [header.value, 1]);
+    fields.push([template.body, 1]);
+    let base = bytes(template.scheme) + (hasHost ? bytes(template.host) : 0), originals = 0;
+    const markers = [];
+    for (const [value, multiplier] of fields) {
+      base += bytes(value);
+      for (const found of positions(value)) {
+        base -= bytes(found[0]);
+        const original = bytes(found[1] ?? "");
+        originals += original;
+        markers.push({ original, multiplier });
+      }
+    }
+    const size = (payloadBytes, position = null) => position === null
+      ? markers.reduce((total, marker) => total + payloadBytes * marker.multiplier, base)
+      : base + originals - markers[position].original + payloadBytes * markers[position].multiplier;
+    const maxSize = (payloadBytes, attackType) => attackType === "sniper" && markers.length
+      ? markers.reduce((largest, _marker, position) => Math.max(largest, size(payloadBytes, position)), 0)
+      : size(payloadBytes);
+    return { markers: markers.length, size, maxSize };
   }
 
   function authorityParts(value) {
@@ -280,7 +292,7 @@
       errors.push(`This attack would send ${plan.length} requests; an attack sends at most ${limits.requests}. Use fewer payloads or positions.`);
     }
     if (template.preview_truncated) errors.push("The request body preview is truncated. Load or supply the complete body first.");
-    const maxExpandedRequestBytes = budget.size(validation.maxPayloadBytes);
+    const maxExpandedRequestBytes = budget.maxSize(validation.maxPayloadBytes, attackType);
     if (validation.count && maxExpandedRequestBytes > limits.expandedRequestBytes) {
       errors.push(`An expanded request exceeds the ${limits.expandedRequestBytes} byte limit.`);
     }
@@ -298,7 +310,7 @@
       for (let index = 0; index < Math.min(limits.samples, plan.length); index += 1) {
         const [position, payloadIndex] = plan[index];
         const payload = validation.payloads[payloadIndex];
-        const estimatedBytes = budget.size(bytes(payload));
+        const estimatedBytes = budget.size(bytes(payload), position);
         // Host occurs both in the request model and headers after expansion.
         // Leave room for that copy and a normalized Content-Length record.
         const previewBytes = 2 * estimatedBytes + bytes(payload) + 256 + 32 * template.headers.length;

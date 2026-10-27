@@ -36,3 +36,33 @@ test("a saved run still sending when it loads is followed to its end", async () 
   assert.equal(state.fuzzerAttackRecord.running, false);
   assert.equal(state.fuzzerRunningAttackId, null);
 });
+
+test("an earlier visit to the same running saved attack cannot retire the newer Stop control", async () => {
+  const state = { activeSession: { id: "session-a" }, fuzzerAttackRecordId: "run-a", fuzzerNotice: "" };
+  const timers = [], requests = [];
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  const c = loadFunctions(
+    ["hydrateFuzzerAttackRecordById", "followFuzzerAttack", "setFuzzerAttackRecord", "normalizeFuzzerAttackRecord",
+      "jsonArray", "sessionQueryPath", "currentSessionId"],
+    {
+      state, _fuzzerAttackLoadGeneration: 0, FUZZER_POLL_MS: 0, URLSearchParams,
+      setTimeout: callback => { timers.push(callback); return 0; },
+      hideFuzzerDetailPanel() {}, renderFuzzer() {}, scheduleWorkspaceStateSave() {},
+      requireOkResponse: async response => assert.equal(response.ok, true),
+      fetch: () => new Promise(resolve => requests.push(resolve)),
+    },
+  );
+  const reply = (running, count) => ({ ok: true, status: 200, json: async () => ({ id: "run-a", running,
+    results: Array.from({ length: count }, (_, index) => ({ index, payload: `p${index}`, status: 200 })) }) });
+  const earlier = c.hydrateFuzzerAttackRecordById("run-a", "session-a");
+  requests.shift()(reply(true, 1)); await tick();
+  const latest = c.hydrateFuzzerAttackRecordById("run-a", "session-a");
+  requests.shift()(reply(true, 2)); await tick();
+  timers.shift()(); await earlier;
+  assert.equal(state.fuzzerRunningAttackId, "run-a", "the latest follow still owns Stop");
+  assert.equal(state.fuzzerAttackRecord.results.length, 2);
+  timers.shift()(); await tick();
+  requests.shift()(reply(false, 3)); await latest;
+  assert.equal(state.fuzzerRunningAttackId, null);
+  assert.equal(state.fuzzerAttackRecord.results.length, 3);
+});

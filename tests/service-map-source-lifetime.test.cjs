@@ -169,9 +169,11 @@ async function blocked(f) {
   for (const method of ['showBodyReferencesOnMap', 'showLinkDeclarationsOnMap', 'showPeerMatchesOnMap']) assert.equal(f.controller[method](), false, method);
   assert.equal(f.requests.length, count, 'blocked actions do not read');
   assert.match(f.els.detail.innerHTML, /session must be active/);
-  for (const kind of ['html-generators', 'peer-matches', 'link-declarations']) assert.match(f.els.detail.innerHTML, new RegExp(`data-service-${kind}="inspect"[^>]*disabled`));
+  for (const kind of ['html-generators', 'body-references', 'link-declarations', 'peer-matches']) assert.doesNotMatch(f.els.detail.innerHTML, new RegExp(`data-service-${kind}="inspect"`));
+  if (f.els.detail.innerHTML.includes('data-service-packet-inspect')) assert.match(f.els.detail.innerHTML, /data-service-packet-inspect="true"[^>]*disabled/);
+  assert.match(f.els.detail.innerHTML, /data-service-packet-peer="true"[^>]*disabled/);
   f.controller.setRelationshipKind('body');
-  assert.match(f.els.detail.innerHTML, /data-service-body-references="inspect"[^>]*disabled/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /data-service-body-references="inspect"/);
 }
 
 for (const kind of KINDS) for (const reason of AUTHORITATIVE) for (const overlayKind of [null, 'body', 'link', 'peer']) {
@@ -183,7 +185,7 @@ for (const kind of KINDS) for (const reason of AUTHORITATIVE) for (const overlay
     assert.equal(f.state.evidence, null); assert.equal(f.state.socketPeer, null); assert.equal(f.state.evidenceId, null);
     assert.equal(f.state.bodyReferenceOverlay, null); noSupplements(f);
     assert.equal(f.state.snapshot, snapshotBefore, 'default cards and aggregate snapshot remain');
-    assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source/);
+    assert.doesNotMatch(f.els.detail.innerHTML, /Capture info/);
     assert.match(f.els.detail.innerHTML, /Source unavailable/);
     if (reason === 'session_source_changed') assert.match(f.els.detail.innerHTML, /Session context changed; verify again\./);
     if (['session_source_changed', 'invalid_evidence_id'].includes(reason)) assert.doesNotMatch(f.els.detail.innerHTML, /no longer retained|removed|deleted/);
@@ -248,7 +250,7 @@ for (const kind of ['html', 'link']) {
       assert.equal(f.state.snapshot, snapshotBefore); assert.equal(f.state.bodyReferenceOverlay, overlay); assert.equal(f.state.inactiveSessionId, null);
       assert.equal(f.state[kind === 'html' ? 'htmlGenerators' : 'linkDeclarations'], null);
       assert.equal(f.state[kind === 'html' ? 'htmlGeneratorsError' : 'linkDeclarationsError'], SUPPLEMENT_ERRORS[kind]);
-      assert.match(f.els.detail.innerHTML, /Verified retained source/);
+      assert.match(f.els.detail.innerHTML, /Capture info/);
       assert.ok(f.els.detail.innerHTML.includes(SUPPLEMENT_ERRORS[kind]));
       assert.ok(!f.els.detail.innerHTML.includes(reason));
       assert.doesNotMatch(f.els.detail.innerHTML, /PRIVATE_CONTENT_SENTINEL|PRIVATE_TOKEN|Source unavailable|session must be active/);
@@ -259,7 +261,7 @@ for (const kind of KINDS) for (const reason of NONIDENTITY[kind]) test(`${kind} 
   const f = await verified(); await show(f); const overlay = f.state.bodyReferenceOverlay, row = f.state.evidence;
   await inspect(f, kind, missing(kind, reason));
   assert.equal(f.state.evidence, row); assert.equal(f.state.bodyReferenceOverlay, overlay); assert.equal(f.state.inactiveSessionId, null);
-  assert.match(f.els.detail.innerHTML, /Verified retained source/);
+  assert.match(f.els.detail.innerHTML, /Capture info/);
 });
 for (const kind of KINDS) for (const failure of ['HTTP 400', 'HTTP 404', 'network', 'JSON', 'malformed envelope']) test(`${kind} generic ${failure} does not disprove verified source`, async () => {
   const f = await verified(); await show(f); const overlay = f.state.bodyReferenceOverlay, row = f.state.evidence;
@@ -294,14 +296,14 @@ for (const first of KINDS) for (const sibling of KINDS.filter(kind => kind !== f
     assert.equal(!!f.state.evidence, reason === 'inactive_session');
     clickDetailTab(f, 'evidence');
     assert.match(f.els.detail.innerHTML, reason === 'inactive_session' ? /session must be active/ : /The source row changed/);
-    if (reason !== 'inactive_session') assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source/);
+    if (reason !== 'inactive_session') assert.doesNotMatch(f.els.detail.innerHTML, /Capture info/);
   });
 }
 for (const kind of KINDS) test(`${kind} inactive_session preserves ordinary verification and latches every active-only action`, async () => {
   const f = await verified(); await show(f); const row = f.state.evidence, peer = f.state.socketPeer;
   await inspect(f, kind, missing(kind, 'inactive_session'));
   assert.equal(f.state.evidence, row); assert.equal(f.state.socketPeer, peer); assert.equal(f.state.bodyReferenceOverlay, null); noSupplements(f);
-  assert.match(f.els.detail.innerHTML, /Verified retained source/); await blocked(f);
+  assert.match(f.els.detail.innerHTML, /Capture info/); await blocked(f);
   await f.verify(SECOND_TOKEN, OTHER); await blocked(f);
   await f.verify(); await blocked(f);
 });
@@ -336,7 +338,7 @@ for (const kind of KINDS) test(`pending map JSON after ${kind} authoritative fai
   f.requests.at(-1).resolve({ ok: true, json: () => parsed.promise }); await Promise.resolve();
   await inspect(f, kind, missing(kind, 'record_missing')); parsed.resolve(snapshot()); assert.equal(await mapRead, true);
   assert.equal(f.state.evidence, null); assert.equal(f.state.bodyReferenceOverlay, null); noSupplements(f);
-  assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source/); assert.match(f.els.detail.innerHTML, /no longer retained/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /Capture info/); assert.match(f.els.detail.innerHTML, /no longer retained/);
 });
 for (const ordinary of [true, false]) test(`inactive peer-bound ${ordinary ? 'ordinary' : 'peer-only'} source survives only independent default-map support`, async () => {
   const f = await verified(), groupOrigin = ordinary ? OTHER : MATCH;
@@ -397,7 +399,7 @@ for (const kind of KINDS) for (const reason of [...AUTHORITATIVE, 'inactive_sess
   assert.equal(f.state.detailTab, 'apis');
   assert.match(f.els.detail.innerHTML, /id="serviceMapDetailApisTab"[^>]*aria-selected="true"/);
   assert.match(f.els.detail.innerHTML, /class="service-map-api-list"/);
-  assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /Capture info/);
   assert.equal(f.state.bodyReferenceOverlay, null); noSupplements(f);
   if (reason === 'inactive_session') {
     assert.equal(f.state.evidence, row); assert.match(f.els.status.textContent, /session must be active/);
@@ -406,14 +408,14 @@ for (const kind of KINDS) for (const reason of [...AUTHORITATIVE, 'inactive_sess
   }
   clickDetailTab(f, 'evidence');
   if (reason === 'inactive_session') {
-    assert.match(f.els.detail.innerHTML, /session must be active/); assert.match(f.els.detail.innerHTML, /Verified retained source/);
+    assert.match(f.els.detail.innerHTML, /session must be active/); assert.match(f.els.detail.innerHTML, /Capture info/);
     await blocked(f);
   } else {
     const messages = { invalid_evidence_id: /Source verification unavailable for this evidence token; verify again\./,
       session_mismatch: /Source session does not match; verify again\./, stale_generation: /Retained history changed; verify again\./,
       record_missing: /The source row is no longer retained\./, record_changed: /The source row changed\./,
       session_source_changed: /Session context changed; verify again\./ };
-    assert.match(f.els.detail.innerHTML, messages[reason]); assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source/);
+    assert.match(f.els.detail.innerHTML, messages[reason]); assert.doesNotMatch(f.els.detail.innerHTML, /Capture info/);
   }
   assert.equal(f.requests.length, readCount, 'response and tab navigation add no reads');
 });
@@ -431,7 +433,7 @@ for (const endpoint of [false, true]) for (const shown of [false, true]) for (co
     assert.equal(f.state.evidence, null);
     assert.equal(f.state.socketPeer, null);
     assert.equal(f.state.bodyReferenceOverlay, null);
-    assert.doesNotMatch(f.els.detail.innerHTML, /Exact retained source verified|Verified retained source/);
+    assert.doesNotMatch(f.els.detail.innerHTML, /Exact retained source verified|Capture info/);
     assert.match(f.els.detail.innerHTML, /Source unavailable/);
     const count = f.requests.length;
     assert.equal(await f.controller.loadBodyReferences(), false);
@@ -449,7 +451,7 @@ for (const [label, mutate] of [
   const f = fixture(); await f.load(snapshot([origin(SOURCE, id)]));
   assert.equal(await f.verify(id), false);
   assert.equal(f.state.evidence, null);
-  assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /Capture info/);
 });
 
 test('identity mismatch clears only the affected shown source', async () => {
@@ -474,5 +476,5 @@ test('exact source preserves uint64 precision through maximum sequence', async (
   const f = fixture(); await f.load(snapshot([origin(SOURCE, id)]));
   assert.equal(await f.verify(id), true);
   assert.equal(f.state.evidence.sequence, sequence);
-  assert.match(f.els.detail.innerHTML, /Verified retained source/);
+  assert.match(f.els.detail.innerHTML, /Capture info/);
 });

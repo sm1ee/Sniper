@@ -476,7 +476,7 @@
                         <th style="width:70px">Scope</th>
                         <th style="width:60px">Target</th>
                         <th>Search</th>
-                        <th>Replace</th>
+                        <th>Actions</th>
                         <th style="width:28px">Re</th>
                         <th style="width:28px">Cs</th>
                       </tr>
@@ -496,7 +496,7 @@
                     <button class="primary-action" id="saveMatchReplaceRuleButton" type="button" disabled>Save</button>
                   </div>
                 </header>
-                <p class="panel-empty" id="matchReplaceEmpty">Add a rule to rewrite requests or responses as they pass through.</p>
+                <p class="panel-empty" id="matchReplaceEmpty">Add a rule to replace or annotate traffic.</p>
                 <div class="settings-form hidden" id="matchReplaceForm">
                   <label class="settings-field">
                     <span>Scope</span>
@@ -519,9 +519,25 @@
                     <span>Search</span>
                     <input id="matchReplaceSearch" type="text" placeholder="foo.example.com" />
                   </label>
+                  <div class="settings-field">
+                    <label class="settings-toggle"><input id="matchReplaceReplaceEnabled" type="checkbox" checked /><span>Replace</span></label>
+                    <input id="matchReplaceReplace" type="text" aria-label="Replacement" placeholder="bar.example.com" />
+                  </div>
                   <label class="settings-field">
-                    <span>Replace</span>
-                    <input id="matchReplaceReplace" type="text" placeholder="bar.example.com" />
+                    <span>Note</span>
+                    <textarea id="matchReplaceAnnotationNote" rows="2"></textarea>
+                  </label>
+                  <label class="settings-field">
+                    <span>Color</span>
+                    <select id="matchReplaceAnnotationColor">
+                      <option value="">None</option>
+                      <option value="red">Red</option>
+                      <option value="orange">Orange</option>
+                      <option value="yellow">Yellow</option>
+                      <option value="green">Green</option>
+                      <option value="blue">Blue</option>
+                      <option value="purple">Purple</option>
+                    </select>
                   </label>
                   <label class="settings-toggle">
                     <input id="matchReplaceRegex" type="checkbox" />
@@ -1602,6 +1618,7 @@
                 <input id="reconSearch" type="search" placeholder="Search URL, method, source or evidence" autocomplete="off" />
                 <label class="recon-sr-only" for="reconKind">Evidence type</label>
                 <select id="reconKind"><option value="">All evidence</option><option value="live">Live</option><option value="observed">Observed</option><option value="history">Historical</option><option value="candidate">Candidate</option></select>
+                <button class="secondary-action" id="reconCopyJson" type="button" disabled>Copy filtered JSON</button>
               </div>
             </header>
             <p id="reconLoadStatus" class="recon-notice hidden" role="status" aria-live="polite"></p>

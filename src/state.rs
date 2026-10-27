@@ -4164,6 +4164,9 @@ mod tests {
         session
             .match_replace
             .replace_all(vec![MatchReplaceRule {
+                annotation_only_enabled: None,
+                annotation_note: None,
+                annotation_color: None,
                 id: uuid::Uuid::new_v4(),
                 enabled: true,
                 description: "count me".to_string(),

@@ -2950,3 +2950,270 @@ fn flow_orders_an_origins_requests_by_page_load_and_folds_repeats() {
         ("https://www.example.com", "/callback")
     );
 }
+
+#[test]
+fn flow_counts_the_row_window_before_display_filters() {
+    let session = Uuid::from_u128(102);
+    let store = TransactionStore::from_records(vec![
+        filter_fixture(
+            "www.example.com",
+            "/config",
+            200,
+            "application/json",
+            None,
+            1,
+        ),
+        filter_fixture("www.example.com", "/logo.png", 200, "image/png", None, 2),
+        filter_fixture("www.example.com", "/icon.png", 200, "image/png", None, 3),
+    ]);
+    let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
+        session,
+        DEFAULT_MAX_RECORDS,
+        technology::CatalogVersion::V2,
+        &crate::store::ListFilters {
+            hidden_extensions: vec!["png".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!((snapshot.considered_rows, snapshot.rows.len()), (3, 1));
+    let flow = crate::service_map_flow::build(
+        session,
+        snapshot,
+        "https://www.example.com",
+        false,
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert_eq!((flow.considered_rows, flow.flow_rows), (3, 1));
+    assert!(flow.complete, "a display filter is not truncation");
+}
+
+#[test]
+fn flow_counts_only_rows_represented_after_the_step_cap() {
+    use crate::service_map_flow::MAX_STEPS;
+    let session = Uuid::from_u128(103);
+    // Both removing whole phases and trimming within a phase must update the
+    // count. The repeated API call also proves that rows are not step counts.
+    for navigation in [false, true] {
+        let mut records: Vec<_> = (0..MAX_STEPS + 2)
+            .map(|index| {
+                let record = filter_fixture(
+                    "www.example.com",
+                    &format!("/step-{index}"),
+                    200,
+                    "application/json",
+                    None,
+                    index as u64 + 1,
+                );
+                with_request_headers(
+                    record,
+                    &[(
+                        "Sec-Fetch-Dest",
+                        if navigation { "document" } else { "empty" },
+                    )],
+                )
+            })
+            .collect();
+        if !navigation {
+            let mut repeat = records.last().unwrap().clone();
+            repeat.id = Uuid::from_u128(1000);
+            repeat.sequence += 1;
+            records.push(repeat);
+        }
+        let considered = records.len();
+        // All fixture timestamps tie, so preserve their explicit sequence order.
+        // The store accepts newest-first records and repairs reversed sequences.
+        records.reverse();
+        let store = TransactionStore::from_records(records);
+        let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
+            session,
+            DEFAULT_MAX_RECORDS,
+            technology::CatalogVersion::V2,
+            &crate::store::ListFilters::default(),
+        );
+        assert_eq!(snapshot.rows[0].sequence, considered.to_string());
+        assert_eq!(snapshot.rows[0].path, format!("/step-{}", MAX_STEPS + 1));
+        let flow = crate::service_map_flow::build(
+            session,
+            snapshot,
+            "https://www.example.com",
+            false,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let steps: Vec<_> = flow.phases.iter().flat_map(|phase| &phase.steps).collect();
+        assert_eq!(steps.len(), MAX_STEPS);
+        assert_eq!(steps[0].path, "/step-2");
+        assert_eq!(
+            steps[MAX_STEPS - 1].path,
+            format!("/step-{}", MAX_STEPS + 1)
+        );
+        assert_eq!(steps[MAX_STEPS - 1].count, 1 + usize::from(!navigation));
+        if !navigation {
+            assert_eq!(steps[MAX_STEPS - 1].record_id, Uuid::from_u128(1000));
+        }
+        assert_eq!(flow.considered_rows, considered);
+        assert_eq!(
+            flow.flow_rows,
+            steps.iter().map(|step| step.count).sum::<usize>()
+        );
+        assert_eq!(flow.flow_rows, MAX_STEPS + usize::from(!navigation));
+        assert!(!flow.complete);
+        assert!(flow.stopped_by.iter().any(|reason| reason == "steps_limit"));
+    }
+}
+
+#[test]
+fn flow_reports_unproven_links_before_selecting_lanes() {
+    let session = Uuid::from_u128(104);
+    let origin = "https://www.example.com";
+    let store = TransactionStore::from_records(vec![
+        filter_fixture("www.example.com", "/", 200, "text/html", None, 1),
+        with_request_headers(
+            filter_fixture(
+                "api.example.com",
+                "/config",
+                200,
+                "application/json",
+                None,
+                2,
+            ),
+            &[("Origin", origin), ("Origin", "https://other.example.com")],
+        ),
+    ]);
+    let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
+        session,
+        DEFAULT_MAX_RECORDS,
+        technology::CatalogVersion::V2,
+        &crate::store::ListFilters::default(),
+    );
+    assert!(snapshot.stopped_by.is_empty());
+    assert!(snapshot
+        .rows
+        .iter()
+        .any(|row| row.omitted.contains(&"ambiguous_origin_header".into())));
+    let all =
+        crate::service_map_flow::build(session, snapshot.clone(), origin, false, &[], &[]).unwrap();
+    assert_eq!(all.lanes, [origin]);
+    assert_eq!(all.flow_rows, 1);
+    assert!(
+        !all.complete,
+        "the suppressed link may hide a neighboring lane"
+    );
+    assert_eq!(all.stopped_by, ["ambiguous_origin_header"]);
+    let scoped = crate::service_map_flow::build(
+        session,
+        snapshot,
+        origin,
+        true,
+        &["www.example.com".into()],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        scoped.complete,
+        "excluded rows cannot affect scoped Flow coverage"
+    );
+}
+
+#[test]
+fn flow_distinguishes_missing_redirects_from_unrelated_metadata_limits() {
+    let session = Uuid::from_u128(105);
+    let origin = "https://www.example.com";
+    let mut ambiguous = filter_fixture("www.example.com", "/login", 302, "text/html", None, 1);
+    ambiguous.response.as_mut().unwrap().headers.extend([
+        HeaderRecord {
+            name: "Location".into(),
+            value: "/first".into(),
+        },
+        HeaderRecord {
+            name: "Location".into(),
+            value: "/second".into(),
+        },
+    ]);
+    let mut unrelated = filter_fixture("www.example.com", "/login", 302, "text/html", None, 2);
+    unrelated.response.as_mut().unwrap().headers.extend([
+        HeaderRecord {
+            name: "Location".into(),
+            value: "/next".into(),
+        },
+        HeaderRecord {
+            name: "Content-Security-Policy".into(),
+            value: "x".repeat(MAX_HEADER_VALUE_BYTES + 1),
+        },
+    ]);
+    let mut cases = vec![
+        (ambiguous, Some("ambiguous_location_headers"), false, false),
+        (unrelated, None, true, false),
+    ];
+    // Fully scanning unrelated oversized values still proves there was no
+    // Location. A 3xx status alone does not make that absence an omission.
+    for name in ["Content-Security-Policy", "Access-Control-Allow-Origin"] {
+        let mut no_location =
+            filter_fixture("www.example.com", "/login", 302, "text/html", None, 3);
+        no_location
+            .response
+            .as_mut()
+            .unwrap()
+            .headers
+            .push(HeaderRecord {
+                name: name.into(),
+                value: "x".repeat(MAX_HEADER_VALUE_BYTES + 1),
+            });
+        cases.push((no_location, None, false, false));
+    }
+    for status in [302, 200] {
+        let mut unread = filter_fixture("www.example.com", "/login", status, "text/html", None, 4);
+        unread
+            .response
+            .as_mut()
+            .unwrap()
+            .headers
+            .push(HeaderRecord {
+                name: "lOcAtIoN".into(),
+                value: "x".repeat(MAX_HEADER_VALUE_BYTES + 1),
+            });
+        let is_redirect = status == 302;
+        cases.push((
+            unread,
+            is_redirect.then_some("header_value_limit"),
+            false,
+            is_redirect,
+        ));
+    }
+    let mut incomplete_scan =
+        filter_fixture("www.example.com", "/login", 302, "text/html", None, 5);
+    incomplete_scan
+        .response
+        .as_mut()
+        .unwrap()
+        .headers
+        .extend((0..MAX_HEADERS).map(|_| HeaderRecord {
+            name: "Content-Security-Policy".into(),
+            value: "default-src 'none'".into(),
+        }));
+    cases.push((incomplete_scan, Some("header_scan_limit"), false, false));
+    for (record, expected, redirected, value_omitted) in cases {
+        let store = TransactionStore::from_records(vec![record]);
+        let (snapshot, _) = store.service_map_snapshot_blocking_for_catalog(
+            session,
+            DEFAULT_MAX_RECORDS,
+            technology::CatalogVersion::V2,
+            &crate::store::ListFilters::default(),
+        );
+        assert!(!snapshot.rows[0].metadata_complete);
+        assert_eq!(snapshot.rows[0].redirect_value_omitted, value_omitted);
+        assert!(serde_json::to_value(&snapshot.rows[0])
+            .unwrap()
+            .get("redirect_value_omitted")
+            .is_none());
+        let flow =
+            crate::service_map_flow::build(session, snapshot.clone(), origin, false, &[], &[])
+                .unwrap();
+        assert_eq!(flow.complete, expected.is_none());
+        assert_eq!(flow.stopped_by, expected.into_iter().collect::<Vec<_>>());
+        assert_eq!(flow.phases[0].steps[0].redirect.is_some(), redirected);
+    }
+}

@@ -721,10 +721,16 @@ test('opening an endpoint shows its parameters: name, where sent, rows and value
   f.controller.selectOrigin(app, 0);
   assert.equal(f.requests.length, before + 1, 'read on opening, with no button to press');
   assert.equal(f.requests.at(-1).path, '/api/target/service-map/parameters?session_id=session-one&origin=https%3A%2F%2Fx-app.example.com&method=GET&path=%2Fsearch');
+  assert.equal(f.state.detailTab, 'evidence');
+  const tab = { dataset: { serviceDetailTab: 'apis' } };
+  f.els.panel.dispatch('click', { target: { closest: () => tab } });
+  assert.equal(f.requests.length, before + 1);
   assert.match(f.els.detail.innerHTML, /Reading parameters…/);
   assert.doesNotMatch(f.els.detail.innerHTML, /Show parameters/);
   f.controller.selectOrigin(app, 0);
   assert.equal(f.requests.length, before + 1, 'reopening the endpoint being read reads nothing more');
+  f.els.panel.dispatch('click', { target: { closest: () => tab } });
+  assert.equal(f.requests.length, before + 1);
   f.requests.at(-1).resolve(response({ schema_version: 1, session_id: 'session-one', available: true, origin: app, method: 'GET', path: '/search', rows: 2, more_rows: false, omitted_parameters: 0,
     parameters: [{ name: 'q', location: 'query', rows: 2, examples: ['shoes', '<b>'] }, { name: 'x', location: 'cookie', rows: 1, examples: [] }] }));
   await new Promise(resolve => setImmediate(resolve));

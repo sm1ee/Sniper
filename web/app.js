@@ -571,6 +571,7 @@ const state = {
   fuzzerConcurrency: 4,
   // The attack this session runs now, so Stop can reach it.
   fuzzerRunningAttackId: null,
+  fuzzerStopRequest: null,
   fuzzerNoticeError: false,
   fuzzerDraftVersion: 0,
   fuzzerRunToken: 0,
@@ -936,6 +937,9 @@ const els = {
   matchReplaceTarget: document.getElementById("matchReplaceTarget"),
   matchReplaceSearch: document.getElementById("matchReplaceSearch"),
   matchReplaceReplace: document.getElementById("matchReplaceReplace"),
+  matchReplaceReplaceEnabled: document.getElementById("matchReplaceReplaceEnabled"),
+  matchReplaceAnnotationNote: document.getElementById("matchReplaceAnnotationNote"),
+  matchReplaceAnnotationColor: document.getElementById("matchReplaceAnnotationColor"),
   matchReplaceRegex: document.getElementById("matchReplaceRegex"),
   matchReplaceCaseSensitive: document.getElementById("matchReplaceCaseSensitive"),
   saveMatchReplaceRuleButton: document.getElementById("saveMatchReplaceRuleButton"),
@@ -1053,6 +1057,8 @@ let workspaceSaveLoopPromise = null;
 let workspaceSaveConflictPending = false;
 let workspaceStateGeneration = 0;
 let renderedHttpReplayDraftOwner = null;
+let historyPacketViewer = null;
+let paneMenuOpen = null;
 const workspacePendingReplayCloses = new Map();
 const workspaceReplayMetadataEdits = new WeakMap();
 let workspaceExternalLoadGeneration = 0;
@@ -1279,6 +1285,12 @@ function setActiveProxyTab(tab, options = {}) {
   return state.activeProxyTab;
 }
 
+function copyReconEndpointUrl(text, label, isCurrent) {
+  return copyTextToClipboard(text, { isCurrent })
+    .then(() => { if (isCurrent()) showToast(label); })
+    .catch(() => { if (isCurrent()) showToast("Failed to copy", "error"); });
+}
+
 function bindEvents() {
   initializeTargetWorkspace();
   if (window.SniperRecon && els.reconShell) {
@@ -1287,6 +1299,8 @@ function bindEvents() {
       getSessionId: currentSessionId,
       getSessionGeneration: () => workspaceStateGeneration,
       arrowStep: tableArrowStep,
+      copyText: copyReconEndpointUrl,
+      openInReplay: openReconEndpointInReplay,
     });
   }
   if (window.SniperTemplates && els.templatesShell) {
@@ -1488,6 +1502,7 @@ function bindEvents() {
     clearHttpHistorySelectionPreview();
     scheduleRefresh({ resetScroll: true });
   });
+
 
   els.requestSearchInput.addEventListener("input", () => {
     state.messageSearch.request = els.requestSearchInput.value;
@@ -2015,15 +2030,23 @@ function bindEvents() {
   const paneCtx = document.getElementById("paneContextMenu");
   if (paneCtx) {
     let paneContextMenuTarget = null;
+    paneMenuOpen = (event, target) => {
+      paneContextMenuTarget = target;
+      for (const button of paneCtx.querySelectorAll?.("[data-pane-action]") || []) {
+        const reason = target.kind === "retained-packet" ? packetActionReason(target, button.dataset.paneAction) : "";
+        button.disabled = !!reason;
+        button.title = reason;
+      }
+      paneCtx.classList.remove("hidden");
+      paneCtx.style.left = `${Math.min(event.clientX, window.innerWidth - paneCtx.offsetWidth - 8)}px`;
+      paneCtx.style.top = `${Math.min(event.clientY, window.innerHeight - paneCtx.offsetHeight - 8)}px`;
+    };
     [els.requestView, els.responseView, els.requestViewCM, els.responseViewCM].forEach((view) => {
       if (!view) return;
       view.addEventListener("contextmenu", (e) => {
         if (!state.selectedId) return;
         e.preventDefault();
-        paneContextMenuTarget = createTransactionRecordMenuTarget(
-          state.selectedId,
-          currentSessionId(),
-        );
+        paneMenuOpen(e, createTransactionRecordMenuTarget(state.selectedId, currentSessionId()));
         paneCtx.classList.remove("hidden");
         const mw = paneCtx.offsetWidth, mh = paneCtx.offsetHeight;
         paneCtx.style.left = `${Math.min(e.clientX, window.innerWidth - mw - 8)}px`;
@@ -2037,23 +2060,32 @@ function bindEvents() {
     paneCtx.addEventListener("click", (e) => {
       const btn = e.target.closest("[data-pane-action]");
       const target = paneContextMenuTarget;
-      if (!btn || !target?.id) return;
+      if (!btn || btn.disabled || !target || !target.id && target.kind !== "retained-packet") return;
       const action = btn.dataset.paneAction;
       paneCtx.classList.add("hidden");
       paneContextMenuTarget = null;
+      if (target.kind === "retained-packet") {
+        runPacketMenuAction(target, action).catch(error => { if (target.isCurrent()) handleSendActionError(error); });
+        return;
+      }
       if (target.sessionId !== currentSessionId()) {
         showToast("The selected session changed. Open the menu again.", "error");
         return;
       }
       if (action === "copy-url") copyMenuTargetUrl(target);
       else if (action === "send-to-replay") {
+        const isCurrent = createRecordClipboardOwner(target.sessionId, target.clipboardSessionGeneration);
+        if (!isCurrent()) return;
         loadMenuTargetRecord(target)
           .then((record) => {
+            if (!isCurrent()) return;
             if (!record) throw new Error("Selected transaction could not be loaded.");
             if (record.kind === "tunnel") throw new Error("Tunnel records cannot be sent to Replay.");
             openTransactionRecordInReplay(record);
           })
-          .catch(handleSendActionError);
+          .catch((error) => {
+            if (isCurrent()) handleSendActionError(error);
+          });
       } else if (action === "send-to-fuzzer") {
         openFuzzerFromRecordLoader(() => loadMenuTargetRecord(target))
           .catch(handleSendActionError);
@@ -2113,6 +2145,9 @@ function bindEvents() {
     els.matchReplaceTarget,
     els.matchReplaceSearch,
     els.matchReplaceReplace,
+    els.matchReplaceReplaceEnabled,
+    els.matchReplaceAnnotationNote,
+    els.matchReplaceAnnotationColor,
     els.matchReplaceRegex,
     els.matchReplaceCaseSensitive,
   ].forEach((element) => {
@@ -3411,6 +3446,17 @@ function readFuzzerWorkspace(fuzzerWS) {
 // `keepShownRun` leaves a run already on screen in place rather than loading it again.
 function applyFuzzerWorkspace(fields, sessionId, { keepShownRun = false } = {}) {
   const { legacyAttackRecord, fuzzerAttackRecordId, ...rest } = fields;
+  if (state._fuzzerFileGeneration) {
+    // An accepted workspace draft supersedes an earlier file choice, including
+    // a change back to its original values. Status and shown-run metadata do
+    // not replace the draft; normalize cloned request/target objects as saved.
+    const draft = (source) => ({
+      ...snapshotFuzzerWorkspace(source), notice: "", attack_record_id: null,
+    });
+    if (workspaceSnapshotValueChanged(draft(state), draft({ ...state, ...rest }))) {
+      state._fuzzerFileGeneration += 1;
+    }
+  }
   Object.assign(state, rest);
   if (keepShownRun && !legacyAttackRecord && fuzzerAttackRecordId === (state.fuzzerAttackRecordId || null)) return;
   setFuzzerAttackRecord(legacyAttackRecord);
@@ -5306,6 +5352,7 @@ function resetSessionScopedUiState() {
   resetEventLogUiState();
   state.matchReplaceRules = [];
   state.matchReplaceSavedRules = [];
+  state.matchReplaceSaveOwner = null;
   state.selectedMatchReplaceRuleId = null;
   state.matchReplaceDirty = false;
   state.matchReplaceEditorSessionId = null;
@@ -5325,6 +5372,8 @@ function resetSessionScopedUiState() {
   state.replayRenamingTabId = null;
   state.fuzzerRunToken = (state.fuzzerRunToken || 0) + 1;
   state.fuzzerRunning = false;
+  state.fuzzerRunningAttackId = null;
+  state.fuzzerStopRequest = null;
   state.fuzzerBaseRequest = null;
   state.fuzzerSourceTransactionId = null;
   state.fuzzerTarget = null;
@@ -5651,18 +5700,28 @@ async function postRuntimeSettings(path, body) {
 
 async function loadRuntimeSettings() {
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
   const writes = state._runtimeWrites || 0;
-  const response = await fetch(sessionQueryPath("/api/runtime", sessionId));
-  await requireOkResponse(response, "Failed to load runtime settings.");
-  const runtime = await response.json();
-  if (sessionId !== currentSessionId() || writes !== (state._runtimeWrites || 0)) {
-    return;
+  const readVersion = state._runtimeReadVersion = (state._runtimeReadVersion || 0) + 1;
+  const ownsRead = () => sessionId === currentSessionId()
+    && workspaceGeneration === workspaceStateGeneration && writes === (state._runtimeWrites || 0);
+  try {
+    const response = await fetch(sessionQueryPath("/api/runtime", sessionId));
+    await requireOkResponse(response, "Failed to load runtime settings.");
+    const runtime = await response.json();
+    // Both runtime readers share this watermark. A newer pending/failed read
+    // does not invalidate useful data; only a newer accepted result does.
+    if (!ownsRead() || readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
+    state._runtimeReadAcceptedVersion = readVersion;
+    state.runtime = runtime;
+    if (typeof templatesController !== "undefined") templatesController?.scopeChanged?.();
+    renderInterceptStatus();
+    renderProxySettings();
+  } catch (error) {
+    if (!ownsRead() || readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    throw error;
   }
-  if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
-  state.runtime = runtime;
-  if (typeof templatesController !== "undefined") templatesController?.scopeChanged?.();
-  renderInterceptStatus();
-  renderProxySettings();
 }
 
 function currentSessionId() {
@@ -6134,7 +6193,8 @@ async function selectHistoryTransaction(id, options = {}) {
   return loadTransactionDetail(state.selectedId);
 }
 
-async function loadSelectedTransactionRecord() {
+async function loadSelectedTransactionRecord(isCurrent = () => true) {
+  if (!isCurrent()) return null;
   const id = state.selectedId;
   if (!id) {
     return null;
@@ -6144,6 +6204,8 @@ async function loadSelectedTransactionRecord() {
   }
 
   const record = await loadTransactionRecordById(id);
+  // An action-owned read must not publish detail before its caller can retire it.
+  if (!isCurrent()) return null;
   if (!record) {
     if (state.selectedId === id) {
       renderEmptyDetail();
@@ -7785,13 +7847,19 @@ async function clearEventLog() {
 
 async function loadMatchReplaceRules() {
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const owner = getMatchReplaceSaveOwner();
+  const saveToken = state.matchReplaceSaveToken || 0;
+  const acknowledgedToken = owner.acknowledgedToken;
+  if (owner.pendingWriteCount) return;
   if (state.matchReplaceDirty && state.matchReplaceEditorSessionId === sessionId) {
     return;
   }
   const response = await fetch(sessionQueryPath("/api/match-replace", sessionId));
   await requireOkResponse(response, "Failed to load match-replace rules.");
   const rules = jsonArray(await response.json());
-  if (sessionId !== currentSessionId()) {
+  if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration
+    || saveToken !== (state.matchReplaceSaveToken || 0) || acknowledgedToken !== owner.acknowledgedToken) {
     return;
   }
   if (state.matchReplaceDirty && state.matchReplaceEditorSessionId === sessionId) {
@@ -7809,47 +7877,46 @@ async function loadMatchReplaceRules() {
 
 async function saveMatchReplaceRules(options = {}) {
   const sessionId = options.sessionId || currentSessionId();
-  if (!sessionId) {
-    return;
-  }
-  if (
-    state.matchReplaceDirty
-    && state.matchReplaceEditorSessionId
-    && state.matchReplaceEditorSessionId !== sessionId
-  ) {
+  if (!sessionId) return;
+  if (state.matchReplaceDirty && state.matchReplaceEditorSessionId
+    && state.matchReplaceEditorSessionId !== sessionId) {
     throw new Error("Match/Replace editor changed sessions. Review the rule and save again.");
   }
-  const workspaceGeneration = workspaceStateGeneration;
+  if (getMatchReplaceSaveOwner().pendingWriteCount) {
+    throw new Error("A rule is still saving. Save again after it finishes.");
+  }
   const draftVersion = state.matchReplaceDraftVersion || 0;
-  const saveToken = state.matchReplaceSaveToken = (state.matchReplaceSaveToken || 0) + 1;
   const submittedRules = JSON.stringify(state.matchReplaceRules);
-  const response = await fetch(sessionWritePath("/api/match-replace", sessionId, options), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ session_id: sessionId, rules: JSON.parse(submittedRules) }),
-  });
-  await requireOkResponse(response, "Failed to save match-replace rules.");
-  const rules = jsonArray(await response.json());
-  if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return false;
-  // An acknowledgement belongs to its dispatched draft, not to edits made
-  // while it was pending (including edit/revert and a newer save attempt).
-  if (draftVersion !== (state.matchReplaceDraftVersion || 0)
-    || saveToken !== state.matchReplaceSaveToken
-    || submittedRules !== JSON.stringify(state.matchReplaceRules)) {
-    showToast("An earlier save completed. Your current draft is unchanged; review it before continuing.", "error", 7000);
-    return false;
+  const payload = matchReplaceRulesPayload(JSON.parse(submittedRules));
+  const write = beginMatchReplaceWrite(payload);
+  try {
+    const response = await fetch(sessionWritePath("/api/match-replace", sessionId, options), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, rules: payload }),
+    });
+    await requireOkResponse(response, "Failed to save match-replace rules.");
+    const rules = jsonArray(await response.json());
+    if (sessionId !== currentSessionId() || !matchReplaceWriteIsCurrent(write)) return false;
+    acknowledgeMatchReplaceRules(write, rules);
+    // Acknowledged server state is distinct from a newer unsaved editor draft.
+    if (draftVersion !== (state.matchReplaceDraftVersion || 0)
+      || write.token !== state.matchReplaceSaveToken
+      || submittedRules !== JSON.stringify(state.matchReplaceRules)) {
+      showToast("An earlier save completed. Your current draft is unchanged; review it before continuing.", "error", 7000);
+      return false;
+    }
+    state.matchReplaceRules = rules;
+    if (!state.matchReplaceRules.some((rule) => rule.id === state.selectedMatchReplaceRuleId)) {
+      state.selectedMatchReplaceRuleId = state.matchReplaceRules[0]?.id ?? null;
+    }
+    state.matchReplaceDirty = false;
+    state.matchReplaceEditorSessionId = sessionId;
+    renderMatchReplaceRules();
+    return true;
+  } finally {
+    finishMatchReplaceWrite(write, payload);
   }
-  state.matchReplaceRules = rules;
-  state.matchReplaceSavedRules = rules.map((rule) => ({ ...rule }));
-  if (!state.matchReplaceRules.some((rule) => rule.id === state.selectedMatchReplaceRuleId)) {
-    state.selectedMatchReplaceRuleId = state.matchReplaceRules[0]?.id ?? null;
-  }
-  state.matchReplaceDirty = false;
-  state.matchReplaceEditorSessionId = sessionId;
-  renderMatchReplaceRules();
-  return true;
 }
 
 async function flushMatchReplaceDraft(options = {}) {
@@ -7906,36 +7973,85 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
   // for Scope, where it is shown, never for the Map tool.
   const loadPaths = state.activeTool === "target";
   const writes = state._runtimeWrites || 0;
-  const [runtimeResponse, siteMapResponse] = await Promise.all([
-    fetch(sessionQueryPath("/api/runtime", sessionId)),
-    loadPaths ? fetch(sessionQueryPath("/api/target/site-map", sessionId)) : null,
-  ]);
-  await requireOkResponse(runtimeResponse, "Failed to load runtime settings.");
-  if (siteMapResponse) await requireOkResponse(siteMapResponse, "Failed to load target site map.");
-  const runtime = await runtimeResponse.json();
-  const siteMap = siteMapResponse ? jsonArray(await siteMapResponse.json()) : null;
-  if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return false;
-  if (writes !== (state._runtimeWrites || 0)) return false;
-  // A save's follow-up read must not overwrite a newer editor before the
-  // waiting save caller gets its chance to check ownership again.
-  if (saveContext && (saveContext.sessionId !== sessionId
-    || saveContext.workspaceGeneration !== workspaceGeneration
-    || saveContext.draftVersion !== (state.targetScopeDraftVersion || 0)
-    || saveContext.saveToken !== state.targetScopeSaveToken
-    || saveContext.scopeDraft !== state.targetScopeDraft
-    || saveContext.excludeDraft !== state.targetScopeExcludeDraft
-    || saveContext.scopeText !== els.targetScopeEditor.value
-    || saveContext.excludeText !== els.targetScopeExcludeEditor?.value)) return false;
-  if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
-  state.runtime = runtime;
-  if (siteMap) state.targetSiteMap = siteMap;
-  if (typeof targetServiceMapController !== "undefined" && state.activeTool === "map") {
-    targetServiceMapController?.refresh();
+  const readVersion = state._runtimeReadVersion = (state._runtimeReadVersion || 0) + 1;
+  const editorDraft = {
+    owner: state.targetScopeEditorSessionId,
+    version: state.targetScopeDraftVersion || 0,
+    dirty: state.targetScopeDirty,
+    fields: [
+      { key: "targetScopeDraft", node: "targetScopeEditor", value: state.targetScopeDraft, text: els.targetScopeEditor.value },
+      { key: "targetScopeExcludeDraft", node: "targetScopeExcludeEditor", value: state.targetScopeExcludeDraft, text: els.targetScopeExcludeEditor?.value },
+    ],
+  };
+  const ownsRead = () => sessionId === currentSessionId() && workspaceGeneration === workspaceStateGeneration
+    && writes === (state._runtimeWrites || 0)
+    // Keep save ownership separate from harmless read supersession. In
+    // particular, a DOM-only edit still invalidates the older save's refresh.
+    && (!saveContext || (saveContext.sessionId === sessionId
+      && saveContext.workspaceGeneration === workspaceGeneration
+      && saveContext.draftVersion === (state.targetScopeDraftVersion || 0)
+      && saveContext.saveToken === state.targetScopeSaveToken
+      && saveContext.scopeDraft === state.targetScopeDraft
+      && saveContext.excludeDraft === state.targetScopeExcludeDraft
+      && saveContext.scopeText === els.targetScopeEditor.value
+      && saveContext.excludeText === els.targetScopeExcludeEditor?.value));
+  try {
+    const [runtimeResponse, siteMapResponse] = await Promise.all([
+      fetch(sessionQueryPath("/api/runtime", sessionId)),
+      loadPaths ? fetch(sessionQueryPath("/api/target/site-map", sessionId)) : null,
+    ]);
+    await requireOkResponse(runtimeResponse, "Failed to load runtime settings.");
+    if (siteMapResponse) await requireOkResponse(siteMapResponse, "Failed to load target site map.");
+    const runtime = await runtimeResponse.json();
+    const siteMap = siteMapResponse ? jsonArray(await siteMapResponse.json()) : null;
+    if (!ownsRead()) return false;
+    // Reject the whole compound result: old paths carry old scope badges.
+    // This is a successful no-op, not a failed acknowledged scope save.
+    if (readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
+    state._runtimeReadAcceptedVersion = readVersion;
+    state.runtime = runtime;
+    if (siteMap) state.targetSiteMap = siteMap;
+    if (typeof targetServiceMapController !== "undefined" && state.activeTool === "map") {
+      targetServiceMapController?.refresh();
+    }
+    const ownedBeforeRead = editorDraft.owner === sessionId;
+    // A user can acquire this editor while the initial read is pending. Protect
+    // that new edit, but do not adopt an unchanged previous session's draft.
+    const draftChanged = state.targetScopeEditorSessionId === sessionId
+      && (editorDraft.version !== (state.targetScopeDraftVersion || 0)
+        || (!editorDraft.dirty && state.targetScopeDirty)
+        || editorDraft.fields.some((field) => state[field.key] !== field.value || els[field.node]?.value !== field.text)
+        || (ownedBeforeRead && (editorDraft.dirty || state.targetScopeDirty
+          || editorDraft.fields.some((field) => field.text !== field.value))));
+    if (draftChanged) {
+      let unversionedEdit = false;
+      for (const field of editorDraft.fields) {
+        const modelChanged = state[field.key] !== field.value;
+        const textChanged = els[field.node]?.value !== field.text;
+        const priorDrift = field.text !== field.value;
+        // A new visible edit wins; otherwise retain a newer model edit. For
+        // pre-existing ambiguous drift, keep the text the user can see.
+        if (textChanged || (!modelChanged && priorDrift)) state[field.key] = els[field.node]?.value ?? "";
+        unversionedEdit ||= modelChanged || textChanged || priorDrift;
+      }
+      if (unversionedEdit && editorDraft.version === (state.targetScopeDraftVersion || 0)) {
+        state.targetScopeDraftVersion = editorDraft.version + 1;
+      }
+      // renderTarget also derives clean drafts from runtime, so preserving the
+      // fields requires retaining their dirty ownership before any render.
+      state.targetScopeDirty = true;
+    } else {
+      syncTargetScopeDraft(forceScopeSync);
+    }
+    renderInterceptStatus();
+    renderProxySettings();
+    renderTarget();
+  } catch (error) {
+    if (!ownsRead()) return false;
+    if (readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    throw error;
   }
-  syncTargetScopeDraft(forceScopeSync);
-  renderInterceptStatus();
-  renderProxySettings();
-  renderTarget();
 }
 
 async function pollAuxiliaryData() {
@@ -9518,7 +9634,8 @@ function renderDashboard() {
   ].filter(Boolean);
   const KINDS = { "manual scan": "Manual scan", "auto scan": "Auto scan", recon: "Recon" };
   const scans = (overview.activity || []).map((entry) => [
-    KINDS[entry.kind] || escapeHtml(entry.kind), escapeHtml(entry.target),
+    KINDS[entry.kind] || escapeHtml(entry.kind),
+    entry.status && entry.status !== "completed" ? escapeHtml(entry.status) : "", escapeHtml(entry.target),
     entry.matched != null ? `${Number(entry.matched).toLocaleString()} matched` : "",
     escapeHtml(formatTimestamp(entry.started_at)),
   ].filter(Boolean).join(" · "));
@@ -12750,6 +12867,114 @@ function renderLoadingDetail(message = "Loading selected transaction...") {
   renderMessagePanes();
 }
 
+// One controller for read-only HTTP panes. History supplies its existing DOM;
+// exact retained Map packets supply the same pane/control structure and adapter.
+function createPacketViewerController({ panes, bindControls = true, onMode, onVariant, onSearch, onMenu, isCurrent = () => true }) {
+  const disposers = [];
+  let destroyed = false;
+  const listen = (element, event, callback) => {
+    if (!element?.addEventListener) return;
+    element.addEventListener(event, callback);
+    disposers.push(() => element.removeEventListener(event, callback));
+  };
+  for (const [side, pane] of bindControls ? Object.entries(panes) : []) {
+    for (const tab of pane.column?.querySelectorAll?.(".view-tab[data-view]") || []) listen(tab, "click", () => {
+      if (!destroyed && isCurrent()) onMode?.(side, tab.dataset.view);
+    });
+    for (const button of pane.column?.querySelectorAll?.(".mr-btn[data-mr]") || []) listen(button, "click", () => {
+      if (!destroyed && isCurrent()) onVariant?.(side, button.dataset.mr === "original");
+    });
+    listen(pane.search, "input", () => { if (!destroyed && isCurrent()) onSearch?.(side, pane.search.value); });
+    listen(pane.meta, "click", event => {
+      if (!event.target.closest?.(".search-hit-count") || destroyed || !isCurrent()) return;
+      getCMView(pane.key)?.nextSearchMatch();
+    });
+    if (onMenu) listen(pane.column, "contextmenu", event => { if (!destroyed && isCurrent()) onMenu(event, side); });
+  }
+  return {
+    update(side, text, { mode = "raw", query = "", owner, changedRanges = [], evidenceRanges = [], renderSubject = null, notice = "" } = {}) {
+      if (destroyed || !isCurrent()) return null;
+      const pane = panes[side];
+      const cmMode = mode === "hex" ? "hex" : mode === "diff" ? "diff" : "http";
+      const result = pane.cm ? updateCodePaneCM(pane.key, pane.cm, text, { mode: cmMode, search: query, owner, changedRanges, evidenceRanges })
+        : pane.legacy && pane.lines ? updateCodePane(pane.legacy, pane.lines, text, mode, side) : null;
+      if (pane.search && pane.search.value !== query) pane.search.value = query;
+      if (pane.meta) pane.meta.innerHTML = buildSearchMeta(result?.lineCount || 0, result?.matchCount || 0);
+      for (const tab of pane.column?.querySelectorAll?.(".view-tab[data-view]") || []) tab.classList.toggle("active", tab.dataset.view === mode);
+      if (pane.notice) { pane.notice.textContent = notice; pane.notice.classList.toggle("hidden", !notice); }
+      if (side === "response") renderResponsePreview({ view: pane.render, editor: pane.cm?.closest?.(".editor-shell"), search: pane.search }, mode === "render", renderSubject || { note: "No response selected." });
+      return result;
+    },
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      for (const dispose of disposers) dispose();
+      for (const pane of Object.values(panes)) {
+        if (pane.render) { pane.render.replaceChildren(); delete pane.render.dataset.renderKey; }
+        if (_cmViews[pane.key]) { _cmViews[pane.key].destroy(); delete _cmViews[pane.key]; }
+      }
+    },
+  };
+}
+
+function getHistoryPacketViewer() {
+  if (!historyPacketViewer) historyPacketViewer = createPacketViewerController({
+    bindControls: false,
+    panes: {
+      request: { key: "request", column: document.getElementById("requestColumn"), cm: els.requestViewCM, legacy: els.requestView, lines: els.requestLines, search: els.requestSearchInput, meta: els.requestSearchMeta },
+      response: { key: "response", column: document.getElementById("responseColumn"), cm: els.responseViewCM, legacy: els.responseView, lines: els.responseLines, search: els.responseSearchInput, meta: els.responseSearchMeta, render: els.responseRenderView },
+    },
+    onMode(side, mode) { state.messageViews[side] = mode; renderViewTabs(); renderMessagePanes(); },
+    onVariant(side, original) { state.showOriginal[side] = original; renderViewTabs(); renderMessagePanes(); },
+    onSearch(side, query) { state.messageSearch[side] = query; updateMessagePaneSearch(side); },
+  });
+  return historyPacketViewer;
+}
+
+function packetViewerMarkup(responseTools = "") {
+  return `<div class="packet-viewer lower-workbench">${["request", "response"].map(side => `<section class="message-column ${side}-column" data-packet-pane="${side}">
+    <header class="pane-header"><span class="pane-title-group"><strong>${side === "request" ? "Request" : "Response"}</strong></span><div class="view-tabs">${["pretty", "raw", "hex", ...(side === "response" ? ["render"] : [])].map(mode => `<button type="button" class="view-tab ${mode === "raw" ? "active" : ""}" data-view="${mode}">${mode[0].toUpperCase() + mode.slice(1)}</button>`).join("")}</div>${side === "response" ? responseTools : ""}</header>
+    <div class="editor-shell"><div class="cm-container"></div></div>${side === "response" ? '<div class="render-view hidden"></div>' : ""}
+    <p class="packet-notice hidden" role="status"></p><footer class="pane-footer"><label class="pane-search" aria-label="Search ${side}"><input type="search" placeholder="Search ${side}" /></label><span class="packet-search-meta"></span></footer></section>`).join("")}</div>`;
+}
+
+function mountServiceMapPacketViewer(container, { packet, row, isCurrent }) {
+  const owner = {}, sessionOwner = createRecordClipboardOwner();
+  let alive = true;
+  const current = () => alive && container.isConnected && sessionOwner() && isCurrent();
+  const modes = { request: "raw", response: "raw" }, searches = { request: "", response: "" };
+  const panes = Object.fromEntries(["request", "response"].map(side => {
+    const column = container.querySelector(`[data-packet-pane="${side}"]`);
+    return [side, { key: `mapPacket-${side}`, column, cm: column.querySelector(".cm-container"), search: column.querySelector("input[type=search]"), meta: column.querySelector(".packet-search-meta"), notice: column.querySelector(".packet-notice"), render: column.querySelector(".render-view") }];
+  }));
+  const controller = createPacketViewerController({ panes, isCurrent: current,
+    onMode(side, mode) { modes[side] = mode; draw(side); },
+    onSearch(side, query) { searches[side] = query; const result = getCMView(panes[side].key)?.applySearch(query); if (result) panes[side].meta.innerHTML = buildSearchMeta(getCMView(panes[side].key).view.state.doc.lines, result.matchCount); },
+    onMenu(event) {
+      event.preventDefault();
+      // This typed snapshot never consults History or reloads an ID.
+      paneMenuOpen?.(event, { kind: "retained-packet", packet, isCurrent: current });
+    },
+  });
+  function draw(side) {
+    if (!current()) return;
+    const message = packet[side]?.message, raw = buildPacketMessagePresentation(message, side), mode = modes[side];
+    let text = raw.text;
+    if (mode === "pretty" && message?.body.available && message.body.body_encoding === "utf8") text = prettyFormat(text, message.body);
+    else if (mode === "hex") text = message?.body.available ? toHexDumpFromHttpParts(raw.head, message.body) : toHexDump(text);
+    const marks = side === "response" && packet.variant === "current" && mode === "raw" && message
+      ? packetEvidenceRanges(message, row.technology_observations, raw) : [];
+    const request = packet.request?.message;
+    const url = packet.variant === "current" && packetRequestTarget(request)
+      ? `${request.scheme}://${request.authority}${request.path}` : null;
+    const renderSubject = message?.body.available ? { response: message.body, key: `${packet.evidence_id}:${packet.variant}`, url, isCurrent: current }
+      : { note: message ? "Response body unavailable" : "Response not retained", isCurrent: current };
+    controller.update(side, text, { mode, query: searches[side], owner, evidenceRanges: marks, notice: raw.notice, renderSubject });
+  }
+  draw("request"); draw("response");
+  return { destroy() { alive = false; controller.destroy(); } };
+}
+
 function renderMessagePanes() {
   const record = state.selectedRecord;
   const detailLoading = Boolean(state.selectedId && state.loadingDetailId === state.selectedId);
@@ -12800,39 +13025,13 @@ function renderMessagePanes() {
       }))
     : [];
 
-  const requestPane = els.requestViewCM
-    ? updateCodePaneCM("request", els.requestViewCM, requestText, { mode: cmMode(reqMode), search: state.messageSearch.request, changedRanges: requestChanged })
-    : (els.requestView && els.requestLines ? updateCodePane(els.requestView, els.requestLines, requestText, reqMode, "request") : null);
-  const responsePane = els.responseViewCM
-    ? updateCodePaneCM("response", els.responseViewCM, responseText, { mode: cmMode(resMode), search: state.messageSearch.response, changedRanges: responseChanged })
-    : (els.responseView && els.responseLines ? updateCodePane(els.responseView, els.responseLines, responseText, resMode, "response") : null);
-  if (els.requestSearchInput.value !== state.messageSearch.request) {
-    els.requestSearchInput.value = state.messageSearch.request;
-  }
-  if (els.responseSearchInput.value !== state.messageSearch.response) {
-    els.responseSearchInput.value = state.messageSearch.response;
-  }
-  els.requestSearchMeta.innerHTML = requestPane
-    ? buildSearchMeta(requestPane.lineCount, requestPane.matchCount)
-    : buildSearchMeta(0, 0);
-  els.responseSearchMeta.innerHTML = responsePane
-    ? buildSearchMeta(responsePane.lineCount, responsePane.matchCount)
-    : buildSearchMeta(0, 0);
-  renderResponsePreview(
-    {
-      view: els.responseRenderView,
-      editor: els.responseViewCM?.closest(".editor-shell"),
-      search: els.responseSearchInput,
-    },
-    resMode === "render",
-    responseRecord
-      ? {
-          response: responseRecord.response || null,
-          key: `${responseRecord.id}:${state.showOriginal.response}`,
-          url: recordPageUrl(responseRecord),
-        }
-      : { note: state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected.") },
-  );
+  const viewer = getHistoryPacketViewer();
+  viewer.update("request", requestText, { mode: reqMode, query: state.messageSearch.request, changedRanges: requestChanged });
+  viewer.update("response", responseText, { mode: resMode, query: state.messageSearch.response, changedRanges: responseChanged,
+    renderSubject: responseRecord ? { response: responseRecord.response || null,
+      key: `${responseRecord.id}:${state.showOriginal.response}`, url: recordPageUrl(responseRecord) }
+      : { note: state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected.") } });
+
 }
 
 // Render: the response drawn inside its own pane, the way Burp's Render tab and
@@ -12840,6 +13039,7 @@ function renderMessagePanes() {
 // place of the pane's editor instead of sitting inside it: the history editor's
 // grid keeps it full width only while it is its shell's only child.
 function renderResponsePreview({ view, editor, search }, active, subject) {
+  if (subject?.isCurrent && !subject.isCurrent()) return;
   if (!view) return;
   editor?.classList.toggle("hidden", active);
   view.classList.toggle("hidden", !active);
@@ -12903,7 +13103,7 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
       const fetcher = createRenderResourceFetcher(currentSessionId());
       sandboxedResponseDocumentWithResources(model.html, subject.url, fetcher)
         .then((doc) => {
-          if (view.dataset.renderKey !== key || !frame.isConnected) return;
+          if (view.dataset.renderKey !== key || !frame.isConnected || subject.isCurrent && !subject.isCurrent()) return;
           frame.srcdoc = doc;
           const failed = fetcher.failures();
           if (failed) {
@@ -12912,7 +13112,7 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
             status.remove();
           }
         })
-        .catch((error) => console.error(error));
+        .catch((error) => { if (!subject.isCurrent || subject.isCurrent()) console.error(error); });
     } else if (RENDER_RESOURCE_REFERENCE.test(model.html)) {
       banner("Images, styles and fonts are not loaded. Settings ▸ Display ▸ Render can load them.");
     }
@@ -15279,11 +15479,11 @@ function renderMatchReplaceRules() {
           const active = rule.id === state.selectedMatchReplaceRuleId ? "selected" : "";
           return `
             <tr class="history-row ${active}" data-id="${rule.id}">
-              <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${rule.enabled ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
+              <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${matchReplaceRuleActivity(rule) ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
               <td>${escapeHtml(rule.scope)}</td>
               <td>${escapeHtml(rule.target)}</td>
               <td class="text-truncate" title="${escapeHtml(rule.search || "")}">${escapeHtml(rule.search || "—")}</td>
-              <td class="text-truncate" title="${escapeHtml(rule.replace || "")}">${escapeHtml(rule.replace || "—")}</td>
+              <td class="text-truncate" title="${escapeHtml(matchReplaceRuleActions(rule))}">${escapeHtml(matchReplaceRuleActions(rule))}</td>
               <td>${rule.regex ? "✓" : ""}</td>
               <td>${rule.case_sensitive ? "✓" : ""}</td>
             </tr>
@@ -15314,14 +15514,19 @@ function renderMatchReplaceRules() {
       event.stopPropagation();
       const rule = state.matchReplaceRules.find((r) => r.id === toggle.dataset.ruleToggle);
       if (rule) {
-        if (rule.enabled !== toggle.checked) {
+        if (matchReplaceRuleActivity(rule) !== toggle.checked) {
           state.matchReplaceDraftVersion = (state.matchReplaceDraftVersion || 0) + 1;
         }
-        rule.enabled = toggle.checked;
-        saveMatchReplaceSwitch(rule.id, rule.enabled).catch((error) => {
+        setMatchReplaceRuleActivity(rule, toggle.checked);
+        state.matchReplaceDirty = true;
+        state.matchReplaceEditorSessionId = currentSessionId();
+        updateMatchReplaceSaveState();
+        const sessionId = currentSessionId();
+        const workspaceGeneration = workspaceStateGeneration;
+        saveMatchReplaceSwitch(rule.id, toggle.checked).catch((error) => {
+          if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return;
           console.error(error);
           showToast(error?.message || "Failed to save rule", "error");
-          loadMatchReplaceRules().catch(console.error);
         });
       }
     });
@@ -15336,14 +15541,16 @@ function renderMatchReplaceRules() {
   updateMatchReplaceSaveState();
   if (!selected) return;
 
-  const isNew = !state.matchReplaceSavedRules.some((rule) => rule.id === selected.id);
   els.matchReplaceEditorPath.textContent = `${selected.scope} / ${selected.target}`;
-  els.matchReplaceEditorTitle.textContent = isNew ? "New rule"
-    : selected.search ? `${selected.search} → ${selected.replace || "∅"}` : "Edit rule";
+  els.matchReplaceEditorTitle.textContent = matchReplaceRuleTitle(selected);
   els.matchReplaceScope.value = selected.scope;
   els.matchReplaceTarget.value = selected.target;
   els.matchReplaceSearch.value = selected.search;
   els.matchReplaceReplace.value = selected.replace;
+  els.matchReplaceReplaceEnabled.checked = selected.annotation_only_enabled == null;
+  els.matchReplaceReplace.disabled = !els.matchReplaceReplaceEnabled.checked;
+  els.matchReplaceAnnotationNote.value = selected.annotation_note ?? "";
+  els.matchReplaceAnnotationColor.value = selected.annotation_color ?? "";
   els.matchReplaceRegex.checked = Boolean(selected.regex);
   els.matchReplaceCaseSensitive.checked = Boolean(selected.case_sensitive);
 }
@@ -15400,6 +15607,8 @@ function initializeTargetWorkspace() {
       scheduleUiSettingsSave();
     },
     request: (path, options) => fetch(path, options),
+    packetViewerMarkup,
+    mountPacketViewer: mountServiceMapPacketViewer,
     onApiDocsOpen: () => { compareLoadGeneration += 1; },
     isActiveModal: (modal) => getActiveModalAction()?.modal === modal,
     restoreFocus: (previous) => restoreModalFocus(previous, document.querySelector("[data-target-view].active")),
@@ -15530,7 +15739,7 @@ function renderTarget() {
                   <div class="target-path-meta">${requestCount} captured request${requestCount === 1 ? "" : "s"} · ${paths.length} path${paths.length === 1 ? "" : "s"} · ${escapeHtml(schemes.join(", ") || "http")}</div>
                 </div>
                 <div class="target-host-actions">
-                  ${host.in_scope ? "" : '<span class="detail-chip none">Out of scope</span>'}
+                  ${host.in_scope ? '<span class="detail-chip ok">In scope</span>' : '<span class="detail-chip none">Out of scope</span>'}
                   <span class="target-host-chevron" aria-hidden="true">▾</span>
                 </div>
               </button>
@@ -15629,6 +15838,8 @@ function renderFuzzer() {
   }
   if (els.stopFuzzerButton) {
     els.stopFuzzerButton.classList.toggle("hidden", !state.fuzzerRunningAttackId);
+    els.stopFuzzerButton.disabled = state.fuzzerStopRequest?.sessionId === state.activeSession?.id
+      && state.fuzzerStopRequest?.id === state.fuzzerRunningAttackId;
   }
   if (els.resetFuzzerButton) {
     els.resetFuzzerButton.disabled = !!state.fuzzerRunning;
@@ -15941,6 +16152,34 @@ async function refreshFuzzerSavedRuns() {
   }
 }
 
+// Concurrent Sniper requests may finish across positions before Stop. Retained
+// row order is not the original payload list, so recover slots from the plan's
+// index/position metadata, never by deduplicating payload text.
+function reusableSniperPayloads(record) {
+  const invalid = () => new Error("This saved Sniper run has invalid payload metadata. View results instead.");
+  const count = record.payload_count, markers = record.marker_count;
+  if (!Number.isSafeInteger(count) || count < 1 || count > 5000
+    || !Number.isSafeInteger(markers) || markers < 1 || markers > 128
+    || count * markers > 50000 || !Array.isArray(record.results)
+    || record.results.length > count * markers) throw invalid();
+  const slots = new Map(), indexes = new Set();
+  for (const row of record.results) {
+    if (!row || typeof row.payload !== "string"
+      || !Number.isSafeInteger(row.index) || row.index < 0 || row.index >= count * markers
+      || !Number.isSafeInteger(row.position) || row.position < 0 || row.position >= markers
+      || row.position !== Math.floor(row.index / count) || indexes.has(row.index)) throw invalid();
+    const slot = row.index % count;
+    if (slots.has(slot) && slots.get(slot) !== row.payload) throw invalid();
+    indexes.add(row.index);
+    slots.set(slot, row.payload);
+  }
+  if (!slots.size) throw new Error("No saved payloads are available to reuse. View results instead.");
+  return {
+    payloads: [...slots.entries()].sort(([left], [right]) => left - right).map(([, payload]) => payload),
+    originalCount: count,
+  };
+}
+
 async function readFuzzerSavedRun(action) {
   const workflow = fuzzerResultsWorkflowState();
   const recordId = workflow.selectedRunId;
@@ -15963,7 +16202,8 @@ async function readFuzzerSavedRun(action) {
       return;
     }
     await requireOkResponse(response, "Failed to load saved fuzzer run.");
-    const record = normalizeFuzzerAttackRecord(await response.json());
+    const savedRecord = await response.json();
+    const record = normalizeFuzzerAttackRecord(savedRecord);
     if (!ownsSelection()) return;
     if (!record || record.id !== recordId) throw new Error("Saved-run response did not match the selected run.");
     if (action === "view") {
@@ -15973,16 +16213,17 @@ async function readFuzzerSavedRun(action) {
       renderFuzzer();
     } else {
       if (!record.template || typeof record.template !== "object") throw new Error("This run has no reusable request template.");
+      // Validate raw Sniper counts before the display normalizer's legacy
+      // defaults/coercions can turn absent metadata into plausible values.
+      const recovered = record.attack_type === "sniper" ? reusableSniperPayloads(savedRecord) : null;
       if (record.results.some((result) => /[\r\n]/.test(String(result.payload ?? "")))) {
         throw new Error("A saved payload contains a line break and cannot be restored into the one-payload-per-line editor.");
       }
       const requestText = buildEditableRawRequest(record.template);
-      // Sniper sends the whole list at its first position before the next, so
-      // its first payload_count results are the list, repeats included.
-      const listed = record.attack_type === "sniper"
-        ? record.results.slice(0, record.payload_count || record.results.length)
-        : record.results;
-      const payloads = listed.map((result) => String(result.payload ?? ""));
+      const payloads = recovered?.payloads || record.results.map((result) => String(result.payload ?? ""));
+      const partialNotice = recovered && payloads.length < recovered.originalCount
+        ? `\n\nOnly ${payloads.length} of ${recovered.originalCount} original payload slots remain. Missing payloads will not be restored.`
+        : "";
       const payloadsText = payloads.join("\n") + (payloads.at(-1) === "" ? "\n" : "");
       if (new TextEncoder().encode(requestText).length > 2 * 1024 * 1024
         || new TextEncoder().encode(payloadsText).length > 4 * 1024 * 1024 || payloads.length > 5000) {
@@ -15990,7 +16231,7 @@ async function readFuzzerSavedRun(action) {
       }
       workflow.notice = "Reuse requires confirmation. Original source and transport overrides are not retained.";
       showConfirmDialog(
-        "Replace the current request and payload draft with this retained run?\n\nThe request is reconstructed from its saved template; original raw formatting, source transaction and target override are unavailable. Any current source and target override will be cleared. A saved template HTTP version is kept when present; otherwise the draft uses HTTP/1.1. The original separate HTTP-version override cannot be recovered. Review the destination and HTTP version before starting. Reuse does not send requests.",
+        "Replace the current request and payload draft with this retained run?\n\nThe request is reconstructed from its saved template; original raw formatting, source transaction and target override are unavailable. Any current source and target override will be cleared. A saved template HTTP version is kept when present; otherwise the draft uses HTTP/1.1. The original separate HTTP-version override cannot be recovered. Review the destination and HTTP version before starting. Reuse does not send requests." + partialNotice,
         () => {
           if (!ownsSelection()) return;
           const template = cloneEditableRequest(record.template);
@@ -16249,8 +16490,9 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
       state.fuzzerRunningAttackId = attackRecord.id;
       renderFuzzer();
       const ended = await followFuzzerAttack(recordId, expectedSessionId, ownsLoad);
+      if (!ownsLoad()) return;
       if (state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
-      if (ended && ownsLoad()) state.fuzzerAttackRecord = ended;
+      if (ended) state.fuzzerAttackRecord = ended;
     }
     renderFuzzer();
   } catch (error) {
@@ -16403,6 +16645,114 @@ function hideFuzzerDetailPanel() {
   state._fuzzerDetailRecord = null;
 }
 
+// Only one bounded configuration is in flight per editor owner. Full Save
+// waits for settlement; switches preserve its submitted fields and membership.
+function getMatchReplaceSaveOwner() {
+  const current = state.matchReplaceSaveOwner;
+  if (current?.sessionId === currentSessionId() && current.generation === workspaceStateGeneration) return current;
+  return state.matchReplaceSaveOwner = {
+    sessionId: currentSessionId(), generation: workspaceStateGeneration,
+    pendingWriteCount: 0, acknowledgedToken: 0, rules: null, activity: [],
+  };
+}
+
+function beginMatchReplaceWrite(rules) {
+  const owner = getMatchReplaceSaveOwner();
+  if (!owner.pendingWriteCount) {
+    owner.rules = rules.map((rule) => ({ ...rule }));
+    owner.activity = rules.map(() => ({ off: 0, on: 0, lastOffToken: 0 }));
+  }
+  const token = state.matchReplaceSaveToken = (state.matchReplaceSaveToken || 0) + 1;
+  rules.forEach((rule, index) => {
+    const activity = owner.activity[index];
+    if (matchReplaceRuleActivity(rule)) activity.on += 1;
+    else {
+      activity.off += 1;
+      activity.on = 0; // A new Off retires older On composition, not its request.
+      activity.lastOffToken = token;
+    }
+  });
+  owner.pendingWriteCount += 1;
+  return { owner, token };
+}
+
+function matchReplaceWriteIsCurrent(write) {
+  return state.matchReplaceSaveOwner === write.owner
+    && write.owner.sessionId === currentSessionId()
+    && write.owner.generation === workspaceStateGeneration;
+}
+
+function acknowledgeMatchReplaceRules(write, rules) {
+  if (!matchReplaceWriteIsCurrent(write) || write.token <= write.owner.acknowledgedToken) return;
+  write.owner.acknowledgedToken = write.token;
+  state.matchReplaceSavedRules = rules.map((rule) => ({ ...rule }));
+}
+
+function finishMatchReplaceWrite(write, rules) {
+  rules.forEach((rule, index) => {
+    const activity = write.owner.activity[index];
+    if (!matchReplaceRuleActivity(rule)) activity.off -= 1;
+    else if (write.token > activity.lastOffToken) activity.on -= 1;
+  });
+  write.owner.pendingWriteCount -= 1;
+  if (!write.owner.pendingWriteCount) {
+    write.owner.rules = null;
+    write.owner.activity = [];
+  }
+}
+
+function matchReplaceRuleActivity(rule) {
+  return rule.annotation_only_enabled == null ? Boolean(rule.enabled) : rule.annotation_only_enabled === true;
+}
+
+function setMatchReplaceRuleActivity(rule, enabled) {
+  rule.enabled = rule.annotation_only_enabled == null ? enabled : false;
+  if (rule.annotation_only_enabled != null) rule.annotation_only_enabled = enabled;
+}
+
+function canonicalMatchReplaceRule(rule) {
+  const canonical = { ...rule };
+  if (canonical.annotation_only_enabled == null) delete canonical.annotation_only_enabled;
+  else canonical.enabled = false; // An older server must never replace annotation-only traffic.
+  if (canonical.annotation_note == null || canonical.annotation_note === "") delete canonical.annotation_note;
+  if (canonical.annotation_color == null || canonical.annotation_color === "") delete canonical.annotation_color;
+  return canonical;
+}
+
+function matchReplaceRulesPayload(rules) {
+  if (rules.length > 500) throw new Error("At most 500 rules can be saved.");
+  let noteBytes = 0;
+  return rules.map((rule) => {
+    if (rule.annotation_only_enabled != null && typeof rule.annotation_only_enabled !== "boolean") {
+      throw new Error("Invalid rule activity.");
+    }
+    const note = rule.annotation_note ?? "";
+    if (typeof note !== "string" || (note && !note.trim())) throw new Error("Rule notes cannot be blank whitespace.");
+    const bytes = new TextEncoder().encode(note).length;
+    if (bytes > 1024) throw new Error("Rule notes must be at most 1,024 UTF-8 bytes.");
+    noteBytes += bytes;
+    if (noteBytes > 32768) throw new Error("Rule notes must total at most 32,768 UTF-8 bytes.");
+    if (rule.annotation_color != null && rule.annotation_color !== "" && !HTTP_COLOR_TAG_OPTIONS.has(rule.annotation_color)) {
+      throw new Error("Invalid rule color.");
+    }
+    return canonicalMatchReplaceRule(rule);
+  });
+}
+
+function matchReplaceRuleTitle(rule) {
+  if (!state.matchReplaceSavedRules.some((saved) => saved.id === rule.id)) return "New rule";
+  if (!rule.search) return "Edit rule";
+  return rule.annotation_only_enabled == null ? `${rule.search} → ${rule.replace || "∅"}` : rule.search;
+}
+
+function matchReplaceRuleActions(rule) {
+  const actions = [];
+  if (rule.annotation_only_enabled == null) actions.push(rule.replace || "∅");
+  if (rule.annotation_note) actions.push(rule.annotation_note);
+  if (rule.annotation_color) actions.push(rule.annotation_color);
+  return actions.join(" · ") || "—";
+}
+
 function createNewMatchReplaceRule() {
   const rule = {
     id: generateUuid(),
@@ -16426,10 +16776,13 @@ function getSelectedMatchReplaceRule() {
 }
 
 // A rule the server does not have yet, or one edited since it was saved.
-function matchReplaceRuleUnsaved(rule) {
-  const saved = state.matchReplaceSavedRules.find((item) => item.id === rule.id);
-  return !saved || ["enabled", "scope", "target", "search", "replace", "regex", "case_sensitive"]
-    .some((field) => (saved[field] ?? false) !== (rule[field] ?? false));
+function matchReplaceRuleUnsaved(rule, savedRules) {
+  const saved = (Array.isArray(savedRules) ? savedRules : state.matchReplaceSavedRules).find((item) => item.id === rule.id);
+  if (!saved) return true;
+  const current = canonicalMatchReplaceRule(rule), previous = canonicalMatchReplaceRule(saved);
+  return ["enabled", "scope", "target", "search", "replace", "regex", "case_sensitive",
+    "annotation_only_enabled", "annotation_note", "annotation_color"]
+    .some((field) => (previous[field] ?? null) !== (current[field] ?? null));
 }
 
 // Save is on when something is unsaved and the rule on screen has a search
@@ -16449,26 +16802,65 @@ function updateMatchReplaceSaveState() {
 // The selected rule when it is new and nothing has been typed into it.
 function untouchedNewMatchReplaceRule() {
   const rule = getSelectedMatchReplaceRule();
-  return rule && !rule.search && !rule.replace
+  return rule && !rule.search && !rule.replace && !rule.annotation_note && !rule.annotation_color
+    && rule.annotation_only_enabled == null
     && !state.matchReplaceSavedRules.some((item) => item.id === rule.id) ? rule : null;
 }
 
 // The On switch saves that switch alone: edits in the editor stay unsaved until
 // Save. With nothing else unsaved, the ordinary save does the same.
 async function saveMatchReplaceSwitch(ruleId, enabled) {
-  const saved = state.matchReplaceSavedRules.find((rule) => rule.id === ruleId);
-  if (saved) saved.enabled = enabled; // a second switch builds on this one
-  if (!state.matchReplaceRules.some(matchReplaceRuleUnsaved)) return saveMatchReplaceRules();
-  if (!saved) return;
-  const sessionId = currentSessionId();
-  const response = await fetch(sessionWritePath("/api/match-replace", sessionId), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, rules: state.matchReplaceSavedRules }),
+  const owner = getMatchReplaceSaveOwner();
+  const base = owner.rules || state.matchReplaceSavedRules;
+  const index = base.findIndex((rule) => rule.id === ruleId);
+  const draft = state.matchReplaceRules.find((rule) => rule.id === ruleId);
+  if (index < 0 || !draft) return;
+  const sameMode = (base[index].annotation_only_enabled == null) === (draft.annotation_only_enabled == null);
+  // Activation never bypasses an unsaved mode or a still-pending safety Off.
+  // Off is immediate; there is no queued activation or automatic resend.
+  if (enabled && (!sameMode || owner.activity[index]?.off)) return;
+  const nextRules = base.map((rule, i) => {
+    const next = { ...rule }, saved = state.matchReplaceSavedRules[i];
+    if (saved?.id === rule.id && (saved.annotation_only_enabled == null) === (rule.annotation_only_enabled == null)) {
+      setMatchReplaceRuleActivity(next, matchReplaceRuleActivity(saved));
+    }
+    const activity = owner.activity[i];
+    if (activity?.off) setMatchReplaceRuleActivity(next, false);
+    else if (activity?.on) setMatchReplaceRuleActivity(next, true);
+    return next;
   });
-  await requireOkResponse(response, "Failed to save match-replace rules.");
-  const rules = jsonArray(await response.json());
-  if (sessionId === currentSessionId()) state.matchReplaceSavedRules = rules.map((rule) => ({ ...rule }));
+  setMatchReplaceRuleActivity(nextRules[index], enabled);
+  const payload = matchReplaceRulesPayload(nextRules);
+  if (!owner.pendingWriteCount && !state.matchReplaceRules.some((rule) => matchReplaceRuleUnsaved(rule, nextRules))) {
+    state.matchReplaceDirty = false;
+    try { return await saveMatchReplaceRules(); }
+    catch (error) {
+      if (owner === state.matchReplaceSaveOwner) state.matchReplaceDirty = state.matchReplaceRules.some(matchReplaceRuleUnsaved);
+      throw error;
+    }
+  }
+  const write = beginMatchReplaceWrite(payload);
+  try {
+    const response = await fetch(sessionWritePath("/api/match-replace", owner.sessionId), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_id: owner.sessionId, rules: payload }),
+    });
+    await requireOkResponse(response, "Failed to save match-replace rules.");
+    const rules = jsonArray(await response.json());
+    if (!matchReplaceWriteIsCurrent(write)) return false;
+    acknowledgeMatchReplaceRules(write, rules);
+    state.matchReplaceDirty = state.matchReplaceRules.some(matchReplaceRuleUnsaved);
+    updateMatchReplaceSaveState();
+    return true;
+  } catch (error) {
+    if (!matchReplaceWriteIsCurrent(write) || write.token !== state.matchReplaceSaveToken) return false;
+    state.matchReplaceDirty = state.matchReplaceRules.some(matchReplaceRuleUnsaved);
+    updateMatchReplaceSaveState();
+    throw error;
+  } finally {
+    finishMatchReplaceWrite(write, payload);
+  }
 }
 
 function syncMatchReplaceEditor() {
@@ -16477,7 +16869,13 @@ function syncMatchReplaceEditor() {
     return;
   }
 
+  const replaceEnabled = els.matchReplaceReplaceEnabled.checked;
+  const activity = matchReplaceRuleActivity(rule);
   const next = {
+    enabled: replaceEnabled ? activity : false,
+    annotation_only_enabled: replaceEnabled ? null : activity,
+    annotation_note: els.matchReplaceAnnotationNote.value || null,
+    annotation_color: els.matchReplaceAnnotationColor.value || null,
     description: "",
     scope: els.matchReplaceScope.value,
     target: els.matchReplaceTarget.value,
@@ -16486,15 +16884,21 @@ function syncMatchReplaceEditor() {
     regex: els.matchReplaceRegex.checked,
     case_sensitive: els.matchReplaceCaseSensitive.checked,
   };
-  const changed = rule.description !== next.description
+  const changed = rule.enabled !== next.enabled
+    || (rule.annotation_only_enabled ?? null) !== next.annotation_only_enabled
+    || (rule.annotation_note || null) !== next.annotation_note
+    || (rule.annotation_color || null) !== next.annotation_color
+    || rule.description !== next.description
     || rule.scope !== next.scope
     || rule.target !== next.target
     || rule.search !== next.search
     || rule.replace !== next.replace
     || Boolean(rule.regex) !== next.regex
     || Boolean(rule.case_sensitive) !== next.case_sensitive;
-  Object.assign(rule, next);
+  els.matchReplaceReplace.disabled = !replaceEnabled;
   if (changed) {
+    Object.assign(rule, next);
+    if (els.matchReplaceEditorTitle) els.matchReplaceEditorTitle.textContent = matchReplaceRuleTitle(rule);
     state.matchReplaceDraftVersion = (state.matchReplaceDraftVersion || 0) + 1;
     state.matchReplaceDirty = true;
     state.matchReplaceEditorSessionId = currentSessionId();
@@ -16742,9 +17146,9 @@ function renderFuzzerSetup() {
   const errors = (model.errors || []).filter((message) => !message.startsWith("Mark at least one position") && message !== "Fuzzer needs at least one payload.");
   const running = state.fuzzerAttackRecord?.running ? state.fuzzerAttackRecord : null;
   // A start that failed says so here, beside Start, until the draft changes.
-  const failed = !busy && state.fuzzerNoticeError && state.fuzzerNotice ? state.fuzzerNotice : "";
-  notice.textContent = busy ? (running ? `Sending… ${running.results.length} of ${running.planned || model.requestCount}` : "Starting…")
-    : failed || errors[0] || (!model.markerCount ? "Select a value to replace." : !model.payloadCount ? "Add payloads." : "");
+  const failed = state.fuzzerNoticeError && state.fuzzerNotice ? state.fuzzerNotice : "";
+  notice.textContent = failed || (busy ? (running ? `Sending… ${running.results.length} of ${running.planned || model.requestCount}` : "Starting…")
+    : errors[0] || (!model.markerCount ? "Select a value to replace." : !model.payloadCount ? "Add payloads." : ""));
   notice.classList?.toggle("fuzzer-notice-error", !!failed || (!busy && !!errors[0]));
   if (!notice.textContent && authorityMayChange) {
     notice.textContent = "Request authority or framing may change. Check Preview.";
@@ -16952,7 +17356,7 @@ async function openFuzzerFromReplay() {
   renderToolPanels();
 }
 
-async function openFuzzerFromRecordLoader(loadRecord, sourceIsCurrent = () => true) {
+async function openFuzzerFromRecordLoader(loadRecord, sourceIsCurrent = () => true, applySource = openFuzzerFromRecord) {
   if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   const generation = state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
   const sessionId = currentSessionId();
@@ -16972,7 +17376,7 @@ async function openFuzzerFromRecordLoader(loadRecord, sourceIsCurrent = () => tr
   }
   if (!ownsImport()) return false;
   if (!record) throw new Error("Selected transaction could not be loaded.");
-  openFuzzerFromRecord(record);
+  applySource(record);
   return true;
 }
 
@@ -17490,17 +17894,46 @@ const FUZZER_POLL_MS = 700;
 // Reads a running attack until it ends, showing each read in place so the
 // selected result stays selected. Null when `owns` says the view moved on.
 async function followFuzzerAttack(recordId, sessionId, owns) {
+  let readErrorNotice = "";
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, FUZZER_POLL_MS));
     if (!owns()) return null;
-    const response = await fetch(sessionQueryPath(`/api/fuzzer/attacks/${encodeURIComponent(recordId)}`, sessionId));
-    if (!owns()) return null;
-    await requireOkResponse(response, "Could not read the running attack.");
-    const record = normalizeFuzzerAttackRecord(await response.json());
-    if (!owns()) return null;
-    if (!record?.running) return record;
-    if (state.fuzzerAttackRecord?.id === record.id) state.fuzzerAttackRecord = record;
-    renderFuzzer();
+    try {
+      const response = await fetch(sessionQueryPath(`/api/fuzzer/attacks/${encodeURIComponent(recordId)}`, sessionId));
+      if (!owns()) return null;
+      if (response.status === 404) {
+        if (state.fuzzerAttackRecord?.id === recordId) {
+          state.fuzzerAttackRecord = { ...state.fuzzerAttackRecord, running: false, status: "unavailable" };
+          state.fuzzerNotice = "Attack is no longer available. Last received results are shown.";
+          state.fuzzerNoticeError = true;
+        }
+        if (state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
+        renderFuzzer();
+        return null;
+      }
+      await requireOkResponse(response, "Could not read the running attack.");
+      const record = normalizeFuzzerAttackRecord(await response.json());
+      if (!owns()) return null;
+      if (!record || record.id !== recordId) throw new Error("The running-attack response did not match this run.");
+      if (readErrorNotice && state.fuzzerNotice === readErrorNotice) {
+        state.fuzzerNotice = "";
+        state.fuzzerNoticeError = false;
+      }
+      readErrorNotice = "";
+      if (!record.running) return record;
+      if (state.fuzzerAttackRecord?.id === record.id) state.fuzzerAttackRecord = record;
+      renderFuzzer();
+    } catch (error) {
+      if (!owns()) return null;
+      // A read failure does not stop the server's attack. Keep its last rows
+      // and Stop control while polling again, rather than clearing the run.
+      if (state.fuzzerAttackRecord?.id === recordId) {
+        readErrorNotice = `${error?.message || "Could not read the running attack."} Retrying…`;
+        state.fuzzerNotice = readErrorNotice;
+        state.fuzzerNoticeError = true;
+        renderFuzzer();
+      }
+    }
   }
 }
 
@@ -17508,19 +17941,31 @@ async function stopFuzzerAttack() {
   const id = state.fuzzerRunningAttackId;
   const sessionId = currentSessionId();
   if (!id || !sessionId) return;
-  if (els.stopFuzzerButton) els.stopFuzzerButton.disabled = true;
+  if (state.fuzzerStopRequest?.id === id && state.fuzzerStopRequest?.sessionId === sessionId) return;
+  const request = { id, sessionId };
+  state.fuzzerStopRequest = request;
+  const ownsRequest = () => state.fuzzerStopRequest === request
+    && currentSessionId() === sessionId && state.fuzzerRunningAttackId === id;
+  renderFuzzer();
   try {
     const response = await fetch(`/api/fuzzer/attacks/${encodeURIComponent(id)}/stop`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ session_id: sessionId }),
     });
+    if (!ownsRequest()) return;
     // 404: it ended on its own meanwhile; the run reads its end either way.
     if (!response.ok && response.status !== 404) {
-      showToast(await readApiErrorMessage(response, "Could not stop the attack."), "error", 4000);
+      const message = await readApiErrorMessage(response, "Could not stop the attack.");
+      if (ownsRequest()) showToast(message, "error", 4000);
     }
+  } catch (error) {
+    if (ownsRequest()) showToast(error?.message || "Could not stop the attack.", "error", 4000);
   } finally {
-    if (els.stopFuzzerButton) els.stopFuzzerButton.disabled = false;
+    if (state.fuzzerStopRequest === request) {
+      state.fuzzerStopRequest = null;
+      renderFuzzer();
+    }
   }
 }
 
@@ -19070,16 +19515,22 @@ function switchInterceptQueueTab(tab) {
 }
 
 async function openReplayFromSelection() {
-  const record = await loadSelectedTransactionRecord();
+  const isCurrent = createRecordClipboardOwner();
+  try {
+    const record = await loadSelectedTransactionRecord(isCurrent);
+    if (!isCurrent()) return;
 
-  if (!record) {
-    throw new Error("Selected transaction could not be loaded.");
-  }
-  if (record.kind === "tunnel") {
-    throw new Error("Tunnel records cannot be sent to Replay.");
-  }
+    if (!record) {
+      throw new Error("Selected transaction could not be loaded.");
+    }
+    if (record.kind === "tunnel") {
+      throw new Error("Tunnel records cannot be sent to Replay.");
+    }
 
-  openTransactionRecordInReplay(record);
+    openTransactionRecordInReplay(record);
+  } catch (error) {
+    if (isCurrent()) throw error;
+  }
 }
 
 function resetReplay() {
@@ -19778,6 +20229,32 @@ async function followRedirect() {
       setReplaySending(false);
     }
   }
+}
+
+function appendUnsentReplayDraft(seed, isCurrent, action) {
+  if (!isCurrent()) return false;
+  if (state.replayTabs.length >= MAX_REPLAY_TABS) throw new Error("Close a Replay tab before opening another request.");
+  if (!preserveActiveHttpReplayDraftBeforeSessionChange(action)) return false;
+  if (!isCurrent()) return false;
+  const tab = createReplayTab(seed);
+  state.replayTabs.push(tab);
+  state.activeReplayTabId = tab.id;
+  setActiveTool("replay");
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
+  return true;
+}
+
+function openReconEndpointInReplay(endpoint, sourceIsCurrent = () => false) {
+  if (!workspaceLoaded || !currentSessionId() || !sourceIsCurrent()) return false;
+  const ownsSession = createRecordClipboardOwner();
+  const { request, notice } = window.SniperRecon.buildReplayDraft(endpoint);
+  // This is a constructed inventory draft, not a retained packet. Keep the
+  // selected method/target/authority literal; HTTP/1.1 is an editing default.
+  const requestText = `${request.method} ${request.path} HTTP/1.1\nHost: ${request.host}`;
+  if (new TextEncoder().encode(requestText).length > 2 * 1024 * 1024) throw new Error("This discovery exceeds Replay draft limits. The inventory is unchanged.");
+  return appendUnsentReplayDraft({ baseRequest: request, requestText, notice, sourceTransactionId: null, httpVersionMode: "HTTP/1.1" },
+    () => sourceIsCurrent() && ownsSession(), "opening a Recon draft");
 }
 
 function openBlankReplayTab() {
@@ -23351,6 +23828,176 @@ function buildRawResponseHead(record) {
   const httpVer = record.response_http_version || record.http_version || "HTTP/1.1";
   const statusLine = `${httpVer} ${record.status ?? 0}`;
   return headers ? `${statusLine}\n${headers}` : statusLine;
+}
+
+// Packet adapters preserve retained fields; the shared viewer owns display modes,
+// search and rendering. These offsets describe displayed text, never wire bytes.
+function packetDisplayText(value) {
+  return String(value ?? "").replace(/\r\n?/g, "\n");
+}
+
+function buildPacketMessagePresentation(message, side) {
+  if (!message) return { text: "", head: "", notice: "Not retained", headerValues: [] };
+  const request = side === "request";
+  const knownLine = request ? typeof message.method === "string" && typeof message.path === "string" && typeof message.http_version === "string"
+    : typeof message.http_version === "string" && Number.isInteger(message.status_code);
+  let text = knownLine ? (request ? `${message.method} ${message.path} ${message.http_version}` : `${message.http_version} ${message.status_code}`) : "";
+  text = packetDisplayText(text);
+  const headerValues = [];
+  for (const header of message.headers) {
+    text += `${text ? "\n" : ""}${packetDisplayText(header.name)}: `;
+    headerValues.push({ from: text.length, value: header.value });
+    text += packetDisplayText(header.value);
+  }
+  const head = text;
+  const body = message.body;
+  let notice = knownLine ? "" : "Start line not retained";
+  if (!body.available) notice = [notice, "Body unavailable"].filter(Boolean).join(" · ");
+  else if (body.body_encoding === "base64") notice = [notice, "Binary preview"].filter(Boolean).join(" · ");
+  else if (body.body_preview.length) text += `\n\n${packetDisplayText(body.body_preview)}`;
+  if (body.preview_truncated) notice = [notice, "Captured preview is truncated"].filter(Boolean).join(" · ");
+  return { text, head, notice, headerValues };
+}
+
+function packetUtf8Span(value, span) {
+  if (!span || !Number.isSafeInteger(span.start) || !Number.isSafeInteger(span.end) || span.start < 0 || span.end <= span.start) return null;
+  let bytes = 0, chars = 0, start = null, end = null;
+  for (const point of value) {
+    if (bytes === span.start) start = chars;
+    if (bytes === span.end) end = chars;
+    bytes += new TextEncoder().encode(point).length;
+    chars += point.length;
+    if (bytes > span.end) break;
+  }
+  if (bytes === span.end) end = chars;
+  if (start === null || end === null) return null;
+  // A boundary inside CRLF would not refer to a boundary in CodeMirror's text.
+  if (value[start - 1] === "\r" && value[start] === "\n" || value[end - 1] === "\r" && value[end] === "\n") return null;
+  return { from: packetDisplayText(value.slice(0, start)).length, to: packetDisplayText(value.slice(0, end)).length, literal: value.slice(start, end) };
+}
+
+function packetEvidenceRanges(message, observations, presentation) {
+  const ranges = [];
+  for (const item of observations || []) {
+    const catalog = SniperServiceMap.technologyLiteral(item.product_id);
+    const header = message.headers[item.header_index], mapped = presentation.headerValues[item.header_index];
+    if (!catalog || !Number.isSafeInteger(item.header_index) || !header || !mapped
+      || header.name.toLowerCase() !== item.header_name || !catalog.headers.includes(item.header_name)
+      || item.offset_basis !== "retained_header_value_utf8") continue;
+    const product = packetUtf8Span(header.value, item.product_span);
+    const version = item.version_span ? packetUtf8Span(header.value, item.version_span) : null;
+    if (!product || product.literal.replace(/[A-Z]/g, c => c.toLowerCase()) !== catalog.literal.replace(/[A-Z]/g, c => c.toLowerCase())
+      || item.version_span && (!version || version.literal !== item.reported_version)) continue;
+    for (const span of [product, version].filter(Boolean)) ranges.push({ from: mapped.from + span.from, to: mapped.from + span.to });
+  }
+  return ranges;
+}
+
+function packetRequestTarget(message) {
+  if (!message || !["http", "https"].includes(message.scheme) || typeof message.authority !== "string" || !message.authority
+    || typeof message.method !== "string" || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(message.method)
+    || message.method.toUpperCase() === "CONNECT" || typeof message.path !== "string" || !/^\/[^\s\u0000-\u001f\u007f#]*$/.test(message.path)
+    || /[\s\u0000-\u001f\u007f/@?#\\]/.test(message.authority)) return null;
+  try {
+    const target = new URL(`${message.scheme}://${message.authority}`);
+    return target.hostname && !target.username && !target.password && target.pathname === "/" ? target : null;
+  } catch (_) { return null; }
+}
+
+function packetRequestForAction(message) {
+  const fail = reason => ({ request: null, reason });
+  const target = packetRequestTarget(message);
+  if (!target || !/^HTTP\/[0-9]+(?:\.[0-9]+)?$/.test(message.http_version) || !normalizeReplayHttpVersion(message.http_version)) return fail("Retained request target or start line is unavailable");
+  if (!message.body?.available) return fail("Request body is unavailable");
+  const body = message.body;
+  if (body.preview_truncated || body.body_encoding !== "utf8" || body.content_decoded || typeof body.body_preview !== "string") return fail("Only complete reusable retained requests can be transferred");
+  const length = new TextEncoder().encode(body.body_preview).length;
+  if (body.body_size !== length) return fail("Retained body is incomplete");
+  const headers = message.headers;
+  if (!Array.isArray(headers) || headers.some(header => typeof header.name !== "string" || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(header.name)
+    || typeof header.value !== "string" || /[\u0000-\u0008\u000a-\u001f\u007f]/.test(header.value))) return fail("Retained headers are unsupported");
+  if (headers.some(header => ["transfer-encoding", "upgrade"].includes(header.name.toLowerCase())
+    || header.name.toLowerCase() === "content-encoding" && header.value.trim().toLowerCase() !== "identity")) return fail("Retained request framing is unsupported");
+  const hosts = headers.filter(header => header.name.toLowerCase() === "host");
+  if (hosts.length !== 1) return fail("Retained Host header is unavailable or ambiguous");
+  try {
+    const host = new URL(`${message.scheme}://${hosts[0].value}`);
+    if (host.host !== target.host || host.username || host.password || host.pathname !== "/" || host.search || host.hash) return fail("Retained Host does not match the target");
+    validateRawHttpBodyFraming(headers, length, [length]);
+  } catch (_) { return fail("Retained request framing is inconsistent"); }
+  return { reason: "", request: { scheme: message.scheme, host: message.authority, method: message.method, path: message.path,
+    http_version: message.http_version, headers: headers.map(header => ({ ...header })), body: body.body_preview,
+    body_encoding: body.body_encoding, preview_truncated: body.preview_truncated } };
+}
+
+function packetRequestText(request) {
+  const head = `${request.method} ${request.path} ${request.http_version}\n${request.headers.map(header => `${header.name}: ${header.value}`).join("\n")}`;
+  return `${head}\n\n${request.body}`;
+}
+
+function packetActionReason(target, action) {
+  if (!["copy-url", "copy-as-curl", "copy-as-python", "copy-as-fetch", "copy-as-powershell", "send-to-replay", "send-to-fuzzer", "copy-response-headers", "copy-response-body", "copy-response-raw"].includes(action)) return "Unsupported packet action";
+  const packet = target.packet;
+  if (!target.isCurrent()) return "The selected source changed";
+  if (action === "copy-url") return packetRequestTarget(packet.request?.message) ? "" : "Retained request target is unavailable";
+  if (action.startsWith("copy-response-")) {
+    const message = packet.response?.message;
+    if (!message) return "Response not retained";
+    if (action !== "copy-response-body" && (!message.http_version || !Number.isInteger(message.status_code))) return "Response start line not retained";
+    if (action !== "copy-response-headers" && !message.body.available) return "Response body unavailable";
+    if (action !== "copy-response-headers" && message.body.body_encoding !== "utf8") return "Binary preview cannot be copied as text";
+    return "";
+  }
+  return packetRequestForAction(packet.request?.message).reason;
+}
+
+async function runPacketMenuAction(target, action) {
+  const reason = packetActionReason(target, action);
+  if (reason) { if (target.isCurrent()) showToast(reason, "error"); return Promise.resolve(false); }
+  const isCurrent = target.isCurrent;
+  const request = packetRequestForAction(target.packet.request?.message).request;
+  if (action === "send-to-replay") {
+    return appendUnsentReplayDraft({ baseRequest: request, sourceTransactionId: null, requestText: packetRequestText(request),
+      httpVersionMode: normalizeReplayHttpVersion(request.http_version) }, isCurrent, "opening a retained packet");
+  }
+  if (action === "send-to-fuzzer") return openFuzzerFromPacket(target, request);
+  let text, label = "Copied";
+  if (action === "copy-url") { const message = target.packet.request.message; text = `${message.scheme}://${message.authority}${message.path}`; }
+  else if (action.startsWith("copy-as-")) {
+    const format = action.slice(8), parsed = parseRequestForExport(packetRequestText(request), request.scheme, request.host, "");
+    const blocked = requestFormatExportBlockedReason(parsed, format);
+    if (blocked) { showToast(blocked, "error"); return Promise.resolve(false); }
+    text = ({ curl: requestToCurl, python: requestToPython, fetch: requestToFetch, powershell: requestToPowerShell })[format]?.(parsed);
+  } else if (action.startsWith("copy-response-")) {
+    const message = target.packet.response.message, body = message.body;
+    if (action === "copy-response-body") { text = body.body_preview; label = body.preview_truncated ? "Copied response preview" : "Copied body"; }
+    else {
+      text = `${message.http_version} ${message.status_code}\r\n${message.headers.map(header => `${header.name}: ${header.value}`).join("\r\n")}\r\n`;
+      if (action === "copy-response-raw") { text += `\r\n${body.body_preview}`; if (body.preview_truncated) label = "Copied response preview"; }
+    }
+  }
+  if (typeof text !== "string") return Promise.resolve(false);
+  return copyTextToClipboard(text, { isCurrent }).then(() => { if (isCurrent()) showToast(label); return true; })
+    .catch(error => { if (isCurrent()) handleClipboardActionError(error); return false; });
+}
+
+function openFuzzerFromPacket(target, request) {
+  return openFuzzerFromRecordLoader(() => request, target.isCurrent, () => {
+  invalidateFuzzerRun();
+  state.fuzzerBaseRequest = request;
+  state.fuzzerSourceTransactionId = null;
+  state.fuzzerTarget = null;
+  state.fuzzerTargetRequestText = null;
+  state.fuzzerNotice = "";
+  state.fuzzerRequestText = packetRequestText(request);
+  state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+  clearFuzzerAttackRecord();
+  state._selectedFuzzerResultKey = null;
+  hideFuzzerDetailPanel();
+  setActiveTool("fuzzer");
+  scheduleWorkspaceStateSave();
+  renderToolPanels();
+  });
 }
 
 function buildFindingsRawMessage(record, side) {
@@ -28161,11 +28808,11 @@ async function loadInterceptForMenu(interceptId) {
 }
 
 function runInterceptMenuAction(action, interceptId, clipboardOwner = createRecordClipboardOwner()) {
-  const isCopyAction = action === "copy-url" || action.startsWith("copy-as-");
-  if (isCopyAction && !clipboardOwner?.()) return;
+  // The captured session owner also owns the destination of a Replay draft.
+  if (!clipboardOwner?.()) return;
   loadInterceptForMenu(interceptId)
     .then((intercept) => {
-      if (isCopyAction && !clipboardOwner()) return;
+      if (!clipboardOwner()) return;
       if (action === "send-to-replay") {
         // Deliberately no sourceTransactionId: the id belongs to the intercept
         // queue, and replay would reject a send that cites it as a capture.
@@ -28200,7 +28847,7 @@ function runInterceptMenuAction(action, interceptId, clipboardOwner = createReco
       return null;
     })
     .catch((error) => {
-      if (!isCopyAction || clipboardOwner()) handleClipboardActionError(error);
+      if (clipboardOwner()) handleClipboardActionError(error);
     });
 }
 
@@ -28823,6 +29470,13 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
       closeContextMenu();
       return;
     }
+    const isReplayOwnerCurrent = action === "send-to-replay"
+      ? createRecordClipboardOwner(targetSessionId, target?.clipboardSessionGeneration)
+      : null;
+    if (isReplayOwnerCurrent && !isReplayOwnerCurrent()) {
+      closeContextMenu();
+      return;
+    }
     state.selectedId = targetId;
     closeContextMenu();
     const loadTargetRecord = () => loadMenuTargetRecord(target)
@@ -28830,11 +29484,14 @@ els.contextMenu.querySelectorAll(".context-menu-item").forEach((item) => {
     if (action === "send-to-replay") {
       loadTargetRecord()
         .then((record) => {
+          if (!isReplayOwnerCurrent()) return;
           if (!record) throw new Error("Selected transaction could not be loaded.");
           if (record.kind === "tunnel") throw new Error("Tunnel records cannot be sent to Replay.");
           openTransactionRecordInReplay(record);
         })
-        .catch(handleSendActionError);
+        .catch((error) => {
+          if (isReplayOwnerCurrent()) handleSendActionError(error);
+        });
     } else if (action === "send-to-fuzzer") {
       openFuzzerFromRecordLoader(loadTargetRecord)
         .catch(handleSendActionError);
@@ -31218,6 +31875,22 @@ function buildChangedLineDecorations(doc, ranges) {
 }
 
 /** Reusable CodeMirror wrapper for Sniper code views. */
+const setPacketEvidenceRanges = CM.StateEffect.define();
+const packetEvidenceField = CM.StateField.define({
+  create() { return CM.Decoration.none; },
+  update(decorations, transaction) {
+    if (transaction.docChanged) decorations = CM.Decoration.none;
+    for (const effect of transaction.effects) if (effect.is(setPacketEvidenceRanges)) {
+      const ranges = effect.value || [];
+      const valid = ranges.filter(range => Number.isSafeInteger(range.from) && Number.isSafeInteger(range.to)
+        && range.from >= 0 && range.to > range.from && range.to <= transaction.state.doc.length);
+      decorations = CM.Decoration.set(valid.map(range => CM.Decoration.mark({ class: "tok-finding-evidence-hit" }).range(range.from, range.to)), true);
+    }
+    return decorations;
+  },
+  provide: field => CM.EditorView.decorations.from(field),
+});
+
 class SniperCodeView {
   constructor(container, options = {}) {
     this._options = options;
@@ -31226,7 +31899,7 @@ class SniperCodeView {
       state: CM.EditorState.create({
         // Initial content is a baseline, not an undoable edit from an empty pane.
         doc: options.content || "",
-        extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField],
+        extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField, packetEvidenceField],
       }),
       parent: container,
     });
@@ -31235,6 +31908,10 @@ class SniperCodeView {
   /** Tint the given character ranges as changed lines. Call after setContent. */
   applyChangedLines(ranges) {
     this.view.dispatch({ effects: setChangedRanges.of(ranges || []) });
+  }
+
+  applyEvidenceRanges(ranges) {
+    this.view.dispatch({ effects: setPacketEvidenceRanges.of(ranges || []) });
   }
 
   setContent(text) {
@@ -31338,7 +32015,7 @@ function updateCodePaneCM(key, container, text, options = {}) {
   // Undo history belongs to one document owner. Tab/session replacement must
   // retire it even when the new document has the same text or persisted ID.
   if (_cmViews[key] && (_cmViews[key]._hlMode !== mode || !!_cmViews[key]._editable !== editable
-    || _cmViews[key]._owner !== options.owner)) {
+    || _cmViews[key]._owner !== options.owner || _cmViews[key]._container && _cmViews[key]._container !== container)) {
     restoreFocus = _cmViews[key]._hlMode === mode && !!_cmViews[key]._editable === editable
       && _cmViews[key].view.hasFocus;
     _cmViews[key].destroy();
@@ -31356,6 +32033,7 @@ function updateCodePaneCM(key, container, text, options = {}) {
     _cmViews[key]._hlMode = mode;
     _cmViews[key]._editable = editable;
     _cmViews[key]._owner = options.owner;
+    _cmViews[key]._container = container;
   }
   const cv = _cmViews[key];
   if (editable && options.onChange && !cv._onChangeWired) {
@@ -31371,6 +32049,7 @@ function updateCodePaneCM(key, container, text, options = {}) {
   // Changed-line highlights (Modified view). Applied after setContent, which
   // clears them, so this is the authoritative re-apply for the new text.
   cv.applyChangedLines(options.changedRanges);
+  if (options.evidenceRanges !== undefined) cv.applyEvidenceRanges(options.evidenceRanges);
   // Keyboard tab cycling can leave focus inside the editor being replaced.
   // Do not claim focus when a toolbar field or tab button owns it instead.
   if (restoreFocus) cv.view.focus();

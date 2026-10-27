@@ -15,6 +15,10 @@ use crate::{
     service_map_parameters::{body_parameter_location, EndpointParameter},
 };
 
+#[cfg(test)]
+#[path = "service_map_openapi_coverage_tests.rs"]
+mod coverage_tests;
+
 /// Operations described per origin, the most recently used first.
 pub const MAX_OPERATIONS: usize = 500;
 /// Each operation's newest rows whose parameters are read.
@@ -34,6 +38,10 @@ pub struct Operation {
     pub request_types: BTreeSet<String>,
     pub auth: BTreeSet<AuthSignal>,
     pub parameters: Vec<EndpointParameter>,
+    /// At least one contributing pre-merge tally dropped (location, name)
+    /// entries at the parameter cap. This is not a count of distinct names
+    /// missing from the merged operation or an overall completeness claim.
+    pub parameter_cap_truncated: bool,
     /// The newest row's capture sequence and transaction ID, to open or
     /// send on; the sequence picks the newest of merged paths.
     pub newest: Option<(u64, Uuid)>,
@@ -113,6 +121,9 @@ pub fn document(
                 "responses": responses(&operation),
                 "x-sniper-requests": operation.requests,
             });
+            if operation.parameter_cap_truncated {
+                value["x-sniper-parameter-cap-truncated"] = true.into();
+            }
             if let Some((_, newest)) = operation.newest {
                 value["x-sniper-newest-transaction"] = newest.to_string().into();
             }
@@ -265,6 +276,7 @@ fn merge_operations(sources: &[&Operation]) -> Operation {
     let mut parameters: BTreeMap<(&str, &str), (usize, BTreeSet<&str>)> = BTreeMap::new();
     for source in sources {
         target.requests += source.requests;
+        target.parameter_cap_truncated |= source.parameter_cap_truncated;
         target.newest = target.newest.max(source.newest);
         for (status, types) in &source.responses {
             target
@@ -821,6 +833,7 @@ mod tests {
                     signal("session_cookie", Some("SID")),
                 ]),
                 parameters: vec![parameter("query", "page", &["2"])],
+                parameter_cap_truncated: false,
                 newest: Some((7, Uuid::from_u128(7))),
                 json_types: BTreeMap::new(),
             },
@@ -836,6 +849,7 @@ mod tests {
                 request_types: BTreeSet::from(["application/json".to_string()]),
                 auth: BTreeSet::from([signal("oauth2", None)]),
                 parameters: vec![parameter("json", "name", &["kim-secret-value"])],
+                parameter_cap_truncated: false,
                 newest: None,
                 json_types: BTreeMap::from([("name".into(), BTreeSet::from(["string"]))]),
             },

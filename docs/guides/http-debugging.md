@@ -287,6 +287,15 @@ The result has `method`, `scheme`, `host`, `path`, `status`, `duration_ms`, and
 `request` and `response` objects. Each of those holds `headers`, `body_preview`,
 `body_size`, `body_encoding`, `content_type` and `preview_truncated`.
 
+Gzip (`gzip`/`x-gzip`) decoding includes every concatenated member before creating
+previews or editable bodies. The existing 16 MiB decoded-output limit applies per
+encoding stage, across all members. A malformed or truncated member, trailing
+non-member bytes, or exceeding that limit falls back to encoded bytes rather than
+publishing a decoded prefix. Existing capture preview caps still apply.
+`body_size` remains the wire byte count; successful decoding also supplies
+`decoded_body_size` and `content_decoded`. Previously stored incomplete previews
+are not repaired: recapture traffic to recover bytes omitted earlier.
+
 ## Trusting the CA, and what that means
 
 A proxy cannot read HTTPS unless it terminates TLS. Sniper creates one root CA on

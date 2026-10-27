@@ -190,6 +190,10 @@ tagged `dos` are never sent.
   template, matcher and endpoint. **Rescan** keeps them.
 - The session keeps at most ten scans, each with up to 1,000 results, its
   counts and its warnings. Auto scan jobs give way first.
+- Completed progress is saved through debounced state checkpoints, even with
+  matched-only history. After a crash, an interrupted job retains the latest
+  written checkpoint and never resumes sending automatically; work within
+  the debounce or pending disk-write window can still be lost.
 
 ### Auto scan
 
@@ -204,6 +208,9 @@ Auto scan**, after turning templates on in the list's On column.
 - An origin is sent to when it is in a non-empty Scope or on the auto scan's
   own host list (patterns as Scope takes them), and never when Scope excludes
   it or it is Sniper itself. Its `{{BaseURL}}` is the origin.
+  Changes to Scope and the auto host list apply to later requests, including
+  those waiting for a rate slot. Manual scans still use their explicitly
+  named targets.
 - One host goes at a time, at the auto scan's pace, as a scan of its own
   marked Auto. Templates with risk tags are left out, and those that need
   Interactsh are left out where the session has none. A scan you start comes

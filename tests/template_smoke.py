@@ -288,7 +288,8 @@ def main():
         # Manual scan: the target is the upstream's origin.
         session = next(item["id"] for item in call("/api/sessions") if item["active"])
         origin = target.rstrip("/")
-        scan = {"session_id": session, "targets": [origin], "ids": ["example-active", "example-detect"]}
+        scan = {"session_id": session, "targets": [origin], "ids": ["example-active", "example-detect"],
+                "history": "matched"}
         preview = call("/api/templates/scans", dict(scan, preview=True))
         assert preview["templates"] == 2 and preview["requests"] == 2, preview
         before = len(seen)
@@ -296,6 +297,7 @@ def main():
         query = f"?session_id={session}"
         job = eventually(lambda: (j := call(f"/api/templates/scans/{job['id']}{query}"))["status"] != "running" and j)
         assert job["status"] == "completed" and job["sent"] == 2 and job["matched"] == 2, job
+        assert job["history"] == "matched", job
         host = f"127.0.0.1:{upstream.server_port}"
         assert sorted(seen[before:]) == [("/", host), ("/.env", host)], seen[before:]
         scanned = {item["rule_id"] for item in call("/api/findings?limit=1000")
@@ -317,13 +319,26 @@ def main():
         # both answers.
         before = len(seen)
         raw_job = call("/api/templates/scans", {"session_id": session, "targets": [origin],
-                                                "ids": ["example-raw"], "acknowledged": True})
+                                                "ids": ["example-raw"], "acknowledged": True,
+                                                "history": "matched"})
         raw_job = eventually(lambda: (j := call(f"/api/templates/scans/{raw_job['id']}{query}"))["status"] != "running" and j)
         assert raw_job["status"] == "completed" and raw_job["sent"] == 2 and raw_job["matched"] == 1, raw_job
+        assert raw_job["history"] == "matched", raw_job
+        login_log = next(entry for entry in raw_job["recent"] if entry["url"].endswith("/login"))
+        assert not login_log.get("record_id") and not login_log["matched"], login_log
         assert seen[before:] == [("/login", host), ("/account?probe={{7*7}}", host)], seen[before:]
         assert posted == [("/account?probe={{7*7}}", "sid=abc", "name=example&csrf=xyz789")], posted
         scanned.add("nuclei:example-raw")
         print(json.dumps({"raw": seen[before:]}), flush=True)
+
+        def retained_exchange(record_id):
+            record = call(f"/api/transactions/{record_id}")
+            return {"method": record["method"], "path": record["path"], "status": record["status"],
+                    "request_body": record["request"]["body_preview"],
+                    "response_body": record["response"]["body_preview"]}
+
+        retained = {record_id: retained_exchange(record_id)
+                    for record_id in kept + [result["record_id"] for result in raw_job["results"]]}
 
         # A crash mid-scan leaves the job interrupted, not running: kill
         # Sniper once the started job has been saved.
@@ -341,7 +356,9 @@ def main():
         survived = {item["rule_id"] for item in call("/api/findings?limit=1000")
                     if item.get("rule_id", "").startswith("nuclei:")}
         assert survived == scanned, survived
-        print("Manual scan, rescan and interruption by a restart passed.", flush=True)
+        assert {record_id: retained_exchange(record_id) for record_id in retained} == retained, \
+            "Retained matched exchanges changed or became unreadable after restart"
+        print("Manual scan, rescan, retained exchange bodies and interruption by a restart passed.", flush=True)
     finally:
         if process is not None and process.poll() is None:
             stop()

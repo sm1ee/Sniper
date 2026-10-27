@@ -29,7 +29,7 @@ function setup({ legacy = false } = {}) {
     },
   });
   for (const name of [
-    "openReplayFromSelection", "openTransactionRecordInReplay", "isWebSocketUpgradeRecord",
+    "openReplayFromSelection", "createRecordClipboardOwner", "openTransactionRecordInReplay", "isWebSocketUpgradeRecord",
     "editableRequestFromRecord", "isRequestPreviewTruncated", "sendReplay", "isReplayTabStillCurrent",
     "setReplaySending", "replayEffectiveHttpVersion", "httpRequestAuthoritiesEquivalent", "normalizeHttpRequestAuthority",
     "replayTargetOverridePayload", "replaySentDraftUnchanged", "applyReplaySentDraftIfUnchanged", "targetStatesEquivalent",

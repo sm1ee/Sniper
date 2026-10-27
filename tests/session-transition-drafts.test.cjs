@@ -690,12 +690,14 @@ for (const operation of ['create', 'activate']) for (const editor of ['scope', '
     const f = setupCompletedAction(); let edit;
     if (editor === 'scope') { edit = useActualScopePreflight(f); edit('example.com'); }
     else {
-      for (const name of ['flushMatchReplaceDraft', 'saveMatchReplaceRules', 'getSelectedMatchReplaceRule', 'syncMatchReplaceEditor', 'sessionWritePath', 'jsonArray']) vm.runInContext(source(name), f.context);
-      f.context.URLSearchParams = URLSearchParams;
+      for (const name of ['flushMatchReplaceDraft', 'saveMatchReplaceRules', 'getSelectedMatchReplaceRule', 'syncMatchReplaceEditor', 'matchReplaceRuleActivity', 'setMatchReplaceRuleActivity', 'canonicalMatchReplaceRule', 'matchReplaceRulesPayload', 'matchReplaceRuleActions', 'matchReplaceRuleTitle', 'getMatchReplaceSaveOwner', 'beginMatchReplaceWrite', 'matchReplaceWriteIsCurrent', 'acknowledgeMatchReplaceRules', 'finishMatchReplaceWrite', 'sessionWritePath', 'jsonArray']) vm.runInContext(source(name), f.context);
+      f.context.URLSearchParams = URLSearchParams; f.context.TextEncoder = TextEncoder;
+  f.context.HTTP_COLOR_TAG_OPTIONS = new Set(['red', 'orange', 'yellow', 'green', 'blue', 'purple']);
       f.state.matchReplaceRules = [{ id: 'disabled-metadata', enabled: false, description: '', scope: 'request', target: 'any', search: '', replace: '', regex: false, case_sensitive: false }];
       f.state.selectedMatchReplaceRuleId = 'disabled-metadata'; f.state.matchReplaceEditorSessionId = 'session-a'; f.state.matchReplaceDirty = true;
       for (const [key, value] of Object.entries({ Scope: 'request', Target: 'any', Search: '', Replace: '' })) f.els[`matchReplace${key}`] = { value };
       f.els.matchReplaceRegex = { checked: false }; f.els.matchReplaceCaseSensitive = { checked: false };
+  f.els.matchReplaceReplaceEnabled = { checked: true }; f.els.matchReplaceAnnotationNote = { value: '' }; f.els.matchReplaceAnnotationColor = { value: '' };
       edit = () => { f.els.matchReplaceCaseSensitive.checked = true; f.context.syncMatchReplaceEditor(); };
     }
     const action = await f.start(operation), body = JSON.parse(f.requests[0].options.body);
@@ -730,14 +732,16 @@ function useLateMetadataEditor(f, editor) {
       save: () => f.context.saveTargetScope({ skipReload: true }),
       response: () => ({ scope_patterns: [f.state.targetScopeDraft], excluded_scope_patterns: [] }) };
   }
-  for (const name of ['flushMatchReplaceDraft', 'saveMatchReplaceRules', 'getSelectedMatchReplaceRule', 'syncMatchReplaceEditor', 'sessionWritePath', 'jsonArray']) vm.runInContext(source(name), f.context);
-  f.context.URLSearchParams = URLSearchParams;
+  for (const name of ['flushMatchReplaceDraft', 'saveMatchReplaceRules', 'getSelectedMatchReplaceRule', 'syncMatchReplaceEditor', 'matchReplaceRuleActivity', 'setMatchReplaceRuleActivity', 'canonicalMatchReplaceRule', 'matchReplaceRulesPayload', 'matchReplaceRuleActions', 'matchReplaceRuleTitle', 'getMatchReplaceSaveOwner', 'beginMatchReplaceWrite', 'matchReplaceWriteIsCurrent', 'acknowledgeMatchReplaceRules', 'finishMatchReplaceWrite', 'sessionWritePath', 'jsonArray']) vm.runInContext(source(name), f.context);
+  f.context.URLSearchParams = URLSearchParams; f.context.TextEncoder = TextEncoder;
+  f.context.HTTP_COLOR_TAG_OPTIONS = new Set(['red', 'orange', 'yellow', 'green', 'blue', 'purple']);
   f.context.updateMatchReplaceSaveState = () => {}; // the Save button is not under test here
   f.state.matchReplaceRules = [{ id: 'disabled-late-metadata', enabled: false, description: '', scope: 'request', target: 'any', search: '', replace: '', regex: false, case_sensitive: false }];
   f.state.selectedMatchReplaceRuleId = 'disabled-late-metadata'; f.state.matchReplaceEditorSessionId = 'session-a'; f.state.matchReplaceDirty = false;
   for (const [key, value] of Object.entries({ Scope: 'request', Target: 'any', Search: '', Replace: '' })) f.els[`matchReplace${key}`] = { value };
   f.els.matchReplaceRegex = { checked: false }; f.els.matchReplaceCaseSensitive = { checked: false };
-  for (const key of ['Scope', 'Target', 'Search', 'Replace', 'Regex', 'CaseSensitive']) {
+  f.els.matchReplaceReplaceEnabled = { checked: true }; f.els.matchReplaceAnnotationNote = { value: '' }; f.els.matchReplaceAnnotationColor = { value: '' };
+  for (const key of ['Scope', 'Target', 'Search', 'Replace', 'ReplaceEnabled', 'AnnotationNote', 'AnnotationColor', 'Regex', 'CaseSensitive']) {
     const element = f.els[`matchReplace${key}`]; element.listeners = {};
     element.addEventListener = (name, handler) => { element.listeners[name] = handler; };
   }

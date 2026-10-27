@@ -618,6 +618,17 @@ fn rehydrate_checked(
     Ok(full)
 }
 
+#[derive(Debug)]
+pub(crate) struct ServiceMapPacketRead {
+    pub(crate) bytes: Vec<u8>,
+    fence: Option<ServiceMapPacketFence>,
+}
+#[derive(Debug)]
+struct ServiceMapPacketFence {
+    located: Option<(crate::session::BodyLocator, Uuid)>,
+    unresolved: bool,
+}
+
 // Resolve the full row token rather than UUID: older retained duplicates can
 // only use their own resident preview, never the newest row's disk locator.
 fn service_map_row_index(
@@ -2644,6 +2655,207 @@ impl TransactionStore {
         .await
     }
 
+    /// Read only the selected exact row's packet pair. The permit belongs to
+    /// actual blocking work, not its cancellable async caller.
+    pub(crate) async fn service_map_packet_source_status(
+        &self,
+        session_id: Uuid,
+        id: &str,
+        read: &ServiceMapPacketRead,
+    ) -> Result<(), &'static str> {
+        let key = crate::service_map::EvidenceKey::parse(id).ok_or("invalid_evidence_id")?;
+        if key.session_id != session_id {
+            return Err("session_mismatch");
+        }
+        if key.generation != self.saved_cursor_generation {
+            return Err("stale_generation");
+        }
+        let current = self.inner.read().await;
+        service_map_row_index(&current, &key)?;
+        if let Some(fence) = &read.fence {
+            if current.unresolved_body_generations.contains(&key.revision) != fence.unresolved {
+                return Err("body_identity_unverifiable");
+            }
+            if let Some((locator, generation)) = fence.located {
+                validate_service_map_body_locator(&current, &key, generation, locator)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn service_map_packet(
+        &self,
+        session_id: Uuid,
+        id: &str,
+        variant: crate::service_map_packet::PacketVariant,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> ServiceMapPacketRead {
+        self.service_map_packet_inner(
+            session_id,
+            id,
+            variant,
+            permit,
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    async fn service_map_packet_inner(
+        &self,
+        session_id: Uuid,
+        id: &str,
+        variant: crate::service_map_packet::PacketVariant,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        #[cfg(test)] hook: Option<ServiceMapBodyReadHook>,
+    ) -> ServiceMapPacketRead {
+        use crate::{
+            service_map::EvidenceKey,
+            service_map_packet::{encode_record, read_pair, unavailable, MAX_SERIALIZED_ROW_BYTES},
+        };
+        let missing = |reason| ServiceMapPacketRead {
+            bytes: unavailable(session_id, id, variant, reason),
+            fence: None,
+        };
+        let Some(key) = EvidenceKey::parse(id) else {
+            return missing("invalid_evidence_id");
+        };
+        if key.session_id != session_id {
+            return missing("session_mismatch");
+        }
+        if key.generation != self.saved_cursor_generation {
+            return missing("stale_generation");
+        }
+        let inner = Arc::clone(&self.inner);
+        let storage_dir = self.storage_dir.clone();
+        let evidence_id = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let missing = |reason| ServiceMapPacketRead {
+                bytes: unavailable(session_id, &evidence_id, variant, reason),
+                fence: None,
+            };
+            #[cfg(test)]
+            if let Some(hook) = &hook {
+                hook("started");
+            }
+            let (located, unresolved, resident) = {
+                let current = inner.blocking_read();
+                let index = match service_map_row_index(&current, &key) {
+                    Ok(index) => index,
+                    Err(reason) => return missing(reason),
+                };
+                let unresolved = current.unresolved_body_generations.contains(&key.revision);
+                let located = if unresolved {
+                    None
+                } else {
+                    (current.by_id.get(&key.record_id) == Some(&index))
+                        .then(|| current.locators.get(&key.record_id).copied())
+                        .flatten()
+                        .map(|locator| (locator, current.file_generation))
+                };
+                if located
+                    .is_some_and(|(locator, _)| locator.len as usize > MAX_SERIALIZED_ROW_BYTES)
+                {
+                    return missing("serialized_row_limit");
+                }
+                let resident = located.is_none().then(|| {
+                    encode_record(
+                        session_id,
+                        &evidence_id,
+                        variant,
+                        &current.entries[index],
+                        None,
+                        unresolved.then_some("body_identity_unverifiable"),
+                    )
+                });
+                (located, unresolved, resident)
+            };
+            let disk = if let Some((locator, generation)) = located {
+                let file = storage_dir
+                    .as_ref()
+                    .ok_or("body_storage_unavailable")
+                    .and_then(|dir| {
+                        fs::File::open(dir.join("transactions.ndjson"))
+                            .map_err(|_| "body_storage_unavailable")
+                    });
+                match file {
+                    Ok(file) => {
+                        #[cfg(test)]
+                        if let Some(hook) = &hook {
+                            hook("after_open");
+                        }
+                        if let Err(reason) = validate_service_map_body_locator(
+                            &inner.blocking_read(),
+                            &key,
+                            generation,
+                            locator,
+                        ) {
+                            return missing(reason);
+                        }
+                        Some(read_pair(file, locator, variant))
+                    }
+                    Err(reason) => Some(Err(reason)),
+                }
+            } else {
+                None
+            };
+            #[cfg(test)]
+            if let Some(hook) = &hook {
+                hook("before_publish");
+            }
+            let current = inner.blocking_read();
+            let index = match service_map_row_index(&current, &key) {
+                Ok(index) => index,
+                Err(reason) => return missing(reason),
+            };
+            if current.unresolved_body_generations.contains(&key.revision) != unresolved {
+                return missing("body_identity_unverifiable");
+            }
+            if let Some((locator, generation)) = located {
+                if let Err(reason) =
+                    validate_service_map_body_locator(&current, &key, generation, locator)
+                {
+                    return missing(reason);
+                }
+            }
+            let result = match disk {
+                Some(Ok(pair)) => encode_record(
+                    session_id,
+                    &evidence_id,
+                    variant,
+                    &current.entries[index],
+                    Some(&pair),
+                    None,
+                ),
+                Some(Err(reason @ ("serialized_row_limit" | "body_identity_unverifiable"))) => {
+                    Err(reason)
+                }
+                Some(Err(reason)) => encode_record(
+                    session_id,
+                    &evidence_id,
+                    variant,
+                    &current.entries[index],
+                    None,
+                    Some(reason),
+                ),
+                None => resident.expect("resident packet or disk locator"),
+            };
+            match result {
+                Ok(bytes) => ServiceMapPacketRead {
+                    bytes,
+                    fence: Some(ServiceMapPacketFence {
+                        located,
+                        unresolved,
+                    }),
+                },
+                Err(reason) => missing(reason),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| missing("packet_read_failed"))
+    }
+
     // Keep inspection inside the read fence. Returning an unfenced preview to
     // callers would permit evidence to escape after retention or file replacement.
     async fn service_map_retained_preview<R: Send + 'static>(
@@ -2977,7 +3189,9 @@ impl TransactionStore {
                         );
                     }
                     operation.json_types = tally.json_types();
-                    operation.parameters = tally.finish().0;
+                    let (parameters, omitted_parameters) = tally.finish();
+                    operation.parameters = parameters;
+                    operation.parameter_cap_truncated = omitted_parameters > 0;
                     (key, operation)
                 })
                 .collect();
@@ -5215,6 +5429,365 @@ pub(crate) mod tests {
                 inner.body_generations[index],
                 &inner.entries[index],
             )
+        }
+
+        async fn packet(
+            store: &TransactionStore,
+            session: Uuid,
+            id: &str,
+            variant: crate::service_map_packet::PacketVariant,
+        ) -> serde_json::Value {
+            let permit = Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await
+                .unwrap();
+            let read = store.service_map_packet(session, id, variant, permit).await;
+            serde_json::from_slice(&read.bytes).unwrap()
+        }
+
+        #[tokio::test]
+        async fn exact_packet_pairs_current_and_original_on_resident_and_disk_without_private_fields(
+        ) {
+            use crate::service_map_packet::PacketVariant::{Current, Original};
+            for lazy in [false, true] {
+                let mut record = body_record("current response", 9_007_199_254_740_993);
+                record.host = "example.com:443".into();
+                record.http_version = Some("HTTP/2.0".into());
+                record.original_request = Some(record.request.clone());
+                record.original_method = Some("PUT".into());
+                record.original_path = Some("/before".into());
+                record.original_response = record.response.clone();
+                record.original_response.as_mut().unwrap().body_preview = "before response".into();
+                record.original_response.as_mut().unwrap().body_size = "before response".len();
+                record.notes = vec!["private system note".into()];
+                record.user_note = Some("private manual note".into());
+                let (store, dir) = fixture_store(&[record.clone()], lazy).await;
+                let session = Uuid::new_v4();
+                let id = token(&store, session, record.sequence).await;
+                let current = packet(&store, session, &id, Current).await;
+                assert_eq!(current["source"]["sequence"], "9007199254740993");
+                assert_eq!(
+                    current["request"]["message"]["authority"],
+                    "example.com:443"
+                );
+                assert_eq!(current["request"]["message"]["body"]["body_preview"], "");
+                assert_eq!(
+                    current["response"]["message"]["body"]["body_preview"],
+                    "current response"
+                );
+                assert!(current["response"]["message"]["http_version"].is_null());
+                let original = packet(&store, session, &id, Original).await;
+                assert_eq!(original["request"]["message"]["method"], "PUT");
+                assert_eq!(
+                    original["response"]["message"]["body"]["body_preview"],
+                    "before response"
+                );
+                assert!(original["request"]["message"]["authority"].is_null());
+                assert!(original["response"]["message"]["status_code"].is_null());
+                assert!(!current.to_string().contains("private"));
+                store
+                    .update_annotations(record.id, None, Some(Some("later private note".into())))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    packet(&store, session, &id, Current).await["available"],
+                    true
+                );
+                drop(store);
+                fs::remove_dir_all(dir).unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn exact_packet_missing_disk_keeps_headers_and_proven_decoded_empty_not_unknown_body()
+        {
+            use crate::service_map_packet::PacketVariant::Current;
+            let mut record = body_record("response content", 1);
+            record.request.content_decoded = true;
+            record.request.decoded_body_size = Some(0);
+            record.request.body_size = 20;
+            record
+                .response
+                .as_mut()
+                .unwrap()
+                .headers
+                .push(HeaderRecord {
+                    name: "Server".into(),
+                    value: "example".into(),
+                });
+            let (store, dir) = fixture_store(&[record], true).await;
+            let session = Uuid::new_v4();
+            let id = token(&store, session, 1).await;
+            fs::remove_file(dir.join("transactions.ndjson")).unwrap();
+            let result = packet(&store, session, &id, Current).await;
+            assert_eq!(result["available"], true);
+            assert_eq!(result["request"]["message"]["body"]["available"], true);
+            assert_eq!(result["request"]["message"]["body"]["body_preview"], "");
+            assert_eq!(
+                result["response"]["message"]["headers"][0]["value"],
+                "example"
+            );
+            assert_eq!(
+                result["response"]["message"]["body"]["reason"],
+                "body_storage_unavailable"
+            );
+            assert!(result["response"]["message"]["body"]["body_preview"].is_null());
+            drop(store);
+            fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[tokio::test]
+        async fn exact_packet_duplicate_uuid_never_borrows_newer_body() {
+            use crate::service_map_packet::PacketVariant::Current;
+            for lazy in [false, true] {
+                let first = body_record("older", 1);
+                let mut second = body_record("newer", 2);
+                second.id = first.id;
+                let (store, dir) = fixture_store(&[first, second], lazy).await;
+                let session = Uuid::new_v4();
+                let id = token(&store, session, 1).await;
+                let result = packet(&store, session, &id, Current).await;
+                assert_eq!(result["available"], true);
+                let body = &result["response"]["message"]["body"];
+                if lazy {
+                    assert_eq!(body["available"], false);
+                    assert!(body["body_preview"].is_null());
+                } else {
+                    assert_eq!(body["body_preview"], "older");
+                }
+                let key = EvidenceKey::parse(&id).unwrap();
+                store
+                    .inner
+                    .write()
+                    .await
+                    .unresolved_body_generations
+                    .insert(key.revision);
+                assert_eq!(
+                    packet(&store, session, &id, Current).await["response"]["message"]["body"]
+                        ["reason"],
+                    "body_identity_unverifiable"
+                );
+                drop(store);
+                fs::remove_dir_all(dir).unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn exact_packet_rejects_invalid_session_generation_and_revised_keys() {
+            use crate::service_map_packet::PacketVariant::Current;
+            let record = body_record("retained", 1);
+            let (store, dir) = fixture_store(&[record.clone()], false).await;
+            let session = Uuid::new_v4();
+            let id = token(&store, session, 1).await;
+            assert_eq!(
+                packet(&store, session, "bad", Current).await["reason"],
+                "invalid_evidence_id"
+            );
+            assert_eq!(
+                packet(&store, Uuid::new_v4(), &id, Current).await["reason"],
+                "session_mismatch"
+            );
+            let replacement = TransactionStore::from_records(vec![record.clone()]);
+            assert_eq!(
+                packet(&replacement, session, &id, Current).await["reason"],
+                "stale_generation"
+            );
+            store
+                .update_record(record.id, |row| row.path = "/changed".into())
+                .await
+                .unwrap();
+            let result = packet(&store, session, &id, Current).await;
+            assert_eq!(result["reason"], "record_changed");
+            assert!(result["request"].is_null() && result["response"].is_null());
+            drop(store);
+            fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[tokio::test]
+        async fn exact_packet_disk_limits_identity_and_missing_preview_are_distinct() {
+            use crate::service_map_packet::PacketVariant::Current;
+            for case in [
+                "oversized",
+                "wrong_id",
+                "wrong_sequence",
+                "malformed",
+                "invalid_utf8",
+                "missing_preview",
+            ] {
+                let record = body_record("retained response", 1);
+                let (store, dir) = fixture_store(&[record.clone()], true).await;
+                let session = Uuid::new_v4();
+                let id = token(&store, session, 1).await;
+                let mut value = serde_json::to_value(&record).unwrap();
+                match case {
+                    "wrong_id" => value["id"] = serde_json::json!(Uuid::new_v4()),
+                    "wrong_sequence" => value["sequence"] = serde_json::json!(2),
+                    "missing_preview" => {
+                        value["response"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("body_preview");
+                    }
+                    _ => {}
+                }
+                let bytes = match case {
+                    "malformed" => b"{".to_vec(),
+                    "invalid_utf8" => b"{\"ignored\":\"\xff\"}".to_vec(),
+                    _ => serde_json::to_vec(&value).unwrap(),
+                };
+                fs::write(dir.join("transactions.ndjson"), &bytes).unwrap();
+                store
+                    .set_body_locator_for_test(
+                        record.id,
+                        crate::session::BodyLocator {
+                            offset: 0,
+                            len: if case == "oversized" {
+                                (MAX_SERIALIZED_ROW_BYTES + 1) as u32
+                            } else {
+                                bytes.len() as u32
+                            },
+                        },
+                    )
+                    .await;
+                let result = packet(&store, session, &id, Current).await;
+                match case {
+                    "oversized" => {
+                        assert_eq!(result["reason"], "serialized_row_limit");
+                        assert!(result["request"].is_null());
+                    }
+                    "wrong_id" | "wrong_sequence" => {
+                        assert_eq!(result["reason"], "body_identity_unverifiable");
+                        assert!(result["response"].is_null());
+                    }
+                    "missing_preview" => assert_eq!(
+                        result["response"]["message"]["body"]["reason"],
+                        "retained_preview_unavailable"
+                    ),
+                    _ => assert_eq!(
+                        result["response"]["message"]["body"]["reason"],
+                        "malformed_retained_row"
+                    ),
+                }
+                drop(store);
+                fs::remove_dir_all(dir).unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn exact_packet_worker_and_late_publication_fences_reject_record_and_file_changes() {
+            use crate::service_map_packet::PacketVariant::Current;
+            for mutation in ["record", "file", "delete"] {
+                let record = body_record("retained", 1);
+                let (store, dir) = fixture_store(&[record.clone()], true).await;
+                let session = Uuid::new_v4();
+                let id = token(&store, session, 1).await;
+                let permit = Arc::new(tokio::sync::Semaphore::new(1))
+                    .acquire_owned()
+                    .await
+                    .unwrap();
+                let read = store
+                    .service_map_packet(session, &id, Current, permit)
+                    .await;
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&read.bytes).unwrap()["available"],
+                    true
+                );
+                match mutation {
+                    "record" => {
+                        store
+                            .update_record(record.id, |row| row.path = "/changed".into())
+                            .await
+                            .unwrap();
+                    }
+                    "file" => {
+                        let locators =
+                            crate::session::write_transactions_file_for_test_returning_locators(
+                                &dir,
+                                &[record],
+                            )
+                            .unwrap();
+                        store.adopt_written_locators(locators).await;
+                    }
+                    "delete" => {
+                        store.inner.write().await.entries.clear();
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    store
+                        .service_map_packet_source_status(session, &id, &read)
+                        .await
+                        .is_err(),
+                    "{mutation}"
+                );
+                drop(store);
+                fs::remove_dir_all(dir).unwrap();
+            }
+            let record = body_record("retained", 1);
+            let (store, dir) = fixture_store(&[record.clone()], true).await;
+            let session = Uuid::new_v4();
+            let id = token(&store, session, 1).await;
+            let (hook, ready, release) = barrier("after_open");
+            let worker_store = store.clone();
+            let worker_id = id.clone();
+            let task = tokio::spawn(async move {
+                let permit = Arc::new(tokio::sync::Semaphore::new(1))
+                    .acquire_owned()
+                    .await
+                    .unwrap();
+                worker_store
+                    .service_map_packet_inner(session, &worker_id, Current, permit, Some(hook))
+                    .await
+            });
+            ready.await.unwrap();
+            let locators = crate::session::write_transactions_file_for_test_returning_locators(
+                &dir,
+                &[record],
+            )
+            .unwrap();
+            store.adopt_written_locators(locators).await;
+            release.send(()).unwrap();
+            let result: serde_json::Value =
+                serde_json::from_slice(&task.await.unwrap().bytes).unwrap();
+            assert_eq!(result["reason"], "body_identity_unverifiable");
+            assert!(result["response"].is_null());
+            drop(store);
+            fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[tokio::test]
+        async fn exact_packet_dropped_owner_keeps_running_worker_permit_until_exit() {
+            let record = body_record("retained", 1);
+            let (store, dir) = fixture_store(&[record], false).await;
+            let session = Uuid::new_v4();
+            let id = token(&store, session, 1).await;
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let (hook, ready, release) = barrier("started");
+            let worker = store.clone();
+            let task = tokio::spawn(async move {
+                worker
+                    .service_map_packet_inner(
+                        session,
+                        &id,
+                        crate::service_map_packet::PacketVariant::Current,
+                        permit,
+                        Some(hook),
+                    )
+                    .await
+            });
+            ready.await.unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert!(semaphore.clone().try_acquire_owned().is_err());
+            release.send(()).unwrap();
+            let permit = tokio::time::timeout(WaitDuration::from_secs(5), semaphore.acquire())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(permit);
+            drop(store);
+            fs::remove_dir_all(dir).unwrap();
         }
 
         #[tokio::test]

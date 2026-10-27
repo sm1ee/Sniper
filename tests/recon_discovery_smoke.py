@@ -72,6 +72,30 @@ def main():
                     f'fetch("/{prefix}-candidate/{index}?first=1&second=2");'
                     for index in range(count)
                 ).encode()
+            elif self.path == "/forms":
+                content_type = "text/html"
+                body = b'''<form id="save-form" method="post" action="/form-fixture/save">
+                  <button formaction="/form-fixture/close" formmethod="DiAlOg">Close</button>
+                  <button formaction="/form-fixture/invalid" formmethod="DELETE">Invalid</button>
+                  <button formaction="/form-fixture/empty" formmethod="">Empty</button>
+                  <button formaction="/form-fixture/inherited">Inherited</button>
+                </form><form method="dialog" action="/form-fixture/dialog">
+                  <button formaction="/form-fixture/inherited-dialog">Close</button>
+                  <button formaction="/form-fixture/explicit-post" formmethod="POST">Post</button>
+                </form><form method="dialog" action="javascript:void(0)">
+                  <button formaction="/form-fixture/dialog-close">Close</button>
+                </form><form method="post" action="javascript:void(0)">
+                  <button formaction="/form-fixture/post-override">Post</button>
+                </form><form method="dialog" action="/form-fixture/dialog-submit">
+                  <button formmethod="POST">Post</button>
+                </form><form method="POST" action="/form-fixture/post-submit">
+                  <button formmethod="GET">Get</button>
+                </form><form method="dialog" action="/form-fixture/no-submit">
+                  <button type="button" formmethod="POST">Button</button>
+                  <button form="missing" formmethod="POST">Missing owner</button>
+                  <button form="save-form" formmethod="GET">Different owner</button>
+                  <input type="text" formmethod="POST">
+                </form>'''
             elif self.path == "/slow":
                 slow_started.set()
                 release_slow.wait(10)
@@ -163,6 +187,24 @@ def main():
             results.append({"case": name, "checks": checks, "job": job, "requested_paths": paths, "snapshot": snapshot})
             print(json.dumps({"case": name, "requests": source["requests"], "discovered": source["discovered"],
                               "truncated": source["truncated"], "failed": failed}), flush=True)
+
+        offset = len(requested)
+        form_job = start("/forms")
+        form_job, form_snapshot = eventually(lambda: completed(form_job))
+        forms = sorted((item["url"].removeprefix(origin), item["method"])
+                       for item in form_snapshot["endpoints"] if "/form-fixture/" in item["url"])
+        expected_forms = sorted([("/form-fixture/save", "POST"), ("/form-fixture/invalid", "GET"),
+                                 ("/form-fixture/empty", "GET"), ("/form-fixture/inherited", "POST"),
+                                 ("/form-fixture/explicit-post", "POST"),
+                                 ("/form-fixture/post-override", "POST"),
+                                 ("/form-fixture/dialog-submit", "POST"),
+                                 ("/form-fixture/post-submit", "GET"),
+                                 ("/form-fixture/post-submit", "POST")])
+        assert forms == expected_forms, forms
+        assert set(requested[offset:]) == {"/forms", "/robots.txt", "/sitemap.xml"}
+        assert all(item["evidence"][0]["kind"] == "candidate" for item in form_snapshot["endpoints"]
+                   if "/form-fixture/" in item["url"])
+        print("HTML form methods retain GET/POST candidates without inventing dialog or custom-method submissions.", flush=True)
 
         before_large = api("/api/recon?session_id=" + sid)
         offset = len(requested)
