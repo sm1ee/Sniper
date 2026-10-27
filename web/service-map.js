@@ -4,10 +4,6 @@
   "use strict";
   const MAX_CARDS = 24;
   const MAX_EDGES = 40;
-  // A dense cyclic graph layers into one long chain; five columns hold a typical
-  // sign-in redirect chain. ponytail: deeper cards share the last column; wrap
-  // them into extra rows if long chains turn out to matter.
-  const MAX_COLUMNS = 5;
   const MAX_RELATION_LAYERS = 8;
   const MAX_REFERENCE_CARDS = 100;
   const MAX_REFERENCE_SOURCES = 30;
@@ -1220,35 +1216,38 @@
   // (longest-path layering), so a chain reads left to right and no arrow joins
   // two cards of one column. Two fixed columns put a real session's hub alone on
   // the left and its 23 targets in one column, drawing their 17 links to each
-  // other as loops piled on the column edge. Only a link that closes a cycle is
-  // turned around, found by a depth-first walk from the sources. Columns are
-  // centered on the tallest and sorted by their sources' rows to limit
-  // crossings; unlinked cards fill a grid below.
+  // other as loops piled on the column edge; capping the columns at five did
+  // the same to the cards past the fifth. Columns are centered on the tallest
+  // and sorted by their sources' rows to limit crossings; unlinked cards fill a
+  // grid below.
+  //
+  // A link that closes a cycle is turned around. The cards are put in order
+  // first (Eades, Lin and Smyth's greedy heuristic): sinks last, sources first,
+  // otherwise the card with the most links out over links in, the first in the
+  // map's order on a tie; a link pointing back in that order is the one turned.
+  // A depth-first walk turned whichever link closed a cycle on its path, so a
+  // front that signed in at an accounts origin put accounts behind it and every
+  // other front behind accounts. ponytail: cards that all link to each other
+  // still take a column each, 24 at most; fold columns into bands if that shows.
   function layeredSlots(visibleOrigins, connections) {
     const ids = visibleOrigins.map((origin) => origin.origin);
     const rank = new Map(ids.map((id, index) => [id, index]));
     const inspected = new Set(visibleOrigins.filter((origin) => origin.inspectedSource).map((origin) => origin.origin));
-    const next = new Map(ids.map((id) => [id, new Set()]));
-    for (const [source, target] of connections) next.get(source).add(target);
     const linked = new Set(connections.flat());
-    const targets = new Set(connections.map(([, target]) => target));
-    const visiting = new Set(), done = new Set(), forward = [];
-    const visit = (id) => {
-      visiting.add(id);
-      for (const target of next.get(id)) {
-        if (visiting.has(target)) {
-          forward.push([target, id]);
-        } else {
-          forward.push([id, target]);
-          if (!done.has(target)) visit(target);
-        }
-      }
-      visiting.delete(id);
-      done.add(id);
-    };
-    for (const id of [...ids.filter((id) => !targets.has(id)), ...ids]) {
-      if (linked.has(id) && !done.has(id)) visit(id);
+    const outs = new Map(ids.map((id) => [id, new Set()])), ins = new Map(ids.map((id) => [id, new Set()]));
+    for (const [source, target] of connections) { outs.get(source).add(target); ins.get(target).add(source); }
+    const pending = ids.filter((id) => linked.has(id)), head = [], tail = [];
+    while (pending.length) {
+      const sink = pending.find((item) => !outs.get(item).size);
+      const id = sink || pending.find((item) => !ins.get(item).size)
+        || pending.reduce((best, item) => outs.get(item).size - ins.get(item).size > outs.get(best).size - ins.get(best).size ? item : best);
+      (sink ? tail : head).push(id);
+      pending.splice(pending.indexOf(id), 1);
+      for (const target of outs.get(id)) ins.get(target).delete(id);
+      for (const source of ins.get(id)) outs.get(source).delete(id);
     }
+    const position = new Map([...head, ...tail.reverse()].map((id, index) => [id, index]));
+    const forward = connections.map(([source, target]) => position.get(source) < position.get(target) ? [source, target] : [target, source]);
     const layer = new Map([...linked].map((id) => [id, 0]));
     for (let changed = true; changed;) {
       changed = false;
@@ -1259,8 +1258,8 @@
         }
       }
     }
-    const columns = Array.from({ length: linked.size ? Math.min(MAX_COLUMNS, Math.max(...layer.values()) + 1) : 0 }, () => []);
-    for (const id of ids) if (linked.has(id)) columns[Math.min(MAX_COLUMNS - 1, layer.get(id))].push(id);
+    const columns = Array.from({ length: linked.size ? Math.max(...layer.values()) + 1 : 0 }, () => []);
+    for (const id of ids) if (linked.has(id)) columns[layer.get(id)].push(id);
     const tallest = Math.max(0, ...columns.map((column) => column.length));
     const slots = new Map();
     columns.forEach((column, index) => {
