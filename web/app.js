@@ -21761,6 +21761,7 @@ let replaySwipeOffset = 0;
 // Decided by the first wheel event that claims a gesture, and fixed until that
 // gesture ends. Going the other way takes lifting off and pulling again.
 let replaySwipeDirection = 0;
+let replaySwipeOwner = null;
 let replaySwipeSettleTimer = 0;
 let replaySwipeBadge = null;
 // Whether THIS gesture was opened by a native phase. Deliberately not sticky: a
@@ -21789,11 +21790,38 @@ function clearReplaySwipeBadge() {
   replaySwipeBadge = null;
 }
 
+function replaySwipeDraftSnapshot(tab) {
+  const editor = getCMView("replayReq");
+  const hexInput = !editor && !els.replayRequestCM && state.replayMessageViews.request === "hex"
+    ? els.replayRequestHighlight?.querySelector?.(".hex-byte-input") : null;
+  return [
+    tab.requestText, tab.httpVersionMode, tab.targetScheme, tab.targetHost, tab.targetPort,
+    tab.requestBytes, hexInput, hexInput?.value,
+    state.replayMessageViews.request,
+    editor ? null : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value),
+    els.replayHostInput?.value, els.replayPortInput?.value, els.replaySchemeSelect?.value,
+    document.getElementById("replayHttpVersionSelect")?.value,
+  ];
+}
+
+function isReplaySwipeOwnerCurrent(owner, checkDraft = false) {
+  return !!owner && workspaceLoaded && state.activeTool === "replay"
+    && owner.tab === getActiveReplayTab() && state.replayTabs.includes(owner.tab)
+    && owner.sessionId === currentSessionId() && owner.generation === workspaceStateGeneration
+    && owner.editorOwner === renderedHttpReplayDraftOwner?.editorOwner
+    && owner.editorDocument === getCMView("replayReq")?.view?.state?.doc
+    && owner.historyEntries === owner.tab.historyEntries && owner.historyIndex === owner.tab.historyIndex
+    && (!checkDraft || (replaySwipeDraftSnapshot(owner.tab).every((value, index) => value === owner.draft[index])
+      && (!owner.bytes || (owner.tab.requestBytes?.length === owner.bytes.length
+        && owner.bytes.every((value, index) => value === owner.tab.requestBytes[index])))));
+}
+
 function resetReplaySwipe() {
   clearTimeout(replaySwipeSettleTimer);
   replaySwipeSettleTimer = 0;
   replaySwipeOffset = 0;
   replaySwipeDirection = 0;
+  replaySwipeOwner = null;
   replaySwipeNativeGesture = false;
   clearReplaySwipeBadge();
 }
@@ -21801,7 +21829,8 @@ function resetReplaySwipe() {
 // Fires once the wheel has been quiet long enough to call the gesture over.
 function settleReplaySwipe() {
   const direction = replaySwipeDirection;
-  const armed = replaySwipeOffset >= REPLAY_SWIPE_THRESHOLD_PX;
+  const armed = replaySwipeOffset >= REPLAY_SWIPE_THRESHOLD_PX
+    && isReplaySwipeOwnerCurrent(replaySwipeOwner, true);
   resetReplaySwipe();
   if (!armed || !direction) return;
   const tab = getActiveReplayTab();
@@ -21874,6 +21903,14 @@ function onReplaySwipeWheel(event, workbench) {
     return;
   }
 
+  // Never let the remainder of a pull take ownership of a newer editor/tab.
+  if (replaySwipeOwner && !isReplaySwipeOwnerCurrent(replaySwipeOwner)) {
+    replaySwipeOffset = 0;
+    clearReplaySwipeBadge();
+    armReplaySwipeSettle();
+    return;
+  }
+
   // A gesture's direction is decided once, by the event that claims it, and does
   // not flip while the fingers are down: pulling back from a full pull retreats
   // the arrow to the edge, it does not raise the opposite one. Turning round
@@ -21886,6 +21923,16 @@ function onReplaySwipeWheel(event, workbench) {
     if (replayScrollerHasRoom(event.target?.closest?.(".cm-scroller"), direction)) return;
     if (!canNavigateReplayHistory(tab, direction)) return;
     replaySwipeDirection = direction;
+    replaySwipeOwner = {
+      tab, sessionId: currentSessionId(), generation: workspaceStateGeneration,
+      editorOwner: renderedHttpReplayDraftOwner?.editorOwner,
+      editorDocument: getCMView("replayReq")?.view?.state?.doc,
+      historyEntries: tab.historyEntries, historyIndex: tab.historyIndex,
+      draft: replaySwipeDraftSnapshot(tab),
+      // Hex edits mutate the buffer in place. Copy once, compare only on release;
+      // wheel events must not repeatedly serialize a potentially large request.
+      bytes: tab.requestBytes?.slice(),
+    };
   }
 
   // Claimed: stop the platform turning the rest of it into a rubber band.
