@@ -2329,7 +2329,6 @@ code {
   font-size: var(--font-2xs);
 }
 
-.tls-badge,
 .detail-chip,
 .section-count {
   display: inline-flex;
@@ -2408,15 +2407,13 @@ code {
   text-align: center;
 }
 
+/* TLS is text with a tone like Method beside it, not a pill on every row. */
 .tls-badge {
-  border: 1px solid var(--point-border);
-  background: var(--point-soft);
-  color: var(--accent-strong);
+  font-weight: 600;
+  color: var(--text-soft);
 }
 
 .tls-badge.empty {
-  border-color: rgba(255, 255, 255, 0.06);
-  background: transparent;
   color: var(--text-dim);
 }
 
@@ -8344,7 +8341,8 @@ button.utility-button.replay-tab-add {
 .service-map-detail h3 { font-size: var(--font-xl); margin: 0; overflow-wrap: anywhere; }
 .service-map-detail-header p { color: var(--text-soft); font-size: var(--font-xs); overflow-wrap: anywhere; margin: 7px 0; }
 .service-map-detail .detail-chip { white-space: nowrap; }
-.service-map-detail .detail-chip.ok { color: var(--point); background: var(--point-soft); border-color: var(--point-border); }
+.service-map-detail .detail-chip.ok,
+.target-host-actions .detail-chip.ok { color: var(--point); background: var(--point-soft); border-color: var(--point-border); }
 .service-map-detail-tabs { display: flex; gap: 16px; padding: 0 18px; border-bottom: 1px solid var(--line); }
 .service-map-detail-tabs button { padding: 11px 12px; background: transparent; border: 0; border-bottom: 3px solid transparent; color: var(--text-soft); cursor: pointer; }
 .service-map-detail-tabs button[aria-selected="true"] { border-bottom-color: var(--point); color: var(--point); }
