@@ -1,8 +1,8 @@
 """Check complete gzip members through capture, rewrite, held forwarding and restart.
 
-Run against a built headless binary:
-  python3 tests/gzip_members_smoke.py /exact/path/to/sniper \
-    --binary-sha256 EXPECTED_SHA256 --evidence-dir NEW_EMPTY_OUTPUT_DIRECTORY
+Run against a built headless binary (default target/release/sniper):
+  python3 tests/gzip_members_smoke.py [path/to/sniper] \
+    [--binary-sha256 EXPECTED_SHA256] [--evidence-dir NEW_EMPTY_OUTPUT_DIRECTORY]
 Exit 0: all integrity checks pass. Exit 1: intact-wire controls pass, but at least
 one full-body integrity assertion fails. Exit 2: fixture/control/setup failure.
 No browser, CLI workspace mutation, Cargo, or external origin is used.
@@ -49,15 +49,16 @@ def eventually(operation, timeout=25):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("binary", type=Path)
-    parser.add_argument("--binary-sha256", required=True)
-    parser.add_argument("--evidence-dir", type=Path, required=True)
+    parser.add_argument("binary", type=Path, nargs="?",
+                        default=Path("target/release") / ("sniper.exe" if os.name == "nt" else "sniper"))
+    parser.add_argument("--binary-sha256", help="refuse to run any other build")
+    parser.add_argument("--evidence-dir", type=Path, help="a new directory; defaults to one under the temp dir")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     assert binary.name in {"sniper", "sniper.exe"}, "Headless binary required"
     binary_hash = digest(binary.read_bytes())
-    assert binary_hash == args.binary_sha256, "Pinned executable hash mismatch"
-    evidence = args.evidence_dir.resolve()
+    assert args.binary_sha256 in (None, binary_hash), "Pinned executable hash mismatch"
+    evidence = (args.evidence_dir or Path(tempfile.mkdtemp(prefix="sniper-evidence-")) / "evidence").resolve()
     evidence.mkdir(parents=True, exist_ok=False)
     wire = gzip.compress(FIRST, mtime=0) + gzip.compress(SECOND, mtime=0)
     assert gzip.decompress(wire) == FULL

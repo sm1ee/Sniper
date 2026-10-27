@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Bounded owned-loopback proof for literal Replace note/color actions.
 
-Run only against an explicitly pinned rebuilt headless binary. This fixture never
-uses a browser, external origin, script runtime, CLI install or real data directory.
+Run: python3 tests/match_replace_annotations_smoke.py [path/to/sniper]
+[--binary-sha256 SHA256] [--evidence-dir NEW_DIRECTORY]; the binary defaults to
+target/release/sniper. This fixture never uses a browser, external origin,
+script runtime, CLI install or real data directory.
 The held first-chunk barriers prove annotation-only response rules do not buffer.
 """
 import argparse
@@ -51,14 +53,16 @@ def eventually(operation, timeout=20):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("binary", type=Path)
-    parser.add_argument("--binary-sha256", required=True)
-    parser.add_argument("--evidence-dir", type=Path, required=True)
+    parser.add_argument("binary", type=Path, nargs="?",
+                        default=Path("target/release") / ("sniper.exe" if os.name == "nt" else "sniper"))
+    parser.add_argument("--binary-sha256", help="refuse to run any other build")
+    parser.add_argument("--evidence-dir", type=Path, help="a new directory; defaults to one under the temp dir")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     assert binary.name in {"sniper", "sniper.exe"}
+    args.binary_sha256 = args.binary_sha256 or sha(binary)
     assert sha(binary) == args.binary_sha256, "Executable pin mismatch"
-    evidence = args.evidence_dir.absolute()
+    evidence = (args.evidence_dir or Path(tempfile.mkdtemp(prefix="sniper-evidence-")) / "evidence").absolute()
     assert evidence.parent.is_dir() and not evidence.exists()
     assert not evidence.resolve().is_relative_to(Path(__file__).resolve().parent.parent), "Evidence must be outside source"
     evidence.mkdir(mode=0o700)

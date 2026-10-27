@@ -2,13 +2,15 @@
 """Owned loopback metadata-only probe; no proxy/capture/scanner/provider requests."""
 import argparse, hashlib, json, os, pathlib, shutil, signal, subprocess, sys, tempfile, time, traceback, urllib.error, urllib.request
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--binary-dir', type=pathlib.Path, required=True)
-parser.add_argument('--source-dir', type=pathlib.Path, required=True)
-parser.add_argument('--evidence-dir', type=pathlib.Path, required=True)
-parser.add_argument('--expected-head', required=True)
-parser.add_argument('--expected-tree', required=True)
-parser.add_argument('--expected-binary-sha256', required=True)
+parser.add_argument('--binary-dir', type=pathlib.Path, default=pathlib.Path('target/release'))
+parser.add_argument('--source-dir', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parent.parent)
+parser.add_argument('--evidence-dir', type=pathlib.Path, help='a new directory; defaults to one under the temp dir')
+# Pins for a sealed run: given, the checkout and server must match them exactly.
+parser.add_argument('--expected-head')
+parser.add_argument('--expected-tree')
+parser.add_argument('--expected-binary-sha256')
 args = parser.parse_args()
+args.evidence_dir = args.evidence_dir or pathlib.Path(tempfile.mkdtemp(prefix='sniper-evidence-')) / 'evidence'
 SOURCE = args.source_dir.resolve(strict=True)
 OUT = args.evidence_dir.absolute()
 BINARY = args.binary_dir.resolve(strict=True) / ('sniper.exe' if os.name == 'nt' else 'sniper')
@@ -119,8 +121,10 @@ def stored(data):
 status='SETUP_OR_FIXTURE_FAILURE'; exit_code=2; initial=None
 try:
     initial=pins()
-    check('sealed source pins',initial['head']==HEAD and initial['tree']==TREE and initial['status']=='')
-    check('sealed server hash',initial['binary_sha256']==BINARY_SHA)
+    if HEAD or TREE:
+        check('sealed source pins',initial['head']==HEAD and initial['tree']==TREE and initial['status']=='')
+    if BINARY_SHA:
+        check('sealed server hash',initial['binary_sha256']==BINARY_SHA)
     data=pathlib.Path(tempfile.mkdtemp(prefix='sniper-session-overview-'))
     rows=start(data)
     check('one initial session',len(rows)==1 and rows[0]['active'])

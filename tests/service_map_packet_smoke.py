@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Owned-loopback retained-packet proof; requires a separately authorized pinned build.
+"""Owned-loopback retained-packet proof.
+
+Run: python3 tests/service_map_packet_smoke.py [path/to/sniper] [--binary-sha256 SHA256]
+[--evidence-dir NEW_DIRECTORY]; the binary defaults to target/release/sniper.
 
 Four tiny origin requests only. Packet reads are local metadata/body reads, never
 sends. No browser, encoded-content scenario, external target or existing user data.
@@ -46,13 +49,15 @@ def eventually(operation, timeout=20):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("binary", type=Path)
-    parser.add_argument("--binary-sha256", required=True)
-    parser.add_argument("--evidence-dir", type=Path, required=True)
+    parser.add_argument("binary", type=Path, nargs="?",
+                        default=Path("target/release") / ("sniper.exe" if os.name == "nt" else "sniper"))
+    parser.add_argument("--binary-sha256", help="refuse to run any other build")
+    parser.add_argument("--evidence-dir", type=Path, help="a new directory; defaults to one under the temp dir")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
+    args.binary_sha256 = args.binary_sha256 or sha(binary)
     assert binary.name in {"sniper", "sniper.exe"} and sha(binary) == args.binary_sha256
-    evidence = args.evidence_dir.absolute()
+    evidence = (args.evidence_dir or Path(tempfile.mkdtemp(prefix="sniper-evidence-")) / "evidence").absolute()
     assert evidence.parent.is_dir() and not evidence.exists()
     assert not evidence.resolve().is_relative_to(Path(__file__).resolve().parent.parent)
     evidence.mkdir(mode=0o700)
