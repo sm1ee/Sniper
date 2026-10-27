@@ -57,3 +57,42 @@ test('mounted inspection failure retries only through fresh explicit Inspect sel
 test('actual shared search-count markup cycles matches only for a mounted current packet owner',async()=>{const f=fixture();await f.loaded();const pane=f.packetNode.columns.response;pane.search.value='nginx';pane.search.dispatch('input');assert.match(pane.meta.innerHTML,/class="search-hit-count"/);const target={closest:selector=>selector==='.search-hit-count'?{}:null};pane.meta.dispatch('click',{target});assert.deepEqual(f.searchCycles,['mapPacket-response']);f.controller.setVisible(false);pane.meta.dispatch('click',{target});assert.deepEqual(f.searchCycles,['mapPacket-response']);});
 
 test('actual document hide/show retains selected packet and does not turn visibility into an explicit read',async()=>{const f=fixture();await f.loaded();const host=f.packetNode,p=f.controller.getState().packet,n=f.requests.length;f.document.hidden=true;f.document.visibilityState='hidden';f.document.dispatch('visibilitychange');f.document.hidden=false;f.document.visibilityState='visible';f.document.dispatch('visibilitychange');assert.equal(f.requests.length,n);assert.equal(f.controller.getState().packet,p);assert.equal(f.packetNode,host);});
+
+for (const initial of ['loaded', 'pending', 'failed']) test(`Map Details resumes after APIs navigation with ${initial} packet`, async () => {
+ const f = fixture(), first = await f.ready();
+ if (initial === 'loaded') first.resolve(response(packet()));
+ if (initial === 'failed') first.reject(new Error('synthetic packet failure'));
+ await wait();
+ const retainedEvidence = f.controller.getState().evidence;
+ const packetRequests = () => f.requests.filter(q => q.url.includes('/packet?'));
+ const navigate = async view => {
+  f.controller.setVisible(true, view);
+  const pending = f.controller.refresh();
+  f.requests.at(-1).resolve(response(snapshot()));
+  await pending;
+ };
+ await navigate('apis');
+ assert.equal(packetRequests().length, 1, 'hidden Details must not load a packet');
+ assert.equal(f.controller.getState().packet, null);
+ await navigate('service-map');
+ assert.equal(packetRequests().length, 2, 'returning to Details must restore the retired packet read');
+ assert.equal(f.controller.getState().evidence, retainedEvidence);
+ assert.equal(f.controller.getState().packetLoading, true);
+ const resumed = packetRequests().at(-1);
+ f.controller.setVisible(true, 'service-map');
+ assert.equal(packetRequests().length, 2, 'repeated active navigation must not duplicate a pending read');
+ if (initial === 'pending') {
+  first.resolve(response(packet()));
+  await wait();
+  assert.equal(f.controller.getState().packet, null, 'retired result must not resurrect');
+  assert.equal(f.controller.getState().packetLoading, true);
+ }
+ resumed.resolve(response(packet()));
+ await wait();
+ assert.equal(f.controller.getState().packet?.variant, 'current');
+ assert.ok(f.packetNode);
+ const host = f.packetNode;
+ await navigate('service-map');
+ assert.equal(packetRequests().length, 2, 'healthy same-view navigation must not reload');
+ assert.equal(f.packetNode, host);
+});
