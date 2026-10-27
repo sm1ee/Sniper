@@ -29,7 +29,8 @@ function fixture(saved = []) {
     matchReplaceEmpty: { classList: classes() }, matchReplaceEditorPath: {}, matchReplaceEditorTitle: {},
     matchReplaceScope: field("request"), matchReplaceTarget: field("any"), matchReplaceSearch: field(),
     matchReplaceReplace: field(), matchReplaceReplaceEnabled: { ...field(), checked: true },
-    matchReplaceAnnotationNote: field(), matchReplaceAnnotationColor: field(), matchReplaceRegex: field(), matchReplaceCaseSensitive: field(),
+    matchReplaceAnnotationNote: field(), matchReplaceAnnotationColor: field(), matchReplaceAnnotation: { open: false },
+    matchReplaceRegex: field(), matchReplaceCaseSensitive: field(),
     deleteMatchReplaceRuleButton: { disabled: false }, saveMatchReplaceRuleButton: { disabled: false },
   };
   const requests = [];

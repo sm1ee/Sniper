@@ -17,7 +17,7 @@ function fixture(rules = [rule()], pending = false) {
   const classes = () => ({ toggle() {} });
   const field = () => ({ value: '', checked: false, disabled: false, listeners: {}, addEventListener(name, fn) { this.listeners[name] = fn; } });
   const els = Object.fromEntries(['Scope', 'Target', 'Search', 'Replace', 'ReplaceEnabled', 'AnnotationNote', 'AnnotationColor',
-    'Regex', 'CaseSensitive'].map(name => [`matchReplace${name}`, field()]));
+    'Annotation', 'Regex', 'CaseSensitive'].map(name => [`matchReplace${name}`, field()]));
   const toggles = new Map();
   const toggle = id => { if (!toggles.has(id)) toggles.set(id, { ...field(), dataset: { ruleToggle: id } }); return toggles.get(id); };
   Object.assign(els, { matchReplaceTableBody: { innerHTML: '', querySelectorAll(selector) {
@@ -197,6 +197,27 @@ test('markup exposes only the requested mode, note and existing palette controls
   for (const name of ['ReplaceEnabled', 'AnnotationNote', 'AnnotationColor']) assert.equal(html.includes(`id="matchReplace${name}"`), true, name);
   const palette = html.match(/<select id="matchReplaceAnnotationColor">([^]*?)<\/select>/)?.[1] ?? '';
   assert.deepEqual([...palette.matchAll(/value="([^"]*)"/g)].map(m => m[1]), ['', 'red', 'orange', 'yellow', 'green', 'blue', 'purple']);
+});
+
+// The form's rule for text fields once gave the Replace checkbox the full
+// width and a 40px height, drawing it as a large box mid-form.
+test('Replace is a switch that keeps its own size inside the editor form', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
+  assert.match(html, /<span class="mini-toggle"><input id="matchReplaceReplaceEnabled" type="checkbox" role="switch" checked \/><span class="mini-toggle-track"><\/span><\/span>/);
+  assert.match(css, /^\.settings-field input:where\(:not\(\[type="checkbox"\], \[type="radio"\]\)\),$/m);
+  assert.doesNotMatch(css, /^\.settings-field input,$/m);
+  assert.match(html, /<details class="match-replace-annotation" id="matchReplaceAnnotation">\s*<summary>Note and color<\/summary>/);
+});
+
+test('Note and color fold away for a plain replacement and open when they matter', () => {
+  const f = fixture([rule()]);
+  assert.equal(f.els.matchReplaceAnnotation.open, false);
+  f.edit('ReplaceEnabled', false);
+  assert.equal(f.els.matchReplaceAnnotation.open, true, 'an annotation-only rule is its note and color');
+  for (const extra of [{ annotation_note: 'flag' }, { annotation_color: 'yellow' }, { enabled: false, annotation_only_enabled: true }]) {
+    assert.equal(fixture([rule(extra)]).els.matchReplaceAnnotation.open, true, JSON.stringify(extra));
+  }
 });
 
 for (const savedOnly of [true, false]) test(`failed mismatched-mode Off keeps saved activity honest, annotation-only=${savedOnly}`, async () => {

@@ -520,25 +520,30 @@
                     <input id="matchReplaceSearch" type="text" placeholder="foo.example.com" />
                   </label>
                   <div class="settings-field">
-                    <label class="settings-toggle"><input id="matchReplaceReplaceEnabled" type="checkbox" checked /><span>Replace</span></label>
+                    <label class="match-replace-replace-head"><span>Replace</span><span class="mini-toggle"><input id="matchReplaceReplaceEnabled" type="checkbox" role="switch" checked /><span class="mini-toggle-track"></span></span></label>
                     <input id="matchReplaceReplace" type="text" aria-label="Replacement" placeholder="bar.example.com" />
                   </div>
-                  <label class="settings-field">
-                    <span>Note</span>
-                    <textarea id="matchReplaceAnnotationNote" rows="2"></textarea>
-                  </label>
-                  <label class="settings-field">
-                    <span>Color</span>
-                    <select id="matchReplaceAnnotationColor">
-                      <option value="">None</option>
-                      <option value="red">Red</option>
-                      <option value="orange">Orange</option>
-                      <option value="yellow">Yellow</option>
-                      <option value="green">Green</option>
-                      <option value="blue">Blue</option>
-                      <option value="purple">Purple</option>
-                    </select>
-                  </label>
+                  <details class="match-replace-annotation" id="matchReplaceAnnotation">
+                    <summary>Note and color</summary>
+                    <div class="match-replace-annotation-fields">
+                      <label class="settings-field">
+                        <span>Note</span>
+                        <textarea id="matchReplaceAnnotationNote" rows="2"></textarea>
+                      </label>
+                      <label class="settings-field">
+                        <span>Color</span>
+                        <select id="matchReplaceAnnotationColor">
+                          <option value="">None</option>
+                          <option value="red">Red</option>
+                          <option value="orange">Orange</option>
+                          <option value="yellow">Yellow</option>
+                          <option value="green">Green</option>
+                          <option value="blue">Blue</option>
+                          <option value="purple">Purple</option>
+                        </select>
+                      </label>
+                    </div>
+                  </details>
                   <label class="settings-toggle">
                     <input id="matchReplaceRegex" type="checkbox" />
                     <span>Regex</span>

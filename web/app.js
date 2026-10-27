@@ -940,6 +940,7 @@ const els = {
   matchReplaceReplaceEnabled: document.getElementById("matchReplaceReplaceEnabled"),
   matchReplaceAnnotationNote: document.getElementById("matchReplaceAnnotationNote"),
   matchReplaceAnnotationColor: document.getElementById("matchReplaceAnnotationColor"),
+  matchReplaceAnnotation: document.getElementById("matchReplaceAnnotation"),
   matchReplaceRegex: document.getElementById("matchReplaceRegex"),
   matchReplaceCaseSensitive: document.getElementById("matchReplaceCaseSensitive"),
   saveMatchReplaceRuleButton: document.getElementById("saveMatchReplaceRuleButton"),
@@ -15551,6 +15552,10 @@ function renderMatchReplaceRules() {
   els.matchReplaceReplace.disabled = !els.matchReplaceReplaceEnabled.checked;
   els.matchReplaceAnnotationNote.value = selected.annotation_note ?? "";
   els.matchReplaceAnnotationColor.value = selected.annotation_color ?? "";
+  // Most rules only replace, so note and color stay folded unless the rule
+  // already uses them or does nothing else.
+  els.matchReplaceAnnotation.open = !els.matchReplaceReplaceEnabled.checked
+    || Boolean(selected.annotation_note || selected.annotation_color);
   els.matchReplaceRegex.checked = Boolean(selected.regex);
   els.matchReplaceCaseSensitive.checked = Boolean(selected.case_sensitive);
 }
@@ -16896,6 +16901,7 @@ function syncMatchReplaceEditor() {
     || Boolean(rule.regex) !== next.regex
     || Boolean(rule.case_sensitive) !== next.case_sensitive;
   els.matchReplaceReplace.disabled = !replaceEnabled;
+  if (!replaceEnabled) els.matchReplaceAnnotation.open = true;
   if (changed) {
     Object.assign(rule, next);
     if (els.matchReplaceEditorTitle) els.matchReplaceEditorTitle.textContent = matchReplaceRuleTitle(rule);

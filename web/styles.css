@@ -5909,8 +5909,9 @@ button.utility-button.replay-tab-add {
   text-transform: uppercase;
 }
 
+/* :where keeps the old specificity, so :focus and per-panel rules still win. */
 .settings-field textarea,
-.settings-field input,
+.settings-field input:where(:not([type="checkbox"], [type="radio"])),
 .settings-field select {
   width: 100%;
   min-height: 40px;
@@ -6246,6 +6247,24 @@ button.utility-button.replay-tab-add {
 
 #matchReplacePanel .settings-field span {
   text-transform: none;
+}
+
+.match-replace-replace-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.match-replace-annotation summary {
+  cursor: pointer;
+  color: var(--text-soft);
+}
+
+.match-replace-annotation-fields {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
 }
 
 .modal-body {
