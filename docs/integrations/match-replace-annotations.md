@@ -1,77 +1,45 @@
 # Match & Replace annotations
 
-A rule can replace traffic, add a capture note/color, or do both. For example,
-choose **Response / Body**, search regex `flag\{[^}]+\}`, turn **Replace** off,
-and set note `flag 탐지` and yellow. Notes are literal: no scripts, variables or
-replacement-group expansion run in them.
+A rule can replace traffic, mark matching captures with a note and color, or do
+both. For example, to flag CTF flags in responses: **Response / Body**, regex
+`flag\{[^}]+\}`, turn **Replace** off, then under **Note and color** set the
+note `flag 탐지` and yellow.
 
-Changing Replace keeps the rule's activity and replacement text. On stays local
-when the mode differs from the saved/submitted rule or a relevant Off write is
-pending. Off submits the saved rule's deactivation without newer editor changes.
-Full Save waits for pending rule writes; nothing is sent automatically afterward.
-
-Annotation-only rules do not rewrite forwarded bytes or entity headers; the
-proxy's existing HTTP framing behavior still applies. They do not create an original/modified-traffic badge. Automatic notes are system notes,
-not the operator's `user_note`. Colors use the existing History color filter and
-marked-request count; note-only actions do not count as manual marks.
+- Notes are literal text. No scripts, variables or regex groups expand in them.
+- A rule that only annotates never changes the bytes sent or received, and does
+  not mark the capture as modified.
+- Rule notes are system notes, kept apart from your own note on a capture.
+  Colors work with the History color filter and the marked-request count.
+- Rules apply to new traffic. Editing a rule does not revisit old captures.
 
 ## Rule JSON
 
-Existing `capture auto-replace list/set` and `/api/match-replace` use these optional
-fields alongside the existing rule fields:
+`capture auto-replace list/set` and `/api/match-replace` take three optional
+fields beside the existing ones:
 
-- `annotation_only_enabled`: omitted/null keeps legacy replacement mode, whose
-  On switch is `enabled`. `true` or `false` selects active/inactive annotation-only
-  mode; in either case `enabled` must be `false`.
-- `annotation_note`: optional literal text, at most 1,024 UTF-8 bytes. All configured
-  notes together may contain at most 32,768 bytes. Empty means no note; nonempty
-  whitespace-only text is rejected.
-- `annotation_color`: optional `red`, `orange`, `yellow`, `green`, `blue` or `purple`.
+- `annotation_only_enabled`: omitted or `null` for a replacement rule, whose On
+  switch is `enabled`. `true` or `false` makes the rule annotation-only, on or
+  off, and `enabled` must then be `false`. Older Sniper versions therefore read
+  it as a disabled rule rather than running its replacement.
+- `annotation_note`: at most 1,024 UTF-8 bytes, 32,768 across all rules. Text
+  that is only whitespace is rejected.
+- `annotation_color`: `red`, `orange`, `yellow`, `green`, `blue` or `purple`.
 
-The existing 500-rule and 8MiB configuration limits remain. Empty search matches
-nothing. An annotation-only rule with neither note nor color is inert. Mixed
-replacement+annotation rules use legacy replacement mode; an empty replacement
-still deletes matching text when Replace is on.
+A rule with a note or color and Replace on is a replacement rule, and an empty
+replacement still deletes the matched text. An annotation-only rule with neither
+a note nor a color does nothing. An empty search matches nothing.
 
-Every serialized annotation-only rule has `enabled:false`, so an old binary
-cannot silently execute its replacement. An old typed client may discard the
-new fields; that round-trip reloads as a **disabled replacement rule**, not an
-active annotation rule. Old software does not understand or retain annotation
-mode. Contradictory raw API input is rejected; contradictory saved state is
-restored with both activation authorities off.
+## Order
 
-## Ordering and manual changes
+Rules run in saved order. The last matching color wins, and response colors come
+after request colors. Once you set or clear a capture's color, or edit its note,
+rules no longer change its color. Your own notes are never overwritten.
 
-Rules are frozen once per request/response evaluation stage. Matches are resolved
-in saved order, once per rule ID per stage; the first matching annotation-bearing
-occurrence wins for a repeated ID. The last resolved color wins, with response
-colors following request colors. Byte replacement traversal keeps its existing
-order, including repeated IDs.
+## Streamed responses
 
-A late streamed completion may update automatic color only while no manual
-annotation revision exists. Manual color edits, explicit clears, and even
-note-only edits protect the current color from late automation. User notes are
-never overwritten. Automatic effects are persisted with the capture; editing
-rules does not revisit old captures.
-
-## Streaming coverage
-
-Annotation-only response rules do not force full buffering. Body conditions on a
-stream run only after explicit completion and only on complete, untruncated
-retained text. Truncated prefixes, interrupted streams, invalid UTF-8 and
-unavailable decoding cannot produce a body match. A fixed system note reports
-when an applicable body condition could not be inspected; header matches still
-work. Header/body colors resolve in rule order, not arrival order.
-
-Already-buffered traffic can use its complete available text under existing
-buffer/decoder limits, even beyond the display preview. Existing decoding policy
-and replacement fallback are unchanged; annotation matching does not treat failed
-or unsupported decoding's raw fallback as decoded text. Known-bodyless responses
-are distinct from malformed empty encoded content. These rules are not a claim
-of complete decoding or inspection of every response.
-
-If an earlier replacement actually changes a Content-Encoding header name/value,
-later body annotation checks in that stage are skipped with the same coverage
-indication. No-op or rejected header replacements do not invalidate eligibility.
-Header/path matches remain available. This conservative guard does not re-decode
-or change the existing replacement engine's body representation.
+Annotation-only rules do not make Sniper buffer a streamed response. Their body
+conditions run when the stream completes, on the complete retained text. A body
+that was truncated, cut off, not valid UTF-8 or not decodable does not match,
+and a system note says it was not checked; header conditions still apply. The
+same happens when an earlier replacement changed `Content-Encoding`. Buffered
+responses are checked on their full text, within the usual decoding limits.

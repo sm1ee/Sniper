@@ -149,13 +149,11 @@ count. The request kinds toggled under **Requests** and the Service Map filter
 apply. Click an arrow to open its newest row in HTTP history, or another lane to
 follow that origin. The lane headers stay at the top while the flow scrolls.
 **Copy Mermaid**, at the end of the legend, copies the flow as a Mermaid
-sequence diagram. Its source keeps the row counts, stop reasons and hidden
-request kinds; a truncated flow also carries a visible **Partial flow** note.
-`considered_rows` counts the newest-row window before display filters;
-`flow_rows` counts the rows represented by the returned steps after the
-300-step cap, including folded repeats.
-Unread or ambiguous request links and redirects also make coverage partial;
-technology-only metadata limits do not.
+sequence diagram. The copy keeps the row counts, stop reasons and hidden request
+kinds, and a cut-off flow is marked **Partial flow**. `considered_rows` is how
+many of the newest rows were read; `flow_rows` is how many the steps show, after
+the 300-step cap. Links or redirects that could not be read also make a flow
+partial.
 
 The view reads the newest 50,000 rows; the CLI reads 10,000 unless told
 otherwise:
@@ -296,12 +294,9 @@ that row in Replay. **Copy OpenAPI JSON** and **Open in Swagger Editor** export
 the document. At most 500 operations are listed; `info.description` says what was
 left out.
 
-An operation has `x-sniper-parameter-cap-truncated: true` when a contributing
-method/path-template tally dropped parameter entries at its 200-entry cap
-(each entry is a location and name). The flag survives merged path variants,
-even if another variant supplies a dropped name; it is not a count of distinct
-missing fields. Its absence does not mean complete coverage: parameter sampling
-still reads each variant's newest 20 rows within the existing body-read bounds.
+`x-sniper-parameter-cap-truncated: true` marks an operation whose parameter list
+reached the 200-entry cap. Its absence does not prove the list complete:
+parameters come from each path variant's newest 20 rows.
 
 ```bash
 sniper-cli scope service-map openapi --session-id <active-session-uuid> --origin https://api.example.com > api.json
@@ -375,7 +370,9 @@ per map and 128 header tokens per row each add a `technology_…_limit` marker t
 These reads inspect one exact retained row, named by an evidence token from the
 map. Copy the token (at most 200 bytes) unchanged. A stale, edited or removed row
 returns unavailable, never another row. Check `available` before using a result,
-and inspection-specific `complete`/`reasons` for a partial inspection. Packet reads use the side/body states below. None sends a request to a target.
+and `complete` and `reasons` for a partial one; a packet read reports each side
+instead (see [Retained packet pair](#retained-packet-pair)). None sends a request
+to a target.
 All except evidence need the active session and never load another.
 
 | Read | CLI | Returns |
@@ -393,76 +390,39 @@ sniper-cli scope service-map body-references --session-id <active-session-uuid> 
 sniper-cli scope service-map packet --session-id <active-session-uuid> --evidence-id <returned-evidence-token> --variant current
 ```
 
-In the GUI, **Details** and its sample picker select the retained source.
-**Inspect** offers the relevant **HTML generators**, **Body references** and
-**Link references** actions; merely selecting a sample does not run inspections.
-**Find matching peer** explicitly inspects its recorded peer when available.
-Offsets and spans count UTF-8 bytes of the retained
-preview or header value, not of the wire. A generator `parser_stop.byte_cursor` can fall
-inside a character, so do not slice text with it.
+In the GUI, **Details** picks the retained sample, and **Inspect** and **Find
+matching peer** run the reads above on it; picking a sample runs none of them.
+Offsets and spans count UTF-8 bytes of the retained preview or header value, not
+of the wire. A generator `parser_stop.byte_cursor` can fall inside a character,
+so do not slice text with it.
 
 ## Retained packet pair
 
-On explicit endpoint or Details navigation, the first listed retained source is
-opened if none is selected; this is not a claim that it is the newest. A compact
-sample/variant selector preserves the exact source. New sources and variants
-start in **Raw**, using the shared packet viewer and literal search. Verified
-current-response product/version spans are marked only when their exact retained
-header ranges agree; originals do not inherit current marks. Render is a separate
-deliberate mode, not an automatic consequence of opening Details.
+**Details** shows one retained request and response in the packet viewer,
+starting in **Raw**; its sample picker chooses the row and the current or
+original version. The packet menu copies the packet, or opens a complete request
+as an unsent Replay or Fuzzer draft. A failed read offers **Retry**.
 
-The existing packet context menu copies only the selected packet. Replay/Fuzzer
-handoffs create independent **unsent** drafts only for complete supported requests;
-unknown routing, unavailable bodies and incomplete transfers remain disabled.
-There is no UUID refetch or durable History link: transferred drafts have a null
-captured transaction identity. Unchanged polling preserves the mounted viewer
-and reading position. A failed packet read offers explicit **Retry**, not an
-automatic retry loop. **Inspect** remains an explicit contextual action.
+`GET /api/target/service-map/packet` takes `session_id` (the active session),
+`evidence_id` and `variant=current|original`; `scope service-map packet` in the
+CLI is the same read. It sends nothing. The reply has `schema_version: 1`,
+`available`, `reason`, the source row's id, time and `sequence` (a string), and
+`request` and `response`. A side that was not kept is
+`{"status": "not_retained", "message": null}`. A kept side has its start line,
+its headers in order and a `body` with `body_preview`, `body_encoding`, sizes,
+`preview_truncated`, `content_decoded` and `content_type`; an unavailable body
+is not an empty string.
 
-`GET /api/target/service-map/packet` requires `session_id`, `evidence_id` and
-`variant=current|original`; unknown query fields are rejected. The read is for
-the active session only and never opens another saved context. CLI operation
-`target.service_map.packet.get` has the same required fields and performs one
-bounded GET, with no retries, fallback, send or scan.
+These are the stored messages, not wire bytes: a body may be decoded or cut to
+the capture preview. An original has only what was kept, and nothing falls back
+to the current version.
 
-The current variant returns Request and Response together. Originals are an
-explicit lazy read and exist only when actually retained. The envelope includes
-`schema_version:1`, session/token/variant, `available`, `status`, nullable
-`reason`, source UUID/time and **sequence as a string**, limits, original-presence
-booleans and the two sides. A missing side is
-`{ "status": "not_retained", "message": null }`. A retained side has
-`status:retained` and `message`, containing nullable start-line fields, ordered
-headers and `body`. Body exposes availability/reason, nullable `body_preview`,
-`body_encoding`, sizes, `preview_truncated`, `content_decoded` and `content_type`.
-An unavailable body is not an empty string; verified headers can remain visible.
-Known complete-empty metadata needs no body file, including decoded size zero
-with a nonzero encoded size. No general notes, colors or workspace are returned.
-
-These are stored captured messages, not byte-for-byte wire packets. Header
-order/duplicates and stored values are preserved without merging Cookie or
-inserting Host. The body may already be decoded or capture-truncated. No further
-decoding is done. Current response protocol is nullable rather than borrowed
-from its request. Original request method/path appear only if retained;
-original scheme, authority and protocol, and original response status/protocol,
-are unknown/null. There is no current-to-original fallback.
-
-The exact token binds session, store generation, sequence, UUID and body revision.
-An older duplicate UUID never borrows the newest row's disk locator. File and
-locator changes are fenced through final API publication. Deletion, revision or
-session change discards the whole result. Reads share the existing single worker
-slot; its 20-second queue timeout returns unavailable `read_busy` for this
-endpoint. Dropping a client does not release a still-running worker's permit.
-
-Only two view limits apply: the **entire selected-pair JSON response is at most
-2 MiB**, and a disk read's entire serialized row is at most the existing 2 MiB.
-The response is counted from borrowed selected fields before cloning/emitting;
-escaping and structure count. There are no additional body/header-count/field
-mini-limits and no clipping. `packet_view_limit` or `serialized_row_limit` yields
-a wholly unavailable response with null source/originals/request/response.
-A disk row can exceed its input limit because of excluded fields even when the
-selected pair would fit. These are read safeguards, not collection limits or a
-promise that all retained packets are viewable. Raw credentials may be present
-in selected captured headers and URLs; handle copied JSON as sensitive traffic.
+The token names one exact row. If that row changes or goes, or the session
+changes, the read is unavailable rather than another row. The reply is at most
+2 MiB, and so is the row read from disk; past either, the read is unavailable
+(`packet_view_limit`, `serialized_row_limit`). Reads share one worker and give
+up with `read_busy` after 20 seconds in its queue. Captured headers and URLs can
+hold credentials, so treat a copied packet as sensitive.
 
 ## Explicit recorded socket peer matches
 

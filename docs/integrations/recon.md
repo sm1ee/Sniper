@@ -2,7 +2,7 @@
 
 Recon builds one endpoint inventory per session from three sources: a static crawler of the target, existing urlscan results, and the Wayback CDX index. Open **Scan ▸ Recon**, enter an absolute target URL, choose sources and optional budgets, then start. Each source reports its status, request count, discoveries, partial results and warnings. **Stop** cancels the job's local work. Jobs stay with their session when you switch sessions; deleting the session or shutting Sniper down cancels them. After a restart, unfinished jobs are marked interrupted and do not resume.
 
-Completed history pages and urlscan result documents are saved to the inventory while collection is still running. Stop keeps those checkpoints; only unfinished provider work may be absent. Checkpointed discoveries retain historical evidence and do not become captured requests or prove that an endpoint is live.
+Results are saved as each page, document or crawler response completes, so **Stop** keeps everything collected so far.
 
 ## Scope and consent
 
@@ -27,35 +27,21 @@ Entries are deduplicated by normalized URL plus method. The query string is kept
 
 Select an endpoint and use **Copy URL** to copy its normalized URL, preserving query order and encoding. Copying does not visit the URL or create a captured request.
 
-**Open in Replay** appends an unsent HTTP draft from the selected normalized URL and inventory method. It preserves raw path/query spelling and explicit authority ports, adds only Host, and leaves the body empty. It does not infer POST fields from evidence, copy authentication or captured headers, look up/create a transaction, send traffic, or start Fuzzer. The existing notice identifies the constructed draft and fixed source/evidence categories; complete evidence remains in Recon. Review the destination, headers and body before sending; availability and an original request/protocol are not established. HTTP/1.1 is an editable default, not an observed protocol. Replay’s existing explicit Fuzzer action remains separate.
+**Open in Replay** opens the selected endpoint as a new, unsent Replay tab with its method, its URL as written, a Host header and an empty body. It copies no form fields, authentication or captured headers, and sends nothing. The HTTP version starts at HTTP/1.1. CONNECT and URLs that are not HTTP(S) are refused.
 
-The action requires a current loaded selection, with no read, mutation or load error. Stale/detached/session-reset actions do nothing. It preserves a current owned Replay editor (including unfinished raw text); invalid target/version or unfinished hex edits must be resolved before retrying. Stale hidden editor controls are not imported. Unknown/invalid methods, CONNECT and unsafe/non-HTTP(S) URLs are refused, not repaired. Existing 2 MiB request-text/editable-message, 4 KiB target-field and 512-tab limits apply without truncating the inventory. This does not guarantee an already nearly-full aggregate workspace can be saved; normal workspace persistence/error handling still applies.
-
-**Copy filtered JSON** copies every matching endpoint in the current sort order, across all pages, with its raw URLs and all retained evidence. It uses the loaded inventory without sending requests. Empty results, loading, pending mutations and failed refreshes disable the action. The copy is limited to 2 MiB of UTF-8 JSON, checked before constructing the export; oversized or malformed results are refused as a whole. Narrow the filter or use the full API/CLI inventory instead. This is a copy limit, not a collection or retained-inventory limit.
-
-The payload records the filters, sort, session and local click time (`copied_at`), not a server freshness time. Session-wide diagnostic counts use fixed status/source categories, with unknown labels counted generically; they do not attribute jobs to individual endpoints. Global job targets and raw warnings/errors are omitted. An absent response-truncation flag is `null` (unknown), not evidence of completeness. Selected URL/query/evidence values are copied faithfully and may be sensitive.
-
-A pending JSON copy keeps its click-time bytes through paging, row selection and background refreshes. Changing filters/sort, starting or stopping a job, hiding/resetting Recon, changing session, or making a newer eligible copy retires its fallback and notices. This cannot cancel a clipboard write already handed to the platform. Individual **Copy URL** keeps its existing selection/refresh ownership rules.
+**Copy filtered JSON** copies every endpoint that matches the filter, across all pages and in the current order, with its raw URLs and evidence. It sends nothing and is limited to 2 MiB; narrow the filter or use the API or CLI for more. The copy records the filter, sort, session and `copied_at`, the time you clicked. Values are copied as collected and may be sensitive.
 
 ## Budgets
 
 `max_requests`, `max_depth`, `max_endpoints` and `max_pages` default to 0, which means no limit; a positive value limits one job. `max_endpoints` counts new entries the job adds; existing entries can still gain evidence. `max_pages` applies to each history source separately. A job that stops at a budget with work left is reported as partial. `max_depth=0` used to mean the seed only; it now means no limit.
 
-urlscan retains the in-scope summaries from each completed search page before requesting its detail documents. If an explicit result budget fills on those summaries, they take priority and no further detail request is sent; the source is marked partial.
+When a result budget fills on urlscan's search summaries, no detail documents are fetched and the source is marked partial. Redirect chains stop after five hops, and a destination left unvisited marks the crawl partial.
 
-Redirect chains stop after five hops; an unvisited in-scope destination left behind by that limit marks the crawl partial. A known urlscan search-page limit is reported while that page's detail requests are still pending, not only after they finish.
-
-Completed crawler responses and known partial-state warnings are checkpointed before the next network wait, including redirects and non-text responses. Stop keeps those checkpoints and the attempted-request count; the unfinished response or body may still be absent.
-
-Collection budgets do not cap raw response-body bytes, so a broad or growing target can use a lot of memory and disk. Set a budget or use Stop.
+Budgets do not limit response-body size, so a broad or growing target can use a lot of memory and disk. Set a budget or use Stop.
 
 ## Compressed crawler responses
 
-The crawler decodes `gzip` and `x-gzip` before static extraction, including repeated/comma-separated encoding fields, stacked gzip layers in reverse order, and concatenated gzip members. Every member must finish with a valid checksum and no trailing non-member bytes. Identity/no-encoding reading is unchanged; request headers and provider/capture decoders are unchanged.
-
-Unsupported or invalid encodings, malformed/truncated streams, and decoding-limit failures skip extraction for that body and mark collection partial with a fixed warning. Compressed bytes are never treated as decoded text. Already observed live responses remain in the inventory, and known partial warnings are checkpointed before the next wait so Stop retains them. Empty 204/205 responses do not require a gzip stream. Unsupported encodings on parseable content are rejected as soon as the headers establish the error (or, for 204/205, the first nonempty chunk), without waiting for an unread body. Binary content outside static extraction keeps its existing handling.
-
-New compressed-work safety limits are 16 MiB decoded output per stage (across all members), two decoding workers, and 15 seconds for queueing plus decoding after the raw body has been read. Worker slots remain occupied until cancelled work actually exits. These are not additional API collection budgets, a new identity/raw-body cap, or a bound on all queued raw-body memory. Stop cancels awaiting work and cooperatively stops running decoding; it does not publish late worker results.
+The crawler decodes `gzip` and `x-gzip` bodies, including stacked layers and several members, before extracting URLs. A body with another encoding, a damaged stream, or more than 16 MiB decoded is skipped and the crawl is marked partial; compressed bytes are never read as text. Decoding runs on at most two workers, for at most 15 seconds a body.
 
 ## What each source collects
 
@@ -63,21 +49,15 @@ New compressed-work safety limits are 16 MiB decoded output per stage (across al
 - Wayback: CDX records without status or MIME filters, so error responses and old resources appear too.
 - Crawler: HTML links, resources and base URLs; GET and POST form actions and field names; URL literals in inline and external JavaScript; robots hints; and sitemap indexes and URLs. It does not render pages, log in, look for source maps, evaluate JavaScript, expand wildcards or infer dynamic routes.
 
-Within the parsed enclosing form/action context, form candidates apply [HTML submission-method defaults](https://html.spec.whatwg.org/dev/form-control-infrastructure.html#form-submission-attributes): invalid methods use GET, omitted overrides inherit the form's method, and dialog submissions do not create HTTP endpoints. Explicit `form=id` ownership and runtime DOM changes are not resolved. These rules do not alter methods in observed provider traffic.
+Form candidates follow HTML's [submission rules](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-attributes): an invalid method means GET, a submit button's `formmethod` and `formaction` override the form's, and `method="dialog"` creates no endpoint. An empty submit-button action means the document URL. Normalized URLs drop fragments; the raw evidence keeps them.
 
-Literal fragment [form actions](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-algorithm) retain their method and resolve through the document base; an exactly empty submitter action instead uses the document URL, not the parent action or `base[href]`. Newly recognized empty/fragment submitter actions require the same parsed enclosing form and submit-button context as method-only overrides. They remain passive candidates: normalized URLs omit fragments while raw URL evidence retains them. This does not change ordinary fragment-link filtering or other whitespace/malformed-action handling.
-
-HTML URL attributes use conservative [static element/attribute recognition](https://html.spec.whatwg.org/multipage/indices.html#attributes-3): `href` on `a`, `area`, or `link`; `src` on `audio`, `embed`, `iframe`, `img`, `script`, `track`, or `video`, and image-type `input`; `video[poster]`; and `object[data]`. Parsed HTML `base[href]` sets relative-URL resolution and is not itself fetched.
-
-For HTML (including the empty-content-type fallback), a base inside a literal [`template`](https://html.spec.whatwg.org/multipage/scripting.html#the-template-element) does not set the document base. This limited nesting guard ignores template-like text in comments and recognized raw-text bodies; an unclosed template remains open, including a self-closing-looking HTML `<template/>`. Other extracted template URLs keep their existing evidence and followability. XHTML base handling is unchanged. This does not reinterpret ordinary non-template raw-text base selection.
-
-Other extracted URL attributes remain candidates with their tag and attribute provenance, including custom/prefixed elements, unresolved `source[src]` media-parent context, and literal SVG/MathML subtrees (including `foreignObject` children). A candidate and a recognized link to the same URL retain separate evidence. Custom-component runtime, namespace integration points, general template/inert DOM behavior and malformed-markup recovery are not interpreted: this is source extraction, not browser execution or full HTML conformance.
+The crawler follows `href` on `a`, `area` and `link`; `src` on `audio`, `embed`, `iframe`, `img`, `script`, `track`, `video` and image inputs; `video[poster]`; and `object[data]`. `base[href]` sets the base for relative URLs, except inside a `<template>`. Other URL attributes become candidates with their tag and attribute recorded. This is static extraction, not a browser: scripts, custom elements and malformed markup are not interpreted.
 
 ## Scope site map
 
-**Scope → Site map** includes the active session's Recon inventory, read-only. Rows mark captured and discovered evidence and keep the Recon source and evidence kind. A row that was also captured keeps its HTTP status and capture metrics, and `request_count` counts captured traffic only. Discovered endpoints do not become proxy transactions, so a Recon-only row has no captured request to open or replay. The separate Recon **Open in Replay** action constructs a new draft, not a captured exchange. The inventory is saved with its session and stays in the map after a restart.
+**Scope → Site map** includes the active session's Recon inventory, read-only. Rows mark captured and discovered evidence and keep the Recon source and evidence kind. A row that was also captured keeps its HTTP status and capture metrics, and `request_count` counts captured traffic only. Discovered endpoints do not become proxy transactions, so a Recon-only row has no captured request to open or replay. The inventory is saved with its session and stays in the map after a restart.
 
-Refreshes do not replace a newer accepted runtime/site-map result. Unsaved scope edits owned by the current session are kept when refreshing or returning to Scope; **Save** still applies them explicitly.
+Refreshing keeps your unsaved scope edits; **Save** applies them.
 
 ## Local API
 
