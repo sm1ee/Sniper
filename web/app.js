@@ -29742,7 +29742,7 @@ function changeReplayMethod(newMethod, tabId = state.activeReplayTabId) {
 // switching from one to POST moves the query into a form body. Any other change
 // only renames the method.
 function requestTextWithMethod(text, method) {
-  const renamed = () => String(text ?? "").replace(/^[A-Z]+(\s)/i, `${method}$1`);
+  const renamed = () => String(text ?? "").replace(/^[A-Za-z0-9!#$%&'*+.^_`|~-]+(\s)/, `${method}$1`);
   const { head, body } = splitRawHttpMessage(text);
   const [requestLine, ...headers] = head.split("\n");
   const line = requestLine.match(/^(\S+)(\s+)(\S+)(.*)$/);

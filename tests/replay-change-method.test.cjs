@@ -98,6 +98,38 @@ test("other changes only replace the method", () => {
   assert.equal(c.requestTextWithMethod(empty, "GET"), empty.replace("POST", "GET"));
 });
 
+for (const method of ["M-SEARCH", "VERSION-CONTROL", "custom2", "!#$%&'*+.^_`|~-"]) {
+  test(`renaming ${method} preserves everything after the method token`, () => {
+    const tail = "\t /items?keep=%2f HTTP/1.1\r\nHost: example.com\r\nContent-Type: text/plain\r\nContent-Length: 7\r\n\r\na\r\nb\n\n\n";
+    assert.equal(c.requestTextWithMethod(`${method}${tail}`, "PUT"), `PUT${tail}`);
+    const emptyTail = " /items HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    assert.equal(c.requestTextWithMethod(`${method}${emptyTail}`, "GET"), `GET${emptyTail}`);
+  });
+}
+
+test("the menu replaces an extension method in the active editor on repeated changes", () => {
+  const tab = { id: "r1", requestText: "GET /stale HTTP/1.1" };
+  let editorText = "M-SEARCH /items HTTP/1.1\r\nHost: example.com\r\n\r\n";
+  const calls = [];
+  const menu = loadFunctions(["changeReplayMethod", "requestTextWithMethod", "splitRawHttpMessage", "editableRequestBodyLength"], {
+    TextEncoder,
+    state: { activeReplayTabId: tab.id },
+    els: {},
+    getReplayTabById: () => tab,
+    getCMView: () => ({ getContent: () => editorText }),
+    clearReplayResponseForDraftChange: () => calls.push("clear"),
+    syncReplayRequestEditorForTab: () => { editorText = tab.requestText; calls.push("sync"); },
+    scheduleWorkspaceStateSave: () => calls.push("save"),
+  });
+  menu.changeReplayMethod("PUT");
+  assert.equal(tab.requestText, "PUT /items HTTP/1.1\r\nHost: example.com\r\n\r\n");
+  assert.equal(editorText, tab.requestText);
+  menu.changeReplayMethod("DELETE");
+  assert.equal(tab.requestText, "DELETE /items HTTP/1.1\r\nHost: example.com\r\n\r\n");
+  assert.equal(editorText, tab.requestText);
+  assert.deepEqual(calls, ["clear", "sync", "save", "clear", "sync", "save"]);
+});
+
 test("the menu applies the change to the tab and clears its stale response", () => {
   const tab = { id: "r1", requestText: lines("POST /a HTTP/1.1", "Host: example.com", "Content-Type: application/x-www-form-urlencoded", "", "b=1") };
   const calls = [];
