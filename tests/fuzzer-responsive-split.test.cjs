@@ -20,10 +20,10 @@ function fixture(templateWidth = 700, payloadWidth = 290) {
   const document = { body, getElementById: id => id === 'fuzzerColResizer' ? handle : null,
     querySelector: selector => ({ '.fuzzer-top-row': top, '.fuzzer-template-card': template, '.fuzzer-payloads-card': payload })[selector],
     addEventListener: (type, callback) => listeners.set(type, callback), removeEventListener: type => listeners.delete(type) };
-  const c = loadFunctions(['initFuzzerResizers'], { document, els: { fuzzerDetailPanel: null } });
+  const c = loadFunctions(['initFuzzerResizers'], { document, window: { addEventListener() {}, removeEventListener() {} }, els: { fuzzerDetailPanel: null } });
   c.initFuzzerResizers();
   return { handle, top, template, payload, body, listeners,
-    drag(delta) { handle.listeners.get('mousedown')({ clientX: 500, preventDefault() {} }); listeners.get('mousemove')?.({ clientX: 500 + delta }); listeners.get('mouseup')?.(); },
+    drag(delta) { handle.listeners.get('mousedown')({ clientX: 500, preventDefault() {} }); listeners.get('mousemove')?.({ clientX: 500 + delta, buttons: 1 }); listeners.get('mouseup')?.(); },
     share() { return Number(top.properties.get('--fuzzer-request-share')); } };
 }
 
@@ -80,12 +80,12 @@ test('detail resize reserves measured chrome and a usable table viewport', () =>
   const document = { body, getElementById: id => id === 'fuzzerDetailResizer' ? handle : null,
     querySelector: () => null,
     addEventListener: (type, callback) => listeners.set(type, callback), removeEventListener: type => listeners.delete(type) };
-  const c = loadFunctions(['initFuzzerResizers'], { document, els: { fuzzerDetailPanel: detail } });
+  const c = loadFunctions(['initFuzzerResizers'], { document, window: { addEventListener() {}, removeEventListener() {} }, els: { fuzzerDetailPanel: detail } });
   c.initFuzzerResizers();
   handle.listeners.get('mousedown')({ clientY: 500, preventDefault() {} });
-  listeners.get('mousemove')({ clientY: -5000 });
+  listeners.get('mousemove')({ clientY: -5000, buttons: 1 });
   assert.equal(detail.style.flex, '0 0 170px');
-  listeners.get('mousemove')({ clientY: 5000 });
+  listeners.get('mousemove')({ clientY: 5000, buttons: 1 });
   assert.equal(detail.style.flex, '0 0 140px');
   listeners.get('mouseup')(); assert.equal(listeners.size, 0);
   handle.listeners.get('dblclick')(); assert.equal(detail.style.flex, '');

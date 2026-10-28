@@ -18267,6 +18267,8 @@ function handleReplayActionError(error) {
 }
 
 function initFuzzerResizers() {
+  // A lost mouseup or another divider drag must retire the previous gesture.
+  let finishResize = null;
   const colHandle = document.getElementById("fuzzerColResizer");
   const rowHandle = document.getElementById("fuzzerRowResizer");
   const topRow = document.querySelector(".fuzzer-top-row");
@@ -18276,6 +18278,7 @@ function initFuzzerResizers() {
   // Column resizer: template ↔ payloads
   if (colHandle && topRow && templateCard && payloadsCard) {
     colHandle.addEventListener("mousedown", (e) => {
+      finishResize?.();
       e.preventDefault();
       const startX = e.clientX;
       const startTemplateW = templateCard.offsetWidth;
@@ -18287,19 +18290,29 @@ function initFuzzerResizers() {
       document.body.classList.add("pane-resizing-x");
       colHandle.classList.add("active");
       const onMove = (me) => {
+        if (finishResize !== onUp) return;
+        if (me.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = me.clientX - startX;
         const newTemplateW = Math.max(minTemplateW, Math.min(totalW - minPayloadsW, startTemplateW + delta));
         // Keep the split proportional when the window is resized later.
         topRow.style.setProperty("--fuzzer-request-share", String(newTemplateW / totalW));
       };
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-x");
         colHandle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
       };
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
     colHandle.addEventListener("dblclick", () => {
       topRow.style.removeProperty("--fuzzer-request-share");
@@ -18309,6 +18322,7 @@ function initFuzzerResizers() {
   // Row resizer: top row ↔ results
   if (rowHandle && topRow) {
     rowHandle.addEventListener("mousedown", (e) => {
+      finishResize?.();
       e.preventDefault();
       const startY = e.clientY;
       const startH = topRow.offsetHeight;
@@ -18317,18 +18331,28 @@ function initFuzzerResizers() {
       document.body.classList.add("pane-resizing-y");
       rowHandle.classList.add("active");
       const onMove = (me) => {
+        if (finishResize !== onUp) return;
+        if (me.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = me.clientY - startY;
         const newH = Math.max(180, Math.min(layoutH - 360, startH + delta));
         topRow.style.height = `${newH}px`;
       };
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-y");
         rowHandle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
       };
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
     rowHandle.addEventListener("dblclick", () => {
       topRow.style.height = "";
@@ -18340,6 +18364,7 @@ function initFuzzerResizers() {
   const detailPanel = els.fuzzerDetailPanel;
   if (detailHandle && detailPanel) {
     detailHandle.addEventListener("mousedown", (e) => {
+      finishResize?.();
       e.preventDefault();
       const startY = e.clientY;
       const startH = detailPanel.offsetHeight;
@@ -18352,18 +18377,28 @@ function initFuzzerResizers() {
       document.body.classList.add("pane-resizing-y");
       detailHandle.classList.add("active");
       const onMove = (me) => {
+        if (finishResize !== onUp) return;
+        if (me.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = startY - me.clientY; // drag up = bigger detail
         const newH = Math.max(140, Math.min(parentH - reservedH, startH + delta));
         detailPanel.style.flex = `0 0 ${newH}px`;
       };
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-y");
         detailHandle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
       };
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
     detailHandle.addEventListener("dblclick", () => {
       detailPanel.style.flex = "";
