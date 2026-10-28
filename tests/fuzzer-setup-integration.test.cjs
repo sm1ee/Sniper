@@ -672,3 +672,52 @@ test('raw offset LF fast path preserves UTF-16 coordinates and rejects invalid o
   assert.equal(f.c.fuzzerRawOffsetForEditorOffset('a\r\nb', 2), 3);
   assert.throws(() => f.c.fuzzerRawOffsetForEditorOffset('a\r\nb', 4), /selection changed/);
 });
+
+for (const nl of ['\n', '\r\n']) for (const value of ['😀한e\u0301', 'oneone']) {
+  test(`actual marker actions create Undo records and preserve raw bytes (${JSON.stringify({ nl, value })})`, () => {
+    const f = fixture();
+    const before = `POST /?q=${value}&q=${value} HTTP/1.1${nl}Host: example.com${nl}X-Repeat: ${value}${nl}${nl}body=${value}`;
+    f.state.fuzzerRequestText = before;
+    // Textarea fallback exposes normalized coordinates, as the browser editor does.
+    const input = f.els.fuzzerRequestEditor = {
+      value: before.replace(/\r\n/g, '\n'), selectionStart: 0, selectionEnd: 0,
+      focus() {}, setSelectionRange(from, to) { this.selectionStart = from; this.selectionEnd = to; },
+    };
+    const render = f.c.renderFuzzer;
+    f.c.renderFuzzer = () => {
+      render();
+      input.value = f.state.fuzzerRequestText.replace(/\r\n/g, '\n');
+    };
+    const start = before.indexOf('body=') + 5, end = start + value.length;
+    const select = (text, from, to) => {
+      input.value = text.replace(/\r\n/g, '\n');
+      input.selectionStart = text.slice(0, from).replace(/\r\n/g, '\n').length;
+      input.selectionEnd = text.slice(0, to).replace(/\r\n/g, '\n').length;
+    };
+    const marked = before.slice(0, start) + '§' + value + '§' + before.slice(end);
+    select(before, start, end);
+    f.c.markFuzzerEditorSelection();
+    assert.equal(f.state.fuzzerRequestText, marked);
+    assert.equal(f.state._fuzzerMarkerUndo.before, before);
+    assert.equal(f.state._fuzzerMarkerUndo.after, marked);
+    f.c.undoFuzzerMarker();
+    assert.equal(f.state.fuzzerRequestText, before);
+    assert.equal(f.state._fuzzerMarkerUndo, null);
+    select(before, start, end);
+    f.c.markFuzzerEditorSelection();
+    select(marked, start, end + 2);
+    f.c.removeFuzzerEditorPosition();
+    assert.equal(f.state.fuzzerRequestText, before);
+    assert.equal(f.state._fuzzerMarkerUndo.before, marked);
+    assert.equal(f.state._fuzzerMarkerUndo.after, before);
+    f.c.undoFuzzerMarker();
+    assert.equal(f.state.fuzzerRequestText, marked);
+    assert.equal(f.state._fuzzerMarkerUndo, null);
+    input.value = marked.replace(/\r\n/g, '\n');
+    f.c.clearFuzzerMarkers();
+    assert.equal(f.state.fuzzerRequestText, before);
+    f.c.undoFuzzerMarker();
+    assert.equal(f.state.fuzzerRequestText, marked);
+    assert.equal(f.state._fuzzerMarkerUndo, null);
+  });
+}
