@@ -14,6 +14,7 @@ function fixture(mode) {
   els.interceptSearchMeta = null;
   Object.assign(context, { escapeHtml: String, formatTimestamp: String });
   for (const name of ['renderIntercepts', 'renderResponseIntercepts', 'getVisibleRequestInterceptSummaries',
+    'getInterceptDraftRecovery', 'captureInterceptDraftRecoveryOwners', 'handleInterceptDraftReadFailure', 'takeInterceptDraftRecovery',
     'selectInterceptQueueItem', 'getInterceptDetailRead', 'updateInterceptDetailFeedback', 'retrySelectedInterceptDetail', 'updateInterceptQueueSelectionStatus', 'scrollSelectedInterceptRowIntoView',
     'getVisibleResponseInterceptSummaries', 'reconcileRequestInterceptSelection', 'reconcileResponseInterceptSelection',
     'setInterceptPaneContent', 'buildEditableRawResponse', 'updateInterceptSearch', 'activeInterceptCMKey']) {
@@ -104,3 +105,32 @@ for (const mode of ['request', 'response']) test(`${mode}: actual CM constructio
   Object.assign(f.state[prefix + 'DetailRead'], { pending: true, showPending: false });
   f.render(); assert.equal(f.cv(), loaded); assert.equal(f.cv().getContent(), draft); assert.equal(created.length, loadedBuilds);
 });
+
+for (const mode of ['request', 'response']) {
+  test(`${mode}: actual CM line normalization does not turn untouched text into a recovery draft`, () => {
+    const f = fixture(mode);
+    f.a[mode].body = 'first\r\nsecond\rthird';
+    f.select(f.a);
+    assert.match(f.cv().getContent(), /first\nsecond\nthird/);
+    f.context.handleInterceptDraftReadFailure(mode, 503, {
+      capture: true, owners: f.context.captureInterceptDraftRecoveryOwners(),
+    });
+    assert.equal(f.state[mode === 'request' ? 'interceptDraftRecovery' : 'responseInterceptDraftRecovery'], null);
+  });
+
+  test(`${mode}: actual CM restores text alone after unavailable detail, never retired Undo or Redo`, () => {
+    const f = fixture(mode); f.edit('local synthetic draft');
+    const text = f.cv().getContent(), old = f.cv();
+    const recordKey = mode === 'request' ? 'selectedInterceptRecord' : 'selectedResponseInterceptRecord';
+    const recoveryKey = mode === 'request' ? 'interceptDraftRecovery' : 'responseInterceptDraftRecovery';
+    f.context.handleInterceptDraftReadFailure(mode, 503, {
+      capture: true, owners: f.context.captureInterceptDraftRecoveryOwners(),
+    });
+    assert.equal(f.state[recoveryKey].text, text);
+    f.state[recordKey] = null; f.render();
+    assert.equal(f.cv().getContent(), ''); assert.equal(old.view.destroyed, true);
+    f.state[recordKey] = f.a; f.render();
+    assert.equal(f.cv().getContent(), text); assert.equal(f.state[recoveryKey], null);
+    assert.equal(f.undo(), false); assert.equal(f.redo(), false);
+  });
+}

@@ -503,10 +503,12 @@ const state = {
   interceptAcceptedLoadGeneration: 0,
   interceptDetailGeneration: 0,
   interceptDetailRead: null,
+  interceptDraftRecovery: null,
   responseInterceptLoadGeneration: 0,
   responseInterceptAcceptedLoadGeneration: 0,
   responseInterceptDetailGeneration: 0,
   responseInterceptDetailRead: null,
+  responseInterceptDraftRecovery: null,
   selectedInterceptId: null,
   selectedInterceptRecord: null,
   selectedResponseInterceptId: null,
@@ -3454,6 +3456,8 @@ function applyWorkspaceState(snapshot) {
     return;
   }
   workspaceStateGeneration += 1;
+  state.interceptDraftRecovery = null;
+  state.responseInterceptDraftRecovery = null;
   retireFindingActionProgress();
   // Later UI reads can fail before panels render and synchronize this owner.
   if (typeof reconController !== "undefined") reconController?.syncSession();
@@ -5371,6 +5375,8 @@ function resetSessionScopedUiState() {
   invalidateVisibleEntriesCache();
   state.intercepts = [];
   state.responseIntercepts = [];
+  state.interceptDraftRecovery = null;
+  state.responseInterceptDraftRecovery = null;
   // Invalidate reads even when the operator returns to the same session ID.
   state.interceptAcceptedLoadGeneration = state.interceptLoadGeneration = (state.interceptLoadGeneration || 0) + 1;
   state.responseInterceptAcceptedLoadGeneration = state.responseInterceptLoadGeneration = (state.responseInterceptLoadGeneration || 0) + 1;
@@ -6428,6 +6434,8 @@ function copyMenuTargetUrl(target) {
 
 async function loadIntercepts(preserveSelection = true) {
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftOwners = captureInterceptDraftRecoveryOwners();
   const generation = state.interceptLoadGeneration = (state.interceptLoadGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && generation >= (state.interceptAcceptedLoadGeneration || 0);
@@ -6435,6 +6443,9 @@ async function loadIntercepts(preserveSelection = true) {
   try {
     const response = await fetch(sessionQueryPath("/api/intercepts", sessionId));
     if (!isCurrent()) return;
+    if (!response.ok && workspaceGeneration === workspaceStateGeneration) {
+      handleInterceptDraftReadFailure("request", response.status, { owners: draftOwners });
+    }
     await requireOkResponse(response, "Failed to load intercepted requests.");
     intercepts = jsonArray(await response.json());
   } catch (error) {
@@ -6449,6 +6460,7 @@ async function loadIntercepts(preserveSelection = true) {
 
   const visibleIntercepts = getVisibleRequestInterceptSummaries();
   if (!preserveSelection || !visibleIntercepts.some((item) => item.id === state.selectedInterceptId)) {
+    state.interceptDraftRecovery = null;
     state.selectedInterceptId = visibleIntercepts[0]?.id ?? null;
     state.interceptDetailRead = null;
     state.selectedInterceptRecord = null;
@@ -6474,6 +6486,8 @@ async function loadInterceptDetail(id, { explicit = false } = {}) {
   // Faster queue polling must not retire this owner's slow detail repeatedly.
   if (!explicit && previousRead?.id === id && previousRead.pending) return;
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftOwners = captureInterceptDraftRecoveryOwners();
   const generation = state.interceptDetailGeneration = (state.interceptDetailGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && state.selectedInterceptId === id && state.interceptDetailGeneration === generation;
@@ -6486,6 +6500,9 @@ async function loadInterceptDetail(id, { explicit = false } = {}) {
     if (!response.ok) {
       read.pending = false;
       read.error = true;
+      if (workspaceGeneration === workspaceStateGeneration) {
+        handleInterceptDraftReadFailure("request", response.status, { capture: true, owners: draftOwners });
+      }
       state.selectedInterceptRecord = null;
       renderIntercepts();
       return;
@@ -6496,6 +6513,8 @@ async function loadInterceptDetail(id, { explicit = false } = {}) {
     read.pending = false;
     read.error = false;
     state.selectedInterceptRecord = record;
+    const draft = getInterceptDraftRecovery("request");
+    if (draft?.id === record.id) state.interceptDraftRecovery = { ...draft, owner: {} };
     renderIntercepts();
   } catch (error) {
     if (isCurrent()) {
@@ -13574,6 +13593,75 @@ function getVisibleResponseInterceptSummaries() {
     : state.responseIntercepts;
 }
 
+function getInterceptDraftRecovery(queue) {
+  const response = queue === "response";
+  const key = response ? "responseInterceptDraftRecovery" : "interceptDraftRecovery";
+  const draft = state[key];
+  const id = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const visible = response ? getVisibleResponseInterceptSummaries() : getVisibleRequestInterceptSummaries();
+  if (draft && (draft.sessionId !== currentSessionId() || draft.workspaceGeneration !== workspaceStateGeneration
+    || draft.id !== id || !visible.some(item => item.id === id))) {
+    state[key] = null;
+  }
+  return state[key] || null;
+}
+
+function captureInterceptDraftRecoveryOwners() {
+  // Pending reads keep only an identity token, not text retired by navigation.
+  return ["request", "response"].map(queue => ({ queue, token: getInterceptDraftRecovery(queue)?.owner,
+    acceptedGeneration: queue === "response" ? state.responseInterceptAcceptedLoadGeneration || 0
+      : state.interceptAcceptedLoadGeneration || 0 }));
+}
+
+function handleInterceptDraftReadFailure(queue, status, { capture = false, owners = [] } = {}) {
+  const response = queue === "response";
+  const key = response ? "responseInterceptDraftRecovery" : "interceptDraftRecovery";
+  // Eligibility is not a promise that a server error is transient. Keep only
+  // unsent text, never the actionable record, until this owner loads again.
+  if (!(status >= 500 && status < 600)) {
+    // A pending newer poll is not a new owner. A replacement slot or accepted
+    // snapshot is: old auth failures must not erase either queue's newer edit.
+    for (const owner of owners) {
+      if (status !== 401 && status !== 403 && owner.queue !== queue) continue;
+      const accepted = owner.queue === "response" ? state.responseInterceptAcceptedLoadGeneration || 0
+        : state.interceptAcceptedLoadGeneration || 0;
+      // A newer list still containing this ID does not negate a current 404
+      // (or another non-auth detail status outside the recovery policy).
+      const currentDetail = capture && owner.queue === queue && status !== 401 && status !== 403;
+      if (owner.token && getInterceptDraftRecovery(owner.queue)?.owner === owner.token
+        && (currentDetail || accepted === owner.acceptedGeneration)) {
+        state[owner.queue === "response" ? "responseInterceptDraftRecovery" : "interceptDraftRecovery"] = null;
+      }
+    }
+    return;
+  }
+  getInterceptDraftRecovery(queue);
+  if (!capture) return;
+  const id = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const record = response ? state.selectedResponseInterceptRecord : state.selectedInterceptRecord;
+  const seed = response ? state.responseInterceptEditorSeedId : state.interceptEditorSeedId;
+  const visible = response ? getVisibleResponseInterceptSummaries() : getVisibleRequestInterceptSummaries();
+  if (!record || record.id !== id || seed !== id || !visible.some(item => item.id === id)) return;
+  const view = getCMView(response ? "interceptRes" : "interceptReq");
+  const editor = response ? els.interceptResponseEditor : els.interceptRequestEditor;
+  const text = view ? view.getContent() : editor?.value;
+  const original = response ? buildEditableRawResponse(record.response) : buildEditableRawRequest(record.request);
+  // Both CM and native textareas normalize line endings. Compare in that
+  // editor domain without rewriting the text retained for recovery.
+  const comparableOriginal = original.replace(/\r\n?/g, "\n");
+  // Read at failure settlement so typing during the fetch is included. Empty
+  // and invalid drafts are still edits; parsing belongs to explicit Forward.
+  state[key] = typeof text === "string" && text.replace(/\r\n?/g, "\n") !== comparableOriginal
+    ? { sessionId: currentSessionId(), workspaceGeneration: workspaceStateGeneration, id, owner: {}, text } : null;
+}
+
+function takeInterceptDraftRecovery(queue, record) {
+  const draft = getInterceptDraftRecovery(queue);
+  if (!draft || record?.id !== draft.id) return null;
+  state[queue === "response" ? "responseInterceptDraftRecovery" : "interceptDraftRecovery"] = null;
+  return draft.text;
+}
+
 function getInterceptDetailRead(queue) {
   const response = queue === "response";
   const read = response ? state.responseInterceptDetailRead : state.interceptDetailRead;
@@ -13632,6 +13720,7 @@ async function retrySelectedInterceptDetail() {
 function selectInterceptQueueItem(queue, id) {
   if (queue === "response") {
     if (state.selectedResponseInterceptId !== id) {
+      state.responseInterceptDraftRecovery = null;
       state.selectedResponseInterceptId = id;
       state.responseInterceptDetailRead = null;
       state.selectedResponseInterceptRecord = null;
@@ -13641,6 +13730,7 @@ function selectInterceptQueueItem(queue, id) {
     return loadResponseInterceptDetail(id, { explicit: true });
   }
   if (state.selectedInterceptId !== id) {
+    state.interceptDraftRecovery = null;
     state.selectedInterceptId = id;
     state.interceptDetailRead = null;
     state.selectedInterceptRecord = null;
@@ -13713,6 +13803,7 @@ function scrollSelectedInterceptRowIntoView(queue) {
 function reconcileRequestInterceptSelection(visibleIntercepts = getVisibleRequestInterceptSummaries()) {
   const selectedIsVisible = visibleIntercepts.some((item) => item.id === state.selectedInterceptId);
   if (!selectedIsVisible) {
+    state.interceptDraftRecovery = null;
     state.selectedInterceptId = visibleIntercepts[0]?.id ?? null;
     state.interceptDetailRead = null;
     state.selectedInterceptRecord = null;
@@ -13720,6 +13811,7 @@ function reconcileRequestInterceptSelection(visibleIntercepts = getVisibleReques
     return;
   }
   if (state.selectedInterceptRecord && state.selectedInterceptRecord.id !== state.selectedInterceptId) {
+    state.interceptDraftRecovery = null;
     state.selectedInterceptRecord = null;
     state.interceptEditorSeedId = null;
   }
@@ -13728,6 +13820,7 @@ function reconcileRequestInterceptSelection(visibleIntercepts = getVisibleReques
 function reconcileResponseInterceptSelection(visibleIntercepts = getVisibleResponseInterceptSummaries()) {
   const selectedIsVisible = visibleIntercepts.some((item) => item.id === state.selectedResponseInterceptId);
   if (!selectedIsVisible) {
+    state.responseInterceptDraftRecovery = null;
     state.selectedResponseInterceptId = visibleIntercepts[0]?.id ?? null;
     state.responseInterceptDetailRead = null;
     state.selectedResponseInterceptRecord = null;
@@ -13735,6 +13828,7 @@ function reconcileResponseInterceptSelection(visibleIntercepts = getVisibleRespo
     return;
   }
   if (state.selectedResponseInterceptRecord && state.selectedResponseInterceptRecord.id !== state.selectedResponseInterceptId) {
+    state.responseInterceptDraftRecovery = null;
     state.selectedResponseInterceptRecord = null;
     state.responseInterceptEditorSeedId = null;
   }
@@ -13765,6 +13859,7 @@ async function applyInterceptScopeFilterLocally() {
 function renderIntercepts() {
   const filteredIntercepts = getVisibleRequestInterceptSummaries();
   reconcileRequestInterceptSelection(filteredIntercepts);
+  getInterceptDraftRecovery("request");
   const feedback = updateInterceptDetailFeedback("request");
   els.interceptTableBody.innerHTML = filteredIntercepts.length
     ? filteredIntercepts
@@ -13844,7 +13939,8 @@ function renderIntercepts() {
   // selection changes. Losing focus (including to search) must not re-seed it.
   if (els.interceptRequestCM) {
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
-      setInterceptPaneContent("interceptReq", els.interceptRequestCM, buildEditableRawRequest(state.selectedInterceptRecord.request), {
+      setInterceptPaneContent("interceptReq", els.interceptRequestCM,
+        takeInterceptDraftRecovery("request", state.selectedInterceptRecord) ?? buildEditableRawRequest(state.selectedInterceptRecord.request), {
         mode: "http", readOnly: false,
       });
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
@@ -13852,7 +13948,8 @@ function renderIntercepts() {
   } else {
     els.interceptRequestEditor.placeholder = "";
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
-      els.interceptRequestEditor.value = buildEditableRawRequest(state.selectedInterceptRecord.request);
+      els.interceptRequestEditor.value = takeInterceptDraftRecovery("request", state.selectedInterceptRecord)
+        ?? buildEditableRawRequest(state.selectedInterceptRecord.request);
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
     }
     renderInterceptRequestHighlight(els.interceptRequestEditor.value);
@@ -19790,6 +19887,8 @@ async function dropSelectedIntercept() {
 
 async function loadResponseIntercepts(preserveSelection = true) {
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftOwners = captureInterceptDraftRecoveryOwners();
   const generation = state.responseInterceptLoadGeneration = (state.responseInterceptLoadGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && generation >= (state.responseInterceptAcceptedLoadGeneration || 0);
@@ -19797,6 +19896,9 @@ async function loadResponseIntercepts(preserveSelection = true) {
   try {
     const response = await fetch(sessionQueryPath("/api/response-intercepts", sessionId));
     if (!isCurrent()) return;
+    if (!response.ok && workspaceGeneration === workspaceStateGeneration) {
+      handleInterceptDraftReadFailure("response", response.status, { owners: draftOwners });
+    }
     await requireOkResponse(response, "Failed to load intercepted responses.");
     responseIntercepts = jsonArray(await response.json());
   } catch (error) {
@@ -19811,6 +19913,7 @@ async function loadResponseIntercepts(preserveSelection = true) {
 
   const visibleResponseIntercepts = getVisibleResponseInterceptSummaries();
   if (!preserveSelection || !visibleResponseIntercepts.some((item) => item.id === state.selectedResponseInterceptId)) {
+    state.responseInterceptDraftRecovery = null;
     state.selectedResponseInterceptId = visibleResponseIntercepts[0]?.id ?? null;
     state.responseInterceptDetailRead = null;
     state.selectedResponseInterceptRecord = null;
@@ -19836,6 +19939,8 @@ async function loadResponseInterceptDetail(id, { explicit = false } = {}) {
   // Faster queue polling must not retire this owner's slow detail repeatedly.
   if (!explicit && previousRead?.id === id && previousRead.pending) return;
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftOwners = captureInterceptDraftRecoveryOwners();
   const generation = state.responseInterceptDetailGeneration = (state.responseInterceptDetailGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && state.selectedResponseInterceptId === id && state.responseInterceptDetailGeneration === generation;
@@ -19848,6 +19953,9 @@ async function loadResponseInterceptDetail(id, { explicit = false } = {}) {
     if (!response.ok) {
       read.pending = false;
       read.error = true;
+      if (workspaceGeneration === workspaceStateGeneration) {
+        handleInterceptDraftReadFailure("response", response.status, { capture: true, owners: draftOwners });
+      }
       state.selectedResponseInterceptRecord = null;
       renderResponseIntercepts();
       return;
@@ -19858,6 +19966,10 @@ async function loadResponseInterceptDetail(id, { explicit = false } = {}) {
     read.pending = false;
     read.error = false;
     state.selectedResponseInterceptRecord = record;
+    // The response may stay hidden until its normal seeding path runs. Renew
+    // the slot so an older read cannot retire text this fresh detail accepted.
+    const draft = getInterceptDraftRecovery("response");
+    if (draft?.id === record.id) state.responseInterceptDraftRecovery = { ...draft, owner: {} };
     renderResponseIntercepts();
   } catch (error) {
     if (isCurrent()) {
@@ -19942,6 +20054,7 @@ function parseEditableRawResponse(text, original, requestMethod = "") {
 function renderResponseIntercepts() {
   const filteredResponseIntercepts = getVisibleResponseInterceptSummaries();
   reconcileResponseInterceptSelection(filteredResponseIntercepts);
+  getInterceptDraftRecovery("response");
   const feedback = updateInterceptDetailFeedback("response");
   els.responseInterceptTableBody.innerHTML = filteredResponseIntercepts.length
     ? filteredResponseIntercepts
@@ -20006,7 +20119,8 @@ function renderResponseIntercepts() {
     // As with requests, preserve this record's draft and search state on polls.
     if (els.interceptResponseCM) {
       if (state.responseInterceptEditorSeedId !== rec.id) {
-        setInterceptPaneContent("interceptRes", els.interceptResponseCM, buildEditableRawResponse(rec.response), {
+        setInterceptPaneContent("interceptRes", els.interceptResponseCM,
+          takeInterceptDraftRecovery("response", rec) ?? buildEditableRawResponse(rec.response), {
           mode: "http", readOnly: false,
         });
         state.responseInterceptEditorSeedId = rec.id;
@@ -20014,7 +20128,7 @@ function renderResponseIntercepts() {
     } else {
       els.interceptResponseEditor.placeholder = "";
       if (state.responseInterceptEditorSeedId !== rec.id) {
-        els.interceptResponseEditor.value = buildEditableRawResponse(rec.response);
+        els.interceptResponseEditor.value = takeInterceptDraftRecovery("response", rec) ?? buildEditableRawResponse(rec.response);
         state.responseInterceptEditorSeedId = rec.id;
       }
       renderInterceptResponseHighlight(els.interceptResponseEditor.value);
