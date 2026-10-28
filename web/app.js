@@ -5779,6 +5779,8 @@ async function activateSessionById(id, { force = false } = {}) {
   const actionScopeDraftVersion = state.targetScopeDraftVersion || 0;
   const actionMatchReplaceDraftVersion = state.matchReplaceDraftVersion || 0;
   const actionSequenceDraftVersion = state.sequenceDraftVersion || 0;
+  const ownsActionWorkspace = () => actionSessionId === currentSessionId()
+    && actionWorkspaceGeneration === workspaceStateGeneration;
   try {
     const response = await fetch(`/api/sessions/${id}/activate${force ? "?force=true" : ""}`, {
       method: "POST",
@@ -5789,9 +5791,16 @@ async function activateSessionById(id, { force = false } = {}) {
       // a stream that does not end on its own — a server-sent event stream, a long
       // poll — so offer to cut it rather than leaving the user stuck.
       if (response.status === 409 && !force && message.includes("proxy activity is still running")) {
+        // Consent to cut activity belongs to this workspace, not just the fixed
+        // destination. Neither a late reply nor an open dialog may transfer it.
+        if (!ownsActionWorkspace()) return;
         showConfirmDialog(
           `${message}.\n\nSwitch anyway? Anything still in flight is cut and will not be recorded.`,
           () => {
+            if (!ownsActionWorkspace()) {
+              showToast("Switch canceled because the active workspace changed. Reopen the session to try again.", "error");
+              return;
+            }
             activateSessionById(id, { force: true }).catch(handleWorkspaceActionError);
           },
           { title: "Proxy is busy", confirmLabel: "Switch anyway" },

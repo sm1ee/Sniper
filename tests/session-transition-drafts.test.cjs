@@ -3,10 +3,11 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const vm = require('node:vm');
-const { fixture, plain } = require('./replay-workspace-fixture.cjs');
+const { fixture, plain, deferred } = require('./replay-workspace-fixture.cjs');
 const { appSource } = require('./frontend-test-helpers.cjs');
 const source = name => appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}$`, 'm'))[0];
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const canceledForceMessage = 'Switch canceled because the active workspace changed. Reopen the session to try again.';
 
 function setup({ rendered = true } = {}) {
   const f = fixture();
@@ -302,7 +303,7 @@ for (const operation of ['create', 'activate']) {
   });
 }
 
-test('force retry reads the newly rendered workspace owner after session reset', async () => {
+test('stale force confirmation leaves the newly rendered workspace draft untouched', async () => {
   const f = setup(); f.dashboard(); const { pending } = await f.start('activate');
   f.requests[0].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
   assert.equal(await pending, undefined); assert.equal(f.confirms.length, 1);
@@ -313,6 +314,7 @@ test('force retry reads the newly rendered workspace owner after session reset',
   const before = take(f); f.confirms[0].callback(); await tick();
   assert.equal(f.requests.length, 1); assert.deepEqual(take(f), before);
   assert.equal(f.context.renderedHttpReplayDraftOwner.tab, replacement);
+  assert.equal(f.toasts.at(-1)[0], canceledForceMessage);
 });
 
 // Completion races use the same production render/reset/input fixture, with real
@@ -644,14 +646,13 @@ for (const operation of ['create', 'activate']) {
     assert.equal(f.state.activeSession.id, 'session-b');
   });
 }
-test('force confirmation starts a fresh preflight owner, and a later reset cancels it before forced dispatch', async () => {
+test('valid same-owner force confirmation runs fresh preflight, and a later reset cancels before forced dispatch', async () => {
   const f = setupCompletedAction(), initial = await f.start('activate', 'session-c');
   f.requests[0].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
   await initial.pending; assert.equal(f.confirms.length, 1);
-  replacePreflightWorkspace(f);
   const gate = pausePreflight(f, preflightPhases[0]); f.confirms[0].callback(); await tick();
-  assert.equal(gate.calls.length, 1, 'force retry must take a fresh entry owner');
-  replacePreflightWorkspace(f, true); const before = f.retained(); gate.resolve(true); await tick();
+  assert.equal(gate.calls.length, 1, 'valid confirmation must still run fresh draft preflight');
+  replacePreflightWorkspace(f); const before = f.retained(); gate.resolve(true); await tick();
   assert.equal(f.requests.length, 1); f.assertRetained(before);
   assert.equal(f.toasts.at(-1)[0], stoppedPreflightMessage); assert.equal(f.error, undefined);
 });
@@ -669,18 +670,128 @@ for (const operation of ['create', 'activate']) test(`${operation}: an edit save
   await f.finishReload(action, 2); assert.equal(f.toasts.length, 0);
   assert.equal(f.state.activeSession.id, 'session-b');
 });
-test('force confirmation after a newer reload captures that current owner and can complete normally', async () => {
+test('force confirmation after a newer reload cancels without touching the current owner', async () => {
   const f = setupCompletedAction(), initial = await f.start('activate', 'session-c');
   f.requests[0].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
   await initial.pending;
   f.context.resetSessionScopedUiState(); f.state.activeSession = { id: 'session-b' };
   f.context.applyWorkspaceState(f.snapshots.get('session-b')); f.context.workspaceLoaded = true;
+  const before = f.retained(), log = [...f.log];
+  f.confirms[0].callback(); await tick();
+  assert.equal(f.requests.length, 1); assert.equal(f.state.activeSession.id, 'session-b');
+  f.assertRetained(before); assert.deepEqual(f.log, log, 'old consent cannot start B draft preflight');
+  assert.deepEqual(f.toasts, [[canceledForceMessage, 'error']]);
+});
+
+// The actual app modal and initialized external-session path, with inert nodes
+// and only the fixture's deferred fetches. Nothing activates a real session.
+function setupBusyModal() {
+  const f = setupCompletedAction();
+  function node() {
+    const listeners = new Map();
+    const element = { isConnected: true, children: [],
+      addEventListener: (event, callback) => listeners.set(event, callback),
+      click() { listeners.get('click')?.({ target: element }); },
+      focus() { f.document.activeElement = element; },
+      remove() { element.isConnected = false; element.children.forEach(child => { child.isConnected = false; }); },
+    };
+    return element;
+  }
+  f.document.createElement = () => {
+    const modal = node(), cancel = node(), ok = node(); modal.children = [cancel, ok];
+    modal.querySelector = selector => selector === '.confirm-dialog-cancel' ? cancel : ok;
+    return modal;
+  };
+  f.document.body = { appendChild() {} }; f.document.querySelector = () => null;
+  Object.assign(f.context, { activeConfirmDialog: null, compareLoadGeneration: 0 });
+  for (const name of ['showConfirmDialog', 'restoreModalFocus', 'escapeHtml', 'handleExternalSessionChanged']) {
+    vm.runInContext(source(name), f.context);
+  }
+  f.context.flushSequenceDraftBeforeExternalSessionReload = async () => true;
+  f.change = async id => {
+    const index = f.requests.length, pending = f.context.handleExternalSessionChanged(f.state.activeSession.id);
+    await tick(); assert.equal(f.requests[index]?.url, '/api/sessions'); f.succeed(index, f.rows(id));
+    await tick(); assert.equal(f.requests[index + 1]?.url, '/api/workspace-state');
+    f.succeed(index + 1, f.snapshots.get(id)); await pending;
+    assert.equal(f.state.activeSession.id, id); assert.equal(f.context.workspaceLoaded, true);
+  };
+  f.modal = () => f.context.activeConfirmDialog?.modal;
+  f.confirm = () => f.modal().querySelector('.confirm-dialog-ok').click();
+  return f;
+}
+
+for (const phase of ['response', 'error body', 'open modal']) {
+  for (const change of ['different session', 'same-ID reset', 'A to B to A']) {
+    test(`busy ${phase} cannot transfer force consent across ${change}`, async () => {
+      const f = setupBusyModal(), initial = await f.start('activate', 'session-c');
+      const body = deferred();
+      if (phase !== 'response') {
+        f.requests[0].resolve({ ok: false, status: 409, text: () => body.promise });
+        await tick();
+      }
+      if (phase === 'open modal') { body.resolve('proxy activity is still running'); await initial.pending; }
+      const originalModal = f.modal();
+      if (change !== 'same-ID reset') await f.change('session-b');
+      if (change !== 'different session') await f.change('session-a');
+      const before = f.retained(), requestCount = f.requests.length, log = [...f.log];
+      if (phase === 'response') f.requests[0].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
+      if (phase === 'error body') body.resolve('proxy activity is still running');
+      await initial.pending;
+      if (phase === 'open modal') {
+        assert.equal(f.modal(), originalModal); assert.equal(originalModal.isConnected, true);
+        f.confirm(); await tick();
+        assert.equal(originalModal.isConnected, false);
+        assert.deepEqual(f.toasts, [[canceledForceMessage, 'error']]);
+      } else {
+        assert.equal(f.modal(), undefined, 'an old busy response must not offer a new destructive choice');
+        assert.deepEqual(f.toasts, []);
+      }
+      assert.equal(f.requests.length, requestCount); f.assertRetained(before);
+      assert.deepEqual(f.log, log, 'stale busy handling cannot flush or reset the newer workspace');
+    });
+  }
+}
+
+test('late busy response cannot replace a current workspace confirmation', async () => {
+  const f = setupBusyModal(), initial = await f.start('activate', 'session-c'); await f.change('session-b');
+  f.context.showConfirmDialog('Current B choice', () => {}); const modal = f.modal();
+  f.requests[0].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
+  await initial.pending; assert.equal(f.modal(), modal); assert.equal(modal.isConnected, true);
+  assert.deepEqual(f.toasts, []);
+});
+
+test('a newly initiated B to C action can offer and confirm its own forced switch after stale A consent is canceled', async () => {
+  const f = setupBusyModal(), initial = await f.start('activate', 'session-c');
+  f.requests[0].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
+  await initial.pending; await f.change('session-b'); f.confirm(); await tick();
+  assert.deepEqual(f.toasts, [[canceledForceMessage, 'error']]);
+  const index = f.requests.length, fresh = await f.start('activate', 'session-c');
+  assert.equal(f.requests[index].url, '/api/sessions/session-c/activate');
+  f.requests[index].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
+  await fresh.pending; assert.ok(f.modal());
+  const activate = f.context.activateSessionById; let pending;
+  f.context.activateSessionById = (...args) => (pending = activate(...args));
+  f.confirm(); await tick(); assert.equal(f.requests[index + 1].url, '/api/sessions/session-c/activate?force=true');
+  await f.finishReload({ pending }, index + 1, 'session-c');
+  assert.equal(f.state.activeSession.id, 'session-c'); assert.equal(f.toasts.length, 1);
+});
+
+test('valid same-owner busy consent saves a new workspace draft before its forced retry', async () => {
+  const f = setupCompletedAction(), initial = await f.start('activate', 'session-c');
+  f.requests[0].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
+  await initial.pending; const originalVersion = f.context.workspaceSaveVersion; f.edit();
+  assert.ok(f.context.workspaceSaveVersion > originalVersion);
   const activate = f.context.activateSessionById; let pending;
   f.context.activateSessionById = (...args) => (pending = activate(...args));
   f.confirms[0].callback(); await tick();
-  assert.equal(f.requests[1].url, '/api/sessions/session-c/activate?force=true');
-  await f.finishReload({ pending }, 1, 'session-c'); assert.equal(f.toasts.length, 0);
-  assert.equal(f.state.activeSession.id, 'session-c');
+  assert.equal(f.requests[1].url, '/api/workspace-state');
+  const body = JSON.parse(f.requests[1].options.body);
+  assert.equal(body.session_id, 'session-a'); assert.equal(body.replay.tabs[0].request_text, 'GET /pending-action-draft HTT');
+  assert.equal(f.requests.length, 2, 'forced activation waits for the new draft save');
+  f.succeed(1, { session_id: 'session-a', revision: 11 }); await tick();
+  assert.equal(f.requests[2].url, '/api/sessions/session-c/activate?force=true');
+  await f.finishReload({ pending }, 2, 'session-c');
+  assert.equal(f.state.activeSession.id, 'session-c'); assert.equal(f.toasts.length, 0);
 });
 
 // A preserved leaf draft must also stop its real create/open caller. Otherwise
