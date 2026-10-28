@@ -17301,6 +17301,19 @@ function fuzzerRawOffsetForEditorOffset(raw, offset) {
   // LF drafts already use the editor's UTF-16 coordinates; avoid scanning
   // the entire prefix on each caret move in a large request body.
   if (!raw.includes("\r")) return offset;
+  // Most requests have few CRLF headers and a large body. Find those pairs
+  // natively instead of walking every UTF-16 unit. Cap the work so dense
+  // newline input falls back to the original mapper without a long pair scan.
+  let mappedOffset = offset;
+  let pair = raw.indexOf("\r\n");
+  for (let pairs = 0; pairs < 128; pairs++) {
+    if (pair === -1 || pair >= mappedOffset) {
+      if (mappedOffset <= raw.length) return mappedOffset;
+      throw new Error("The selection changed. Select a value again.");
+    }
+    mappedOffset++;
+    pair = raw.indexOf("\r\n", pair + 2);
+  }
   let visibleOffset = 0;
   for (let index = 0; index < raw.length; index++) {
     if (visibleOffset === offset) return index;
