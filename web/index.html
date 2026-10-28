@@ -91,13 +91,13 @@
               <table class="history-table session-table" id="dashboardSessionsTable">
                 <thead>
                   <tr>
-                    <th data-sort-key="name">Name</th>
-                    <th data-sort-key="storage_bytes">Size</th>
-                    <th data-sort-key="request_count">Requests</th>
-                    <th data-sort-key="websocket_count">WebSockets</th>
-                    <th data-sort-key="finding_count">Findings</th>
-                    <th data-sort-key="last_captured_at">Last capture</th>
-                    <th data-sort-key="created_at">Created</th>
+                    <th data-sort-key="name" aria-sort="none"><button class="session-sort-button" type="button">Name</button></th>
+                    <th data-sort-key="storage_bytes" aria-sort="none"><button class="session-sort-button" type="button">Size</button></th>
+                    <th data-sort-key="request_count" aria-sort="none"><button class="session-sort-button" type="button">Requests</button></th>
+                    <th data-sort-key="websocket_count" aria-sort="none"><button class="session-sort-button" type="button">WebSockets</button></th>
+                    <th data-sort-key="finding_count" aria-sort="none"><button class="session-sort-button" type="button">Findings</button></th>
+                    <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last capture</button></th>
+                    <th data-sort-key="created_at" aria-sort="descending"><button class="session-sort-button" type="button">Created</button></th>
                     <th>Action</th>
                   </tr>
                 </thead>

@@ -4901,13 +4901,33 @@ button.utility-button.replay-tab-add {
 .session-table thead th:nth-child(7) { width: 160px; }
 .session-table thead th:nth-child(8) { width: 180px; }
 
-.session-table thead th {
+.session-table thead th[data-sort-key] {
   cursor: pointer;
   user-select: none;
 }
 
-.session-table thead th:hover {
+.session-table thead th[data-sort-key]:hover {
   color: var(--text);
+}
+
+.session-table .session-sort-button {
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.session-table .session-sort-button:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: 3px;
 }
 
 .session-table thead th .sort-arrow {

@@ -1890,6 +1890,7 @@ function bindEvents() {
   });
 
   // Session table sort headers
+  // One header listener handles both native button clicks and cell padding.
   document.querySelectorAll("#dashboardSessionsTable thead th[data-sort-key]").forEach((th) => {
     th.addEventListener("click", () => {
       const key = th.dataset.sortKey;
@@ -9760,11 +9761,14 @@ function renderDashboard() {
     sessTable.querySelectorAll("thead th[data-sort-key]").forEach((th) => {
       const existing = th.querySelector(".sort-arrow");
       if (existing) existing.remove();
-      if (th.dataset.sortKey === state.sessionSortKey) {
+      const active = th.dataset.sortKey === state.sessionSortKey;
+      th.setAttribute("aria-sort", active ? (state.sessionSortDir === "asc" ? "ascending" : "descending") : "none");
+      if (active) {
         const arrow = document.createElement("span");
         arrow.className = "sort-arrow";
+        arrow.setAttribute("aria-hidden", "true");
         arrow.textContent = state.sessionSortDir === "asc" ? "\u25B2" : "\u25BC";
-        th.appendChild(arrow);
+        th.querySelector(".session-sort-button").appendChild(arrow);
       }
     });
   }
