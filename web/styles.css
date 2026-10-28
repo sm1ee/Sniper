@@ -6426,8 +6426,11 @@ button.utility-button.replay-tab-add {
   border-bottom-color: var(--accent);
 }
 
-.intercept-queue-table {
+.mini-table.intercept-queue-table {
   font-size: var(--font-xs);
+  /* Keep identity columns readable in both queues; narrower panes scroll
+     inside their existing table shell instead of crushing every column. */
+  min-width: 520px;
 }
 
 .intercept-queue-table td,
@@ -6437,8 +6440,8 @@ button.utility-button.replay-tab-add {
   text-overflow: ellipsis;
 }
 
-.iq-col-method { width: 44px; max-width: 44px; }
-.iq-col-status { width: 40px; max-width: 40px; }
+.iq-col-method { width: 96px; }
+.iq-col-status { width: 70px; }
 /* Six table cells across the replace rules and both intercept queues carry
    .text-truncate, and it was never defined — so a long value in a
    table-layout:fixed cell did not shrink the column, it overflowed and printed
@@ -6451,8 +6454,10 @@ button.utility-button.replay-tab-add {
   white-space: nowrap;
 }
 
-.iq-col-host { width: 40%; max-width: 0; }
-.iq-col-path { width: 40%; max-width: 0; }
+/* Share only the space left after Method, Status and Time, rather than
+   overcommitting 80% of the table before those fixed columns are counted. */
+.iq-col-host { width: auto; max-width: 0; }
+.iq-col-path { width: auto; max-width: 0; }
 .iq-col-time { width: 120px; max-width: 120px; }
 
 .intercept-rules-header {
