@@ -1221,7 +1221,7 @@ var hasher = {
               '<span id="'+this.elements[i].id+'-note" class="note"></span>'+
             '</div>'+
             '<div id="'+this.elements[i].id+'-value" class="value">'+
-              '<textarea id="'+this.elements[i].id+'" rows="1" readonly spellcheck="false" data-autosize="decoder"></textarea>';
+              '<textarea id="'+this.elements[i].id+'" aria-labelledby="'+this.elements[i].id+'-title" rows="1" readonly spellcheck="false" data-autosize="decoder"></textarea>';
 
               if (this.elements[i].ruler != undefined) {
                 html += '<div id="'+this.elements[i].id+'-ruler" class="ruler"></div>';
