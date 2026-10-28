@@ -60,7 +60,7 @@
       maxPayloadBytes = Math.max(maxPayloadBytes, size);
       if (size > limits.payloadBytes && oversizedIndex === -1) oversizedIndex = index;
     }
-    if (oversizedIndex !== -1) errors.push(`Fuzzer payload ${oversizedIndex} cannot exceed ${limits.payloadBytes} bytes.`);
+    if (oversizedIndex !== -1) errors.push(`Payloads line ${oversizedIndex + 1} exceeds ${limits.payloadBytes / 1024} KiB (${limits.payloadBytes} bytes). Shorten this line.`);
     if (totalBytes > limits.totalPayloadBytes) errors.push(`Fuzzer payloads cannot exceed ${limits.totalPayloadBytes} total bytes.`);
     return { valid: !errors.length, errors, count: payloads.length, totalBytes, maxPayloadBytes, payloads };
   }
@@ -403,7 +403,7 @@
     if (validation.count && maxExpandedRequestBytes > limits.expandedRequestBytes) {
       errors.push(`An expanded request exceeds the ${limits.expandedRequestBytes} byte limit.`);
     }
-    if (template.body_encoding === "base64") warnings.push("The body is base64: payloads go into the encoded text.");
+    if (template.body_encoding === "base64") warnings.push("The body is base64-encoded text. Use header or query positions instead of body markers.");
     const hostHeader = template.headers.find(header => isHeader(header, "host"));
     if (markerCount(hostHeader ? hostHeader.value : template.host)) {
       warnings.push("Host markers can change the request authority by payload. Check the sample requests and connection target.");

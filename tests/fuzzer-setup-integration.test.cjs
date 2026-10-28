@@ -7,7 +7,7 @@ const workflow = require('../web/fuzzer-workflow.js');
 const plain = value => JSON.parse(JSON.stringify(value));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const raw = 'POST /items?id=one&id=two%2Fthree HTTP/1.0\r\nHost: example.com\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 3\r\n\r\na=1';
-const parserNames = ['parseFuzzerRequestTemplate', 'parseEditableRawRequest', 'splitRawHttpMessage', 'editableRequestBodyLength', 'decodedBase64Length', 'parseReplayHttpVersionToken', 'normalizeReplayHttpVersion', 'headerValue', 'headerNameEquals', 'normalizedHeaders', 'validateRawHttpBodyFraming', 'buildEditableRawRequest', 'mergeHeaders', 'httpRequestAuthoritiesEquivalent', 'normalizeHttpRequestAuthority', 'createDefaultEditableRequest'];
+const parserNames = ['parseFuzzerRequestTemplate', 'parseEditableRawRequest', 'splitRawHttpMessage', 'editableRequestBodyLength', 'decodedBase64Length', 'parseReplayHttpVersionToken', 'normalizeReplayHttpVersion', 'headerValue', 'headerNameEquals', 'normalizedHeaders', 'validateRawHttpBodyFraming', 'buildEditableRawRequest', 'mergeHeaders', 'httpRequestAuthoritiesEquivalent', 'normalizeHttpRequestAuthority', 'authorityToTargetState', 'stripIpv6Brackets', 'defaultHttpPortForScheme', 'createDefaultEditableRequest'];
 const names = [...parserNames, 'renderFuzzerSetup', 'renderFuzzerPayloadImportStatus', 'fuzzerSetupNode', 'escapeHtml', 'initFuzzerSetupControls', 'fuzzerRequestTextForAction', 'fuzzerRawOffsetForEditorOffset', 'splitFuzzerPayloadLines', 'fuzzerPayloadCount', 'fuzzerPayloadTextWithinLimits', 'fuzzerSetupPreflight', 'markFuzzerPosition', 'markFuzzerEditorSelection', 'fuzzerMarkerRemoval', 'renderFuzzerRemoveMarkerControl', 'removeFuzzerEditorPosition', 'undoFuzzerMarker', 'clearFuzzerMarkers', 'applyFuzzerPayloadList', 'importFuzzerPayloadFile', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'invalidateFuzzerRun', 'openFuzzerFromRecord', 'openFuzzerFromReplay', 'runFuzzerAttack', 'followFuzzerAttack', 'isCurrentFuzzerRun', 'replayHttpVersionFromText', 'validateManualRepeaterTargetInput', 'normalizePortValue', 'isLikelyIpv6Literal', 'setReplayTargetInputValidity'];
 function fixture() {
   const state = { activeSession: { id: 'session-a' }, fuzzerBaseRequest: { scheme: 'https', host: 'example.com', method: 'POST', path: '/items', body: 'a=1', body_encoding: 'utf8', preview_truncated: false }, fuzzerRequestText: raw, fuzzerPayloadsText: 'x', fuzzerDraftVersion: 0, fuzzerRunToken: 0, fuzzerRunning: false, fuzzerSourceTransactionId: 'source-a' };
@@ -219,12 +219,93 @@ for (const outcome of ['success', 'error']) test(`rejected oversized replacement
 });
 
 function setupNodes(f) {
-  const ids = ['fuzzerMarkSelectionButton', 'startFuzzerButton', 'fuzzerPreflightSummary', 'fuzzerPositionCount', 'fuzzerPayloadCount', 'fuzzerClearMarkersButton', 'fuzzerTargetSummary', 'fuzzerPreflightNotice', 'fuzzerPreviewSamples', 'fuzzerPreviewNotes', 'fuzzerCandidateSelect', 'fuzzerMarkCandidateButton'];
+  const ids = ['fuzzerMarkSelectionButton', 'startFuzzerButton', 'fuzzerPreflightSummary', 'fuzzerPositionCount', 'fuzzerPayloadCount', 'fuzzerClearMarkersButton', 'fuzzerTargetSummary', 'fuzzerPreflightNotice', 'fuzzerPreviewSamples', 'fuzzerPreviewNotes', 'fuzzerCandidateSelect', 'fuzzerMarkCandidateButton', 'fuzzerRequestHelp'];
   const nodes = Object.fromEntries(ids.map(id => [id, { value: '', textContent: '', innerHTML: '', disabled: true, listeners: {},
     addEventListener(name, callback) { this.listeners[name] = callback; } }]));
   f.c.document.getElementById = id => nodes[id] || null;
   return nodes;
 }
+
+for (const body of ['$payload$', '§YQ==§', 'not base64!']) test(`base64 body guidance explains invalid ${JSON.stringify(body)} without modifying the draft`, () => {
+  const f = fixture(), nodes = setupNodes(f);
+  f.state.fuzzerBaseRequest.body_encoding = 'base64';
+  f.state.fuzzerBaseRequest.body = 'YQ==';
+  f.state.fuzzerRequestText = raw.replace('one', '§one§').replace('a=1', body);
+  const before = f.state.fuzzerRequestText;
+  const message = 'Request body must be valid base64. Restore valid base64 in Request; use header or query positions instead of body markers.';
+  assert.throws(() => f.c.parseFuzzerRequestTemplate(before), { message });
+  f.c.renderFuzzerSetup();
+  assert.equal(nodes.startFuzzerButton.disabled, true);
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, message);
+  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Raw HTTP request · Body format: base64. Select a header or query value, then Add §.');
+  assert.match(nodes.fuzzerPreviewNotes.textContent, /Body format: base64/);
+  assert.equal(f.state.fuzzerRequestText, before);
+  assert.equal(f.state.fuzzerPayloadsText, 'x');
+  assert.equal(f.state.fuzzerBaseRequest.body, 'YQ==');
+  assert.equal(f.saves, 0);
+  assert.equal(f.requests.length, 0);
+  f.state.fuzzerRequestText = raw.replace('one', '§one§').replace('a=1', 'YQ==');
+  f.c.renderFuzzerSetup();
+  assert.equal(nodes.startFuzzerButton.disabled, false);
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, '');
+  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Raw HTTP request · Body format: base64. Select a header or query value, then Add §.');
+});
+
+test('base64 guidance does not tighten decoding or replace unrelated parser errors', () => {
+  const f = fixture();
+  f.state.fuzzerBaseRequest.body_encoding = 'base64';
+  for (const body of ['', 'YQ==', 'YQ', ' YQ==\r\n']) {
+    const before = raw.replace('a=1', body);
+    assert.equal(f.c.parseFuzzerRequestTemplate(before).body, body);
+  }
+  const valid = raw.replace('a=1', 'YQ==');
+  for (const [text, message] of [
+    [valid.replace('POST /items?id=one&id=two%2Fthree HTTP/1.0', 'not-a-request'), 'Invalid request line in editor'],
+    [valid.replace('/items?id=one&id=two%2Fthree', 'https://other.example.com/items'), 'Absolute-form request target does not match Host header'],
+    [valid.replace('Content-Length: 3', 'Transfer-Encoding: chunked'), 'Raw HTTP input with Transfer-Encoding: chunked is not supported'],
+    [valid.replace('Content-Length: 3', 'Content-Length: nope'), 'Invalid or conflicting Content-Length headers in the request template.'],
+  ]) assert.throws(() => f.c.parseFuzzerRequestTemplate(text), { message });
+});
+
+for (const position of ['query', 'header']) test(`base64 request ${position} positions stay available and preserve the encoded body`, () => {
+  const f = fixture(), nodes = setupNodes(f);
+  f.state.fuzzerBaseRequest.body_encoding = 'base64';
+  f.state.fuzzerBaseRequest.body = 'YQ==';
+  const before = raw.replace('a=1', 'YQ==');
+  f.state.fuzzerRequestText = before;
+  const value = position === 'query' ? 'one' : 'application/x-www-form-urlencoded';
+  const start = before.indexOf(value);
+  f.c.markFuzzerPosition(start, start + value.length, before);
+  const marked = f.state.fuzzerRequestText;
+  assert.equal(marked, before.slice(0, start) + `§${value}§` + before.slice(start + value.length));
+  const template = f.c.parseFuzzerRequestTemplate(marked);
+  assert.equal(template.body, 'YQ==');
+  assert.equal(template.body_encoding, 'base64');
+  f.c.renderFuzzerSetup();
+  assert.equal(nodes.startFuzzerButton.disabled, false);
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, '');
+  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Raw HTTP request · Body format: base64. Select a header or query value, then Add §.');
+  assert.match(nodes.fuzzerPreviewNotes.textContent, /header or query positions instead of body markers/);
+  assert.equal(f.state.fuzzerRequestText, marked);
+  f.state.fuzzerBaseRequest.body_encoding = 'utf8';
+  f.c.renderFuzzerSetup();
+  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Raw HTTP request · select a value, then Add §');
+  assert.doesNotMatch(nodes.fuzzerPreviewNotes.textContent, /base64/);
+});
+
+for (const [prefix, line] of [['', 1], ['small\n', 2], ['\r\n', 2], [' \r\n\r\n', 3]]) test(`oversized Payloads line ${line} with prefix ${JSON.stringify(prefix)} disables Start without rewriting input`, () => {
+  const f = fixture(), nodes = setupNodes(f);
+  f.state.fuzzerRequestText = raw.replace('one', '§one§');
+  f.state.fuzzerPayloadsText = prefix + 'a'.repeat(65537) + '\r\n';
+  const before = f.state.fuzzerPayloadsText;
+  f.c.renderFuzzerSetup();
+  assert.equal(nodes.startFuzzerButton.disabled, true);
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, `Payloads line ${line} exceeds 64 KiB (65536 bytes). Shorten this line.`);
+  assert.equal(f.state.fuzzerPayloadsText, before);
+  assert.equal(f.saves, 0);
+  assert.equal(f.requests.length, 0);
+});
+
 test('ready setup keeps target, count and protocol visible with details off the main action path', () => {
   const f = fixture(), nodes = setupNodes(f);
   f.state.fuzzerRequestText = raw.replace('one', '$payload$');

@@ -17520,7 +17520,14 @@ function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || 
   const raw = String(text || "");
   const boundary = /\r?\n\r?\n/.exec(raw);
   const { body } = splitRawHttpMessage(raw);
-  const bodyLength = editableRequestBodyLength(body, fallback?.body_encoding === "base64" ? "base64" : "utf8");
+  const bodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
+  let bodyLength;
+  try {
+    bodyLength = editableRequestBodyLength(body, bodyEncoding);
+  } catch (error) {
+    if (bodyEncoding !== "base64") throw error;
+    throw new Error("Request body must be valid base64. Restore valid base64 in Request; use header or query positions instead of body markers.");
+  }
   const headEnd = boundary ? boundary.index : raw.length;
   // The engine always recalculates Content-Length after expansion. Normalize
   // only this derived field before using the shared parser, independent of the
@@ -17661,6 +17668,12 @@ function renderFuzzerSetup() {
   renderFuzzerPayloadImportStatus();
   if (typeof SniperFuzzerWorkflow === "undefined" || !fuzzerSetupNode("fuzzerPreflightSummary")) return;
   const raw = fuzzerRequestTextForAction();
+  // Source encoding still applies when the edited body cannot be parsed.
+  const bodyEncodingHelp = workspaceLoaded && state.fuzzerBaseRequest?.body_encoding === "base64"
+    ? "Body format: base64. Select a header or query value, then Add §." : "";
+  const requestHelp = fuzzerSetupNode("fuzzerRequestHelp");
+  if (requestHelp) requestHelp.textContent = bodyEncodingHelp
+    ? `Raw HTTP request · ${bodyEncodingHelp}` : "Raw HTTP request · select a value, then Add §";
   const select = fuzzerSetupNode("fuzzerCandidateSelect");
   let candidates = [];
   let template = null;
@@ -17737,7 +17750,7 @@ function renderFuzzerSetup() {
     summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "No request selected.";
     notice.textContent = raw.trim() ? error : "Paste a raw HTTP request, or send one from History / Replay.";
     notice.classList?.toggle("fuzzer-notice-error", !!raw.trim() && !!error);
-    if (previewNotes) previewNotes.textContent = "";
+    if (previewNotes) previewNotes.textContent = bodyEncodingHelp;
     if (samples) samples.textContent = "Add a valid request and payloads to preview.";
     return;
   }

@@ -72,6 +72,22 @@ test("payload validation uses UTF-8 bytes and Rust's single trailing-CR normaliz
   assert.match(workflow.validatePayloads(Array(65).fill("a".repeat(65536))).errors[0], /4194304 total bytes/);
 });
 
+for (const [label, prefix, suffix, line] of [
+  ["first line", "", "", 1],
+  ["second line", "small\n", "", 2],
+  ["preceding empty line", "\n", "", 2],
+  ["CRLF and whitespace lines", "\r\n \r\n", "\r\n", 3],
+  ["CR-only lines", "small\r\r", "\r", 3],
+]) test(`oversized payload guidance names the visible ${label} without changing its content`, () => {
+  const oversized = "😀".repeat(16385);
+  const payloads = workflow.payloadLines(prefix + oversized + suffix);
+  const checked = workflow.validatePayloads(payloads);
+  assert.equal(checked.valid, false);
+  assert.equal(checked.errors[0], `Payloads line ${line} exceeds 64 KiB (65536 bytes). Shorten this line.`);
+  assert.deepEqual(checked.payloads, payloads);
+  assert.equal(checked.payloads[line - 1], oversized);
+});
+
 test("generic presets include an empty payload, stay bounded, and serialize losslessly", () => {
   assert.deepEqual(workflow.presets.map(preset => preset.id), ["text-boundaries", "number-boundaries"]);
   for (const preset of workflow.presets) {
@@ -326,6 +342,7 @@ test("truncated request bodies fail setup while a base64 source warns and keeps 
   const checked = workflow.preflight(request({ body: "YQ==", body_encoding: "base64" }), ["x"]);
   assert.equal(checked.valid, true);
   assert.match(checked.warnings.join(" "), /encoded text/);
+  assert.match(checked.warnings.join(" "), /header or query positions instead of body markers/);
   assert.equal(checked.samples[0].request.body, "YQ==");
 });
 
