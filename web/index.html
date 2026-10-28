@@ -1190,12 +1190,13 @@
               <div id="fuzzerPreflightSummary" class="fuzzer-preflight-summary" role="status" aria-live="polite">No request selected.</div>
               <div class="toolbar-actions">
                 <button class="secondary-action" id="resetFuzzerButton" type="button">Reset</button>
-                <button class="secondary-action hidden" id="stopFuzzerButton" type="button">Stop</button>
+                <button class="secondary-action hidden" id="stopFuzzerButton" type="button" aria-describedby="fuzzerStopStatus">Stop</button>
                 <button class="primary-action" id="startFuzzerButton" type="button" aria-describedby="fuzzerPreflightSummary fuzzerTargetSummary fuzzerPreflightNotice">Start</button>
               </div>
             </div>
             <section class="fuzzer-preflight" aria-label="Review before running">
               <span id="fuzzerTargetSummary" class="fuzzer-target-summary"></span>
+              <p id="fuzzerStopStatus" class="fuzzer-help fuzzer-notice-error hidden" role="status" aria-live="polite"></p>
               <p id="fuzzerPreflightNotice" class="fuzzer-help" role="status" aria-live="polite"></p>
               <details class="fuzzer-disclosure fuzzer-preview-disclosure hidden" id="fuzzerPreviewDisclosure">
                 <summary>Preview &amp; details</summary>

@@ -572,6 +572,7 @@ const state = {
   // The attack this session runs now, so Stop can reach it.
   fuzzerRunningAttackId: null,
   fuzzerStopRequest: null,
+  fuzzerStopError: null,
   fuzzerRestoredRun: null,
   fuzzerNoticeError: false,
   fuzzerDraftVersion: 0,
@@ -983,6 +984,7 @@ const els = {
   fuzzerDetailResponseMeta: document.getElementById("fuzzerDetailResponseMeta"),
   startFuzzerButton: document.getElementById("startFuzzerButton"),
   stopFuzzerButton: document.getElementById("stopFuzzerButton"),
+  fuzzerStopStatus: document.getElementById("fuzzerStopStatus"),
   resetFuzzerButton: document.getElementById("resetFuzzerButton"),
   contextMenu: document.getElementById("contextMenu"),
   interceptContextMenu: document.getElementById("interceptContextMenu"),
@@ -5395,6 +5397,7 @@ function resetSessionScopedUiState() {
   state.fuzzerRunning = false;
   state.fuzzerRunningAttackId = null;
   state.fuzzerStopRequest = null;
+  state.fuzzerStopError = null;
   state.fuzzerRestoredRun = null;
   state.fuzzerBaseRequest = null;
   state.fuzzerSourceTransactionId = null;
@@ -15872,10 +15875,21 @@ function renderFuzzer() {
   if (els.startFuzzerButton) {
     els.startFuzzerButton.disabled = attackRunning;
   }
+  // Stop belongs to the tracked run, not the retained results being viewed.
+  // A terminal poll or session change retires its error even on another view.
+  if (state.fuzzerStopError && (state.fuzzerStopError.sessionId !== currentSessionId()
+    || state.fuzzerStopError.id !== state.fuzzerRunningAttackId)) state.fuzzerStopError = null;
+  const stopping = !!state.fuzzerStopRequest && state.fuzzerStopRequest.sessionId === currentSessionId()
+    && state.fuzzerStopRequest.id === state.fuzzerRunningAttackId;
   if (els.stopFuzzerButton) {
     els.stopFuzzerButton.classList.toggle("hidden", !state.fuzzerRunningAttackId);
-    els.stopFuzzerButton.disabled = state.fuzzerStopRequest?.sessionId === state.activeSession?.id
-      && state.fuzzerStopRequest?.id === state.fuzzerRunningAttackId;
+    els.stopFuzzerButton.disabled = stopping;
+    els.stopFuzzerButton.textContent = stopping ? "Stopping…" : state.fuzzerStopError ? "Retry Stop" : "Stop";
+  }
+  if (els.fuzzerStopStatus) {
+    els.fuzzerStopStatus.textContent = state.fuzzerStopError
+      ? "Could not stop the attack. Requests may still be running. Retry Stop." : "";
+    els.fuzzerStopStatus.classList.toggle("hidden", !state.fuzzerStopError);
   }
   if (els.resetFuzzerButton) {
     els.resetFuzzerButton.disabled = attackRunning;
@@ -18106,6 +18120,7 @@ async function stopFuzzerAttack() {
   if (state.fuzzerStopRequest?.id === id && state.fuzzerStopRequest?.sessionId === sessionId) return;
   const request = { id, sessionId };
   state.fuzzerStopRequest = request;
+  state.fuzzerStopError = null;
   const ownsRequest = () => state.fuzzerStopRequest === request
     && currentSessionId() === sessionId && state.fuzzerRunningAttackId === id;
   renderFuzzer();
@@ -18118,11 +18133,10 @@ async function stopFuzzerAttack() {
     if (!ownsRequest()) return;
     // 404: it ended on its own meanwhile; the run reads its end either way.
     if (!response.ok && response.status !== 404) {
-      const message = await readApiErrorMessage(response, "Could not stop the attack.");
-      if (ownsRequest()) showToast(message, "error", 4000);
+      state.fuzzerStopError = { id, sessionId };
     }
-  } catch (error) {
-    if (ownsRequest()) showToast(error?.message || "Could not stop the attack.", "error", 4000);
+  } catch (_) {
+    if (ownsRequest()) state.fuzzerStopError = { id, sessionId };
   } finally {
     if (state.fuzzerStopRequest === request) {
       state.fuzzerStopRequest = null;

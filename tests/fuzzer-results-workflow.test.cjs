@@ -33,7 +33,7 @@ function fixture() {
     'fuzzerSavedRunSelect', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton', 'fuzzerSavedRunNotice',
     'fuzzerRequestEditor', 'fuzzerPayloadsEditor', 'fuzzerResultsBody', 'fuzzerDetailPanel', 'fuzzerDetailReqCM',
     'fuzzerDetailResCM', 'fuzzerDetailResponseMeta', 'fuzzerMeta', 'startFuzzerButton', 'stopFuzzerButton', 'resetFuzzerButton',
-    'fuzzerDetailResizer', 'compareModal', 'closeCompareButton', 'compareWithBaseBtn'];
+    'fuzzerStopStatus', 'fuzzerDetailResizer', 'compareModal', 'closeCompareButton', 'compareWithBaseBtn'];
   const els = Object.fromEntries(ids.map(id => [id, node(id)])), shell = node('shell');
   els.fuzzerResultsBody.closest = () => shell;
   const state = { activeSession: { id: 'session-a' }, fuzzerDraftVersion: 0, fuzzerRunToken: 0,
@@ -51,7 +51,7 @@ function fixture() {
     'followRestoredFuzzerAttack', 'followFuzzerAttack', 'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
     'clearFuzzerResponsePane', 'invalidateFuzzerRun', 'resetFuzzer', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'cloneEditableRequest', 'buildEditableRawRequest', 'normalizedHeaders', 'mergeHeaders', 'headerNameEquals',
-    'setCompareBase', 'openCompareModal', 'closeCompareModal', 'clearCompareState', 'splitFuzzerPayloadLines', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool',
+    'stopFuzzerAttack', 'setCompareBase', 'openCompareModal', 'closeCompareModal', 'clearCompareState', 'splitFuzzerPayloadLines', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool',
   ], { state, els, TextEncoder, FUZZER_POLL_MS: 0, setTimeout: callback => { timers.push(callback); return 0; }, document: { getElementById: id => els[id], activeElement: null },
     _fuzzerAttackLoadGeneration: 0, _fuzzerDetailGeneration: 0,
     compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0,
@@ -959,3 +959,81 @@ for (const boundary of ['base', 'selection', 'session', 'leave']) for (const sta
     assert.equal(f.compares, 0);
   });
 }
+
+function prepareStopFixture() {
+  const f = fixture(), stops = [];
+  f.state.fuzzerRunningAttackId = 'run-a';
+  f.state.fuzzerAttackRecord.running = true;
+  f.c.fetch = (url, options) => {
+    assert.match(url, /^\/api\/fuzzer\/attacks\/run-[ab]\/stop$/);
+    assert.equal(options.method, 'POST');
+    const pending = deferred(); stops.push(pending); return pending.promise;
+  };
+  f.c.renderFuzzer();
+  return { ...f, stops };
+}
+test('Stop pending and failure stay local, retain results and offer an explicit retry', async () => {
+  const f = prepareStopFixture(), before = JSON.stringify(f.state.fuzzerAttackRecord);
+  const stop = f.c.stopFuzzerAttack();
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stopping…');
+  assert.equal(f.els.stopFuzzerButton.disabled, true);
+  await f.c.stopFuzzerAttack(); assert.equal(f.stops.length, 1);
+  f.stops[0].reject(new Error('Synthetic transport failure')); await stop;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Retry Stop');
+  assert.equal(f.els.stopFuzzerButton.disabled, false);
+  assert.match(f.els.fuzzerStopStatus.textContent, /Could not stop.*may still be running.*Retry Stop/);
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), false);
+  assert.deepEqual(f.toasts, []);
+  assert.equal(JSON.stringify(f.state.fuzzerAttackRecord), before);
+  f.c.updateFuzzerPayloadsText('changed draft', { userEdit: true });
+  f.c.renderFuzzer(); assert.match(f.els.fuzzerStopStatus.textContent, /Could not stop/);
+  assert.equal(f.state.fuzzerRunningAttackId, 'run-a');
+  const retry = f.c.stopFuzzerAttack();
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stopping…');
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), true);
+  f.stops[1].resolve(response({}, 200)); await retry;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stop');
+  assert.equal(f.state.fuzzerStopError, null);
+});
+for (const boundary of ['terminal', 'other-run', 'session']) test(`Stop failure is retired on ${boundary} independently of displayed history`, async () => {
+  const f = prepareStopFixture(), stop = f.c.stopFuzzerAttack();
+  f.stops[0].resolve(response({}, 500)); await stop;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Retry Stop');
+  f.c.setFuzzerAttackRecord(run('historical'));
+  if (boundary === 'terminal') f.state.fuzzerRunningAttackId = null;
+  if (boundary === 'other-run') f.state.fuzzerRunningAttackId = 'run-b';
+  if (boundary === 'session') f.state.activeSession = { id: 'session-b' };
+  f.c.renderFuzzer();
+  assert.equal(f.state.fuzzerStopError, null);
+  assert.equal(f.els.fuzzerStopStatus.textContent, '');
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), true);
+  assert.equal(f.state.fuzzerAttackRecordId, 'historical');
+});
+test('old Stop failure cannot overwrite a newer Stop pending label or retained error', async () => {
+  const f = prepareStopFixture(), old = f.c.stopFuzzerAttack();
+  f.state.fuzzerRunningAttackId = 'run-b';
+  const latest = f.c.stopFuzzerAttack();
+  f.stops[0].reject(new Error('old error')); await old;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stopping…');
+  assert.equal(f.state.fuzzerStopError, null);
+  f.stops[1].reject(new Error('latest error')); await latest;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Retry Stop');
+  assert.equal(f.state.fuzzerStopError.id, 'run-b');
+});
+test('a late Stop failure cannot revive feedback after terminal polling ends the tracked run', async () => {
+  const f = prepareStopFixture(), stopping = f.c.stopFuzzerAttack();
+  f.state.fuzzerRunningAttackId = null;
+  f.c.setFuzzerAttackRecord(run('historical')); f.c.renderFuzzer();
+  f.stops[0].resolve(response({}, 503)); await stopping;
+  assert.equal(f.state.fuzzerStopError, null);
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), true);
+  assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), true);
+  assert.equal(f.state.fuzzerAttackRecordId, 'historical');
+});
+test('Stop 404 is an already-ended outcome, not a retained failure', async () => {
+  const f = prepareStopFixture(), stopping = f.c.stopFuzzerAttack();
+  f.stops[0].resolve(response({}, 404)); await stopping;
+  assert.equal(f.state.fuzzerStopError, null);
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), true);
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stop');
+});

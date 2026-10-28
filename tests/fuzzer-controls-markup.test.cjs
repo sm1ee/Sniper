@@ -60,7 +60,7 @@ test('payload controls declare append default, exact presets and accessible file
 test('preflight names the two ways payloads fill positions, and a running attack can be stopped', () => {
   assert.match(fuzzer, /Sniper puts each payload in one position at a time; Battering ram puts it in every position at once/);
   assert.deepEqual(values('fuzzerAttackType'), ['sniper', 'battering_ram']);
-  assert.match(fuzzer, /<button class="secondary-action hidden" id="stopFuzzerButton" type="button">Stop<\/button>/);
+  assert.match(fuzzer, /<button class="secondary-action hidden" id="stopFuzzerButton" type="button" aria-describedby="fuzzerStopStatus">Stop<\/button>/);
   for (const id of ['fuzzerPreflightSummary', 'fuzzerPreflightNotice']) assert.equal(byId(id).attrs.role, 'status');
   assert.equal(byId('fuzzerPreviewSamples').tag, 'div');
   assert.match(fuzzer, /<details[^>]*fuzzer-preview-disclosure[^>]*>\s*<summary>Preview &amp; details<\/summary>[\s\S]*?<div id="fuzzerPreviewSamples"/);
@@ -134,4 +134,14 @@ test('payload import has a compact local live status connected to its trigger', 
   assert.equal(byId('fuzzerImportPayloadButton').attrs['aria-describedby'], 'fuzzerPayloadImportStatus');
   assert.equal(disclosureDepthAt('fuzzerPayloadImportStatus'), 0);
   assert.match(css, /#fuzzerPayloadImportStatus\.fuzzer-notice-error/);
+});
+
+test('Stop has a hidden compact live error status with matching error styling', () => {
+  assert.equal(byId('fuzzerStopStatus').attrs.role, 'status');
+  assert.equal(byId('fuzzerStopStatus').attrs['aria-live'], 'polite');
+  assert.match(byId('fuzzerStopStatus').attrs.class, /\bhidden\b/);
+  assert.match(byId('fuzzerStopStatus').attrs.class, /\bfuzzer-notice-error\b/);
+  assert.equal(byId('stopFuzzerButton').attrs['aria-describedby'], 'fuzzerStopStatus');
+  assert.equal(disclosureDepthAt('fuzzerStopStatus'), 0);
+  assert.match(css, /#fuzzerStopStatus\.fuzzer-notice-error\s*\{[^}]*color:/s);
 });

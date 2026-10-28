@@ -3722,7 +3722,8 @@ body.pane-resizing-y {
 
 /* A start the server refused, or a draft it would refuse. */
 .fuzzer-shell #fuzzerPreflightNotice.fuzzer-notice-error,
-.fuzzer-shell #fuzzerPayloadImportStatus.fuzzer-notice-error {
+.fuzzer-shell #fuzzerPayloadImportStatus.fuzzer-notice-error,
+.fuzzer-shell #fuzzerStopStatus.fuzzer-notice-error {
   color: var(--danger);
 }
 
