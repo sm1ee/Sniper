@@ -55,6 +55,18 @@ function safeUriTransform(transform, input) {
   }
 }
 
+function parseDecoderBase64(input) {
+  // CryptoJS accepts invalid characters and ignores everything after '='.
+  // Validate only these Tools inputs; other CryptoJS consumers keep their behavior.
+  var normalized = input.replace(/\s/g, "");
+  var parts = /^([A-Za-z0-9+/]*)(={0,2})$/.exec(normalized);
+  if (!parts || parts[0] !== normalized || parts[1].length % 4 === 1 ||
+      (parts[2].length > 0 && normalized.length % 4 !== 0)) {
+    return null;
+  }
+  return CryptoJS.enc.Base64.parse(normalized);
+}
+
 function utf8StringToBytes(value) {
   return new TextEncoder().encode(value);
 }
@@ -803,7 +815,8 @@ var hasher = {
       title : "Base64 decode",
       calculate : function (input) {
         try {
-          var words = CryptoJS.enc.Base64.parse(input);
+          var words = parseDecoderBase64(input);
+          if (words === null) return "Invalid Base64 input";
           return CryptoJS.enc.Utf8.stringify(words);
         } catch (err) {
           return "";
@@ -817,7 +830,8 @@ var hasher = {
       ruler: 2,
       calculate : function (input) {
         try {
-          var words = CryptoJS.enc.Base64.parse(input);
+          var words = parseDecoderBase64(input);
+          if (words === null) return "Invalid Base64 input";
           return CryptoJS.enc.Hex.stringify(words);
         } catch (err) {
           return "Parse error";
