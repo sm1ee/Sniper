@@ -17181,6 +17181,7 @@ function renderFuzzerSetup() {
   if (!model) {
     summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "No request selected.";
     notice.textContent = raw.trim() ? error : "Paste a raw HTTP request, or send one from History / Replay.";
+    notice.classList?.toggle("fuzzer-notice-error", !!raw.trim() && !!error);
     if (previewNotes) previewNotes.textContent = "";
     if (samples) samples.textContent = "Add a valid request and payloads to preview.";
     return;
@@ -17673,11 +17674,19 @@ function updateFuzzerPayloadsText(text, { userEdit = false } = {}) {
 
 function markFuzzerDraftChanged() {
   state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+  // A failure belongs to the previous draft, not the corrected setup.
+  const clearedFailure = !!state.fuzzerNoticeError;
+  if (clearedFailure) {
+    state.fuzzerNoticeError = false;
+    state.fuzzerNotice = "";
+  }
   if (state.fuzzerAttackRecord || state.fuzzerAttackRecordId) {
     clearFuzzerAttackRecord();
     state._selectedFuzzerResultKey = null;
     state.fuzzerNotice = "Fuzzer draft changed. Start a new run to see results for the current template.";
     hideFuzzerDetailPanel();
+    renderFuzzer();
+  } else if (clearedFailure) {
     renderFuzzer();
   }
 }
@@ -20163,9 +20172,15 @@ async function followRedirect() {
   const requestText = buildEditableRawRequest(newRequest);
   tab.requestText = requestText;
   tab.baseRequest = cloneEditableRequest(newRequest);
+  // A Hex view caches bytes separately; carrying them across the redirect would
+  // restore the old request when the operator returns to Pretty or Raw.
+  tab.requestBytes = null;
+  tab.requestOriginalBytes = null;
   tab.responseRecord = null;
   tab.notice = "Following redirect...";
-  if (getCMView("replayReq")) {
+  if (state.replayMessageViews.request === "hex") {
+    renderReplayViewContent("request");
+  } else if (getCMView("replayReq")) {
     getCMView("replayReq").setContent(requestText);
   } else if (els.replayRequestEditor) {
     els.replayRequestEditor.value = requestText;

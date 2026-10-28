@@ -387,3 +387,66 @@ test('restored active attack blocks Add, Clear and Undo even without local runni
   assert.throws(() => f.c.undoFuzzerMarker(), /changed/);
   f.c.renderFuzzerSetup(); assert.equal(nodes.fuzzerClearMarkersButton.disabled, true);
 });
+
+for (const edit of ['request', 'payloads', 'markers', 'preset']) test(`${edit} edit clears the previous start failure and shows current setup guidance`, () => {
+  const f = fixture(), nodes = setupNodes(f);
+  f.state.fuzzerNotice = 'Previous start failed'; f.state.fuzzerNoticeError = true;
+  f.c.renderFuzzerSetup();
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Previous start failed');
+  if (edit === 'request') f.c.updateFuzzerRequestText(raw.replace('one', 'changed'), { userEdit: true });
+  if (edit === 'payloads') f.c.updateFuzzerPayloadsText('', { userEdit: true });
+  if (edit === 'markers') f.c.markFuzzerPosition(raw.indexOf('one'), raw.indexOf('one') + 3);
+  if (edit === 'preset') f.c.applyFuzzerPayloadList(['fresh']);
+  f.c.renderFuzzerSetup();
+  assert.equal(f.state.fuzzerNoticeError, false);
+  assert.equal(f.state.fuzzerNotice, '');
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, edit === 'markers' ? '' : 'Select a value to replace.');
+});
+
+test('unchanged text and non-user synchronization preserve the current start failure', () => {
+  const f = fixture(); f.state.fuzzerNotice = 'Previous start failed'; f.state.fuzzerNoticeError = true;
+  f.c.updateFuzzerRequestText(raw, { userEdit: true });
+  f.c.updateFuzzerPayloadsText('x', { userEdit: true });
+  f.c.updateFuzzerRequestText(raw.replace('one', 'synced'));
+  assert.equal(f.state.fuzzerNoticeError, true); assert.equal(f.state.fuzzerNotice, 'Previous start failed');
+});
+
+test('editing a shown failed run retains the new-draft explanation without marking it as an error', () => {
+  const f = fixture(), nodes = setupNodes(f);
+  f.state.fuzzerAttackRecord = { id: 'old' }; f.state.fuzzerAttackRecordId = 'old';
+  f.state.fuzzerNotice = 'Previous poll failed'; f.state.fuzzerNoticeError = true;
+  f.c.updateFuzzerPayloadsText('new', { userEdit: true }); f.c.renderFuzzerSetup();
+  assert.equal(f.state.fuzzerNoticeError, false);
+  assert.match(f.state.fuzzerNotice, /draft changed/);
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Select a value to replace.');
+});
+
+test('clearing a failed request removes error styling from the empty-editor guidance', () => {
+  const f = fixture(), nodes = setupNodes(f), classes = new Set();
+  nodes.fuzzerPreflightNotice.classList = { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); } };
+  f.state.fuzzerNotice = 'Previous start failed'; f.state.fuzzerNoticeError = true;
+  f.c.renderFuzzerSetup(); assert.equal(classes.has('fuzzer-notice-error'), true);
+  f.c.updateFuzzerRequestText('', { userEdit: true }); f.c.renderFuzzerSetup();
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Paste a raw HTTP request, or send one from History / Replay.');
+  assert.equal(classes.has('fuzzer-notice-error'), false);
+  f.c.updateFuzzerRequestText('not a request', { userEdit: true }); f.c.renderFuzzerSetup();
+  assert.equal(classes.has('fuzzer-notice-error'), true);
+});
+
+for (const field of ['Request', 'Payloads']) test(`${field} correction clears the old failure from the actual Results render, not just setup`, () => {
+  const state = { fuzzerRequestText: raw, fuzzerPayloadsText: 'x', fuzzerNotice: 'Previous start failed', fuzzerNoticeError: true };
+  const els = { fuzzerPayloadsEditor: { value: 'x' }, fuzzerMeta: { textContent: '' } };
+  let resultText = '', emptyRenders = 0;
+  const c = loadFunctions(['updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'renderFuzzer'], {
+    state, els, renderFuzzerResultsWorkflow() {}, renderFuzzerSetup() {},
+    normalizeFuzzerAttackRecord: value => value || null,
+    renderEmptyFuzzerResults(text) { resultText = text; emptyRenders++; },
+  });
+  c.renderFuzzer();
+  assert.equal(resultText, 'Previous start failed'); assert.equal(els.fuzzerMeta.textContent, resultText);
+  c[`updateFuzzer${field}Text`](field === 'Request' ? raw + '\n' : 'corrected', { userEdit: true });
+  assert.equal(resultText, 'Results appear here after running.');
+  assert.equal(els.fuzzerMeta.textContent, ''); assert.equal(emptyRenders, 2);
+  // Further typing without an error does not repeatedly repaint the Results area.
+  c[`updateFuzzer${field}Text`]('another edit', { userEdit: true }); assert.equal(emptyRenders, 2);
+});
