@@ -20659,6 +20659,11 @@ function wireReplayTabDragReorder(tabElement, id) {
 
 function renderReplayTabs(options = {}) {
   const preserveScrollLeft = options.keepScroll ? els.replayTabStrip.scrollLeft : null;
+  const focused = document.activeElement;
+  const focusedTabId = els.replayTabStrip.contains?.(focused)
+    ? focused?.closest?.(".replay-tab")?.dataset.replayTabId : null;
+  const focusedControl = [".replay-tab-button", ".replay-tab-pin-btn", ".replay-tab-close"]
+    .find((selector) => focused?.matches?.(selector));
   const sortedTabs = getReplayTabVisualOrder();
   const renamingTab = sortedTabs.find((tab) => tab.id === state.replayRenamingTabId);
   const renameInput = renamingTab && els.replayTabStrip.querySelector(
@@ -20814,6 +20819,22 @@ function renderReplayTabs(options = {}) {
     els.replayTabStrip.scrollLeft = preserveScrollLeft;
   } else {
     scrollActiveReplayTabIntoView();
+  }
+
+  // Rebuilding the strip detaches its focused button. Keep keyboard actions on
+  // their logical control, without taking focus from an editor or newer dialog.
+  if (focusedTabId && focusedControl && state.activeTool === "replay"
+    && !state.replayRenamingTabId && !getActiveModalAction()
+    && (document.activeElement === document.body || document.activeElement === focused && !focused.isConnected)) {
+    const tabElement = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab"))
+      .find((element) => element.dataset.replayTabId === focusedTabId);
+    const activeElement = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab"))
+      .find((element) => element.dataset.replayTabId === state.activeReplayTabId);
+    const canFocus = (element) => element?.isConnected && !element.disabled && element.tabIndex >= 0
+      && element.getClientRects().length && window.getComputedStyle(element).visibility !== "hidden";
+    const target = [tabElement?.querySelector(focusedControl), tabElement?.querySelector(".replay-tab-button"),
+      activeElement?.querySelector(".replay-tab-button"), els.newReplayTabButton].find(canFocus);
+    target?.focus({ preventScroll: true });
   }
 }
 
