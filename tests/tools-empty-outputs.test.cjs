@@ -47,7 +47,9 @@ test("a category with nothing to show for the input is idle, except the one in u
   const items = new Map();
   const node = () => {
     const names = new Set();
-    return { classList: { toggle: (n, on) => (on ? names.add(n) : names.delete(n)), contains: (n) => names.has(n) } };
+    const button = { disabled: false, attributes: {}, setAttribute(name, value) { this.attributes[name] = value; } };
+    return { button, querySelector: () => button,
+      classList: { toggle: (n, on) => (on ? names.add(n) : names.delete(n)), contains: (n) => names.has(n) } };
   };
   const inputs = { "input-value": { value: "user=alice" }, "input-password": { value: "" } };
   const document = { getElementById: (id) => inputs[id] || items.get(id) || items.set(id, node()).get(id) };
@@ -66,7 +68,15 @@ test("a category with nothing to show for the input is idle, except the one in u
   const idle = (name) => document.getElementById(name).classList.contains("idle");
   assert.deepEqual(["encode", "number", "jwt", "json"].map(idle), [false, true, true, false]);
   assert.equal(calls.filter((tab) => tab === 1).length, 1, "a category stops at its first output that shows");
+  assert.deepEqual(["encode", "number", "jwt", "json"].map(name => document.getElementById(name).button.disabled), [false, true, true, false]);
+  assert.deepEqual(["encode", "number", "jwt", "json"].map(name => document.getElementById(name).button.attributes["aria-pressed"]), ["false", "false", "false", "true"]);
+  window.hasher.tab = 2;
+  c.markIdleDecoderTabs();
+  assert.equal(document.getElementById("number").button.disabled, false, "the active category remains available");
+  assert.equal(document.getElementById("number").button.attributes["aria-pressed"], "true");
+  assert.equal(document.getElementById("json").button.attributes["aria-pressed"], "false");
   inputs["input-value"].value = "";
   c.markIdleDecoderTabs();
   assert.deepEqual(["encode", "number", "jwt", "json"].map(idle), [false, false, false, false]);
+  assert.deepEqual(["encode", "number", "jwt", "json"].map(name => document.getElementById(name).button.disabled), [false, false, false, false]);
 });

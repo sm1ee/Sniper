@@ -9439,7 +9439,14 @@ function markIdleDecoderTabs() {
     }
   }
   for (const [name, tab] of Object.entries(window.tabs)) {
-    document.getElementById(name)?.classList.toggle("idle", judged && !shown.has(tab) && tab !== window.hasher.tab);
+    const item = document.getElementById(name);
+    const idle = judged && !shown.has(tab) && tab !== window.hasher.tab;
+    item?.classList.toggle("idle", idle);
+    const button = item?.querySelector("button");
+    if (button) {
+      button.disabled = idle;
+      button.setAttribute("aria-pressed", tab === window.hasher.tab ? "true" : "false");
+    }
   }
 }
 

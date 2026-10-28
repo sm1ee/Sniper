@@ -1391,11 +1391,25 @@ code {
   z-index: 1;
   display: inline-flex;
   align-items: center;
-  padding: 6px 10px;
   color: var(--text-soft);
   cursor: pointer;
   font-size: var(--font-sm);
   transition: color 140ms ease;
+}
+
+.tools-tool-list li > button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: inherit;
+}
+
+.tools-tool-list li > button:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
 }
 
 .tools-tool-list li:hover {
