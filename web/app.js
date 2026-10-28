@@ -17302,6 +17302,8 @@ function applyFuzzerPayloadList(payloads, mode = "append") {
   const next = [...existing, ...payloads];
   const text = SniperFuzzerWorkflow.payloadText(next);
   fuzzerPayloadTextWithinLimits(text, next);
+  // An explicit list action supersedes a pending file even when its text is unchanged.
+  state._fuzzerFileGeneration = (state._fuzzerFileGeneration || 0) + 1;
   updateFuzzerPayloadsText(text, { userEdit: true });
   scheduleWorkspaceStateSave();
   renderFuzzer();

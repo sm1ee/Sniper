@@ -450,3 +450,45 @@ for (const field of ['Request', 'Payloads']) test(`${field} correction clears th
   // Further typing without an error does not repeatedly repaint the Results area.
   c[`updateFuzzer${field}Text`]('another edit', { userEdit: true }); assert.equal(emptyRenders, 2);
 });
+
+for (const action of ['range', 'preset']) for (const outcome of ['success', 'error']) {
+  test(`same-text ${action} replacement retires an earlier file ${outcome} without retiring results`, async () => {
+    const f = fixture(), read = deferred();
+    const values = action === 'range' ? workflow.numericRange(1, 3, 1) : [...workflow.presets[0].payloads];
+    f.state.fuzzerPayloadsText = workflow.payloadText(values);
+    const shown = { id: 'shown-run', results: [] };
+    f.state.fuzzerAttackRecord = shown;
+    f.state.fuzzerAttackRecordId = shown.id;
+    f.state.fuzzerNotice = 'Existing run notice';
+    const version = f.state.fuzzerDraftVersion, token = f.state.fuzzerRunToken;
+    const pending = f.c.importFuzzerPayloadFile({ size: 3, arrayBuffer: () => read.promise }, 'replace');
+    f.c.applyFuzzerPayloadList(values, 'replace');
+    if (outcome === 'success') read.resolve(new TextEncoder().encode('old'));
+    else read.reject(new Error('older file failed'));
+    assert.equal(await pending, false);
+    assert.equal(f.state.fuzzerPayloadsText, workflow.payloadText(values));
+    assert.equal(f.state.fuzzerDraftVersion, version);
+    assert.equal(f.state.fuzzerRunToken, token);
+    assert.equal(f.state.fuzzerAttackRecord, shown);
+    assert.equal(f.state.fuzzerAttackRecordId, shown.id);
+    assert.equal(f.state.fuzzerNotice, 'Existing run notice');
+  });
+}
+for (const invalid of ['range', 'payload-count', 'payload-size', 'combined-size']) {
+  test(`rejected ${invalid} list action leaves the pending file owned`, async () => {
+    const f = fixture(), read = deferred();
+    const pending = f.c.importFuzzerPayloadFile({ size: 5, arrayBuffer: () => read.promise }, 'replace');
+    const generation = f.state._fuzzerFileGeneration;
+    assert.throws(() => {
+      if (invalid === 'range') f.c.applyFuzzerPayloadList(workflow.numericRange(1, 3, 0), 'replace');
+      else if (invalid === 'payload-count') f.c.applyFuzzerPayloadList(Array(5001).fill('a'), 'replace');
+      else if (invalid === 'payload-size') f.c.applyFuzzerPayloadList(['a'.repeat(65537)], 'replace');
+      else f.c.applyFuzzerPayloadList(Array(64).fill('a'.repeat(65536)), 'replace');
+    });
+    assert.equal(f.state._fuzzerFileGeneration, generation);
+    assert.equal(f.state.fuzzerPayloadsText, 'x');
+    read.resolve(new TextEncoder().encode('fresh'));
+    assert.equal(await pending, true);
+    assert.equal(f.state.fuzzerPayloadsText, 'fresh');
+  });
+}
