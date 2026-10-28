@@ -502,9 +502,11 @@ const state = {
   interceptLoadGeneration: 0,
   interceptAcceptedLoadGeneration: 0,
   interceptDetailGeneration: 0,
+  interceptDetailRead: null,
   responseInterceptLoadGeneration: 0,
   responseInterceptAcceptedLoadGeneration: 0,
   responseInterceptDetailGeneration: 0,
+  responseInterceptDetailRead: null,
   selectedInterceptId: null,
   selectedInterceptRecord: null,
   selectedResponseInterceptId: null,
@@ -849,6 +851,8 @@ const els = {
   interceptTableBody: document.getElementById("interceptTableBody"),
   interceptDetailPath: document.getElementById("interceptDetailPath"),
   interceptDetailTitle: document.getElementById("interceptDetailTitle"),
+  interceptDetailRetryButton: document.getElementById("interceptDetailRetryButton"),
+  interceptDetailStatus: document.getElementById("interceptDetailStatus"),
   interceptRequestHighlight: document.getElementById("interceptRequestHighlight"),
   interceptRequestEditor: document.getElementById("interceptRequestEditor"),
   interceptMeta: document.getElementById("interceptMeta"),
@@ -1971,6 +1975,9 @@ function bindEvents() {
       console.error(error);
       showToast(error?.message || "Failed to drop response.", "error");
     });
+  });
+  els.interceptDetailRetryButton?.addEventListener("click", () => {
+    retrySelectedInterceptDetail().catch((error) => console.error(error));
   });
   els.interceptQueueTabRequest.addEventListener("click", () => switchInterceptQueueTab("request"));
   els.interceptQueueTabResponse.addEventListener("click", () => switchInterceptQueueTab("response"));
@@ -5370,6 +5377,8 @@ function resetSessionScopedUiState() {
   state.interceptDetailGeneration = (state.interceptDetailGeneration || 0) + 1;
   state.responseInterceptDetailGeneration = (state.responseInterceptDetailGeneration || 0) + 1;
   state.interceptRules = [];
+  state.interceptDetailRead = null;
+  state.responseInterceptDetailRead = null;
   state.selectedInterceptId = null;
   state.selectedInterceptRecord = null;
   state.selectedResponseInterceptId = null;
@@ -6441,6 +6450,7 @@ async function loadIntercepts(preserveSelection = true) {
   const visibleIntercepts = getVisibleRequestInterceptSummaries();
   if (!preserveSelection || !visibleIntercepts.some((item) => item.id === state.selectedInterceptId)) {
     state.selectedInterceptId = visibleIntercepts[0]?.id ?? null;
+    state.interceptDetailRead = null;
     state.selectedInterceptRecord = null;
     state.interceptEditorSeedId = null;
   }
@@ -6459,15 +6469,23 @@ async function loadIntercepts(preserveSelection = true) {
   }
 }
 
-async function loadInterceptDetail(id) {
+async function loadInterceptDetail(id, { explicit = false } = {}) {
+  const previousRead = getInterceptDetailRead("request");
+  // Faster queue polling must not retire this owner's slow detail repeatedly.
+  if (!explicit && previousRead?.id === id && previousRead.pending) return;
   const sessionId = currentSessionId();
   const generation = state.interceptDetailGeneration = (state.interceptDetailGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && state.selectedInterceptId === id && state.interceptDetailGeneration === generation;
+  const read = state.interceptDetailRead = { sessionId, id, generation, pending: true,
+    error: Boolean(previousRead?.error), showPending: explicit || !previousRead?.error };
+  renderIntercepts();
   try {
     const response = await fetch(sessionQueryPath(`/api/intercepts/${id}`, sessionId));
     if (!isCurrent()) return;
     if (!response.ok) {
+      read.pending = false;
+      read.error = true;
       state.selectedInterceptRecord = null;
       renderIntercepts();
       return;
@@ -6475,10 +6493,17 @@ async function loadInterceptDetail(id) {
 
     const record = await response.json();
     if (!isCurrent()) return;
+    read.pending = false;
+    read.error = false;
     state.selectedInterceptRecord = record;
     renderIntercepts();
   } catch (error) {
-    if (isCurrent()) throw error;
+    if (isCurrent()) {
+      read.pending = false;
+      read.error = true;
+      renderIntercepts();
+      throw new Error("Could not load request details.");
+    }
   }
 }
 
@@ -13549,23 +13574,80 @@ function getVisibleResponseInterceptSummaries() {
     : state.responseIntercepts;
 }
 
+function getInterceptDetailRead(queue) {
+  const response = queue === "response";
+  const read = response ? state.responseInterceptDetailRead : state.interceptDetailRead;
+  const id = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const generation = response ? state.responseInterceptDetailGeneration : state.interceptDetailGeneration;
+  return read && read.sessionId === currentSessionId() && read.id === id && read.generation === generation ? read : null;
+}
+
+function updateInterceptDetailFeedback(queue) {
+  const response = queue === "response";
+  const id = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const record = response ? state.selectedResponseInterceptRecord : state.selectedInterceptRecord;
+  const read = getInterceptDetailRead(queue);
+  // Automatic retries keep the last failure quiet; an explicit row or Retry
+  // action shows progress again without turning each failed poll into an alert.
+  const error = Boolean(read?.error && (!read.pending || !read.showPending));
+  const loading = Boolean(id && !record && !error);
+  const message = loading ? `Loading selected ${queue} details.`
+    : error ? `Could not ${record ? "refresh" : "load"} ${queue} details. Retry to try again.` : "";
+  // Both queues refresh independently; only the visible owner may announce or
+  // expose Retry. Keep its button during a retry so focus is not hidden mid-read.
+  if (state.interceptQueueTab === queue) {
+    if (els.interceptDetailRetryButton) {
+      els.interceptDetailRetryButton.classList.toggle("hidden", !read?.error);
+      // Native disabled blurs a focused button during background polling. Keep
+      // this Tab stop and let the owned-read guard reject busy activations.
+      const retryDisabled = String(!read?.error || read.pending);
+      const retryBusy = String(Boolean(read?.error && read.pending));
+      if (els.interceptDetailRetryButton.getAttribute("aria-disabled") !== retryDisabled) {
+        els.interceptDetailRetryButton.setAttribute("aria-disabled", retryDisabled);
+      }
+      if (els.interceptDetailRetryButton.getAttribute("aria-busy") !== retryBusy) {
+        els.interceptDetailRetryButton.setAttribute("aria-busy", retryBusy);
+      }
+      const retryLabel = read?.error && read.pending ? "Retrying…" : "Retry detail";
+      if (els.interceptDetailRetryButton.textContent !== retryLabel) {
+        els.interceptDetailRetryButton.textContent = retryLabel;
+      }
+    }
+    if (els.interceptDetailStatus && els.interceptDetailStatus.textContent !== message) {
+      els.interceptDetailStatus.textContent = message;
+    }
+  }
+  return { error, loading, message };
+}
+
+async function retrySelectedInterceptDetail() {
+  const queue = state.interceptQueueTab;
+  const read = getInterceptDetailRead(queue);
+  // Busy Retry remains focusable; native pointer/keyboard activations and queued
+  // calls must all obey the current read owner rather than a DOM disabled flag.
+  if (!read?.error || read.pending) return;
+  await selectInterceptQueueItem(queue, read.id);
+}
+
 function selectInterceptQueueItem(queue, id) {
   if (queue === "response") {
     if (state.selectedResponseInterceptId !== id) {
       state.selectedResponseInterceptId = id;
+      state.responseInterceptDetailRead = null;
       state.selectedResponseInterceptRecord = null;
       state.responseInterceptEditorSeedId = null;
       renderResponseIntercepts();
     }
-    return loadResponseInterceptDetail(id);
+    return loadResponseInterceptDetail(id, { explicit: true });
   }
   if (state.selectedInterceptId !== id) {
     state.selectedInterceptId = id;
+    state.interceptDetailRead = null;
     state.selectedInterceptRecord = null;
     state.interceptEditorSeedId = null;
     renderIntercepts();
   }
-  return loadInterceptDetail(id);
+  return loadInterceptDetail(id, { explicit: true });
 }
 
 function onInterceptQueueKeydown(event) {
@@ -13632,6 +13714,7 @@ function reconcileRequestInterceptSelection(visibleIntercepts = getVisibleReques
   const selectedIsVisible = visibleIntercepts.some((item) => item.id === state.selectedInterceptId);
   if (!selectedIsVisible) {
     state.selectedInterceptId = visibleIntercepts[0]?.id ?? null;
+    state.interceptDetailRead = null;
     state.selectedInterceptRecord = null;
     state.interceptEditorSeedId = null;
     return;
@@ -13646,6 +13729,7 @@ function reconcileResponseInterceptSelection(visibleIntercepts = getVisibleRespo
   const selectedIsVisible = visibleIntercepts.some((item) => item.id === state.selectedResponseInterceptId);
   if (!selectedIsVisible) {
     state.selectedResponseInterceptId = visibleIntercepts[0]?.id ?? null;
+    state.responseInterceptDetailRead = null;
     state.selectedResponseInterceptRecord = null;
     state.responseInterceptEditorSeedId = null;
     return;
@@ -13681,6 +13765,7 @@ async function applyInterceptScopeFilterLocally() {
 function renderIntercepts() {
   const filteredIntercepts = getVisibleRequestInterceptSummaries();
   reconcileRequestInterceptSelection(filteredIntercepts);
+  const feedback = updateInterceptDetailFeedback("request");
   els.interceptTableBody.innerHTML = filteredIntercepts.length
     ? filteredIntercepts
         .map((item) => {
@@ -13721,19 +13806,24 @@ function renderIntercepts() {
   if (!state.selectedInterceptRecord) {
     state.interceptEditorSeedId = null;
     if (state.interceptQueueTab === "request") {
-      els.interceptDetailPath.textContent = "Intercept";
-      els.interceptDetailTitle.textContent = "No request selected";
-      els.interceptMeta.textContent = state.runtime?.intercept_enabled
+      const selected = filteredIntercepts.find((item) => item.id === state.selectedInterceptId);
+      els.interceptDetailPath.textContent = selected ? `${selected.method} ${selected.host}${selected.path || "/"}` : "Intercept";
+      els.interceptDetailTitle.textContent = selected
+        ? (feedback.error ? "Could not load request" : "Loading request…") : "No request selected";
+      els.interceptMeta.textContent = feedback.message || (state.runtime?.intercept_enabled
         ? "Intercept is on. New requests will queue here."
-        : "Intercept is off. Toggle it on to pause requests before forwarding.";
+        : "Intercept is off. Toggle it on to pause requests before forwarding.");
     }
     if (els.interceptRequestCM) {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM, "", {
         mode: "http", readOnly: false,
-        placeholder: "Intercepted request will appear here...",
+        placeholder: feedback.loading ? "Loading selected request details…"
+          : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here...",
       });
     } else {
       els.interceptRequestEditor.value = "";
+      els.interceptRequestEditor.placeholder = feedback.loading ? "Loading selected request details…"
+        : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here...";
       renderInterceptRequestHighlight("");
     }
     els.forwardInterceptButton.disabled = true;
@@ -13744,7 +13834,7 @@ function renderIntercepts() {
   if (state.interceptQueueTab === "request") {
     els.interceptDetailPath.textContent = `${state.selectedInterceptRecord.request.scheme.toUpperCase()} / ${state.selectedInterceptRecord.peer_addr}`;
     els.interceptDetailTitle.textContent = `${state.selectedInterceptRecord.request.method} ${state.selectedInterceptRecord.request.host}`;
-    els.interceptMeta.textContent = [
+    els.interceptMeta.textContent = feedback.message || [
       state.selectedInterceptRecord.is_websocket ? "WebSocket upgrade" : "HTTP request",
       `queued at ${formatTimestamp(state.selectedInterceptRecord.started_at)}`,
       state.selectedInterceptRecord.request.preview_truncated ? "captured request body is preview-truncated" : "body captured in memory",
@@ -13760,6 +13850,7 @@ function renderIntercepts() {
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
     }
   } else {
+    els.interceptRequestEditor.placeholder = "";
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
       els.interceptRequestEditor.value = buildEditableRawRequest(state.selectedInterceptRecord.request);
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
@@ -19721,6 +19812,7 @@ async function loadResponseIntercepts(preserveSelection = true) {
   const visibleResponseIntercepts = getVisibleResponseInterceptSummaries();
   if (!preserveSelection || !visibleResponseIntercepts.some((item) => item.id === state.selectedResponseInterceptId)) {
     state.selectedResponseInterceptId = visibleResponseIntercepts[0]?.id ?? null;
+    state.responseInterceptDetailRead = null;
     state.selectedResponseInterceptRecord = null;
     state.responseInterceptEditorSeedId = null;
   }
@@ -19739,15 +19831,23 @@ async function loadResponseIntercepts(preserveSelection = true) {
   }
 }
 
-async function loadResponseInterceptDetail(id) {
+async function loadResponseInterceptDetail(id, { explicit = false } = {}) {
+  const previousRead = getInterceptDetailRead("response");
+  // Faster queue polling must not retire this owner's slow detail repeatedly.
+  if (!explicit && previousRead?.id === id && previousRead.pending) return;
   const sessionId = currentSessionId();
   const generation = state.responseInterceptDetailGeneration = (state.responseInterceptDetailGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && state.selectedResponseInterceptId === id && state.responseInterceptDetailGeneration === generation;
+  const read = state.responseInterceptDetailRead = { sessionId, id, generation, pending: true,
+    error: Boolean(previousRead?.error), showPending: explicit || !previousRead?.error };
+  renderResponseIntercepts();
   try {
     const response = await fetch(sessionQueryPath(`/api/response-intercepts/${id}`, sessionId));
     if (!isCurrent()) return;
     if (!response.ok) {
+      read.pending = false;
+      read.error = true;
       state.selectedResponseInterceptRecord = null;
       renderResponseIntercepts();
       return;
@@ -19755,10 +19855,17 @@ async function loadResponseInterceptDetail(id) {
 
     const record = await response.json();
     if (!isCurrent()) return;
+    read.pending = false;
+    read.error = false;
     state.selectedResponseInterceptRecord = record;
     renderResponseIntercepts();
   } catch (error) {
-    if (isCurrent()) throw error;
+    if (isCurrent()) {
+      read.pending = false;
+      read.error = true;
+      renderResponseIntercepts();
+      throw new Error("Could not load response details.");
+    }
   }
 }
 
@@ -19835,6 +19942,7 @@ function parseEditableRawResponse(text, original, requestMethod = "") {
 function renderResponseIntercepts() {
   const filteredResponseIntercepts = getVisibleResponseInterceptSummaries();
   reconcileResponseInterceptSelection(filteredResponseIntercepts);
+  const feedback = updateInterceptDetailFeedback("response");
   els.responseInterceptTableBody.innerHTML = filteredResponseIntercepts.length
     ? filteredResponseIntercepts
         .map((item) => {
@@ -19868,18 +19976,23 @@ function renderResponseIntercepts() {
     if (els.interceptResponseCM) {
       setInterceptPaneContent("interceptRes", els.interceptResponseCM, "", {
         mode: "http", readOnly: false,
-        placeholder: "Intercepted response will appear here...",
+        placeholder: feedback.loading ? "Loading selected response details…"
+          : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here...",
       });
     } else {
       els.interceptResponseEditor.value = "";
+      els.interceptResponseEditor.placeholder = feedback.loading ? "Loading selected response details…"
+        : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here...";
       renderInterceptResponseHighlight("");
     }
     if (state.interceptQueueTab === "response") {
-      els.interceptDetailPath.textContent = "Response Intercept";
-      els.interceptDetailTitle.textContent = "No response selected";
-      els.interceptMeta.textContent = state.runtime?.intercept_enabled
+      const selected = filteredResponseIntercepts.find((item) => item.id === state.selectedResponseInterceptId);
+      els.interceptDetailPath.textContent = selected ? `${selected.status} / ${selected.method} ${selected.host}${selected.path || "/"}` : "Response Intercept";
+      els.interceptDetailTitle.textContent = selected
+        ? (feedback.error ? "Could not load response" : "Loading response…") : "No response selected";
+      els.interceptMeta.textContent = feedback.message || (state.runtime?.intercept_enabled
         ? "Intercept is on. Matched responses will queue here."
-        : "Intercept is off. Toggle it on to pause responses before forwarding.";
+        : "Intercept is off. Toggle it on to pause responses before forwarding.");
     }
     els.forwardResponseInterceptButton.disabled = true;
     els.dropResponseInterceptButton.disabled = true;
@@ -19899,13 +20012,14 @@ function renderResponseIntercepts() {
         state.responseInterceptEditorSeedId = rec.id;
       }
     } else {
+      els.interceptResponseEditor.placeholder = "";
       if (state.responseInterceptEditorSeedId !== rec.id) {
         els.interceptResponseEditor.value = buildEditableRawResponse(rec.response);
         state.responseInterceptEditorSeedId = rec.id;
       }
       renderInterceptResponseHighlight(els.interceptResponseEditor.value);
     }
-    els.interceptMeta.textContent = `Response queued at ${formatTimestamp(rec.started_at)}`;
+    els.interceptMeta.textContent = feedback.message || `Response queued at ${formatTimestamp(rec.started_at)}`;
   }
   els.forwardResponseInterceptButton.disabled = false;
   els.dropResponseInterceptButton.disabled = false;
@@ -20023,7 +20137,10 @@ function setInterceptPaneContent(key, container, text, options = {}) {
   const record = key === "interceptRes" ? state.selectedResponseInterceptRecord : state.selectedInterceptRecord;
   // A held message owns its Undo history; clearing selection retires it before
   // another detail arrives, including an identical message in a new workspace.
-  const owner = JSON.stringify([currentSessionId(), workspaceStateGeneration, record?.id || null]);
+  // CM installs its placeholder at construction. An unavailable detail may
+  // change from empty to loading to failed without ever having a record owner.
+  const owner = JSON.stringify([currentSessionId(), workspaceStateGeneration,
+    record?.id || null, record ? null : options.placeholder || null]);
   const result = updateCodePaneCM(key, container, text, { ...options, owner, search: query });
   if (els.interceptSearchMeta && activeInterceptCMKey() === key) {
     els.interceptSearchMeta.innerHTML = buildSearchMeta(result.lineCount, result.matchCount);

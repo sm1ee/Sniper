@@ -6458,7 +6458,8 @@ button.utility-button.replay-tab-add {
   outline-offset: -2px;
 }
 
-.intercept-queue-accessibility {
+.intercept-queue-accessibility,
+.intercept-detail-accessibility {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -6470,10 +6471,16 @@ button.utility-button.replay-tab-add {
   border: 0;
 }
 
-/* Two buttons: the held URL beside them gives way instead. */
+/* Keep the detail actions reachable while the selected URL gives way. */
+#interceptDetailActions,
 #interceptRequestActions,
 #responseInterceptActions {
   flex: none;
+}
+
+#interceptDetailRetryButton[aria-disabled="true"] {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .intercept-queue-tabs {

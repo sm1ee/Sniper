@@ -14,7 +14,7 @@ function fixture(mode) {
   els.interceptSearchMeta = null;
   Object.assign(context, { escapeHtml: String, formatTimestamp: String });
   for (const name of ['renderIntercepts', 'renderResponseIntercepts', 'getVisibleRequestInterceptSummaries',
-    'selectInterceptQueueItem', 'updateInterceptQueueSelectionStatus', 'scrollSelectedInterceptRowIntoView',
+    'selectInterceptQueueItem', 'getInterceptDetailRead', 'updateInterceptDetailFeedback', 'retrySelectedInterceptDetail', 'updateInterceptQueueSelectionStatus', 'scrollSelectedInterceptRowIntoView',
     'getVisibleResponseInterceptSummaries', 'reconcileRequestInterceptSelection', 'reconcileResponseInterceptSelection',
     'setInterceptPaneContent', 'buildEditableRawResponse', 'updateInterceptSearch', 'activeInterceptCMKey']) {
     vm.runInContext(source(name), context);
@@ -74,3 +74,33 @@ for (const mode of ['request', 'response']) {
     assert.equal(f.redo(), true); assert.equal(cv.getContent(), edited);
   });
 }
+
+for (const mode of ['request', 'response']) test(`${mode}: actual CM construction updates empty/loading/error placeholders without touching a loaded draft`, () => {
+  const f = fixture(mode), created = [];
+  const createBaseExtensions = f.context.createBaseExtensions;
+  f.context.createBaseExtensions = options => {
+    created.push(options.placeholder || '');
+    return createBaseExtensions(options);
+  };
+  const response = mode === 'response';
+  const queue = response ? 'responseIntercepts' : 'intercepts';
+  const selected = response ? 'selectedResponseIntercept' : 'selectedIntercept';
+  const prefix = response ? 'responseIntercept' : 'intercept';
+  f.state[queue] = []; f.render();
+  assert.equal(created.at(-1), `Intercepted ${mode} will appear here...`);
+  f.state[queue] = [f.a]; f.render();
+  assert.equal(created.at(-1), `Loading selected ${mode} details…`);
+  f.state[prefix + 'DetailGeneration'] = 1;
+  f.state[prefix + 'DetailRead'] = { id: f.a.id, sessionId: f.state.activeSession.id, generation: 1, pending: false, error: true };
+  f.render(); assert.equal(created.at(-1), `Could not load ${mode} details. Use Retry detail.`);
+  const errorView = f.cv(), builds = created.length;
+  f.render(); assert.equal(f.cv(), errorView); assert.equal(created.length, builds);
+  Object.assign(f.state[prefix + 'DetailRead'], { pending: true, showPending: true });
+  f.render(); assert.equal(created.at(-1), `Loading selected ${mode} details…`);
+  f.state[selected + 'Record'] = f.a;
+  Object.assign(f.state[prefix + 'DetailRead'], { pending: false, error: false });
+  f.render(); assert.equal(created.at(-1), '');
+  f.edit('local draft'); const loaded = f.cv(), draft = loaded.getContent(), loadedBuilds = created.length;
+  Object.assign(f.state[prefix + 'DetailRead'], { pending: true, showPending: false });
+  f.render(); assert.equal(f.cv(), loaded); assert.equal(f.cv().getContent(), draft); assert.equal(created.length, loadedBuilds);
+});

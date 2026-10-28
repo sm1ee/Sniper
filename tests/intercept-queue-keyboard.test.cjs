@@ -62,7 +62,7 @@ function fixture(mode, cm = true) {
     responseIntercepts: [record("response-a"), record("response-b"), record("response-c")], runtime: { intercept_enabled: true } };
   const forbidden = name => () => { mutations.push(name); assert.fail(`Unexpected ${name}`); };
   const c = loadFunctions([
-    "onInterceptQueueKeydown", "selectInterceptQueueItem", "updateInterceptQueueSelectionStatus", "scrollSelectedInterceptRowIntoView",
+    "onInterceptQueueKeydown", "selectInterceptQueueItem", "getInterceptDetailRead", "updateInterceptDetailFeedback", "retrySelectedInterceptDetail", "updateInterceptQueueSelectionStatus", "scrollSelectedInterceptRowIntoView",
     "tableArrowStep", "isEditableTarget", "loadIntercepts", "loadInterceptDetail", "loadResponseIntercepts", "loadResponseInterceptDetail",
     "renderIntercepts", "renderResponseIntercepts", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
     "reconcileRequestInterceptSelection", "reconcileResponseInterceptSelection", "refreshInterceptDetailsForCurrentSelection",

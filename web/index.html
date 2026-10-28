@@ -345,15 +345,19 @@
                     <p class="placeholder-kicker" id="interceptDetailPath">Intercept</p>
                     <h2 id="interceptDetailTitle">No request selected</h2>
                   </div>
-                  <div class="toolbar-actions" id="interceptRequestActions">
-                    <button class="secondary-action" id="dropInterceptButton" type="button">Drop</button>
-                    <button class="primary-action" id="forwardInterceptButton" type="button">Forward</button>
-                  </div>
-                  <div class="toolbar-actions hidden" id="responseInterceptActions">
-                    <button class="secondary-action" id="dropResponseInterceptButton" type="button">Drop</button>
-                    <button class="primary-action" id="forwardResponseInterceptButton" type="button">Forward</button>
+                  <div class="toolbar-actions" id="interceptDetailActions">
+                    <button class="secondary-action hidden" id="interceptDetailRetryButton" type="button" aria-describedby="interceptDetailStatus" aria-disabled="true" aria-busy="false">Retry detail</button>
+                    <div class="toolbar-actions" id="interceptRequestActions">
+                      <button class="secondary-action" id="dropInterceptButton" type="button">Drop</button>
+                      <button class="primary-action" id="forwardInterceptButton" type="button">Forward</button>
+                    </div>
+                    <div class="toolbar-actions hidden" id="responseInterceptActions">
+                      <button class="secondary-action" id="dropResponseInterceptButton" type="button">Drop</button>
+                      <button class="primary-action" id="forwardResponseInterceptButton" type="button">Forward</button>
+                    </div>
                   </div>
                 </header>
+                <p class="intercept-detail-accessibility" id="interceptDetailStatus" role="status" aria-live="polite" aria-atomic="true"></p>
                 <div class="editor-panel" id="interceptRequestEditorPanel">
                   <div id="interceptRequestCM" class="cm-container" style="height:100%"></div>
                 </div>
