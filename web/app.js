@@ -18207,7 +18207,7 @@ function addExtractionRule(stepIndex) {
     group: 1,
   });
   markSequenceDraftDirty();
-  renderSequencePanel();
+  renderSequencePanel({ focusExtractionStepId: step.id });
 }
 
 function removeExtractionRule(stepIndex, ruleIndex) {
@@ -18441,7 +18441,7 @@ async function runCurrentSequence() {
   }
 }
 
-function renderSequencePanel() {
+function renderSequencePanel({ focusExtractionStepId = null } = {}) {
   const listBody = document.getElementById("sequenceListBody");
   const editorTitle = document.getElementById("sequenceEditorTitle");
   const stepsContainer = document.getElementById("sequenceStepsContainer");
@@ -18451,6 +18451,17 @@ function renderSequencePanel() {
   const runMeta = document.getElementById("sequenceRunMeta");
   const resultsBody = document.getElementById("sequenceRunResultsBody");
   const pastBody = document.getElementById("sequencePastRunsBody");
+
+  // DOM expansion belongs to this sequence in this session, not to an index
+  // that may now identify a different step after removal.
+  const expansionOwner = JSON.stringify([state.activeSession?.id || null, state.editingSequence?.id || null]);
+  const expandedSteps = new Set();
+  if (stepsContainer._sequenceExpansionOwner === expansionOwner) {
+    stepsContainer.querySelectorAll(".sequence-step-card").forEach((card) => {
+      if (card.querySelector(".step-extractions")?.open) expandedSteps.add(card.dataset.stepId);
+    });
+  }
+  stepsContainer._sequenceExpansionOwner = expansionOwner;
 
   // With no sequence there is nothing to list, edit or run: a line on what a
   // sequence does and the button that makes one stand in for the panes.
@@ -18513,14 +18524,14 @@ function renderSequencePanel() {
         </div>
       `).join("");
 
-      return `<div class="sequence-step-card" data-step-idx="${idx}">
+      return `<div class="sequence-step-card" data-step-idx="${idx}" data-step-id="${escapeHtml(step.id)}">
         <div class="step-header">
           <span class="step-number">#${idx + 1}</span>
           <input class="step-label" value="${escapeHtml(step.label)}" placeholder="Step label" />
           <button class="step-remove" data-remove-step="${idx}" title="Remove step">&times;</button>
         </div>
         <textarea class="step-request-text" spellcheck="false">${escapeHtml(reqText)}</textarea>
-        <details class="step-extractions">
+        <details class="step-extractions"${expandedSteps.has(step.id) || focusExtractionStepId === step.id ? " open" : ""}>
           <summary>Extractions (${step.extractions.length}) <button class="ext-add" data-add-ext="${idx}" style="font-size:0.7rem;margin-left:8px">+ Extract</button></summary>
           ${extractionsHtml}
         </details>
@@ -18556,6 +18567,12 @@ function renderSequencePanel() {
         removeExtractionRule(parseInt(btn.dataset.step, 10), parseInt(btn.dataset.rule, 10));
       });
     });
+    if (focusExtractionStepId != null) {
+      const card = Array.from(stepsContainer.querySelectorAll(".sequence-step-card"))
+        .find((entry) => entry.dataset.stepId === focusExtractionStepId);
+      const variables = card?.querySelectorAll(".ext-var");
+      variables?.[variables.length - 1]?.focus();
+    }
   } else {
     stepsContainer.innerHTML = `<div style="padding:20px;color:var(--text-muted);font-size:0.85rem">Select or create a sequence to start building steps.</div>`;
   }
