@@ -12,7 +12,7 @@ const functions = [
   "cloneWorkspaceSnapshotForBaseline", "hydrateReplayTab", "hydrateRepeaterHistoryEntry", "normalizeReplayTabCustomLabel",
   "normalizeReplayHttpVersion", "normalizeReplayHttpVersionMode", "replayHttpVersionFromText", "replayHttpVersionState",
   "replayLegacyHttpVersionState", "replayStoredHttpVersionMode", "normalizeRepeaterHistoryIndex",
-  "normalizePortValue", "normalizeRepeaterTargetInput", "authorityToTargetState", "stripIpv6Brackets", "defaultHttpPortForScheme",
+  "normalizePortValue", "normalizeRepeaterTargetInput", "authorityToTargetState", "explicitAuthorityPort", "stripIpv6Brackets", "defaultHttpPortForScheme",
   "cloneEditableRequest", "normalizedHeaders", "cloneTransactionRecord", "createDefaultEditableRequest",
   "buildEditableRawRequest", "mergeHeaders", "headerNameEquals", "replayRequestTextsEquivalent",
   "getRepeaterTargetConfig", "getActiveReplayTab", "getReplayTabVisualOrder", "isReplayTabSending", "sessionQueryPath",

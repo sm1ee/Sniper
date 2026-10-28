@@ -22222,19 +22222,26 @@ function validateManualRepeaterTargetInput(host, port) {
       hostError = "Target host must not include whitespace, user info, or URL components.";
     } else if (absoluteTarget) {
       try {
+        // Do not let URL repair an empty authority (for example https:///host).
+        const rawAuthority = rawHost.slice(rawHost.indexOf("://") + 3).split(/[/?#]/, 1)[0];
         const parsed = new URL(rawHost);
         const scheme = parsed.protocol.replace(":", "").toLowerCase();
+        // URL.port omits explicit default ports, which must still conflict with
+        // a different Port field rather than silently changing the destination.
+        const targetPort = normalizePortValue(explicitAuthorityPort(rawHost)) || parsed.port;
         const hasUrlComponents = parsed.username
           || parsed.password
           || (parsed.pathname && parsed.pathname !== "/")
           || parsed.search
           || parsed.hash;
-        if (scheme !== "http" && scheme !== "https") {
+        if (!rawAuthority) {
+          hostError = "Target host is not a valid URL.";
+        } else if (scheme !== "http" && scheme !== "https") {
           hostError = "Target URL scheme must be HTTP or HTTPS.";
         } else if (hasUrlComponents) {
           hostError = "Target host must not include path, query, fragment, or credentials.";
-        } else if (parsed.port && rawPort && normalizePortValue(rawPort) !== parsed.port) {
-          portError = `Port conflicts with target URL port ${parsed.port}.`;
+        } else if (targetPort && rawPort && normalizePortValue(rawPort) !== targetPort) {
+          portError = `Port conflicts with target URL port ${targetPort}.`;
         }
       } catch (_error) {
         hostError = "Target host is not a valid URL.";
