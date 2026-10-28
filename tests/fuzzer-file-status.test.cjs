@@ -12,7 +12,7 @@ function fixture() {
   const nodes = {fuzzerPayloadImportStatus:notice};
   const effects = {toasts:0,focus:0};
   const c = loadFunctions(['renderFuzzerPayloadImportStatus','fuzzerSetupNode','importFuzzerPayloadFile','applyFuzzerPayloadList','updateFuzzerPayloadsText','markFuzzerDraftChanged','fuzzerPayloadTextWithinLimits','fuzzerPayloadCount','splitFuzzerPayloadLines','initFuzzerSetupControls'], {
-    state,els:{},TextEncoder,TextDecoder,SniperFuzzerWorkflow:workflow,document:{getElementById:id=>nodes[id] || null},
+    workspaceLoaded:true,state,els:{},TextEncoder,TextDecoder,SniperFuzzerWorkflow:workflow,document:{getElementById:id=>nodes[id] || null},
     currentSessionId:()=>state.activeSession.id, renderFuzzer(){c.renderFuzzerPayloadImportStatus();},scheduleWorkspaceStateSave(){},
     scheduleFuzzerSetupRender(){c.renderFuzzerPayloadImportStatus();},showToast(){effects.toasts++;},
     markFuzzerEditorSelection(){},removeFuzzerEditorPosition(){},undoFuzzerMarker(){},clearFuzzerMarkers(){},fuzzerSetupError(){effects.toasts++;},

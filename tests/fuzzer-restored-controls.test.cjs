@@ -12,7 +12,7 @@ function fixture() {
     'clearFuzzerAttackRecord', 'normalizeFuzzerAttackRecord', 'jsonArray', 'sessionQueryPath', 'currentSessionId',
     'resetFuzzer', 'invalidateFuzzerRun', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged',
     'runFuzzerAttack', 'stopFuzzerAttack'], {
-    state, _fuzzerAttackLoadGeneration: 0, FUZZER_POLL_MS: 0, URLSearchParams,
+    workspaceLoaded: true, state, _fuzzerAttackLoadGeneration: 0, FUZZER_POLL_MS: 0, URLSearchParams,
     setTimeout: callback => { timers.push(callback); return 0; },
     hideFuzzerDetailPanel() {}, renderFuzzer() {}, scheduleWorkspaceStateSave() {}, scheduleFuzzerSetupRender() {},
     requireOkResponse: async response => assert.equal(response.ok, true),
@@ -33,7 +33,7 @@ test('Reset and Start reject an already-restored running attack without abandoni
   const before = JSON.stringify(f.state);
   f.c.resetFuzzer(); await f.c.runFuzzerAttack();
   assert.equal(JSON.stringify(f.state), before);
-  assert.match(appSource, /els\.resetFuzzerButton\.disabled = attackRunning;/);
+  assert.match(appSource, /els\.resetFuzzerButton\.disabled = !workspaceLoaded \|\| attackRunning;/);
   f.timers.shift()(); await tick(); f.requests.shift().resolve(f.reply(false)); await pending;
   assert.equal(f.state.fuzzerRunningAttackId, null);
 });

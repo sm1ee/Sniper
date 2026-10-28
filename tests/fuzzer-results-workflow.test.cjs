@@ -52,7 +52,7 @@ function fixture() {
     'clearFuzzerResponsePane', 'invalidateFuzzerRun', 'resetFuzzer', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'cloneEditableRequest', 'buildEditableRawRequest', 'normalizedHeaders', 'mergeHeaders', 'headerNameEquals',
     'stopFuzzerAttack', 'setCompareBase', 'openCompareModal', 'closeCompareModal', 'clearCompareState', 'splitFuzzerPayloadLines', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool',
-  ], { state, els, TextEncoder, FUZZER_POLL_MS: 0, setTimeout: callback => { timers.push(callback); return 0; }, document: { getElementById: id => els[id], activeElement: null },
+  ], { workspaceLoaded: true, state, els, TextEncoder, FUZZER_POLL_MS: 0, setTimeout: callback => { timers.push(callback); return 0; }, document: { getElementById: id => els[id], activeElement: null },
     _fuzzerAttackLoadGeneration: 0, _fuzzerDetailGeneration: 0,
     compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0,
     compareBaseRecord: null, compareTargetRecord: null, compareActiveTab: 'request', compareReturnFocus: null,

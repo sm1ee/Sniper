@@ -956,6 +956,7 @@ const els = {
   fuzzerRequestEditor: document.getElementById("fuzzerRequestEditor"),
   fuzzerPayloadsEditor: document.getElementById("fuzzerPayloadsEditor"),
   fuzzerMeta: document.getElementById("fuzzerMeta"),
+  fuzzerRetryWorkspaceButton: document.getElementById("fuzzerRetryWorkspaceButton"),
   fuzzerResultStatus: document.getElementById("fuzzerResultStatus"),
   fuzzerResultMinBytes: document.getElementById("fuzzerResultMinBytes"),
   fuzzerResultMaxBytes: document.getElementById("fuzzerResultMaxBytes"),
@@ -2190,6 +2191,7 @@ function bindEvents() {
     });
   });
   els.resetFuzzerButton.addEventListener("click", resetFuzzer);
+  els.fuzzerRetryWorkspaceButton?.addEventListener("click", retryFuzzerWorkspaceLoad);
   els.stopFuzzerButton?.addEventListener("click", () => {
     stopFuzzerAttack().catch((error) => console.error("Fuzzer stop error:", error));
   });
@@ -2478,7 +2480,7 @@ function bindEvents() {
   });
   if (els.fuzzerRequestEditor) {
     els.fuzzerRequestEditor.addEventListener("input", () => {
-      if (els.fuzzerRequestCM) return; // CM handles it
+      if (!workspaceLoaded || els.fuzzerRequestCM) return; // CM handles it
       updateFuzzerRequestText(els.fuzzerRequestEditor.value, { userEdit: true });
       renderFuzzerRequestHighlight(state.fuzzerRequestText);
       scheduleWorkspaceStateSave();
@@ -2987,15 +2989,17 @@ function bindEvents() {
 
 }
 
-async function loadSettings(retries = 5) {
+async function loadSettings(retries = 5, { isCurrent = () => true } = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (!isCurrent()) return false;
     try {
       const response = await fetch("/api/settings");
       if (!response.ok) {
         throw new Error(`loadSettings failed: ${response.status}`);
       }
-      return await _applySettings(response);
+      return await _applySettings(response, { isCurrent });
     } catch (err) {
+      if (!isCurrent()) return false;
       if (attempt < retries) {
         await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
         continue;
@@ -3005,8 +3009,10 @@ async function loadSettings(retries = 5) {
   }
 }
 
-async function _applySettings(response) {
-  state.settings = await response.json();
+async function _applySettings(response, { isCurrent = () => true } = {}) {
+  const settings = await response.json();
+  if (!isCurrent()) return false;
+  state.settings = settings;
   if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, state.settings.runtime);
   state.runtime = state.settings.runtime;
   syncHttpCapturePill();
@@ -3264,7 +3270,7 @@ async function performSelfUpdate() {
 let sessionsLoadGeneration = 0;
 let sessionsAppliedLoadGeneration = 0;
 
-async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwner = false } = {}) {
+async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwner = false, isCurrent = () => true } = {}) {
   const generation = ++sessionsLoadGeneration;
   const workspaceGeneration = preserveWorkspaceOwner ? workspaceStateGeneration : null;
   const workspaceSessionId = preserveWorkspaceOwner ? currentSessionId() : null;
@@ -3280,12 +3286,12 @@ async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwn
       throw new Error("Invalid session list response. Reload to try again.");
     }
   } catch (error) {
-    if (generation < sessionsAppliedLoadGeneration) return;
+    if (!isCurrent() || generation < sessionsAppliedLoadGeneration) return;
     throw error;
   }
   // Awaited startup/workspace reads still supply data while a refresh is pending.
   // Only an already accepted newer list can supersede this read.
-  if (generation < sessionsAppliedLoadGeneration) return;
+  if (!isCurrent() || generation < sessionsAppliedLoadGeneration) return;
   // Error reconciliation refreshes rows only. A later workspace load owns its
   // own session list, and must not be relabelled by this older action's read.
   if (preserveWorkspaceOwner && (workspaceGeneration !== workspaceStateGeneration
@@ -3377,20 +3383,49 @@ function canReloadWorkspaceAfterSessionAction(sessionId, workspaceGeneration, sa
     && sequenceDraftVersion === (state.sequenceDraftVersion || 0);
 }
 
-async function loadWorkspaceState() {
-  const response = await fetch("/api/workspace-state");
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  const snapshot = await response.json();
-  if (!workspaceSnapshotMatchesActiveSession(snapshot)) {
-    await loadSessions();
+async function loadWorkspaceState({ isCurrent = () => true, onAdopt = () => {} } = {}) {
+  if (!isCurrent()) return false;
+  state.workspaceLoadError = "";
+  if (!workspaceLoaded) renderFuzzer();
+  let snapshot;
+  try {
+    const response = await fetch("/api/workspace-state");
+    if (!isCurrent()) return false;
+    // Callers may toast this error; never surface captured data from a response body.
+    if (!response.ok) throw new Error("Could not load session workspace.");
+    snapshot = await response.json();
+    if (!isCurrent()) return false;
     if (!workspaceSnapshotMatchesActiveSession(snapshot)) {
-      throw new WorkspaceSessionMismatchError(snapshot?.session_id || null);
+      await loadSessions({ isCurrent });
+      if (!isCurrent()) return false;
+      if (!workspaceSnapshotMatchesActiveSession(snapshot)) {
+        throw new WorkspaceSessionMismatchError(snapshot?.session_id || null);
+      }
     }
+  } catch (error) {
+    if (!isCurrent()) return false;
+    if (!workspaceLoaded) {
+      state.workspaceLoadError = "Could not load session. Editing is unavailable.";
+      renderFuzzer();
+    }
+    throw error;
   }
-  applyWorkspaceState(snapshot);
-  workspaceLoaded = true;
+  // Adoption advances the workspace generation synchronously. It is not a
+  // stale read, and failures in adoption/rendering must still reach the caller.
+  try {
+    applyWorkspaceState(snapshot);
+    workspaceLoaded = true;
+    state.workspaceLoadError = "";
+    onAdopt();
+    renderFuzzer();
+    return true;
+  } catch (error) {
+    if (!workspaceLoaded) {
+      state.workspaceLoadError = "Could not load session. Editing is unavailable.";
+      renderFuzzer();
+    }
+    throw error;
+  }
 }
 
 class WorkspaceSessionMismatchError extends Error {
@@ -5288,6 +5323,8 @@ function resetSessionScopedUiState() {
   state._historyRetentionClearedSelection = false;
   state._historyRetentionReconcile = false;
   workspaceLoaded = false;
+  state.workspaceLoadError = "";
+  state.fuzzerWorkspaceRetry = null;
   clearReplaySendInFlight();
   closeContextMenu();
   window.clearTimeout(refreshTimer);
@@ -5458,32 +5495,57 @@ async function reloadSessionWorkspace({ cleanupBeforeReset = true } = {}) {
     await cleanupWsReplayTabsBeforeStateReset();
   }
   resetSessionScopedUiState();
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    await loadSessions();
-    await loadSettings();
-    try {
-      await loadWorkspaceState();
-      break;
-    } catch (error) {
-      if (error instanceof WorkspaceSessionMismatchError && attempt === 0) {
-        continue;
+  // A newer reset owns subsequent reads; an old retry must never relabel it.
+  let generation = workspaceStateGeneration;
+  const isCurrent = () => generation === workspaceStateGeneration;
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await loadSessions({ isCurrent });
+      if (!isCurrent()) return false;
+      await loadSettings(5, { isCurrent });
+      if (!isCurrent()) return false;
+      try {
+        if (await loadWorkspaceState({ isCurrent, onAdopt: () => { generation = workspaceStateGeneration; } }) === false) return false;
+        if (!isCurrent()) return false;
+        break;
+      } catch (error) {
+        if (error instanceof WorkspaceSessionMismatchError && attempt === 0) {
+          continue;
+        }
+        throw error;
       }
-      throw error;
     }
+  } catch (error) {
+    if (isCurrent() && !workspaceLoaded) {
+      state.workspaceLoadError = "Could not load session. Editing is unavailable.";
+      renderFuzzer();
+    }
+    throw error;
   }
   await loadTransactions(false);
+  if (!isCurrent()) return false;
   await loadIntercepts(false);
+  if (!isCurrent()) return false;
   await loadResponseIntercepts(false);
+  if (!isCurrent()) return false;
   await loadInterceptRules();
+  if (!isCurrent()) return false;
   await loadWebsockets(false);
+  if (!isCurrent()) return false;
   await loadEventLog();
+  if (!isCurrent()) return false;
   await loadMatchReplaceRules();
+  if (!isCurrent()) return false;
   await loadSequences();
+  if (!isCurrent()) return false;
   await loadTargetSiteMap(true);
+  if (!isCurrent()) return false;
   if (state.activeTool === "proxy" && state.activeProxyTab === "oast") {
     await loadOastCallbacks();
+    if (!isCurrent()) return false;
   }
   await refreshScannerQuickToggle();
+  if (!isCurrent()) return false;
   connectEvents();
   renderToolPanels();
 }
@@ -15852,17 +15914,44 @@ function renderFuzzerPayloadsEditor() {
     }
     editor._fuzzerOwner = owner;
     editor.addEventListener("input", () => {
-      if (els.fuzzerPayloadsEditor !== editor || sessionId !== currentSessionId()
+      if (!workspaceLoaded || els.fuzzerPayloadsEditor !== editor || sessionId !== currentSessionId()
         || generation !== workspaceStateGeneration) return;
       updateFuzzerPayloadsText(editor.value, { userEdit: true });
       scheduleWorkspaceStateSave();
     });
     if (hadFocus && editor !== previous) editor.focus({ preventScroll: true });
   }
+  editor.disabled = !workspaceLoaded;
   if (editor.value !== state.fuzzerPayloadsText) editor.value = state.fuzzerPayloadsText;
 }
 
+async function retryFuzzerWorkspaceLoad() {
+  if (workspaceLoaded || !state.workspaceLoadError
+    || state.fuzzerWorkspaceRetry?.generation === workspaceStateGeneration) return false;
+  const retry = { generation: workspaceStateGeneration };
+  // Reload resets synchronously before its first read; capture that new owner.
+  const pending = reloadSessionWorkspace({ cleanupBeforeReset: false });
+  retry.generation = workspaceStateGeneration;
+  state.fuzzerWorkspaceRetry = retry;
+  try {
+    await pending;
+  } catch (_) {
+    // The owned load already shows a bounded failure message beside Retry.
+    return false;
+  } finally {
+    if (state.fuzzerWorkspaceRetry === retry) {
+      state.fuzzerWorkspaceRetry = null;
+      if (retry.generation === workspaceStateGeneration) renderFuzzer();
+    }
+  }
+}
+
 function renderFuzzer() {
+  const retry = els.fuzzerRetryWorkspaceButton;
+  if (retry) {
+    retry.classList.toggle("hidden", workspaceLoaded || !state.workspaceLoadError);
+    retry.disabled = !!state.fuzzerWorkspaceRetry && state.fuzzerWorkspaceRetry.generation === workspaceStateGeneration;
+  }
   renderFuzzerResultsWorkflow();
   if (els.fuzzerRequestCM) {
     // CM path
@@ -15871,9 +15960,9 @@ function renderFuzzer() {
     const generation = workspaceStateGeneration;
     const owner = JSON.stringify([sessionId, generation]);
     // A session/workspace replacement retires history even for identical text.
-    if (!cv || cv._owner !== owner || cv.getContent() !== state.fuzzerRequestText) {
+    if (!cv || cv._owner !== owner || cv._editable !== workspaceLoaded || cv.getContent() !== state.fuzzerRequestText) {
       updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, state.fuzzerRequestText, {
-        mode: "http", readOnly: false, owner,
+        mode: "http", readOnly: !workspaceLoaded, owner,
         payloadHighlight: true,
         placeholder: "Paste an HTTP request, then mark the values to fuzz",
       });
@@ -15884,7 +15973,7 @@ function renderFuzzer() {
       if (newCv && !newCv._fuzzerOnChangeWired) {
         newCv._fuzzerOnChangeWired = true;
         addCMUpdateListener(newCv.view, (newText) => {
-          if (getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
+          if (!workspaceLoaded || getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
             || generation !== workspaceStateGeneration) return;
           updateFuzzerRequestText(newText, { userEdit: true });
           scheduleWorkspaceStateSave();
@@ -15893,6 +15982,7 @@ function renderFuzzer() {
       }
     }
   } else if (els.fuzzerRequestEditor) {
+    els.fuzzerRequestEditor.readOnly = !workspaceLoaded;
     if (els.fuzzerRequestEditor.value !== state.fuzzerRequestText) {
       els.fuzzerRequestEditor.value = state.fuzzerRequestText;
     }
@@ -15902,7 +15992,7 @@ function renderFuzzer() {
   const attackRunning = !!state.fuzzerRunning || !!state.fuzzerRunningAttackId;
   els.fuzzerShell?.classList?.toggle("fuzzer-results-empty", !attackRunning && !state.fuzzerAttackRecord && !state.fuzzerAttackRecordId);
   if (els.startFuzzerButton) {
-    els.startFuzzerButton.disabled = attackRunning;
+    els.startFuzzerButton.disabled = !workspaceLoaded || attackRunning;
   }
   // Stop belongs to the tracked run, not the retained results being viewed.
   // A terminal poll or session change retires its error even on another view.
@@ -15921,10 +16011,16 @@ function renderFuzzer() {
     els.fuzzerStopStatus.classList.toggle("hidden", !state.fuzzerStopError);
   }
   if (els.resetFuzzerButton) {
-    els.resetFuzzerButton.disabled = attackRunning;
+    els.resetFuzzerButton.disabled = !workspaceLoaded || attackRunning;
   }
 
   if (typeof renderFuzzerSetup === "function") renderFuzzerSetup();
+  if (!workspaceLoaded) {
+    const notice = state.workspaceLoadError || "Loading session…";
+    els.fuzzerMeta.textContent = notice;
+    renderEmptyFuzzerResults(notice);
+    return;
+  }
   const attackRecord = normalizeFuzzerAttackRecord(state.fuzzerAttackRecord);
   state.fuzzerAttackRecord = attackRecord;
   if (attackRecord?.id) {
@@ -16142,7 +16238,7 @@ function renderFuzzerResultsWorkflow() {
     els.fuzzerSavedRunSelect.value = workflow.selectedRunId;
   }
   if (els.fuzzerRefreshRunsButton) els.fuzzerRefreshRunsButton.disabled = workflow.listBusy;
-  const unavailable = !workflow.selectedRunId || workflow.readBusy || !!state.fuzzerRunning;
+  const unavailable = !workspaceLoaded || !workflow.selectedRunId || workflow.readBusy || !!state.fuzzerRunning;
   if (els.fuzzerViewRunButton) els.fuzzerViewRunButton.disabled = unavailable;
   if (els.fuzzerReuseRunButton) els.fuzzerReuseRunButton.disabled = unavailable;
   if (els.fuzzerSavedRunNotice) els.fuzzerSavedRunNotice.textContent = workflow.notice;
@@ -16260,6 +16356,7 @@ function reusableSniperPayloads(record) {
 }
 
 async function readFuzzerSavedRun(action) {
+  if (!workspaceLoaded) return;
   const workflow = fuzzerResultsWorkflowState();
   const recordId = workflow.selectedRunId;
   if (!recordId || !workflow.sessionId || state.fuzzerRunning || !["view", "reuse"].includes(action)) return;
@@ -16268,7 +16365,7 @@ async function readFuzzerSavedRun(action) {
   _fuzzerAttackLoadGeneration += 1;
   const generation = ++workflow.readGeneration;
   const ownsRead = fuzzerSavedReadOwner(workflow, generation, "readGeneration");
-  const ownsSelection = () => ownsRead() && workflow.selectedRunId === recordId;
+  const ownsSelection = () => workspaceLoaded && ownsRead() && workflow.selectedRunId === recordId;
   workflow.readBusy = true;
   const loadingNotice = "Loading saved run...";
   workflow.notice = loadingNotice;
@@ -17247,7 +17344,11 @@ function renderFuzzerSetup() {
     select._fuzzerRaw = raw;
     select._fuzzerCandidates = candidates;
   }
-  const busy = !!state.fuzzerRunning || !!state.fuzzerRunningAttackId;
+  const busy = !workspaceLoaded || !!state.fuzzerRunning || !!state.fuzzerRunningAttackId;
+  for (const id of ["fuzzerPayloadFile", "fuzzerPayloadImportMode", "fuzzerPayloadPreset", "fuzzerRangeStart", "fuzzerRangeEnd", "fuzzerRangeStep"]) {
+    const input = fuzzerSetupNode(id);
+    if (input) input.disabled = busy;
+  }
   const startButton = fuzzerSetupNode("startFuzzerButton");
   if (startButton) startButton.disabled = busy || !model?.valid;
   if (select) select.disabled = busy || candidates.length === 0;
@@ -17282,6 +17383,14 @@ function renderFuzzerSetup() {
   if (targetSummary) targetSummary.textContent = "";
   const samples = fuzzerSetupNode("fuzzerPreviewSamples");
   const previewNotes = fuzzerSetupNode("fuzzerPreviewNotes");
+  if (!workspaceLoaded) {
+    summary.textContent = "";
+    notice.textContent = state.workspaceLoadError || "Loading session…";
+    notice.classList?.toggle("fuzzer-notice-error", !!state.workspaceLoadError);
+    if (previewNotes) previewNotes.textContent = "";
+    if (samples) samples.textContent = "Preview is available after the session loads.";
+    return;
+  }
   if (!model) {
     summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "No request selected.";
     notice.textContent = raw.trim() ? error : "Paste a raw HTTP request, or send one from History / Replay.";
@@ -17353,6 +17462,7 @@ function fuzzerRawOffsetForEditorOffset(raw, offset) {
 }
 
 function markFuzzerPosition(start, end, expectedRaw = fuzzerRequestTextForAction()) {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
   const raw = fuzzerRequestTextForAction();
   if (raw !== expectedRaw) throw new Error("The request changed. Choose the value again.");
@@ -17413,7 +17523,7 @@ function renderFuzzerRemoveMarkerControl() {
   const button = fuzzerSetupNode("fuzzerRemoveMarkerButton");
   if (!button) return;
   button.disabled = true;
-  if (state.fuzzerRunning || state.fuzzerRunningAttackId) return;
+  if (!workspaceLoaded || state.fuzzerRunning || state.fuzzerRunningAttackId) return;
   try {
     fuzzerMarkerRemoval();
     button.disabled = false;
@@ -17421,6 +17531,7 @@ function renderFuzzerRemoveMarkerControl() {
 }
 
 function removeFuzzerEditorPosition() {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
   const raw = fuzzerRequestTextForAction();
   const result = fuzzerMarkerRemoval();
@@ -17442,6 +17553,7 @@ function removeFuzzerEditorPosition() {
 }
 
 function clearFuzzerMarkers() {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
   const raw = fuzzerRequestTextForAction();
   const next = SniperFuzzerWorkflow.clearRequestPositions(raw);
@@ -17454,6 +17566,7 @@ function clearFuzzerMarkers() {
 }
 
 function undoFuzzerMarker() {
+  if (!workspaceLoaded) return false;
   const undo = state._fuzzerMarkerUndo;
   if (state.fuzzerRunning || state.fuzzerRunningAttackId || !undo || undo.after !== fuzzerRequestTextForAction() || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken) {
     throw new Error("The request changed after the marker action. Use the editor's undo instead.");
@@ -17468,6 +17581,7 @@ function undoFuzzerMarker() {
 }
 
 function applyFuzzerPayloadList(payloads, mode = "append") {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning) throw new Error("Wait for the current run to finish before loading payloads.");
   const incoming = SniperFuzzerWorkflow.validatePayloads(payloads);
   if (!incoming.valid) throw new Error(incoming.errors.join(" "));
@@ -17484,6 +17598,7 @@ function applyFuzzerPayloadList(payloads, mode = "append") {
 }
 
 async function importFuzzerPayloadFile(file, mode = "append") {
+  if (!workspaceLoaded) return false;
   if (!file) return;
   // Even a rejected replacement selection supersedes an older pending read.
   const generation = (state._fuzzerFileGeneration || 0) + 1;
@@ -17491,7 +17606,7 @@ async function importFuzzerPayloadFile(file, mode = "append") {
   const sessionId = currentSessionId();
   const draftVersion = state.fuzzerDraftVersion || 0;
   const runToken = state.fuzzerRunToken;
-  const ownsImport = () => state._fuzzerFileGeneration === generation && currentSessionId() === sessionId
+  const ownsImport = () => workspaceLoaded && state._fuzzerFileGeneration === generation && currentSessionId() === sessionId
     && (state.fuzzerDraftVersion || 0) === draftVersion && state.fuzzerRunToken === runToken && !state.fuzzerRunning;
   // Status belongs to the file intent, not the visible tool. Switching tools
   // keeps a valid import running and its failure available when the user returns.
@@ -17529,6 +17644,7 @@ async function importFuzzerPayloadFile(file, mode = "append") {
 
 function initFuzzerSetupControls() {
   const bind = (id, callback) => fuzzerSetupNode(id)?.addEventListener("click", () => {
+    if (!workspaceLoaded) return;
     try { callback(); } catch (error) { fuzzerSetupError(error); }
   });
   bind("fuzzerMarkSelectionButton", markFuzzerEditorSelection);
@@ -17539,6 +17655,7 @@ function initFuzzerSetupControls() {
   bind("fuzzerUndoMarkerButton", undoFuzzerMarker);
   bind("fuzzerClearMarkersButton", clearFuzzerMarkers);
   fuzzerSetupNode("fuzzerCandidateSelect")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
     const button = fuzzerSetupNode("fuzzerMarkCandidateButton");
     if (button) button.disabled = !!state.fuzzerRunning || !event.target.value;
   });
@@ -17549,6 +17666,7 @@ function initFuzzerSetupControls() {
     markFuzzerPosition(candidate.start, candidate.end, select._fuzzerRaw);
   });
   fuzzerSetupNode("fuzzerAttackType")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
     const value = event.target.value === "battering_ram" ? "battering_ram" : "sniper";
     // Setup edits retire pending replacements without hiding historical results.
     if (value !== (state.fuzzerAttackType || "sniper")) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
@@ -17556,12 +17674,14 @@ function initFuzzerSetupControls() {
     renderFuzzerSetup();
   });
   fuzzerSetupNode("fuzzerUrlEncode")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
     const value = !!event.target.checked;
     if (value !== (state.fuzzerUrlEncode !== false)) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
     state.fuzzerUrlEncode = value;
     renderFuzzerSetup();
   });
   fuzzerSetupNode("fuzzerConcurrency")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
     const value = Math.round(Number(event.target.value));
     const concurrency = Number.isFinite(value) ? Math.min(16, Math.max(1, value)) : 4;
     if (concurrency !== (state.fuzzerConcurrency || 4)) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
@@ -17570,6 +17690,7 @@ function initFuzzerSetupControls() {
   });
   bind("fuzzerImportPayloadButton", () => fuzzerSetupNode("fuzzerPayloadFile")?.click());
   fuzzerSetupNode("fuzzerPayloadFile")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
     const file = event.target.files?.[0];
     const mode = fuzzerSetupNode("fuzzerPayloadImportMode")?.value || "append";
     event.target.value = "";
@@ -17589,6 +17710,7 @@ function initFuzzerSetupControls() {
 }
 
 async function openFuzzerFromReplay() {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   const tab = getActiveReplayTab();
   if (!tab || tab.type === "websocket") {
@@ -17619,13 +17741,14 @@ async function openFuzzerFromReplay() {
 }
 
 async function openFuzzerFromRecordLoader(loadRecord, sourceIsCurrent = () => true, applySource = openFuzzerFromRecord) {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   const generation = state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
   const sessionId = currentSessionId();
   const workspaceGeneration = workspaceStateGeneration;
   const draftVersion = state.fuzzerDraftVersion || 0;
   const runToken = state.fuzzerRunToken || 0;
-  const ownsImport = () => generation === state._fuzzerImportGeneration
+  const ownsImport = () => workspaceLoaded && generation === state._fuzzerImportGeneration
     && sessionId === currentSessionId() && workspaceGeneration === workspaceStateGeneration
     && draftVersion === (state.fuzzerDraftVersion || 0) && runToken === (state.fuzzerRunToken || 0)
     && !state.fuzzerRunning && sourceIsCurrent();
@@ -17654,6 +17777,7 @@ async function openFuzzerFromSelection() {
 }
 
 function openFuzzerFromRecord(record) {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   if (record.kind === "tunnel") {
     throw new Error("Tunnel records cannot be sent to Fuzzer.");
@@ -17839,6 +17963,7 @@ function initFuzzerResizers() {
 }
 
 function resetFuzzer() {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning || state.fuzzerRunningAttackId) return;
   invalidateFuzzerRun();
   updateFuzzerRequestText(
@@ -17855,6 +17980,7 @@ function resetFuzzer() {
 }
 
 function updateFuzzerRequestText(text, { userEdit = false } = {}) {
+  if (userEdit && !workspaceLoaded) return;
   const normalized = text || "";
   if (state.fuzzerRequestText !== normalized) {
     state.fuzzerRequestText = normalized;
@@ -17864,6 +17990,7 @@ function updateFuzzerRequestText(text, { userEdit = false } = {}) {
 }
 
 function updateFuzzerPayloadsText(text, { userEdit = false } = {}) {
+  if (userEdit && !workspaceLoaded) return;
   const normalized = text || "";
   if (state.fuzzerPayloadsText !== normalized) {
     state.fuzzerPayloadsText = normalized;
@@ -17980,6 +18107,7 @@ function isCurrentFuzzerRun(runToken, sessionId) {
 }
 
 async function runFuzzerAttack() {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning || state.fuzzerRunningAttackId) {
     return;
   }

@@ -1081,7 +1081,7 @@ for (const phase of ["fetch", "json", "error body"]) {
             ? [{ id: "a", name: "Synthetic session", active: true }]
             : { session_id: "a", replay: { tabs: [] }, fuzzer: {} } };
         },
-        requireOkResponse: async () => {}, renderDashboard() {}, loadSettings: async () => {},
+        requireOkResponse: async () => {}, renderDashboard() {}, renderFuzzer() {}, loadSettings: async () => {},
         workspaceSnapshotMatchesActiveSession: snapshot => snapshot.session_id === f.session,
         hydrateReplayTab: value => value, normalizeFuzzerTargetOverride: () => null,
         normalizeFuzzerAttackRecord: () => null, setFuzzerAttackRecord() {},

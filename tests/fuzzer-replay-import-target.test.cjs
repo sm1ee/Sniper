@@ -10,7 +10,7 @@ function fixture(port) {
  const state={activeTool:'replay',activeReplayTabId:tab.id,replayTabs:[tab],fuzzerRequestText:'prior draft',fuzzerPayloadsText:'a\n b',fuzzerRunToken:4,fuzzerDraftVersion:9};
  const input=value=>({value,setCustomValidity(s){this.error=s},toggleAttribute(){}});
  const els={replayHostInput:input('new.example.com'),replayPortInput:input(port),replaySchemeSelect:input('https')};
- const c=loadFunctions(names,{state,els,URL,TextEncoder,TextDecoder,atob,document:{getElementById:()=>null},scheduleWorkspaceStateSave(){},renderReplay(){},clearFuzzerAttackRecord(){},hideFuzzerDetailPanel(){},setActiveTool(tool){state.activeTool=tool},renderToolPanels(){}});
+ const c=loadFunctions(names,{workspaceLoaded:true,state,els,URL,TextEncoder,TextDecoder,atob,document:{getElementById:()=>null},scheduleWorkspaceStateSave(){},renderReplay(){},clearFuzzerAttackRecord(){},hideFuzzerDetailPanel(){},setActiveTool(tool){state.activeTool=tool},renderToolPanels(){}});
  return{c,state,els,tab};
 }
 test('valid Replay import retains committed destination, exact payloads, source, and HTTP version', async()=>{

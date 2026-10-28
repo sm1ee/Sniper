@@ -63,7 +63,7 @@ function fixture() {
     'resetFuzzer', 'invalidateFuzzerRun', 'updateFuzzerRequestText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',
   ], {
-    compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0, workspaceStateGeneration: 0,
+    workspaceLoaded: true, compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0, workspaceStateGeneration: 0,
     renderFuzzerPayloadsEditor() { els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText; },
     state, els, document, mainTabs: [], _fuzzerDetailViewModes: { request: 'raw', response: 'raw' },
     FUZZER_RESULT_ROW_HEIGHT: 30, FUZZER_RESULT_BUFFER_ROWS: 5, measuredFuzzerResultRowHeight: 30,

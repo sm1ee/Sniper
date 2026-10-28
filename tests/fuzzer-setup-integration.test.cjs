@@ -15,7 +15,7 @@ function fixture() {
   const target = { scheme: 'https', host: '127.0.0.1', port: '8443' };
   const pending = deferred(), requests = [];
   let editor = null, renders = 0, saves = 0;
-  const c = loadFunctions(names, { state, els, TextEncoder, TextDecoder, URL, atob, SniperFuzzerWorkflow: workflow,
+  const c = loadFunctions(names, { workspaceLoaded: true, state, els, TextEncoder, TextDecoder, URL, atob, SniperFuzzerWorkflow: workflow,
     document: { getElementById: () => null }, getCMView: () => editor,
     currentSessionId: () => state.activeSession?.id || null,
     renderFuzzer() { renders++; els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText; },
@@ -438,7 +438,7 @@ for (const field of ['Request', 'Payloads']) test(`${field} correction clears th
   const els = { fuzzerPayloadsEditor: { value: 'x' }, fuzzerMeta: { textContent: '' } };
   let resultText = '', emptyRenders = 0;
   const c = loadFunctions(['updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'renderFuzzer'], {
-    state, els, renderFuzzerResultsWorkflow() {}, renderFuzzerSetup() {},
+    workspaceLoaded: true, state, els, renderFuzzerResultsWorkflow() {}, renderFuzzerSetup() {},
     renderFuzzerPayloadsEditor() { els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText; },
     normalizeFuzzerAttackRecord: value => value || null,
     renderEmptyFuzzerResults(text) { resultText = text; emptyRenders++; },

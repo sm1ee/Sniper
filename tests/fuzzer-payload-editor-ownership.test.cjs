@@ -21,7 +21,7 @@ function fixture() {
   }
   const els = { fuzzerPayloadsEditor: control() };
   const c = loadFunctions(['renderFuzzerPayloadsEditor'], {
-    state, els, document, workspaceStateGeneration: 0, currentSessionId: () => state.activeSession?.id || null,
+    workspaceLoaded: true, state, els, document, workspaceStateGeneration: 0, currentSessionId: () => state.activeSession?.id || null,
     updateFuzzerPayloadsText(value, options) { assert.equal(options.userEdit, true); edits++; state.fuzzerPayloadsText = value; },
     scheduleWorkspaceStateSave() { saves++; },
   });

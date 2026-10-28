@@ -65,9 +65,9 @@ function setup({ rendered = true } = {}) {
     canNavigateReplayHistory: () => false,
   });
   f.context.loadSessions = async () => { f.log.push('reload'); f.state.activeSession = { id: 'session-b' }; };
-  f.context.loadWorkspaceState = async () => {
+  f.context.loadWorkspaceState = async ({ onAdopt = () => {} } = {}) => {
     const snapshot = f.remote([f.next], 20); snapshot.session_id = 'session-b';
-    f.context.applyWorkspaceState(snapshot); f.context.workspaceLoaded = true;
+    f.context.applyWorkspaceState(snapshot); f.context.workspaceLoaded = true; onAdopt();
   };
   f.context.reconcileSessionsAfterActionError = async (...args) => f.reconciles.push(args);
   f.context.showConfirmDialog = (message, callback, options) => f.confirms.push({ message, callback, options });
