@@ -102,3 +102,28 @@ test('one-time nearest scrolling keeps the selected row above the fold after det
   c.scrollFuzzerResultToIndex(0, { nearest: true }); assert.equal(shell.scrollTop, 0);
   assert.equal(renders, 3);
 });
+
+test('selected detail headers wrap their modes instead of clipping the last control', () => {
+  const header = css.match(/\.fuzzer-detail-panel \.pane-header\s*\{([^}]+)\}/)?.[1] ?? '';
+  assert.match(header, /flex-wrap:\s*wrap;/);
+  assert.match(header, /flex-shrink:\s*0;/);
+  assert.match(header, /min-width:\s*0;/);
+  const tabs = css.match(/\.fuzzer-detail-panel \.view-tabs\s*\{([^}]+)\}/)?.[1] ?? '';
+  assert.match(tabs, /flex-wrap:\s*wrap;/);
+  assert.match(tabs, /min-width:\s*0;/);
+  assert.match(tabs, /max-width:\s*100%;/);
+  assert.match(tabs, /margin-left:\s*auto;/);
+});
+
+test('response metadata is bounded without consuming the detail editor or removing modes', () => {
+  const meta = css.match(/#fuzzerDetailResponseMeta\s*\{([^}]+)\}/)?.[1] ?? '';
+  assert.match(meta, /min-width:\s*0;/);
+  assert.match(meta, /display:\s*block;/);
+  assert.match(meta, /max-width:\s*100%;/);
+  assert.match(meta, /overflow:\s*hidden;/);
+  assert.match(meta, /text-overflow:\s*ellipsis;/);
+  assert.match(meta, /white-space:\s*nowrap;/);
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  const modes = [...html.matchAll(/<button\b[^>]*data-fuzzer-detail-target="response"[^>]*data-fuzzer-detail-view="([^"]+)"[^>]*>/g)].map(match => match[1]);
+  assert.deepEqual(modes, ['pretty', 'raw', 'hex', 'render']);
+});

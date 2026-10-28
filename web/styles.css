@@ -3590,8 +3590,12 @@ body.pane-resizing-y {
   background: var(--panel-code);
 }
 
+/* Detail headers must wrap within each half-pane, not clip the last mode. */
 .fuzzer-detail-panel .pane-header {
   display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  min-width: 0;
   align-items: center;
   gap: 8px;
   padding: 4px 12px;
@@ -3601,6 +3605,19 @@ body.pane-resizing-y {
 
 .fuzzer-detail-panel .view-tabs {
   margin-left: auto;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Long MIME labels must not consume the selected response editor vertically. */
+#fuzzerDetailResponseMeta {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Selected fuzzer result row */
