@@ -1407,6 +1407,11 @@ function base32Encode(input) {
 function base32Decode(input) {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
   const normalized = input.toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
+  // These symbol counts cannot encode whole bytes; do not silently truncate them.
+  const remainder = normalized.length % 8;
+  if (remainder === 1 || remainder === 3 || remainder === 6) {
+    throw new Error("Invalid Base32 input");
+  }
   let output = [];
   let buffer = 0;
   let bitsLeft = 0;
