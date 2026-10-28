@@ -1689,32 +1689,50 @@ function bindEvents() {
 
   document.getElementById("clearHistoryButton")?.addEventListener("click", (e) => {
     const button = e.currentTarget;
+    const sessionId = currentSessionId();
+    const workspaceGeneration = workspaceStateGeneration;
+    if (!sessionId) {
+      showToast("Clear history is unavailable until an active session is loaded.", "error");
+      return;
+    }
+    // External session changes leave this dialog open. Its confirmation belongs
+    // to the original workspace, even if the operator later returns to its ID.
+    const ownsWorkspace = () => sessionId === currentSessionId()
+      && workspaceGeneration === workspaceStateGeneration;
+    const sessionName = state.activeSession?.id === sessionId && typeof state.activeSession.name === "string"
+      ? state.activeSession.name.trim() || sessionId : sessionId;
     // Irreversible and easy to hit beside Filter, so it asks first — through the
     // app's own dialog. window.confirm is useless here: the desktop webview
     // shows no native JS panel, so it returned false and Clear did nothing at
     // all. Every other destructive action in this file already uses this.
     showConfirmDialog(
-      "Remove every captured request in this session?\nThis cannot be undone.",
-      () => withButtonProgress(button, async () => {
-        const sessionId = currentSessionId();
-        try {
-          const response = await fetch(sessionWritePath("/api/transactions", sessionId), {
-            method: "DELETE",
-          });
-          await requireOkResponse(response, "Failed to clear the history.");
-          const result = await response.json();
-          if (sessionId !== currentSessionId()) return;
-          targetServiceMapController?.invalidate();
-          clearHttpHistorySelectionPreview();
-          state.selectedId = null;
-          state.selectedRecord = null;
-          scheduleRefresh({ resetScroll: true });
-          showToast(`Cleared ${result.removed} captured request${result.removed === 1 ? "" : "s"}.`, "info");
-        } catch (error) {
-          console.error(error);
-          showToast(error?.message || "Failed to clear the history.", "error");
+      `Remove every captured request in session "${sessionName}"?\nThis cannot be undone.`,
+      () => {
+        if (!ownsWorkspace()) {
+          showToast("Clear canceled because the active workspace changed. Reopen Clear history to try again.", "error");
+          return;
         }
-      }),
+        return withButtonProgress(button, async () => {
+          try {
+            const response = await fetch(sessionWritePath("/api/transactions", sessionId), {
+              method: "DELETE",
+            });
+            await requireOkResponse(response, "Failed to clear the history.");
+            const result = await response.json();
+            if (!ownsWorkspace()) return;
+            targetServiceMapController?.invalidate();
+            clearHttpHistorySelectionPreview();
+            state.selectedId = null;
+            state.selectedRecord = null;
+            scheduleRefresh({ resetScroll: true });
+            showToast(`Cleared ${result.removed} captured request${result.removed === 1 ? "" : "s"}.`, "info");
+          } catch (error) {
+            if (!ownsWorkspace()) return;
+            console.error(error);
+            showToast(error?.message || "Failed to clear the history.", "error");
+          }
+        });
+      },
       { title: "Clear history", confirmLabel: "Clear" },
     );
   });
