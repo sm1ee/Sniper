@@ -18143,12 +18143,13 @@ async function createNewSequence() {
 }
 
 async function selectSequence(id) {
+  // Re-selecting the current sequence also supersedes navigation waiting on a save.
+  const selectionGeneration = (state.sequenceSelectionGeneration || 0) + 1;
+  state.sequenceSelectionGeneration = selectionGeneration;
   if (state.selectedSequenceId === id) {
     syncSequenceStepFromDom({ allowInvalidRequests: true });
     return;
   }
-  const selectionGeneration = (state.sequenceSelectionGeneration || 0) + 1;
-  state.sequenceSelectionGeneration = selectionGeneration;
   if (!(await flushSequenceDraft())) {
     return;
   }
@@ -18470,14 +18471,25 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
   document.getElementById("sequenceHeader").classList.toggle("hidden", none);
   document.getElementById("sequenceLayout").classList.toggle("hidden", none);
 
+  // Capture focus at render time, not before an asynchronous draft save: the
+  // user may have moved elsewhere while that save was pending.
+  const listSessionId = state.activeSession?.id || null;
+  const focusedListControl = document.activeElement?.closest?.(".seq-select, .seq-delete");
+  const restoreListFocus = listBody._sequenceSessionId === listSessionId
+    && focusedListControl && listBody.contains(focusedListControl)
+    ? { id: focusedListControl.dataset.seqSelect || focusedListControl.dataset.seqDelete,
+        action: focusedListControl.dataset.seqSelect ? "select" : "delete" }
+    : null;
+  listBody._sequenceSessionId = listSessionId;
+
   // List
   listBody.innerHTML = state.sequenceDefinitions.length
     ? state.sequenceDefinitions.map((def) => {
         const selected = def.id === state.selectedSequenceId ? "selected" : "";
         return `<tr class="history-row ${selected}" data-seq-id="${def.id}">
-          <td>${escapeHtml(def.name)}</td>
+          <td><button type="button" class="seq-select" data-seq-select="${escapeHtml(def.id)}" aria-pressed="${def.id === state.selectedSequenceId}">${escapeHtml(def.name)}</button></td>
           <td>${def.steps.length}</td>
-          <td><button class="secondary-action seq-delete" data-seq-delete="${def.id}" style="font-size:0.7rem;padding:2px 6px">&times;</button></td>
+          <td><button type="button" class="secondary-action seq-delete" data-seq-delete="${escapeHtml(def.id)}" aria-label="Delete sequence ${escapeHtml(def.name)}" style="font-size:0.7rem;padding:2px 6px">&times;</button></td>
         </tr>`;
       }).join("")
     : `<tr class="empty-row"><td colspan="3">No sequences yet.</td></tr>`;
@@ -18491,6 +18503,13 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
   listBody.querySelectorAll(".seq-delete").forEach((btn) => {
     onClickWithProgress(btn, () => deleteSequence(btn.dataset.seqDelete).catch(handleSequenceActionError));
   });
+
+  if (restoreListFocus && (!document.activeElement || document.activeElement === document.body
+      || document.activeElement === focusedListControl)) {
+    const selector = restoreListFocus.action === "select" ? ".seq-select" : ".seq-delete";
+    const controls = Array.from(listBody.querySelectorAll(selector));
+    controls.find((control) => (control.dataset.seqSelect || control.dataset.seqDelete) === restoreListFocus.id)?.focus();
+  }
 
   // Editor
   const editing = state.editingSequence;

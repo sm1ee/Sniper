@@ -3471,6 +3471,23 @@ body.pane-resizing-y {
 }
 
 
+.sequence-list-card .seq-select {
+  display: block;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sequence-list-card .seq-select:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: 3px;
+}
+
 .sequence-list-card,
 .sequence-editor-card,
 .sequence-results-card {
