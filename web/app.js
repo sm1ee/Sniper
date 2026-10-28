@@ -28763,21 +28763,36 @@ async function openCompareModal(targetId, ownsOrigin = () => true) {
     clearCompareState();
     return;
   }
-  const [baseRes, targetRes] = await Promise.all([
-    fetch(transactionPath(baseId, sessionId)).then((r) => r.ok ? r.json() : null),
-    fetch(transactionPath(targetId, sessionId)).then((r) => r.ok ? r.json() : null),
-  ]);
+  // Keep failure outcomes until ownership is checked: an old missing base
+  // must neither clear a newer pin nor report an error over newer navigation.
+  const read = (id) => fetch(transactionPath(id, sessionId))
+    .then(async (response) => ({ status: response.status, record: response.ok ? await response.json() : null }))
+    .catch(() => ({ status: 0, record: null }));
+  const [baseRead, targetRead] = await Promise.all([read(baseId), read(targetId)]);
   // A dismissed or superseded comparison must not reopen from a late response.
   if (generation !== compareLoadGeneration || currentSessionId() !== sessionId || !ownsOrigin()) return;
-  if (!baseRes || !targetRes) return;
   const modal = document.getElementById("compareModal");
   // A currently open dialog takes precedence over a delayed Compare reveal.
   const activeModal = getActiveModalAction();
   if (activeModal && activeModal.modal !== modal) return;
+  if (!baseRead.record || !targetRead.record) {
+    const missingBase = !baseRead.record;
+    const failed = missingBase ? baseRead : targetRead;
+    if (missingBase && failed.status === 404 && compareBaseId === baseId && compareBaseSessionId === sessionId) {
+      clearCompareState();
+      renderFuzzerResultsWorkflow();
+    }
+    const message = failed.status === 404
+      ? missingBase ? "Comparison base is no longer available. Set a new compare base."
+        : "Selected transaction is no longer available. Select another transaction to compare."
+      : `Could not load ${missingBase ? "comparison base" : "selected transaction"}${failed.status ? ` (HTTP ${failed.status})` : ""}. Try again.`;
+    showToast(message, "error", 5000);
+    return;
+  }
   const wasVisible = isModalVisible(modal);
   if (!wasVisible) compareReturnFocus = document.activeElement;
-  compareBaseRecord = baseRes;
-  compareTargetRecord = targetRes;
+  compareBaseRecord = baseRead.record;
+  compareTargetRecord = targetRead.record;
   compareActiveTab = "request";
   renderCompareModal();
   modal.classList.remove("hidden");

@@ -51,7 +51,7 @@ function fixture() {
     'followRestoredFuzzerAttack', 'followFuzzerAttack', 'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
     'clearFuzzerResponsePane', 'invalidateFuzzerRun', 'resetFuzzer', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'cloneEditableRequest', 'buildEditableRawRequest', 'normalizedHeaders', 'mergeHeaders', 'headerNameEquals',
-    'setCompareBase', 'openCompareModal', 'closeCompareModal', 'splitFuzzerPayloadLines', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool',
+    'setCompareBase', 'openCompareModal', 'closeCompareModal', 'clearCompareState', 'splitFuzzerPayloadLines', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool',
   ], { state, els, TextEncoder, FUZZER_POLL_MS: 0, setTimeout: callback => { timers.push(callback); return 0; }, document: { getElementById: id => els[id], activeElement: null },
     _fuzzerAttackLoadGeneration: 0, _fuzzerDetailGeneration: 0,
     compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0,
@@ -62,7 +62,7 @@ function fixture() {
     updateCodePaneCM: (key, _, value) => panes.set(key, value), scheduleWorkspaceStateSave: () => saves++,
     showConfirmDialog: (message, confirm, options) => confirmations.push({ message, confirm, options }),
     getHistoryItem: () => null, getActiveModalAction: () => null, isModalVisible: el => !el.classList.contains('hidden'),
-    renderCompareModal: () => compares++, clearCompareState() { throw new Error('Unexpected clear'); },
+    renderCompareModal: () => compares++,
     showToast: message => toasts.push(message), console: { error() {} },
     requestAnimationFrame: callback => { callback(); return 1; },
     fetch(url, options) {
@@ -874,3 +874,44 @@ for (const newerWorkflow of [false, true]) test(`terminal picker follow ${newerW
     assert.match(f.els.fuzzerSavedRunSelect.innerHTML, /original time.*completed/);
   }
 });
+
+for (const side of ['base', 'target']) for (const outcome of [404, 500, 'network', 'json']) {
+  test(`Fuzzer Compare reports current ${side} ${outcome} without extra reads or an invalid modal`, async () => {
+    const f = fixture();
+    f.select(0).resolve(response({ id: 'tx-0' })); await tick(); await f.c.useFuzzerComparisonBase();
+    f.select(1).resolve(response({ id: 'tx-1' })); await tick();
+    const before = f.requests.length, pending = f.c.compareSelectedFuzzerResult();
+    const pair = f.requests.slice(-2), failure = side === 'base' ? 0 : 1;
+    pair[1 - failure].resolve(response({ id: failure ? 'tx-0' : 'tx-1' }));
+    if (outcome === 'network') pair[failure].reject(new Error('Synthetic connection failure'));
+    else if (outcome === 'json') pair[failure].resolve({ ok: true, status: 200, json: async () => { throw new Error('Synthetic malformed body'); } });
+    else pair[failure].resolve(response({}, outcome));
+    await pending;
+    assert.equal(f.requests.length, before + 2);
+    assert.equal(f.compares, 0);
+    assert.equal(f.els.compareModal.classList.contains('hidden'), true);
+    assert.equal(f.toasts.length, 1);
+    assert.match(f.toasts[0], outcome === 404 ? /no longer available/ : /Try again/);
+    assert.match(f.toasts[0], side === 'base' ? /[Cc]omparison base/ : /[Ss]elected transaction/);
+    const cleared = side === 'base' && outcome === 404;
+    assert.equal(f.c.compareBaseId, cleared ? null : 'tx-0');
+    assert.equal(f.els.fuzzerCompareButton.disabled, cleared);
+  });
+}
+for (const boundary of ['base', 'selection', 'session', 'leave']) for (const status of [404, 500]) {
+  test(`stale Compare HTTP ${status} after ${boundary} cannot notify or clear the current pin`, async () => {
+    const f = fixture(); f.state.activeTool = 'fuzzer';
+    f.select(0).resolve(response({ id: 'tx-0' })); await tick(); await f.c.useFuzzerComparisonBase();
+    f.select(1).resolve(response({ id: 'tx-1' })); await tick();
+    const pending = f.c.compareSelectedFuzzerResult(), pair = f.requests.slice(-2);
+    if (boundary === 'base') await f.c.setCompareBase('new-base');
+    if (boundary === 'selection') f.select(0);
+    if (boundary === 'session') f.resetSession('session-b');
+    if (boundary === 'leave') f.c.setActiveTool('replay');
+    const pin = f.c.compareBaseId;
+    pair[0].resolve(response({}, status)); pair[1].resolve(response({ id: 'tx-1' })); await pending;
+    assert.deepEqual(f.toasts, []);
+    assert.equal(f.c.compareBaseId, pin);
+    assert.equal(f.compares, 0);
+  });
+}
