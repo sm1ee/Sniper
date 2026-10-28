@@ -15843,9 +15843,13 @@ function renderFuzzer() {
   if (els.fuzzerRequestCM) {
     // CM path
     const cv = getCMView("fuzzerReq");
-    if (!cv || cv.getContent() !== state.fuzzerRequestText) {
+    const sessionId = currentSessionId();
+    const generation = workspaceStateGeneration;
+    const owner = JSON.stringify([sessionId, generation]);
+    // A session/workspace replacement retires history even for identical text.
+    if (!cv || cv._owner !== owner || cv.getContent() !== state.fuzzerRequestText) {
       updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, state.fuzzerRequestText, {
-        mode: "http", readOnly: false,
+        mode: "http", readOnly: false, owner,
         payloadHighlight: true,
         placeholder: "Paste an HTTP request, then mark the values to fuzz",
       });
@@ -15856,6 +15860,8 @@ function renderFuzzer() {
       if (newCv && !newCv._fuzzerOnChangeWired) {
         newCv._fuzzerOnChangeWired = true;
         addCMUpdateListener(newCv.view, (newText) => {
+          if (getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
+            || generation !== workspaceStateGeneration) return;
           updateFuzzerRequestText(newText, { userEdit: true });
           scheduleWorkspaceStateSave();
         });
