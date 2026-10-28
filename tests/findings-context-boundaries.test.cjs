@@ -76,6 +76,7 @@ function fixture() {
   const interceptPill = element();
   const c = loadFunctions([
     "applyWorkspaceState", "readFuzzerWorkspace", "applyFuzzerWorkspace", "workspaceSnapshotMatchesActiveSession", "_applySettings", "loadSessions",
+    "snapshotFuzzerWorkspace", "workspaceSnapshotValueChanged", "cloneEditableRequest", "normalizedHeaders",
     "currentSessionId", "sessionQueryPath", "transactionPath",
     "runFindingAction", "sendFindingToReplay", "sendFindingToFuzzer", "openFuzzerFromRecordLoader",
     "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveTool",

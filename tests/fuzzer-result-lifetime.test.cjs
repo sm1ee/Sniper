@@ -57,6 +57,7 @@ function fixture() {
     'renderEmptyFuzzerResults', 'renderFuzzerResultsVirtual', 'scrollFuzzerResultToIndex', 'selectFuzzerResultIndex',
     'selectFuzzerRow', 'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord',
     'fuzzerWorkspaceAttackRecordId', 'applyFuzzerWorkspace', 'followRestoredFuzzerAttack', 'hydrateFuzzerAttackRecordById', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
+    'snapshotFuzzerWorkspace', 'workspaceSnapshotValueChanged', 'cloneEditableRequest', 'normalizeFuzzerTargetOverride',
     'clearFuzzerResponsePane', 'syncFuzzerResponsePreview', 'syncFuzzerDetailTabs', 'renderFuzzerDetailPanes',
     'buildRawRequest', 'buildRawResponse', 'buildRawRequestHead', 'buildRawResponseHead', 'normalizedHeaders',
     'mergeHeaders', 'headerNameEquals', 'renderBody', 'binaryBodyPlaceholder', 'prettyFormat', 'prettyJsonText',
@@ -90,8 +91,8 @@ function fixture() {
   vm.runInContext(`(() => { ${appSource.slice(start, end)} })()`, c);
   const resetBinding = appSource.match(/^  els\.resetFuzzerButton\.addEventListener\(\"click\", resetFuzzer\);$/m)?.[0];
   assert.ok(resetBinding); vm.runInContext(resetBinding, c);
-  // This is only the saved-result display initialization branch. No snapshot
-  // serialization, revision, save, or persistence code is loaded.
+  // This is only saved-result display initialization and draft-value comparison;
+  // no workspace revision, save, or persistence code is loaded.
   vm.runInContext(`function restoreSavedJob(snapshot) {
     applyFuzzerWorkspace({ fuzzerAttackRecordId: fuzzerWorkspaceAttackRecordId(snapshot.fuzzer), legacyAttackRecord: null }, snapshot.session_id);
     renderFuzzer();
