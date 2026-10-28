@@ -162,3 +162,52 @@ test('targeted removal is distinct from clear-all and included in Undo descripti
   assert.match(byId('fuzzerClearMarkersButton').attrs.title, /keeping their original values/);
   assert.match(byId('fuzzerUndoMarkerButton').attrs.title, /Add, Remove or Clear/);
 });
+
+// Structural ownership is checked independently of whitespace/indentation.
+function ancestorNodesAt(id) {
+  const stack = [];
+  const voidTags = new Set(['input', 'br', 'hr', 'img', 'meta', 'link']);
+  for (const match of fuzzer.matchAll(/<(\/?)([a-z][\w-]*)\b([^>]*?)(\/?)>/gi)) {
+    const [, close, tag, attrs, selfClose] = match;
+    if (close) { assert.equal(stack.pop()?.tag, tag, `Unbalanced ${tag}`); continue; }
+    if (new RegExp(`\\bid="${id}"`).test(attrs)) return stack;
+    if (!selfClose && !voidTags.has(tag)) stack.push({ tag, attrs });
+  }
+  assert.fail(`Missing #${id}`);
+}
+function inCard(id, name) {
+  return ancestorNodesAt(id).some(node => node.tag === 'section' && node.attrs.includes(name));
+}
+
+test('value helper is a candidate-hidden closed disclosure beside the Request editor', () => {
+  assert.equal(byId('fuzzerValueRow').tag, 'details');
+  assert.ok(!('open' in byId('fuzzerValueRow').attrs));
+  assert.match(byId('fuzzerValueRow').attrs.class, /\bhidden\b/);
+  for (const id of ['fuzzerValueRow', 'fuzzerCandidateSelect', 'fuzzerMarkCandidateButton']) {
+    assert.equal(inCard(id, 'fuzzer-template-card'), true, id);
+  }
+  assert.match(fuzzer, /id="fuzzerValueRow"[^>]*>\s*<summary>Choose a value<\/summary>/);
+});
+
+test('existing generators and payload help belong to a closed Payloads-local disclosure', () => {
+  assert.equal(byId('fuzzerPayloadTools').tag, 'details');
+  assert.ok(!('open' in byId('fuzzerPayloadTools').attrs));
+  for (const id of ['fuzzerPayloadPreset', 'fuzzerApplyPresetButton', 'fuzzerRangeStart', 'fuzzerRangeEnd', 'fuzzerRangeStep', 'fuzzerGenerateRangeButton', 'fuzzerPayloadHelp']) {
+    assert.equal(inCard(id, 'fuzzer-payloads-card'), true, id);
+    assert.equal(disclosureDepthAt(id), 1);
+  }
+  assert.match(fuzzer, /id="fuzzerPayloadTools"[^>]*>\s*<summary>Generate payloads<\/summary>/);
+});
+
+test('only execution settings remain in Options and local helpers share one card scroller', () => {
+  for (const id of ['fuzzerConcurrency', 'fuzzerUrlEncode']) {
+    assert.equal(ancestorNodesAt(id).some(node => node.attrs.includes('fuzzer-options')), true);
+  }
+  for (const id of ['fuzzerCandidateSelect', 'fuzzerPayloadPreset', 'fuzzerRangeStart']) {
+    assert.equal(ancestorNodesAt(id).some(node => node.attrs.includes('fuzzer-options')), false);
+  }
+  assert.match(css, /\.fuzzer-value-tools \.fuzzer-quick-controls\s*\{[^}]*padding: 0;[^}]*border: 0;/);
+  assert.match(css, /\.fuzzer-control-disclosure\s*\{[^}]*flex: 0 0 auto;/);
+  assert.match(css, /\.fuzzer-top-row \.fuzzer-control-disclosure > \.fuzzer-disclosure-body\s*\{[^}]*max-height: none;[^}]*overflow: visible;/);
+  assert.match(css, /\.fuzzer-top-row > \.fuzzer-template-card,\s*\.fuzzer-top-row > \.fuzzer-payloads-card\s*\{[^}]*overflow: auto;/);
+});

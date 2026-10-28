@@ -1233,33 +1233,6 @@
                     </label>
                     <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
                   </div>
-                <div class="fuzzer-control-row fuzzer-quick-controls hidden" id="fuzzerValueRow">
-                  <label class="compact-field fuzzer-field-grow" for="fuzzerCandidateSelect">
-                    <span>Value</span>
-                    <select id="fuzzerCandidateSelect" disabled><option value="">Select text in the request</option></select>
-                  </label>
-                  <button class="secondary-action" id="fuzzerMarkCandidateButton" type="button" disabled>Mark value</button>
-                </div>
-                    <div class="fuzzer-control-row">
-                      <label class="compact-field fuzzer-field-grow" for="fuzzerPayloadPreset">
-                        <span>Boundary preset</span>
-                        <select id="fuzzerPayloadPreset">
-                          <option value="text-boundaries">Text boundaries</option>
-                          <option value="number-boundaries">Number boundaries</option>
-                        </select>
-                      </label>
-                      <button class="secondary-action" id="fuzzerApplyPresetButton" type="button">Use preset</button>
-                    </div>
-                    <fieldset class="fuzzer-range-fields">
-                      <legend>Inclusive number range</legend>
-                      <div class="fuzzer-range-grid">
-                        <label class="compact-field" for="fuzzerRangeStart"><span>From</span><input id="fuzzerRangeStart" type="number" value="1" step="1" /></label>
-                        <label class="compact-field" for="fuzzerRangeEnd"><span>Through</span><input id="fuzzerRangeEnd" type="number" value="10" step="1" /></label>
-                        <label class="compact-field" for="fuzzerRangeStep"><span>Step</span><input id="fuzzerRangeStep" type="number" value="1" step="1" /></label>
-                      </div>
-                      <button class="secondary-action" id="fuzzerGenerateRangeButton" type="button">Generate range</button>
-                    </fieldset>
-                    <p class="fuzzer-help" id="fuzzerPayloadHelp">One payload per line. Spaces are preserved. Blank lines are empty payloads; a final line break is ignored.</p>
                 </div>
               </details>
             </section>
@@ -1279,6 +1252,18 @@
                   </div>
                 </header>
                 <p class="fuzzer-input-label" id="fuzzerRequestHelp">Raw HTTP request · select a value, then Add §</p>
+                <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-value-tools hidden" id="fuzzerValueRow">
+                  <summary>Choose a value</summary>
+                  <div class="fuzzer-disclosure-body">
+                    <div class="fuzzer-control-row fuzzer-quick-controls">
+                      <label class="compact-field fuzzer-field-grow" for="fuzzerCandidateSelect">
+                        <span>Value</span>
+                        <select id="fuzzerCandidateSelect" disabled><option value="">Select text in the request</option></select>
+                      </label>
+                      <button class="secondary-action" id="fuzzerMarkCandidateButton" type="button" disabled>Mark value</button>
+                    </div>
+                  </div>
+                </details>
                 <div class="editor-panel" role="group" aria-labelledby="fuzzerRequestHeading" aria-describedby="fuzzerRequestHelp">
                   <div id="fuzzerRequestCM" class="cm-container" style="height:100%"></div>
                 </div>
@@ -1304,6 +1289,31 @@
                   </label>
                 </div>
                 <p id="fuzzerPayloadImportStatus" class="fuzzer-import-status hidden" role="status" aria-live="polite"></p>
+                <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-payload-tools" id="fuzzerPayloadTools">
+                  <summary>Generate payloads</summary>
+                  <div class="fuzzer-disclosure-body">
+                    <div class="fuzzer-control-row">
+                      <label class="compact-field fuzzer-field-grow" for="fuzzerPayloadPreset">
+                        <span>Boundary preset</span>
+                        <select id="fuzzerPayloadPreset">
+                          <option value="text-boundaries">Text boundaries</option>
+                          <option value="number-boundaries">Number boundaries</option>
+                        </select>
+                      </label>
+                      <button class="secondary-action" id="fuzzerApplyPresetButton" type="button">Use preset</button>
+                    </div>
+                    <fieldset class="fuzzer-range-fields">
+                      <legend>Inclusive number range</legend>
+                      <div class="fuzzer-range-grid">
+                        <label class="compact-field" for="fuzzerRangeStart"><span>From</span><input id="fuzzerRangeStart" type="number" value="1" step="1" /></label>
+                        <label class="compact-field" for="fuzzerRangeEnd"><span>Through</span><input id="fuzzerRangeEnd" type="number" value="10" step="1" /></label>
+                        <label class="compact-field" for="fuzzerRangeStep"><span>Step</span><input id="fuzzerRangeStep" type="number" value="1" step="1" /></label>
+                      </div>
+                      <button class="secondary-action" id="fuzzerGenerateRangeButton" type="button">Generate range</button>
+                    </fieldset>
+                    <p class="fuzzer-help" id="fuzzerPayloadHelp">One payload per line. Spaces are preserved. Blank lines are empty payloads; a final line break is ignored.</p>
+                  </div>
+                </details>
                 <div class="editor-panel">
                   <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="Paste payloads, one per line" aria-describedby="fuzzerPayloadHelp"></textarea>
                 </div>

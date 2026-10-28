@@ -721,3 +721,27 @@ for (const nl of ['\n', '\r\n']) for (const value of ['😀한e\u0301', 'oneone'
     assert.equal(f.state._fuzzerMarkerUndo, null);
   });
 }
+
+test('setup repaints preserve local helper disclosure state and focused range control', () => {
+  const f = fixture(), nodes = setupNodes(f);
+  const classes = new Set();
+  const valueDisclosure = nodes.fuzzerValueRow = { open: true, classList: { toggle: (name, on) => on ? classes.add(name) : classes.delete(name) } };
+  const payloadDisclosure = nodes.fuzzerPayloadTools = { open: true };
+  const range = nodes.fuzzerRangeStart = { value: '7', disabled: false };
+  f.c.document.activeElement = range;
+  f.c.renderFuzzerSetup();
+  f.c.renderFuzzerSetup();
+  assert.equal(nodes.fuzzerValueRow, valueDisclosure);
+  assert.equal(nodes.fuzzerPayloadTools, payloadDisclosure);
+  assert.equal(valueDisclosure.open, true);
+  assert.equal(payloadDisclosure.open, true);
+  assert.equal(classes.has('hidden'), false);
+  assert.equal(f.c.document.activeElement, range);
+  assert.equal(range.value, '7');
+  assert.equal(f.requests.length, 0);
+  f.state.fuzzerRequestText = '';
+  f.c.renderFuzzerSetup();
+  assert.equal(classes.has('hidden'), true, 'candidate-free state hides the whole value disclosure');
+  assert.equal(valueDisclosure.open, true, 'visibility updates do not reset the user-controlled disclosure state');
+  assert.equal(payloadDisclosure.open, true);
+});

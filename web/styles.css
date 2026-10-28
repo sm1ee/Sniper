@@ -9070,8 +9070,9 @@ button.utility-button.replay-tab-add {
 .fuzzer-preflight > details[open] { flex-basis: 100%; }
 .fuzzer-preflight > #fuzzerPreflightNotice { align-self: center; }
 .fuzzer-preflight > details > summary { padding: 3px 0; min-height: 24px; }
-.fuzzer-options .fuzzer-disclosure-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.fuzzer-options .fuzzer-quick-controls { padding: 0; border: 0; }
+.fuzzer-value-tools .fuzzer-quick-controls { padding: 0; border: 0; }
+/* Local setup helpers share the card scroll instead of nesting another scrollbar. */
+.fuzzer-top-row .fuzzer-control-disclosure > .fuzzer-disclosure-body { max-height: none; overflow: visible; }
 .fuzzer-count { color: var(--text-soft); font-size: var(--font-xs); white-space: nowrap; }
 .fuzzer-top-row .toolbar-actions { margin-left: auto; }
 .fuzzer-input-label { margin: 0; padding: 7px 10px; color: var(--text-soft); font-size: var(--font-xs); }
