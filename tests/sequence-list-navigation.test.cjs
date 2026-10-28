@@ -125,3 +125,20 @@ test('reselecting the active sequence cancels an earlier pending navigation', as
   assert.equal(f.document.activeElement, f.rows()[0].select);
   assert.equal(f.counts().saves, 1);
 });
+
+test('compact list prioritizes full names while retaining Steps and accessible Actions header', () => {
+  const fs = require('node:fs'); const path = require('node:path');
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
+  const list = html.match(/<section class="panel-card sequence-list-card">([^]*?)<\/section>/)[1];
+  assert.match(list, /<th>Steps<\/th>/);
+  assert.match(list, /<th><span class="sequence-actions-heading">Actions<\/span><\/th>/);
+  assert.match(css, /\.sequence-list-card \.mini-table td:nth-child\(2\) \{\s*width: 48px;\s*padding-inline: 6px;\s*text-align: center;/);
+  assert.match(css, /\.sequence-list-card \.mini-table td:nth-child\(3\) \{\s*width: 32px;\s*padding-inline: 4px;\s*text-align: center;/);
+  const name = css.match(/\.sequence-list-card \.seq-select \{([^]*?)\}/)[1];
+  assert.match(name, /overflow-wrap: anywhere/); assert.doesNotMatch(name, /ellipsis|nowrap|overflow: hidden/);
+  assert.match(css, /\.sequence-list-card \.sequence-actions-heading \{[^]*?clip: rect\(0, 0, 0, 0\);/);
+  assert.match(css, /\.sequence-list-card \.seq-delete:focus-visible \{\s*outline: 2px solid var\(--point\);\s*outline-offset: 1px;/);
+  const f = fixture(); f.state.sequenceDefinitions[0].steps = Array.from({ length: 123 }, () => ({}));
+  f.c.renderSequencePanel(); assert.match(f.list.innerHTML, /<td>123<\/td>/);
+});
