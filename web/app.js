@@ -1681,6 +1681,7 @@ function bindEvents() {
       state.runtime = runtime;
       syncHttpCapturePill();
     } catch (error) {
+      if (sessionId !== currentSessionId()) return;
       console.error(error);
       showToast(error?.message || "Failed to change capture.", "error");
     }
