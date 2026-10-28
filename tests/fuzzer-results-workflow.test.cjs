@@ -746,6 +746,7 @@ function wireReuseSetupControls(f) {
   f.c.fuzzerSetupNode = id => f.els[id];
   f.c.renderFuzzerSetup = () => {};
   for (const name of ['markFuzzerEditorSelection', 'removeFuzzerEditorPosition', 'renderFuzzerRemoveMarkerControl', 'undoFuzzerMarker', 'clearFuzzerMarkers']) f.c[name] = () => {};
+  vm.runInContext(appSource.match(/^function finishFuzzerOptionChange\([^]*?^\}/m)[0], f.c);
   vm.runInContext(appSource.match(/^function initFuzzerSetupControls\([^]*?^\}/m)[0], f.c);
   f.c.initFuzzerSetupControls();
 }

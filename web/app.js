@@ -18057,6 +18057,20 @@ async function importFuzzerPayloadFile(file, mode = "append") {
   }
 }
 
+function finishFuzzerOptionChange(changed) {
+  if (changed) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+  // A settled Start failure belongs to the old draft. Polling/unavailable-run
+  // warnings still belong to their retained results and must remain visible.
+  if (changed && state.fuzzerNoticeError && !state.fuzzerRunning && !state.fuzzerRunningAttackId
+    && !state.fuzzerAttackRecord && !state.fuzzerAttackRecordId) {
+    state.fuzzerNoticeError = false;
+    state.fuzzerNotice = "";
+    renderFuzzer(); // Also retire the duplicate empty-results/metadata notice.
+  } else {
+    renderFuzzerSetup();
+  }
+}
+
 function initFuzzerSetupControls() {
   const bind = (id, callback) => fuzzerSetupNode(id)?.addEventListener("click", () => {
     if (!workspaceLoaded) return;
@@ -18087,24 +18101,24 @@ function initFuzzerSetupControls() {
     if (!workspaceLoaded) return;
     const value = event.target.value === "battering_ram" ? "battering_ram" : "sniper";
     // Setup edits retire pending replacements without hiding historical results.
-    if (value !== (state.fuzzerAttackType || "sniper")) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+    const changed = value !== (state.fuzzerAttackType || "sniper");
     state.fuzzerAttackType = value;
-    renderFuzzerSetup();
+    finishFuzzerOptionChange(changed);
   });
   fuzzerSetupNode("fuzzerUrlEncode")?.addEventListener("change", (event) => {
     if (!workspaceLoaded) return;
     const value = !!event.target.checked;
-    if (value !== (state.fuzzerUrlEncode !== false)) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+    const changed = value !== (state.fuzzerUrlEncode !== false);
     state.fuzzerUrlEncode = value;
-    renderFuzzerSetup();
+    finishFuzzerOptionChange(changed);
   });
   fuzzerSetupNode("fuzzerConcurrency")?.addEventListener("change", (event) => {
     if (!workspaceLoaded) return;
     const value = Math.round(Number(event.target.value));
     const concurrency = Number.isFinite(value) ? Math.min(16, Math.max(1, value)) : 4;
-    if (concurrency !== (state.fuzzerConcurrency || 4)) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+    const changed = concurrency !== (state.fuzzerConcurrency || 4);
     state.fuzzerConcurrency = concurrency;
-    renderFuzzerSetup();
+    finishFuzzerOptionChange(changed);
   });
   bind("fuzzerImportPayloadButton", () => fuzzerSetupNode("fuzzerPayloadFile")?.click());
   fuzzerSetupNode("fuzzerPayloadFile")?.addEventListener("change", (event) => {
