@@ -439,6 +439,7 @@ for (const field of ['Request', 'Payloads']) test(`${field} correction clears th
   let resultText = '', emptyRenders = 0;
   const c = loadFunctions(['updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'renderFuzzer'], {
     state, els, renderFuzzerResultsWorkflow() {}, renderFuzzerSetup() {},
+    renderFuzzerPayloadsEditor() { els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText; },
     normalizeFuzzerAttackRecord: value => value || null,
     renderEmptyFuzzerResults(text) { resultText = text; emptyRenders++; },
   });

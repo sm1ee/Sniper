@@ -2485,10 +2485,6 @@ function bindEvents() {
     });
     els.fuzzerRequestEditor.addEventListener("scroll", syncFuzzerRequestHighlightScroll);
   }
-  els.fuzzerPayloadsEditor.addEventListener("input", () => {
-    updateFuzzerPayloadsText(els.fuzzerPayloadsEditor.value, { userEdit: true });
-    scheduleWorkspaceStateSave();
-  });
   if (els.interceptRequestEditor) {
     els.interceptRequestEditor.addEventListener("input", () => {
       if (els.interceptRequestCM) return; // CM handles it
@@ -15838,6 +15834,34 @@ function renderTarget() {
   }
 }
 
+function renderFuzzerPayloadsEditor() {
+  const sessionId = currentSessionId();
+  const generation = workspaceStateGeneration;
+  const owner = JSON.stringify([sessionId, generation]);
+  let editor = els.fuzzerPayloadsEditor;
+  if (editor._fuzzerOwner !== owner) {
+    const previous = editor;
+    const hadFocus = document.activeElement === previous;
+    if (previous._fuzzerOwner !== undefined) {
+      // Equal-value assignments can retain native Undo history. A fresh control
+      // retires the old workspace's edits even when both drafts are empty.
+      editor = previous.cloneNode(false);
+      editor.value = state.fuzzerPayloadsText;
+      previous.replaceWith(editor);
+      els.fuzzerPayloadsEditor = editor;
+    }
+    editor._fuzzerOwner = owner;
+    editor.addEventListener("input", () => {
+      if (els.fuzzerPayloadsEditor !== editor || sessionId !== currentSessionId()
+        || generation !== workspaceStateGeneration) return;
+      updateFuzzerPayloadsText(editor.value, { userEdit: true });
+      scheduleWorkspaceStateSave();
+    });
+    if (hadFocus && editor !== previous) editor.focus({ preventScroll: true });
+  }
+  if (editor.value !== state.fuzzerPayloadsText) editor.value = state.fuzzerPayloadsText;
+}
+
 function renderFuzzer() {
   renderFuzzerResultsWorkflow();
   if (els.fuzzerRequestCM) {
@@ -15874,9 +15898,7 @@ function renderFuzzer() {
     }
     renderFuzzerRequestHighlight(state.fuzzerRequestText);
   }
-  if (els.fuzzerPayloadsEditor.value !== state.fuzzerPayloadsText) {
-    els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText;
-  }
+  renderFuzzerPayloadsEditor();
   const attackRunning = !!state.fuzzerRunning || !!state.fuzzerRunningAttackId;
   els.fuzzerShell?.classList?.toggle("fuzzer-results-empty", !attackRunning && !state.fuzzerAttackRecord && !state.fuzzerAttackRecordId);
   if (els.startFuzzerButton) {
@@ -19785,7 +19807,11 @@ function updateInterceptSearch() {
 // pass, and refresh the footer meta when the pane being written is the visible one.
 function setInterceptPaneContent(key, container, text, options = {}) {
   const query = els.interceptSearchInput ? els.interceptSearchInput.value.trim() : "";
-  const result = updateCodePaneCM(key, container, text, { ...options, search: query });
+  const record = key === "interceptRes" ? state.selectedResponseInterceptRecord : state.selectedInterceptRecord;
+  // A held message owns its Undo history; clearing selection retires it before
+  // another detail arrives, including an identical message in a new workspace.
+  const owner = JSON.stringify([currentSessionId(), workspaceStateGeneration, record?.id || null]);
+  const result = updateCodePaneCM(key, container, text, { ...options, owner, search: query });
   if (els.interceptSearchMeta && activeInterceptCMKey() === key) {
     els.interceptSearchMeta.innerHTML = buildSearchMeta(result.lineCount, result.matchCount);
   }

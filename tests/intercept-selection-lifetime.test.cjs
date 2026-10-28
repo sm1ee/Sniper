@@ -64,7 +64,7 @@ function fixture(mode, cm = true) {
     "currentSessionId", "sessionQueryPath", "jsonArray",
     "createHistoryPagingState", "createWebsocketPagingState", "createDefaultFilterSettings", "createDefaultDisplaySettings",
   ], {
-    els, URL, URLSearchParams, TextEncoder, document: { getElementById: () => null },
+    els, URL, URLSearchParams, TextEncoder, document: { getElementById: () => null }, workspaceStateGeneration: 0,
     HTTP_HISTORY_PAGE_SIZE: 250, WEBSOCKET_PAGE_SIZE: 100, DEFAULT_HISTORY_COLUMN_ORDER: [],
     createDefaultHistoryColumnWidths: () => ({}), createDefaultWsColumnWidths: () => ({}),
     console: { ...console, error: error => errors.push(error) },

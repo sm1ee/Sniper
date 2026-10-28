@@ -15,6 +15,7 @@ function fixture() {
   f.saves = 0;
   Object.assign(f.context, {
     renderFuzzerResultsWorkflow() {}, renderFuzzerSetup() {}, renderEmptyFuzzerResults() {},
+    renderFuzzerPayloadsEditor() { f.els.fuzzerPayloadsEditor.value = f.state.fuzzerPayloadsText; },
     wireFuzzerMarkerSelection() {}, scheduleFuzzerSetupRender() {},
     scheduleWorkspaceStateSave() { f.saves++; },
   });

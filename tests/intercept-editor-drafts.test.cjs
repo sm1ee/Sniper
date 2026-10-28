@@ -88,7 +88,7 @@ function fixture(mode, cm) {
     "responseContentLengthMayDescribeRepresentation", "currentSessionId", "sessionQueryPath", "sessionWritePath",
     "expectedActiveSessionIdForWrite", "jsonArray",
   ], {
-    state, els, document, URL, URLSearchParams, TextEncoder,
+    state, els, document, URL, URLSearchParams, TextEncoder, workspaceStateGeneration: 0,
     getCMView: key => views.get(key),
     updateCodePaneCM(key, _container, text) {
       writes.push({ key, text });
