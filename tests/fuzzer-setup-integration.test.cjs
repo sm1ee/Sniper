@@ -8,7 +8,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const raw = 'POST /items?id=one&id=two%2Fthree HTTP/1.0\r\nHost: example.com\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 3\r\n\r\na=1';
 const parserNames = ['parseFuzzerRequestTemplate', 'parseEditableRawRequest', 'splitRawHttpMessage', 'editableRequestBodyLength', 'decodedBase64Length', 'parseReplayHttpVersionToken', 'normalizeReplayHttpVersion', 'headerValue', 'headerNameEquals', 'normalizedHeaders', 'validateRawHttpBodyFraming', 'buildEditableRawRequest', 'mergeHeaders', 'httpRequestAuthoritiesEquivalent', 'normalizeHttpRequestAuthority', 'createDefaultEditableRequest'];
-const names = [...parserNames, 'renderFuzzerSetup', 'renderFuzzerPayloadImportStatus', 'fuzzerSetupNode', 'escapeHtml', 'initFuzzerSetupControls', 'fuzzerRequestTextForAction', 'fuzzerRawOffsetForEditorOffset', 'splitFuzzerPayloadLines', 'fuzzerPayloadCount', 'fuzzerPayloadTextWithinLimits', 'fuzzerSetupPreflight', 'markFuzzerPosition', 'markFuzzerEditorSelection', 'undoFuzzerMarker', 'clearFuzzerMarkers', 'applyFuzzerPayloadList', 'importFuzzerPayloadFile', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'invalidateFuzzerRun', 'openFuzzerFromRecord', 'openFuzzerFromReplay', 'runFuzzerAttack', 'followFuzzerAttack', 'isCurrentFuzzerRun', 'replayHttpVersionFromText', 'validateManualRepeaterTargetInput', 'normalizePortValue', 'isLikelyIpv6Literal', 'setReplayTargetInputValidity'];
+const names = [...parserNames, 'renderFuzzerSetup', 'renderFuzzerPayloadImportStatus', 'fuzzerSetupNode', 'escapeHtml', 'initFuzzerSetupControls', 'fuzzerRequestTextForAction', 'fuzzerRawOffsetForEditorOffset', 'splitFuzzerPayloadLines', 'fuzzerPayloadCount', 'fuzzerPayloadTextWithinLimits', 'fuzzerSetupPreflight', 'markFuzzerPosition', 'markFuzzerEditorSelection', 'fuzzerMarkerRemoval', 'renderFuzzerRemoveMarkerControl', 'removeFuzzerEditorPosition', 'undoFuzzerMarker', 'clearFuzzerMarkers', 'applyFuzzerPayloadList', 'importFuzzerPayloadFile', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'invalidateFuzzerRun', 'openFuzzerFromRecord', 'openFuzzerFromReplay', 'runFuzzerAttack', 'followFuzzerAttack', 'isCurrentFuzzerRun', 'replayHttpVersionFromText', 'validateManualRepeaterTargetInput', 'normalizePortValue', 'isLikelyIpv6Literal', 'setReplayTargetInputValidity'];
 function fixture() {
   const state = { activeSession: { id: 'session-a' }, fuzzerBaseRequest: { scheme: 'https', host: 'example.com', method: 'POST', path: '/items', body: 'a=1', body_encoding: 'utf8', preview_truncated: false }, fuzzerRequestText: raw, fuzzerPayloadsText: 'x', fuzzerDraftVersion: 0, fuzzerRunToken: 0, fuzzerRunning: false, fuzzerSourceTransactionId: 'source-a' };
   const els = { fuzzerPayloadsEditor: { value: 'x' } };
@@ -492,3 +492,101 @@ for (const invalid of ['range', 'payload-count', 'payload-size', 'combined-size'
     assert.equal(f.state.fuzzerPayloadsText, 'fresh');
   });
 }
+
+
+test('targeted removal maps normalized editor offsets, preserves CRLF, saves and supports Undo', () => {
+  const f = fixture(), text = raw.replace('a=1', 'a=§한😀글§');
+  f.state.fuzzerRequestText = text;
+  const visible = text.replace(/\r\n?/g, '\n'), offset = visible.indexOf('한');
+  const selection = { from: offset, to: offset + 1 }, dispatched = [];
+  let focused = 0;
+  f.setEditor({ getContent: () => f.state.fuzzerRequestText.replace(/\r\n?/g, '\n'), view: {
+    state: { selection: { main: selection } }, dispatch: value => dispatched.push(value), focus() { focused++; },
+  } });
+  f.c.removeFuzzerEditorPosition();
+  assert.equal(f.state.fuzzerRequestText, text.replace('§한😀글§', '한😀글'));
+  assert.equal(f.saves, 1);
+  assert.equal(focused, 1);
+  assert.deepEqual(plain(dispatched[0].selection), { anchor: offset - 1, head: offset + 3 });
+  f.c.undoFuzzerMarker();
+  assert.equal(f.state.fuzzerRequestText, text);
+});
+
+test('targeted removal rejects partial selection and active runs without mutation or saves', () => {
+  const f = fixture(), text = raw.replace('a=1', 'a=§one§&b=§two§');
+  f.state.fuzzerRequestText = text;
+  const visible = text.replace(/\r\n?/g, '\n');
+  const selection = { from: visible.lastIndexOf('one') + 1, to: visible.lastIndexOf('two') + 4 };
+  f.setEditor({ getContent: () => visible, view: { state: { selection: { main: selection } } } });
+  assert.throws(() => f.c.removeFuzzerEditorPosition(), /whole marked position/);
+  selection.from = visible.lastIndexOf('one'); selection.to = selection.from;
+  for (const flag of ['fuzzerRunning', 'fuzzerRunningAttackId']) {
+    f.state[flag] = true;
+    assert.throws(() => f.c.removeFuzzerEditorPosition(), /current run/);
+    f.state[flag] = false;
+  }
+  assert.equal(f.state.fuzzerRequestText, text);
+  assert.equal(f.saves, 0);
+});
+
+
+test('Remove button follows current selection and active-run state without mutating the draft', () => {
+  const f = fixture(), button = { disabled: true };
+  f.c.document.getElementById = id => id === 'fuzzerRemoveMarkerButton' ? button : null;
+  const text = raw.replace('a=1', 'a=§one§');
+  f.state.fuzzerRequestText = text;
+  const visible = text.replace(/\r\n?/g, '\n');
+  const selection = { from: 0, to: 0 };
+  f.setEditor({ getContent: () => visible, view: { state: { selection: { main: selection } } } });
+  f.c.renderFuzzerRemoveMarkerControl(); assert.equal(button.disabled, true);
+  selection.from = selection.to = visible.lastIndexOf('one');
+  f.c.renderFuzzerRemoveMarkerControl(); assert.equal(button.disabled, false);
+  f.state.fuzzerRunningAttackId = 'active';
+  f.c.renderFuzzerRemoveMarkerControl(); assert.equal(button.disabled, true);
+  assert.equal(f.saves, 0); assert.equal(f.state.fuzzerRequestText, text);
+});
+
+
+test('textarea removal fallback keeps values and clear-all still ignores the selection', () => {
+  const f = fixture(), text = raw.replace('a=1', 'a=§one§&b=§two§');
+  f.state.fuzzerRequestText = text;
+  const visible = text.replace(/\r\n?/g, '\n');
+  const at = visible.lastIndexOf('one');
+  let focused = 0, restored = null;
+  f.els.fuzzerRequestEditor = { value: visible, selectionStart: at, selectionEnd: at,
+    setSelectionRange(from, to) { restored = [from, to]; }, focus() { focused++; } };
+  f.c.removeFuzzerEditorPosition();
+  assert.equal(f.state.fuzzerRequestText, text.replace('§one§', 'one'));
+  assert.deepEqual(restored, [at - 1, at + 2]); assert.equal(focused, 1);
+  f.els.fuzzerRequestEditor.value = text.replace(/\r\n?/g, '\n');
+  f.state.fuzzerRequestText = text;
+  f.c.clearFuzzerMarkers();
+  assert.equal(f.state.fuzzerRequestText, text.replace('§one§', 'one').replace('§two§', 'two'));
+});
+
+
+test('CodeMirror selection listener is installed once and refreshes only the Remove control', () => {
+  let dispatches = 0, refreshes = 0, listener;
+  const c = loadFunctions(['wireFuzzerMarkerSelection'], {
+    CM: { StateEffect: { appendConfig: { of: value => value } }, EditorView: { updateListener: { of: callback => callback } } },
+    renderFuzzerRemoveMarkerControl() { refreshes++; },
+  });
+  const editor = { view: { dispatch(value) { dispatches++; listener = value.effects; } } };
+  c.wireFuzzerMarkerSelection(editor); c.wireFuzzerMarkerSelection(editor);
+  assert.equal(dispatches, 1);
+  listener({ selectionSet: true, docChanged: false });
+  listener({ selectionSet: false, docChanged: true });
+  listener({ selectionSet: false, docChanged: false });
+  assert.equal(refreshes, 2); assert.equal(dispatches, 1);
+  c.wireFuzzerMarkerSelection({ view: { dispatch() { dispatches++; } } });
+  assert.equal(dispatches, 2);
+});
+
+
+test('raw offset LF fast path preserves UTF-16 coordinates and rejects invalid offsets', () => {
+  const f = fixture(), text = 'GET /😀 HTTP/1.1\nHost: example.com\n\n한😀글';
+  for (let offset = 0; offset <= text.length; offset++) assert.equal(f.c.fuzzerRawOffsetForEditorOffset(text, offset), offset);
+  for (const offset of [-1, 0.5, NaN, Infinity, text.length + 1]) assert.throws(() => f.c.fuzzerRawOffsetForEditorOffset(text, offset), /selection changed/);
+  assert.equal(f.c.fuzzerRawOffsetForEditorOffset('a\r\nb', 2), 3);
+  assert.throws(() => f.c.fuzzerRawOffsetForEditorOffset('a\r\nb', 4), /selection changed/);
+});

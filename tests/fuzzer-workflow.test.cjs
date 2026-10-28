@@ -354,3 +354,48 @@ test('raw request marker editing is field bounded and preserves mixed line endin
   assert.throws(() => workflow.markRequestSelection(raw, raw.indexOf('X-'), raw.indexOf('value') + 5), /one request field/);
   assert.equal(workflow.clearRequestPositions('GET https://example.com/§a§ HTTP/1.1\r\n\r\n'), 'GET https://example.com/a HTTP/1.1\r\n\r\n');
 });
+
+test('targeted removal keeps originals and only removes unambiguous selected positions', () => {
+  const raw = 'GET /§one§/§two§/$payload$/literal§ HTTP/1.1\r\nHost: example.com\r\n\r\n';
+  const a = raw.indexOf('§one§'), b = raw.indexOf('§two§');
+  for (const [from, to] of [[a + 1, a + 1], [a, a + 5], [a + 2, a + 3]]) {
+    const result = workflow.removeRequestSelection(raw, from, to);
+    assert.equal(result.text, raw.replace('§one§', 'one'));
+    assert.equal(result.text.slice(result.from, result.to), 'one');
+  }
+  assert.equal(workflow.removeRequestSelection(raw, a, b + 5).text, raw.replace('§one§/§two§', 'one/two'));
+  const legacy = raw.indexOf('$payload$');
+  assert.equal(workflow.removeRequestSelection(raw, legacy + 2, legacy + 2).text, raw.replace('$payload$', ''));
+  for (const [from, to] of [[a, a], [a + 5, a + 5], [0, 0], [a + 2, b + 5], [a, b + 2]]) {
+    assert.throws(() => workflow.removeRequestSelection(raw, from, to));
+  }
+  const empty = 'GET /§§ HTTP/1.1\r\n\r\n';
+  assert.equal(workflow.removeRequestSelection(empty, 6, 6).text, 'GET / HTTP/1.1\r\n\r\n');
+});
+
+test('targeted removal respects request fields, literal syntax, Unicode and unchanged raw bytes', () => {
+  const raw = 'GET /literal§ HTTP/1.1\r\nX-§: value§\nOther: §한😀글§\r\n\r\n§line\r\nbody§';
+  const from = raw.indexOf('§한'), to = raw.length;
+  assert.equal(workflow.removeRequestSelection(raw, from, to).text, raw.replace('§한😀글§', '한😀글').replace('§line\r\nbody§', 'line\r\nbody'));
+  assert.throws(() => workflow.removeRequestSelection(raw, raw.indexOf('😀') + 1, raw.indexOf('😀') + 1), /complete character/);
+  assert.throws(() => workflow.removeRequestSelection(raw, raw.lastIndexOf('\r\n') + 1, raw.lastIndexOf('\r\n') + 1), /line break/);
+  assert.throws(() => workflow.removeRequestSelection(raw, raw.indexOf('literal'), raw.indexOf('Other')), /marked position/);
+  const escaped = 'GET /\\§value\\§ HTTP/1.1\n\n';
+  assert.equal(workflow.removeRequestSelection(escaped, 8, 8).text, 'GET /\\value\\ HTTP/1.1\n\n');
+  const nested = 'GET /§$payload$§ HTTP/1.1\n\n';
+  assert.throws(() => workflow.removeRequestSelection(nested, 7, 7), /expose another position/);
+  for (const offsets of [[-1, 0], [2, 1], [0, raw.length + 1], [NaN, 1]]) assert.throws(() => workflow.removeRequestSelection(raw, ...offsets));
+});
+
+
+test('targeted removal rejects marker exposure across the removed delimiters too', () => {
+  const raw = 'GET /$pay§load§$ HTTP/1.1\r\n\r\n';
+  assert.throws(() => workflow.removeRequestSelection(raw, raw.indexOf('load'), raw.indexOf('load')), /expose another position/);
+});
+
+
+test('targeted legacy removal cannot join payload-token fragments into a new position', () => {
+  const raw = 'POST / HTTP/1.1\r\nHost: example.com\r\n\r\n$pay$payload$load$';
+  const at = raw.indexOf('$payload$');
+  assert.throws(() => workflow.removeRequestSelection(raw, at, at + 9), /expose another position/);
+});

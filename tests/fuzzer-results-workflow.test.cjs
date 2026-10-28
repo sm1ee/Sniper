@@ -742,7 +742,7 @@ function wireReuseSetupControls(f) {
   for (const id of ['fuzzerAttackType', 'fuzzerUrlEncode', 'fuzzerConcurrency']) f.els[id] = node(id);
   f.c.fuzzerSetupNode = id => f.els[id];
   f.c.renderFuzzerSetup = () => {};
-  for (const name of ['markFuzzerEditorSelection', 'undoFuzzerMarker', 'clearFuzzerMarkers']) f.c[name] = () => {};
+  for (const name of ['markFuzzerEditorSelection', 'removeFuzzerEditorPosition', 'renderFuzzerRemoveMarkerControl', 'undoFuzzerMarker', 'clearFuzzerMarkers']) f.c[name] = () => {};
   vm.runInContext(appSource.match(/^function initFuzzerSetupControls\([^]*?^\}/m)[0], f.c);
   f.c.initFuzzerSetupControls();
 }

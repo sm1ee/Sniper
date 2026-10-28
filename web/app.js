@@ -15859,6 +15859,7 @@ function renderFuzzer() {
           updateFuzzerRequestText(newText, { userEdit: true });
           scheduleWorkspaceStateSave();
         });
+        wireFuzzerMarkerSelection(newCv);
       }
     }
   } else if (els.fuzzerRequestEditor) {
@@ -17236,6 +17237,7 @@ function renderFuzzerSetup() {
   if (addPosition) addPosition.disabled = busy || !raw.trim();
   const markCandidate = fuzzerSetupNode("fuzzerMarkCandidateButton");
   if (markCandidate) markCandidate.disabled = busy || !select?.value || candidates.length === 0;
+  renderFuzzerRemoveMarkerControl();
   const undo = state._fuzzerMarkerUndo;
   const undoButton = fuzzerSetupNode("fuzzerUndoMarkerButton");
   if (undoButton) undoButton.disabled = busy || !undo || undo.after !== raw || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken;
@@ -17293,6 +17295,12 @@ function scheduleFuzzerSetupRender() {
 }
 
 function fuzzerRawOffsetForEditorOffset(raw, offset) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > raw.length) {
+    throw new Error("The selection changed. Select a value again.");
+  }
+  // LF drafts already use the editor's UTF-16 coordinates; avoid scanning
+  // the entire prefix on each caret move in a large request body.
+  if (!raw.includes("\r")) return offset;
   let visibleOffset = 0;
   for (let index = 0; index < raw.length; index++) {
     if (visibleOffset === offset) return index;
@@ -17339,6 +17347,57 @@ function markFuzzerEditorSelection() {
     if (!input) throw new Error("Place the caret or select a value in the request editor first.");
     markFuzzerPosition(fuzzerRawOffsetForEditorOffset(raw, input.selectionStart), fuzzerRawOffsetForEditorOffset(raw, input.selectionEnd), raw);
   }
+}
+
+function fuzzerMarkerRemoval() {
+  const raw = fuzzerRequestTextForAction();
+  const editor = getCMView("fuzzerReq");
+  const selection = editor?.view?.state?.selection?.main;
+  const input = els.fuzzerRequestEditor;
+  if (!selection && !input) throw new Error("Select a marked position in the request editor first.");
+  const start = fuzzerRawOffsetForEditorOffset(raw, selection ? selection.from : input.selectionStart);
+  const end = fuzzerRawOffsetForEditorOffset(raw, selection ? selection.to : input.selectionEnd);
+  return SniperFuzzerWorkflow.removeRequestSelection(raw, start, end);
+}
+
+function wireFuzzerMarkerSelection(editor) {
+  if (!editor?.view || editor._fuzzerMarkerSelectionWired) return;
+  editor._fuzzerMarkerSelectionWired = true;
+  editor.view.dispatch({ effects: CM.StateEffect.appendConfig.of(CM.EditorView.updateListener.of((update) => {
+    if (update.selectionSet || update.docChanged) renderFuzzerRemoveMarkerControl();
+  })) });
+}
+
+function renderFuzzerRemoveMarkerControl() {
+  const button = fuzzerSetupNode("fuzzerRemoveMarkerButton");
+  if (!button) return;
+  button.disabled = true;
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) return;
+  try {
+    fuzzerMarkerRemoval();
+    button.disabled = false;
+  } catch (_) { /* No unambiguous marked position is selected. */ }
+}
+
+function removeFuzzerEditorPosition() {
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
+  const raw = fuzzerRequestTextForAction();
+  const result = fuzzerMarkerRemoval();
+  state._fuzzerMarkerUndo = { before: raw, after: result.text, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
+  updateFuzzerRequestText(result.text, { userEdit: true });
+  scheduleWorkspaceStateSave();
+  renderFuzzer();
+  const anchor = result.text.slice(0, result.from).replace(/\r\n?/g, "\n").length;
+  const head = result.text.slice(0, result.to).replace(/\r\n?/g, "\n").length;
+  const editor = getCMView("fuzzerReq");
+  if (editor?.view) {
+    editor.view.dispatch({ selection: { anchor, head }, scrollIntoView: true });
+    editor.view.focus();
+  } else if (els.fuzzerRequestEditor) {
+    els.fuzzerRequestEditor.setSelectionRange(anchor, head);
+    els.fuzzerRequestEditor.focus();
+  }
+  renderFuzzerRemoveMarkerControl();
 }
 
 function clearFuzzerMarkers() {
@@ -17432,6 +17491,10 @@ function initFuzzerSetupControls() {
     try { callback(); } catch (error) { fuzzerSetupError(error); }
   });
   bind("fuzzerMarkSelectionButton", markFuzzerEditorSelection);
+  bind("fuzzerRemoveMarkerButton", removeFuzzerEditorPosition);
+  for (const event of ["select", "keyup", "mouseup"]) {
+    els.fuzzerRequestEditor?.addEventListener(event, renderFuzzerRemoveMarkerControl);
+  }
   bind("fuzzerUndoMarkerButton", undoFuzzerMarker);
   bind("fuzzerClearMarkersButton", clearFuzzerMarkers);
   fuzzerSetupNode("fuzzerCandidateSelect")?.addEventListener("change", (event) => {

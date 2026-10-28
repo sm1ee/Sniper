@@ -23,7 +23,7 @@ function values(id) {
   return [...contents.matchAll(/<option value="([^"]*)"/g)].map(([, value]) => value);
 }
 
-const buttons = ['resetFuzzerButton', 'stopFuzzerButton', 'startFuzzerButton', 'fuzzerMarkSelectionButton', 'fuzzerClearMarkersButton', 'fuzzerUndoMarkerButton',
+const buttons = ['resetFuzzerButton', 'stopFuzzerButton', 'startFuzzerButton', 'fuzzerMarkSelectionButton', 'fuzzerRemoveMarkerButton', 'fuzzerClearMarkersButton', 'fuzzerUndoMarkerButton',
   'fuzzerMarkCandidateButton', 'fuzzerImportPayloadButton', 'fuzzerApplyPresetButton', 'fuzzerGenerateRangeButton',
   'fuzzerCompareBaseButton', 'fuzzerCompareButton', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton'];
 const labeledControls = ['fuzzerCandidateSelect', 'fuzzerAttackType', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadImportMode', 'fuzzerPayloadPreset',
@@ -107,7 +107,7 @@ function disclosureDepthAt(id) {
   return [...prefix.matchAll(/<details\b[^>]*>|<\/details>/g)].reduce((depth, [tag]) => depth + (tag.startsWith('</') ? -1 : 1), 0);
 }
 test('common value and file actions are immediate while advanced options and explanations stay collapsed', () => {
-  for (const id of ['fuzzerPayloadImportMode', 'fuzzerMarkSelectionButton', 'fuzzerClearMarkersButton', 'fuzzerImportPayloadButton', 'startFuzzerButton']) {
+  for (const id of ['fuzzerPayloadImportMode', 'fuzzerMarkSelectionButton', 'fuzzerRemoveMarkerButton', 'fuzzerClearMarkersButton', 'fuzzerImportPayloadButton', 'startFuzzerButton']) {
     assert.equal(disclosureDepthAt(id), 0, `${id} should not require opening a disclosure`);
   }
   for (const id of ['fuzzerCandidateSelect', 'fuzzerMarkCandidateButton', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadPreset', 'fuzzerRangeStart', 'fuzzerPreviewNotes', 'fuzzerPayloadHelp']) {
@@ -144,4 +144,12 @@ test('Stop has a hidden compact live error status with matching error styling', 
   assert.equal(byId('stopFuzzerButton').attrs['aria-describedby'], 'fuzzerStopStatus');
   assert.equal(disclosureDepthAt('fuzzerStopStatus'), 0);
   assert.match(css, /#fuzzerStopStatus\.fuzzer-notice-error\s*\{[^}]*color:/s);
+});
+
+
+test('targeted removal is distinct from clear-all and included in Undo description', () => {
+  assert.ok('disabled' in byId('fuzzerRemoveMarkerButton').attrs);
+  assert.match(byId('fuzzerRemoveMarkerButton').attrs.title, /selected value; keep the value/);
+  assert.match(byId('fuzzerClearMarkersButton').attrs.title, /keeping their original values/);
+  assert.match(byId('fuzzerUndoMarkerButton').attrs.title, /Add, Remove or Clear/);
 });

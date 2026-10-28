@@ -219,6 +219,47 @@
     return next + raw.slice(cursor);
   }
 
+  function removeRequestSelection(raw, start, end) {
+    raw = String(raw ?? "");
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > raw.length) {
+      throw new Error("Select a marked position in the current request draft.");
+    }
+    for (const offset of [start, end]) {
+      if (offset > 0 && /[\uD800-\uDBFF]/.test(raw[offset - 1]) && /[\uDC00-\uDFFF]/.test(raw[offset] || "")) {
+        throw new Error("Select a complete character.");
+      }
+      if (raw[offset - 1] === "\r" && raw[offset] === "\n") throw new Error("Select a value without splitting a line break.");
+    }
+    const selected = [], remaining = [];
+    for (const [from, to] of requestFieldSpans(raw)) {
+      for (const match of positions(raw.slice(from, to))) {
+        const first = from + match.index, after = first + match[0].length;
+        const inside = start > first && end < after;
+        const contains = start <= first && end >= after;
+        const overlaps = start < after && end > first;
+        if (inside || contains) selected.push({ first, after, original: match[1] ?? "" });
+        else if (overlaps) throw new Error("Select the whole marked position or place the caret inside it.");
+        else remaining.push(match[0]);
+      }
+    }
+    if (!selected.length) throw new Error("Select a marked position or place the caret inside it.");
+    if (selected.some(item => positions(item.original).length)) {
+      throw new Error("Removing these markers would expose another position; edit this value directly.");
+    }
+    let text = "", cursor = 0, removed = 0;
+    for (const item of selected) {
+      text += raw.slice(cursor, item.first) + item.original;
+      removed += item.after - item.first - item.original.length;
+      cursor = item.after;
+    }
+    text += raw.slice(cursor);
+    const after = requestFieldSpans(text).flatMap(([from, to]) => positions(text.slice(from, to)).map(match => match[0]));
+    if (after.length !== remaining.length || after.some((value, index) => value !== remaining[index])) {
+      throw new Error("Removing these markers would expose another position; edit this value directly.");
+    }
+    return { text, from: selected[0].first, to: selected[selected.length - 1].after - removed };
+  }
+
   function markRequestSelection(raw, start, end) {
     raw = String(raw ?? "");
     const field = requestFieldSpans(raw).find(([from, to]) => start >= from && end <= to);
@@ -396,7 +437,7 @@
     };
   }
 
-  const api = Object.freeze({ MARKER, limits, presets, payloadLines, payloadText, validatePayloads, numericRange, candidates, replaceSelection, clearPositions, clearRequestPositions, markRequestSelection, encodeUrlPayload, planRequests, expandTemplate, preflight });
+  const api = Object.freeze({ MARKER, limits, presets, payloadLines, payloadText, validatePayloads, numericRange, candidates, replaceSelection, clearPositions, clearRequestPositions, removeRequestSelection, markRequestSelection, encodeUrlPayload, planRequests, expandTemplate, preflight });
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.SniperFuzzerWorkflow = api;
 })(typeof window !== "undefined" ? window : null);
