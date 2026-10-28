@@ -1271,7 +1271,7 @@
                   <span class="fuzzer-count" id="fuzzerPayloadCount">0 payloads</span>
                   <div class="toolbar-actions">
                     <input id="fuzzerPayloadFile" type="file" accept=".txt,text/plain" hidden aria-label="Payload text file" />
-                    <button class="secondary-action" id="fuzzerImportPayloadButton" type="button" aria-controls="fuzzerPayloadFile">Import file</button>
+                    <button class="secondary-action" id="fuzzerImportPayloadButton" type="button" aria-controls="fuzzerPayloadFile" aria-describedby="fuzzerPayloadImportStatus">Import file</button>
                   </div>
                 </header>
                 <div class="fuzzer-payload-input-bar">
@@ -1284,6 +1284,7 @@
                     </select>
                   </label>
                 </div>
+                <p id="fuzzerPayloadImportStatus" class="fuzzer-import-status hidden" role="status" aria-live="polite"></p>
                 <div class="editor-panel">
                   <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="Paste payloads, one per line" aria-describedby="fuzzerPayloadHelp"></textarea>
                 </div>

@@ -3721,7 +3721,8 @@ body.pane-resizing-y {
 }
 
 /* A start the server refused, or a draft it would refuse. */
-.fuzzer-shell #fuzzerPreflightNotice.fuzzer-notice-error {
+.fuzzer-shell #fuzzerPreflightNotice.fuzzer-notice-error,
+.fuzzer-shell #fuzzerPayloadImportStatus.fuzzer-notice-error {
   color: var(--danger);
 }
 
@@ -8972,6 +8973,7 @@ button.utility-button.replay-tab-add {
 .fuzzer-input-label { margin: 0; padding: 7px 10px; color: var(--text-soft); font-size: var(--font-xs); }
 .fuzzer-template-card > .fuzzer-input-label { border-bottom: 1px solid var(--line); }
 .fuzzer-payload-input-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding-right: 10px; border-bottom: 1px solid var(--line); }
+.fuzzer-import-status { margin: 0; padding: 6px 10px; font-size: var(--font-xs); color: var(--text-soft); overflow-wrap: anywhere; }
 .fuzzer-import-mode { flex-direction: row; align-items: center; gap: 6px; margin-left: auto; padding: 4px 0; }
 .fuzzer-import-mode > span { font-size: var(--font-xs); }
 .fuzzer-import-mode select { max-width: 140px; }

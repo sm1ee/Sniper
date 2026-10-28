@@ -126,3 +126,12 @@ test('active-filter indication remains in summary and one-click clearing is outs
   assert.equal(disclosureDepthAt('fuzzerClearResultFiltersButton'), 0);
   assert.match(byId('fuzzerClearResultFiltersButton').attrs.class, /\bhidden\b/);
 });
+
+test('payload import has a compact local live status connected to its trigger', () => {
+  assert.equal(byId('fuzzerPayloadImportStatus').attrs.role, 'status');
+  assert.equal(byId('fuzzerPayloadImportStatus').attrs['aria-live'], 'polite');
+  assert.match(byId('fuzzerPayloadImportStatus').attrs.class, /\bhidden\b/);
+  assert.equal(byId('fuzzerImportPayloadButton').attrs['aria-describedby'], 'fuzzerPayloadImportStatus');
+  assert.equal(disclosureDepthAt('fuzzerPayloadImportStatus'), 0);
+  assert.match(css, /#fuzzerPayloadImportStatus\.fuzzer-notice-error/);
+});

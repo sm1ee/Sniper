@@ -5391,6 +5391,7 @@ function resetSessionScopedUiState() {
   state.replayTabSequence = 0;
   state.replayRenamingTabId = null;
   state.fuzzerRunToken = (state.fuzzerRunToken || 0) + 1;
+  state._fuzzerPayloadImportStatus = null;
   state.fuzzerRunning = false;
   state.fuzzerRunningAttackId = null;
   state.fuzzerStopRequest = null;
@@ -17162,7 +17163,22 @@ function fuzzerSetupPreflight(raw = fuzzerRequestTextForAction()) {
   return { ...SniperFuzzerWorkflow.preflight(template, payloads, options), template, payloads, target, httpVersion };
 }
 
+function renderFuzzerPayloadImportStatus() {
+  const status = state._fuzzerPayloadImportStatus;
+  if (status && (status.generation !== state._fuzzerFileGeneration || status.sessionId !== currentSessionId()
+    || status.draftVersion !== (state.fuzzerDraftVersion || 0) || status.runToken !== state.fuzzerRunToken || state.fuzzerRunning)) {
+    state._fuzzerPayloadImportStatus = null;
+  }
+  const current = state._fuzzerPayloadImportStatus;
+  const notice = fuzzerSetupNode("fuzzerPayloadImportStatus");
+  if (!notice) return;
+  notice.textContent = current?.message || "";
+  notice.classList.toggle("hidden", !current);
+  notice.classList.toggle("fuzzer-notice-error", !!current?.error);
+}
+
 function renderFuzzerSetup() {
+  renderFuzzerPayloadImportStatus();
   if (typeof SniperFuzzerWorkflow === "undefined" || !fuzzerSetupNode("fuzzerPreflightSummary")) return;
   const raw = fuzzerRequestTextForAction();
   const select = fuzzerSetupNode("fuzzerCandidateSelect");
@@ -17358,13 +17374,19 @@ async function importFuzzerPayloadFile(file, mode = "append") {
   // Even a rejected replacement selection supersedes an older pending read.
   const generation = (state._fuzzerFileGeneration || 0) + 1;
   state._fuzzerFileGeneration = generation;
-  if (file.size > 4 * 1024 * 1024) throw new Error("Payload files cannot exceed 4 MiB.");
   const sessionId = currentSessionId();
   const draftVersion = state.fuzzerDraftVersion || 0;
   const runToken = state.fuzzerRunToken;
   const ownsImport = () => state._fuzzerFileGeneration === generation && currentSessionId() === sessionId
     && (state.fuzzerDraftVersion || 0) === draftVersion && state.fuzzerRunToken === runToken && !state.fuzzerRunning;
+  // Status belongs to the file intent, not the visible tool. Switching tools
+  // keeps a valid import running and its failure available when the user returns.
+  const status = { generation, sessionId, draftVersion, runToken, error: false,
+    message: `Reading payload file (${mode === "replace" ? "replace" : "append"})…` };
+  state._fuzzerPayloadImportStatus = status;
+  renderFuzzerPayloadImportStatus();
   try {
+    if (file.size > 4 * 1024 * 1024) throw new Error("Payload files cannot exceed 4 MiB.");
     const bytes = await file.arrayBuffer();
     if (!ownsImport()) return false;
     if (bytes.byteLength > 4 * 1024 * 1024) throw new Error("Payload files cannot exceed 4 MiB.");
@@ -17379,9 +17401,14 @@ async function importFuzzerPayloadFile(file, mode = "append") {
     const payloads = fuzzerPayloadTextWithinLimits(text);
     if (!payloads.length) throw new Error("The selected file contains no payloads.");
     applyFuzzerPayloadList(payloads, mode);
+    if (state._fuzzerPayloadImportStatus === status) state._fuzzerPayloadImportStatus = null;
+    renderFuzzerPayloadImportStatus();
     return true;
   } catch (error) {
     if (!ownsImport()) return false;
+    status.error = true;
+    status.message = `Import failed: ${error?.message || "Could not read the payload file. Try again."}`;
+    renderFuzzerPayloadImportStatus();
     throw error;
   }
 }
@@ -17428,7 +17455,8 @@ function initFuzzerSetupControls() {
     const file = event.target.files?.[0];
     const mode = fuzzerSetupNode("fuzzerPayloadImportMode")?.value || "append";
     event.target.value = "";
-    importFuzzerPayloadFile(file, mode).catch(fuzzerSetupError);
+    // The importer retains failures beside the file controls, without a global toast.
+    importFuzzerPayloadFile(file, mode).catch(() => {});
   });
   bind("fuzzerApplyPresetButton", () => {
     const preset = SniperFuzzerWorkflow.presets.find((item) => item.id === fuzzerSetupNode("fuzzerPayloadPreset")?.value);

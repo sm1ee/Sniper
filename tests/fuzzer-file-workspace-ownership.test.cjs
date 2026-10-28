@@ -28,7 +28,7 @@ function fixture({ shown = false } = {}) {
   };
   c.SniperFuzzerWorkflow = { validatePayloads: () => ({ valid: true }), payloadText: values => values.join('\n') };
   c.fuzzerPayloadTextWithinLimits = text => text.split('\n');
-  for (const name of ['importFuzzerPayloadFile', 'applyFuzzerPayloadList', 'updateFuzzerPayloadsText', 'updateFuzzerRequestText', 'markFuzzerDraftChanged',
+  for (const name of ['renderFuzzerPayloadImportStatus', 'fuzzerSetupNode', 'importFuzzerPayloadFile', 'applyFuzzerPayloadList', 'updateFuzzerPayloadsText', 'updateFuzzerRequestText', 'markFuzzerDraftChanged',
     'normalizeFuzzerTargetOverride', 'normalizeFuzzerTargetAuthority', 'fuzzerAuthorityFromSavedValue']) {
     const source = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'));
     assert.ok(source, name); vm.runInContext(source[0], c);
