@@ -187,6 +187,50 @@ test('virtualized arrow navigation follows the filtered sorted projection beyond
   assert.ok((f.els.fuzzerResultsBody.innerHTML.match(/class="fuzzer-result-row/g) || []).length < 10);
   f.key('ArrowUp'); assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-501');
 });
+for (const [index, key] of [[0, 'ArrowUp'], [1, 'ArrowDown']]) {
+  test(`boundary ${key} preserves loaded detail and comparison controls without refetching`, async () => {
+    const f = fixture(), before = draft(f.state);
+    f.select(index).resolve(response({ id: `tx-${index}` })); await tick();
+    const detail = f.state._fuzzerDetailRecord;
+    for (let repeat = 0; repeat < 5; repeat++) f.key(key);
+    f.key('Home'); f.key('End'); // These keys do not select rows in this table.
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.state._fuzzerDetailRecord, detail);
+    assert.equal(f.els.fuzzerCompareBaseButton.disabled, false);
+    assert.equal(draft(f.state), before); assert.equal(f.saves, 0);
+    // Moving in the other direction remains an intentional new selection.
+    f.key(key === 'ArrowUp' ? 'ArrowDown' : 'ArrowUp');
+    assert.equal(f.requests.length, 2);
+    assert.equal(f.state._selectedFuzzerResultKey, `tx:tx-${1 - index}`);
+  });
+}
+test('boundary arrows preserve the pending read of a single filtered result and explicit retry still works', async () => {
+  const f = fixture(); f.setFilter('fuzzerResultMinBytes', '1');
+  f.setFilter('fuzzerResultDirection', 'desc');
+  f.key('ArrowDown'); const pending = f.requests[0];
+  f.key('ArrowUp'); f.key('ArrowDown');
+  assert.equal(f.requests.length, 1);
+  pending.resolve(response(null, 404)); await tick();
+  assert.equal(f.panes.get('fuzzerDetailReq'), 'Failed to load transaction: 404');
+  f.select(0).resolve(response({ id: 'tx-1' })); await tick();
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.state._fuzzerDetailRecord.id, 'tx-1');
+});
+test('arrow boundaries use the filtered sorted order rather than source indexes', async () => {
+  const f = fixture();
+  f.c.setFuzzerAttackRecord(run('sorted', [result(0, 200, 30), result(1, 404, 20), result(2, 200, 10)]));
+  f.setFilter('fuzzerResultStatus', '2xx'); f.setFilter('fuzzerResultSort', 'bytes');
+  f.key('ArrowDown');
+  assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-2');
+  const first = f.requests[0]; f.key('ArrowUp'); assert.equal(f.requests.length, 1);
+  f.key('ArrowDown'); assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-0');
+  f.requests[1].resolve(response({ id: 'tx-0' })); await tick();
+  first.resolve(response({ id: 'tx-2' })); await tick();
+  f.key('ArrowDown'); assert.equal(f.requests.length, 2);
+  assert.equal(f.state._fuzzerDetailRecord.id, 'tx-0');
+  f.key('ArrowUp'); assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-2');
+  assert.equal(f.requests.length, 3);
+});
 test('with no results there is nothing to compare or count, and one empty message', () => {
   const f = fixture();
   for (const id of ['fuzzerCompareBaseButton', 'fuzzerCompareButton', 'fuzzerResultFilterCount']) {

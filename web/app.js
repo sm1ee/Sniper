@@ -2232,6 +2232,8 @@ function bindEvents() {
         : (e.key === "ArrowDown"
           ? Math.min(selectedIndex + 1, totalCount - 1)
           : Math.max(selectedIndex - 1, 0));
+      // A held arrow at the edge must not restart the same detail read.
+      if (nextIndex === selectedIndex) return;
       selectFuzzerResultIndex(nextIndex, { scroll: true });
     });
   }
