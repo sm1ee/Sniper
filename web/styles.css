@@ -3420,28 +3420,56 @@ body.pane-resizing-y {
   resize: vertical;
 }
 .sequence-step-card .step-extractions {
+  container: sequence-extractions / inline-size;
   margin-top: 6px;
-  font-size: 0.72rem;
+  font-size: var(--font-xs);
 }
 .sequence-step-card .step-extractions summary {
   cursor: pointer;
-  color: var(--fg-muted);
+  color: var(--text-soft);
 }
 .sequence-step-card .extraction-row {
   display: grid;
-  grid-template-columns: 1fr 80px 1fr auto;
+  grid-template-columns: minmax(0, 1fr) 72px minmax(0, 1.3fr) 28px;
+  align-items: end;
+  gap: 6px;
+  margin-top: 8px;
+}
+.sequence-step-card .extraction-field {
+  display: grid;
   gap: 4px;
-  margin-top: 4px;
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: var(--font-xs);
 }
 .sequence-step-card .extraction-row input,
 .sequence-step-card .extraction-row select {
-  background: var(--input-bg);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-s);
-  color: inherit;
-  font-size: 0.72rem;
-  padding: 2px 4px;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  background: var(--panel-code);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: var(--font-sm);
+  padding: 4px 6px;
 }
+.sequence-step-card .step-extractions .secondary-action {
+  min-height: 28px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: var(--font-xs);
+}
+.sequence-step-card .step-extractions .ext-add { margin-left: 8px; }
+.sequence-step-card .step-extractions .ext-remove { padding: 3px; }
+@container sequence-extractions (max-width: 400px) {
+  .sequence-step-card .extraction-row {
+    grid-template-columns: minmax(0, 1fr) 72px 28px;
+  }
+  .sequence-step-card .extraction-field:nth-child(2) { grid-column: 2 / -1; }
+  .sequence-step-card .extraction-field:nth-child(3) { grid-column: 1 / 3; }
+}
+
 
 .sequence-list-card,
 .sequence-editor-card,

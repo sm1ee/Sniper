@@ -18514,13 +18514,19 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
       const reqText = step.request_text ?? buildEditableRawRequest(requestForRender);
       const extractionsHtml = step.extractions.map((rule, rIdx) => `
         <div class="extraction-row">
-          <input class="ext-var" placeholder="Variable name" value="${escapeHtml(rule.variable_name)}" />
-          <select class="ext-source">
-            <option value="response_body"${rule.source === "response_body" ? " selected" : ""}>Body</option>
-            <option value="response_header"${rule.source === "response_header" ? " selected" : ""}>Header</option>
-          </select>
-          <input class="ext-pattern" placeholder="Regex / header name" value="${escapeHtml(rule.pattern)}" />
-          <button class="ext-remove" data-step="${idx}" data-rule="${rIdx}" title="Remove">&times;</button>
+          <label class="extraction-field"><span>Variable</span>
+            <input class="ext-var" placeholder="Variable name" value="${escapeHtml(rule.variable_name)}" />
+          </label>
+          <label class="extraction-field"><span>Source</span>
+            <select class="ext-source">
+              <option value="response_body"${rule.source === "response_body" ? " selected" : ""}>Body</option>
+              <option value="response_header"${rule.source === "response_header" ? " selected" : ""}>Header</option>
+            </select>
+          </label>
+          <label class="extraction-field"><span>Pattern / header</span>
+            <input class="ext-pattern" placeholder="Regex / header name" value="${escapeHtml(rule.pattern)}" />
+          </label>
+          <button class="secondary-action ext-remove" data-step="${idx}" data-rule="${rIdx}" title="Remove extraction" aria-label="Remove extraction ${rIdx + 1} from step ${idx + 1}">&times;</button>
         </div>
       `).join("");
 
@@ -18532,7 +18538,7 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
         </div>
         <textarea class="step-request-text" spellcheck="false">${escapeHtml(reqText)}</textarea>
         <details class="step-extractions"${expandedSteps.has(step.id) || focusExtractionStepId === step.id ? " open" : ""}>
-          <summary>Extractions (${step.extractions.length}) <button class="ext-add" data-add-ext="${idx}" style="font-size:0.7rem;margin-left:8px">+ Extract</button></summary>
+          <summary>Extractions (${step.extractions.length}) <button class="secondary-action ext-add" data-add-ext="${idx}" aria-label="Add extraction to step ${idx + 1}">+ Extract</button></summary>
           ${extractionsHtml}
         </details>
       </div>`;

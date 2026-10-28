@@ -14,6 +14,7 @@ function fixture() {
   const node = () => ({ innerHTML: '', querySelectorAll: () => [], classList: { toggle() {} }, addEventListener() {} });
   const container = node();
   Object.defineProperty(container, 'innerHTML', { set(html) {
+    this.renderedHtml = html;
     cards = [...html.matchAll(/<div class="sequence-step-card"[^]*?(?=<div class="sequence-step-card"|$)/g)].map(match => {
       const markup = match[0];
       const stepId = markup.match(/data-step-id="([^"]+)"/)[1];
@@ -41,7 +42,7 @@ function fixture() {
     normalizeSequenceRunResult: () => null, jsonArray: value => Array.isArray(value) ? value : [],
   });
   c.renderSequencePanel();
-  return { c, state, document, cards: () => cards };
+  return { c, state, document, container, cards: () => cards };
 }
 
 for (const initiallyOpen of [false, true]) test(`Add opens the target and focuses its new variable (initially ${initiallyOpen})`, () => {
@@ -111,4 +112,16 @@ test('Reordering preserves expansion by step identity', () => {
   const f = fixture(); f.cards()[1].details.open = true;
   f.state.editingSequence.steps.reverse(); f.c.renderSequencePanel();
   assert.deepEqual(f.cards().map(card => [card.dataset.stepId, card.details.open]), [['second', true], ['first', false]]);
+});
+
+
+test('Extraction controls have persistent visible associated labels and themed named actions', () => {
+  const f = fixture(); const html = f.container.renderedHtml;
+  for (const [caption, control] of [['Variable', 'ext-var'], ['Source', 'ext-source'], ['Pattern / header', 'ext-pattern']]) {
+    const labels = [...html.matchAll(/<label class="extraction-field">([^]*?)<\/label>/g)].map(match => match[1]);
+    assert.ok(labels.some(label => label.includes(`<span>${caption}</span>`) && label.includes(`class="${control}"`)), caption);
+  }
+  assert.match(html, /class="secondary-action ext-add"[^>]*aria-label="Add extraction to step 1"/);
+  assert.match(html, /class="secondary-action ext-remove"[^>]*aria-label="Remove extraction 1 from step 1"/);
+  assert.doesNotMatch(html, /class="ext-(?:add|remove)"/);
 });
