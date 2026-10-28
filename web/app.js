@@ -12363,13 +12363,25 @@ function historyEmptyMessage(hiddenConnectCount, paging) {
   if (state.historyListError) {
     return `HTTP History filter error: ${state.historyListError}`;
   }
-  if (hiddenConnectCount) {
-    return "Only CONNECT tunnels were captured, and they are hidden from HTTP history. Trust the Sniper Root CA and retry the HTTPS client if you expect decrypted traffic.";
-  }
-  if (!paging.fullyLoaded) {
+  if (!paging.fullyLoaded || paging.loading || paging.hasMore) {
     return paging.loading
       ? "No loaded traffic matches yet. Older history is still loading."
       : "No loaded traffic matches yet. Older history will load as needed.";
+  }
+  if (hiddenConnectCount > 0) {
+    // Hidden CONNECT totals are filter-scoped; a loaded-row fallback is weaker
+    // still. Only current exact counts can establish what the whole session holds.
+    const onlyTunnels = Number.isSafeInteger(paging.total)
+      && paging.total > 0
+      && paging.hiddenConnectTotal === paging.total
+      && hiddenConnectCount === paging.hiddenConnectTotal
+      && paging.filteredTotal === 0
+      && paging.querySignature
+      && isCurrentHistoryQuerySignature(paging.querySignature);
+    if (onlyTunnels) {
+      return "Only CONNECT tunnels are retained in this session, and they are hidden from HTTP history. If you expected decrypted HTTPS traffic, check whether the client trusts the Sniper Root CA.";
+    }
+    return "No HTTP traffic matches the current filter settings. CONNECT tunnels are hidden from HTTP history.";
   }
   return "No traffic matches the current filter settings.";
 }
