@@ -16,8 +16,13 @@ test("with no tabs, Replay shows how to start one and creates none", () => {
     replayFollowRedirectButton: element(), replayHostInput: {}, replayPortInput: {}, replaySchemeSelect: {},
     replayResponseMeta: {}, sendReplayButton: {}, cancelReplayButton: {}, replayBackButton: {}, replayForwardButton: {},
   };
+  for (const input of [els.replayHostInput, els.replayPortInput]) {
+    input.attributes = {};
+    input.setCustomValidity = message => { input.validationMessage = message; };
+    input.setAttribute = (name, value) => { input.attributes[name] = String(value); };
+  }
   els.replayEmptyState.classList.add("hidden");
-  const c = loadFunctions(["renderReplay", "ensureRepeaterTab", "getActiveReplayTab"], {
+  const c = loadFunctions(["renderReplay", "ensureRepeaterTab", "getActiveReplayTab", "setReplayTargetInputValidity"], {
     state, els, renderedHttpReplayDraftOwner: null, renderReplayTabs() {}, renderReplayRequestHighlight() {},
     renderReplayResponseView() {}, updateReplaySearchPane() {},
   });
@@ -27,5 +32,9 @@ test("with no tabs, Replay shows how to start one and creates none", () => {
   assert.equal(els.replayEmptyState.classList.contains("hidden"), false);
   for (const name of ["httpReplayToolbar", "httpReplayWorkbench", "wsReplayPanel"]) {
     assert.equal(els[name].classList.contains("hidden"), true, name);
+  }
+  for (const input of [els.replayHostInput, els.replayPortInput]) {
+    assert.equal(input.validationMessage, "");
+    assert.equal(input.attributes["aria-invalid"], "false");
   }
 });

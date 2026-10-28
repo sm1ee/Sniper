@@ -5832,6 +5832,22 @@ button.utility-button.replay-tab-add {
   width: min(100%, 610px);
 }
 
+.replay-target-error {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--font-xs);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.replay-target-error:empty { display: none; }
+
+.replay-target-bar input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
 .compact-field {
   display: flex;
   flex-direction: column;

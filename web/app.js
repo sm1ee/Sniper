@@ -918,6 +918,8 @@ const els = {
   replaySchemeSelect: document.getElementById("replaySchemeSelect"),
   replayHostInput: document.getElementById("replayHostInput"),
   replayPortInput: document.getElementById("replayPortInput"),
+  replayHostError: document.getElementById("replayHostError"),
+  replayPortError: document.getElementById("replayPortError"),
   replayRequestHighlight: document.getElementById("replayRequestHighlight"),
   replayRequestEditor: document.getElementById("replayRequestEditor"),
   replayRequestSearchInput: document.getElementById("replayRequestSearchInput"),
@@ -5508,6 +5510,7 @@ function renderReplayClearedState() {
   if (els.replayHostInput) els.replayHostInput.value = "";
   if (els.replayPortInput) els.replayPortInput.value = "";
   if (els.replaySchemeSelect) els.replaySchemeSelect.value = "https";
+  setReplayTargetInputValidity({ hostError: "", portError: "" });
   if (els.replayResponseMeta) els.replayResponseMeta.textContent = "Loading session...";
   renderReplayResponseView("Loading session...");
   updateReplaySearchPane("request", "");
@@ -15226,6 +15229,7 @@ function renderReplay(options = {}) {
     els.replayHostInput.value = "";
     els.replayPortInput.value = "";
     els.replaySchemeSelect.value = "https";
+    setReplayTargetInputValidity({ hostError: "", portError: "" });
     els.replayResponseMeta.textContent = "No response yet.";
     renderReplayResponseView("Send a request from Replay to capture the response here.");
     updateReplaySearchPane("request", "");
@@ -22024,13 +22028,16 @@ async function applyReplayTargetFields() {
 }
 
 function setReplayTargetInputValidity(validation) {
-  if (!els.replayHostInput || !els.replayPortInput) {
-    return;
+  for (const [input, errorNode, message] of [
+    [els.replayHostInput, els.replayHostError, validation.hostError || ""],
+    [els.replayPortInput, els.replayPortError, validation.portError || ""],
+  ]) {
+    if (input) {
+      input.setCustomValidity(message);
+      input.setAttribute("aria-invalid", String(!!message));
+    }
+    if (errorNode) errorNode.textContent = message;
   }
-  els.replayHostInput.setCustomValidity(validation.hostError || "");
-  els.replayPortInput.setCustomValidity(validation.portError || "");
-  els.replayHostInput.toggleAttribute("aria-invalid", !!validation.hostError);
-  els.replayPortInput.toggleAttribute("aria-invalid", !!validation.portError);
 }
 
 function applyRepeaterTargetOverride(request, target) {

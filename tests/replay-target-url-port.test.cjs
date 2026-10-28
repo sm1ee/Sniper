@@ -14,7 +14,7 @@ function fixture(host, port) {
   };
   const input = value => ({ value, validationMessage: '', attributes: {},
     setCustomValidity(message) { this.validationMessage = message; },
-    toggleAttribute(name, enabled) { this.attributes[name] = enabled; },
+    setAttribute(name, value) { this.attributes[name] = String(value); },
   });
   const els = {
     replayHostInput: input(host), replayPortInput: input(port), replaySchemeSelect: input('https'),
@@ -52,7 +52,7 @@ for (const [host, port, explicitPort] of [
     assert.equal(f.els.replaySchemeSelect.value, 'https');
     assert.equal(f.els.replayHostInput.validationMessage, '');
     assert.equal(f.els.replayPortInput.validationMessage, `Port conflicts with target URL port ${explicitPort}.`);
-    assert.equal(f.els.replayPortInput.attributes['aria-invalid'], true);
+    assert.equal(f.els.replayPortInput.attributes['aria-invalid'], 'true');
   });
 }
 
@@ -86,7 +86,7 @@ for (const [host, port, scheme, targetHost, targetPort] of [
     assert.deepEqual(f.counts(), { saves: 1, renders: 1 });
     assert.equal(f.els.replayHostInput.validationMessage, '');
     assert.equal(f.els.replayPortInput.validationMessage, '');
-    assert.equal(f.els.replayPortInput.attributes['aria-invalid'], false);
+    assert.equal(f.els.replayPortInput.attributes['aria-invalid'], 'false');
   });
 }
 
@@ -107,7 +107,7 @@ for (const [host, port, field, message] of [
     assert.equal(JSON.stringify(f.tab), before);
     assert.deepEqual(f.counts(), { saves: 0, renders: 0 });
     assert.equal(f.els[field].validationMessage, message);
-    assert.equal(f.els[field].attributes['aria-invalid'], true);
+    assert.equal(f.els[field].attributes['aria-invalid'], 'true');
   });
 }
 
@@ -119,7 +119,7 @@ test('correcting a URL port conflict clears validation and applies only the corr
   f.els.replayPortInput.value = '443';
   await f.context.applyReplayTargetFields();
   assert.equal(f.els.replayPortInput.validationMessage, '');
-  assert.equal(f.els.replayPortInput.attributes['aria-invalid'], false);
+  assert.equal(f.els.replayPortInput.attributes['aria-invalid'], 'false');
   assert.equal(f.tab.targetHost, 'example.com');
   assert.equal(f.tab.targetPort, '443');
   assert.equal(f.tab.responseRecord, null);

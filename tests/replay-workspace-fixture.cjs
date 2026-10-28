@@ -43,6 +43,10 @@ function fixture() {
   let uuid = 0, timer = 0, editor = null;
   const els = { replayRequestHighlight: { innerText: "" }, replayRequestEditor: { value: "" },
     replayHostInput: { value: "" }, replayPortInput: { value: "" }, replaySchemeSelect: { value: "https" } };
+  for (const input of [els.replayHostInput, els.replayPortInput]) {
+    input.attributes = {};
+    input.setAttribute = (name, value) => { input.attributes[name] = String(value); };
+  }
   const versionSelect = { value: "HTTP/1.1" };
   const document = { activeElement: els.replayRequestHighlight, getElementById: id => id === "replayHttpVersionSelect" ? versionSelect : null };
   const context = loadFunctions(functions, {
