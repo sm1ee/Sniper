@@ -53,7 +53,7 @@ function fixture() {
     state, els, document, URL, TextEncoder, Blob, Uint8Array,
     workspacePendingReplayCloses: new Map(), workspaceReplayMetadataEdits: new WeakMap(), MAX_REPLAY_TABS: 512,
     workspaceLoaded: true, workspaceStateGeneration: 0, workspaceExternalLoadGeneration: 0, workspaceExternalAppliedGeneration: 0,
-    renderedHttpReplayDraftOwner: null,
+    renderedHttpReplayDraftOwner: null, sessionActivationIntent: null,
     workspaceSaveConflictPending: false, workspaceSaveConflictLatest: null, workspaceSaveCommittedSnapshot: null,
     workspaceClientId: "ui-client", workspaceSaveVersion: 0, workspaceSaveDirty: false, workspaceSaveTimer: null,
     workspaceSaveLastSnapshot: null, workspaceSaveInFlight: false, workspaceSaveLoopPromise: null,

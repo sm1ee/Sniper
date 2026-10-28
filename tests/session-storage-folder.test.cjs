@@ -76,7 +76,7 @@ function fixture({ render = true } = {}) {
     "activateSessionById", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "currentSessionId",
     "canReloadWorkspaceAfterSessionAction", "canLeaveSessionAfterDraftPreflight", "hasPendingWorkspaceStateSave",
   ], {
-    state, els, document,
+    state, els, document, sessionActivationIntent: null,
     window: { innerWidth: 1000, innerHeight: 1000, clearTimeout },
     sessionContextMenuEl: null,
     formatCappedCount: value => String(value ?? 0), retainedTransactionsCap() {}, retainedEntriesCap() {},

@@ -3302,6 +3302,7 @@ async function performSelfUpdate() {
   }
 }
 
+let sessionActivationIntent = null;
 let sessionsLoadGeneration = 0;
 let sessionsAppliedLoadGeneration = 0;
 
@@ -5741,6 +5742,9 @@ async function createSession() {
 
 async function activateSessionById(id, { force = false } = {}) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("switching sessions")) return;
+  // Busy confirmation follows the latest requested destination, not reply order.
+  // Ordinary completion still reconciles every request that reached the server.
+  const activationIntent = sessionActivationIntent = {};
   const entrySessionId = currentSessionId();
   const entryWorkspaceGeneration = workspaceStateGeneration;
   const canContinuePreflight = () => {
@@ -5793,12 +5797,16 @@ async function activateSessionById(id, { force = false } = {}) {
       if (response.status === 409 && !force && message.includes("proxy activity is still running")) {
         // Consent to cut activity belongs to this workspace, not just the fixed
         // destination. Neither a late reply nor an open dialog may transfer it.
-        if (!ownsActionWorkspace()) return;
+        if (!ownsActionWorkspace() || activationIntent !== sessionActivationIntent) return;
         showConfirmDialog(
           `${message}.\n\nSwitch anyway? Anything still in flight is cut and will not be recorded.`,
           () => {
             if (!ownsActionWorkspace()) {
               showToast("Switch canceled because the active workspace changed. Reopen the session to try again.", "error");
+              return;
+            }
+            if (activationIntent !== sessionActivationIntent) {
+              showToast("Switch canceled because a newer session action was started. Reopen the session to try again.", "error");
               return;
             }
             activateSessionById(id, { force: true }).catch(handleWorkspaceActionError);

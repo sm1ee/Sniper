@@ -1440,3 +1440,90 @@ for (const kind of ['legacy', 'CodeMirror']) test(`passive ${kind} sync cannot r
   assert.equal(f.context.syncActiveHttpReplayDraftFromDom(), true);
   assert.equal(f.old.requestText, original); assert.equal(f.old.httpVersionMode, 'HTTP/1.1'); assert.equal(f.requests.length, 1);
 });
+
+const supersededForceMessage = 'Switch canceled because a newer session action was started. Reopen the session to try again.';
+function setupBusyOpenButtons() {
+  const f = setupBusyModal(); f.dashboard(); f.clicks = [];
+  function button(id) {
+    const listeners = new Map();
+    const element = { disabled: false, classList: { add() {}, remove() {} },
+      addEventListener: (event, callback) => listeners.set(event, callback),
+      closest: () => ({ dataset: { id } }),
+      click() { if (!element.disabled) listeners.get('click')({ stopPropagation() {} }); },
+    }; return element;
+  }
+  f.openB = button('session-b'); f.openC = button('session-c');
+  f.els.dashboardSessionsBody = { querySelectorAll: selector => selector === '.session-open-button' ? [f.openB, f.openC] : [] };
+  Object.assign(f.context, { BUTTON_PROGRESS_DELAY_MS: 180, clearTimeout() {} });
+  vm.runInContext(source('withButtonProgress'), f.context);
+  const progress = f.context.withButtonProgress;
+  f.context.withButtonProgress = (...args) => { const pending = progress(...args); f.clicks.push(pending); return pending; };
+  const begin = appSource.indexOf('  Array.from(els.dashboardSessionsBody.querySelectorAll(".session-open-button"))');
+  const end = appSource.indexOf('\n  // Right-click context menu', begin);
+  assert.ok(begin > 0 && end > begin);
+  vm.runInContext(appSource.slice(begin, end), f.context);
+  f.busy = index => f.requests[index].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
+  return f;
+}
+
+for (const firstReply of ['older', 'newer']) test(`actual Open buttons keep latest busy choice when ${firstReply} responds first`, async () => {
+  const f = setupBusyOpenButtons(); f.openB.click(); await tick();
+  assert.equal(f.openB.disabled, true); assert.equal(f.openC.disabled, false);
+  const intent = f.context.sessionActivationIntent;
+  f.openB.click(); await tick(); assert.equal(f.requests.length, 1, 'same button remains guarded');
+  assert.equal(f.context.sessionActivationIntent, intent);
+  f.openC.click(); await tick(); assert.equal(f.requests.length, 2);
+  assert.equal(f.requests[0].url, '/api/sessions/session-b/activate');
+  assert.equal(f.requests[1].url, '/api/sessions/session-c/activate');
+  const first = firstReply === 'older' ? 0 : 1, second = 1 - first;
+  f.busy(first); await f.clicks[first]; const modal = f.modal();
+  if (first === 0) assert.equal(modal, undefined); else assert.ok(modal?.isConnected);
+  f.busy(second); await f.clicks[second]; assert.ok(f.modal());
+  if (first === 1) assert.equal(f.modal(), modal, 'old response must not replace latest choice');
+  assert.equal(f.toasts.length, 0);
+  f.confirm(); await tick();
+  assert.equal(f.requests[2].url, '/api/sessions/session-c/activate?force=true');
+});
+
+for (const phase of ['response', 'error body', 'open modal']) {
+  for (const outcome of ['pending', 'refused', 'rejected']) {
+    test(`busy intent ${phase} is superseded while newer preflight is ${outcome}`, async () => {
+      const f = setupBusyModal(), older = await f.start('activate', 'session-b');
+      const body = deferred();
+      if (phase !== 'response') {
+        f.requests[0].resolve({ ok: false, status: 409, text: () => body.promise }); await tick();
+      }
+      if (phase === 'open modal') { body.resolve('proxy activity is still running'); await older.pending; }
+      const gate = pausePreflight(f, preflightPhases[0]), newer = await f.start('activate', 'session-c');
+      assert.equal(gate.calls.length, 1); assert.equal(f.requests.length, 1, 'new intent is captured before its request');
+      if (outcome === 'refused') { gate.resolve(false); assert.equal(await newer.pending, undefined); }
+      if (outcome === 'rejected') {
+        const error = new Error('Synthetic newer preflight failure'); gate.reject(error); assert.equal(await newer.pending, error);
+      }
+      if (phase === 'response') f.requests[0].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
+      if (phase === 'error body') body.resolve('proxy activity is still running');
+      await older.pending;
+      if (phase === 'open modal') {
+        f.confirm(); await tick(); assert.deepEqual(f.toasts, [[supersededForceMessage, 'error']]);
+      } else { assert.equal(f.modal(), undefined); assert.deepEqual(f.toasts, []); }
+      assert.equal(f.requests.length, 1); assert.equal(gate.calls.length, 1, 'old confirmation cannot begin another preflight');
+      if (outcome === 'pending') { gate.resolve(false); await newer.pending; }
+    });
+  }
+}
+
+test('synchronously refused activation does not supersede existing busy consent', async () => {
+  const f = setupBusyModal(), initial = await f.start('activate', 'session-b');
+  f.requests[0].resolve({ ok: false, status: 409, text: async () => 'proxy activity is still running' });
+  await initial.pending; const intent = f.context.sessionActivationIntent;
+  f.invalid(); const refused = await f.start('activate', 'session-c'); assert.equal(await refused.pending, undefined);
+  assert.equal(f.context.sessionActivationIntent, intent); assert.equal(f.requests.length, 1);
+  f.els.replayPortInput.value = '443'; f.confirm(); await tick();
+  assert.equal(f.requests[1].url, '/api/sessions/session-b/activate?force=true');
+});
+
+test('busy intent is module-local and absent from explicit workspace/settings snapshots', () => {
+  assert.match(appSource, /^let sessionActivationIntent = null;$/m);
+  assert.doesNotMatch(source('snapshotWorkspaceState'), /sessionActivationIntent/);
+  assert.doesNotMatch(source('snapshotUiSettings'), /sessionActivationIntent/);
+});
