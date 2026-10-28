@@ -26,7 +26,7 @@ function values(id) {
 const buttons = ['resetFuzzerButton', 'stopFuzzerButton', 'startFuzzerButton', 'fuzzerMarkSelectionButton', 'fuzzerRemoveMarkerButton', 'fuzzerClearMarkersButton', 'fuzzerUndoMarkerButton',
   'fuzzerMarkCandidateButton', 'fuzzerImportPayloadButton', 'fuzzerApplyPresetButton', 'fuzzerGenerateRangeButton',
   'fuzzerCompareBaseButton', 'fuzzerCompareButton', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton'];
-const labeledControls = ['fuzzerCandidateSelect', 'fuzzerAttackType', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadImportMode', 'fuzzerPayloadPreset',
+const labeledControls = ['fuzzerCandidateSelect', 'fuzzerAttackType', 'fuzzerTransportSelect', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadImportMode', 'fuzzerPayloadPreset',
   'fuzzerRangeStart', 'fuzzerRangeEnd', 'fuzzerRangeStep', 'fuzzerPayloadsEditor', 'fuzzerResultStatus',
   'fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs',
   'fuzzerResultSort', 'fuzzerResultDirection', 'fuzzerSavedRunSelect'];
@@ -55,6 +55,15 @@ test('payload controls declare append default, exact presets and accessible file
   for (const id of ['fuzzerRangeStart', 'fuzzerRangeEnd', 'fuzzerRangeStep']) assert.equal(byId(id).attrs.type, 'number');
   assert.equal(byId('fuzzerPayloadsEditor').attrs['aria-describedby'], 'fuzzerPayloadHelp');
   assert.match(fuzzer, /Spaces are preserved\. Blank lines are empty payloads; a final line break is ignored\./);
+});
+
+test('Transport is a labeled native HTTP/HTTPS selector beside the destination with visible contextual help', () => {
+  assert.deepEqual(values('fuzzerTransportSelect'), ['https', 'http']);
+  assert.equal(byId('fuzzerTransportSelect').attrs['aria-describedby'], 'fuzzerTransportHelp fuzzerTargetSummary');
+  assert.ok('disabled' in byId('fuzzerTransportSelect').attrs);
+  assert.equal(disclosureDepthAt('fuzzerTransportSelect'), 0);
+  assert.equal(disclosureDepthAt('fuzzerTransportHelp'), 0);
+  assert.ok(fuzzer.indexOf('id="fuzzerTransportSelect"') < fuzzer.indexOf('id="fuzzerTargetSummary"'));
 });
 
 test('preflight names the two ways payloads fill positions, and a running attack can be stopped', () => {

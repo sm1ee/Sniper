@@ -9101,6 +9101,9 @@ button.utility-button.replay-tab-add {
 
 .fuzzer-target-summary { color: var(--text-soft); font: var(--font-xs) var(--mono); align-self: center; overflow-wrap: anywhere; }
 .fuzzer-target-summary:empty { display: none; }
+.fuzzer-transport-field { flex-direction: row; align-items: center; align-self: center; gap: 6px; }
+.fuzzer-transport-field select { max-width: 100px; }
+.fuzzer-transport-help { align-self: center; margin: 0; }
 
 /* A retained run needs room for both row navigation and its selected message.
    Never let the detail pane consume the table's entire viewport. Inline drag

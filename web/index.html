@@ -1201,7 +1201,15 @@
               </div>
             </div>
             <section class="fuzzer-preflight" aria-label="Review before running">
+              <label class="compact-field fuzzer-transport-field" for="fuzzerTransportSelect">
+                <span>Transport</span>
+                <select id="fuzzerTransportSelect" aria-describedby="fuzzerTransportHelp fuzzerTargetSummary" disabled>
+                  <option value="https">HTTPS</option>
+                  <option value="http">HTTP</option>
+                </select>
+              </label>
               <span id="fuzzerTargetSummary" class="fuzzer-target-summary"></span>
+              <p id="fuzzerTransportHelp" class="fuzzer-help fuzzer-transport-help hidden"></p>
               <p id="fuzzerStopStatus" class="fuzzer-help fuzzer-notice-error hidden" role="status" aria-live="polite"></p>
               <p id="fuzzerPreflightNotice" class="fuzzer-help" role="status" aria-live="polite"></p>
               <details class="fuzzer-disclosure fuzzer-preview-disclosure hidden" id="fuzzerPreviewDisclosure">

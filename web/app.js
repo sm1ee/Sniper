@@ -17582,6 +17582,67 @@ function fuzzerSetupPreflight(raw = fuzzerRequestTextForAction()) {
   return { ...SniperFuzzerWorkflow.preflight(template, payloads, options), template, payloads, target, httpVersion };
 }
 
+function fuzzerTransportState(raw = fuzzerRequestTextForAction(), template = undefined) {
+  const unavailable = { scheme: "https", disabled: true, help: "", target: null };
+  if (!workspaceLoaded) return unavailable;
+  if (!raw.trim()) return { ...unavailable, help: "Paste a request to choose transport." };
+  try {
+    if (new TextEncoder().encode(raw).length > 2 * 1024 * 1024) throw new Error("Request too large");
+    if (template === undefined) template = parseFuzzerRequestTemplate(raw);
+    if (!template) throw new Error("Invalid request");
+    const target = activeFuzzerTargetForRequest(raw);
+    const scheme = target?.scheme || template.scheme;
+    if (scheme !== "http" && scheme !== "https") throw new Error("Invalid transport");
+    const firstLine = splitRawHttpMessage(raw).head.split("\n").find(line => line.length > 0) || "";
+    if (!target && /^\S+\s+https?:\/\//i.test(firstLine)) {
+      return { scheme, disabled: true, help: "To change transport, edit http:// or https:// in the request URL.", target: null };
+    }
+    const notes = [];
+    if (target) notes.push(target.port ? "Connection override; port is kept." : "Connection override.");
+    if (state.fuzzerRunning || state.fuzzerRunningAttackId) notes.push("Edits apply to the next Start.");
+    return { scheme, disabled: false, help: notes.join(" "), target };
+  } catch (_) {
+    return { ...unavailable, help: "Fix the request to choose transport." };
+  }
+}
+
+function renderFuzzerTransport(raw = fuzzerRequestTextForAction(), template = undefined) {
+  const select = fuzzerSetupNode("fuzzerTransportSelect");
+  if (!select) return;
+  const transport = fuzzerTransportState(raw, template);
+  select.value = transport.scheme;
+  select.disabled = transport.disabled;
+  const help = fuzzerSetupNode("fuzzerTransportHelp");
+  if (help) {
+    help.textContent = transport.help;
+    help.classList.toggle("hidden", !transport.help);
+  }
+}
+
+function setFuzzerTransport(scheme) {
+  const transport = fuzzerTransportState();
+  if (transport.disabled || (scheme !== "http" && scheme !== "https") || scheme === transport.scheme) {
+    renderFuzzerTransport();
+    return false;
+  }
+  if (transport.target) {
+    // A connection override is bound to the unchanged request authority. Changing
+    // its base scheme instead would drop that binding, host and explicit port.
+    state.fuzzerTarget = { ...state.fuzzerTarget, scheme };
+  } else {
+    state.fuzzerBaseRequest = { ...(state.fuzzerBaseRequest || createDefaultEditableRequest()), scheme };
+    // A previously inactive override must not revive when the scheme matches again.
+    state.fuzzerTarget = null;
+    state.fuzzerTargetRequestText = null;
+  }
+  // Like typing in the request, this changes the next draft, not the active run.
+  // The draft version fences a pending Start and preserves edits on completion.
+  markFuzzerDraftChanged();
+  scheduleWorkspaceStateSave();
+  renderFuzzer();
+  return true;
+}
+
 function renderFuzzerPayloadImportStatus() {
   const status = state._fuzzerPayloadImportStatus;
   if (status && (status.generation !== state._fuzzerFileGeneration || status.sessionId !== currentSessionId()
@@ -17602,17 +17663,19 @@ function renderFuzzerSetup() {
   const raw = fuzzerRequestTextForAction();
   const select = fuzzerSetupNode("fuzzerCandidateSelect");
   let candidates = [];
+  let template = null;
   let model = null;
   let error = "";
   let candidateKey = `${currentSessionId()}|${raw}|${state.fuzzerBaseRequest?.body_encoding}|${state.fuzzerBaseRequest?.preview_truncated}`;
   try {
     if (new TextEncoder().encode(raw).length > 2 * 1024 * 1024) throw new Error("Request editor text cannot exceed 2 MiB.");
-    const template = parseFuzzerRequestTemplate(raw);
+    template = parseFuzzerRequestTemplate(raw);
     candidates = SniperFuzzerWorkflow.candidates(raw, { bodyEncoding: template.body_encoding, previewTruncated: template.preview_truncated });
     model = fuzzerSetupPreflight(raw);
   } catch (failure) {
     error = failure?.message || "Review the request template.";
   }
+  if (fuzzerSetupNode("fuzzerTransportSelect")) renderFuzzerTransport(raw, template);
   // Nothing to choose from, or nothing yet to preview, is not shown at all.
   fuzzerSetupNode("fuzzerValueRow")?.classList?.toggle("hidden", candidates.length === 0);
   fuzzerSetupNode("fuzzerPreviewDisclosure")?.classList?.toggle("hidden", !raw.trim());
@@ -17925,6 +17988,9 @@ function initFuzzerSetupControls() {
   const bind = (id, callback) => fuzzerSetupNode(id)?.addEventListener("click", () => {
     if (!workspaceLoaded) return;
     try { callback(); } catch (error) { fuzzerSetupError(error); }
+  });
+  fuzzerSetupNode("fuzzerTransportSelect")?.addEventListener("change", (event) => {
+    setFuzzerTransport(event.target.value);
   });
   bind("fuzzerMarkSelectionButton", markFuzzerEditorSelection);
   bind("fuzzerRemoveMarkerButton", removeFuzzerEditorPosition);

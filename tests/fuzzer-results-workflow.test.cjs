@@ -317,8 +317,9 @@ for (const boundary of ['draft', 'reset', 'session-bounce', 'new-run']) test(`pe
   read.resolve(response([{ id: 'old-session-run' }])); await pending;
   assert.equal(f.c.fuzzerResultsWorkflowState().runs.length, 0);
 });
-test('Reuse waits for confirmation, clears unrelated transport/source and retains template HTTP version', async () => {
+for (const scheme of ['http', 'https']) test(`Reuse waits for confirmation, clears unrelated transport/source and retains ${scheme} template and HTTP version`, async () => {
   const f = fixture(), before = draft(f.state), saved = run('run-b'); saved.template.http_version = 'HTTP/2';
+  saved.template.scheme = scheme;
   saved.results = [{ payload: 'a' }, { payload: '' }]; f.pick('run-b'); const read = f.reuse();
   f.requests.at(-1).resolve(response(saved)); await read;
   assert.equal(draft(f.state), before); assert.equal(f.confirmations.length, 1);
@@ -326,6 +327,7 @@ test('Reuse waits for confirmation, clears unrelated transport/source and retain
   f.confirmations[0].confirm();
   assert.equal(f.state.fuzzerSourceTransactionId, null); assert.equal(f.state.fuzzerTarget, null);
   assert.equal(f.state.fuzzerTargetRequestText, null); assert.equal(f.state.fuzzerBaseRequest.http_version, 'HTTP/2');
+  assert.equal(f.state.fuzzerBaseRequest.scheme, scheme);
   assert.match(f.state.fuzzerRequestText, /^GET \/\$payload\$ HTTP\/2/);
   assert.deepEqual(Array.from(f.c.splitFuzzerPayloadLines(f.state.fuzzerPayloadsText)), ['a', '']);
   assert.equal(f.state.fuzzerAttackRecord, null); assert.equal(f.requests.length, 1);
