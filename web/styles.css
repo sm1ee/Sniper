@@ -4882,10 +4882,24 @@ button.utility-button.replay-tab-add {
   border-bottom-color: var(--point-soft);
 }
 
-.session-table {
+/* Keep names flexible while counts and actions retain a usable budget.
+   Narrow windows scroll this table inside its existing history-table-shell. */
+.history-table.session-table {
   width: 100%;
-  min-width: 800px;
+  min-width: 1140px;
 }
+
+.session-table thead th {
+  box-sizing: border-box;
+}
+
+.session-table thead th:nth-child(2) { width: 136px; }
+.session-table thead th:nth-child(3) { width: 88px; }
+.session-table thead th:nth-child(4) { width: 104px; }
+.session-table thead th:nth-child(5) { width: 80px; }
+.session-table thead th:nth-child(6),
+.session-table thead th:nth-child(7) { width: 160px; }
+.session-table thead th:nth-child(8) { width: 180px; }
 
 .session-table thead th {
   cursor: pointer;
@@ -4933,6 +4947,30 @@ button.utility-button.replay-tab-add {
 
 /* The session in use carries a dot; the others offer Open and Delete where
    the pointer, the keyboard or the selection is. */
+/* Native buttons expose row selection without requiring the arrow shortcut. */
+.session-table .session-select-button {
+  display: block;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 0;
+  margin: -3px 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-table :is(.session-select-button, .session-open-button, .session-delete-button):focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: 2px;
+}
+
 .session-table .session-name::before {
   content: "";
   display: inline-block;

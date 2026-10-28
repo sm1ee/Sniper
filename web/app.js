@@ -9651,6 +9651,14 @@ function closeSessionCreateForm() {
 }
 
 function renderDashboard() {
+  // Replacing rows should not strand a keyboard user on the document body.
+  // Capture only list controls, so a refresh never steals focus from elsewhere.
+  const focusedControl = document.activeElement;
+  const focusedRow = focusedControl?.closest?.("tr[data-id]");
+  const focusedClass = ["session-select-button", "session-open-button", "session-delete-button"]
+    .find((name) => focusedControl?.classList?.contains(name));
+  const restoreListFocus = focusedClass && els.dashboardSessionsBody.contains?.(focusedControl);
+  const focusedSessionId = restoreListFocus ? focusedRow?.dataset.id : null;
   // Ensure selectedSessionId defaults to active session
   const activeSession = state.sessions.find((session) => session.active)
     || state.sessions.find((session) => session.id === state.activeSession?.id) || null;
@@ -9765,7 +9773,7 @@ function renderDashboard() {
     ? sortedSessions
         .map((session) => `
           <tr class="${["history-row", session.id === state.selectedSessionId && "selected", session.active && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
-            <td><div class="session-name">${escapeHtml(session.name)}</div>${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+            <td><button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -9774,8 +9782,8 @@ function renderDashboard() {
             <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
             <td>
               ${session.active ? "" : `<div class="session-actions">
-                <button class="secondary-action session-open-button" type="button">Open</button>
-                <button class="session-delete-button" type="button">Delete</button>
+                <button class="secondary-action session-open-button" type="button" aria-label="Open session ${escapeHtml(session.name)}">Open</button>
+                <button class="session-delete-button" type="button" aria-label="Delete session ${escapeHtml(session.name)}">Delete</button>
               </div>`}
             </td>
           </tr>
@@ -9832,6 +9840,12 @@ function renderDashboard() {
       return id ? deleteSessionById(id) : undefined;
     });
   });
+
+  if (focusedSessionId && (document.activeElement === focusedControl || document.activeElement === document.body)) {
+    const replacementRow = Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]"))
+      .find((row) => row.dataset.id === focusedSessionId);
+    replacementRow?.querySelector(`.${focusedClass}`)?.focus({ preventScroll: true });
+  }
 }
 
 // ── Session context menu ──
