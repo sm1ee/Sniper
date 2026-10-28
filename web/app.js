@@ -16254,8 +16254,10 @@ async function readFuzzerSavedRun(action) {
       }
       const requestText = buildEditableRawRequest(record.template);
       const payloads = recovered?.payloads || record.results.map((result) => String(result.payload ?? ""));
-      const partialNotice = recovered && payloads.length < recovered.originalCount
-        ? `\n\nOnly ${payloads.length} of ${recovered.originalCount} original payload slots remain. Missing payloads will not be restored.`
+      const originalCount = recovered?.originalCount
+        ?? (Number.isSafeInteger(savedRecord.payload_count) && savedRecord.payload_count > 0 ? savedRecord.payload_count : null);
+      const partialNotice = originalCount != null && payloads.length < originalCount
+        ? `\n\nOnly ${payloads.length} of ${originalCount} original payload slots remain. Missing payloads will not be restored.`
         : "";
       const payloadsText = payloads.join("\n") + (payloads.at(-1) === "" ? "\n" : "");
       if (new TextEncoder().encode(requestText).length > 2 * 1024 * 1024
@@ -17381,16 +17383,23 @@ function initFuzzerSetupControls() {
     markFuzzerPosition(candidate.start, candidate.end, select._fuzzerRaw);
   });
   fuzzerSetupNode("fuzzerAttackType")?.addEventListener("change", (event) => {
-    state.fuzzerAttackType = event.target.value === "battering_ram" ? "battering_ram" : "sniper";
+    const value = event.target.value === "battering_ram" ? "battering_ram" : "sniper";
+    // Setup edits retire pending replacements without hiding historical results.
+    if (value !== (state.fuzzerAttackType || "sniper")) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+    state.fuzzerAttackType = value;
     renderFuzzerSetup();
   });
   fuzzerSetupNode("fuzzerUrlEncode")?.addEventListener("change", (event) => {
-    state.fuzzerUrlEncode = !!event.target.checked;
+    const value = !!event.target.checked;
+    if (value !== (state.fuzzerUrlEncode !== false)) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+    state.fuzzerUrlEncode = value;
     renderFuzzerSetup();
   });
   fuzzerSetupNode("fuzzerConcurrency")?.addEventListener("change", (event) => {
     const value = Math.round(Number(event.target.value));
-    state.fuzzerConcurrency = Number.isFinite(value) ? Math.min(16, Math.max(1, value)) : 4;
+    const concurrency = Number.isFinite(value) ? Math.min(16, Math.max(1, value)) : 4;
+    if (concurrency !== (state.fuzzerConcurrency || 4)) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+    state.fuzzerConcurrency = concurrency;
     renderFuzzerSetup();
   });
   bind("fuzzerImportPayloadButton", () => fuzzerSetupNode("fuzzerPayloadFile")?.click());

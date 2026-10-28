@@ -691,3 +691,90 @@ test('Sniper slot recovery still enforces payload editor byte limits before conf
   await prepareReuse(f, saved);
   assert.equal(f.confirmations.length, 0); assert.match(f.els.fuzzerSavedRunNotice.textContent, /editor limits/);
 });
+
+// Exercise the real setup listeners, not direct state mutation: these controls
+// remain usable while a retained-run GET is pending.
+function wireReuseSetupControls(f) {
+  for (const id of ['fuzzerAttackType', 'fuzzerUrlEncode', 'fuzzerConcurrency']) f.els[id] = node(id);
+  f.c.fuzzerSetupNode = id => f.els[id];
+  f.c.renderFuzzerSetup = () => {};
+  for (const name of ['markFuzzerEditorSelection', 'undoFuzzerMarker', 'clearFuzzerMarkers']) f.c[name] = () => {};
+  vm.runInContext(appSource.match(/^function initFuzzerSetupControls\([^]*?^\}/m)[0], f.c);
+  f.c.initFuzzerSetupControls();
+}
+const reuseSetupEdits = [
+  ['fuzzerAttackType', 'fuzzerAttackType', 'battering_ram', 'sniper'],
+  ['fuzzerUrlEncode', 'fuzzerUrlEncode', false, true],
+  ['fuzzerConcurrency', 'fuzzerConcurrency', 12, 4],
+];
+for (const [id, field, value, original] of reuseSetupEdits) {
+  for (const boundary of ['read', 'confirmation']) test(`newer ${id} retires pending Reuse ${boundary} without hiding results`, async () => {
+    const f = fixture(); wireReuseSetupControls(f); f.state[field] = original;
+    const visible = f.state.fuzzerAttackRecord, before = draft(f.state);
+    f.pick('saved'); const pending = f.reuse();
+    if (boundary === 'confirmation') { f.requests.at(-1).resolve(response(run('saved'))); await pending; }
+    f.els[id].value = String(value); f.els[id].checked = value; f.els[id].dispatch('change');
+    assert.equal(f.state[field], value); assert.equal(f.state.fuzzerDraftVersion, 1);
+    const edited = draft(f.state);
+    if (boundary === 'read') { f.requests.at(-1).resolve(response(run('saved'))); await pending; assert.equal(f.confirmations.length, 0); }
+    else { assert.equal(f.confirmations.length, 1); f.confirmations[0].confirm(); }
+    assert.notEqual(edited, before); assert.equal(draft(f.state), edited);
+    assert.equal(f.state[field], value); assert.equal(f.state.fuzzerAttackRecord, visible);
+    assert.equal(f.requests.length, 1); assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, false);
+  });
+  test(`same-value ${id} keeps intentional Reuse owned`, async () => {
+    const f = fixture(); wireReuseSetupControls(f); f.state[field] = original;
+    f.pick('saved'); const pending = f.reuse();
+    // Fractional concurrency normalizes back to the same effective value.
+    f.els[id].value = id === 'fuzzerConcurrency' ? '4.2' : String(original);
+    f.els[id].checked = original; f.els[id].dispatch('change');
+    assert.equal(f.state.fuzzerDraftVersion, 0);
+    f.requests.at(-1).resolve(response(run('saved'))); await pending;
+    assert.equal(f.confirmations.length, 1);
+    f.els[id].dispatch('change'); f.confirmations[0].confirm();
+    assert.equal(f.state.fuzzerRequestText.includes('/$payload$'), true);
+    assert.equal(f.state.fuzzerDraftVersion, 1); assert.equal(f.requests.length, 1);
+  });
+}
+
+test('stopped Battering ram Reuse discloses the retained subset before replacement', async () => {
+  const f = fixture(), saved = run('partial-ram', [result(0), result(2)]);
+  Object.assign(saved, { attack_type: 'battering_ram', payload_count: 10, stopped: true, running: false, planned: 10 });
+  await prepareReuse(f, saved);
+  assert.equal(f.confirmations.length, 1);
+  assert.match(f.confirmations[0].message, /Only 2 of 10 original payload slots remain/);
+  assert.match(f.confirmations[0].message, /Missing payloads will not be restored/);
+  f.confirmations[0].confirm();
+  assert.deepEqual(reusedPayloads(f), ['synthetic-0', 'synthetic-2']);
+  assert.equal(f.requests.length, 1);
+});
+
+test('complete Battering ram Reuse does not claim payloads are missing', async () => {
+  const f = fixture(), saved = run('complete-ram'); saved.attack_type = 'battering_ram';
+  await prepareReuse(f, saved);
+  assert.equal(f.confirmations.length, 1);
+  assert.doesNotMatch(f.confirmations[0].message, /original payload slots remain/);
+});
+
+for (const count of [undefined, '10', -1, 10.5]) test(`legacy Battering ram count ${count} does not invent a partial count warning`, async () => {
+  const f = fixture(), saved = run('legacy-ram');
+  saved.attack_type = 'battering_ram';
+  if (count === undefined) delete saved.payload_count; else saved.payload_count = count;
+  await prepareReuse(f, saved);
+  assert.equal(f.confirmations.length, 1);
+  assert.doesNotMatch(f.confirmations[0].message, /original payload slots remain/);
+  f.confirmations[0].confirm();
+  assert.deepEqual(reusedPayloads(f), ['synthetic-0', 'synthetic-1']);
+});
+
+test('concurrency clamped to its existing upper bound keeps pending Reuse owned', async () => {
+  const f = fixture(); wireReuseSetupControls(f); f.state.fuzzerConcurrency = 16;
+  f.pick('saved'); const pending = f.reuse();
+  f.els.fuzzerConcurrency.value = '99'; f.els.fuzzerConcurrency.dispatch('change');
+  assert.equal(f.state.fuzzerConcurrency, 16); assert.equal(f.state.fuzzerDraftVersion, 0);
+  f.requests.at(-1).resolve(response(run('saved'))); await pending;
+  assert.equal(f.confirmations.length, 1);
+  f.els.fuzzerConcurrency.dispatch('change'); f.confirmations[0].confirm();
+  assert.equal(f.state.fuzzerRequestText.includes('/$payload$'), true);
+  assert.equal(f.state.fuzzerDraftVersion, 1); assert.equal(f.requests.length, 1);
+});
