@@ -49,7 +49,7 @@ function fixture() {
   // Use the production initial values rather than inventing request tokens.
   vm.runInNewContext(`Object.assign(state, {${appSource.slice(appSource.indexOf('  fuzzerBaseRequest: null,'), appSource.indexOf('  oastTokenClearPending:'))}})`, { state });
   let saves = 0;
-  const c = loadFunctions([
+  const c = loadFunctions(['tableArrowStep', 'isEditableTarget',
     'fuzzerResultsWorkflowState', 'fuzzerResultMetric', 'fuzzerResultFilterValidation', 'visibleFuzzerResults', 'renderFuzzerResultsWorkflow',
     'fuzzerSelectedTransactionId', 'cancelPendingFuzzerComparison',
     'currentSessionId', 'sessionQueryPath', 'transactionPath', 'jsonArray', 'escapeHtml', 'formatStatus', 'formatSize',
@@ -64,7 +64,7 @@ function fixture() {
     'resetFuzzer', 'invalidateFuzzerRun', 'updateFuzzerRequestText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',
   ], {
-    workspaceLoaded: true, compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0, workspaceStateGeneration: 0,
+    workspaceLoaded: true, HTMLElement: class HTMLElement {}, getActiveModalAction: () => null, compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0, workspaceStateGeneration: 0,
     renderFuzzerPayloadsEditor() { els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText; },
     state, els, document, mainTabs: [], _fuzzerDetailViewModes: { request: 'raw', response: 'raw' },
     FUZZER_RESULT_ROW_HEIGHT: 30, FUZZER_RESULT_BUFFER_ROWS: 5, measuredFuzzerResultRowHeight: 30,

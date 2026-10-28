@@ -2260,7 +2260,8 @@ function bindEvents() {
       });
     });
     fuzzerResultsShell.addEventListener("keydown", (e) => {
-      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      const step = e.isComposing ? 0 : tableArrowStep(e);
+      if (!step) return;
       e.preventDefault();
       const totalCount = visibleFuzzerResults().length;
       if (!totalCount) return;
