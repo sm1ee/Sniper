@@ -572,6 +572,7 @@ const state = {
   // The attack this session runs now, so Stop can reach it.
   fuzzerRunningAttackId: null,
   fuzzerStopRequest: null,
+  fuzzerRestoredRun: null,
   fuzzerNoticeError: false,
   fuzzerDraftVersion: 0,
   fuzzerRunToken: 0,
@@ -5391,6 +5392,7 @@ function resetSessionScopedUiState() {
   state.fuzzerRunning = false;
   state.fuzzerRunningAttackId = null;
   state.fuzzerStopRequest = null;
+  state.fuzzerRestoredRun = null;
   state.fuzzerBaseRequest = null;
   state.fuzzerSourceTransactionId = null;
   state.fuzzerTarget = null;
@@ -15866,7 +15868,7 @@ function renderFuzzer() {
       && state.fuzzerStopRequest?.id === state.fuzzerRunningAttackId;
   }
   if (els.resetFuzzerButton) {
-    els.resetFuzzerButton.disabled = !!state.fuzzerRunning;
+    els.resetFuzzerButton.disabled = attackRunning;
   }
 
   if (typeof renderFuzzerSetup === "function") renderFuzzerSetup();
@@ -16521,10 +16523,22 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
     if (attackRecord.running && !state.fuzzerRunning) {
       state.fuzzerRunningAttackId = attackRecord.id;
       renderFuzzer();
-      const ended = await followFuzzerAttack(recordId, expectedSessionId, ownsLoad);
-      if (!ownsLoad()) return;
-      if (state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
-      if (ended) state.fuzzerAttackRecord = ended;
+      // Editing the draft or viewing another saved record releases this view,
+      // not the server's attack. Keep Stop and terminal tracking independent.
+      const owner = { id: recordId, sessionId: expectedSessionId };
+      state.fuzzerRestoredRun = owner;
+      const ownsRun = () => state.fuzzerRestoredRun === owner
+        && currentSessionId() === expectedSessionId
+        && state.fuzzerRunningAttackId === recordId && !state.fuzzerRunning;
+      const ended = await followFuzzerAttack(recordId, expectedSessionId, ownsRun, ownsLoad);
+      if (state.fuzzerRestoredRun !== owner || currentSessionId() !== expectedSessionId) return;
+      state.fuzzerRestoredRun = null;
+      if (!state.fuzzerRunning && state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
+      if (ended && ownsLoad()) state.fuzzerAttackRecord = ended;
+      if (!state.fuzzerRunning && !state.fuzzerRunningAttackId && owner.draftNotice
+        && state.fuzzerNotice === owner.draftNotice) {
+        state.fuzzerNotice = "Fuzzer draft changed. Start a new run to see results for the current template.";
+      }
     }
     renderFuzzer();
   } catch (error) {
@@ -17194,7 +17208,7 @@ function renderFuzzerSetup() {
   const running = state.fuzzerAttackRecord?.running ? state.fuzzerAttackRecord : null;
   // A start that failed says so here, beside Start, until the draft changes.
   const failed = state.fuzzerNoticeError && state.fuzzerNotice ? state.fuzzerNotice : "";
-  notice.textContent = failed || (busy ? (running ? `Sending… ${running.results.length} of ${running.planned || model.requestCount}` : "Starting…")
+  notice.textContent = failed || (busy ? (running ? `Sending… ${running.results.length} of ${running.planned || model.requestCount}` : state.fuzzerRunningAttackId ? "Run in progress…" : "Starting…")
     : errors[0] || (!model.markerCount ? "Select a value to replace." : !model.payloadCount ? "Add payloads." : ""));
   notice.classList?.toggle("fuzzer-notice-error", !!failed || (!busy && !!errors[0]));
   if (!notice.textContent && authorityMayChange) {
@@ -17642,6 +17656,7 @@ function initFuzzerResizers() {
 }
 
 function resetFuzzer() {
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) return;
   invalidateFuzzerRun();
   updateFuzzerRequestText(
     state.fuzzerBaseRequest ? buildEditableRawRequest(state.fuzzerBaseRequest) : "",
@@ -17685,7 +17700,10 @@ function markFuzzerDraftChanged() {
   if (state.fuzzerAttackRecord || state.fuzzerAttackRecordId) {
     clearFuzzerAttackRecord();
     state._selectedFuzzerResultKey = null;
-    state.fuzzerNotice = "Fuzzer draft changed. Start a new run to see results for the current template.";
+    state.fuzzerNotice = state.fuzzerRunningAttackId
+      ? "Draft changed. The current run is still active; edits apply to the next run."
+      : "Fuzzer draft changed. Start a new run to see results for the current template.";
+    if (state.fuzzerRestoredRun) state.fuzzerRestoredRun.draftNotice = state.fuzzerNotice;
     hideFuzzerDetailPanel();
     renderFuzzer();
   } else if (clearedFailure) {
@@ -17779,7 +17797,7 @@ function isCurrentFuzzerRun(runToken, sessionId) {
 }
 
 async function runFuzzerAttack() {
-  if (state.fuzzerRunning) {
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) {
     return;
   }
   const runToken = (state.fuzzerRunToken || 0) + 1;
@@ -17970,8 +17988,9 @@ async function runFuzzerAttack() {
 const FUZZER_POLL_MS = 700;
 
 // Reads a running attack until it ends, showing each read in place so the
-// selected result stays selected. Null when `owns` says the view moved on.
-async function followFuzzerAttack(recordId, sessionId, owns) {
+// selected result stays selected. Run ownership keeps Stop alive independently
+// of a mutable result view. Null when that run ownership is released.
+async function followFuzzerAttack(recordId, sessionId, owns, ownsView = owns) {
   let readErrorNotice = "";
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, FUZZER_POLL_MS));
@@ -17980,7 +17999,7 @@ async function followFuzzerAttack(recordId, sessionId, owns) {
       const response = await fetch(sessionQueryPath(`/api/fuzzer/attacks/${encodeURIComponent(recordId)}`, sessionId));
       if (!owns()) return null;
       if (response.status === 404) {
-        if (state.fuzzerAttackRecord?.id === recordId) {
+        if (ownsView() && state.fuzzerAttackRecord?.id === recordId) {
           state.fuzzerAttackRecord = { ...state.fuzzerAttackRecord, running: false, status: "unavailable" };
           state.fuzzerNotice = "Attack is no longer available. Last received results are shown.";
           state.fuzzerNoticeError = true;
@@ -17993,19 +18012,19 @@ async function followFuzzerAttack(recordId, sessionId, owns) {
       const record = normalizeFuzzerAttackRecord(await response.json());
       if (!owns()) return null;
       if (!record || record.id !== recordId) throw new Error("The running-attack response did not match this run.");
-      if (readErrorNotice && state.fuzzerNotice === readErrorNotice) {
+      if (ownsView() && readErrorNotice && state.fuzzerNotice === readErrorNotice) {
         state.fuzzerNotice = "";
         state.fuzzerNoticeError = false;
       }
       readErrorNotice = "";
       if (!record.running) return record;
-      if (state.fuzzerAttackRecord?.id === record.id) state.fuzzerAttackRecord = record;
+      if (ownsView() && state.fuzzerAttackRecord?.id === record.id) state.fuzzerAttackRecord = record;
       renderFuzzer();
     } catch (error) {
       if (!owns()) return null;
       // A read failure does not stop the server's attack. Keep its last rows
       // and Stop control while polling again, rather than clearing the run.
-      if (state.fuzzerAttackRecord?.id === recordId) {
+      if (ownsView() && state.fuzzerAttackRecord?.id === recordId) {
         readErrorNotice = `${error?.message || "Could not read the running attack."} Retrying…`;
         state.fuzzerNotice = readErrorNotice;
         state.fuzzerNoticeError = true;
