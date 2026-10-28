@@ -16244,6 +16244,12 @@ async function readFuzzerSavedRun(action) {
       workflow.notice = "Viewing retained results. Your request, payloads and target are unchanged.";
       scheduleWorkspaceStateSave();
       renderFuzzer();
+      const viewGeneration = _fuzzerAttackLoadGeneration;
+      const ownsView = () => viewGeneration === _fuzzerAttackLoadGeneration
+        && currentSessionId() === workflow.sessionId && state.fuzzerAttackRecordId === recordId;
+      // Keep the picker usable while the run is followed; View itself is only
+      // a read, and a later completed View must not release this run's Stop.
+      followRestoredFuzzerAttack(record, workflow.sessionId, ownsView).catch((error) => console.error(error));
     } else {
       if (!record.template || typeof record.template !== "object") throw new Error("This run has no reusable request template.");
       // Validate raw Sniper counts before the display normalizer's legacy
@@ -16493,6 +16499,38 @@ function fuzzerWorkspaceAttackRecordId(fuzzerWS, legacyRecord = null) {
   return legacyId || null;
 }
 
+async function followRestoredFuzzerAttack(attackRecord, sessionId, ownsView) {
+  if (!attackRecord?.running || state.fuzzerRunning) return;
+  const recordId = attackRecord.id;
+  const workflow = state.fuzzerResultsWorkflow;
+  state.fuzzerRunningAttackId = attackRecord.id;
+  renderFuzzer();
+  // Editing the draft or viewing another saved record releases this view,
+  // not the server's attack. Keep Stop and terminal tracking independent.
+  const owner = { id: recordId, sessionId };
+  state.fuzzerRestoredRun = owner;
+  const ownsRun = () => state.fuzzerRestoredRun === owner
+    && currentSessionId() === sessionId
+    && state.fuzzerRunningAttackId === recordId && !state.fuzzerRunning;
+  const ended = await followFuzzerAttack(recordId, sessionId, ownsRun, ownsView);
+  if (state.fuzzerRestoredRun !== owner || currentSessionId() !== sessionId) return;
+  state.fuzzerRestoredRun = null;
+  if (!state.fuzzerRunning && state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
+  if (ended && ownsView()) state.fuzzerAttackRecord = ended;
+  // Retained-run labels share this terminal state, even if another completed
+  // run is now displayed. Keep the selected run and its saved metadata intact.
+  if (ended && workflow?.sessionId === sessionId && workflow === state.fuzzerResultsWorkflow) {
+    const summary = workflow.runs.find((run) => run.id === recordId);
+    if (summary) Object.assign(summary, { running: false, stopped: !!ended.stopped, status: ended.status,
+      result_count: ended.results.length });
+  }
+  if (!state.fuzzerRunning && !state.fuzzerRunningAttackId && owner.draftNotice
+    && state.fuzzerNotice === owner.draftNotice) {
+    state.fuzzerNotice = "Fuzzer draft changed. Start a new run to see results for the current template.";
+  }
+  renderFuzzer();
+}
+
 async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
   if (!recordId) return;
   // IDs alone cannot distinguish an earlier visit to the same saved run.
@@ -16529,26 +16567,7 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
     if (state.fuzzerNotice === "Loading saved fuzzer run...") {
       state.fuzzerNotice = "";
     }
-    if (attackRecord.running && !state.fuzzerRunning) {
-      state.fuzzerRunningAttackId = attackRecord.id;
-      renderFuzzer();
-      // Editing the draft or viewing another saved record releases this view,
-      // not the server's attack. Keep Stop and terminal tracking independent.
-      const owner = { id: recordId, sessionId: expectedSessionId };
-      state.fuzzerRestoredRun = owner;
-      const ownsRun = () => state.fuzzerRestoredRun === owner
-        && currentSessionId() === expectedSessionId
-        && state.fuzzerRunningAttackId === recordId && !state.fuzzerRunning;
-      const ended = await followFuzzerAttack(recordId, expectedSessionId, ownsRun, ownsLoad);
-      if (state.fuzzerRestoredRun !== owner || currentSessionId() !== expectedSessionId) return;
-      state.fuzzerRestoredRun = null;
-      if (!state.fuzzerRunning && state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
-      if (ended && ownsLoad()) state.fuzzerAttackRecord = ended;
-      if (!state.fuzzerRunning && !state.fuzzerRunningAttackId && owner.draftNotice
-        && state.fuzzerNotice === owner.draftNotice) {
-        state.fuzzerNotice = "Fuzzer draft changed. Start a new run to see results for the current template.";
-      }
-    }
+    await followRestoredFuzzerAttack(attackRecord, expectedSessionId, ownsLoad);
     renderFuzzer();
   } catch (error) {
     if (!ownsLoad()) {

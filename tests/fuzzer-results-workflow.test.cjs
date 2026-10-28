@@ -32,7 +32,7 @@ function fixture() {
     'fuzzerResultFilterBadge', 'fuzzerResultFilterSummary', 'fuzzerClearResultFiltersButton', 'fuzzerResultStatusRow', 'fuzzerCompareBaseButton', 'fuzzerCompareButton',
     'fuzzerSavedRunSelect', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton', 'fuzzerSavedRunNotice',
     'fuzzerRequestEditor', 'fuzzerPayloadsEditor', 'fuzzerResultsBody', 'fuzzerDetailPanel', 'fuzzerDetailReqCM',
-    'fuzzerDetailResCM', 'fuzzerDetailResponseMeta', 'fuzzerMeta', 'startFuzzerButton', 'resetFuzzerButton',
+    'fuzzerDetailResCM', 'fuzzerDetailResponseMeta', 'fuzzerMeta', 'startFuzzerButton', 'stopFuzzerButton', 'resetFuzzerButton',
     'fuzzerDetailResizer', 'compareModal', 'closeCompareButton', 'compareWithBaseBtn'];
   const els = Object.fromEntries(ids.map(id => [id, node(id)])), shell = node('shell');
   els.fuzzerResultsBody.closest = () => shell;
@@ -40,7 +40,7 @@ function fixture() {
     fuzzerRequestText: 'GET /typed HTTP/2\nHost: example.com', fuzzerPayloadsText: 'typed-payload', fuzzerNotice: 'typed notice',
     fuzzerBaseRequest: { host: 'example.com', path: '/typed', method: 'GET' }, fuzzerSourceTransactionId: 'source-draft',
     fuzzerTarget: { host: 'example.com', port: 8443 }, fuzzerTargetRequestText: 'https://example.com' };
-  const requests = [], confirmations = [], panes = new Map(), toasts = [];
+  const requests = [], confirmations = [], panes = new Map(), toasts = [], timers = [];
   let saves = 0, compares = 0;
   const newNames = appSource.slice(appSource.indexOf('function fuzzerResultsWorkflowState()'), appSource.indexOf('function fuzzerSelectionKeyForResult'))
     .match(/^(?:async )?function (\w+)/gm).map(line => line.match(/function (\w+)/)[1]);
@@ -48,11 +48,11 @@ function fixture() {
     'currentSessionId', 'sessionQueryPath', 'transactionPath', 'jsonArray', 'escapeHtml', 'formatStatus', 'formatSize',
     'renderFuzzer', 'fuzzerSelectionKeyForResult', 'fuzzerSelectedResultIndex', 'fuzzerResultsShell', 'renderEmptyFuzzerResults',
     'renderFuzzerResultsVirtual', 'scrollFuzzerResultToIndex', 'selectFuzzerResultIndex', 'selectFuzzerRow',
-    'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
+    'followRestoredFuzzerAttack', 'followFuzzerAttack', 'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
     'clearFuzzerResponsePane', 'invalidateFuzzerRun', 'resetFuzzer', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'cloneEditableRequest', 'buildEditableRawRequest', 'normalizedHeaders', 'mergeHeaders', 'headerNameEquals',
     'setCompareBase', 'openCompareModal', 'closeCompareModal', 'splitFuzzerPayloadLines', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool',
-  ], { state, els, TextEncoder, document: { getElementById: id => els[id], activeElement: null },
+  ], { state, els, TextEncoder, FUZZER_POLL_MS: 0, setTimeout: callback => { timers.push(callback); return 0; }, document: { getElementById: id => els[id], activeElement: null },
     _fuzzerAttackLoadGeneration: 0, _fuzzerDetailGeneration: 0,
     compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0,
     compareBaseRecord: null, compareTargetRecord: null, compareActiveTab: 'request', compareReturnFocus: null,
@@ -76,7 +76,7 @@ function fixture() {
   const end = appSource.indexOf('  // Fuzzer detail view mode tabs', start);
   vm.runInContext(`(() => { ${appSource.slice(start, end)} })()`, c);
   c.setFuzzerAttackRecord(run()); c.renderFuzzer();
-  return { c, state, els, shell, requests, confirmations, panes, toasts,
+  return { c, state, els, shell, requests, confirmations, panes, toasts, timers,
     get saves() { return saves; }, get compares() { return compares; },
     setFilter(id, value) { els[id].value = value; els[id].dispatch(/Status|Sort|Direction/.test(id) ? 'change' : 'input'); },
     pick(id) { els.fuzzerSavedRunSelect.value = id; els.fuzzerSavedRunSelect.dispatch('change'); },
@@ -777,4 +777,100 @@ test('concurrency clamped to its existing upper bound keeps pending Reuse owned'
   f.els.fuzzerConcurrency.dispatch('change'); f.confirmations[0].confirm();
   assert.equal(f.state.fuzzerRequestText.includes('/$payload$'), true);
   assert.equal(f.state.fuzzerDraftVersion, 1); assert.equal(f.requests.length, 1);
+});
+
+async function viewRunningPickerRun(f, id = 'external-live') {
+  f.pick(id);
+  const pending = f.c.readFuzzerSavedRun('view');
+  f.requests.at(-1).resolve(response({ ...run(id, [result(0)]), running: true, planned: 3, payload_count: 3 }));
+  await pending;
+}
+test('picker View follows a running retained run without replacing the draft or holding the picker busy', async () => {
+  const f = fixture(), before = draft(f.state);
+  await viewRunningPickerRun(f);
+  assert.equal(draft(f.state), before);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.els.startFuzzerButton.disabled, true);
+  assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), false);
+  assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, false);
+  assert.equal(f.els.fuzzerViewRunButton.disabled, false);
+  f.timers.shift()(); await tick();
+  f.requests.at(-1).resolve(response({ ...run('external-live', [result(0), result(1), result(2)]), running: false }));
+  await tick();
+  assert.equal(f.state.fuzzerAttackRecord.results.length, 3);
+  assert.equal(f.state.fuzzerRunningAttackId, null);
+  assert.equal(f.els.startFuzzerButton.disabled, false);
+  assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), true);
+  assert.equal(draft(f.state), before);
+});
+for (const boundary of ['draft', 'completed-view', 'running-view', 'session']) {
+  test(`picker running follow preserves newer ${boundary} while retiring only its own lifecycle`, async () => {
+    const f = fixture(); await viewRunningPickerRun(f);
+    f.timers.shift()(); await tick(); const poll = f.requests.at(-1);
+    if (boundary === 'draft') f.c.updateFuzzerPayloadsText('new payload', { userEdit: true });
+    if (boundary === 'completed-view') {
+      f.pick('completed'); const pending = f.c.readFuzzerSavedRun('view');
+      f.requests.at(-1).resolve(response(run('completed'))); await pending;
+      assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+      assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), false);
+    }
+    if (boundary === 'running-view') await viewRunningPickerRun(f, 'new-live');
+    if (boundary === 'session') f.resetSession('session-b');
+    const recordBefore = JSON.stringify(f.state.fuzzerAttackRecord);
+    poll.resolve(response({ ...run('external-live', [result(0), result(1), result(2)]), running: false }));
+    await tick();
+    assert.equal(JSON.stringify(f.state.fuzzerAttackRecord), recordBefore);
+    if (boundary === 'draft') assert.equal(f.state.fuzzerPayloadsText, 'new payload');
+    if (boundary === 'running-view') {
+      assert.equal(f.state.fuzzerRunningAttackId, 'new-live');
+      assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), false);
+    } else if (boundary !== 'session') assert.equal(f.state.fuzzerRunningAttackId, null);
+  });
+}
+test('a stale picker running response cannot adopt Stop after a newer View', async () => {
+  const f = fixture(); f.pick('old-live');
+  const old = f.c.readFuzzerSavedRun('view'), request = f.requests.at(-1);
+  f.pick('completed'); const latest = f.c.readFuzzerSavedRun('view');
+  f.requests.at(-1).resolve(response(run('completed'))); await latest;
+  request.resolve(response({ ...run('old-live'), running: true })); await old;
+  assert.equal(f.state.fuzzerAttackRecordId, 'completed');
+  assert.equal(f.state.fuzzerRunningAttackId, undefined);
+  assert.equal(f.timers.length, 0);
+});
+test('revisiting the same running picker record fences the earlier terminal read', async () => {
+  const f = fixture(); await viewRunningPickerRun(f);
+  f.timers.shift()(); await tick(); const oldPoll = f.requests.at(-1);
+  await viewRunningPickerRun(f);
+  const owner = f.state.fuzzerRestoredRun;
+  oldPoll.resolve(response({ ...run('external-live'), running: false })); await tick();
+  assert.equal(f.state.fuzzerRestoredRun, owner);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.state.fuzzerAttackRecord.running, true);
+  f.timers.shift()(); await tick();
+  f.requests.at(-1).resolve(response({ ...run('external-live'), running: false })); await tick();
+  assert.equal(f.state.fuzzerRunningAttackId, null);
+  assert.equal(f.state.fuzzerAttackRecord.running, false);
+});
+
+for (const newerWorkflow of [false, true]) test(`terminal picker follow ${newerWorkflow ? 'leaves a replaced workflow alone' : 'updates only its retained summary without changing selection'}`, async () => {
+  const f = fixture(), workflow = f.c.fuzzerResultsWorkflowState();
+  const summary = { id: 'external-live', running: true, stopped: false, status: 'running', result_count: 1,
+    payload_count: 3, started_at: 'original time', host: 'example.com', path: '/original' };
+  const unrelated = { id: 'other', running: true, status: 'running', payload_count: 9 };
+  workflow.runs = [summary, unrelated];
+  await viewRunningPickerRun(f);
+  f.pick('other');
+  if (newerWorkflow) f.state.fuzzerResultsWorkflow = { ...workflow, runs: [{ ...summary }, { ...unrelated }] };
+  const before = JSON.stringify(f.state.fuzzerResultsWorkflow);
+  f.timers.shift()(); await tick();
+  f.requests.at(-1).resolve(response({ ...run('external-live', [result(0), result(1), result(2)]), running: false }));
+  await tick();
+  if (newerWorkflow) assert.equal(JSON.stringify(f.state.fuzzerResultsWorkflow), before);
+  else {
+    assert.deepEqual(summary, { id: 'external-live', running: false, stopped: false, status: 'completed', result_count: 3,
+      payload_count: 3, started_at: 'original time', host: 'example.com', path: '/original' });
+    assert.deepEqual(unrelated, { id: 'other', running: true, status: 'running', payload_count: 9 });
+    assert.equal(workflow.selectedRunId, 'other');
+    assert.match(f.els.fuzzerSavedRunSelect.innerHTML, /original time.*completed/);
+  }
 });

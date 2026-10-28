@@ -8,7 +8,7 @@ function fixture() {
     fuzzerRequestText: 'GET /?q=§x§ HTTP/1.1\r\nHost: example.com\r\n\r\n',
     fuzzerPayloadsText: 'a\nb', fuzzerRunning: false, fuzzerRunToken: 0 };
   const timers = [], requests = [];
-  const c = loadFunctions(['hydrateFuzzerAttackRecordById', 'followFuzzerAttack', 'setFuzzerAttackRecord',
+  const c = loadFunctions(['followRestoredFuzzerAttack', 'hydrateFuzzerAttackRecordById', 'followFuzzerAttack', 'setFuzzerAttackRecord',
     'clearFuzzerAttackRecord', 'normalizeFuzzerAttackRecord', 'jsonArray', 'sessionQueryPath', 'currentSessionId',
     'resetFuzzer', 'invalidateFuzzerRun', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged',
     'runFuzzerAttack', 'stopFuzzerAttack'], {
