@@ -129,6 +129,7 @@ test("Capture search labels stay unchanged and editor metadata does not spread t
   const labels = {
     requestViewCM: "Captured request", responseViewCM: "Captured response",
     replayRequestCM: "Replay request", replayResponseCM: "Replay response",
+    fuzzerDetailReqCM: "Fuzzer result request", fuzzerDetailResCM: "Fuzzer result response",
   };
   for (const match of html.matchAll(/<div id="([^"]+)" class="cm-container"[^>]*>/g)) {
     assert.equal(elementFromHtml(match[1]).getAttribute("data-editor-label"), labels[match[1]] ?? null, match[1]);
