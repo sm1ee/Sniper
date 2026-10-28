@@ -32848,6 +32848,8 @@ class SniperCodeView {
       }),
       parent: container,
     });
+    const editorLabel = container?.getAttribute?.("data-editor-label");
+    if (editorLabel?.trim()) this.view.contentDOM.setAttribute("aria-label", editorLabel);
   }
 
   /** Tint the given character ranges as changed lines. Call after setContent. */

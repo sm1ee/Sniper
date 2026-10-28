@@ -5980,7 +5980,7 @@ button.utility-button.replay-tab-add {
 
 .replay-workbench > .panel-card {
   grid-template-rows: auto minmax(0, 1fr) auto;
-  min-height: 300px;
+  min-height: 0;
   min-width: 0;
   width: 100%;
 }
@@ -6751,7 +6751,7 @@ button.utility-button.replay-tab-add {
 
   .replay-workbench {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(260px, 0.9fr) minmax(260px, 1.1fr);
+    grid-template-rows: minmax(0, 0.9fr) minmax(0, 1.1fr);
   }
 
   .websocket-filter-bar {
