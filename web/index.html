@@ -300,7 +300,9 @@
                   <button class="intercept-queue-tab active" data-queue="request" id="interceptQueueTabRequest">Request Queue</button>
                   <button class="intercept-queue-tab" data-queue="response" id="interceptQueueTabResponse">Response Queue</button>
                 </nav>
-                <div class="history-table-shell" style="flex:1 1 auto;min-height:80px">
+                <p class="intercept-queue-accessibility" id="interceptQueueInstructions">Use Up and Down arrow keys to select a held item.</p>
+                <p class="intercept-queue-accessibility" id="interceptQueueSelectionStatus" role="status" aria-live="polite" aria-atomic="true">Request queue is empty.</p>
+                <div class="history-table-shell" id="interceptQueueShell" tabindex="0" role="group" aria-label="Request Queue" aria-describedby="interceptQueueInstructions interceptQueueSelectionStatus" style="flex:1 1 auto;min-height:80px">
                   <table class="mini-table intercept-queue-table" id="interceptRequestTable">
                     <thead>
                       <tr>

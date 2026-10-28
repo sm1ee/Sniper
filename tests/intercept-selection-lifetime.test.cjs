@@ -57,6 +57,7 @@ function fixture(mode, cm = true) {
   const c = loadFunctions([
     "loadIntercepts", "loadInterceptDetail", "loadResponseIntercepts", "loadResponseInterceptDetail",
     "renderIntercepts", "renderResponseIntercepts", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
+    "selectInterceptQueueItem", "updateInterceptQueueSelectionStatus", "scrollSelectedInterceptRowIntoView",
     "reconcileRequestInterceptSelection", "reconcileResponseInterceptSelection", "refreshInterceptDetailsForCurrentSelection",
     "applyInterceptScopeFilterLocally", "switchInterceptQueueTab", "updateInterceptQueueBadges",
     "activeInterceptCMKey", "updateInterceptSearch", "setInterceptPaneContent",

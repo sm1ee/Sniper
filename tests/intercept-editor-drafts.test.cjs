@@ -77,6 +77,7 @@ function fixture(mode, cm) {
   const context = loadFunctions([
     "loadIntercepts", "loadInterceptDetail", "loadResponseIntercepts", "loadResponseInterceptDetail",
     "renderIntercepts", "renderResponseIntercepts", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
+    "selectInterceptQueueItem", "updateInterceptQueueSelectionStatus", "scrollSelectedInterceptRowIntoView",
     "reconcileRequestInterceptSelection", "reconcileResponseInterceptSelection", "refreshInterceptDetailsForCurrentSelection",
     "applyInterceptScopeFilterLocally", "switchInterceptQueueTab", "updateInterceptQueueBadges",
     "activeInterceptCMKey", "updateInterceptSearch", "setInterceptPaneContent",

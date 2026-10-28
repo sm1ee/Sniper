@@ -844,6 +844,8 @@ const els = {
   filterHiddenExtensions: document.getElementById("filterHiddenExtensions"),
   filterPort: document.getElementById("filterPort"),
   colorTagFilter: document.getElementById("colorTagFilter"),
+  interceptQueueShell: document.getElementById("interceptQueueShell"),
+  interceptQueueSelectionStatus: document.getElementById("interceptQueueSelectionStatus"),
   interceptTableBody: document.getElementById("interceptTableBody"),
   interceptDetailPath: document.getElementById("interceptDetailPath"),
   interceptDetailTitle: document.getElementById("interceptDetailTitle"),
@@ -1972,6 +1974,8 @@ function bindEvents() {
   });
   els.interceptQueueTabRequest.addEventListener("click", () => switchInterceptQueueTab("request"));
   els.interceptQueueTabResponse.addEventListener("click", () => switchInterceptQueueTab("response"));
+  els.interceptQueueShell?.addEventListener("keydown", onInterceptQueueKeydown);
+  els.interceptQueueShell?.addEventListener("focus", () => scrollSelectedInterceptRowIntoView(state.interceptQueueTab));
 
   if (els.interceptSearchInput) {
     els.interceptSearchInput.addEventListener("input", updateInterceptSearch);
@@ -13545,6 +13549,85 @@ function getVisibleResponseInterceptSummaries() {
     : state.responseIntercepts;
 }
 
+function selectInterceptQueueItem(queue, id) {
+  if (queue === "response") {
+    if (state.selectedResponseInterceptId !== id) {
+      state.selectedResponseInterceptId = id;
+      state.selectedResponseInterceptRecord = null;
+      state.responseInterceptEditorSeedId = null;
+      renderResponseIntercepts();
+    }
+    return loadResponseInterceptDetail(id);
+  }
+  if (state.selectedInterceptId !== id) {
+    state.selectedInterceptId = id;
+    state.selectedInterceptRecord = null;
+    state.interceptEditorSeedId = null;
+    renderIntercepts();
+  }
+  return loadInterceptDetail(id);
+}
+
+function onInterceptQueueKeydown(event) {
+  const shell = els.interceptQueueShell;
+  // Selection belongs to this stable Tab stop, never an editor, queue switch,
+  // or incidental focus elsewhere in the workspace.
+  if (!shell || event.target !== shell || document.activeElement !== shell || event.isComposing
+    || state.activeTool !== "proxy" || state.activeProxyTab !== "intercept" || !shell.getClientRects().length) return;
+  if (els.interceptContextMenu && !els.interceptContextMenu.classList.contains("hidden")) return;
+  const step = tableArrowStep(event);
+  if (!step) return;
+  event.preventDefault();
+  const queue = state.interceptQueueTab;
+  const response = queue === "response";
+  const items = response ? getVisibleResponseInterceptSummaries() : getVisibleRequestInterceptSummaries();
+  if (!items.length) return;
+  const selectedId = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const current = items.findIndex(item => item.id === selectedId);
+  const next = current < 0 ? (step > 0 ? 0 : items.length - 1) : Math.max(0, Math.min(items.length - 1, current + step));
+  // Holding an arrow at the edge must not refetch or re-seed a typed draft.
+  if (next === current) return;
+  selectInterceptQueueItem(queue, items[next].id).catch(error => console.error(error));
+}
+
+function updateInterceptQueueSelectionStatus(queue, items) {
+  const shell = els.interceptQueueShell;
+  // Both queues poll independently; the hidden queue cannot rename or scroll
+  // the shared keyboard surface while its detail read settles.
+  if (!shell || state.interceptQueueTab !== queue) return;
+  const response = queue === "response";
+  const label = response ? "Response" : "Request";
+  const selectedId = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const index = items.findIndex(item => item.id === selectedId);
+  const item = items[index];
+  const status = item
+    ? `${label} ${index + 1} of ${items.length}: ${response ? `${item.status} ` : ""}${item.method} ${item.host}${item.path || "/"}.`
+    : `${label} queue is empty.`;
+  if (shell.getAttribute("aria-label") !== `${label} Queue`) shell.setAttribute("aria-label", `${label} Queue`);
+  if (els.interceptQueueSelectionStatus && els.interceptQueueSelectionStatus.textContent !== status) {
+    els.interceptQueueSelectionStatus.textContent = status;
+  }
+  if (document.activeElement === shell) scrollSelectedInterceptRowIntoView(queue);
+}
+
+function scrollSelectedInterceptRowIntoView(queue) {
+  const shell = els.interceptQueueShell;
+  if (!shell || state.interceptQueueTab !== queue || shell.clientHeight <= 0) return;
+  const response = queue === "response";
+  const table = response ? els.responseInterceptTable : els.interceptRequestTable;
+  const body = response ? els.responseInterceptTableBody : els.interceptTableBody;
+  const row = body.querySelector(".history-row.selected");
+  if (!row) return;
+  // Native nearest would leave an upward selection behind the sticky header.
+  const rect = row.getBoundingClientRect();
+  const clientTop = shell.getBoundingClientRect().top + shell.clientTop;
+  const viewTop = clientTop + (table.tHead?.getBoundingClientRect().height || 0);
+  const viewBottom = clientTop + shell.clientHeight;
+  const adjustment = rect.top < viewTop ? rect.top - viewTop
+    : Math.max(0, Math.min(rect.top - viewTop, rect.bottom - viewBottom));
+  if (adjustment) shell.scrollTop = Math.max(0, shell.scrollTop + adjustment);
+}
+
 function reconcileRequestInterceptSelection(visibleIntercepts = getVisibleRequestInterceptSummaries()) {
   const selectedIsVisible = visibleIntercepts.some((item) => item.id === state.selectedInterceptId);
   if (!selectedIsVisible) {
@@ -13620,14 +13703,7 @@ function renderIntercepts() {
 
   Array.from(els.interceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
     row.addEventListener("click", () => {
-      const id = row.dataset.id;
-      if (state.selectedInterceptId !== id) {
-        state.selectedInterceptId = id;
-        state.selectedInterceptRecord = null;
-        state.interceptEditorSeedId = null;
-        renderIntercepts();
-      }
-      loadInterceptDetail(id).catch((error) => console.error(error));
+      selectInterceptQueueItem("request", row.dataset.id).catch((error) => console.error(error));
     });
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -13635,15 +13711,12 @@ function renderIntercepts() {
       if (!id) return;
       // Select first, so the menu acts on what the operator sees highlighted.
       if (state.selectedInterceptId !== id) {
-        state.selectedInterceptId = id;
-        state.selectedInterceptRecord = null;
-        state.interceptEditorSeedId = null;
-        renderIntercepts();
-        loadInterceptDetail(id).catch((error) => console.error(error));
+        selectInterceptQueueItem("request", id).catch((error) => console.error(error));
       }
       openInterceptContextMenu(event.clientX, event.clientY, id);
     });
   });
+  updateInterceptQueueSelectionStatus("request", filteredIntercepts);
 
   if (!state.selectedInterceptRecord) {
     state.interceptEditorSeedId = null;
@@ -19785,16 +19858,10 @@ function renderResponseIntercepts() {
 
   Array.from(els.responseInterceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
     row.addEventListener("click", () => {
-      const id = row.dataset.id;
-      if (state.selectedResponseInterceptId !== id) {
-        state.selectedResponseInterceptId = id;
-        state.selectedResponseInterceptRecord = null;
-        state.responseInterceptEditorSeedId = null;
-        renderResponseIntercepts();
-      }
-      loadResponseInterceptDetail(id).catch((error) => console.error(error));
+      selectInterceptQueueItem("response", row.dataset.id).catch((error) => console.error(error));
     });
   });
+  updateInterceptQueueSelectionStatus("response", filteredResponseIntercepts);
 
   if (!state.selectedResponseInterceptRecord) {
     state.responseInterceptEditorSeedId = null;

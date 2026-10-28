@@ -14,6 +14,7 @@ function fixture(mode) {
   els.interceptSearchMeta = null;
   Object.assign(context, { escapeHtml: String, formatTimestamp: String });
   for (const name of ['renderIntercepts', 'renderResponseIntercepts', 'getVisibleRequestInterceptSummaries',
+    'selectInterceptQueueItem', 'updateInterceptQueueSelectionStatus', 'scrollSelectedInterceptRowIntoView',
     'getVisibleResponseInterceptSummaries', 'reconcileRequestInterceptSelection', 'reconcileResponseInterceptSelection',
     'setInterceptPaneContent', 'buildEditableRawResponse', 'updateInterceptSearch', 'activeInterceptCMKey']) {
     vm.runInContext(source(name), context);
