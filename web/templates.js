@@ -81,6 +81,13 @@
     };
   }
 
+  // What the daily update switch does, and when it last asked GitHub.
+  function dailyUpdateTitle(status) {
+    const what = status?.library?.tag === "main" ? "main's newest commit" : "a newer release";
+    const asked = status?.checked_at ? ` Last asked ${String(status.checked_at).slice(0, 16).replace("T", " ")} UTC.` : "";
+    return `Once a day, Sniper asks GitHub for ${what} and installs it.${asked}`;
+  }
+
   // ---- YAML ----
 
   const YAML_KEY = /^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^\s#'"[\]{},:][^#]*?)(:)(?=\s|$)/;
@@ -363,7 +370,7 @@
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
     const ids = ["Version", "Status", "Progress", "ProgressBar", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
-      "More", "Switch", "ImportMenu",
+      "More", "Switch", "ImportMenu", "Update", "UpdateNote", "AutoUpdate",
       "Search", "Severity", "Support", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
       "Views", "ListControls", "ListActions", "Table", "ResultsTable", "ResultsHead", "ResultsRows", "ResultsTitle",
       "ResultsMatched", "ResultsStop", "Pagination",
@@ -472,6 +479,14 @@
       if (lastCheck && lastCheck.sha256 !== library?.sha256) lastCheck = null;
       const installed = installedChannel();
       const idle = !working && !busy;
+      // Only a library GitHub served updates itself; an imported archive is
+      // left as it is.
+      els.Update.classList.toggle("hidden", library?.source !== "github");
+      els.AutoUpdate.setAttribute("aria-checked", status?.auto_update ? "true" : "false");
+      els.AutoUpdate.disabled = busy;
+      els.AutoUpdate.title = dailyUpdateTitle(status);
+      els.UpdateNote.textContent = status?.check_error ? "Last check failed" : "";
+      els.UpdateNote.title = status?.check_error || "";
       els.Check.classList.toggle("hidden", !library || !!working);
       els.Check.disabled = !idle;
       els.Download.classList.toggle("hidden", !!working || !(!library || lastCheck?.update_available));
@@ -1269,6 +1284,11 @@
 
     on(els.Download, "click", () => download(installedChannel()));
     on(els.Switch, "click", () => download(status?.library ? (installedChannel() === "main" ? "release" : "main") : "main"));
+    on(els.AutoUpdate, "click", () => act(async () => {
+      status = await json(await fetcher("/api/templates/library/auto-update", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !status?.auto_update }),
+      }), "Could not save the daily update");
+    }));
     on(els.Check, "click", () => act(async () => {
       const result = await json(await fetcher("/api/templates/library/check", { method: "POST" }), "Could not reach GitHub");
       lastCheck = { ...result, sha256: status?.library?.sha256 };

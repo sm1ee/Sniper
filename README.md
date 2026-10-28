@@ -298,7 +298,8 @@ bruteforce and the like, or that send PUT, DELETE or PATCH, run only if you
 allow each risk, and `dos` templates never run. Out-of-band templates
 (`{{interactsh-url}}`) are sent where the session has an Interactsh server
 (**Capture ▸ OAST**) and match when the target calls back. Findings appear
-under `nuclei`.
+under `nuclei`. A library downloaded from GitHub updates itself once a day;
+**Update daily** in the library card turns that off.
 
 ```bash
 sniper-cli templates library status

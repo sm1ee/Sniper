@@ -327,7 +327,7 @@ const settle = async () => { for (let tick = 0; tick < 5; tick += 1) await new P
 
 async function listFixture(items, arrowStep, {
   sessionId = null, auto = null, scopeCount = 1, library = { source: "import", verified: false }, jobs = [], openRecord,
-  scanError = null, check = null, records = {}, total = items.length,
+  scanError = null, check = null, records = {}, total = items.length, libraryStatus = {},
 } = {}) {
   const els = new Map();
   const sent = [];
@@ -336,7 +336,7 @@ async function listFixture(items, arrowStep, {
     ownerDocument: doc,
     querySelector(selector) { if (!els.has(selector)) els.set(selector, listeningElement()); return els.get(selector); },
   };
-  const status = { state: "idle", library, templates: items.length, passive_supported: 0, passive_enabled: 0 };
+  const status = { state: "idle", library, templates: items.length, passive_supported: 0, passive_enabled: 0, ...libraryStatus };
   const urls = [];
   const timers = [];
   const controller = templates.createController({
@@ -353,6 +353,7 @@ async function listFixture(items, arrowStep, {
       const record = String(url).match(/^\/api\/transactions\/([^?/]+)/)?.[1];
       const body = record ? records[record]
         : check && String(url) === "/api/templates/library/check" ? check
+        : String(url) === "/api/templates/library/auto-update" ? Object.assign(status, { auto_update: JSON.parse(init.body).enabled })
         : String(url).includes("/library") ? status
         : String(url).startsWith("/api/templates/auto/templates") ? { auto_enabled: 1, ignored: 0 }
           : String(url).startsWith("/api/templates/auto") ? Object.assign(auto, init.method === "POST" ? JSON.parse(init.body) : {})
@@ -498,6 +499,41 @@ test("with templates installed, only an update found offers Update", async () =>
   download.dispatch("click", {});
   await settle();
   assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/download", body: { acknowledged: true, channel: "release" } });
+  f.controller.dispose();
+});
+
+// A library GitHub served updates itself once a day; the switch says so and
+// saves when flipped.
+test("the daily update switch shows for a library from GitHub and saves when flipped", async () => {
+  const library = { source: "github", tag: "v10.5.0", verified: true };
+  const f = await listFixture([], () => 0, {
+    sessionId: "s-1", library, libraryStatus: { auto_update: true, checked_at: "2026-10-28T01:00:00Z" },
+  });
+  const toggle = f.els.get("#templatesAutoUpdate");
+  assert.equal(f.els.get("#templatesUpdate").classList.contains("hidden"), false);
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  assert.match(toggle.title, /2026-10-28/);
+  toggle.dispatch("click", {});
+  await settle();
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/library/auto-update", body: { enabled: false } });
+  assert.equal(toggle.getAttribute("aria-checked"), "false");
+  f.controller.dispose();
+});
+
+// An imported archive is left as it is, so it has no switch; a daily check
+// that failed is a quiet note, not an error nobody asked for.
+test("an imported archive has no daily update, and a failed check is a quiet note", async () => {
+  const imported = await listFixture([], () => 0, { sessionId: "s-1" });
+  assert.equal(imported.els.get("#templatesUpdate").classList.contains("hidden"), true);
+  imported.controller.dispose();
+  const library = { source: "github", tag: "v10.5.0", verified: true };
+  const f = await listFixture([], () => 0, {
+    sessionId: "s-1", library, libraryStatus: { auto_update: true, check_error: "GitHub answered 503" },
+  });
+  const note = f.els.get("#templatesUpdateNote");
+  assert.equal(note.textContent, "Last check failed");
+  assert.equal(note.title, "GitHub answered 503");
+  assert.equal(f.els.get("#templatesNotice").textContent, "");
   f.controller.dispose();
 });
 

@@ -734,6 +734,16 @@ enum TemplatesLibraryCommand {
     Download(TemplatesDownloadArgs),
     /// Install a release archive (.tar.gz) from disk, for networks without GitHub.
     Import(TemplatesImportArgs),
+    /// Turn the daily update on or off. While on, Sniper asks GitHub once a day
+    /// for a newer release, or main's newest commit when main is installed,
+    /// and installs it. An imported archive is never updated.
+    AutoUpdate(TemplatesAutoUpdateArgs),
+}
+
+#[derive(Args, Debug)]
+struct TemplatesAutoUpdateArgs {
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
 }
 
 #[derive(Args, Debug)]
@@ -828,6 +838,7 @@ impl TemplatesCommand {
                 TemplatesLibraryCommand::Check => "templates.library.check",
                 TemplatesLibraryCommand::Download(_) => "templates.library.download",
                 TemplatesLibraryCommand::Import(_) => "templates.library.import",
+                TemplatesLibraryCommand::AutoUpdate(_) => "templates.library.set_auto_update",
             },
             Self::List(_) => "templates.list",
             Self::Get(_) => "templates.get",
@@ -1020,6 +1031,9 @@ fn templates_input_preview(command: &TemplatesCommand) -> Value {
         TemplatesCommand::Library {
             command: TemplatesLibraryCommand::Import(args),
         } => json!({ "file": args.file }),
+        TemplatesCommand::Library {
+            command: TemplatesLibraryCommand::AutoUpdate(args),
+        } => json!({ "enabled": args.enabled }),
         TemplatesCommand::Library { .. } => json!({}),
         TemplatesCommand::List(args) => {
             let mut input = templates_filter_json(&args.filter);
@@ -1087,6 +1101,11 @@ fn templates_api_preview(command: &TemplatesCommand) -> Value {
                 "POST",
                 "/api/templates/library/import",
                 Some(json!({ "file": args.file, "content_type": "application/gzip" })),
+            ),
+            TemplatesLibraryCommand::AutoUpdate(args) => api_preview(
+                "POST",
+                "/api/templates/library/auto-update",
+                Some(json!({ "enabled": args.enabled })),
             ),
         },
         TemplatesCommand::List(args) => api_preview("GET", templates_list_path(args), None),
@@ -3862,7 +3881,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.library.status",
             "templates library status",
-            "Read the installed Nuclei template release (tag, SHA-256, whether the release's checksum verified it), template counts by what Sniper can run, the passive templates turned on, and any download or import in progress. Local; contacts nothing.",
+            "Read the installed Nuclei template release (tag, SHA-256, whether the release's checksum verified it), template counts by what Sniper can run, the passive templates turned on, whether the daily update is on and when it last asked GitHub (checked_at, check_error), and any download or import in progress. Local; contacts nothing.",
             Read,
             false,
             &[],
@@ -3894,6 +3913,15 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             true,
             &["file"],
             vec![json!({"file":"nuclei-templates.tar.gz"})],
+        ),
+        op(
+            "templates.library.set_auto_update",
+            "templates library auto-update --enabled <true|false>",
+            "Turn the daily update on or off; it starts on. While on, Sniper asks GitHub once a day for a newer nuclei-templates release, or main's newest commit when main is installed, and installs it the way download does; templates turned on stay on. A failed check keeps the installed library and shows in status as check_error. An imported archive is never updated.",
+            Write,
+            true,
+            &["enabled"],
+            vec![json!({"enabled":false}), json!({"enabled":true})],
         ),
         op(
             "templates.list",
@@ -6472,6 +6500,10 @@ fn templates_input_schema(operation: &str) -> Option<Value> {
             "type":"object","additionalProperties":false,"required":["file"],
             "properties":{"file":{"type":"string","minLength":1,"description":"Path to a nuclei-templates release .tar.gz on this machine, at most 64 MiB."}}
         }),
+        "templates.library.set_auto_update" => json!({
+            "type":"object","additionalProperties":false,"required":["enabled"],
+            "properties":{"enabled":{"type":"boolean","description":"Turn the daily update on (true) or off (false)."}}
+        }),
         "templates.list" => {
             let mut properties = filter;
             properties["protocol"] = json!({"type":["string","null"],"maxLength":200,"description":"Comma-separated protocols: http, dns, network, code and the rest."});
@@ -7088,6 +7120,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "templates.library.status" | "templates.library.check" => &[],
         "templates.library.download" => &["main"],
         "templates.library.import" => &["file"],
+        "templates.library.set_auto_update" => &["enabled"],
         "templates.list" => &[
             "search",
             "severity",
@@ -8474,6 +8507,7 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     match command.operation_name() {
         "templates.library.check" | "templates.library.download" => notes.push("Contacts GitHub through the environment's proxy: the latest-release API, then for a download the release's checksums file and source .tar.gz; with main, the branch API and that commit's .tar.gz. A release that does not match its published SHA-256 is not installed; main has no checksum. Dry-run contacts nothing."),
         "templates.library.import" => notes.push("Reads the local .tar.gz and uploads it to the running Sniper, which installs it; nothing contacts GitHub. Dry-run reads nothing."),
+        "templates.library.set_auto_update" => notes.push("While on, Sniper asks GitHub once a day through the environment's proxy and installs a newer release or main commit. Dry-run contacts nothing."),
         "templates.passive.set_enabled" => notes.push("Enabled passive templates judge captured responses whose host is in a non-empty Scope include list while Passive Scan is on, and never send requests. Run findings rescan to apply a change to stored history."),
         "templates.auto.set" => notes.push("While on, the auto scan sends requests to every new host the proxy captures in Scope or on its list. Dry-run contacts nothing."),
         "templates.scan.start" => notes.push("Sends the templates' requests to the targets once it runs. Dry-run contacts nothing; templates scan preview asks Sniper what would be sent and still sends nothing to a target."),
@@ -8820,6 +8854,13 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             command: TemplatesCommand::Library {
                 command: TemplatesLibraryCommand::Import(TemplatesImportArgs {
                     file: call_required::<String>(operation, input, "file")?.into(),
+                }),
+            },
+        },
+        "templates.library.set_auto_update" => Command::Templates {
+            command: TemplatesCommand::Library {
+                command: TemplatesLibraryCommand::AutoUpdate(TemplatesAutoUpdateArgs {
+                    enabled: call_required(operation, input, "enabled")?,
                 }),
             },
         },
@@ -10775,6 +10816,15 @@ async fn handle_templates(api: ApiClient, command: TemplatesCommand) -> Result<(
                     );
                 }
                 print_json(&wait_for_template_library(&api).await?)
+            }
+            TemplatesLibraryCommand::AutoUpdate(args) => {
+                let status: Value = api
+                    .post_json(
+                        "/api/templates/library/auto-update",
+                        &json!({ "enabled": args.enabled }),
+                    )
+                    .await?;
+                print_json(&status)
             }
         },
         TemplatesCommand::List(args) => {
@@ -21925,6 +21975,33 @@ mod tests {
             let spec = operation_spec(operation).unwrap();
             assert_eq!(spec.input_schema["additionalProperties"], false);
         }
+    }
+
+    // Turning the daily update off is how an agent stops Sniper asking GitHub
+    // once a day, so the switch must name its value.
+    #[test]
+    fn the_daily_template_update_switch_names_its_value() {
+        let set = |input: Value| {
+            command_from_operation_input("templates.library.set_auto_update", &input)
+        };
+        assert!(set(json!({})).is_err());
+        let off = set(json!({"enabled": false})).unwrap();
+        assert!(off.requires_confirmation());
+        let preview = super::command_api_preview(&off).unwrap();
+        assert_eq!(preview["path"], "/api/templates/library/auto-update");
+        assert_eq!(preview["body"], json!({ "enabled": false }));
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "templates",
+            "library",
+            "auto-update",
+            "--enabled",
+            "false"
+        ])
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["sniper-cli", "templates", "library", "auto-update"]).is_err()
+        );
     }
 
     // Turning passive templates on takes exactly one selection, so a missing

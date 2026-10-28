@@ -8694,6 +8694,8 @@ button.utility-button.replay-tab-add {
 .templates-shell .templates-actions select { flex: 1 1 110px; width: auto; }
 .templates-version { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .templates-version strong { font-family: var(--mono); font-weight: 600; }
+.templates-update { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.templates-update .switch { margin-left: auto; }
 .templates-auto-fields { display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 10px; align-items: start; }
 .templates-options[open] > summary { margin-bottom: 10px; }
 .templates-limits { grid-template-columns: repeat(3, minmax(0, 1fr)); }

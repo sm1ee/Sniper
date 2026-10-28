@@ -333,6 +333,9 @@ fn run_desktop() -> Result<()> {
         None
     };
     let oast_task = runtime.spawn(sniper::oast::run_oast_poller_for_state(state.clone()));
+    runtime.spawn(sniper::templates::library::run_daily_update(
+        state.templates.clone(),
+    ));
 
     let event_loop = EventLoopBuilder::<DesktopUserEvent>::with_user_event().build();
     let event_proxy = event_loop.create_proxy();

@@ -65,6 +65,13 @@ const MAX_CHECKSUMS_BYTES: usize = 64 * 1024;
 const PASSIVE_PERMITS: usize = 4;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the daily update waits after it last asked GitHub, or after a
+/// library arrived, before it asks again.
+const DAILY_UPDATE_EVERY: chrono::Duration = chrono::Duration::hours(24);
+/// How often the daily update looks whether it is due, and how long after
+/// launch it first looks: once the library has loaded and startup is done.
+const DAILY_UPDATE_LOOK: Duration = Duration::from_secs(60 * 60);
+const DAILY_UPDATE_FIRST_LOOK: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LibraryInfo {
@@ -86,6 +93,27 @@ pub struct LibraryInfo {
     pub bundle: String,
 }
 
+impl LibraryInfo {
+    /// What the library follows: main for a commit taken from main, else the
+    /// releases (an imported archive is checked against the latest release).
+    fn channel(&self) -> Channel {
+        if self.tag == "main" {
+            Channel::Main
+        } else {
+            Channel::Release
+        }
+    }
+
+    /// Whether this is the release tag, or the main commit, GitHub names as
+    /// the newest.
+    fn is_current(&self, newest: &str) -> bool {
+        match self.channel() {
+            Channel::Main => self.commit.as_deref() == Some(newest),
+            Channel::Release => self.tag == newest,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Manifest {
     #[serde(default)]
@@ -95,9 +123,36 @@ struct Manifest {
     /// Templates that must send requests, turned on for the auto scan.
     #[serde(default)]
     auto_enabled: Vec<String>,
+    /// Whether a library GitHub served updates itself once a day. None, as in
+    /// a manifest written before the switch existed, reads as on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auto_update: Option<bool>,
+    /// When the daily update last asked GitHub, and why that failed if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checked_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    check_error: Option<String>,
 }
 
 impl Manifest {
+    fn auto_update(&self) -> bool {
+        self.auto_update.unwrap_or(true)
+    }
+
+    /// Whether the daily update should ask GitHub now: for a library GitHub
+    /// served, with the switch on, a day after it last asked or the library
+    /// arrived. An imported archive is left alone: it may be pinned, or on a
+    /// network without GitHub.
+    fn update_due(&self, now: DateTime<Utc>) -> bool {
+        let Some(info) = self.library.as_ref().filter(|info| info.source == "github") else {
+            return false;
+        };
+        let last = self
+            .checked_at
+            .map_or(info.imported_at, |checked| checked.max(info.imported_at));
+        self.auto_update() && now - last >= DAILY_UPDATE_EVERY
+    }
+
     /// Whether a template is turned on: to check captured traffic when it
     /// can, else for the auto scan to send.
     fn is_on(&self, id: &str) -> bool {
@@ -217,6 +272,13 @@ pub struct LibraryStatus {
     pub check_total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest: Option<String>,
+    /// Whether a library GitHub served updates itself once a day.
+    pub auto_update: bool,
+    /// When the daily update last asked GitHub, and why that failed if it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_error: Option<String>,
     pub repository: &'static str,
     pub license: &'static str,
 }
@@ -483,9 +545,35 @@ impl TemplateLibrary {
             checked: task.checked.map(|(done, _)| done),
             check_total: task.checked.map(|(_, total)| total),
             latest: task.latest,
+            auto_update: loaded.manifest.auto_update(),
+            checked_at: loaded.manifest.checked_at,
+            check_error: loaded.manifest.check_error.clone(),
             repository: REPOSITORY,
             license: LICENSE,
         }
+    }
+
+    /// Turns the daily update on or off.
+    pub fn set_auto_update(&self, enabled: bool) -> Result<()> {
+        self.change_manifest(|manifest| manifest.auto_update = Some(enabled))
+    }
+
+    /// Notes when the daily update asked GitHub, and why that failed if it did.
+    fn record_check(&self, at: DateTime<Utc>, error: Option<String>) -> Result<()> {
+        self.change_manifest(|manifest| {
+            manifest.checked_at = Some(at);
+            manifest.check_error = error;
+        })
+    }
+
+    fn change_manifest(&self, change: impl FnOnce(&mut Manifest)) -> Result<()> {
+        let _writer = self.writer.lock().unwrap();
+        let mut manifest = self.loaded.read().unwrap().manifest.clone();
+        change(&mut manifest);
+        fs::create_dir_all(&self.dir).context("creating the templates directory")?;
+        crate::session::write_json(&self.manifest_path(), &manifest)?;
+        self.loaded.write().unwrap().manifest = manifest;
+        Ok(())
     }
 
     /// The enabled passive templates, compiled; None when none are enabled.
@@ -1100,6 +1188,63 @@ impl TemplateLibrary {
         });
         true
     }
+
+    /// The daily update. When it is due, asks GitHub for the newest release,
+    /// or main's newest commit while main is installed, and installs it when
+    /// it differs. Nobody waits on it, so a failure keeps the installed
+    /// library and is only noted; the library's state stays idle.
+    pub async fn update_if_due(self: &Arc<Self>) {
+        let installed = {
+            let loaded = self.loaded.read().unwrap();
+            if !loaded.manifest.update_due(Utc::now()) {
+                return;
+            }
+            loaded.manifest.library.clone()
+        };
+        let Some(installed) = installed else {
+            return;
+        };
+        let channel = installed.channel();
+        let newest = match channel {
+            Channel::Main => self.check_main().await.map(|(commit, _)| commit),
+            Channel::Release => self.check_latest().await,
+        };
+        let outcome = match newest {
+            Ok(newest) if installed.is_current(&newest) => Ok(()),
+            Ok(_) => {
+                // A download or import the operator started goes first; the
+                // next look asks again.
+                if !self.begin_task(TaskState::Downloading) {
+                    return;
+                }
+                let downloaded = Arc::clone(self).download(channel).await;
+                self.set_task(TaskState::Idle, None);
+                downloaded
+            }
+            Err(error) => Err(error),
+        };
+        let error = outcome.err().map(|error| {
+            tracing::warn!(%error, "daily template update failed");
+            format!("{error:#}")
+        });
+        let library = Arc::clone(self);
+        let saved =
+            tokio::task::spawn_blocking(move || library.record_check(Utc::now(), error)).await;
+        if let Ok(Err(error)) = saved {
+            tracing::warn!(%error, "saving the daily template check failed");
+        }
+    }
+}
+
+/// Runs the daily update while Sniper runs: it first looks a minute after
+/// launch, then every hour.
+pub async fn run_daily_update(library: Arc<TemplateLibrary>) {
+    let first = tokio::time::Instant::now() + DAILY_UPDATE_FIRST_LOOK;
+    let mut looks = tokio::time::interval_at(first, DAILY_UPDATE_LOOK);
+    loop {
+        looks.tick().await;
+        library.update_if_due().await;
+    }
 }
 
 const MAX_LIST_LIMIT: usize = 30_000;
@@ -1683,6 +1828,28 @@ pub async fn start_import(State(state): State<Arc<AppState>>, body: Bytes) -> Re
     (StatusCode::ACCEPTED, Json(state.templates.status())).into_response()
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoUpdateRequest {
+    enabled: bool,
+}
+
+/// Turns the daily update on or off; answers with the library's status.
+pub async fn set_auto_update(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<AutoUpdateRequest>,
+) -> Response {
+    let library = Arc::clone(&state.templates);
+    match tokio::task::spawn_blocking(move || library.set_auto_update(request.enabled)).await {
+        Ok(Ok(())) => Json(state.templates.status()).into_response(),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "saving the daily template update switch failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 pub async fn list(State(state): State<Arc<AppState>>, Query(query): Query<ListQuery>) -> Response {
     if let Some(error) = sort_error(&query) {
         return (StatusCode::BAD_REQUEST, error).into_response();
@@ -1978,6 +2145,104 @@ mod tests {
         assert_eq!(second.status().templates, 3);
         assert_eq!(second.status().passive_enabled, 1);
         assert_eq!(second.passive_set().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn github_release(tag: &str, installed: DateTime<Utc>) -> LibraryInfo {
+        LibraryInfo {
+            tag: tag.into(),
+            source: "github".into(),
+            sha256: "0".repeat(64),
+            verified: true,
+            commit: None,
+            committed_at: None,
+            imported_at: installed,
+            templates: 1,
+            bundle: bundle_file_name(&"0".repeat(64)),
+        }
+    }
+
+    // A library GitHub served asks again a day after it last asked, or after
+    // it arrived. An imported archive is left alone: it may be pinned, or on a
+    // network without GitHub.
+    #[test]
+    fn the_daily_update_is_due_a_day_after_the_last_check_or_install() {
+        let installed: DateTime<Utc> = "2026-10-20T00:00:00Z".parse().unwrap();
+        let hours = |n| installed + chrono::Duration::hours(n);
+        let mut manifest = Manifest {
+            library: Some(github_release("v10.5.0", installed)),
+            ..Manifest::default()
+        };
+        assert!(!manifest.update_due(hours(23)));
+        assert!(manifest.update_due(hours(24)));
+        manifest.checked_at = Some(hours(30));
+        assert!(!manifest.update_due(hours(53)));
+        assert!(manifest.update_due(hours(54)));
+        manifest.auto_update = Some(false);
+        assert!(!manifest.update_due(hours(100)), "switched off");
+        manifest.auto_update = None;
+        manifest.library.as_mut().unwrap().source = "import".into();
+        assert!(!manifest.update_due(hours(100)), "an imported archive");
+        manifest.library = None;
+        assert!(!manifest.update_due(hours(100)), "nothing installed");
+    }
+
+    #[test]
+    fn a_library_is_current_when_github_names_its_release_or_main_commit() {
+        let installed: DateTime<Utc> = "2026-10-20T00:00:00Z".parse().unwrap();
+        let release = github_release("v10.5.0", installed);
+        assert!(release.is_current("v10.5.0"));
+        assert!(!release.is_current("v10.5.1"));
+        let main = LibraryInfo {
+            tag: "main".into(),
+            commit: Some("50852f5ce7".repeat(4)),
+            ..release
+        };
+        assert!(main.is_current(&"50852f5ce7".repeat(4)));
+        assert!(!main.is_current(&"9a681fa000".repeat(4)));
+    }
+
+    #[test]
+    fn the_daily_update_is_on_until_turned_off_and_stays_off() {
+        let dir = std::env::temp_dir().join(format!("sniper-templates-{}", uuid::Uuid::new_v4()));
+        let first = library(&dir);
+        assert!(first.status().auto_update);
+        first.import_blocking(&release(), Source::Import).unwrap();
+        assert!(first.status().auto_update);
+        first.set_auto_update(false).unwrap();
+        assert!(!first.status().auto_update);
+
+        let second = library(&dir);
+        assert!(!second.status().auto_update);
+        // A new release keeps the operator's choice.
+        second.import_blocking(&release(), Source::Import).unwrap();
+        assert!(!second.status().auto_update);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // Nobody waits on the daily update, so its failure is a note on the card:
+    // the installed library stays, and so does the idle state.
+    #[test]
+    fn a_daily_check_is_kept_with_why_it_failed_until_one_works() {
+        let dir = std::env::temp_dir().join(format!("sniper-templates-{}", uuid::Uuid::new_v4()));
+        let first = library(&dir);
+        first.import_blocking(&release(), Source::Import).unwrap();
+        let failed: DateTime<Utc> = "2026-10-28T01:00:00Z".parse().unwrap();
+        first
+            .record_check(failed, Some("GitHub answered 503".into()))
+            .unwrap();
+        let status = first.status();
+        assert_eq!(status.state, TaskState::Idle);
+        assert_eq!(status.templates, 3);
+        assert_eq!(status.checked_at, Some(failed));
+        assert_eq!(status.check_error.as_deref(), Some("GitHub answered 503"));
+
+        let second = library(&dir);
+        assert_eq!(second.status().checked_at, Some(failed));
+        let worked = failed + chrono::Duration::hours(24);
+        second.record_check(worked, None).unwrap();
+        assert_eq!(second.status().checked_at, Some(worked));
+        assert_eq!(second.status().check_error, None);
         let _ = fs::remove_dir_all(dir);
     }
 

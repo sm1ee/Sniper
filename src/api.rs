@@ -384,6 +384,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             post(crate::templates::library::start_import),
         )
         .route(
+            "/api/templates/library/auto-update",
+            post(crate::templates::library::set_auto_update),
+        )
+        .route(
             "/api/templates/passive",
             post(crate::templates::library::set_passive),
         )

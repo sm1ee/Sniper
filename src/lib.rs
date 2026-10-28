@@ -83,6 +83,9 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
     };
     let state = Arc::new(AppState::new(config.clone())?);
     let oast_task = oast::start_oast_poller_for_state(state.clone());
+    tokio::spawn(templates::library::run_daily_update(
+        state.templates.clone(),
+    ));
 
     info!(
         proxy_addr = %config.proxy_addr,
