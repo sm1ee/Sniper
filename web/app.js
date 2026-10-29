@@ -13583,8 +13583,14 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
     frame.setAttribute("sandbox", "");
     frame.setAttribute("referrerpolicy", "no-referrer");
     // Drawn at once from what the response holds; resources, when on, follow.
-    frame.srcdoc = sandboxedResponseDocument(model.html);
-    if (loadResources) {
+    const sandboxed = sandboxedResponseDocument(model.html);
+    frame.srcdoc = sandboxed.html;
+    if (!sandboxed.draws) {
+      // A client-rendered app ships an empty root for its scripts to fill, so
+      // the frame stays blank with or without resources. Pointing at resource
+      // loading here sent people to turn it on and still see nothing.
+      banner("Nothing to show: this page is drawn by its scripts, which Render does not run.");
+    } else if (loadResources) {
       const status = banner("Loading images, styles and fonts…");
       const fetcher = createRenderResourceFetcher(currentSessionId());
       sandboxedResponseDocumentWithResources(model.html, subject.url, fetcher)
@@ -13650,7 +13656,28 @@ const RESPONSE_RENDER_CSP = "default-src 'none'; img-src data:; font-src data:; 
 function sandboxedResponseDocument(html) {
   const doc = new DOMParser().parseFromString(html, "text/html");
   sanitizeRenderDocument(doc);
-  return serializeRenderDocument(doc);
+  return { html: serializeRenderDocument(doc), draws: Boolean(doc.body && renderDocumentDraws(doc.body)) };
+}
+
+// Elements that show something with no text, no scripts and no stylesheet.
+const RENDER_DRAWN_ELEMENTS = new Set(["img", "svg", "video", "canvas", "input", "select", "textarea", "button"]);
+
+// Whether a body has anything the sandboxed frame can show: text, or an element
+// that draws on its own. Hidden subtrees and styles do not count. <noscript> is
+// walked like any element, because the sandbox runs no scripts and shows it.
+// ponytail: ignores what stylesheets alone draw (backgrounds, generated content).
+function renderDocumentDraws(node) {
+  for (const child of node.childNodes) {
+    if (child.nodeType === 3) {
+      if (child.data.trim()) return true;
+      continue;
+    }
+    if (child.nodeType !== 1 || child.hasAttribute("hidden")) continue;
+    if (child.localName === "script" || child.localName === "style") continue;
+    if (RENDER_DRAWN_ELEMENTS.has(child.localName) && child.type !== "hidden") return true;
+    if (renderDocumentDraws(child)) return true;
+  }
+  return false;
 }
 
 function sanitizeRenderDocument(doc, { keepStylesheets = false } = {}) {
