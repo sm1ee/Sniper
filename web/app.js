@@ -19412,10 +19412,10 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
       return `<div class="sequence-step-card" data-step-idx="${idx}" data-step-id="${escapeHtml(step.id)}">
         <div class="step-header">
           <span class="step-number">#${idx + 1}</span>
-          <input class="step-label" value="${escapeHtml(step.label)}" placeholder="Step label" />
-          <button class="step-remove" data-remove-step="${idx}" title="Remove step">&times;</button>
+          <input class="step-label" value="${escapeHtml(step.label)}" placeholder="Step label" aria-label="Step ${idx + 1} label" />
+          <button class="step-remove" data-remove-step="${idx}" title="Remove step" aria-label="Remove step ${idx + 1}">&times;</button>
         </div>
-        <textarea class="step-request-text" spellcheck="false">${escapeHtml(reqText)}</textarea>
+        <textarea class="step-request-text" spellcheck="false" aria-label="Step ${idx + 1} raw HTTP request">${escapeHtml(reqText)}</textarea>
         <details class="step-extractions"${expandedSteps.has(step.id) || focusExtractionStepId === step.id ? " open" : ""}>
           <summary>Extractions (${step.extractions.length}) <button class="secondary-action ext-add" data-add-ext="${idx}" aria-label="Add extraction to step ${idx + 1}">+ Extract</button></summary>
           ${extractionsHtml}

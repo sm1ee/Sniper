@@ -21,6 +21,8 @@ function fixture() {
       const idx = state.editingSequence.steps.findIndex(step => step.id === stepId);
       const step = state.editingSequence.steps[idx];
       const request = { value: step.request_text };
+      const label = { value: step.label };
+      const remove = { dataset: { removeStep: String(idx) }, addEventListener(type, fn) { this[type] = fn; } };
       const add = { dataset: { addExt: String(idx) }, addEventListener(type, fn) { this[type] = fn; } };
       const rows = step.extractions.map(rule => {
         const fields = { '.ext-var': { value: rule.variable_name }, '.ext-source': { value: rule.source }, '.ext-pattern': { value: rule.pattern } };
@@ -28,17 +30,17 @@ function fixture() {
       });
       const details = { open: /<details[^>]*\bopen\b/.test(markup) };
       const inputs = [...markup.matchAll(/class="ext-var"/g)].map(() => ({ focus() { document.activeElement = this; } }));
-      return { dataset: { stepId }, details, inputs, request, rows, add,
-        querySelector: selector => selector === '.step-extractions' ? details : selector === '.step-request-text' ? request : null,
+      return { dataset: { stepId }, details, inputs, request, label, remove, rows, add, markup,
+        querySelector: selector => selector === '.step-extractions' ? details : selector === '.step-request-text' ? request : selector === '.step-label' ? label : null,
         querySelectorAll: selector => selector === '.ext-var' ? inputs : selector === '.extraction-row' ? rows : [] };
     });
   } });
-  container.querySelectorAll = selector => selector === '.sequence-step-card' ? cards : selector === '.ext-add' ? cards.map(card => card.add) : [];
+  container.querySelectorAll = selector => selector === '.sequence-step-card' ? cards : selector === '.ext-add' ? cards.map(card => card.add) : selector === '.step-remove' ? cards.map(card => card.remove) : [];
   const nodes = new Map([['sequenceStepsContainer', container]]);
   document.getElementById = id => nodes.get(id) || nodes.set(id, node()).get(id);
   const c = loadFunctions(['renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue', 'syncSequenceRunButton', 'addExtractionRule', 'removeExtractionRule', 'removeSequenceStep',
-    'markSequenceDraftDirty', 'bumpSequenceDraftVersion', 'syncSequenceStepFromDom'], {
-    state, document, replayHttpVersionFromText: () => '', parseEditableRawRequest() { throw new Error('Invalid request'); }, escapeHtml: String, formatTimestamp: String, normalizeReplayHttpVersion: () => '',
+    'markSequenceDraftDirty', 'bumpSequenceDraftVersion', 'syncSequenceStepFromDom', 'escapeHtml'], {
+    state, document, replayHttpVersionFromText: () => '', parseEditableRawRequest() { throw new Error('Invalid request'); }, formatTimestamp: String, normalizeReplayHttpVersion: () => '',
     normalizeSequenceRunResult: () => null, jsonArray: value => Array.isArray(value) ? value : [],
   });
   c.renderSequencePanel();
@@ -124,4 +126,80 @@ test('Extraction controls have persistent visible associated labels and themed n
   assert.match(html, /class="secondary-action ext-add"[^>]*aria-label="Add extraction to step 1"/);
   assert.match(html, /class="secondary-action ext-remove"[^>]*aria-label="Remove extraction 1 from step 1"/);
   assert.doesNotMatch(html, /class="ext-(?:add|remove)"/);
+});
+
+function assertStepControlNames(card, number) {
+  const controls = [
+    ['input', 'step-label', `Step ${number} label`],
+    ['textarea', 'step-request-text', `Step ${number} raw HTTP request`],
+    ['button', 'step-remove', `Remove step ${number}`],
+  ];
+  return controls.map(([tag, className, expected]) => {
+    const opening = card.markup.match(new RegExp(`<${tag} class="${className}"[^>]*>`))?.[0];
+    assert.ok(opening, className);
+    const name = opening.match(/\baria-label="([^"]+)"/)?.[1];
+    assert.equal(name, expected);
+    return name;
+  });
+}
+
+test('Repeated step labels still expose unique numbered label, raw request, and Remove names', () => {
+  const f = fixture();
+  f.state.editingSequence.steps.forEach(step => { step.label = 'Same label'; });
+  const before = JSON.stringify(f.state.editingSequence);
+  f.c.renderSequencePanel();
+  const names = f.cards().flatMap((card, idx) => assertStepControlNames(card, idx + 1));
+  assert.equal(new Set(names).size, 6);
+  assert.equal(JSON.stringify(f.state.editingSequence), before);
+  for (const card of f.cards()) {
+    assert.match(card.markup, /value="Same label" placeholder="Step label"/);
+    assert.match(card.markup, /title="Remove step"[^>]*>&times;<\/button>/);
+  }
+});
+
+test('Actual local Remove handler reindexes surviving control names and retains unsaved values', () => {
+  const f = fixture();
+  f.cards()[1].label.value = 'Unsaved surviving label';
+  f.cards()[1].request.value = 'unsaved invalid request';
+  f.cards()[0].remove.click();
+  assert.equal(f.cards().length, 1);
+  assert.equal(f.cards()[0].dataset.stepId, 'second');
+  assertStepControlNames(f.cards()[0], 1);
+  assert.equal(f.state.editingSequence.steps[0].label, 'Unsaved surviving label');
+  assert.equal(f.state.editingSequence.steps[0].request_text, 'unsaved invalid request');
+  assert.equal(f.state.sequenceDirty, true);
+  assert.match(f.cards()[0].markup, /data-remove-step="0"/);
+  assert.match(f.cards()[0].markup, /aria-label="Add extraction to step 1"/);
+  assert.match(f.cards()[0].markup, /aria-label="Remove extraction 1 from step 1"/);
+  assert.doesNotMatch(f.cards()[0].markup, /aria-label="[^"]*step 2"/i);
+});
+
+test('Renderer numbers controls by new position after synthetic draft reorder, without renaming steps', () => {
+  const f = fixture();
+  f.state.editingSequence.steps.reverse();
+  const before = JSON.stringify(f.state.editingSequence);
+  f.c.renderSequencePanel();
+  assert.deepEqual(f.cards().map(card => card.dataset.stepId), ['second', 'first']);
+  f.cards().forEach((card, idx) => {
+    assertStepControlNames(card, idx + 1);
+    assert.match(card.markup, new RegExp(`aria-label="Add extraction to step ${idx + 1}"`));
+    assert.match(card.markup, new RegExp(`aria-label="Remove extraction 1 from step ${idx + 1}"`));
+  });
+  assert.equal(JSON.stringify(f.state.editingSequence), before);
+});
+
+test('Numbered control names never interpolate user values or change their existing escaping', () => {
+  const f = fixture();
+  const label = 'Login "quoted" <tag> & token';
+  const raw = 'GET /?a=1&b=2 HTTP/1.1\r\nHost: example.com\r\n\r\n</textarea><script>"x"</script>';
+  f.state.editingSequence.steps[0].label = label;
+  f.state.editingSequence.steps[0].request_text = raw;
+  f.c.renderSequencePanel();
+  const card = f.cards()[0];
+  assertStepControlNames(card, 1);
+  assert.ok(card.markup.includes('value="Login &quot;quoted&quot; &lt;tag&gt; &amp; token"'));
+  assert.ok(card.markup.includes('GET /?a=1&amp;b=2 HTTP/1.1\r\nHost: example.com\r\n\r\n&lt;/textarea&gt;&lt;script&gt;&quot;x&quot;&lt;/script&gt;</textarea>'));
+  assert.doesNotMatch(card.markup, /<script>/);
+  assert.equal(f.state.editingSequence.steps[0].label, label);
+  assert.equal(f.state.editingSequence.steps[0].request_text, raw);
 });
