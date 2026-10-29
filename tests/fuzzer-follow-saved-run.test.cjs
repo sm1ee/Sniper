@@ -15,7 +15,7 @@ test("a saved run still sending when it loads is followed to its end", async () 
   ];
   const urls = [];
   const c = loadFunctions(
-    ["hydrateFuzzerAttackRecordById", "followFuzzerAttack", "setFuzzerAttackRecord", "normalizeFuzzerAttackRecord",
+    ["followRestoredFuzzerAttack", "hydrateFuzzerAttackRecordById", "followFuzzerAttack", "setFuzzerAttackRecord", "normalizeFuzzerAttackRecord",
       "jsonArray", "sessionQueryPath", "currentSessionId"],
     {
       state, _fuzzerAttackLoadGeneration: 0, FUZZER_POLL_MS: 0, URLSearchParams,
@@ -42,7 +42,7 @@ test("an earlier visit to the same running saved attack cannot retire the newer 
   const timers = [], requests = [];
   const tick = () => new Promise(resolve => setImmediate(resolve));
   const c = loadFunctions(
-    ["hydrateFuzzerAttackRecordById", "followFuzzerAttack", "setFuzzerAttackRecord", "normalizeFuzzerAttackRecord",
+    ["followRestoredFuzzerAttack", "hydrateFuzzerAttackRecordById", "followFuzzerAttack", "setFuzzerAttackRecord", "normalizeFuzzerAttackRecord",
       "jsonArray", "sessionQueryPath", "currentSessionId"],
     {
       state, _fuzzerAttackLoadGeneration: 0, FUZZER_POLL_MS: 0, URLSearchParams,

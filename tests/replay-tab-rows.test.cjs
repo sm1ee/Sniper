@@ -115,7 +115,7 @@ test("pinned tabs render on their own row, which renders empty when nothing is p
     els: { replayTabStrip: { set innerHTML(value) { markup = value; }, querySelectorAll: () => [] } },
     replayTabAutoLabel: (tab) => tab.id, replayTabLabel: (tab) => tab.id,
     replayTabTooltipLabel: (tab, label) => label, escapeHtml: String,
-    scrollActiveReplayTabIntoView() {},
+    scrollActiveReplayTabIntoView() {}, document: { activeElement: null },
   });
   context.renderReplayTabs();
   const rows = markup.match(/<div class="replay-tab-list[^"]*" data-replay-tab-row="(\w+)"[^>]*>/g);

@@ -76,6 +76,7 @@ function fixture() {
   const interceptPill = element();
   const c = loadFunctions([
     "applyWorkspaceState", "readFuzzerWorkspace", "applyFuzzerWorkspace", "workspaceSnapshotMatchesActiveSession", "_applySettings", "loadSessions",
+    "snapshotFuzzerWorkspace", "workspaceSnapshotValueChanged", "cloneEditableRequest", "normalizedHeaders",
     "currentSessionId", "sessionQueryPath", "transactionPath",
     "runFindingAction", "sendFindingToReplay", "sendFindingToFuzzer", "openFuzzerFromRecordLoader",
     "retireFindingActionProgress", "invalidateFindingNavigation", "setActiveTool",
@@ -90,7 +91,7 @@ function fixture() {
     state, els, console: { warn: (...args) => warnings.push(args), error: (...args) => errors.push(args) },
     document: { getElementById: id => buttons[id] || (id === "interceptInScopeToggle" ? interceptPill : null) },
     window: { setTimeout: setTimer, clearTimeout: clearTimer }, setTimeout: setTimer, clearTimeout: clearTimer,
-    workspaceStateGeneration: 4, workspaceSaveCommittedSnapshot: null,
+    workspaceLoaded: true, workspaceStateGeneration: 4, workspaceSaveCommittedSnapshot: null,
     sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
     selectedFindingId: finding.id, findingsDetailGeneration: 2, findingActionPending: null,
     findingsStateGeneration: 5, findingsLoadGeneration: 6, findingsData: [finding],

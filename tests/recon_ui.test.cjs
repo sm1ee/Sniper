@@ -1068,7 +1068,7 @@ for (const phase of ["fetch", "json", "error body"]) {
       const reachedLegacyReset = new Error("Unrelated reset cleanup boundary");
       const historyFailure = new Error("Synthetic history read failure");
       const forbidden = label => () => assert.fail(`Unexpected ${label}`);
-      const app = loadAppFunctions(["retireFindingActionProgress", "applyWorkspaceState", "readFuzzerWorkspace", "applyFuzzerWorkspace", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "loadWorkspaceState"], {
+      const app = loadAppFunctions(["retireFindingActionProgress", "applyWorkspaceState", "readFuzzerWorkspace", "applyFuzzerWorkspace", "snapshotFuzzerWorkspace", "workspaceSnapshotValueChanged", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "loadWorkspaceState"], {
         state: { activeSession: { id: "a" }, replayTabs: [], activeTool: "recon" },
         workspaceLoaded: true, sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
         reconController: f.controller, currentSessionId: () => f.session,
@@ -1081,7 +1081,7 @@ for (const phase of ["fetch", "json", "error body"]) {
             ? [{ id: "a", name: "Synthetic session", active: true }]
             : { session_id: "a", replay: { tabs: [] }, fuzzer: {} } };
         },
-        requireOkResponse: async () => {}, renderDashboard() {}, loadSettings: async () => {},
+        requireOkResponse: async () => {}, renderDashboard() {}, renderFuzzer() {}, loadSettings: async () => {},
         workspaceSnapshotMatchesActiveSession: snapshot => snapshot.session_id === f.session,
         hydrateReplayTab: value => value, normalizeFuzzerTargetOverride: () => null,
         normalizeFuzzerAttackRecord: () => null, setFuzzerAttackRecord() {},

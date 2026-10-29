@@ -23,10 +23,10 @@ function values(id) {
   return [...contents.matchAll(/<option value="([^"]*)"/g)].map(([, value]) => value);
 }
 
-const buttons = ['resetFuzzerButton', 'stopFuzzerButton', 'startFuzzerButton', 'fuzzerMarkSelectionButton', 'fuzzerUndoMarkerButton',
+const buttons = ['resetFuzzerButton', 'stopFuzzerButton', 'startFuzzerButton', 'fuzzerMarkSelectionButton', 'fuzzerRemoveMarkerButton', 'fuzzerClearMarkersButton', 'fuzzerUndoMarkerButton',
   'fuzzerMarkCandidateButton', 'fuzzerImportPayloadButton', 'fuzzerApplyPresetButton', 'fuzzerGenerateRangeButton',
   'fuzzerCompareBaseButton', 'fuzzerCompareButton', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton'];
-const labeledControls = ['fuzzerCandidateSelect', 'fuzzerAttackType', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadImportMode', 'fuzzerPayloadPreset',
+const labeledControls = ['fuzzerCandidateSelect', 'fuzzerAttackType', 'fuzzerTransportSelect', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadImportMode', 'fuzzerPayloadPreset',
   'fuzzerRangeStart', 'fuzzerRangeEnd', 'fuzzerRangeStep', 'fuzzerPayloadsEditor', 'fuzzerResultStatus',
   'fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs',
   'fuzzerResultSort', 'fuzzerResultDirection', 'fuzzerSavedRunSelect'];
@@ -57,10 +57,19 @@ test('payload controls declare append default, exact presets and accessible file
   assert.match(fuzzer, /Spaces are preserved\. Blank lines are empty payloads; a final line break is ignored\./);
 });
 
+test('Transport is a labeled native HTTP/HTTPS selector beside the destination with visible contextual help', () => {
+  assert.deepEqual(values('fuzzerTransportSelect'), ['https', 'http']);
+  assert.equal(byId('fuzzerTransportSelect').attrs['aria-describedby'], 'fuzzerTransportHelp fuzzerTargetSummary');
+  assert.ok('disabled' in byId('fuzzerTransportSelect').attrs);
+  assert.equal(disclosureDepthAt('fuzzerTransportSelect'), 0);
+  assert.equal(disclosureDepthAt('fuzzerTransportHelp'), 0);
+  assert.ok(fuzzer.indexOf('id="fuzzerTransportSelect"') < fuzzer.indexOf('id="fuzzerTargetSummary"'));
+});
+
 test('preflight names the two ways payloads fill positions, and a running attack can be stopped', () => {
   assert.match(fuzzer, /Sniper puts each payload in one position at a time; Battering ram puts it in every position at once/);
   assert.deepEqual(values('fuzzerAttackType'), ['sniper', 'battering_ram']);
-  assert.match(fuzzer, /<button class="secondary-action hidden" id="stopFuzzerButton" type="button">Stop<\/button>/);
+  assert.match(fuzzer, /<button class="secondary-action hidden" id="stopFuzzerButton" type="button" aria-describedby="fuzzerStopStatus">Stop<\/button>/);
   for (const id of ['fuzzerPreflightSummary', 'fuzzerPreflightNotice']) assert.equal(byId(id).attrs.role, 'status');
   assert.equal(byId('fuzzerPreviewSamples').tag, 'div');
   assert.match(fuzzer, /<details[^>]*fuzzer-preview-disclosure[^>]*>\s*<summary>Preview &amp; details<\/summary>[\s\S]*?<div id="fuzzerPreviewSamples"/);
@@ -107,10 +116,10 @@ function disclosureDepthAt(id) {
   return [...prefix.matchAll(/<details\b[^>]*>|<\/details>/g)].reduce((depth, [tag]) => depth + (tag.startsWith('</') ? -1 : 1), 0);
 }
 test('common value and file actions are immediate while advanced options and explanations stay collapsed', () => {
-  for (const id of ['fuzzerCandidateSelect', 'fuzzerMarkCandidateButton', 'fuzzerMarkSelectionButton', 'fuzzerImportPayloadButton', 'startFuzzerButton']) {
+  for (const id of ['fuzzerPayloadImportMode', 'fuzzerMarkSelectionButton', 'fuzzerRemoveMarkerButton', 'fuzzerClearMarkersButton', 'fuzzerImportPayloadButton', 'startFuzzerButton']) {
     assert.equal(disclosureDepthAt(id), 0, `${id} should not require opening a disclosure`);
   }
-  for (const id of ['fuzzerPayloadImportMode', 'fuzzerPayloadPreset', 'fuzzerRangeStart', 'fuzzerPreviewNotes', 'fuzzerPayloadHelp']) {
+  for (const id of ['fuzzerCandidateSelect', 'fuzzerMarkCandidateButton', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadPreset', 'fuzzerRangeStart', 'fuzzerPreviewNotes', 'fuzzerPayloadHelp']) {
     assert.equal(disclosureDepthAt(id), 1, `${id} should remain in a closed disclosure`);
   }
   assert.doesNotMatch(fuzzer, /Send a captured request to Fuzzer, mark positions, load payloads/);
@@ -125,4 +134,80 @@ test('active-filter indication remains in summary and one-click clearing is outs
   assert.equal(byId('fuzzerClearResultFiltersButton').attrs.type, 'button');
   assert.equal(disclosureDepthAt('fuzzerClearResultFiltersButton'), 0);
   assert.match(byId('fuzzerClearResultFiltersButton').attrs.class, /\bhidden\b/);
+});
+
+test('payload import has a compact local live status connected to its trigger', () => {
+  assert.equal(byId('fuzzerPayloadImportStatus').attrs.role, 'status');
+  assert.equal(byId('fuzzerPayloadImportStatus').attrs['aria-live'], 'polite');
+  assert.match(byId('fuzzerPayloadImportStatus').attrs.class, /\bhidden\b/);
+  assert.equal(byId('fuzzerImportPayloadButton').attrs['aria-describedby'], 'fuzzerPayloadImportStatus');
+  assert.equal(disclosureDepthAt('fuzzerPayloadImportStatus'), 0);
+  assert.match(css, /#fuzzerPayloadImportStatus\.fuzzer-notice-error/);
+});
+
+test('Stop has a hidden compact live error status with matching error styling', () => {
+  assert.equal(byId('fuzzerStopStatus').attrs.role, 'status');
+  assert.equal(byId('fuzzerStopStatus').attrs['aria-live'], 'polite');
+  assert.match(byId('fuzzerStopStatus').attrs.class, /\bhidden\b/);
+  assert.match(byId('fuzzerStopStatus').attrs.class, /\bfuzzer-notice-error\b/);
+  assert.equal(byId('stopFuzzerButton').attrs['aria-describedby'], 'fuzzerStopStatus');
+  assert.equal(disclosureDepthAt('fuzzerStopStatus'), 0);
+  assert.match(css, /#fuzzerStopStatus\.fuzzer-notice-error\s*\{[^}]*color:/s);
+});
+
+
+test('targeted removal is distinct from clear-all and included in Undo description', () => {
+  assert.ok('disabled' in byId('fuzzerRemoveMarkerButton').attrs);
+  assert.match(byId('fuzzerRemoveMarkerButton').attrs.title, /selected value; keep the value/);
+  assert.match(byId('fuzzerClearMarkersButton').attrs.title, /keeping their original values/);
+  assert.match(byId('fuzzerUndoMarkerButton').attrs.title, /Add, Remove or Clear/);
+});
+
+// Structural ownership is checked independently of whitespace/indentation.
+function ancestorNodesAt(id) {
+  const stack = [];
+  const voidTags = new Set(['input', 'br', 'hr', 'img', 'meta', 'link']);
+  for (const match of fuzzer.matchAll(/<(\/?)([a-z][\w-]*)\b([^>]*?)(\/?)>/gi)) {
+    const [, close, tag, attrs, selfClose] = match;
+    if (close) { assert.equal(stack.pop()?.tag, tag, `Unbalanced ${tag}`); continue; }
+    if (new RegExp(`\\bid="${id}"`).test(attrs)) return stack;
+    if (!selfClose && !voidTags.has(tag)) stack.push({ tag, attrs });
+  }
+  assert.fail(`Missing #${id}`);
+}
+function inCard(id, name) {
+  return ancestorNodesAt(id).some(node => node.tag === 'section' && node.attrs.includes(name));
+}
+
+test('value helper is a candidate-hidden closed disclosure beside the Request editor', () => {
+  assert.equal(byId('fuzzerValueRow').tag, 'details');
+  assert.ok(!('open' in byId('fuzzerValueRow').attrs));
+  assert.match(byId('fuzzerValueRow').attrs.class, /\bhidden\b/);
+  for (const id of ['fuzzerValueRow', 'fuzzerCandidateSelect', 'fuzzerMarkCandidateButton']) {
+    assert.equal(inCard(id, 'fuzzer-template-card'), true, id);
+  }
+  assert.match(fuzzer, /id="fuzzerValueRow"[^>]*>\s*<summary>Choose a value<\/summary>/);
+});
+
+test('existing generators and payload help belong to a closed Payloads-local disclosure', () => {
+  assert.equal(byId('fuzzerPayloadTools').tag, 'details');
+  assert.ok(!('open' in byId('fuzzerPayloadTools').attrs));
+  for (const id of ['fuzzerPayloadPreset', 'fuzzerApplyPresetButton', 'fuzzerRangeStart', 'fuzzerRangeEnd', 'fuzzerRangeStep', 'fuzzerGenerateRangeButton', 'fuzzerPayloadHelp']) {
+    assert.equal(inCard(id, 'fuzzer-payloads-card'), true, id);
+    assert.equal(disclosureDepthAt(id), 1);
+  }
+  assert.match(fuzzer, /id="fuzzerPayloadTools"[^>]*>\s*<summary>Generate payloads<\/summary>/);
+});
+
+test('only execution settings remain in Options and local helpers share one card scroller', () => {
+  for (const id of ['fuzzerConcurrency', 'fuzzerUrlEncode']) {
+    assert.equal(ancestorNodesAt(id).some(node => node.attrs.includes('fuzzer-options')), true);
+  }
+  for (const id of ['fuzzerCandidateSelect', 'fuzzerPayloadPreset', 'fuzzerRangeStart']) {
+    assert.equal(ancestorNodesAt(id).some(node => node.attrs.includes('fuzzer-options')), false);
+  }
+  assert.match(css, /\.fuzzer-value-tools \.fuzzer-quick-controls\s*\{[^}]*padding: 0;[^}]*border: 0;/);
+  assert.match(css, /\.fuzzer-control-disclosure\s*\{[^}]*flex: 0 0 auto;/);
+  assert.match(css, /\.fuzzer-top-row \.fuzzer-control-disclosure > \.fuzzer-disclosure-body\s*\{[^}]*max-height: none;[^}]*overflow: visible;/);
+  assert.match(css, /\.fuzzer-top-row > \.fuzzer-template-card,\s*\.fuzzer-top-row > \.fuzzer-payloads-card\s*\{[^}]*overflow: auto;/);
 });

@@ -158,6 +158,9 @@ Hold a request on its way out, edit it, then forward or drop it.
 
 Send payload lists at marked positions and compare status, length and timing.
 
+[Fuzzer quick start (한국어)](docs/guides/fuzzer-assisted-workflow.ko.md) shows what
+to paste into Request and Payloads, how to mark a value, and how to preview before sending.
+
 <p align="center">
   <img src="docs/assets/sniper-v0.3.2-fuzzer.jpg" width="800" alt="The Fuzzer with a marked page parameter and its results sorted by status: quote payloads answered 500, others 400" />
 </p>

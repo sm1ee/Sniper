@@ -4336,7 +4336,7 @@
         if (!value || view !== state.view) closeProductFilters();
         if (!value || view !== state.view) suspendRefresh();
         if (!value || view !== state.view) replayActionId += 1;
-        const becameVisible = value && !visible;
+        const becameActive = value && (!visible || view !== state.view);
         if (!value) cancelParameters();
         if (!value || view !== state.view) cancelPacket();
         if (!value || view !== "service-map") {
@@ -4350,7 +4350,8 @@
         state.view = view;
         if (state.sessionId !== getSessionId()) reset();
         render();
-        if (becameVisible && state.detailTab === "evidence") selectDetails();
+        // Map and APIs share controller visibility, but only Map owns Details.
+        if (becameActive && view === "service-map" && state.detailTab === "evidence") selectDetails();
         historyPresentationPending = false;
         resumeFlow();
         scheduleAutomaticRefresh();

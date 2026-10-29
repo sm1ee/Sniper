@@ -30,7 +30,9 @@ test('Stop handles a transport failure without an unhandled rejection', async ()
   const stopping = f.c.stopFuzzerAttack();
   f.requests[0].reject(new Error('Synthetic Stop transport failure'));
   await assert.doesNotReject(stopping);
-  assert.deepEqual(f.notices, ['Synthetic Stop transport failure']);
+  assert.deepEqual(f.notices, []);
+  assert.equal(f.state.fuzzerStopError.id, 'attack-a');
+  assert.equal(f.state.fuzzerStopError.sessionId, 'session-a');
   assert.equal(f.button.disabled, false);
 });
 
@@ -63,15 +65,21 @@ for (const boundary of ['session', 'attack']) for (const outcome of ['success', 
   });
 }
 
-test('Stop error body resolved after a session change stays in its old session', async () => {
-  const f = fixture(), body = deferred();
-  const old = f.c.stopFuzzerAttack();
-  f.requests[0].resolve({ ok: false, status: 500, text: () => body.promise });
-  await new Promise(resolve => setImmediate(resolve));
+test('Stop HTTP failure uses local feedback without reading or retaining response content', async () => {
+  const f = fixture(), stopping = f.c.stopFuzzerAttack();
+  f.requests[0].resolve({ ok: false, status: 500, text() { assert.fail('Stop feedback must not read response content'); } });
+  await stopping;
+  assert.deepEqual(f.notices, []);
+  assert.equal(JSON.stringify(f.state.fuzzerStopError), JSON.stringify({ id: 'attack-a', sessionId: 'session-a' }));
+});
+
+test('Stop HTTP failure arriving after a session change cannot set a local error', async () => {
+  const f = fixture(), old = f.c.stopFuzzerAttack();
   f.state.activeSession = { id: 'session-b' };
-  body.resolve('Old delayed error body');
+  f.requests[0].resolve(response(false, 500, 'Old response content'));
   await old;
   assert.deepEqual(f.notices, []);
+  assert.equal(f.state.fuzzerStopError, null);
 });
 
 test('session reset retires the old attack id and pending Stop control', () => {

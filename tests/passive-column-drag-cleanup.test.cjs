@@ -37,6 +37,8 @@ function fixture(kind) {
   const makeHandle = key => {
     const handle = eventTarget();
     handle.dataset = { columnKey: key, wsColKey: key, findingsCol: key };
+    handle.attributes = {};
+    handle.setAttribute = (name, value) => { handle.attributes[name] = String(value); };
     handle.classList = classList();
     handle.classList.add("existing-handle-class");
     handle.closest = () => ({ getBoundingClientRect: () => ({ width: widths[key] }) });

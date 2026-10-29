@@ -89,7 +89,7 @@ function clearHistoryAction(f, { success = true, confirm = true, beforeResponse 
   const start = appSource.indexOf('  document.getElementById("clearHistoryButton")?.addEventListener');
   const end = appSource.indexOf('\n  onClickWithProgress(document.getElementById("interceptInScopeToggle")', start);
   assert.ok(start > 0 && end > start, 'the real Clear callback is loaded without bootstrapping the app');
-  const context = vm.createContext({ console: { error() {} }, state: {}, currentSessionId: f.getSession,
+  const context = vm.createContext({ console: { error() {} }, state: {}, currentSessionId: f.getSession, workspaceStateGeneration: 0,
     document: { getElementById: () => button }, targetServiceMapController: f.controller,
     showConfirmDialog(_message, callback) { if (confirm) pending = callback(); }, withButtonProgress(_button, callback) { return callback(); },
     sessionWritePath: path => path, fetch: async () => { beforeResponse(); return { ok: success, json: async () => ({ removed: 2 }) }; },

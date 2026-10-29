@@ -31,7 +31,7 @@ function fixture() {
     "onClickWithProgress", "withButtonProgress", "requireOkResponse", "readApiErrorMessage",
     "formatStructuredApiErrorMessage",
   ], { refreshHistoryFindings() {},
-    state, els, workspaceStateGeneration: 0, selectedFindingId: "finding-a",
+    workspaceLoaded: true, state, els, workspaceStateGeneration: 0, selectedFindingId: "finding-a",
     findingsDetailGeneration: 0, findingActionPending: null, BUTTON_PROGRESS_DELAY_MS: 180,
     currentSessionId: () => state.activeSession.id,
     transactionPath: (id, session) => `/api/transactions/${id}?session_id=${session}`,

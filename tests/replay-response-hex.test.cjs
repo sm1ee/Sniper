@@ -26,6 +26,11 @@ function fixture(message = {}, mode = "hex", legacy = false) {
     sendReplayButton: {}, cancelReplayButton: {}, replayBackButton: {}, replayForwardButton: {},
     replayFollowRedirectButton: { classList: { toggle() {}, add() {} } },
   };
+  for (const input of [els.replayHostInput, els.replayPortInput]) {
+    input.attributes = {};
+    input.setCustomValidity = message => { input.validationMessage = message; };
+    input.setAttribute = (name, value) => { input.attributes[name] = String(value); };
+  }
   let shown = null;
   let searched = null;
   const editorOptions = [];
@@ -37,7 +42,7 @@ function fixture(message = {}, mode = "hex", legacy = false) {
     destroy() { destroyed += 1; }
   }
   const c = loadFunctions([
-    "renderReplay", "renderReplayResponseOnly", "renderReplayViewContent", "renderReplayResponseView", "renderReplayEmptyResponse",
+    "renderReplay", "renderReplayResponseOnly", "renderReplayViewContent", "renderReplayResponseView", "renderReplayEmptyResponse", "setReplayTargetInputValidity",
     "buildRawResponse", "buildRawResponseHead", "normalizedHeaders", "headerNameEquals",
     "renderBody", "binaryBodyPlaceholder", "formatSize", "formatStatus", "prettyFormat", "prettyJsonText", "replayRequestEditorText",
     "toHexDump", "buildMessageHexPresentation", "toHexDumpFromHttpParts", "messageBodyBytes",
@@ -201,4 +206,8 @@ test("the full Replay renderer keeps the no-tab prompt as text in Hex mode", () 
   assert.equal(f.searched(), f.shown());
   assert.equal(f.els.replayResponseMeta.textContent, "No response yet.");
   assert.equal(f.els.sendReplayButton.disabled, true);
+  for (const input of [f.els.replayHostInput, f.els.replayPortInput]) {
+    assert.equal(input.validationMessage, "");
+    assert.equal(input.attributes["aria-invalid"], "false");
+  }
 });

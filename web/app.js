@@ -505,9 +505,13 @@ const state = {
   interceptLoadGeneration: 0,
   interceptAcceptedLoadGeneration: 0,
   interceptDetailGeneration: 0,
+  interceptDetailRead: null,
+  interceptDraftRecovery: null,
   responseInterceptLoadGeneration: 0,
   responseInterceptAcceptedLoadGeneration: 0,
   responseInterceptDetailGeneration: 0,
+  responseInterceptDetailRead: null,
+  responseInterceptDraftRecovery: null,
   selectedInterceptId: null,
   selectedInterceptRecord: null,
   selectedResponseInterceptId: null,
@@ -576,6 +580,8 @@ const state = {
   // The attack this session runs now, so Stop can reach it.
   fuzzerRunningAttackId: null,
   fuzzerStopRequest: null,
+  fuzzerStopError: null,
+  fuzzerRestoredRun: null,
   fuzzerNoticeError: false,
   fuzzerDraftVersion: 0,
   fuzzerRunToken: 0,
@@ -849,9 +855,13 @@ const els = {
   filterHiddenExtensions: document.getElementById("filterHiddenExtensions"),
   filterPort: document.getElementById("filterPort"),
   colorTagFilter: document.getElementById("colorTagFilter"),
+  interceptQueueShell: document.getElementById("interceptQueueShell"),
+  interceptQueueSelectionStatus: document.getElementById("interceptQueueSelectionStatus"),
   interceptTableBody: document.getElementById("interceptTableBody"),
   interceptDetailPath: document.getElementById("interceptDetailPath"),
   interceptDetailTitle: document.getElementById("interceptDetailTitle"),
+  interceptDetailRetryButton: document.getElementById("interceptDetailRetryButton"),
+  interceptDetailStatus: document.getElementById("interceptDetailStatus"),
   interceptRequestHighlight: document.getElementById("interceptRequestHighlight"),
   interceptRequestEditor: document.getElementById("interceptRequestEditor"),
   interceptMeta: document.getElementById("interceptMeta"),
@@ -915,6 +925,8 @@ const els = {
   replaySchemeSelect: document.getElementById("replaySchemeSelect"),
   replayHostInput: document.getElementById("replayHostInput"),
   replayPortInput: document.getElementById("replayPortInput"),
+  replayHostError: document.getElementById("replayHostError"),
+  replayPortError: document.getElementById("replayPortError"),
   replayRequestHighlight: document.getElementById("replayRequestHighlight"),
   replayRequestEditor: document.getElementById("replayRequestEditor"),
   replayRequestSearchInput: document.getElementById("replayRequestSearchInput"),
@@ -961,6 +973,7 @@ const els = {
   fuzzerRequestEditor: document.getElementById("fuzzerRequestEditor"),
   fuzzerPayloadsEditor: document.getElementById("fuzzerPayloadsEditor"),
   fuzzerMeta: document.getElementById("fuzzerMeta"),
+  fuzzerRetryWorkspaceButton: document.getElementById("fuzzerRetryWorkspaceButton"),
   fuzzerResultStatus: document.getElementById("fuzzerResultStatus"),
   fuzzerResultMinBytes: document.getElementById("fuzzerResultMinBytes"),
   fuzzerResultMaxBytes: document.getElementById("fuzzerResultMaxBytes"),
@@ -989,6 +1002,7 @@ const els = {
   fuzzerDetailResponseMeta: document.getElementById("fuzzerDetailResponseMeta"),
   startFuzzerButton: document.getElementById("startFuzzerButton"),
   stopFuzzerButton: document.getElementById("stopFuzzerButton"),
+  fuzzerStopStatus: document.getElementById("fuzzerStopStatus"),
   resetFuzzerButton: document.getElementById("resetFuzzerButton"),
   contextMenu: document.getElementById("contextMenu"),
   interceptContextMenu: document.getElementById("interceptContextMenu"),
@@ -1677,6 +1691,7 @@ function bindEvents() {
       state.runtime = runtime;
       syncHttpCapturePill();
     } catch (error) {
+      if (sessionId !== currentSessionId()) return;
       console.error(error);
       showToast(error?.message || "Failed to change capture.", "error");
     }
@@ -1684,32 +1699,50 @@ function bindEvents() {
 
   document.getElementById("clearHistoryButton")?.addEventListener("click", (e) => {
     const button = e.currentTarget;
+    const sessionId = currentSessionId();
+    const workspaceGeneration = workspaceStateGeneration;
+    if (!sessionId) {
+      showToast("Clear history is unavailable until an active session is loaded.", "error");
+      return;
+    }
+    // External session changes leave this dialog open. Its confirmation belongs
+    // to the original workspace, even if the operator later returns to its ID.
+    const ownsWorkspace = () => sessionId === currentSessionId()
+      && workspaceGeneration === workspaceStateGeneration;
+    const sessionName = state.activeSession?.id === sessionId && typeof state.activeSession.name === "string"
+      ? state.activeSession.name.trim() || sessionId : sessionId;
     // Irreversible and easy to hit beside Filter, so it asks first — through the
     // app's own dialog. window.confirm is useless here: the desktop webview
     // shows no native JS panel, so it returned false and Clear did nothing at
     // all. Every other destructive action in this file already uses this.
     showConfirmDialog(
-      "Remove every captured request in this session?\nThis cannot be undone.",
-      () => withButtonProgress(button, async () => {
-        const sessionId = currentSessionId();
-        try {
-          const response = await fetch(sessionWritePath("/api/transactions", sessionId), {
-            method: "DELETE",
-          });
-          await requireOkResponse(response, "Failed to clear the history.");
-          const result = await response.json();
-          if (sessionId !== currentSessionId()) return;
-          targetServiceMapController?.invalidate();
-          clearHttpHistorySelectionPreview();
-          state.selectedId = null;
-          state.selectedRecord = null;
-          scheduleRefresh({ resetScroll: true });
-          showToast(`Cleared ${result.removed} captured request${result.removed === 1 ? "" : "s"}.`, "info");
-        } catch (error) {
-          console.error(error);
-          showToast(error?.message || "Failed to clear the history.", "error");
+      `Remove every captured request in session "${sessionName}"?\nThis cannot be undone.`,
+      () => {
+        if (!ownsWorkspace()) {
+          showToast("Clear canceled because the active workspace changed. Reopen Clear history to try again.", "error");
+          return;
         }
-      }),
+        return withButtonProgress(button, async () => {
+          try {
+            const response = await fetch(sessionWritePath("/api/transactions", sessionId), {
+              method: "DELETE",
+            });
+            await requireOkResponse(response, "Failed to clear the history.");
+            const result = await response.json();
+            if (!ownsWorkspace()) return;
+            targetServiceMapController?.invalidate();
+            clearHttpHistorySelectionPreview();
+            state.selectedId = null;
+            state.selectedRecord = null;
+            scheduleRefresh({ resetScroll: true });
+            showToast(`Cleared ${result.removed} captured request${result.removed === 1 ? "" : "s"}.`, "info");
+          } catch (error) {
+            if (!ownsWorkspace()) return;
+            console.error(error);
+            showToast(error?.message || "Failed to clear the history.", "error");
+          }
+        });
+      },
       { title: "Clear history", confirmLabel: "Clear" },
     );
   });
@@ -1897,6 +1930,7 @@ function bindEvents() {
   });
 
   // Session table sort headers
+  // One header listener handles both native button clicks and cell padding.
   document.querySelectorAll("#dashboardSessionsTable thead th[data-sort-key]").forEach((th) => {
     th.addEventListener("click", () => {
       const key = th.dataset.sortKey;
@@ -1976,8 +2010,13 @@ function bindEvents() {
       showToast(error?.message || "Failed to drop response.", "error");
     });
   });
+  els.interceptDetailRetryButton?.addEventListener("click", () => {
+    retrySelectedInterceptDetail().catch((error) => console.error(error));
+  });
   els.interceptQueueTabRequest.addEventListener("click", () => switchInterceptQueueTab("request"));
   els.interceptQueueTabResponse.addEventListener("click", () => switchInterceptQueueTab("response"));
+  els.interceptQueueShell?.addEventListener("keydown", onInterceptQueueKeydown);
+  els.interceptQueueShell?.addEventListener("focus", () => scrollSelectedInterceptRowIntoView(state.interceptQueueTab));
 
   if (els.interceptSearchInput) {
     els.interceptSearchInput.addEventListener("input", updateInterceptSearch);
@@ -2210,6 +2249,7 @@ function bindEvents() {
     });
   });
   els.resetFuzzerButton.addEventListener("click", resetFuzzer);
+  els.fuzzerRetryWorkspaceButton?.addEventListener("click", retryFuzzerWorkspaceLoad);
   els.stopFuzzerButton?.addEventListener("click", () => {
     stopFuzzerAttack().catch((error) => console.error("Fuzzer stop error:", error));
   });
@@ -2243,7 +2283,8 @@ function bindEvents() {
       });
     });
     fuzzerResultsShell.addEventListener("keydown", (e) => {
-      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      const step = e.isComposing ? 0 : tableArrowStep(e);
+      if (!step) return;
       e.preventDefault();
       const totalCount = visibleFuzzerResults().length;
       if (!totalCount) return;
@@ -2254,6 +2295,8 @@ function bindEvents() {
         : (e.key === "ArrowDown"
           ? Math.min(selectedIndex + 1, totalCount - 1)
           : Math.max(selectedIndex - 1, 0));
+      // A held arrow at the edge must not restart the same detail read.
+      if (nextIndex === selectedIndex) return;
       selectFuzzerResultIndex(nextIndex, { scroll: true });
     });
   }
@@ -2281,6 +2324,8 @@ function bindEvents() {
     createNewSequence().catch(handleSequenceActionError));
   onClickWithProgress(document.getElementById("sequenceEmptyNewButton"), () =>
     createNewSequence().catch(handleSequenceActionError));
+  document.getElementById("sequenceNameInput").addEventListener("input", updateSequenceNameFromInput);
+  document.getElementById("sequenceNameInput").addEventListener("change", updateSequenceNameFromInput);
   document.getElementById("addSequenceStepButton").addEventListener("click", addSequenceStep);
   onClickWithProgress(document.getElementById("saveSequenceButton"), () =>
     saveCurrentSequence().catch(handleSequenceActionError));
@@ -2496,17 +2541,13 @@ function bindEvents() {
   });
   if (els.fuzzerRequestEditor) {
     els.fuzzerRequestEditor.addEventListener("input", () => {
-      if (els.fuzzerRequestCM) return; // CM handles it
+      if (!workspaceLoaded || els.fuzzerRequestCM) return; // CM handles it
       updateFuzzerRequestText(els.fuzzerRequestEditor.value, { userEdit: true });
       renderFuzzerRequestHighlight(state.fuzzerRequestText);
       scheduleWorkspaceStateSave();
     });
     els.fuzzerRequestEditor.addEventListener("scroll", syncFuzzerRequestHighlightScroll);
   }
-  els.fuzzerPayloadsEditor.addEventListener("input", () => {
-    updateFuzzerPayloadsText(els.fuzzerPayloadsEditor.value, { userEdit: true });
-    scheduleWorkspaceStateSave();
-  });
   if (els.interceptRequestEditor) {
     els.interceptRequestEditor.addEventListener("input", () => {
       if (els.interceptRequestCM) return; // CM handles it
@@ -3024,15 +3065,17 @@ function bindEvents() {
 
 }
 
-async function loadSettings(retries = 5) {
+async function loadSettings(retries = 5, { isCurrent = () => true } = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (!isCurrent()) return false;
     try {
       const response = await fetch("/api/settings");
       if (!response.ok) {
         throw new Error(`loadSettings failed: ${response.status}`);
       }
-      return await _applySettings(response);
+      return await _applySettings(response, { isCurrent });
     } catch (err) {
+      if (!isCurrent()) return false;
       if (attempt < retries) {
         await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
         continue;
@@ -3042,8 +3085,10 @@ async function loadSettings(retries = 5) {
   }
 }
 
-async function _applySettings(response) {
-  state.settings = await response.json();
+async function _applySettings(response, { isCurrent = () => true } = {}) {
+  const settings = await response.json();
+  if (!isCurrent()) return false;
+  state.settings = settings;
   if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, state.settings.runtime);
   state.runtime = state.settings.runtime;
   syncHttpCapturePill();
@@ -3121,16 +3166,32 @@ async function loadAppVersionInfo({ refresh = false } = {}) {
 // "no update". A found release is offered in a dialog, because a toast would
 // sit over the Update button it points to.
 async function checkForUpdatesNow() {
+  const pending = loadAppVersionInfo({ refresh: true });
+  const generation = appVersionReadGeneration;
   try {
-    const info = await loadAppVersionInfo({ refresh: true });
+    const info = await pending;
+    // The read fence also owns its announcement, not just the top-bar state.
+    if (generation !== appVersionReadGeneration) return;
     if (info.update_available) {
-      showConfirmDialog(`Sniper ${info.latest_version} is available. You have v${info.current_version}.`, performSelfUpdate, {
+      showConfirmDialog(`Sniper ${info.latest_version} is available. You have v${info.current_version}.`, () => {
+        // A background refresh may change the target while the offer is open.
+        // Identical metadata still permits the user's explicit update choice.
+        const matchesOffer = ["current_version", "latest_version", "update_available",
+          "self_update_supported", "latest_release_url", "releases_url"]
+          .every(key => state.appVersion?.[key] === info[key]);
+        if (!matchesOffer) {
+          showToast("Update information changed. Please check for updates again.", "info", 5000);
+          return;
+        }
+        performSelfUpdate();
+      }, {
         title: "Update available", confirmLabel: "Update", cancelLabel: "Later", confirmClass: "primary-action",
       });
     } else {
       showToast(`Sniper v${info.current_version} is up to date.`, "success", 5000);
     }
   } catch (error) {
+    if (generation !== appVersionReadGeneration) return;
     showToast(`Couldn't check for updates. ${error.message}`, "error", 5000);
   }
 }
@@ -3282,10 +3343,11 @@ async function performSelfUpdate() {
   }
 }
 
+let sessionActivationIntent = null;
 let sessionsLoadGeneration = 0;
 let sessionsAppliedLoadGeneration = 0;
 
-async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwner = false } = {}) {
+async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwner = false, isCurrent = () => true } = {}) {
   const generation = ++sessionsLoadGeneration;
   const workspaceGeneration = preserveWorkspaceOwner ? workspaceStateGeneration : null;
   const workspaceSessionId = preserveWorkspaceOwner ? currentSessionId() : null;
@@ -3301,12 +3363,12 @@ async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwn
       throw new Error("Invalid session list response. Reload to try again.");
     }
   } catch (error) {
-    if (generation < sessionsAppliedLoadGeneration) return;
+    if (!isCurrent() || generation < sessionsAppliedLoadGeneration) return;
     throw error;
   }
   // Awaited startup/workspace reads still supply data while a refresh is pending.
   // Only an already accepted newer list can supersede this read.
-  if (generation < sessionsAppliedLoadGeneration) return;
+  if (!isCurrent() || generation < sessionsAppliedLoadGeneration) return;
   // Error reconciliation refreshes rows only. A later workspace load owns its
   // own session list, and must not be relabelled by this older action's read.
   if (preserveWorkspaceOwner && (workspaceGeneration !== workspaceStateGeneration
@@ -3398,20 +3460,49 @@ function canReloadWorkspaceAfterSessionAction(sessionId, workspaceGeneration, sa
     && sequenceDraftVersion === (state.sequenceDraftVersion || 0);
 }
 
-async function loadWorkspaceState() {
-  const response = await fetch("/api/workspace-state");
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
-  const snapshot = await response.json();
-  if (!workspaceSnapshotMatchesActiveSession(snapshot)) {
-    await loadSessions();
+async function loadWorkspaceState({ isCurrent = () => true, onAdopt = () => {} } = {}) {
+  if (!isCurrent()) return false;
+  state.workspaceLoadError = "";
+  if (!workspaceLoaded) renderFuzzer();
+  let snapshot;
+  try {
+    const response = await fetch("/api/workspace-state");
+    if (!isCurrent()) return false;
+    // Callers may toast this error; never surface captured data from a response body.
+    if (!response.ok) throw new Error("Could not load session workspace.");
+    snapshot = await response.json();
+    if (!isCurrent()) return false;
     if (!workspaceSnapshotMatchesActiveSession(snapshot)) {
-      throw new WorkspaceSessionMismatchError(snapshot?.session_id || null);
+      await loadSessions({ isCurrent });
+      if (!isCurrent()) return false;
+      if (!workspaceSnapshotMatchesActiveSession(snapshot)) {
+        throw new WorkspaceSessionMismatchError(snapshot?.session_id || null);
+      }
     }
+  } catch (error) {
+    if (!isCurrent()) return false;
+    if (!workspaceLoaded) {
+      state.workspaceLoadError = "Could not load session. Editing is unavailable.";
+      renderFuzzer();
+    }
+    throw error;
   }
-  applyWorkspaceState(snapshot);
-  workspaceLoaded = true;
+  // Adoption advances the workspace generation synchronously. It is not a
+  // stale read, and failures in adoption/rendering must still reach the caller.
+  try {
+    applyWorkspaceState(snapshot);
+    workspaceLoaded = true;
+    state.workspaceLoadError = "";
+    onAdopt();
+    renderFuzzer();
+    return true;
+  } catch (error) {
+    if (!workspaceLoaded) {
+      state.workspaceLoadError = "Could not load session. Editing is unavailable.";
+      renderFuzzer();
+    }
+    throw error;
+  }
 }
 
 class WorkspaceSessionMismatchError extends Error {
@@ -3428,6 +3519,8 @@ function applyWorkspaceState(snapshot) {
     return;
   }
   workspaceStateGeneration += 1;
+  state.interceptDraftRecovery = null;
+  state.responseInterceptDraftRecovery = null;
   retireFindingActionProgress();
   // Later UI reads can fail before panels render and synchronize this owner.
   if (typeof reconController !== "undefined") reconController?.syncSession();
@@ -3485,15 +3578,22 @@ function readFuzzerWorkspace(fuzzerWS) {
 // `keepShownRun` leaves a run already on screen in place rather than loading it again.
 function applyFuzzerWorkspace(fields, sessionId, { keepShownRun = false } = {}) {
   const { legacyAttackRecord, fuzzerAttackRecordId, ...rest } = fields;
-  if (state._fuzzerFileGeneration) {
-    // An accepted workspace draft supersedes an earlier file choice, including
-    // a change back to its original values. Status and shown-run metadata do
-    // not replace the draft; normalize cloned request/target objects as saved.
-    const draft = (source) => ({
-      ...snapshotFuzzerWorkspace(source), notice: "", attack_record_id: null,
-    });
-    if (workspaceSnapshotValueChanged(draft(state), draft({ ...state, ...rest }))) {
-      state._fuzzerFileGeneration += 1;
+  // Accepted draft changes retire earlier replacements, including a change
+  // back to the original values. Status and shown-run metadata are not edits.
+  const draft = (source) => ({
+    ...snapshotFuzzerWorkspace(source), notice: "", attack_record_id: null,
+  });
+  if (workspaceSnapshotValueChanged(draft(state), draft({ ...state, ...rest }))) {
+    if (state._fuzzerFileGeneration) state._fuzzerFileGeneration += 1;
+    const workflow = state.fuzzerResultsWorkflow;
+    if (sessionId === currentSessionId() && workflow?.sessionId === sessionId) {
+      // Retire the picker read/confirmation, not the shown run or its polling.
+      workflow.readGeneration += 1;
+      workflow.readBusy = false;
+      if (workflow.notice === "Loading saved run..."
+        || workflow.notice === "Reuse requires confirmation. Original source and transport overrides are not retained.") {
+        workflow.notice = "";
+      }
     }
   }
   Object.assign(state, rest);
@@ -5373,6 +5473,8 @@ function resetSessionScopedUiState() {
   state._historyRetentionClearedSelection = false;
   state._historyRetentionReconcile = false;
   workspaceLoaded = false;
+  state.workspaceLoadError = "";
+  state.fuzzerWorkspaceRetry = null;
   clearReplaySendInFlight();
   closeContextMenu();
   window.clearTimeout(refreshTimer);
@@ -5408,12 +5510,16 @@ function resetSessionScopedUiState() {
   invalidateVisibleEntriesCache();
   state.intercepts = [];
   state.responseIntercepts = [];
+  state.interceptDraftRecovery = null;
+  state.responseInterceptDraftRecovery = null;
   // Invalidate reads even when the operator returns to the same session ID.
   state.interceptAcceptedLoadGeneration = state.interceptLoadGeneration = (state.interceptLoadGeneration || 0) + 1;
   state.responseInterceptAcceptedLoadGeneration = state.responseInterceptLoadGeneration = (state.responseInterceptLoadGeneration || 0) + 1;
   state.interceptDetailGeneration = (state.interceptDetailGeneration || 0) + 1;
   state.responseInterceptDetailGeneration = (state.responseInterceptDetailGeneration || 0) + 1;
   state.interceptRules = [];
+  state.interceptDetailRead = null;
+  state.responseInterceptDetailRead = null;
   state.selectedInterceptId = null;
   state.selectedInterceptRecord = null;
   state.selectedResponseInterceptId = null;
@@ -5475,9 +5581,12 @@ function resetSessionScopedUiState() {
   state.replayTabSequence = 0;
   state.replayRenamingTabId = null;
   state.fuzzerRunToken = (state.fuzzerRunToken || 0) + 1;
+  state._fuzzerPayloadImportStatus = null;
   state.fuzzerRunning = false;
   state.fuzzerRunningAttackId = null;
   state.fuzzerStopRequest = null;
+  state.fuzzerStopError = null;
+  state.fuzzerRestoredRun = null;
   state.fuzzerBaseRequest = null;
   state.fuzzerSourceTransactionId = null;
   state.fuzzerTarget = null;
@@ -5527,6 +5636,7 @@ function renderReplayClearedState() {
   if (els.replayHostInput) els.replayHostInput.value = "";
   if (els.replayPortInput) els.replayPortInput.value = "";
   if (els.replaySchemeSelect) els.replaySchemeSelect.value = "https";
+  setReplayTargetInputValidity({ hostError: "", portError: "" });
   if (els.replayResponseMeta) els.replayResponseMeta.textContent = "Loading session...";
   renderReplayResponseView("Loading session...");
   updateReplaySearchPane("request", "");
@@ -5541,32 +5651,57 @@ async function reloadSessionWorkspace({ cleanupBeforeReset = true } = {}) {
     await cleanupWsReplayTabsBeforeStateReset();
   }
   resetSessionScopedUiState();
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    await loadSessions();
-    await loadSettings();
-    try {
-      await loadWorkspaceState();
-      break;
-    } catch (error) {
-      if (error instanceof WorkspaceSessionMismatchError && attempt === 0) {
-        continue;
+  // A newer reset owns subsequent reads; an old retry must never relabel it.
+  let generation = workspaceStateGeneration;
+  const isCurrent = () => generation === workspaceStateGeneration;
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await loadSessions({ isCurrent });
+      if (!isCurrent()) return false;
+      await loadSettings(5, { isCurrent });
+      if (!isCurrent()) return false;
+      try {
+        if (await loadWorkspaceState({ isCurrent, onAdopt: () => { generation = workspaceStateGeneration; } }) === false) return false;
+        if (!isCurrent()) return false;
+        break;
+      } catch (error) {
+        if (error instanceof WorkspaceSessionMismatchError && attempt === 0) {
+          continue;
+        }
+        throw error;
       }
-      throw error;
     }
+  } catch (error) {
+    if (isCurrent() && !workspaceLoaded) {
+      state.workspaceLoadError = "Could not load session. Editing is unavailable.";
+      renderFuzzer();
+    }
+    throw error;
   }
   await loadTransactions(false);
+  if (!isCurrent()) return false;
   await loadIntercepts(false);
+  if (!isCurrent()) return false;
   await loadResponseIntercepts(false);
+  if (!isCurrent()) return false;
   await loadInterceptRules();
+  if (!isCurrent()) return false;
   await loadWebsockets(false);
+  if (!isCurrent()) return false;
   await loadEventLog();
+  if (!isCurrent()) return false;
   await loadMatchReplaceRules();
+  if (!isCurrent()) return false;
   await loadSequences();
+  if (!isCurrent()) return false;
   await loadTargetSiteMap(true);
+  if (!isCurrent()) return false;
   if (state.activeTool === "proxy" && state.activeProxyTab === "oast") {
     await loadOastCallbacks();
+    if (!isCurrent()) return false;
   }
   await refreshScannerQuickToggle();
+  if (!isCurrent()) return false;
   connectEvents();
   renderToolPanels();
 }
@@ -5713,6 +5848,9 @@ async function createSession() {
 
 async function activateSessionById(id, { force = false } = {}) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("switching sessions")) return;
+  // Busy confirmation follows the latest requested destination, not reply order.
+  // Ordinary completion still reconciles every request that reached the server.
+  const activationIntent = sessionActivationIntent = {};
   const entrySessionId = currentSessionId();
   const entryWorkspaceGeneration = workspaceStateGeneration;
   const canContinuePreflight = () => {
@@ -5751,6 +5889,8 @@ async function activateSessionById(id, { force = false } = {}) {
   const actionScopeDraftVersion = state.targetScopeDraftVersion || 0;
   const actionMatchReplaceDraftVersion = state.matchReplaceDraftVersion || 0;
   const actionSequenceDraftVersion = state.sequenceDraftVersion || 0;
+  const ownsActionWorkspace = () => actionSessionId === currentSessionId()
+    && actionWorkspaceGeneration === workspaceStateGeneration;
   try {
     const response = await fetch(`/api/sessions/${id}/activate${force ? "?force=true" : ""}`, {
       method: "POST",
@@ -5761,9 +5901,20 @@ async function activateSessionById(id, { force = false } = {}) {
       // a stream that does not end on its own — a server-sent event stream, a long
       // poll — so offer to cut it rather than leaving the user stuck.
       if (response.status === 409 && !force && message.includes("proxy activity is still running")) {
+        // Consent to cut activity belongs to this workspace, not just the fixed
+        // destination. Neither a late reply nor an open dialog may transfer it.
+        if (!ownsActionWorkspace() || activationIntent !== sessionActivationIntent) return;
         showConfirmDialog(
           `${message}.\n\nSwitch anyway? Anything still in flight is cut and will not be recorded.`,
           () => {
+            if (!ownsActionWorkspace()) {
+              showToast("Switch canceled because the active workspace changed. Reopen the session to try again.", "error");
+              return;
+            }
+            if (activationIntent !== sessionActivationIntent) {
+              showToast("Switch canceled because a newer session action was started. Reopen the session to try again.", "error");
+              return;
+            }
             activateSessionById(id, { force: true }).catch(handleWorkspaceActionError);
           },
           { title: "Proxy is busy", confirmLabel: "Switch anyway" },
@@ -5965,6 +6116,8 @@ async function fetchTransactionPage(offsetOrOptions = 0) {
   const options = typeof offsetOrOptions === "object"
     ? offsetOrOptions
     : { offset: offsetOrOptions };
+  const isCurrent = options.isCurrent || (() => true);
+  if (!isCurrent()) return null;
   const queryState = options.queryState || createHistoryQueryState();
   const querySignature = options.querySignature || historyQuerySignature(queryState);
   const response = await fetch(buildTransactionsPageUrl({
@@ -5973,9 +6126,10 @@ async function fetchTransactionPage(offsetOrOptions = 0) {
     beforeSequence: options.beforeSequence ?? null,
     queryState,
   }));
+  if (!isCurrent()) return null;
   if (!response.ok) {
     const message = await response.text();
-    if (retentionEpoch !== (state._historyRetentionEpoch || 0) || !isCurrentHistoryQuerySignature(querySignature)) {
+    if (!isCurrent() || retentionEpoch !== (state._historyRetentionEpoch || 0) || !isCurrentHistoryQuerySignature(querySignature)) {
       return null;
     }
     if (els.historyMeta) els.historyMeta.textContent = `HTTP History filter error: ${message}`;
@@ -5986,7 +6140,7 @@ async function fetchTransactionPage(offsetOrOptions = 0) {
     throw new Error(message);
   }
   const page = await response.json();
-  if (retentionEpoch !== (state._historyRetentionEpoch || 0) || !isCurrentHistoryQuerySignature(querySignature)) {
+  if (!isCurrent() || retentionEpoch !== (state._historyRetentionEpoch || 0) || !isCurrentHistoryQuerySignature(querySignature)) {
     return null;
   }
   return page;
@@ -6161,7 +6315,8 @@ async function loadTransactions(preserveSelection = true, options = {}) {
   }
 }
 
-async function loadTransactionDetail(id) {
+async function loadTransactionDetail(id, { isCurrent = () => true } = {}) {
+  if (!isCurrent()) return null;
   const generation = ++_historyDetailGeneration;
   const sessionId = currentSessionId();
   const reconcileRetention = state._historyRetentionReconcile === true;
@@ -6169,7 +6324,7 @@ async function loadTransactionDetail(id) {
     while (true) {
       const annotationGeneration = state._historyDetailAnnotationGeneration || 0;
       const response = await fetch(transactionPath(id, sessionId));
-      if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
+      if (!isCurrent() || generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
         return null;
       }
       if (annotationGeneration !== (state._historyDetailAnnotationGeneration || 0)) continue;
@@ -6201,7 +6356,7 @@ async function loadTransactionDetail(id) {
       }
 
       const record = await response.json();
-      if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
+      if (!isCurrent() || generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
         return null;
       }
       if (record?.id !== id) {
@@ -6226,7 +6381,7 @@ async function loadTransactionDetail(id) {
   } catch (_error) {
     // A failed read owns the placeholder only while its selection and session
     // are current; a late rejection must not erase a newer row or retry.
-    if (generation === _historyDetailGeneration && state.selectedId === id && sessionId === currentSessionId()) {
+    if (isCurrent() && generation === _historyDetailGeneration && state.selectedId === id && sessionId === currentSessionId()) {
       renderEmptyDetail("Failed to load selected transaction. Select the row again to retry.");
     }
     return null;
@@ -6439,6 +6594,8 @@ function copyMenuTargetUrl(target) {
 
 async function loadIntercepts(preserveSelection = true) {
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftOwners = captureInterceptDraftRecoveryOwners();
   const generation = state.interceptLoadGeneration = (state.interceptLoadGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && generation >= (state.interceptAcceptedLoadGeneration || 0);
@@ -6446,6 +6603,9 @@ async function loadIntercepts(preserveSelection = true) {
   try {
     const response = await fetch(sessionQueryPath("/api/intercepts", sessionId));
     if (!isCurrent()) return;
+    if (!response.ok && workspaceGeneration === workspaceStateGeneration) {
+      handleInterceptDraftReadFailure("request", response.status, { owners: draftOwners });
+    }
     await requireOkResponse(response, "Failed to load intercepted requests.");
     intercepts = jsonArray(await response.json());
   } catch (error) {
@@ -6460,7 +6620,9 @@ async function loadIntercepts(preserveSelection = true) {
 
   const visibleIntercepts = getVisibleRequestInterceptSummaries();
   if (!preserveSelection || !visibleIntercepts.some((item) => item.id === state.selectedInterceptId)) {
+    state.interceptDraftRecovery = null;
     state.selectedInterceptId = visibleIntercepts[0]?.id ?? null;
+    state.interceptDetailRead = null;
     state.selectedInterceptRecord = null;
     state.interceptEditorSeedId = null;
   }
@@ -6479,15 +6641,28 @@ async function loadIntercepts(preserveSelection = true) {
   }
 }
 
-async function loadInterceptDetail(id) {
+async function loadInterceptDetail(id, { explicit = false } = {}) {
+  const previousRead = getInterceptDetailRead("request");
+  // Faster queue polling must not retire this owner's slow detail repeatedly.
+  if (!explicit && previousRead?.id === id && previousRead.pending) return;
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftOwners = captureInterceptDraftRecoveryOwners();
   const generation = state.interceptDetailGeneration = (state.interceptDetailGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && state.selectedInterceptId === id && state.interceptDetailGeneration === generation;
+  const read = state.interceptDetailRead = { sessionId, id, generation, pending: true,
+    error: Boolean(previousRead?.error), showPending: explicit || !previousRead?.error };
+  renderIntercepts();
   try {
     const response = await fetch(sessionQueryPath(`/api/intercepts/${id}`, sessionId));
     if (!isCurrent()) return;
     if (!response.ok) {
+      read.pending = false;
+      read.error = true;
+      if (workspaceGeneration === workspaceStateGeneration) {
+        handleInterceptDraftReadFailure("request", response.status, { capture: true, owners: draftOwners });
+      }
       state.selectedInterceptRecord = null;
       renderIntercepts();
       return;
@@ -6495,10 +6670,19 @@ async function loadInterceptDetail(id) {
 
     const record = await response.json();
     if (!isCurrent()) return;
+    read.pending = false;
+    read.error = false;
     state.selectedInterceptRecord = record;
+    const draft = getInterceptDraftRecovery("request");
+    if (draft?.id === record.id) state.interceptDraftRecovery = { ...draft, owner: {} };
     renderIntercepts();
   } catch (error) {
-    if (isCurrent()) throw error;
+    if (isCurrent()) {
+      read.pending = false;
+      read.error = true;
+      renderIntercepts();
+      throw new Error("Could not load request details.");
+    }
   }
 }
 
@@ -7942,15 +8126,22 @@ function mergeEventLogEntries(primaryEntries, fallbackEntries) {
 
 async function clearEventLog() {
   const sessionId = currentSessionId();
-  const response = await fetch(sessionWritePath("/api/event-log", sessionId), { method: "DELETE" });
-  await requireOkResponse(response, "Failed to clear event log.");
-  if (sessionId !== currentSessionId()) {
-    return;
+  const workspaceGeneration = workspaceStateGeneration;
+  // A reset can return to the same session ID before this acknowledgment arrives.
+  const ownsWorkspace = () => sessionId === currentSessionId()
+    && workspaceGeneration === workspaceStateGeneration;
+  try {
+    const response = await fetch(sessionWritePath("/api/event-log", sessionId), { method: "DELETE" });
+    await requireOkResponse(response, "Failed to clear event log.");
+    if (!ownsWorkspace()) return;
+    _eventLogMutationGeneration += 1;
+    _eventLogClearGeneration += 1;
+    state.eventLog = [];
+    renderEventLog();
+  } catch (error) {
+    if (!ownsWorkspace()) return;
+    throw error;
   }
-  _eventLogMutationGeneration += 1;
-  _eventLogClearGeneration += 1;
-  state.eventLog = [];
-  renderEventLog();
 }
 
 async function loadMatchReplaceRules() {
@@ -9533,7 +9724,14 @@ function markIdleDecoderTabs() {
     }
   }
   for (const [name, tab] of Object.entries(window.tabs)) {
-    document.getElementById(name)?.classList.toggle("idle", judged && !shown.has(tab) && tab !== window.hasher.tab);
+    const item = document.getElementById(name);
+    const idle = judged && !shown.has(tab) && tab !== window.hasher.tab;
+    item?.classList.toggle("idle", idle);
+    const button = item?.querySelector("button");
+    if (button) {
+      button.disabled = idle;
+      button.setAttribute("aria-pressed", tab === window.hasher.tab ? "true" : "false");
+    }
   }
 }
 
@@ -9674,6 +9872,14 @@ function closeSessionCreateForm() {
 }
 
 function renderDashboard() {
+  // Replacing rows should not strand a keyboard user on the document body.
+  // Capture only list controls, so a refresh never steals focus from elsewhere.
+  const focusedControl = document.activeElement;
+  const focusedRow = focusedControl?.closest?.("tr[data-id]");
+  const focusedClass = ["session-select-button", "session-open-button", "session-delete-button"]
+    .find((name) => focusedControl?.classList?.contains(name));
+  const restoreListFocus = focusedClass && els.dashboardSessionsBody.contains?.(focusedControl);
+  const focusedSessionId = restoreListFocus ? focusedRow?.dataset.id : null;
   // Ensure selectedSessionId defaults to active session
   const activeSession = state.sessions.find((session) => session.active)
     || state.sessions.find((session) => session.id === state.activeSession?.id) || null;
@@ -9775,11 +9981,14 @@ function renderDashboard() {
     sessTable.querySelectorAll("thead th[data-sort-key]").forEach((th) => {
       const existing = th.querySelector(".sort-arrow");
       if (existing) existing.remove();
-      if (th.dataset.sortKey === state.sessionSortKey) {
+      const active = th.dataset.sortKey === state.sessionSortKey;
+      th.setAttribute("aria-sort", active ? (state.sessionSortDir === "asc" ? "ascending" : "descending") : "none");
+      if (active) {
         const arrow = document.createElement("span");
         arrow.className = "sort-arrow";
+        arrow.setAttribute("aria-hidden", "true");
         arrow.textContent = state.sessionSortDir === "asc" ? "\u25B2" : "\u25BC";
-        th.appendChild(arrow);
+        th.querySelector(".session-sort-button").appendChild(arrow);
       }
     });
   }
@@ -9788,7 +9997,7 @@ function renderDashboard() {
     ? sortedSessions
         .map((session) => `
           <tr class="${["history-row", session.id === state.selectedSessionId && "selected", session.active && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
-            <td><div class="session-name">${escapeHtml(session.name)}</div>${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+            <td><button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -9797,8 +10006,8 @@ function renderDashboard() {
             <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
             <td>
               ${session.active ? "" : `<div class="session-actions">
-                <button class="secondary-action session-open-button" type="button">Open</button>
-                <button class="session-delete-button" type="button">Delete</button>
+                <button class="secondary-action session-open-button" type="button" aria-label="Open session ${escapeHtml(session.name)}">Open</button>
+                <button class="session-delete-button" type="button" aria-label="Delete session ${escapeHtml(session.name)}">Delete</button>
               </div>`}
             </td>
           </tr>
@@ -9855,6 +10064,12 @@ function renderDashboard() {
       return id ? deleteSessionById(id) : undefined;
     });
   });
+
+  if (focusedSessionId && (document.activeElement === focusedControl || document.activeElement === document.body)) {
+    const replacementRow = Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]"))
+      .find((row) => row.dataset.id === focusedSessionId);
+    replacementRow?.querySelector(`.${focusedClass}`)?.focus({ preventScroll: true });
+  }
 }
 
 // ── Session context menu ──
@@ -11019,6 +11234,12 @@ function extractFindingKeywords(finding) {
 
 function jumpToTransaction(recordId) {
   state._historySelectionGeneration = (state._historySelectionGeneration || 0) + 1;
+  const selectionGeneration = state._historySelectionGeneration;
+  const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const isCurrent = () => selectionGeneration === state._historySelectionGeneration
+    && sessionId === currentSessionId() && workspaceGeneration === workspaceStateGeneration
+    && state.selectedId === recordId;
   setActiveTool("proxy");
   setActiveProxyTab("http-history");
   const hadRenderedDetail = Boolean(state.selectedRecord?.id);
@@ -11030,20 +11251,20 @@ function jumpToTransaction(recordId) {
   scheduleHistoryDetailLoading(recordId, "Loading selected transaction...", {
     immediate: !hadRenderedDetail,
   });
-  loadTransactionDetail(recordId).then(async (record) => {
-    if (!record || state.selectedId !== recordId) return;
-    const revealed = await ensureHistoryWindowContainsRecord(record);
+  loadTransactionDetail(recordId, { isCurrent }).then(async (record) => {
+    if (!record || !isCurrent()) return;
+    const revealed = await ensureHistoryWindowContainsRecord(record, { isCurrent });
+    // A superseded reveal is not a failed current jump, even when IDs match.
+    if (revealed === null || !isCurrent()) return;
     if (!revealed) {
-      if (state.selectedId === recordId) {
-        state.selectedId = null;
-        state.selectedRecord = null;
-        renderEmptyDetail();
-        renderHistory();
-      }
+      state.selectedId = null;
+      state.selectedRecord = null;
+      renderEmptyDetail();
+      renderHistory();
       return;
     }
     focusHistoryRecord(recordId);
-  }).catch((error) => console.error(error));
+  }).catch((error) => { if (isCurrent()) console.error(error); });
 }
 
 function sequenceCursorAfter(sequence) {
@@ -11060,7 +11281,8 @@ function sequenceCursorAfter(sequence) {
   return String(Math.trunc(numeric) + 1);
 }
 
-async function ensureHistoryWindowContainsRecord(record) {
+async function ensureHistoryWindowContainsRecord(record, { isCurrent = () => true } = {}) {
+  if (!isCurrent()) return null;
   if (!record?.id || getHistoryItem(record.id)) {
     return true;
   }
@@ -11083,19 +11305,13 @@ async function ensureHistoryWindowContainsRecord(record) {
   paging.generation = generation;
   paging.querySignature = querySignature;
   paging.loading = true;
+  const ownsPaging = () => state.historyPaging === paging && paging.generation === generation
+    && paging.querySignature === querySignature;
+  const ownsReveal = () => isCurrent() && ownsPaging() && sessionId === currentSessionId()
+    && state.selectedId === record.id && isCurrentHistoryQuerySignature(querySignature);
   try {
-    const page = await fetchTransactionPage({ beforeSequence, queryState, querySignature });
-    if (!page || sessionId !== currentSessionId() || state.selectedId !== record.id) {
-      return false;
-    }
-    if (
-      state.historyPaging !== paging
-      || paging.generation !== generation
-      || paging.querySignature !== querySignature
-      || !isCurrentHistoryQuerySignature(querySignature)
-    ) {
-      return false;
-    }
+    const page = await fetchTransactionPage({ beforeSequence, queryState, querySignature, isCurrent: ownsReveal });
+    if (!page || !ownsReveal()) return null;
 
     const pageItems = jsonArray(page.items);
     if (!pageItems.some((item) => item?.id === record.id)) {
@@ -11112,13 +11328,15 @@ async function ensureHistoryWindowContainsRecord(record) {
     paging.fullyLoaded = !paging.hasMore;
     return true;
   } catch (error) {
+    if (!ownsReveal()) return null;
     console.error("Failed to reveal history transaction:", error);
     showToast(error?.message || "Failed to reveal transaction in HTTP History.", "error", 5000);
     return false;
   } finally {
-    if (state.historyPaging === paging && paging.generation === generation && paging.querySignature === querySignature) {
+    // Release our slot after selection changes without repainting the newer UI.
+    if (ownsPaging()) {
       paging.loading = false;
-      if (isCurrentHistoryQuerySignature(querySignature)) renderHistory();
+      if (ownsReveal()) renderHistory();
     }
   }
 }
@@ -12434,13 +12652,25 @@ function historyEmptyMessage(hiddenConnectCount, paging) {
   if (state.historyListError) {
     return `HTTP History filter error: ${state.historyListError}`;
   }
-  if (hiddenConnectCount) {
-    return "Only CONNECT tunnels were captured, and they are hidden from HTTP history. Trust the Sniper Root CA and retry the HTTPS client if you expect decrypted traffic.";
-  }
-  if (!paging.fullyLoaded) {
+  if (!paging.fullyLoaded || paging.loading || paging.hasMore) {
     return paging.loading
       ? "No loaded traffic matches yet. Older history is still loading."
       : "No loaded traffic matches yet. Older history will load as needed.";
+  }
+  if (hiddenConnectCount > 0) {
+    // Hidden CONNECT totals are filter-scoped; a loaded-row fallback is weaker
+    // still. Only current exact counts can establish what the whole session holds.
+    const onlyTunnels = Number.isSafeInteger(paging.total)
+      && paging.total > 0
+      && paging.hiddenConnectTotal === paging.total
+      && hiddenConnectCount === paging.hiddenConnectTotal
+      && paging.filteredTotal === 0
+      && paging.querySignature
+      && isCurrentHistoryQuerySignature(paging.querySignature);
+    if (onlyTunnels) {
+      return "Only CONNECT tunnels are retained in this session, and they are hidden from HTTP history. If you expected decrypted HTTPS traffic, check whether the client trusts the Sniper Root CA.";
+    }
+    return "No HTTP traffic matches the current filter settings. CONNECT tunnels are hidden from HTTP history.";
   }
   return "No traffic matches the current filter settings.";
 }
@@ -13693,15 +13923,225 @@ function getVisibleResponseInterceptSummaries() {
     : state.responseIntercepts;
 }
 
+function getInterceptDraftRecovery(queue) {
+  const response = queue === "response";
+  const key = response ? "responseInterceptDraftRecovery" : "interceptDraftRecovery";
+  const draft = state[key];
+  const id = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const visible = response ? getVisibleResponseInterceptSummaries() : getVisibleRequestInterceptSummaries();
+  if (draft && (draft.sessionId !== currentSessionId() || draft.workspaceGeneration !== workspaceStateGeneration
+    || draft.id !== id || !visible.some(item => item.id === id))) {
+    state[key] = null;
+  }
+  return state[key] || null;
+}
+
+function captureInterceptDraftRecoveryOwners() {
+  // Pending reads keep only an identity token, not text retired by navigation.
+  return ["request", "response"].map(queue => ({ queue, token: getInterceptDraftRecovery(queue)?.owner,
+    acceptedGeneration: queue === "response" ? state.responseInterceptAcceptedLoadGeneration || 0
+      : state.interceptAcceptedLoadGeneration || 0 }));
+}
+
+function handleInterceptDraftReadFailure(queue, status, { capture = false, owners = [] } = {}) {
+  const response = queue === "response";
+  const key = response ? "responseInterceptDraftRecovery" : "interceptDraftRecovery";
+  // Eligibility is not a promise that a server error is transient. Keep only
+  // unsent text, never the actionable record, until this owner loads again.
+  if (!(status >= 500 && status < 600)) {
+    // A pending newer poll is not a new owner. A replacement slot or accepted
+    // snapshot is: old auth failures must not erase either queue's newer edit.
+    for (const owner of owners) {
+      if (status !== 401 && status !== 403 && owner.queue !== queue) continue;
+      const accepted = owner.queue === "response" ? state.responseInterceptAcceptedLoadGeneration || 0
+        : state.interceptAcceptedLoadGeneration || 0;
+      // A newer list still containing this ID does not negate a current 404
+      // (or another non-auth detail status outside the recovery policy).
+      const currentDetail = capture && owner.queue === queue && status !== 401 && status !== 403;
+      if (owner.token && getInterceptDraftRecovery(owner.queue)?.owner === owner.token
+        && (currentDetail || accepted === owner.acceptedGeneration)) {
+        state[owner.queue === "response" ? "responseInterceptDraftRecovery" : "interceptDraftRecovery"] = null;
+      }
+    }
+    return;
+  }
+  getInterceptDraftRecovery(queue);
+  if (!capture) return;
+  const id = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const record = response ? state.selectedResponseInterceptRecord : state.selectedInterceptRecord;
+  const seed = response ? state.responseInterceptEditorSeedId : state.interceptEditorSeedId;
+  const visible = response ? getVisibleResponseInterceptSummaries() : getVisibleRequestInterceptSummaries();
+  if (!record || record.id !== id || seed !== id || !visible.some(item => item.id === id)) return;
+  const view = getCMView(response ? "interceptRes" : "interceptReq");
+  const editor = response ? els.interceptResponseEditor : els.interceptRequestEditor;
+  const text = view ? view.getContent() : editor?.value;
+  const original = response ? buildEditableRawResponse(record.response) : buildEditableRawRequest(record.request);
+  // Both CM and native textareas normalize line endings. Compare in that
+  // editor domain without rewriting the text retained for recovery.
+  const comparableOriginal = original.replace(/\r\n?/g, "\n");
+  // Read at failure settlement so typing during the fetch is included. Empty
+  // and invalid drafts are still edits; parsing belongs to explicit Forward.
+  state[key] = typeof text === "string" && text.replace(/\r\n?/g, "\n") !== comparableOriginal
+    ? { sessionId: currentSessionId(), workspaceGeneration: workspaceStateGeneration, id, owner: {}, text } : null;
+}
+
+function takeInterceptDraftRecovery(queue, record) {
+  const draft = getInterceptDraftRecovery(queue);
+  if (!draft || record?.id !== draft.id) return null;
+  state[queue === "response" ? "responseInterceptDraftRecovery" : "interceptDraftRecovery"] = null;
+  return draft.text;
+}
+
+function getInterceptDetailRead(queue) {
+  const response = queue === "response";
+  const read = response ? state.responseInterceptDetailRead : state.interceptDetailRead;
+  const id = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const generation = response ? state.responseInterceptDetailGeneration : state.interceptDetailGeneration;
+  return read && read.sessionId === currentSessionId() && read.id === id && read.generation === generation ? read : null;
+}
+
+function updateInterceptDetailFeedback(queue) {
+  const response = queue === "response";
+  const id = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const record = response ? state.selectedResponseInterceptRecord : state.selectedInterceptRecord;
+  const read = getInterceptDetailRead(queue);
+  // Automatic retries keep the last failure quiet; an explicit row or Retry
+  // action shows progress again without turning each failed poll into an alert.
+  const error = Boolean(read?.error && (!read.pending || !read.showPending));
+  const loading = Boolean(id && !record && !error);
+  const message = loading ? `Loading selected ${queue} details.`
+    : error ? `Could not ${record ? "refresh" : "load"} ${queue} details. Retry to try again.` : "";
+  // Both queues refresh independently; only the visible owner may announce or
+  // expose Retry. Keep its button during a retry so focus is not hidden mid-read.
+  if (state.interceptQueueTab === queue) {
+    if (els.interceptDetailRetryButton) {
+      els.interceptDetailRetryButton.classList.toggle("hidden", !read?.error);
+      // Native disabled blurs a focused button during background polling. Keep
+      // this Tab stop and let the owned-read guard reject busy activations.
+      const retryDisabled = String(!read?.error || read.pending);
+      const retryBusy = String(Boolean(read?.error && read.pending));
+      if (els.interceptDetailRetryButton.getAttribute("aria-disabled") !== retryDisabled) {
+        els.interceptDetailRetryButton.setAttribute("aria-disabled", retryDisabled);
+      }
+      if (els.interceptDetailRetryButton.getAttribute("aria-busy") !== retryBusy) {
+        els.interceptDetailRetryButton.setAttribute("aria-busy", retryBusy);
+      }
+      const retryLabel = read?.error && read.pending ? "Retrying…" : "Retry detail";
+      if (els.interceptDetailRetryButton.textContent !== retryLabel) {
+        els.interceptDetailRetryButton.textContent = retryLabel;
+      }
+    }
+    if (els.interceptDetailStatus && els.interceptDetailStatus.textContent !== message) {
+      els.interceptDetailStatus.textContent = message;
+    }
+  }
+  return { error, loading, message };
+}
+
+async function retrySelectedInterceptDetail() {
+  const queue = state.interceptQueueTab;
+  const read = getInterceptDetailRead(queue);
+  // Busy Retry remains focusable; native pointer/keyboard activations and queued
+  // calls must all obey the current read owner rather than a DOM disabled flag.
+  if (!read?.error || read.pending) return;
+  await selectInterceptQueueItem(queue, read.id);
+}
+
+function selectInterceptQueueItem(queue, id) {
+  if (queue === "response") {
+    if (state.selectedResponseInterceptId !== id) {
+      state.responseInterceptDraftRecovery = null;
+      state.selectedResponseInterceptId = id;
+      state.responseInterceptDetailRead = null;
+      state.selectedResponseInterceptRecord = null;
+      state.responseInterceptEditorSeedId = null;
+      renderResponseIntercepts();
+    }
+    return loadResponseInterceptDetail(id, { explicit: true });
+  }
+  if (state.selectedInterceptId !== id) {
+    state.interceptDraftRecovery = null;
+    state.selectedInterceptId = id;
+    state.interceptDetailRead = null;
+    state.selectedInterceptRecord = null;
+    state.interceptEditorSeedId = null;
+    renderIntercepts();
+  }
+  return loadInterceptDetail(id, { explicit: true });
+}
+
+function onInterceptQueueKeydown(event) {
+  const shell = els.interceptQueueShell;
+  // Selection belongs to this stable Tab stop, never an editor, queue switch,
+  // or incidental focus elsewhere in the workspace.
+  if (!shell || event.target !== shell || document.activeElement !== shell || event.isComposing
+    || state.activeTool !== "proxy" || state.activeProxyTab !== "intercept" || !shell.getClientRects().length) return;
+  if (els.interceptContextMenu && !els.interceptContextMenu.classList.contains("hidden")) return;
+  const step = tableArrowStep(event);
+  if (!step) return;
+  event.preventDefault();
+  const queue = state.interceptQueueTab;
+  const response = queue === "response";
+  const items = response ? getVisibleResponseInterceptSummaries() : getVisibleRequestInterceptSummaries();
+  if (!items.length) return;
+  const selectedId = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const current = items.findIndex(item => item.id === selectedId);
+  const next = current < 0 ? (step > 0 ? 0 : items.length - 1) : Math.max(0, Math.min(items.length - 1, current + step));
+  // Holding an arrow at the edge must not refetch or re-seed a typed draft.
+  if (next === current) return;
+  selectInterceptQueueItem(queue, items[next].id).catch(error => console.error(error));
+}
+
+function updateInterceptQueueSelectionStatus(queue, items) {
+  const shell = els.interceptQueueShell;
+  // Both queues poll independently; the hidden queue cannot rename or scroll
+  // the shared keyboard surface while its detail read settles.
+  if (!shell || state.interceptQueueTab !== queue) return;
+  const response = queue === "response";
+  const label = response ? "Response" : "Request";
+  const selectedId = response ? state.selectedResponseInterceptId : state.selectedInterceptId;
+  const index = items.findIndex(item => item.id === selectedId);
+  const item = items[index];
+  const status = item
+    ? `${label} ${index + 1} of ${items.length}: ${response ? `${item.status} ` : ""}${item.method} ${item.host}${item.path || "/"}.`
+    : `${label} queue is empty.`;
+  if (shell.getAttribute("aria-label") !== `${label} Queue`) shell.setAttribute("aria-label", `${label} Queue`);
+  if (els.interceptQueueSelectionStatus && els.interceptQueueSelectionStatus.textContent !== status) {
+    els.interceptQueueSelectionStatus.textContent = status;
+  }
+  if (document.activeElement === shell) scrollSelectedInterceptRowIntoView(queue);
+}
+
+function scrollSelectedInterceptRowIntoView(queue) {
+  const shell = els.interceptQueueShell;
+  if (!shell || state.interceptQueueTab !== queue || shell.clientHeight <= 0) return;
+  const response = queue === "response";
+  const table = response ? els.responseInterceptTable : els.interceptRequestTable;
+  const body = response ? els.responseInterceptTableBody : els.interceptTableBody;
+  const row = body.querySelector(".history-row.selected");
+  if (!row) return;
+  // Native nearest would leave an upward selection behind the sticky header.
+  const rect = row.getBoundingClientRect();
+  const clientTop = shell.getBoundingClientRect().top + shell.clientTop;
+  const viewTop = clientTop + (table.tHead?.getBoundingClientRect().height || 0);
+  const viewBottom = clientTop + shell.clientHeight;
+  const adjustment = rect.top < viewTop ? rect.top - viewTop
+    : Math.max(0, Math.min(rect.top - viewTop, rect.bottom - viewBottom));
+  if (adjustment) shell.scrollTop = Math.max(0, shell.scrollTop + adjustment);
+}
+
 function reconcileRequestInterceptSelection(visibleIntercepts = getVisibleRequestInterceptSummaries()) {
   const selectedIsVisible = visibleIntercepts.some((item) => item.id === state.selectedInterceptId);
   if (!selectedIsVisible) {
+    state.interceptDraftRecovery = null;
     state.selectedInterceptId = visibleIntercepts[0]?.id ?? null;
+    state.interceptDetailRead = null;
     state.selectedInterceptRecord = null;
     state.interceptEditorSeedId = null;
     return;
   }
   if (state.selectedInterceptRecord && state.selectedInterceptRecord.id !== state.selectedInterceptId) {
+    state.interceptDraftRecovery = null;
     state.selectedInterceptRecord = null;
     state.interceptEditorSeedId = null;
   }
@@ -13710,12 +14150,15 @@ function reconcileRequestInterceptSelection(visibleIntercepts = getVisibleReques
 function reconcileResponseInterceptSelection(visibleIntercepts = getVisibleResponseInterceptSummaries()) {
   const selectedIsVisible = visibleIntercepts.some((item) => item.id === state.selectedResponseInterceptId);
   if (!selectedIsVisible) {
+    state.responseInterceptDraftRecovery = null;
     state.selectedResponseInterceptId = visibleIntercepts[0]?.id ?? null;
+    state.responseInterceptDetailRead = null;
     state.selectedResponseInterceptRecord = null;
     state.responseInterceptEditorSeedId = null;
     return;
   }
   if (state.selectedResponseInterceptRecord && state.selectedResponseInterceptRecord.id !== state.selectedResponseInterceptId) {
+    state.responseInterceptDraftRecovery = null;
     state.selectedResponseInterceptRecord = null;
     state.responseInterceptEditorSeedId = null;
   }
@@ -13746,6 +14189,8 @@ async function applyInterceptScopeFilterLocally() {
 function renderIntercepts() {
   const filteredIntercepts = getVisibleRequestInterceptSummaries();
   reconcileRequestInterceptSelection(filteredIntercepts);
+  getInterceptDraftRecovery("request");
+  const feedback = updateInterceptDetailFeedback("request");
   els.interceptTableBody.innerHTML = filteredIntercepts.length
     ? filteredIntercepts
         .map((item) => {
@@ -13768,14 +14213,7 @@ function renderIntercepts() {
 
   Array.from(els.interceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
     row.addEventListener("click", () => {
-      const id = row.dataset.id;
-      if (state.selectedInterceptId !== id) {
-        state.selectedInterceptId = id;
-        state.selectedInterceptRecord = null;
-        state.interceptEditorSeedId = null;
-        renderIntercepts();
-      }
-      loadInterceptDetail(id).catch((error) => console.error(error));
+      selectInterceptQueueItem("request", row.dataset.id).catch((error) => console.error(error));
     });
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -13783,32 +14221,34 @@ function renderIntercepts() {
       if (!id) return;
       // Select first, so the menu acts on what the operator sees highlighted.
       if (state.selectedInterceptId !== id) {
-        state.selectedInterceptId = id;
-        state.selectedInterceptRecord = null;
-        state.interceptEditorSeedId = null;
-        renderIntercepts();
-        loadInterceptDetail(id).catch((error) => console.error(error));
+        selectInterceptQueueItem("request", id).catch((error) => console.error(error));
       }
       openInterceptContextMenu(event.clientX, event.clientY, id);
     });
   });
+  updateInterceptQueueSelectionStatus("request", filteredIntercepts);
 
   if (!state.selectedInterceptRecord) {
     state.interceptEditorSeedId = null;
     if (state.interceptQueueTab === "request") {
-      els.interceptDetailPath.textContent = "Intercept";
-      els.interceptDetailTitle.textContent = "No request selected";
-      els.interceptMeta.textContent = state.runtime?.intercept_enabled
+      const selected = filteredIntercepts.find((item) => item.id === state.selectedInterceptId);
+      els.interceptDetailPath.textContent = selected ? `${selected.method} ${selected.host}${selected.path || "/"}` : "Intercept";
+      els.interceptDetailTitle.textContent = selected
+        ? (feedback.error ? "Could not load request" : "Loading request…") : "No request selected";
+      els.interceptMeta.textContent = feedback.message || (state.runtime?.intercept_enabled
         ? "Intercept is on. New requests will queue here."
-        : "Intercept is off. Toggle it on to pause requests before forwarding.";
+        : "Intercept is off. Toggle it on to pause requests before forwarding.");
     }
     if (els.interceptRequestCM) {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM, "", {
         mode: "http", readOnly: false,
-        placeholder: "Intercepted request will appear here...",
+        placeholder: feedback.loading ? "Loading selected request details…"
+          : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here...",
       });
     } else {
       els.interceptRequestEditor.value = "";
+      els.interceptRequestEditor.placeholder = feedback.loading ? "Loading selected request details…"
+        : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here...";
       renderInterceptRequestHighlight("");
     }
     els.forwardInterceptButton.disabled = true;
@@ -13819,7 +14259,7 @@ function renderIntercepts() {
   if (state.interceptQueueTab === "request") {
     els.interceptDetailPath.textContent = `${state.selectedInterceptRecord.request.scheme.toUpperCase()} / ${state.selectedInterceptRecord.peer_addr}`;
     els.interceptDetailTitle.textContent = `${state.selectedInterceptRecord.request.method} ${state.selectedInterceptRecord.request.host}`;
-    els.interceptMeta.textContent = [
+    els.interceptMeta.textContent = feedback.message || [
       state.selectedInterceptRecord.is_websocket ? "WebSocket upgrade" : "HTTP request",
       `queued at ${formatTimestamp(state.selectedInterceptRecord.started_at)}`,
       state.selectedInterceptRecord.request.preview_truncated ? "captured request body is preview-truncated" : "body captured in memory",
@@ -13829,14 +14269,17 @@ function renderIntercepts() {
   // selection changes. Losing focus (including to search) must not re-seed it.
   if (els.interceptRequestCM) {
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
-      setInterceptPaneContent("interceptReq", els.interceptRequestCM, buildEditableRawRequest(state.selectedInterceptRecord.request), {
+      setInterceptPaneContent("interceptReq", els.interceptRequestCM,
+        takeInterceptDraftRecovery("request", state.selectedInterceptRecord) ?? buildEditableRawRequest(state.selectedInterceptRecord.request), {
         mode: "http", readOnly: false,
       });
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
     }
   } else {
+    els.interceptRequestEditor.placeholder = "";
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
-      els.interceptRequestEditor.value = buildEditableRawRequest(state.selectedInterceptRecord.request);
+      els.interceptRequestEditor.value = takeInterceptDraftRecovery("request", state.selectedInterceptRecord)
+        ?? buildEditableRawRequest(state.selectedInterceptRecord.request);
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
     }
     renderInterceptRequestHighlight(els.interceptRequestEditor.value);
@@ -15106,6 +15549,7 @@ function renderReplay(options = {}) {
     els.replayHostInput.value = "";
     els.replayPortInput.value = "";
     els.replaySchemeSelect.value = "https";
+    setReplayTargetInputValidity({ hostError: "", portError: "" });
     els.replayResponseMeta.textContent = "No response yet.";
     renderReplayResponseView("Send a request from Replay to capture the response here.");
     updateReplaySearchPane("request", "");
@@ -16080,50 +16524,131 @@ function renderTarget() {
   }
 }
 
+function renderFuzzerPayloadsEditor() {
+  const sessionId = currentSessionId();
+  const generation = workspaceStateGeneration;
+  const owner = JSON.stringify([sessionId, generation]);
+  let editor = els.fuzzerPayloadsEditor;
+  if (editor._fuzzerOwner !== owner) {
+    const previous = editor;
+    const hadFocus = document.activeElement === previous;
+    if (previous._fuzzerOwner !== undefined) {
+      // Equal-value assignments can retain native Undo history. A fresh control
+      // retires the old workspace's edits even when both drafts are empty.
+      editor = previous.cloneNode(false);
+      editor.value = state.fuzzerPayloadsText;
+      previous.replaceWith(editor);
+      els.fuzzerPayloadsEditor = editor;
+    }
+    editor._fuzzerOwner = owner;
+    editor.addEventListener("input", () => {
+      if (!workspaceLoaded || els.fuzzerPayloadsEditor !== editor || sessionId !== currentSessionId()
+        || generation !== workspaceStateGeneration) return;
+      updateFuzzerPayloadsText(editor.value, { userEdit: true });
+      scheduleWorkspaceStateSave();
+    });
+    if (hadFocus && editor !== previous) editor.focus({ preventScroll: true });
+  }
+  editor.disabled = !workspaceLoaded;
+  if (editor.value !== state.fuzzerPayloadsText) editor.value = state.fuzzerPayloadsText;
+}
+
+async function retryFuzzerWorkspaceLoad() {
+  if (workspaceLoaded || !state.workspaceLoadError
+    || state.fuzzerWorkspaceRetry?.generation === workspaceStateGeneration) return false;
+  const retry = { generation: workspaceStateGeneration };
+  // Reload resets synchronously before its first read; capture that new owner.
+  const pending = reloadSessionWorkspace({ cleanupBeforeReset: false });
+  retry.generation = workspaceStateGeneration;
+  state.fuzzerWorkspaceRetry = retry;
+  try {
+    await pending;
+  } catch (_) {
+    // The owned load already shows a bounded failure message beside Retry.
+    return false;
+  } finally {
+    if (state.fuzzerWorkspaceRetry === retry) {
+      state.fuzzerWorkspaceRetry = null;
+      if (retry.generation === workspaceStateGeneration) renderFuzzer();
+    }
+  }
+}
+
 function renderFuzzer() {
+  const retry = els.fuzzerRetryWorkspaceButton;
+  if (retry) {
+    retry.classList.toggle("hidden", workspaceLoaded || !state.workspaceLoadError);
+    retry.disabled = !!state.fuzzerWorkspaceRetry && state.fuzzerWorkspaceRetry.generation === workspaceStateGeneration;
+  }
   renderFuzzerResultsWorkflow();
   if (els.fuzzerRequestCM) {
     // CM path
     const cv = getCMView("fuzzerReq");
-    if (!cv || cv.getContent() !== state.fuzzerRequestText) {
+    const sessionId = currentSessionId();
+    const generation = workspaceStateGeneration;
+    const owner = JSON.stringify([sessionId, generation]);
+    // A session/workspace replacement retires history even for identical text.
+    if (!cv || cv._owner !== owner || cv._editable !== workspaceLoaded || cv.getContent() !== state.fuzzerRequestText) {
       updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, state.fuzzerRequestText, {
-        mode: "http", readOnly: false,
+        mode: "http", readOnly: !workspaceLoaded, owner,
         payloadHighlight: true,
         placeholder: "Paste an HTTP request, then mark the values to fuzz",
       });
       // Wire onChange to sync state
       const newCv = getCMView("fuzzerReq");
+      newCv?.view?.contentDOM?.setAttribute("aria-label", "Raw HTTP request");
+      newCv?.view?.contentDOM?.setAttribute("aria-describedby", "fuzzerRequestHelp");
       if (newCv && !newCv._fuzzerOnChangeWired) {
         newCv._fuzzerOnChangeWired = true;
         addCMUpdateListener(newCv.view, (newText) => {
+          if (!workspaceLoaded || getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
+            || generation !== workspaceStateGeneration) return;
           updateFuzzerRequestText(newText, { userEdit: true });
           scheduleWorkspaceStateSave();
         });
+        wireFuzzerMarkerSelection(newCv);
       }
     }
   } else if (els.fuzzerRequestEditor) {
+    els.fuzzerRequestEditor.readOnly = !workspaceLoaded;
     if (els.fuzzerRequestEditor.value !== state.fuzzerRequestText) {
       els.fuzzerRequestEditor.value = state.fuzzerRequestText;
     }
     renderFuzzerRequestHighlight(state.fuzzerRequestText);
   }
-  if (els.fuzzerPayloadsEditor.value !== state.fuzzerPayloadsText) {
-    els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText;
-  }
+  renderFuzzerPayloadsEditor();
   const attackRunning = !!state.fuzzerRunning || !!state.fuzzerRunningAttackId;
+  els.fuzzerShell?.classList?.toggle("fuzzer-results-empty", !attackRunning && !state.fuzzerAttackRecord && !state.fuzzerAttackRecordId);
   if (els.startFuzzerButton) {
-    els.startFuzzerButton.disabled = attackRunning;
+    els.startFuzzerButton.disabled = !workspaceLoaded || attackRunning;
   }
+  // Stop belongs to the tracked run, not the retained results being viewed.
+  // A terminal poll or session change retires its error even on another view.
+  if (state.fuzzerStopError && (state.fuzzerStopError.sessionId !== currentSessionId()
+    || state.fuzzerStopError.id !== state.fuzzerRunningAttackId)) state.fuzzerStopError = null;
+  const stopping = !!state.fuzzerStopRequest && state.fuzzerStopRequest.sessionId === currentSessionId()
+    && state.fuzzerStopRequest.id === state.fuzzerRunningAttackId;
   if (els.stopFuzzerButton) {
     els.stopFuzzerButton.classList.toggle("hidden", !state.fuzzerRunningAttackId);
-    els.stopFuzzerButton.disabled = state.fuzzerStopRequest?.sessionId === state.activeSession?.id
-      && state.fuzzerStopRequest?.id === state.fuzzerRunningAttackId;
+    els.stopFuzzerButton.disabled = stopping;
+    els.stopFuzzerButton.textContent = stopping ? "Stopping…" : state.fuzzerStopError ? "Retry Stop" : "Stop";
+  }
+  if (els.fuzzerStopStatus) {
+    els.fuzzerStopStatus.textContent = state.fuzzerStopError
+      ? "Could not stop the attack. Requests may still be running. Retry Stop." : "";
+    els.fuzzerStopStatus.classList.toggle("hidden", !state.fuzzerStopError);
   }
   if (els.resetFuzzerButton) {
-    els.resetFuzzerButton.disabled = !!state.fuzzerRunning;
+    els.resetFuzzerButton.disabled = !workspaceLoaded || attackRunning;
   }
 
   if (typeof renderFuzzerSetup === "function") renderFuzzerSetup();
+  if (!workspaceLoaded) {
+    const notice = state.workspaceLoadError || "Loading session…";
+    els.fuzzerMeta.textContent = notice;
+    renderEmptyFuzzerResults(notice);
+    return;
+  }
   const attackRecord = normalizeFuzzerAttackRecord(state.fuzzerAttackRecord);
   state.fuzzerAttackRecord = attackRecord;
   if (attackRecord?.id) {
@@ -16208,12 +16733,13 @@ function visibleFuzzerResults() {
     if (view.sort === "duration") return fuzzerResultMetric(result.duration_ms);
     return fuzzerResultMetric(result.index) ?? sourceIndex;
   };
+  const payloadCollator = view.sort === "payload" ? new Intl.Collator(undefined, { numeric: true }) : null;
   filtered.sort((a, b) => {
     const left = valueFor(a), right = valueFor(b);
     // Unknown metrics remain at the end in either direction; ties keep run order.
     if (left == null || right == null) return left == right ? a.sourceIndex - b.sourceIndex : left == null ? 1 : -1;
     // Payloads read as people number them: p2 before p10.
-    const order = typeof left === "string" ? left.localeCompare(right, undefined, { numeric: true }) : left - right;
+    const order = typeof left === "string" ? payloadCollator.compare(left, right) : left - right;
     return order * (view.direction === "desc" ? -1 : 1) || a.sourceIndex - b.sourceIndex;
   });
   return filtered;
@@ -16277,13 +16803,13 @@ function initFuzzerResultsWorkflow() {
   els.fuzzerCompareButton?.addEventListener("click", () => compareSelectedFuzzerResult());
 }
 
-function fuzzerSelectedTransactionId() {
-  const entry = visibleFuzzerResults()[fuzzerSelectedResultIndex()];
+function fuzzerSelectedTransactionId(results = visibleFuzzerResults()) {
+  const entry = results[fuzzerSelectedResultIndex(results)];
   const transactionId = entry?.result?.transaction_id;
   return transactionId && state._fuzzerDetailRecord?.id === transactionId ? transactionId : null;
 }
 
-function renderFuzzerResultsWorkflow() {
+function renderFuzzerResultsWorkflow(results = visibleFuzzerResults()) {
   const workflow = fuzzerResultsWorkflowState();
   const validation = fuzzerResultFilterValidation(workflow);
   const fields = {
@@ -16309,7 +16835,7 @@ function renderFuzzerResultsWorkflow() {
   const resultCount = jsonArray(state.fuzzerAttackRecord?.results).length;
   if (els.fuzzerResultFilterCount) {
     els.fuzzerResultFilterCount.textContent = validation.valid
-      ? `${visibleFuzzerResults().length} of ${resultCount} results`
+      ? `${results.length} of ${resultCount} results`
       : `Invalid filters: ${validation.message}`;
   }
   // Counting and comparing wait for results; the table says there are none.
@@ -16325,7 +16851,7 @@ function renderFuzzerResultsWorkflow() {
   els.fuzzerClearResultFiltersButton?.classList.toggle("hidden", !activeFilterCount);
   // Their row goes too while neither shows, so it leaves no gap.
   els.fuzzerResultStatusRow?.classList.toggle("hidden", resultCount === 0 && !activeFilterCount);
-  const transactionId = fuzzerSelectedTransactionId();
+  const transactionId = fuzzerSelectedTransactionId(results);
   if (els.fuzzerCompareBaseButton) els.fuzzerCompareBaseButton.disabled = !transactionId;
   if (els.fuzzerCompareButton) {
     els.fuzzerCompareButton.disabled = !transactionId || !compareBaseId
@@ -16341,7 +16867,7 @@ function renderFuzzerResultsWorkflow() {
     els.fuzzerSavedRunSelect.value = workflow.selectedRunId;
   }
   if (els.fuzzerRefreshRunsButton) els.fuzzerRefreshRunsButton.disabled = workflow.listBusy;
-  const unavailable = !workflow.selectedRunId || workflow.readBusy || !!state.fuzzerRunning;
+  const unavailable = !workspaceLoaded || !workflow.selectedRunId || workflow.readBusy || !!state.fuzzerRunning;
   if (els.fuzzerViewRunButton) els.fuzzerViewRunButton.disabled = unavailable;
   if (els.fuzzerReuseRunButton) els.fuzzerReuseRunButton.disabled = unavailable;
   if (els.fuzzerSavedRunNotice) els.fuzzerSavedRunNotice.textContent = workflow.notice;
@@ -16459,6 +16985,7 @@ function reusableSniperPayloads(record) {
 }
 
 async function readFuzzerSavedRun(action) {
+  if (!workspaceLoaded) return;
   const workflow = fuzzerResultsWorkflowState();
   const recordId = workflow.selectedRunId;
   if (!recordId || !workflow.sessionId || state.fuzzerRunning || !["view", "reuse"].includes(action)) return;
@@ -16467,7 +16994,7 @@ async function readFuzzerSavedRun(action) {
   _fuzzerAttackLoadGeneration += 1;
   const generation = ++workflow.readGeneration;
   const ownsRead = fuzzerSavedReadOwner(workflow, generation, "readGeneration");
-  const ownsSelection = () => ownsRead() && workflow.selectedRunId === recordId;
+  const ownsSelection = () => workspaceLoaded && ownsRead() && workflow.selectedRunId === recordId;
   workflow.readBusy = true;
   const loadingNotice = "Loading saved run...";
   workflow.notice = loadingNotice;
@@ -16489,6 +17016,12 @@ async function readFuzzerSavedRun(action) {
       workflow.notice = "Viewing retained results. Your request, payloads and target are unchanged.";
       scheduleWorkspaceStateSave();
       renderFuzzer();
+      const viewGeneration = _fuzzerAttackLoadGeneration;
+      const ownsView = () => viewGeneration === _fuzzerAttackLoadGeneration
+        && currentSessionId() === workflow.sessionId && state.fuzzerAttackRecordId === recordId;
+      // Keep the picker usable while the run is followed; View itself is only
+      // a read, and a later completed View must not release this run's Stop.
+      followRestoredFuzzerAttack(record, workflow.sessionId, ownsView).catch((error) => console.error(error));
     } else {
       if (!record.template || typeof record.template !== "object") throw new Error("This run has no reusable request template.");
       // Validate raw Sniper counts before the display normalizer's legacy
@@ -16499,8 +17032,10 @@ async function readFuzzerSavedRun(action) {
       }
       const requestText = buildEditableRawRequest(record.template);
       const payloads = recovered?.payloads || record.results.map((result) => String(result.payload ?? ""));
-      const partialNotice = recovered && payloads.length < recovered.originalCount
-        ? `\n\nOnly ${payloads.length} of ${recovered.originalCount} original payload slots remain. Missing payloads will not be restored.`
+      const originalCount = recovered?.originalCount
+        ?? (Number.isSafeInteger(savedRecord.payload_count) && savedRecord.payload_count > 0 ? savedRecord.payload_count : null);
+      const partialNotice = originalCount != null && payloads.length < originalCount
+        ? `\n\nOnly ${payloads.length} of ${originalCount} original payload slots remain. Missing payloads will not be restored.`
         : "";
       const payloadsText = payloads.join("\n") + (payloads.at(-1) === "" ? "\n" : "");
       if (new TextEncoder().encode(requestText).length > 2 * 1024 * 1024
@@ -16550,9 +17085,9 @@ function fuzzerSelectionKeyForResult(result, rowIndex) {
   return txId ? `tx:${txId}` : `row:${rowIndex}`;
 }
 
-function fuzzerSelectedResultIndex() {
+function fuzzerSelectedResultIndex(results) {
   const selectionKey = String(state._selectedFuzzerResultKey || "");
-  return selectionKey ? visibleFuzzerResults().findIndex(({ result, sourceIndex }) =>
+  return selectionKey ? (results ?? visibleFuzzerResults()).findIndex(({ result, sourceIndex }) =>
     fuzzerSelectionKeyForResult(result, sourceIndex) === selectionKey) : -1;
 }
 
@@ -16560,7 +17095,7 @@ function fuzzerResultsShell() {
   return els.fuzzerResultsBody?.closest(".history-table-shell") || null;
 }
 
-function renderEmptyFuzzerResults(message) {
+function renderEmptyFuzzerResults(message, results) {
   if (els.fuzzerResultsBody) {
     els.fuzzerResultsBody.innerHTML = `
       <tr class="empty-row">
@@ -16574,10 +17109,12 @@ function renderEmptyFuzzerResults(message) {
   }
   state._selectedFuzzerResultKey = null;
   hideFuzzerDetailPanel();
-  renderFuzzerResultsWorkflow();
+  renderFuzzerResultsWorkflow(results);
 }
 
 function renderFuzzerResultsVirtual() {
+  // Share this projection with counts and selection checks; scrolling must not
+  // repeatedly sort every retained result just to paint the visible rows.
   const results = visibleFuzzerResults();
   if (!els.fuzzerResultsBody) {
     return;
@@ -16586,7 +17123,7 @@ function renderFuzzerResultsVirtual() {
     const validation = fuzzerResultFilterValidation();
     renderEmptyFuzzerResults(!validation.valid ? `Fix the result filters. ${validation.message}`
       : jsonArray(state.fuzzerAttackRecord?.results).length
-        ? "No results match these filters." : "No fuzzer results are available for this run.");
+        ? "No results match these filters." : "No fuzzer results are available for this run.", results);
     return;
   }
   const shell = fuzzerResultsShell();
@@ -16594,14 +17131,15 @@ function renderFuzzerResultsVirtual() {
     return;
   }
 
-  if (state._selectedFuzzerResultKey && fuzzerSelectedResultIndex() < 0) {
+  if (state._selectedFuzzerResultKey && fuzzerSelectedResultIndex(results) < 0) {
     state._selectedFuzzerResultKey = null;
     hideFuzzerDetailPanel();
   }
-  renderFuzzerResultsWorkflow();
+  renderFuzzerResultsWorkflow(results);
 
   const rowHeight = measuredFuzzerResultRowHeight || FUZZER_RESULT_ROW_HEIGHT;
-  const viewportHeight = shell.clientHeight || rowHeight;
+  const headerHeight = els.fuzzerResultsHead?.offsetHeight || 0;
+  const viewportHeight = Math.max(rowHeight, (shell.clientHeight || rowHeight) - headerHeight);
   const totalCount = results.length;
   const maxScrollTop = Math.max(0, totalCount * rowHeight - viewportHeight);
   const scrollTop = Math.min(shell.scrollTop, maxScrollTop);
@@ -16645,13 +17183,17 @@ function renderFuzzerResultsVirtual() {
   }
 }
 
-function scrollFuzzerResultToIndex(rowIndex) {
+function scrollFuzzerResultToIndex(rowIndex, { nearest = false } = {}) {
   const shell = fuzzerResultsShell();
   if (!shell) {
     return;
   }
   const rowHeight = measuredFuzzerResultRowHeight || FUZZER_RESULT_ROW_HEIGHT;
-  shell.scrollTop = Math.max(0, rowIndex * rowHeight - shell.clientHeight / 2);
+  const viewportHeight = Math.max(rowHeight, shell.clientHeight - (els.fuzzerResultsHead?.offsetHeight || 0));
+  const top = rowIndex * rowHeight, bottom = top + rowHeight;
+  if (!nearest) shell.scrollTop = Math.max(0, top - viewportHeight / 2);
+  else if (top < shell.scrollTop) shell.scrollTop = top;
+  else if (bottom > shell.scrollTop + viewportHeight) shell.scrollTop = bottom - viewportHeight;
   renderFuzzerResultsVirtual();
 }
 
@@ -16684,6 +17226,9 @@ function selectFuzzerResultIndex(rowIndex, options = {}) {
     clearFuzzerResponsePane();
     if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
   }
+  // Detail activation can shrink the table after the click. Keep that row in
+  // view once, without snapping scroll on later polling or detail responses.
+  scrollFuzzerResultToIndex(rowIndex, { nearest: true });
   renderFuzzerResultsWorkflow();
 }
 
@@ -16728,6 +17273,38 @@ function fuzzerWorkspaceAttackRecordId(fuzzerWS, legacyRecord = null) {
   return legacyId || null;
 }
 
+async function followRestoredFuzzerAttack(attackRecord, sessionId, ownsView) {
+  if (!attackRecord?.running || state.fuzzerRunning) return;
+  const recordId = attackRecord.id;
+  const workflow = state.fuzzerResultsWorkflow;
+  state.fuzzerRunningAttackId = attackRecord.id;
+  renderFuzzer();
+  // Editing the draft or viewing another saved record releases this view,
+  // not the server's attack. Keep Stop and terminal tracking independent.
+  const owner = { id: recordId, sessionId };
+  state.fuzzerRestoredRun = owner;
+  const ownsRun = () => state.fuzzerRestoredRun === owner
+    && currentSessionId() === sessionId
+    && state.fuzzerRunningAttackId === recordId && !state.fuzzerRunning;
+  const ended = await followFuzzerAttack(recordId, sessionId, ownsRun, ownsView);
+  if (state.fuzzerRestoredRun !== owner || currentSessionId() !== sessionId) return;
+  state.fuzzerRestoredRun = null;
+  if (!state.fuzzerRunning && state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
+  if (ended && ownsView()) state.fuzzerAttackRecord = ended;
+  // Retained-run labels share this terminal state, even if another completed
+  // run is now displayed. Keep the selected run and its saved metadata intact.
+  if (ended && workflow?.sessionId === sessionId && workflow === state.fuzzerResultsWorkflow) {
+    const summary = workflow.runs.find((run) => run.id === recordId);
+    if (summary) Object.assign(summary, { running: false, stopped: !!ended.stopped, status: ended.status,
+      result_count: ended.results.length });
+  }
+  if (!state.fuzzerRunning && !state.fuzzerRunningAttackId && owner.draftNotice
+    && state.fuzzerNotice === owner.draftNotice) {
+    state.fuzzerNotice = "Fuzzer draft changed. Start a new run to see results for the current template.";
+  }
+  renderFuzzer();
+}
+
 async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
   if (!recordId) return;
   // IDs alone cannot distinguish an earlier visit to the same saved run.
@@ -16764,14 +17341,7 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
     if (state.fuzzerNotice === "Loading saved fuzzer run...") {
       state.fuzzerNotice = "";
     }
-    if (attackRecord.running && !state.fuzzerRunning) {
-      state.fuzzerRunningAttackId = attackRecord.id;
-      renderFuzzer();
-      const ended = await followFuzzerAttack(recordId, expectedSessionId, ownsLoad);
-      if (!ownsLoad()) return;
-      if (state.fuzzerRunningAttackId === recordId) state.fuzzerRunningAttackId = null;
-      if (ended) state.fuzzerAttackRecord = ended;
-    }
+    await followRestoredFuzzerAttack(attackRecord, expectedSessionId, ownsLoad);
     renderFuzzer();
   } catch (error) {
     if (!ownsLoad()) {
@@ -17302,7 +17872,14 @@ function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || 
   const raw = String(text || "");
   const boundary = /\r?\n\r?\n/.exec(raw);
   const { body } = splitRawHttpMessage(raw);
-  const bodyLength = editableRequestBodyLength(body, fallback?.body_encoding === "base64" ? "base64" : "utf8");
+  const bodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
+  let bodyLength;
+  try {
+    bodyLength = editableRequestBodyLength(body, bodyEncoding);
+  } catch (error) {
+    if (bodyEncoding !== "base64") throw error;
+    throw new Error("Request body must be valid base64. Restore valid base64 in Request; use header or query positions instead of body markers.");
+  }
   const headEnd = boundary ? boundary.index : raw.length;
   // The engine always recalculates Content-Length after expansion. Normalize
   // only this derived field before using the shared parser, independent of the
@@ -17364,22 +17941,106 @@ function fuzzerSetupPreflight(raw = fuzzerRequestTextForAction()) {
   return { ...SniperFuzzerWorkflow.preflight(template, payloads, options), template, payloads, target, httpVersion };
 }
 
+function fuzzerTransportState(raw = fuzzerRequestTextForAction(), template = undefined) {
+  const unavailable = { scheme: "https", disabled: true, help: "", target: null };
+  if (!workspaceLoaded) return unavailable;
+  if (!raw.trim()) return { ...unavailable, help: "Paste a request to choose transport." };
+  try {
+    if (new TextEncoder().encode(raw).length > 2 * 1024 * 1024) throw new Error("Request too large");
+    if (template === undefined) template = parseFuzzerRequestTemplate(raw);
+    if (!template) throw new Error("Invalid request");
+    const target = activeFuzzerTargetForRequest(raw);
+    const scheme = target?.scheme || template.scheme;
+    if (scheme !== "http" && scheme !== "https") throw new Error("Invalid transport");
+    const firstLine = splitRawHttpMessage(raw).head.split("\n").find(line => line.length > 0) || "";
+    if (!target && /^\S+\s+https?:\/\//i.test(firstLine)) {
+      return { scheme, disabled: true, help: "To change transport, edit http:// or https:// in the request URL.", target: null };
+    }
+    const notes = [];
+    if (target) notes.push(target.port ? "Connection override; port is kept." : "Connection override.");
+    if (state.fuzzerRunning || state.fuzzerRunningAttackId) notes.push("Edits apply to the next Start.");
+    return { scheme, disabled: false, help: notes.join(" "), target };
+  } catch (_) {
+    return { ...unavailable, help: "Fix the request to choose transport." };
+  }
+}
+
+function renderFuzzerTransport(raw = fuzzerRequestTextForAction(), template = undefined) {
+  const select = fuzzerSetupNode("fuzzerTransportSelect");
+  if (!select) return;
+  const transport = fuzzerTransportState(raw, template);
+  select.value = transport.scheme;
+  select.disabled = transport.disabled;
+  const help = fuzzerSetupNode("fuzzerTransportHelp");
+  if (help) {
+    help.textContent = transport.help;
+    help.classList.toggle("hidden", !transport.help);
+  }
+}
+
+function setFuzzerTransport(scheme) {
+  const transport = fuzzerTransportState();
+  if (transport.disabled || (scheme !== "http" && scheme !== "https") || scheme === transport.scheme) {
+    renderFuzzerTransport();
+    return false;
+  }
+  if (transport.target) {
+    // A connection override is bound to the unchanged request authority. Changing
+    // its base scheme instead would drop that binding, host and explicit port.
+    state.fuzzerTarget = { ...state.fuzzerTarget, scheme };
+  } else {
+    state.fuzzerBaseRequest = { ...(state.fuzzerBaseRequest || createDefaultEditableRequest()), scheme };
+    // A previously inactive override must not revive when the scheme matches again.
+    state.fuzzerTarget = null;
+    state.fuzzerTargetRequestText = null;
+  }
+  // Like typing in the request, this changes the next draft, not the active run.
+  // The draft version fences a pending Start and preserves edits on completion.
+  markFuzzerDraftChanged();
+  scheduleWorkspaceStateSave();
+  renderFuzzer();
+  return true;
+}
+
+function renderFuzzerPayloadImportStatus() {
+  const status = state._fuzzerPayloadImportStatus;
+  if (status && (status.generation !== state._fuzzerFileGeneration || status.sessionId !== currentSessionId()
+    || status.draftVersion !== (state.fuzzerDraftVersion || 0) || status.runToken !== state.fuzzerRunToken || state.fuzzerRunning)) {
+    state._fuzzerPayloadImportStatus = null;
+  }
+  const current = state._fuzzerPayloadImportStatus;
+  const notice = fuzzerSetupNode("fuzzerPayloadImportStatus");
+  if (!notice) return;
+  notice.textContent = current?.message || "";
+  notice.classList.toggle("hidden", !current);
+  notice.classList.toggle("fuzzer-notice-error", !!current?.error);
+}
+
 function renderFuzzerSetup() {
+  renderFuzzerPayloadImportStatus();
   if (typeof SniperFuzzerWorkflow === "undefined" || !fuzzerSetupNode("fuzzerPreflightSummary")) return;
   const raw = fuzzerRequestTextForAction();
+  // Source encoding still applies when the edited body cannot be parsed.
+  const bodyEncodingHelp = workspaceLoaded && state.fuzzerBaseRequest?.body_encoding === "base64"
+    ? "Body format: base64. Select a header or query value, then Add §." : "";
+  const requestHelp = fuzzerSetupNode("fuzzerRequestHelp");
+  if (requestHelp) requestHelp.textContent = bodyEncodingHelp
+    ? `Raw HTTP request · ${bodyEncodingHelp}` : "Raw HTTP request · select a value, then Add §";
   const select = fuzzerSetupNode("fuzzerCandidateSelect");
   let candidates = [];
+  let template = null;
   let model = null;
   let error = "";
   let candidateKey = `${currentSessionId()}|${raw}|${state.fuzzerBaseRequest?.body_encoding}|${state.fuzzerBaseRequest?.preview_truncated}`;
   try {
     if (new TextEncoder().encode(raw).length > 2 * 1024 * 1024) throw new Error("Request editor text cannot exceed 2 MiB.");
-    const template = parseFuzzerRequestTemplate(raw);
+    template = parseFuzzerRequestTemplate(raw);
     candidates = SniperFuzzerWorkflow.candidates(raw, { bodyEncoding: template.body_encoding, previewTruncated: template.preview_truncated });
     model = fuzzerSetupPreflight(raw);
   } catch (failure) {
     error = failure?.message || "Review the request template.";
   }
+  if (fuzzerSetupNode("fuzzerTransportSelect")) renderFuzzerTransport(raw, template);
   // Nothing to choose from, or nothing yet to preview, is not shown at all.
   fuzzerSetupNode("fuzzerValueRow")?.classList?.toggle("hidden", candidates.length === 0);
   fuzzerSetupNode("fuzzerPreviewDisclosure")?.classList?.toggle("hidden", !raw.trim());
@@ -17390,7 +18051,13 @@ function renderFuzzerSetup() {
     select._fuzzerRaw = raw;
     select._fuzzerCandidates = candidates;
   }
-  const busy = !!state.fuzzerRunning;
+  const busy = !workspaceLoaded || !!state.fuzzerRunning || !!state.fuzzerRunningAttackId;
+  for (const id of ["fuzzerPayloadFile", "fuzzerPayloadImportMode", "fuzzerPayloadPreset", "fuzzerRangeStart", "fuzzerRangeEnd", "fuzzerRangeStep"]) {
+    const input = fuzzerSetupNode(id);
+    if (input) input.disabled = busy;
+  }
+  const startButton = fuzzerSetupNode("startFuzzerButton");
+  if (startButton) startButton.disabled = busy || !model?.valid;
   if (select) select.disabled = busy || candidates.length === 0;
   const attackType = fuzzerSetupNode("fuzzerAttackType");
   const urlEncode = fuzzerSetupNode("fuzzerUrlEncode");
@@ -17398,35 +18065,56 @@ function renderFuzzerSetup() {
   if (attackType) { attackType.value = state.fuzzerAttackType || "sniper"; attackType.disabled = busy; }
   if (urlEncode) { urlEncode.checked = state.fuzzerUrlEncode !== false; urlEncode.disabled = busy; }
   if (concurrency) { concurrency.value = String(state.fuzzerConcurrency || 4); concurrency.disabled = busy; }
-  for (const id of ["fuzzerMarkSelectionButton", "fuzzerMarkCandidateButton", "fuzzerImportPayloadButton", "fuzzerApplyPresetButton", "fuzzerGenerateRangeButton"]) {
+  for (const id of ["fuzzerMarkSelectionButton", "fuzzerClearMarkersButton", "fuzzerMarkCandidateButton", "fuzzerImportPayloadButton", "fuzzerApplyPresetButton", "fuzzerGenerateRangeButton"]) {
     const button = fuzzerSetupNode(id);
     if (button) button.disabled = busy;
   }
+  const addPosition = fuzzerSetupNode("fuzzerMarkSelectionButton");
+  if (addPosition) addPosition.disabled = busy || !raw.trim();
   const markCandidate = fuzzerSetupNode("fuzzerMarkCandidateButton");
   if (markCandidate) markCandidate.disabled = busy || !select?.value || candidates.length === 0;
+  renderFuzzerRemoveMarkerControl();
   const undo = state._fuzzerMarkerUndo;
   const undoButton = fuzzerSetupNode("fuzzerUndoMarkerButton");
   if (undoButton) undoButton.disabled = busy || !undo || undo.after !== raw || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken;
+  const positions = fuzzerSetupNode("fuzzerPositionCount");
+  if (positions) positions.textContent = model ? `${model.markerCount} position${model.markerCount === 1 ? "" : "s"}` : raw.trim() ? "— positions" : "0 positions";
+  const payloadCount = fuzzerPayloadCount(state.fuzzerPayloadsText || "");
+  const payloadLabel = fuzzerSetupNode("fuzzerPayloadCount");
+  if (payloadLabel) payloadLabel.textContent = `${payloadCount} payload${payloadCount === 1 ? "" : "s"}`;
+  const clearButton = fuzzerSetupNode("fuzzerClearMarkersButton");
+  if (clearButton) clearButton.disabled = busy || SniperFuzzerWorkflow.clearRequestPositions(raw) === raw;
   const summary = fuzzerSetupNode("fuzzerPreflightSummary");
   const notice = fuzzerSetupNode("fuzzerPreflightNotice");
+  const targetSummary = fuzzerSetupNode("fuzzerTargetSummary");
+  if (targetSummary) targetSummary.textContent = "";
   const samples = fuzzerSetupNode("fuzzerPreviewSamples");
   const previewNotes = fuzzerSetupNode("fuzzerPreviewNotes");
+  if (!workspaceLoaded) {
+    summary.textContent = "";
+    notice.textContent = state.workspaceLoadError || "Loading session…";
+    notice.classList?.toggle("fuzzer-notice-error", !!state.workspaceLoadError);
+    if (previewNotes) previewNotes.textContent = "";
+    if (samples) samples.textContent = "Preview is available after the session loads.";
+    return;
+  }
   if (!model) {
     summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "No request selected.";
-    notice.textContent = raw.trim() ? error : "Send a request from History or Replay.";
-    if (previewNotes) previewNotes.textContent = "";
+    notice.textContent = raw.trim() ? error : "Paste a raw HTTP request, or send one from History / Replay.";
+    notice.classList?.toggle("fuzzer-notice-error", !!raw.trim() && !!error);
+    if (previewNotes) previewNotes.textContent = bodyEncodingHelp;
     if (samples) samples.textContent = "Add a valid request and payloads to preview.";
     return;
   }
   const destination = typeof model.effectiveTarget === "string" ? model.effectiveTarget : JSON.stringify(model.effectiveTarget);
   const authorityMayChange = (model.warnings || []).some((message) => /^(Host markers|Header-name markers)/.test(message));
-  const sharing = model.attackType === "sniper" ? " (one at a time)" : " (shared payload)";
-  summary.textContent = `${model.payloadCount} payload${model.payloadCount === 1 ? "" : "s"} → ${model.requestCount} planned request${model.requestCount === 1 ? "" : "s"} · ${model.markerCount} position${model.markerCount === 1 ? "" : "s"}${model.markerCount > 1 ? sharing : ""} · ${authorityMayChange ? "Template target: " : ""}${destination || "Target unavailable"} · ${model.httpVersion || "Automatic HTTP"}`;
+  summary.textContent = `${model.payloadCount} payload${model.payloadCount === 1 ? "" : "s"} → ${model.requestCount} planned request${model.requestCount === 1 ? "" : "s"}`;
+  if (targetSummary) targetSummary.textContent = `${authorityMayChange ? "Template target: " : ""}${destination || "Target unavailable"} · ${model.httpVersion || "Automatic HTTP"}`;
   const errors = (model.errors || []).filter((message) => !message.startsWith("Mark at least one position") && message !== "Fuzzer needs at least one payload.");
   const running = state.fuzzerAttackRecord?.running ? state.fuzzerAttackRecord : null;
   // A start that failed says so here, beside Start, until the draft changes.
   const failed = state.fuzzerNoticeError && state.fuzzerNotice ? state.fuzzerNotice : "";
-  notice.textContent = failed || (busy ? (running ? `Sending… ${running.results.length} of ${running.planned || model.requestCount}` : "Starting…")
+  notice.textContent = failed || (busy ? (running ? `Sending… ${running.results.length} of ${running.planned || model.requestCount}` : state.fuzzerRunningAttackId ? "Run in progress…" : "Starting…")
     : errors[0] || (!model.markerCount ? "Select a value to replace." : !model.payloadCount ? "Add payloads." : ""));
   notice.classList?.toggle("fuzzer-notice-error", !!failed || (!busy && !!errors[0]));
   if (!notice.textContent && authorityMayChange) {
@@ -17451,6 +18139,25 @@ function scheduleFuzzerSetupRender() {
 }
 
 function fuzzerRawOffsetForEditorOffset(raw, offset) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > raw.length) {
+    throw new Error("The selection changed. Select a value again.");
+  }
+  // LF drafts already use the editor's UTF-16 coordinates; avoid scanning
+  // the entire prefix on each caret move in a large request body.
+  if (!raw.includes("\r")) return offset;
+  // Most requests have few CRLF headers and a large body. Find those pairs
+  // natively instead of walking every UTF-16 unit. Cap the work so dense
+  // newline input falls back to the original mapper without a long pair scan.
+  let mappedOffset = offset;
+  let pair = raw.indexOf("\r\n");
+  for (let pairs = 0; pairs < 128; pairs++) {
+    if (pair === -1 || pair >= mappedOffset) {
+      if (mappedOffset <= raw.length) return mappedOffset;
+      throw new Error("The selection changed. Select a value again.");
+    }
+    mappedOffset++;
+    pair = raw.indexOf("\r\n", pair + 2);
+  }
   let visibleOffset = 0;
   for (let index = 0; index < raw.length; index++) {
     if (visibleOffset === offset) return index;
@@ -17462,16 +18169,18 @@ function fuzzerRawOffsetForEditorOffset(raw, offset) {
 }
 
 function markFuzzerPosition(start, end, expectedRaw = fuzzerRequestTextForAction()) {
-  if (state.fuzzerRunning) throw new Error("Wait for the current run to finish before changing positions.");
+  if (!workspaceLoaded) return false;
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
   const raw = fuzzerRequestTextForAction();
   if (raw !== expectedRaw) throw new Error("The request changed. Choose the value again.");
   const template = parseFuzzerRequestTemplate(raw);
   const boundary = /\r?\n\r?\n/.exec(raw);
   const bodyStart = boundary ? boundary.index + boundary[0].length : raw.length;
-  if (end > bodyStart && (template.body_encoding === "base64" || template.preview_truncated)) {
+  if (boundary && (end > bodyStart || start === bodyStart) && (template.body_encoding === "base64" || template.preview_truncated)) {
     throw new Error("Body positions require a complete UTF-8 request body. Header and query positions remain available.");
   }
-  const next = SniperFuzzerWorkflow.replaceSelection(raw, start, end);
+  const next = SniperFuzzerWorkflow.markRequestSelection(raw, start, end);
+  parseFuzzerRequestTemplate(next);
   state._fuzzerMarkerUndo = { before: raw, after: next, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
   updateFuzzerRequestText(next, { userEdit: true });
   scheduleWorkspaceStateSave();
@@ -17480,7 +18189,7 @@ function markFuzzerPosition(start, end, expectedRaw = fuzzerRequestTextForAction
   if (editor?.view) {
     const anchor = next.slice(0, start).replace(/\r\n?/g, "\n").length;
     const marked = next.slice(start, end + 2).replace(/\r\n?/g, "\n").length;
-    editor.view.dispatch({ selection: { anchor, head: anchor + marked }, scrollIntoView: true });
+    editor.view.dispatch({ selection: { anchor: start === end ? anchor + 1 : anchor, head: start === end ? anchor + 1 : anchor + marked }, scrollIntoView: true });
     editor.view.focus();
   }
 }
@@ -17490,27 +18199,96 @@ function markFuzzerEditorSelection() {
   const editor = getCMView("fuzzerReq");
   const selection = editor?.view?.state?.selection?.main;
   if (selection) {
-    if (selection.empty || selection.from === selection.to) throw new Error("Select the value in the request editor first.");
     markFuzzerPosition(fuzzerRawOffsetForEditorOffset(raw, selection.from), fuzzerRawOffsetForEditorOffset(raw, selection.to), raw);
   } else {
     const input = els.fuzzerRequestEditor;
-    if (!input || input.selectionStart === input.selectionEnd) throw new Error("Select the value in the request editor first.");
-    markFuzzerPosition(input.selectionStart, input.selectionEnd, raw);
+    if (!input) throw new Error("Place the caret or select a value in the request editor first.");
+    markFuzzerPosition(fuzzerRawOffsetForEditorOffset(raw, input.selectionStart), fuzzerRawOffsetForEditorOffset(raw, input.selectionEnd), raw);
   }
 }
 
+function fuzzerMarkerRemoval() {
+  const raw = fuzzerRequestTextForAction();
+  const editor = getCMView("fuzzerReq");
+  const selection = editor?.view?.state?.selection?.main;
+  const input = els.fuzzerRequestEditor;
+  if (!selection && !input) throw new Error("Select a marked position in the request editor first.");
+  const start = fuzzerRawOffsetForEditorOffset(raw, selection ? selection.from : input.selectionStart);
+  const end = fuzzerRawOffsetForEditorOffset(raw, selection ? selection.to : input.selectionEnd);
+  return SniperFuzzerWorkflow.removeRequestSelection(raw, start, end);
+}
+
+function wireFuzzerMarkerSelection(editor) {
+  if (!editor?.view || editor._fuzzerMarkerSelectionWired) return;
+  editor._fuzzerMarkerSelectionWired = true;
+  editor.view.dispatch({ effects: CM.StateEffect.appendConfig.of(CM.EditorView.updateListener.of((update) => {
+    if (update.selectionSet || update.docChanged) renderFuzzerRemoveMarkerControl();
+  })) });
+}
+
+function renderFuzzerRemoveMarkerControl() {
+  const button = fuzzerSetupNode("fuzzerRemoveMarkerButton");
+  if (!button) return;
+  button.disabled = true;
+  if (!workspaceLoaded || state.fuzzerRunning || state.fuzzerRunningAttackId) return;
+  try {
+    fuzzerMarkerRemoval();
+    button.disabled = false;
+  } catch (_) { /* No unambiguous marked position is selected. */ }
+}
+
+function removeFuzzerEditorPosition() {
+  if (!workspaceLoaded) return false;
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
+  const raw = fuzzerRequestTextForAction();
+  const result = fuzzerMarkerRemoval();
+  state._fuzzerMarkerUndo = { before: raw, after: result.text, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
+  updateFuzzerRequestText(result.text, { userEdit: true });
+  scheduleWorkspaceStateSave();
+  renderFuzzer();
+  const anchor = result.text.slice(0, result.from).replace(/\r\n?/g, "\n").length;
+  const head = result.text.slice(0, result.to).replace(/\r\n?/g, "\n").length;
+  const editor = getCMView("fuzzerReq");
+  if (editor?.view) {
+    editor.view.dispatch({ selection: { anchor, head }, scrollIntoView: true });
+    editor.view.focus();
+  } else if (els.fuzzerRequestEditor) {
+    els.fuzzerRequestEditor.setSelectionRange(anchor, head);
+    els.fuzzerRequestEditor.focus();
+  }
+  renderFuzzerRemoveMarkerControl();
+}
+
+function clearFuzzerMarkers() {
+  if (!workspaceLoaded) return false;
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
+  const raw = fuzzerRequestTextForAction();
+  const next = SniperFuzzerWorkflow.clearRequestPositions(raw);
+  if (next === raw) return;
+  state._fuzzerMarkerUndo = { before: raw, after: next, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
+  updateFuzzerRequestText(next, { userEdit: true });
+  scheduleWorkspaceStateSave();
+  renderFuzzer();
+  getCMView("fuzzerReq")?.view?.focus();
+}
+
 function undoFuzzerMarker() {
+  if (!workspaceLoaded) return false;
   const undo = state._fuzzerMarkerUndo;
-  if (state.fuzzerRunning || !undo || undo.after !== fuzzerRequestTextForAction() || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken) {
-    throw new Error("The request changed after that position was added. Use the editor's undo instead.");
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId || !undo || undo.after !== fuzzerRequestTextForAction() || undo.sessionId !== currentSessionId() || undo.runToken !== state.fuzzerRunToken) {
+    throw new Error("The request changed after the marker action. Use the editor's undo instead.");
   }
   state._fuzzerMarkerUndo = null;
   updateFuzzerRequestText(undo.before, { userEdit: true });
   scheduleWorkspaceStateSave();
   renderFuzzer();
+  const editor = getCMView("fuzzerReq");
+  if (editor?.view) editor.view.focus();
+  else els.fuzzerRequestEditor?.focus();
 }
 
 function applyFuzzerPayloadList(payloads, mode = "append") {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning) throw new Error("Wait for the current run to finish before loading payloads.");
   const incoming = SniperFuzzerWorkflow.validatePayloads(payloads);
   if (!incoming.valid) throw new Error(incoming.errors.join(" "));
@@ -17519,23 +18297,32 @@ function applyFuzzerPayloadList(payloads, mode = "append") {
   const next = [...existing, ...payloads];
   const text = SniperFuzzerWorkflow.payloadText(next);
   fuzzerPayloadTextWithinLimits(text, next);
+  // An explicit list action supersedes a pending file even when its text is unchanged.
+  state._fuzzerFileGeneration = (state._fuzzerFileGeneration || 0) + 1;
   updateFuzzerPayloadsText(text, { userEdit: true });
   scheduleWorkspaceStateSave();
   renderFuzzer();
 }
 
 async function importFuzzerPayloadFile(file, mode = "append") {
+  if (!workspaceLoaded) return false;
   if (!file) return;
   // Even a rejected replacement selection supersedes an older pending read.
   const generation = (state._fuzzerFileGeneration || 0) + 1;
   state._fuzzerFileGeneration = generation;
-  if (file.size > 4 * 1024 * 1024) throw new Error("Payload files cannot exceed 4 MiB.");
   const sessionId = currentSessionId();
   const draftVersion = state.fuzzerDraftVersion || 0;
   const runToken = state.fuzzerRunToken;
-  const ownsImport = () => state._fuzzerFileGeneration === generation && currentSessionId() === sessionId
+  const ownsImport = () => workspaceLoaded && state._fuzzerFileGeneration === generation && currentSessionId() === sessionId
     && (state.fuzzerDraftVersion || 0) === draftVersion && state.fuzzerRunToken === runToken && !state.fuzzerRunning;
+  // Status belongs to the file intent, not the visible tool. Switching tools
+  // keeps a valid import running and its failure available when the user returns.
+  const status = { generation, sessionId, draftVersion, runToken, error: false,
+    message: `Reading payload file (${mode === "replace" ? "replace" : "append"})…` };
+  state._fuzzerPayloadImportStatus = status;
+  renderFuzzerPayloadImportStatus();
   try {
+    if (file.size > 4 * 1024 * 1024) throw new Error("Payload files cannot exceed 4 MiB.");
     const bytes = await file.arrayBuffer();
     if (!ownsImport()) return false;
     if (bytes.byteLength > 4 * 1024 * 1024) throw new Error("Payload files cannot exceed 4 MiB.");
@@ -17550,20 +18337,49 @@ async function importFuzzerPayloadFile(file, mode = "append") {
     const payloads = fuzzerPayloadTextWithinLimits(text);
     if (!payloads.length) throw new Error("The selected file contains no payloads.");
     applyFuzzerPayloadList(payloads, mode);
+    if (state._fuzzerPayloadImportStatus === status) state._fuzzerPayloadImportStatus = null;
+    renderFuzzerPayloadImportStatus();
     return true;
   } catch (error) {
     if (!ownsImport()) return false;
+    status.error = true;
+    status.message = `Import failed: ${error?.message || "Could not read the payload file. Try again."}`;
+    renderFuzzerPayloadImportStatus();
     throw error;
+  }
+}
+
+function finishFuzzerOptionChange(changed) {
+  if (changed) state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+  // A settled Start failure belongs to the old draft. Polling/unavailable-run
+  // warnings still belong to their retained results and must remain visible.
+  if (changed && state.fuzzerNoticeError && !state.fuzzerRunning && !state.fuzzerRunningAttackId
+    && !state.fuzzerAttackRecord && !state.fuzzerAttackRecordId) {
+    state.fuzzerNoticeError = false;
+    state.fuzzerNotice = "";
+    renderFuzzer(); // Also retire the duplicate empty-results/metadata notice.
+  } else {
+    renderFuzzerSetup();
   }
 }
 
 function initFuzzerSetupControls() {
   const bind = (id, callback) => fuzzerSetupNode(id)?.addEventListener("click", () => {
+    if (!workspaceLoaded) return;
     try { callback(); } catch (error) { fuzzerSetupError(error); }
   });
+  fuzzerSetupNode("fuzzerTransportSelect")?.addEventListener("change", (event) => {
+    setFuzzerTransport(event.target.value);
+  });
   bind("fuzzerMarkSelectionButton", markFuzzerEditorSelection);
+  bind("fuzzerRemoveMarkerButton", removeFuzzerEditorPosition);
+  for (const event of ["select", "keyup", "mouseup"]) {
+    els.fuzzerRequestEditor?.addEventListener(event, renderFuzzerRemoveMarkerControl);
+  }
   bind("fuzzerUndoMarkerButton", undoFuzzerMarker);
+  bind("fuzzerClearMarkersButton", clearFuzzerMarkers);
   fuzzerSetupNode("fuzzerCandidateSelect")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
     const button = fuzzerSetupNode("fuzzerMarkCandidateButton");
     if (button) button.disabled = !!state.fuzzerRunning || !event.target.value;
   });
@@ -17574,24 +18390,36 @@ function initFuzzerSetupControls() {
     markFuzzerPosition(candidate.start, candidate.end, select._fuzzerRaw);
   });
   fuzzerSetupNode("fuzzerAttackType")?.addEventListener("change", (event) => {
-    state.fuzzerAttackType = event.target.value === "battering_ram" ? "battering_ram" : "sniper";
-    renderFuzzerSetup();
+    if (!workspaceLoaded) return;
+    const value = event.target.value === "battering_ram" ? "battering_ram" : "sniper";
+    // Setup edits retire pending replacements without hiding historical results.
+    const changed = value !== (state.fuzzerAttackType || "sniper");
+    state.fuzzerAttackType = value;
+    finishFuzzerOptionChange(changed);
   });
   fuzzerSetupNode("fuzzerUrlEncode")?.addEventListener("change", (event) => {
-    state.fuzzerUrlEncode = !!event.target.checked;
-    renderFuzzerSetup();
+    if (!workspaceLoaded) return;
+    const value = !!event.target.checked;
+    const changed = value !== (state.fuzzerUrlEncode !== false);
+    state.fuzzerUrlEncode = value;
+    finishFuzzerOptionChange(changed);
   });
   fuzzerSetupNode("fuzzerConcurrency")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
     const value = Math.round(Number(event.target.value));
-    state.fuzzerConcurrency = Number.isFinite(value) ? Math.min(16, Math.max(1, value)) : 4;
-    renderFuzzerSetup();
+    const concurrency = Number.isFinite(value) ? Math.min(16, Math.max(1, value)) : 4;
+    const changed = concurrency !== (state.fuzzerConcurrency || 4);
+    state.fuzzerConcurrency = concurrency;
+    finishFuzzerOptionChange(changed);
   });
   bind("fuzzerImportPayloadButton", () => fuzzerSetupNode("fuzzerPayloadFile")?.click());
   fuzzerSetupNode("fuzzerPayloadFile")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
     const file = event.target.files?.[0];
     const mode = fuzzerSetupNode("fuzzerPayloadImportMode")?.value || "append";
     event.target.value = "";
-    importFuzzerPayloadFile(file, mode).catch(fuzzerSetupError);
+    // The importer retains failures beside the file controls, without a global toast.
+    importFuzzerPayloadFile(file, mode).catch(() => {});
   });
   bind("fuzzerApplyPresetButton", () => {
     const preset = SniperFuzzerWorkflow.presets.find((item) => item.id === fuzzerSetupNode("fuzzerPayloadPreset")?.value);
@@ -17606,6 +18434,7 @@ function initFuzzerSetupControls() {
 }
 
 async function openFuzzerFromReplay() {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   const tab = getActiveReplayTab();
   if (!tab || tab.type === "websocket") {
@@ -17636,13 +18465,14 @@ async function openFuzzerFromReplay() {
 }
 
 async function openFuzzerFromRecordLoader(loadRecord, sourceIsCurrent = () => true, applySource = openFuzzerFromRecord) {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   const generation = state._fuzzerImportGeneration = (state._fuzzerImportGeneration || 0) + 1;
   const sessionId = currentSessionId();
   const workspaceGeneration = workspaceStateGeneration;
   const draftVersion = state.fuzzerDraftVersion || 0;
   const runToken = state.fuzzerRunToken || 0;
-  const ownsImport = () => generation === state._fuzzerImportGeneration
+  const ownsImport = () => workspaceLoaded && generation === state._fuzzerImportGeneration
     && sessionId === currentSessionId() && workspaceGeneration === workspaceStateGeneration
     && draftVersion === (state.fuzzerDraftVersion || 0) && runToken === (state.fuzzerRunToken || 0)
     && !state.fuzzerRunning && sourceIsCurrent();
@@ -17671,6 +18501,7 @@ async function openFuzzerFromSelection() {
 }
 
 function openFuzzerFromRecord(record) {
+  if (!workspaceLoaded) return false;
   if (state.fuzzerRunning) throw new Error("Wait for the current Fuzzer run to finish before replacing its request.");
   if (record.kind === "tunnel") {
     throw new Error("Tunnel records cannot be sent to Fuzzer.");
@@ -17751,6 +18582,8 @@ function handleReplayActionError(error) {
 }
 
 function initFuzzerResizers() {
+  // A lost mouseup or another divider drag must retire the previous gesture.
+  let finishResize = null;
   const colHandle = document.getElementById("fuzzerColResizer");
   const rowHandle = document.getElementById("fuzzerRowResizer");
   const topRow = document.querySelector(".fuzzer-top-row");
@@ -17760,6 +18593,7 @@ function initFuzzerResizers() {
   // Column resizer: template ↔ payloads
   if (colHandle && topRow && templateCard && payloadsCard) {
     colHandle.addEventListener("mousedown", (e) => {
+      finishResize?.();
       e.preventDefault();
       const startX = e.clientX;
       const startTemplateW = templateCard.offsetWidth;
@@ -17771,19 +18605,29 @@ function initFuzzerResizers() {
       document.body.classList.add("pane-resizing-x");
       colHandle.classList.add("active");
       const onMove = (me) => {
+        if (finishResize !== onUp) return;
+        if (me.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = me.clientX - startX;
         const newTemplateW = Math.max(minTemplateW, Math.min(totalW - minPayloadsW, startTemplateW + delta));
         // Keep the split proportional when the window is resized later.
         topRow.style.setProperty("--fuzzer-request-share", String(newTemplateW / totalW));
       };
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-x");
         colHandle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
       };
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
     colHandle.addEventListener("dblclick", () => {
       topRow.style.removeProperty("--fuzzer-request-share");
@@ -17793,6 +18637,7 @@ function initFuzzerResizers() {
   // Row resizer: top row ↔ results
   if (rowHandle && topRow) {
     rowHandle.addEventListener("mousedown", (e) => {
+      finishResize?.();
       e.preventDefault();
       const startY = e.clientY;
       const startH = topRow.offsetHeight;
@@ -17801,18 +18646,28 @@ function initFuzzerResizers() {
       document.body.classList.add("pane-resizing-y");
       rowHandle.classList.add("active");
       const onMove = (me) => {
+        if (finishResize !== onUp) return;
+        if (me.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = me.clientY - startY;
-        const newH = Math.max(120, Math.min(layoutH - 200, startH + delta));
+        const newH = Math.max(180, Math.min(layoutH - 360, startH + delta));
         topRow.style.height = `${newH}px`;
       };
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-y");
         rowHandle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
       };
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
     rowHandle.addEventListener("dblclick", () => {
       topRow.style.height = "";
@@ -17824,25 +18679,41 @@ function initFuzzerResizers() {
   const detailPanel = els.fuzzerDetailPanel;
   if (detailHandle && detailPanel) {
     detailHandle.addEventListener("mousedown", (e) => {
+      finishResize?.();
       e.preventDefault();
       const startY = e.clientY;
       const startH = detailPanel.offsetHeight;
-      const parentH = detailPanel.parentElement.offsetHeight;
+      const parent = detailPanel.parentElement;
+      const parentH = parent.offsetHeight;
+      const chromeH = Array.from(parent.children).filter((node) => node !== detailPanel
+        && !node.classList.contains("history-table-shell") && node !== detailHandle)
+        .reduce((height, node) => height + node.offsetHeight, 0);
+      const reservedH = chromeH + 132 + detailHandle.offsetHeight;
       document.body.classList.add("pane-resizing-y");
       detailHandle.classList.add("active");
       const onMove = (me) => {
+        if (finishResize !== onUp) return;
+        if (me.buttons === 0) {
+          onUp();
+          return;
+        }
         const delta = startY - me.clientY; // drag up = bigger detail
-        const newH = Math.max(100, Math.min(parentH - 100, startH + delta));
+        const newH = Math.max(140, Math.min(parentH - reservedH, startH + delta));
         detailPanel.style.flex = `0 0 ${newH}px`;
       };
       const onUp = () => {
+        if (finishResize !== onUp) return;
+        finishResize = null;
         document.body.classList.remove("pane-resizing-y");
         detailHandle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
+        window.removeEventListener("blur", onUp);
       };
+      finishResize = onUp;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+      window.addEventListener("blur", onUp);
     });
     detailHandle.addEventListener("dblclick", () => {
       detailPanel.style.flex = "";
@@ -17851,6 +18722,8 @@ function initFuzzerResizers() {
 }
 
 function resetFuzzer() {
+  if (!workspaceLoaded) return false;
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) return;
   invalidateFuzzerRun();
   updateFuzzerRequestText(
     state.fuzzerBaseRequest ? buildEditableRawRequest(state.fuzzerBaseRequest) : "",
@@ -17866,6 +18739,7 @@ function resetFuzzer() {
 }
 
 function updateFuzzerRequestText(text, { userEdit = false } = {}) {
+  if (userEdit && !workspaceLoaded) return;
   const normalized = text || "";
   if (state.fuzzerRequestText !== normalized) {
     state.fuzzerRequestText = normalized;
@@ -17875,6 +18749,7 @@ function updateFuzzerRequestText(text, { userEdit = false } = {}) {
 }
 
 function updateFuzzerPayloadsText(text, { userEdit = false } = {}) {
+  if (userEdit && !workspaceLoaded) return;
   const normalized = text || "";
   if (state.fuzzerPayloadsText !== normalized) {
     state.fuzzerPayloadsText = normalized;
@@ -17885,11 +18760,22 @@ function updateFuzzerPayloadsText(text, { userEdit = false } = {}) {
 
 function markFuzzerDraftChanged() {
   state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+  // A failure belongs to the previous draft, not the corrected setup.
+  const clearedFailure = !!state.fuzzerNoticeError;
+  if (clearedFailure) {
+    state.fuzzerNoticeError = false;
+    state.fuzzerNotice = "";
+  }
   if (state.fuzzerAttackRecord || state.fuzzerAttackRecordId) {
     clearFuzzerAttackRecord();
     state._selectedFuzzerResultKey = null;
-    state.fuzzerNotice = "Fuzzer draft changed. Start a new run to see results for the current template.";
+    state.fuzzerNotice = state.fuzzerRunningAttackId
+      ? "Draft changed. The current run is still active; edits apply to the next run."
+      : "Fuzzer draft changed. Start a new run to see results for the current template.";
+    if (state.fuzzerRestoredRun) state.fuzzerRestoredRun.draftNotice = state.fuzzerNotice;
     hideFuzzerDetailPanel();
+    renderFuzzer();
+  } else if (clearedFailure) {
     renderFuzzer();
   }
 }
@@ -17980,7 +18866,8 @@ function isCurrentFuzzerRun(runToken, sessionId) {
 }
 
 async function runFuzzerAttack() {
-  if (state.fuzzerRunning) {
+  if (!workspaceLoaded) return false;
+  if (state.fuzzerRunning || state.fuzzerRunningAttackId) {
     return;
   }
   const runToken = (state.fuzzerRunToken || 0) + 1;
@@ -18171,8 +19058,9 @@ async function runFuzzerAttack() {
 const FUZZER_POLL_MS = 700;
 
 // Reads a running attack until it ends, showing each read in place so the
-// selected result stays selected. Null when `owns` says the view moved on.
-async function followFuzzerAttack(recordId, sessionId, owns) {
+// selected result stays selected. Run ownership keeps Stop alive independently
+// of a mutable result view. Null when that run ownership is released.
+async function followFuzzerAttack(recordId, sessionId, owns, ownsView = owns) {
   let readErrorNotice = "";
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, FUZZER_POLL_MS));
@@ -18181,7 +19069,7 @@ async function followFuzzerAttack(recordId, sessionId, owns) {
       const response = await fetch(sessionQueryPath(`/api/fuzzer/attacks/${encodeURIComponent(recordId)}`, sessionId));
       if (!owns()) return null;
       if (response.status === 404) {
-        if (state.fuzzerAttackRecord?.id === recordId) {
+        if (ownsView() && state.fuzzerAttackRecord?.id === recordId) {
           state.fuzzerAttackRecord = { ...state.fuzzerAttackRecord, running: false, status: "unavailable" };
           state.fuzzerNotice = "Attack is no longer available. Last received results are shown.";
           state.fuzzerNoticeError = true;
@@ -18194,19 +19082,19 @@ async function followFuzzerAttack(recordId, sessionId, owns) {
       const record = normalizeFuzzerAttackRecord(await response.json());
       if (!owns()) return null;
       if (!record || record.id !== recordId) throw new Error("The running-attack response did not match this run.");
-      if (readErrorNotice && state.fuzzerNotice === readErrorNotice) {
+      if (ownsView() && readErrorNotice && state.fuzzerNotice === readErrorNotice) {
         state.fuzzerNotice = "";
         state.fuzzerNoticeError = false;
       }
       readErrorNotice = "";
       if (!record.running) return record;
-      if (state.fuzzerAttackRecord?.id === record.id) state.fuzzerAttackRecord = record;
+      if (ownsView() && state.fuzzerAttackRecord?.id === record.id) state.fuzzerAttackRecord = record;
       renderFuzzer();
     } catch (error) {
       if (!owns()) return null;
       // A read failure does not stop the server's attack. Keep its last rows
       // and Stop control while polling again, rather than clearing the run.
-      if (state.fuzzerAttackRecord?.id === recordId) {
+      if (ownsView() && state.fuzzerAttackRecord?.id === recordId) {
         readErrorNotice = `${error?.message || "Could not read the running attack."} Retrying…`;
         state.fuzzerNotice = readErrorNotice;
         state.fuzzerNoticeError = true;
@@ -18223,6 +19111,7 @@ async function stopFuzzerAttack() {
   if (state.fuzzerStopRequest?.id === id && state.fuzzerStopRequest?.sessionId === sessionId) return;
   const request = { id, sessionId };
   state.fuzzerStopRequest = request;
+  state.fuzzerStopError = null;
   const ownsRequest = () => state.fuzzerStopRequest === request
     && currentSessionId() === sessionId && state.fuzzerRunningAttackId === id;
   renderFuzzer();
@@ -18235,11 +19124,10 @@ async function stopFuzzerAttack() {
     if (!ownsRequest()) return;
     // 404: it ended on its own meanwhile; the run reads its end either way.
     if (!response.ok && response.status !== 404) {
-      const message = await readApiErrorMessage(response, "Could not stop the attack.");
-      if (ownsRequest()) showToast(message, "error", 4000);
+      state.fuzzerStopError = { id, sessionId };
     }
-  } catch (error) {
-    if (ownsRequest()) showToast(error?.message || "Could not stop the attack.", "error", 4000);
+  } catch (_) {
+    if (ownsRequest()) state.fuzzerStopError = { id, sessionId };
   } finally {
     if (state.fuzzerStopRequest === request) {
       state.fuzzerStopRequest = null;
@@ -18306,10 +19194,20 @@ function handleSequenceActionError(error) {
 }
 
 async function createNewSequence() {
-  if (!(await flushSequenceDraft())) {
+  const selectionGeneration = (state.sequenceSelectionGeneration || 0) + 1;
+  state.sequenceSelectionGeneration = selectionGeneration;
+  const sessionId = currentSequenceSessionId();
+  const selectedBeforeCreate = state.selectedSequenceId;
+  const draftVersion = state.sequenceDraftVersion || 0;
+  const runGeneration = state.sequenceRunGeneration || 0;
+  const ownsSelection = () => state.sequenceSelectionGeneration === selectionGeneration
+    && isCurrentSequenceSession(sessionId)
+    && state.selectedSequenceId === selectedBeforeCreate
+    && (state.sequenceDraftVersion || 0) === draftVersion
+    && (state.sequenceRunGeneration || 0) === runGeneration;
+  if (!(await flushSequenceDraft()) || !ownsSelection()) {
     return false;
   }
-  const sessionId = currentSequenceSessionId();
   const def = {
     id: generateUuid(),
     name: "New sequence",
@@ -18335,21 +19233,30 @@ async function createNewSequence() {
   if (!loaded) {
     return false;
   }
+  if (!ownsSelection()) {
+    // Creation already succeeded; show it without replacing a newer editor.
+    // Import callers must not append their request to that newer selection.
+    renderSequenceList();
+    showToast("New sequence created in the list. Kept your current sequence open.");
+    return false;
+  }
   state.selectedSequenceId = def.id;
   state.editingSequence = JSON.parse(JSON.stringify(def));
   state.sequenceDirty = false;
   bumpSequenceDraftVersion();
+  state.sequenceRunResult = null;
   renderSequencePanel();
   return true;
 }
 
 async function selectSequence(id) {
+  // Re-selecting the current sequence also supersedes navigation waiting on a save.
+  const selectionGeneration = (state.sequenceSelectionGeneration || 0) + 1;
+  state.sequenceSelectionGeneration = selectionGeneration;
   if (state.selectedSequenceId === id) {
     syncSequenceStepFromDom({ allowInvalidRequests: true });
     return;
   }
-  const selectionGeneration = (state.sequenceSelectionGeneration || 0) + 1;
-  state.sequenceSelectionGeneration = selectionGeneration;
   if (!(await flushSequenceDraft())) {
     return;
   }
@@ -18372,6 +19279,28 @@ function bumpSequenceDraftVersion() {
 function markSequenceDraftDirty() {
   state.sequenceDirty = true;
   bumpSequenceDraftVersion();
+}
+
+function sequenceDisplayName(value) {
+  const name = String(value ?? "");
+  return name.trim() ? name : "Unnamed sequence";
+}
+
+function sequenceNameInputValue(value) {
+  return String(value ?? "").replace(/[\r\n]/g, "");
+}
+
+function updateSequenceNameFromInput() {
+  const editing = state.editingSequence;
+  const input = document.getElementById("sequenceNameInput");
+  if (!editing || input.disabled || input.value === sequenceNameInputValue(editing.name)) return;
+  // Only a visible edit replaces the raw name: rendering a single-line input
+  // must not normalize names loaded from another client during an unrelated save.
+  editing.name = input.value;
+  markSequenceDraftDirty();
+  const title = document.getElementById("sequenceEditorTitle");
+  title.textContent = sequenceDisplayName(editing.name);
+  title.title = title.textContent;
 }
 
 function addSequenceStep() {
@@ -18397,6 +19326,56 @@ function removeSequenceStep(index) {
   renderSequencePanel();
 }
 
+function moveSequenceStep(index, direction) {
+  const steps = state.editingSequence?.steps;
+  if (!Array.isArray(steps) || !Number.isInteger(index) || ![-1, 1].includes(direction)) return false;
+  const nextIndex = index + direction;
+  if (index < 0 || index >= steps.length || nextIndex < 0 || nextIndex >= steps.length) return false;
+
+  const container = document.getElementById("sequenceStepsContainer");
+  const nameFocused = document.activeElement === document.getElementById("sequenceNameInput");
+  const selections = new Map();
+  container.querySelectorAll(".sequence-step-card").forEach((card) => {
+    selections.set(card.dataset.stepId, Array.from(card.querySelectorAll("input, textarea, select"), (field) => ({
+      focused: field === document.activeElement,
+      start: field.selectionStart,
+      end: field.selectionEnd,
+      direction: field.selectionDirection,
+    })));
+  });
+  // DOM fields still correspond to the old order. Sync before moving whole
+  // objects so invalid request drafts and extraction edits follow their step.
+  syncSequenceStepFromDom({ allowInvalidRequests: true });
+  const [moved] = steps.splice(index, 1);
+  steps.splice(nextIndex, 0, moved);
+  markSequenceDraftDirty();
+  renderSequencePanel();
+
+  let restoredFieldFocus = false;
+  let movedCard = null;
+  container.querySelectorAll(".sequence-step-card").forEach((card) => {
+    if (card.dataset.stepId === moved.id) movedCard = card;
+    const previous = selections.get(card.dataset.stepId) || [];
+    card.querySelectorAll("input, textarea, select").forEach((field, fieldIndex) => {
+      const selection = previous[fieldIndex];
+      if (!selection) return;
+      if (selection.focused) {
+        field.focus({ preventScroll: true });
+        restoredFieldFocus = true;
+      }
+      if (typeof selection.start === "number" && typeof selection.end === "number") {
+        field.setSelectionRange(selection.start, selection.end, selection.direction);
+      }
+    });
+  });
+  // Keep keyboard activation on the same action even at an unavailable edge:
+  // repeated Enter/Space must neither reverse the move nor type into a label.
+  if (!restoredFieldFocus && !nameFocused) {
+    movedCard?.querySelector(`.step-move[data-move-direction="${direction}"]`)?.focus();
+  }
+  return true;
+}
+
 function addExtractionRule(stepIndex) {
   if (!state.editingSequence) return;
   const step = state.editingSequence.steps[stepIndex];
@@ -18408,7 +19387,7 @@ function addExtractionRule(stepIndex) {
     group: 1,
   });
   markSequenceDraftDirty();
-  renderSequencePanel();
+  renderSequencePanel({ focusExtractionStepId: step.id });
 }
 
 function removeExtractionRule(stepIndex, ruleIndex) {
@@ -18420,11 +19399,31 @@ function removeExtractionRule(stepIndex, ruleIndex) {
   renderSequencePanel();
 }
 
+function sequenceExtractionGuidance(rule) {
+  if (rule.source === "response_header") {
+    return { label: "Header name", placeholder: "X-Example", help: "Name only; saves its full value." };
+  }
+  // Imported rules can use group 0 or a later capture; do not describe every
+  // rule as the UI's group-1 default or normalize its saved group.
+  const group = rule.group ?? 1;
+  return {
+    label: "Body regex",
+    placeholder: group === 1 ? "csrf=([a-z]+)" : group === 0 ? "csrf=[a-z]+" : `Regex with capture group ${group}`,
+    help: group === 0 ? "Saves the whole match (group 0)." : `Saves capture group ${group}.`,
+  };
+}
+
+function sequenceRequestErrorMessage(step, index, error) {
+  const label = String(step.label || "").trim();
+  return `Step ${index + 1}${label ? ` (${label})` : ""} raw HTTP request: ${error}`;
+}
+
 function syncSequenceStepFromDom({ allowInvalidRequests = false } = {}) {
   if (!state.editingSequence) return;
   const container = document.getElementById("sequenceStepsContainer");
   if (!container) return;
   const cards = container.querySelectorAll(".sequence-step-card");
+  let firstInvalidRequest = null;
   cards.forEach((card, i) => {
     const step = state.editingSequence.steps[i];
     if (!step) return;
@@ -18442,9 +19441,17 @@ function syncSequenceStepFromDom({ allowInvalidRequests = false } = {}) {
         delete step.request_parse_error;
       } catch (error) {
         step.request_parse_error = error?.message || "Invalid request";
-        if (!allowInvalidRequests) {
-          throw error;
+        if (!allowInvalidRequests && !firstInvalidRequest) {
+          firstInvalidRequest = { card, input: reqTextarea, message: sequenceRequestErrorMessage(step, i, step.request_parse_error) };
         }
+      }
+      const errorEl = card.querySelector(".step-request-error");
+      if (errorEl) {
+        // Typing and draft saves stay quiet until Run has exposed this error.
+        const showError = Boolean(step.request_parse_error && (!allowInvalidRequests || errorEl.textContent));
+        errorEl.textContent = showError ? sequenceRequestErrorMessage(step, i, step.request_parse_error) : "";
+        errorEl.classList.toggle("hidden", !showError);
+        reqTextarea.setAttribute("aria-invalid", String(showError));
       }
     }
     card.querySelectorAll(".extraction-row").forEach((row, j) => {
@@ -18456,8 +19463,29 @@ function syncSequenceStepFromDom({ allowInvalidRequests = false } = {}) {
       if (varInput) rule.variable_name = varInput.value;
       if (sourceSelect) rule.source = sourceSelect.value;
       if (patternInput) rule.pattern = patternInput.value;
+      // Source changes update this row in place, keeping every live draft
+      // control and caret intact rather than rebuilding the editor.
+      const guidance = sequenceExtractionGuidance(rule);
+      const patternLabel = row.querySelector(".ext-pattern-label");
+      const patternHelp = row.querySelector(".extraction-help");
+      if (patternLabel) patternLabel.textContent = guidance.label;
+      if (patternInput) patternInput.placeholder = guidance.placeholder;
+      if (patternHelp) patternHelp.textContent = guidance.help;
     });
   });
+  // Finish syncing every draft before reporting the first invalid request.
+  // Focus the live field synchronously; no async completion may steal it later.
+  if (firstInvalidRequest) {
+    const { card, input, message } = firstInvalidRequest;
+    const { selectionStart, selectionEnd, selectionDirection } = input;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+    input.scrollIntoView({ block: "nearest", inline: "nearest" });
+    // The editor clips overflow: revealing its final textarea alone can leave
+    // the explanation just below the viewport after the toast has disappeared.
+    card.querySelector(".step-request-error")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    throw new Error(message);
+  }
 }
 
 async function saveCurrentSequence({
@@ -18567,6 +19595,14 @@ async function deleteSequence(id) {
 
 async function runCurrentSequence() {
   if (!state.editingSequence || state.sequenceRunning) return;
+  // Invalid local drafts must keep their live controls, focus and caret. Check
+  // before busy rendering replaces the editor or any save/run can be dispatched.
+  try {
+    syncSequenceStepFromDom();
+  } catch (error) {
+    showToast(`Sequence error: ${error.message}`, "error");
+    return;
+  }
   state.sequenceRunning = true;
   renderSequencePanel();
   const runSequenceId = state.editingSequence.id;
@@ -18576,7 +19612,6 @@ async function runCurrentSequence() {
   let runDraftVersion = null;
 
   try {
-    syncSequenceStepFromDom();
     const saved = await saveCurrentSequence();
     if (!saved) {
       return;
@@ -18633,26 +19668,30 @@ async function runCurrentSequence() {
   } finally {
     if (
       state.sequenceRunGeneration === runGeneration
-      && state.selectedSequenceId === runSequenceId
       && isCurrentSequenceSession(sessionId)
     ) {
       state.sequenceRunning = false;
-      renderSequencePanel();
+      // Settling a run releases its shared control even after navigation, but
+      // must not replace an editor that now belongs to another draft.
+      if (isCurrentSequenceRun(runGeneration, runSequenceId, sessionId, runDraftVersion)) {
+        renderSequencePanel();
+      } else {
+        syncSequenceRunButton();
+      }
     }
   }
 }
 
-function renderSequencePanel() {
-  const listBody = document.getElementById("sequenceListBody");
-  const editorTitle = document.getElementById("sequenceEditorTitle");
-  const stepsContainer = document.getElementById("sequenceStepsContainer");
-  const addStepBtn = document.getElementById("addSequenceStepButton");
-  const saveBtn = document.getElementById("saveSequenceButton");
+function syncSequenceRunButton() {
   const runBtn = document.getElementById("runSequenceButton");
-  const runMeta = document.getElementById("sequenceRunMeta");
-  const resultsBody = document.getElementById("sequenceRunResultsBody");
-  const pastBody = document.getElementById("sequencePastRunsBody");
+  const editing = state.editingSequence;
+  const sequenceRunning = Boolean(state.sequenceRunning);
+  runBtn.disabled = sequenceRunning || !editing || !editing.steps?.length;
+  runBtn.textContent = sequenceRunning ? "Running..." : "Run";
+}
 
+function renderSequenceList() {
+  const listBody = document.getElementById("sequenceListBody");
   // With no sequence there is nothing to list, edit or run: a line on what a
   // sequence does and the button that makes one stand in for the panes.
   const none = !state.sequenceDefinitions.length;
@@ -18660,14 +19699,26 @@ function renderSequencePanel() {
   document.getElementById("sequenceHeader").classList.toggle("hidden", none);
   document.getElementById("sequenceLayout").classList.toggle("hidden", none);
 
+  // Capture focus at render time, not before an asynchronous draft save: the
+  // user may have moved elsewhere while that save was pending.
+  const listSessionId = state.activeSession?.id || null;
+  const focusedListControl = document.activeElement?.closest?.(".seq-select, .seq-delete");
+  const restoreListFocus = listBody._sequenceSessionId === listSessionId
+    && focusedListControl && listBody.contains(focusedListControl)
+    ? { id: focusedListControl.dataset.seqSelect || focusedListControl.dataset.seqDelete,
+        action: focusedListControl.dataset.seqSelect ? "select" : "delete" }
+    : null;
+  listBody._sequenceSessionId = listSessionId;
+
   // List
   listBody.innerHTML = state.sequenceDefinitions.length
     ? state.sequenceDefinitions.map((def) => {
         const selected = def.id === state.selectedSequenceId ? "selected" : "";
+        const displayName = sequenceDisplayName(def.name);
         return `<tr class="history-row ${selected}" data-seq-id="${def.id}">
-          <td>${escapeHtml(def.name)}</td>
+          <td><button type="button" class="seq-select" data-seq-select="${escapeHtml(def.id)}" aria-pressed="${def.id === state.selectedSequenceId}">${escapeHtml(displayName)}</button></td>
           <td>${def.steps.length}</td>
-          <td><button class="secondary-action seq-delete" data-seq-delete="${def.id}" style="font-size:0.7rem;padding:2px 6px">&times;</button></td>
+          <td><button type="button" class="secondary-action seq-delete" data-seq-delete="${escapeHtml(def.id)}" aria-label="Delete sequence ${escapeHtml(displayName)}" style="font-size:0.7rem;padding:2px 6px">&times;</button></td>
         </tr>`;
       }).join("")
     : `<tr class="empty-row"><td colspan="3">No sequences yet.</td></tr>`;
@@ -18682,17 +19733,53 @@ function renderSequencePanel() {
     onClickWithProgress(btn, () => deleteSequence(btn.dataset.seqDelete).catch(handleSequenceActionError));
   });
 
+  if (restoreListFocus && (!document.activeElement || document.activeElement === document.body
+      || document.activeElement === focusedListControl)) {
+    const selector = restoreListFocus.action === "select" ? ".seq-select" : ".seq-delete";
+    const controls = Array.from(listBody.querySelectorAll(selector));
+    controls.find((control) => (control.dataset.seqSelect || control.dataset.seqDelete) === restoreListFocus.id)?.focus();
+  }
+}
+
+function renderSequencePanel({ focusExtractionStepId = null } = {}) {
+  const editorTitle = document.getElementById("sequenceEditorTitle");
+  const stepsContainer = document.getElementById("sequenceStepsContainer");
+  const addStepBtn = document.getElementById("addSequenceStepButton");
+  const saveBtn = document.getElementById("saveSequenceButton");
+  const runBtn = document.getElementById("runSequenceButton");
+  const runMeta = document.getElementById("sequenceRunMeta");
+  const resultsBody = document.getElementById("sequenceRunResultsBody");
+  const pastBody = document.getElementById("sequencePastRunsBody");
+
+  // DOM expansion belongs to this sequence in this session, not to an index
+  // that may now identify a different step after removal.
+  const expansionOwner = JSON.stringify([state.activeSession?.id || null, state.editingSequence?.id || null]);
+  const expandedSteps = new Set();
+  const requestErrorSteps = new Set();
+  if (stepsContainer._sequenceExpansionOwner === expansionOwner) {
+    stepsContainer.querySelectorAll(".sequence-step-card").forEach((card) => {
+      if (card.querySelector(".step-extractions")?.open) expandedSteps.add(card.dataset.stepId);
+      if (card.querySelector(".step-request-error")?.textContent) requestErrorSteps.add(card.dataset.stepId);
+    });
+  }
+  stepsContainer._sequenceExpansionOwner = expansionOwner;
+  renderSequenceList();
+
   // Editor
   const editing = state.editingSequence;
   const hasSequence = !!editing;
-  const sequenceRunning = Boolean(state.sequenceRunning);
   addStepBtn.disabled = !hasSequence;
   saveBtn.disabled = !hasSequence;
   // The editor's buttons wait for a sequence to act on.
   for (const button of [addStepBtn, saveBtn, runBtn]) button.classList.toggle("hidden", !hasSequence);
-  runBtn.disabled = sequenceRunning || !hasSequence || !editing?.steps?.length;
-  runBtn.textContent = sequenceRunning ? "Running..." : "Run";
-  editorTitle.textContent = hasSequence ? editing.name : "No sequence selected";
+  syncSequenceRunButton();
+  editorTitle.textContent = hasSequence ? sequenceDisplayName(editing.name) : "No sequence selected";
+  editorTitle.title = hasSequence ? editorTitle.textContent : "";
+  const nameInput = document.getElementById("sequenceNameInput");
+  document.getElementById("sequenceNameField").classList.toggle("hidden", !hasSequence);
+  nameInput.disabled = !hasSequence;
+  const nameValue = sequenceNameInputValue(editing?.name);
+  if (nameInput.value !== nameValue) nameInput.value = nameValue;
 
   if (hasSequence) {
     stepsContainer.innerHTML = editing.steps.map((step, idx) => {
@@ -18702,31 +19789,49 @@ function renderSequencePanel() {
           || step.request?.http_version,
       };
       const reqText = step.request_text ?? buildEditableRawRequest(requestForRender);
-      const extractionsHtml = step.extractions.map((rule, rIdx) => `
+      const requestError = requestErrorSteps.has(step.id) && step.request_parse_error
+        ? sequenceRequestErrorMessage(step, idx, step.request_parse_error)
+        : "";
+      const requestErrorId = `sequenceStepRequestError-${idx}`;
+      const extractionsHtml = step.extractions.map((rule, rIdx) => {
+        const guidance = sequenceExtractionGuidance(rule);
+        const helpId = `sequenceExtractionHelp-${idx}-${rIdx}`;
+        return `
         <div class="extraction-row">
-          <input class="ext-var" placeholder="Variable name" value="${escapeHtml(rule.variable_name)}" />
-          <select class="ext-source">
-            <option value="response_body"${rule.source === "response_body" ? " selected" : ""}>Body</option>
-            <option value="response_header"${rule.source === "response_header" ? " selected" : ""}>Header</option>
-          </select>
-          <input class="ext-pattern" placeholder="Regex / header name" value="${escapeHtml(rule.pattern)}" />
-          <button class="ext-remove" data-step="${idx}" data-rule="${rIdx}" title="Remove">&times;</button>
+          <label class="extraction-field"><span>Variable name</span>
+            <input class="ext-var" placeholder="token" value="${escapeHtml(rule.variable_name)}" />
+          </label>
+          <label class="extraction-field"><span>Source</span>
+            <select class="ext-source">
+              <option value="response_body"${rule.source === "response_body" ? " selected" : ""}>Body</option>
+              <option value="response_header"${rule.source === "response_header" ? " selected" : ""}>Header</option>
+            </select>
+          </label>
+          <label class="extraction-field"><span class="ext-pattern-label">${escapeHtml(guidance.label)}</span>
+            <input class="ext-pattern" placeholder="${escapeHtml(guidance.placeholder)}" aria-describedby="${helpId}" value="${escapeHtml(rule.pattern)}" />
+          </label>
+          <button class="secondary-action ext-remove" data-step="${idx}" data-rule="${rIdx}" title="Remove extraction" aria-label="Remove extraction ${rIdx + 1} from step ${idx + 1}">&times;</button>
+          <p class="extraction-help" id="${helpId}">${escapeHtml(guidance.help)}</p>
         </div>
-      `).join("");
+      `;
+      }).join("");
 
-      return `<div class="sequence-step-card" data-step-idx="${idx}">
+      return `<div class="sequence-step-card" data-step-idx="${idx}" data-step-id="${escapeHtml(step.id)}">
         <div class="step-header">
           <span class="step-number">#${idx + 1}</span>
-          <input class="step-label" value="${escapeHtml(step.label)}" placeholder="Step label" />
-          <button class="step-remove" data-remove-step="${idx}" title="Remove step">&times;</button>
+          <input class="step-label" value="${escapeHtml(step.label)}" placeholder="Step label" aria-label="Step ${idx + 1} label" />
+          <button class="step-move" type="button" data-move-step="${idx}" data-move-direction="-1" title="Move step ${idx + 1} up" aria-label="Move step ${idx + 1} up" aria-disabled="${idx === 0}">&uarr;</button>
+          <button class="step-move" type="button" data-move-step="${idx}" data-move-direction="1" title="Move step ${idx + 1} down" aria-label="Move step ${idx + 1} down" aria-disabled="${idx === editing.steps.length - 1}">&darr;</button>
+          <button class="step-remove" data-remove-step="${idx}" title="Remove step" aria-label="Remove step ${idx + 1}">&times;</button>
         </div>
-        <textarea class="step-request-text" spellcheck="false">${escapeHtml(reqText)}</textarea>
-        <details class="step-extractions">
-          <summary>Extractions (${step.extractions.length}) <button class="ext-add" data-add-ext="${idx}" style="font-size:0.7rem;margin-left:8px">+ Extract</button></summary>
+        <textarea class="step-request-text" spellcheck="false" aria-label="Step ${idx + 1} raw HTTP request" aria-invalid="${Boolean(requestError)}" aria-describedby="${requestErrorId}">${escapeHtml(reqText)}</textarea>
+        <p class="step-request-error${requestError ? "" : " hidden"}" id="${requestErrorId}">${escapeHtml(requestError)}</p>
+        <details class="step-extractions"${expandedSteps.has(step.id) || focusExtractionStepId === step.id ? " open" : ""}>
+          <summary>Extractions (${step.extractions.length}) <button class="secondary-action ext-add" data-add-ext="${idx}" aria-label="Add extraction to step ${idx + 1}">+ Extract</button></summary>
           ${extractionsHtml}
         </details>
       </div>`;
-    }).join("");
+    }).join("") || '<p class="empty-copy">No steps yet. Choose <strong>+ Step</strong>, then paste a raw HTTP request into the step.</p>';
 
     if (!stepsContainer._sequenceDraftSyncWired) {
       stepsContainer._sequenceDraftSyncWired = true;
@@ -18738,6 +19843,11 @@ function renderSequencePanel() {
       stepsContainer.addEventListener("change", markSequenceDirty);
     }
 
+    stepsContainer.querySelectorAll(".step-move").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        moveSequenceStep(Number(btn.dataset.moveStep), Number(btn.dataset.moveDirection));
+      });
+    });
     stepsContainer.querySelectorAll(".step-remove").forEach((btn) => {
       btn.addEventListener("click", () => {
         syncSequenceStepFromDom({ allowInvalidRequests: true });
@@ -18757,6 +19867,12 @@ function renderSequencePanel() {
         removeExtractionRule(parseInt(btn.dataset.step, 10), parseInt(btn.dataset.rule, 10));
       });
     });
+    if (focusExtractionStepId != null) {
+      const card = Array.from(stepsContainer.querySelectorAll(".sequence-step-card"))
+        .find((entry) => entry.dataset.stepId === focusExtractionStepId);
+      const variables = card?.querySelectorAll(".ext-var");
+      variables?.[variables.length - 1]?.focus();
+    }
   } else {
     stepsContainer.innerHTML = `<div style="padding:20px;color:var(--text-muted);font-size:0.85rem">Select or create a sequence to start building steps.</div>`;
   }
@@ -19437,6 +20553,8 @@ async function dropSelectedIntercept() {
 
 async function loadResponseIntercepts(preserveSelection = true) {
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftOwners = captureInterceptDraftRecoveryOwners();
   const generation = state.responseInterceptLoadGeneration = (state.responseInterceptLoadGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && generation >= (state.responseInterceptAcceptedLoadGeneration || 0);
@@ -19444,6 +20562,9 @@ async function loadResponseIntercepts(preserveSelection = true) {
   try {
     const response = await fetch(sessionQueryPath("/api/response-intercepts", sessionId));
     if (!isCurrent()) return;
+    if (!response.ok && workspaceGeneration === workspaceStateGeneration) {
+      handleInterceptDraftReadFailure("response", response.status, { owners: draftOwners });
+    }
     await requireOkResponse(response, "Failed to load intercepted responses.");
     responseIntercepts = jsonArray(await response.json());
   } catch (error) {
@@ -19458,7 +20579,9 @@ async function loadResponseIntercepts(preserveSelection = true) {
 
   const visibleResponseIntercepts = getVisibleResponseInterceptSummaries();
   if (!preserveSelection || !visibleResponseIntercepts.some((item) => item.id === state.selectedResponseInterceptId)) {
+    state.responseInterceptDraftRecovery = null;
     state.selectedResponseInterceptId = visibleResponseIntercepts[0]?.id ?? null;
+    state.responseInterceptDetailRead = null;
     state.selectedResponseInterceptRecord = null;
     state.responseInterceptEditorSeedId = null;
   }
@@ -19477,15 +20600,28 @@ async function loadResponseIntercepts(preserveSelection = true) {
   }
 }
 
-async function loadResponseInterceptDetail(id) {
+async function loadResponseInterceptDetail(id, { explicit = false } = {}) {
+  const previousRead = getInterceptDetailRead("response");
+  // Faster queue polling must not retire this owner's slow detail repeatedly.
+  if (!explicit && previousRead?.id === id && previousRead.pending) return;
   const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftOwners = captureInterceptDraftRecoveryOwners();
   const generation = state.responseInterceptDetailGeneration = (state.responseInterceptDetailGeneration || 0) + 1;
   const isCurrent = () => sessionId === currentSessionId()
     && state.selectedResponseInterceptId === id && state.responseInterceptDetailGeneration === generation;
+  const read = state.responseInterceptDetailRead = { sessionId, id, generation, pending: true,
+    error: Boolean(previousRead?.error), showPending: explicit || !previousRead?.error };
+  renderResponseIntercepts();
   try {
     const response = await fetch(sessionQueryPath(`/api/response-intercepts/${id}`, sessionId));
     if (!isCurrent()) return;
     if (!response.ok) {
+      read.pending = false;
+      read.error = true;
+      if (workspaceGeneration === workspaceStateGeneration) {
+        handleInterceptDraftReadFailure("response", response.status, { capture: true, owners: draftOwners });
+      }
       state.selectedResponseInterceptRecord = null;
       renderResponseIntercepts();
       return;
@@ -19493,10 +20629,21 @@ async function loadResponseInterceptDetail(id) {
 
     const record = await response.json();
     if (!isCurrent()) return;
+    read.pending = false;
+    read.error = false;
     state.selectedResponseInterceptRecord = record;
+    // The response may stay hidden until its normal seeding path runs. Renew
+    // the slot so an older read cannot retire text this fresh detail accepted.
+    const draft = getInterceptDraftRecovery("response");
+    if (draft?.id === record.id) state.responseInterceptDraftRecovery = { ...draft, owner: {} };
     renderResponseIntercepts();
   } catch (error) {
-    if (isCurrent()) throw error;
+    if (isCurrent()) {
+      read.pending = false;
+      read.error = true;
+      renderResponseIntercepts();
+      throw new Error("Could not load response details.");
+    }
   }
 }
 
@@ -19573,6 +20720,8 @@ function parseEditableRawResponse(text, original, requestMethod = "") {
 function renderResponseIntercepts() {
   const filteredResponseIntercepts = getVisibleResponseInterceptSummaries();
   reconcileResponseInterceptSelection(filteredResponseIntercepts);
+  getInterceptDraftRecovery("response");
+  const feedback = updateInterceptDetailFeedback("response");
   els.responseInterceptTableBody.innerHTML = filteredResponseIntercepts.length
     ? filteredResponseIntercepts
         .map((item) => {
@@ -19596,34 +20745,33 @@ function renderResponseIntercepts() {
 
   Array.from(els.responseInterceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
     row.addEventListener("click", () => {
-      const id = row.dataset.id;
-      if (state.selectedResponseInterceptId !== id) {
-        state.selectedResponseInterceptId = id;
-        state.selectedResponseInterceptRecord = null;
-        state.responseInterceptEditorSeedId = null;
-        renderResponseIntercepts();
-      }
-      loadResponseInterceptDetail(id).catch((error) => console.error(error));
+      selectInterceptQueueItem("response", row.dataset.id).catch((error) => console.error(error));
     });
   });
+  updateInterceptQueueSelectionStatus("response", filteredResponseIntercepts);
 
   if (!state.selectedResponseInterceptRecord) {
     state.responseInterceptEditorSeedId = null;
     if (els.interceptResponseCM) {
       setInterceptPaneContent("interceptRes", els.interceptResponseCM, "", {
         mode: "http", readOnly: false,
-        placeholder: "Intercepted response will appear here...",
+        placeholder: feedback.loading ? "Loading selected response details…"
+          : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here...",
       });
     } else {
       els.interceptResponseEditor.value = "";
+      els.interceptResponseEditor.placeholder = feedback.loading ? "Loading selected response details…"
+        : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here...";
       renderInterceptResponseHighlight("");
     }
     if (state.interceptQueueTab === "response") {
-      els.interceptDetailPath.textContent = "Response Intercept";
-      els.interceptDetailTitle.textContent = "No response selected";
-      els.interceptMeta.textContent = state.runtime?.intercept_enabled
+      const selected = filteredResponseIntercepts.find((item) => item.id === state.selectedResponseInterceptId);
+      els.interceptDetailPath.textContent = selected ? `${selected.status} / ${selected.method} ${selected.host}${selected.path || "/"}` : "Response Intercept";
+      els.interceptDetailTitle.textContent = selected
+        ? (feedback.error ? "Could not load response" : "Loading response…") : "No response selected";
+      els.interceptMeta.textContent = feedback.message || (state.runtime?.intercept_enabled
         ? "Intercept is on. Matched responses will queue here."
-        : "Intercept is off. Toggle it on to pause responses before forwarding.";
+        : "Intercept is off. Toggle it on to pause responses before forwarding.");
     }
     els.forwardResponseInterceptButton.disabled = true;
     els.dropResponseInterceptButton.disabled = true;
@@ -19637,19 +20785,21 @@ function renderResponseIntercepts() {
     // As with requests, preserve this record's draft and search state on polls.
     if (els.interceptResponseCM) {
       if (state.responseInterceptEditorSeedId !== rec.id) {
-        setInterceptPaneContent("interceptRes", els.interceptResponseCM, buildEditableRawResponse(rec.response), {
+        setInterceptPaneContent("interceptRes", els.interceptResponseCM,
+          takeInterceptDraftRecovery("response", rec) ?? buildEditableRawResponse(rec.response), {
           mode: "http", readOnly: false,
         });
         state.responseInterceptEditorSeedId = rec.id;
       }
     } else {
+      els.interceptResponseEditor.placeholder = "";
       if (state.responseInterceptEditorSeedId !== rec.id) {
-        els.interceptResponseEditor.value = buildEditableRawResponse(rec.response);
+        els.interceptResponseEditor.value = takeInterceptDraftRecovery("response", rec) ?? buildEditableRawResponse(rec.response);
         state.responseInterceptEditorSeedId = rec.id;
       }
       renderInterceptResponseHighlight(els.interceptResponseEditor.value);
     }
-    els.interceptMeta.textContent = `Response queued at ${formatTimestamp(rec.started_at)}`;
+    els.interceptMeta.textContent = feedback.message || `Response queued at ${formatTimestamp(rec.started_at)}`;
   }
   els.forwardResponseInterceptButton.disabled = false;
   els.dropResponseInterceptButton.disabled = false;
@@ -19764,7 +20914,14 @@ function updateInterceptSearch() {
 // pass, and refresh the footer meta when the pane being written is the visible one.
 function setInterceptPaneContent(key, container, text, options = {}) {
   const query = els.interceptSearchInput ? els.interceptSearchInput.value.trim() : "";
-  const result = updateCodePaneCM(key, container, text, { ...options, search: query });
+  const record = key === "interceptRes" ? state.selectedResponseInterceptRecord : state.selectedInterceptRecord;
+  // A held message owns its Undo history; clearing selection retires it before
+  // another detail arrives, including an identical message in a new workspace.
+  // CM installs its placeholder at construction. An unavailable detail may
+  // change from empty to loading to failed without ever having a record owner.
+  const owner = JSON.stringify([currentSessionId(), workspaceStateGeneration,
+    record?.id || null, record ? null : options.placeholder || null]);
+  const result = updateCodePaneCM(key, container, text, { ...options, owner, search: query });
   if (els.interceptSearchMeta && activeInterceptCMKey() === key) {
     els.interceptSearchMeta.innerHTML = buildSearchMeta(result.lineCount, result.matchCount);
   }
@@ -20367,9 +21524,15 @@ async function followRedirect() {
   const requestText = buildEditableRawRequest(newRequest);
   tab.requestText = requestText;
   tab.baseRequest = cloneEditableRequest(newRequest);
+  // A Hex view caches bytes separately; carrying them across the redirect would
+  // restore the old request when the operator returns to Pretty or Raw.
+  tab.requestBytes = null;
+  tab.requestOriginalBytes = null;
   tab.responseRecord = null;
   tab.notice = "Following redirect...";
-  if (getCMView("replayReq")) {
+  if (state.replayMessageViews.request === "hex") {
+    renderReplayViewContent("request");
+  } else if (getCMView("replayReq")) {
     getCMView("replayReq").setContent(replayRequestEditorText(requestText));
   } else if (els.replayRequestEditor) {
     els.replayRequestEditor.value = requestText;
@@ -20876,6 +22039,11 @@ function renderReplayTabs(options = {}) {
   const preserveScrollLeft = options.keepScroll
     ? Array.from(els.replayTabStrip.querySelectorAll(".replay-tab-list"), (row) => row.scrollLeft)
     : null;
+  const focused = document.activeElement;
+  const focusedTabId = els.replayTabStrip.contains?.(focused)
+    ? focused?.closest?.(".replay-tab")?.dataset.replayTabId : null;
+  const focusedControl = [".replay-tab-button", ".replay-tab-pin-btn", ".replay-tab-close"]
+    .find((selector) => focused?.matches?.(selector));
   const sortedTabs = getReplayTabVisualOrder();
   const renamingTab = sortedTabs.find((tab) => tab.id === state.replayRenamingTabId);
   const renameInput = renamingTab && els.replayTabStrip.querySelector(
@@ -20988,13 +22156,29 @@ function renderReplayTabs(options = {}) {
         if (!ownsRename()) return;
         // Composition keys edit the label, rather than commit or cancel it.
         if (event.isComposing) return;
+        if (event.key !== "Enter" && event.key !== "Escape") return;
+        const restoreFocus = document.activeElement === nameInput;
+        event.preventDefault();
         if (event.key === "Enter") {
-          event.preventDefault();
           commitReplayTabRename(id, nameInput.value);
-        } else if (event.key === "Escape") {
-          event.preventDefault();
+        } else {
           state.replayRenamingTabId = null;
           renderReplayTabs();
+        }
+        // Only keyboard completion returns to the label. A blur belongs to its
+        // destination, and a newer workspace, modal or focus must keep control.
+        if (restoreFocus && owner.sessionId === currentSessionId()
+          && owner.generation === workspaceStateGeneration && state.replayTabs.includes(owner.tab)
+          && owner.activeTabId === state.activeReplayTabId && state.activeTool === "replay"
+          && !state.replayRenamingTabId && !getActiveModalAction()
+          && (document.activeElement === document.body
+            || document.activeElement === nameInput && !nameInput.isConnected)) {
+          const button = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab"))
+            .find((element) => element.dataset.replayTabId === id)?.querySelector(".replay-tab-button");
+          if (button?.isConnected && !button.disabled && button.tabIndex >= 0
+            && button.getClientRects().length && window.getComputedStyle(button).visibility !== "hidden") {
+            button.focus({ preventScroll: true });
+          }
         }
       });
       nameInput.addEventListener("blur", () => {
@@ -21038,6 +22222,22 @@ function renderReplayTabs(options = {}) {
     });
   } else {
     scrollActiveReplayTabIntoView();
+  }
+
+  // Rebuilding the strip detaches its focused button. Keep keyboard actions on
+  // their logical control, without taking focus from an editor or newer dialog.
+  if (focusedTabId && focusedControl && state.activeTool === "replay"
+    && !state.replayRenamingTabId && !getActiveModalAction()
+    && (document.activeElement === document.body || document.activeElement === focused && !focused.isConnected)) {
+    const tabElement = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab"))
+      .find((element) => element.dataset.replayTabId === focusedTabId);
+    const activeElement = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab"))
+      .find((element) => element.dataset.replayTabId === state.activeReplayTabId);
+    const canFocus = (element) => element?.isConnected && !element.disabled && element.tabIndex >= 0
+      && element.getClientRects().length && window.getComputedStyle(element).visibility !== "hidden";
+    const target = [tabElement?.querySelector(focusedControl), tabElement?.querySelector(".replay-tab-button"),
+      activeElement?.querySelector(".replay-tab-button"), els.newReplayTabButton].find(canFocus);
+    target?.focus({ preventScroll: true });
   }
 }
 
@@ -21453,13 +22653,16 @@ async function applyReplayTargetFields() {
 }
 
 function setReplayTargetInputValidity(validation) {
-  if (!els.replayHostInput || !els.replayPortInput) {
-    return;
+  for (const [input, errorNode, message] of [
+    [els.replayHostInput, els.replayHostError, validation.hostError || ""],
+    [els.replayPortInput, els.replayPortError, validation.portError || ""],
+  ]) {
+    if (input) {
+      input.setCustomValidity(message);
+      input.setAttribute("aria-invalid", String(!!message));
+    }
+    if (errorNode) errorNode.textContent = message;
   }
-  els.replayHostInput.setCustomValidity(validation.hostError || "");
-  els.replayPortInput.setCustomValidity(validation.portError || "");
-  els.replayHostInput.toggleAttribute("aria-invalid", !!validation.hostError);
-  els.replayPortInput.toggleAttribute("aria-invalid", !!validation.portError);
 }
 
 function applyRepeaterTargetOverride(request, target) {
@@ -21651,19 +22854,26 @@ function validateManualRepeaterTargetInput(host, port) {
       hostError = "Target host must not include whitespace, user info, or URL components.";
     } else if (absoluteTarget) {
       try {
+        // Do not let URL repair an empty authority (for example https:///host).
+        const rawAuthority = rawHost.slice(rawHost.indexOf("://") + 3).split(/[/?#]/, 1)[0];
         const parsed = new URL(rawHost);
         const scheme = parsed.protocol.replace(":", "").toLowerCase();
+        // URL.port omits explicit default ports, which must still conflict with
+        // a different Port field rather than silently changing the destination.
+        const targetPort = normalizePortValue(explicitAuthorityPort(rawHost)) || parsed.port;
         const hasUrlComponents = parsed.username
           || parsed.password
           || (parsed.pathname && parsed.pathname !== "/")
           || parsed.search
           || parsed.hash;
-        if (scheme !== "http" && scheme !== "https") {
+        if (!rawAuthority) {
+          hostError = "Target host is not a valid URL.";
+        } else if (scheme !== "http" && scheme !== "https") {
           hostError = "Target URL scheme must be HTTP or HTTPS.";
         } else if (hasUrlComponents) {
           hostError = "Target host must not include path, query, fragment, or credentials.";
-        } else if (parsed.port && rawPort && normalizePortValue(rawPort) !== parsed.port) {
-          portError = `Port conflicts with target URL port ${parsed.port}.`;
+        } else if (targetPort && rawPort && normalizePortValue(rawPort) !== targetPort) {
+          portError = `Port conflicts with target URL port ${targetPort}.`;
         }
       } catch (_error) {
         hostError = "Target host is not a valid URL.";
@@ -22067,6 +23277,7 @@ let replaySwipeOffset = 0;
 // Decided by the first wheel event that claims a gesture, and fixed until that
 // gesture ends. Going the other way takes lifting off and pulling again.
 let replaySwipeDirection = 0;
+let replaySwipeOwner = null;
 let replaySwipeSettleTimer = 0;
 let replaySwipeBadge = null;
 // Whether THIS gesture was opened by a native phase. Deliberately not sticky: a
@@ -22095,11 +23306,38 @@ function clearReplaySwipeBadge() {
   replaySwipeBadge = null;
 }
 
+function replaySwipeDraftSnapshot(tab) {
+  const editor = getCMView("replayReq");
+  const hexInput = !editor && !els.replayRequestCM && state.replayMessageViews.request === "hex"
+    ? els.replayRequestHighlight?.querySelector?.(".hex-byte-input") : null;
+  return [
+    tab.requestText, tab.httpVersionMode, tab.targetScheme, tab.targetHost, tab.targetPort,
+    tab.requestBytes, hexInput, hexInput?.value,
+    state.replayMessageViews.request,
+    editor ? null : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value),
+    els.replayHostInput?.value, els.replayPortInput?.value, els.replaySchemeSelect?.value,
+    document.getElementById("replayHttpVersionSelect")?.value,
+  ];
+}
+
+function isReplaySwipeOwnerCurrent(owner, checkDraft = false) {
+  return !!owner && workspaceLoaded && state.activeTool === "replay"
+    && owner.tab === getActiveReplayTab() && state.replayTabs.includes(owner.tab)
+    && owner.sessionId === currentSessionId() && owner.generation === workspaceStateGeneration
+    && owner.editorOwner === renderedHttpReplayDraftOwner?.editorOwner
+    && owner.editorDocument === getCMView("replayReq")?.view?.state?.doc
+    && owner.historyEntries === owner.tab.historyEntries && owner.historyIndex === owner.tab.historyIndex
+    && (!checkDraft || (replaySwipeDraftSnapshot(owner.tab).every((value, index) => value === owner.draft[index])
+      && (!owner.bytes || (owner.tab.requestBytes?.length === owner.bytes.length
+        && owner.bytes.every((value, index) => value === owner.tab.requestBytes[index])))));
+}
+
 function resetReplaySwipe() {
   clearTimeout(replaySwipeSettleTimer);
   replaySwipeSettleTimer = 0;
   replaySwipeOffset = 0;
   replaySwipeDirection = 0;
+  replaySwipeOwner = null;
   replaySwipeNativeGesture = false;
   clearReplaySwipeBadge();
 }
@@ -22107,7 +23345,8 @@ function resetReplaySwipe() {
 // Fires once the wheel has been quiet long enough to call the gesture over.
 function settleReplaySwipe() {
   const direction = replaySwipeDirection;
-  const armed = replaySwipeOffset >= REPLAY_SWIPE_THRESHOLD_PX;
+  const armed = replaySwipeOffset >= REPLAY_SWIPE_THRESHOLD_PX
+    && isReplaySwipeOwnerCurrent(replaySwipeOwner, true);
   resetReplaySwipe();
   if (!armed || !direction) return;
   const tab = getActiveReplayTab();
@@ -22180,6 +23419,14 @@ function onReplaySwipeWheel(event, workbench) {
     return;
   }
 
+  // Never let the remainder of a pull take ownership of a newer editor/tab.
+  if (replaySwipeOwner && !isReplaySwipeOwnerCurrent(replaySwipeOwner)) {
+    replaySwipeOffset = 0;
+    clearReplaySwipeBadge();
+    armReplaySwipeSettle();
+    return;
+  }
+
   // A gesture's direction is decided once, by the event that claims it, and does
   // not flip while the fingers are down: pulling back from a full pull retreats
   // the arrow to the edge, it does not raise the opposite one. Turning round
@@ -22192,6 +23439,16 @@ function onReplaySwipeWheel(event, workbench) {
     if (replayScrollerHasRoom(event.target?.closest?.(".cm-scroller"), direction)) return;
     if (!canNavigateReplayHistory(tab, direction)) return;
     replaySwipeDirection = direction;
+    replaySwipeOwner = {
+      tab, sessionId: currentSessionId(), generation: workspaceStateGeneration,
+      editorOwner: renderedHttpReplayDraftOwner?.editorOwner,
+      editorDocument: getCMView("replayReq")?.view?.state?.doc,
+      historyEntries: tab.historyEntries, historyIndex: tab.historyIndex,
+      draft: replaySwipeDraftSnapshot(tab),
+      // Hex edits mutate the buffer in place. Copy once, compare only on release;
+      // wheel events must not repeatedly serialize a potentially large request.
+      bytes: tab.requestBytes?.slice(),
+    };
   }
 
   // Claimed: stop the platform turning the rest of it into a rubber band.
@@ -22950,6 +24207,11 @@ function applyHistoryColumnWidths() {
     totalWidth += width;
   });
   els.historyTable.style.setProperty("--history-table-width", `${Math.max(totalWidth, 1160)}px`);
+  els.historyTable.querySelectorAll(".column-resize-handle").forEach((handle) => {
+    const width = state.historyColumnWidths[handle.dataset.columnKey];
+    handle.setAttribute("aria-valuenow", String(width));
+    handle.setAttribute("aria-valuetext", `${width} pixels`);
+  });
 }
 
 function sanitizeHistoryColumnOrder(candidate) {
@@ -22989,17 +24251,23 @@ function renderHistoryHeader() {
   const thead = els.historyTable?.querySelector("thead tr");
   if (!thead) return;
 
+  const previousFocus = document.activeElement;
+  const restoreColumn = previousFocus?.classList?.contains("column-resize-handle") && thead.contains(previousFocus)
+    ? previousFocus.dataset.columnKey : null;
   thead.innerHTML = state.historyColumnOrder
     .map((colKey) => {
       const def = HISTORY_COLUMN_DEFS[colKey];
-      if (!def) return "";
+      const limits = HISTORY_COLUMN_RULES[colKey];
+      if (!def || !limits) return "";
+      const width = state.historyColumnWidths[colKey] ?? limits.default;
+      const columnName = colKey === "index" ? "sequence number" : def.label;
       return `
         <th class="${def.cssClass}" data-column-key="${colKey}" draggable="true">
           <button class="sort-header" data-sort-key="${def.sortKey}" type="button">
             <span>${def.label}</span>
             <span class="sort-indicator" aria-hidden="true">\u2195</span>
           </button>
-          <span class="column-resize-handle" data-column-key="${colKey}" aria-hidden="true"></span>
+          <span class="column-resize-handle" data-column-key="${colKey}" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Resize ${columnName} column" aria-valuemin="${limits.min}" aria-valuemax="${limits.max}" aria-valuenow="${width}" aria-valuetext="${width} pixels" aria-describedby="historyColumnResizeHelp" title="Drag to resize. Left/Right: 8 pixels. Enter: reset this column."></span>
         </th>
       `;
     })
@@ -23017,12 +24285,20 @@ function renderHistoryHeader() {
   bindHistoryColumnResizers();
   bindColumnDragAndDrop();
   renderSortHeaders();
+  // Settings adoption can replace these nodes. Restore only the handle this
+  // render removed, not focus the user or another callback moved elsewhere.
+  if (restoreColumn && !thead.contains(previousFocus)
+      && (!document.activeElement || document.activeElement === document.body || document.activeElement === previousFocus)) {
+    historyColumnHandles.find((handle) => handle.dataset.columnKey === restoreColumn)?.focus({ preventScroll: true });
+  }
 }
 
 function renderHistoryCell(colKey, item, entry) {
   switch (colKey) {
-    case "index":
-      return `<td>${item.sequence != null ? item.sequence : entry.index + 1}</td>`;
+    case "index": {
+      const value = escapeHtml(item.sequence != null ? item.sequence : entry.index + 1);
+      return `<td class="history-index-cell" title="${value}">${value}</td>`;
+    }
     case "host":
       return `<td class="cell-host">${escapeHtml(item.host)}</td>`;
     case "method":
@@ -25266,8 +26542,36 @@ function bindWsColumnResizers() {
 }
 
 function bindHistoryColumnResizers() {
+  const table = els.historyTable;
+  // A settings/header replacement already owns its incoming widths. Retire
+  // the old drag without treating that replacement as a user preference save.
+  table._cancelHistoryColumnResize?.();
   let finishResize = null;
   historyColumnHandles.forEach((handle) => {
+    handle.addEventListener("keydown", (event) => {
+      if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      // A focused column boundary must not send vertical arrows to History's
+      // row-selection shortcuts; leave native scrolling available instead.
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.stopPropagation();
+        return;
+      }
+      if (!["ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) return;
+      const key = handle.dataset.columnKey;
+      const limits = HISTORY_COLUMN_RULES[key];
+      if (!limits) return;
+      event.preventDefault();
+      event.stopPropagation();
+      finishResize?.();
+      const current = state.historyColumnWidths[key] ?? limits.default;
+      const next = event.key === "Enter" ? limits.default
+        : clamp(Math.round(current + (event.key === "ArrowLeft" ? -8 : 8)), limits.min, limits.max);
+      if (next === current) return;
+      state.historyColumnWidths[key] = next;
+      applyHistoryColumnWidths();
+      saveHistoryColumnWidths();
+    });
+
     handle.addEventListener("dblclick", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -25275,6 +26579,8 @@ function bindHistoryColumnResizers() {
       if (!key || !HISTORY_COLUMN_RULES[key]) {
         return;
       }
+      finishResize?.();
+      if (state.historyColumnWidths[key] === HISTORY_COLUMN_RULES[key].default) return;
       state.historyColumnWidths[key] = HISTORY_COLUMN_RULES[key].default;
       applyHistoryColumnWidths();
       saveHistoryColumnWidths();
@@ -25297,6 +26603,7 @@ function bindHistoryColumnResizers() {
       handle.classList.add("active");
 
       const onMove = (moveEvent) => {
+        if (finishResize !== onUp) return;
         if (moveEvent.buttons === 0) {
           onUp();
           return;
@@ -25310,18 +26617,22 @@ function bindHistoryColumnResizers() {
         applyHistoryColumnWidths();
       };
 
-      const onUp = () => {
+      const finish = (save) => {
         if (finishResize !== onUp) return;
         finishResize = null;
+        if (table._cancelHistoryColumnResize === cancelResize) table._cancelHistoryColumnResize = null;
         document.body.classList.remove("pane-resizing-x");
         handle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         window.removeEventListener("blur", onUp);
-        saveHistoryColumnWidths();
+        if (save) saveHistoryColumnWidths();
       };
+      const onUp = () => finish(true);
+      const cancelResize = () => finish(false);
 
       finishResize = onUp;
+      table._cancelHistoryColumnResize = cancelResize;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
       window.addEventListener("blur", onUp);
@@ -28856,21 +30167,36 @@ async function openCompareModal(targetId, ownsOrigin = () => true) {
     clearCompareState();
     return;
   }
-  const [baseRes, targetRes] = await Promise.all([
-    fetch(transactionPath(baseId, sessionId)).then((r) => r.ok ? r.json() : null),
-    fetch(transactionPath(targetId, sessionId)).then((r) => r.ok ? r.json() : null),
-  ]);
+  // Keep failure outcomes until ownership is checked: an old missing base
+  // must neither clear a newer pin nor report an error over newer navigation.
+  const read = (id) => fetch(transactionPath(id, sessionId))
+    .then(async (response) => ({ status: response.status, record: response.ok ? await response.json() : null }))
+    .catch(() => ({ status: 0, record: null }));
+  const [baseRead, targetRead] = await Promise.all([read(baseId), read(targetId)]);
   // A dismissed or superseded comparison must not reopen from a late response.
   if (generation !== compareLoadGeneration || currentSessionId() !== sessionId || !ownsOrigin()) return;
-  if (!baseRes || !targetRes) return;
   const modal = document.getElementById("compareModal");
   // A currently open dialog takes precedence over a delayed Compare reveal.
   const activeModal = getActiveModalAction();
   if (activeModal && activeModal.modal !== modal) return;
+  if (!baseRead.record || !targetRead.record) {
+    const missingBase = !baseRead.record;
+    const failed = missingBase ? baseRead : targetRead;
+    if (missingBase && failed.status === 404 && compareBaseId === baseId && compareBaseSessionId === sessionId) {
+      clearCompareState();
+      renderFuzzerResultsWorkflow();
+    }
+    const message = failed.status === 404
+      ? missingBase ? "Comparison base is no longer available. Set a new compare base."
+        : "Selected transaction is no longer available. Select another transaction to compare."
+      : `Could not load ${missingBase ? "comparison base" : "selected transaction"}${failed.status ? ` (HTTP ${failed.status})` : ""}. Try again.`;
+    showToast(message, "error", 5000);
+    return;
+  }
   const wasVisible = isModalVisible(modal);
   if (!wasVisible) compareReturnFocus = document.activeElement;
-  compareBaseRecord = baseRes;
-  compareTargetRecord = targetRes;
+  compareBaseRecord = baseRead.record;
+  compareTargetRecord = targetRead.record;
   compareActiveTab = "request";
   renderCompareModal();
   modal.classList.remove("hidden");
@@ -30078,7 +31404,7 @@ function changeReplayMethod(newMethod, tabId = state.activeReplayTabId) {
 // switching from one to POST moves the query into a form body. Any other change
 // only renames the method.
 function requestTextWithMethod(text, method) {
-  const renamed = () => String(text ?? "").replace(/^[A-Z]+(\s)/i, `${method}$1`);
+  const renamed = () => String(text ?? "").replace(/^[A-Za-z0-9!#$%&'*+.^_`|~-]+(\s)/, `${method}$1`);
   const { head, body } = splitRawHttpMessage(text);
   const [requestLine, ...headers] = head.split("\n");
   const line = requestLine.match(/^(\S+)(\s+)(\S+)(.*)$/);
@@ -32252,6 +33578,8 @@ class SniperCodeView {
       }),
       parent: container,
     });
+    const editorLabel = container?.getAttribute?.("data-editor-label");
+    if (editorLabel?.trim()) this.view.contentDOM.setAttribute("aria-label", editorLabel);
   }
 
   /** Tint the given character ranges as changed lines. Call after setContent. */

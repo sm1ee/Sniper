@@ -91,13 +91,13 @@
               <table class="history-table session-table" id="dashboardSessionsTable">
                 <thead>
                   <tr>
-                    <th data-sort-key="name">Name</th>
-                    <th data-sort-key="storage_bytes">Size</th>
-                    <th data-sort-key="request_count">Requests</th>
-                    <th data-sort-key="websocket_count">WebSockets</th>
-                    <th data-sort-key="finding_count">Findings</th>
-                    <th data-sort-key="last_captured_at">Last capture</th>
-                    <th data-sort-key="created_at">Created</th>
+                    <th data-sort-key="name" aria-sort="none"><button class="session-sort-button" type="button">Name</button></th>
+                    <th data-sort-key="storage_bytes" aria-sort="none"><button class="session-sort-button" type="button">Size</button></th>
+                    <th data-sort-key="request_count" aria-sort="none"><button class="session-sort-button" type="button">Requests</button></th>
+                    <th data-sort-key="websocket_count" aria-sort="none"><button class="session-sort-button" type="button">WebSockets</button></th>
+                    <th data-sort-key="finding_count" aria-sort="none"><button class="session-sort-button" type="button">Findings</button></th>
+                    <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last capture</button></th>
+                    <th data-sort-key="created_at" aria-sort="descending"><button class="session-sort-button" type="button">Created</button></th>
                     <th>Action</th>
                   </tr>
                 </thead>
@@ -164,6 +164,7 @@
 
           <section class="traffic-region" id="trafficRegion" tabindex="0">
             <div class="history-table-shell">
+              <p id="historyColumnResizeHelp" class="history-column-resize-help">Use Left and Right arrow keys to resize a column by 8 pixels. Press Enter to restore that column's default width.</p>
               <table class="history-table" id="historyTable">
                 <thead>
                   <tr></tr>
@@ -192,7 +193,7 @@
                 </div>
               </header>
               <div class="editor-shell">
-                <div id="requestViewCM" class="cm-container"></div>
+                <div id="requestViewCM" class="cm-container" data-editor-label="Captured request"></div>
               </div>
               <footer class="pane-footer">
                 <label class="pane-search" aria-label="Search request">
@@ -221,7 +222,7 @@
                 </div>
               </header>
               <div class="editor-shell">
-                <div id="responseViewCM" class="cm-container"></div>
+                <div id="responseViewCM" class="cm-container" data-editor-label="Captured response"></div>
               </div>
               <div id="responseRenderView" class="render-view hidden"></div>
               <footer class="pane-footer">
@@ -301,7 +302,9 @@
                   <button class="intercept-queue-tab active" data-queue="request" id="interceptQueueTabRequest">Request Queue</button>
                   <button class="intercept-queue-tab" data-queue="response" id="interceptQueueTabResponse">Response Queue</button>
                 </nav>
-                <div class="history-table-shell" style="flex:1 1 auto;min-height:80px">
+                <p class="intercept-queue-accessibility" id="interceptQueueInstructions">Use Up and Down arrow keys to select a held item.</p>
+                <p class="intercept-queue-accessibility" id="interceptQueueSelectionStatus" role="status" aria-live="polite" aria-atomic="true">Request queue is empty.</p>
+                <div class="history-table-shell" id="interceptQueueShell" tabindex="0" role="group" aria-label="Request Queue" aria-describedby="interceptQueueInstructions interceptQueueSelectionStatus" style="flex:1 1 auto;min-height:80px">
                   <table class="mini-table intercept-queue-table" id="interceptRequestTable">
                     <thead>
                       <tr>
@@ -344,15 +347,19 @@
                     <p class="placeholder-kicker" id="interceptDetailPath">Intercept</p>
                     <h2 id="interceptDetailTitle">No request selected</h2>
                   </div>
-                  <div class="toolbar-actions" id="interceptRequestActions">
-                    <button class="secondary-action" id="dropInterceptButton" type="button">Drop</button>
-                    <button class="primary-action" id="forwardInterceptButton" type="button">Forward</button>
-                  </div>
-                  <div class="toolbar-actions hidden" id="responseInterceptActions">
-                    <button class="secondary-action" id="dropResponseInterceptButton" type="button">Drop</button>
-                    <button class="primary-action" id="forwardResponseInterceptButton" type="button">Forward</button>
+                  <div class="toolbar-actions" id="interceptDetailActions">
+                    <button class="secondary-action hidden" id="interceptDetailRetryButton" type="button" aria-describedby="interceptDetailStatus" aria-disabled="true" aria-busy="false">Retry detail</button>
+                    <div class="toolbar-actions" id="interceptRequestActions">
+                      <button class="secondary-action" id="dropInterceptButton" type="button">Drop</button>
+                      <button class="primary-action" id="forwardInterceptButton" type="button">Forward</button>
+                    </div>
+                    <div class="toolbar-actions hidden" id="responseInterceptActions">
+                      <button class="secondary-action" id="dropResponseInterceptButton" type="button">Drop</button>
+                      <button class="primary-action" id="forwardResponseInterceptButton" type="button">Forward</button>
+                    </div>
                   </div>
                 </header>
+                <p class="intercept-detail-accessibility" id="interceptDetailStatus" role="status" aria-live="polite" aria-atomic="true"></p>
                 <div class="editor-panel" id="interceptRequestEditorPanel">
                   <div id="interceptRequestCM" class="cm-container" style="height:100%"></div>
                 </div>
@@ -962,20 +969,23 @@
                 </label>
                 <label class="compact-field replay-target-field">
                   <span>Target host</span>
-                  <input id="replayHostInput" type="text" placeholder="api.example.com" />
+                  <input id="replayHostInput" type="text" placeholder="api.example.com" aria-describedby="replayHostError" />
                 </label>
                 <label class="compact-field compact-field-port">
                   <span>Port</span>
-                  <input id="replayPortInput" type="number" min="1" max="65535" placeholder="443" />
+                  <input id="replayPortInput" type="number" min="1" max="65535" placeholder="443" aria-describedby="replayPortError" />
                 </label>
                 <label class="compact-field compact-field-scheme">
                   <span>Version</span>
                   <select id="replayHttpVersionSelect">
                     <option value="">Auto</option>
+                    <option value="HTTP/1.0">HTTP/1.0</option>
                     <option value="HTTP/1.1">HTTP/1.1</option>
                     <option value="HTTP/2">HTTP/2</option>
                   </select>
                 </label>
+                <p id="replayHostError" class="replay-target-error"></p>
+                <p id="replayPortError" class="replay-target-error"></p>
               </div>
             </div>
           </header>
@@ -991,11 +1001,11 @@
                 </div>
               </header>
               <div class="editor-panel">
-                <div id="replayRequestCM" class="cm-container" style="height:100%"></div>
+                <div id="replayRequestCM" class="cm-container" data-editor-label="Replay request" style="height:100%"></div>
               </div>
               <footer class="pane-footer">
                 <label class="pane-search">
-                  <input id="replayRequestSearchInput" type="search" placeholder="Search request" />
+                  <input id="replayRequestSearchInput" type="search" aria-label="Search Replay request" placeholder="Search request" />
                 </label>
                 <span id="replayRequestSearchMeta">No highlights · 1 lines · Pretty view</span>
               </footer>
@@ -1013,12 +1023,12 @@
                 </div>
               </header>
               <div class="editor-panel">
-                <div id="replayResponseCM" class="cm-container"></div>
+                <div id="replayResponseCM" class="cm-container" data-editor-label="Replay response"></div>
               </div>
               <div id="replayResponseRenderView" class="render-view hidden"></div>
               <footer class="pane-footer">
                 <label class="pane-search">
-                  <input id="replayResponseSearchInput" type="search" placeholder="Search response" />
+                  <input id="replayResponseSearchInput" type="search" aria-label="Search Replay response" placeholder="Search response" />
                 </label>
                 <span id="replayResponseSearchMeta">No highlights · 1 lines · Pretty view</span>
               </footer>
@@ -1120,19 +1130,19 @@
                 </div>
                 <div class="tools-tool-strip">
                   <ul id="tabs" class="tools-tool-list" data-tab-active=".on">
-                    <li id="encode" class="on">Encode</li>
-                    <li id="string">Strings</li>
-                    <li id="number">Num</li>
-                    <li id="json">JSON</li>
-                    <li id="jwt">JWT</li>
-                    <li id="hash">Hash</li>
-                    <li id="hmac">HMAC</li>
-                    <li id="crc">CRC</li>
-                    <li id="cipher">Cipher</li>
-                    <li id="net">Net</li>
-                    <li id="time">Time</li>
-                    <li id="morse">Morse</li>
-                    <li id="password">Password</li>
+                    <li id="encode" class="on"><button type="button" aria-pressed="true">Encode</button></li>
+                    <li id="string"><button type="button" aria-pressed="false">Strings</button></li>
+                    <li id="number"><button type="button" aria-pressed="false">Num</button></li>
+                    <li id="json"><button type="button" aria-pressed="false">JSON</button></li>
+                    <li id="jwt"><button type="button" aria-pressed="false">JWT</button></li>
+                    <li id="hash"><button type="button" aria-pressed="false">Hash</button></li>
+                    <li id="hmac"><button type="button" aria-pressed="false">HMAC</button></li>
+                    <li id="crc"><button type="button" aria-pressed="false">CRC</button></li>
+                    <li id="cipher"><button type="button" aria-pressed="false">Cipher</button></li>
+                    <li id="net"><button type="button" aria-pressed="false">Net</button></li>
+                    <li id="time"><button type="button" aria-pressed="false">Time</button></li>
+                    <li id="morse"><button type="button" aria-pressed="false">Morse</button></li>
+                    <li id="password"><button type="button" aria-pressed="false">Password</button></li>
                   </ul>
                 </div>
               </div>
@@ -1189,14 +1199,31 @@
           <header class="panel-toolbar replay-header fuzzer-workflow-header">
             <div class="fuzzer-header-row">
               <h2>Fuzzer</h2>
+              <label class="compact-field fuzzer-mode-field" for="fuzzerAttackType">
+                <span>Attack</span>
+                <select id="fuzzerAttackType">
+                  <option value="sniper" selected>Sniper · one at a time</option>
+                  <option value="battering_ram">Battering ram · all positions</option>
+                </select>
+              </label>
+              <div id="fuzzerPreflightSummary" class="fuzzer-preflight-summary" role="status" aria-live="polite">No request selected.</div>
               <div class="toolbar-actions">
                 <button class="secondary-action" id="resetFuzzerButton" type="button">Reset</button>
-                <button class="secondary-action hidden" id="stopFuzzerButton" type="button">Stop</button>
-                <button class="primary-action" id="startFuzzerButton" type="button" aria-describedby="fuzzerPreflightSummary fuzzerPreflightNotice">Start</button>
+                <button class="secondary-action hidden" id="stopFuzzerButton" type="button" aria-describedby="fuzzerStopStatus">Stop</button>
+                <button class="primary-action" id="startFuzzerButton" type="button" aria-describedby="fuzzerPreflightSummary fuzzerTargetSummary fuzzerPreflightNotice">Start</button>
               </div>
             </div>
             <section class="fuzzer-preflight" aria-label="Review before running">
-              <div id="fuzzerPreflightSummary" class="fuzzer-preflight-summary" role="status" aria-live="polite">No request selected.</div>
+              <label class="compact-field fuzzer-transport-field" for="fuzzerTransportSelect">
+                <span>Transport</span>
+                <select id="fuzzerTransportSelect" aria-describedby="fuzzerTransportHelp fuzzerTargetSummary" disabled>
+                  <option value="https">HTTPS</option>
+                  <option value="http">HTTP</option>
+                </select>
+              </label>
+              <span id="fuzzerTargetSummary" class="fuzzer-target-summary"></span>
+              <p id="fuzzerTransportHelp" class="fuzzer-help fuzzer-transport-help hidden"></p>
+              <p id="fuzzerStopStatus" class="fuzzer-help fuzzer-notice-error hidden" role="status" aria-live="polite"></p>
               <p id="fuzzerPreflightNotice" class="fuzzer-help" role="status" aria-live="polite"></p>
               <details class="fuzzer-disclosure fuzzer-preview-disclosure hidden" id="fuzzerPreviewDisclosure">
                 <summary>Preview &amp; details</summary>
@@ -1206,66 +1233,75 @@
                   <div id="fuzzerPreviewSamples" class="fuzzer-preview-samples">Add a request and payloads to preview.</div>
                 </div>
               </details>
+              <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-options">
+                <summary>Options</summary>
+                <div class="fuzzer-disclosure-body">
+                  <div class="fuzzer-control-row fuzzer-attack-options">
+                    <label class="compact-field fuzzer-concurrency-field" for="fuzzerConcurrency">
+                      <span>Concurrent requests</span>
+                      <input id="fuzzerConcurrency" type="number" min="1" max="16" step="1" value="4" />
+                    </label>
+                    <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
+                  </div>
+                </div>
+              </details>
             </section>
           </header>
 
           <section class="fuzzer-layout">
-            <!-- Top row: Request template | resizer | Payloads -->
             <div class="fuzzer-top-row">
               <section class="panel-card fuzzer-template-card">
                 <header class="panel-toolbar">
-                  <h2 id="fuzzerRequestHeading">1. Request</h2>
+                  <h2 id="fuzzerRequestHeading">Request</h2>
+                  <span class="fuzzer-count" id="fuzzerPositionCount">0 positions</span>
                   <div class="toolbar-actions">
-                    <button class="secondary-action" id="fuzzerMarkSelectionButton" type="button" title="Mark the selected text as a position">Mark selection</button>
-                    <button class="secondary-action" id="fuzzerUndoMarkerButton" type="button" disabled>Undo marker</button>
+                    <button class="secondary-action" id="fuzzerMarkSelectionButton" type="button" title="Wrap selected text in § markers, or insert an empty position at the caret">Add §</button>
+                    <button class="secondary-action" id="fuzzerRemoveMarkerButton" type="button" title="Remove markers around the selected value; keep the value" disabled>Remove §</button>
+                    <button class="secondary-action" id="fuzzerClearMarkersButton" type="button" title="Remove recognized position markers, keeping their original values">Clear §</button>
+                    <button class="secondary-action" id="fuzzerUndoMarkerButton" type="button" title="Undo the last Add, Remove or Clear markers action" disabled>Undo</button>
                   </div>
                 </header>
-                <div class="fuzzer-control-row fuzzer-quick-controls hidden" id="fuzzerValueRow">
-                  <label class="compact-field fuzzer-field-grow" for="fuzzerCandidateSelect">
-                    <span>Value</span>
-                    <select id="fuzzerCandidateSelect" disabled><option value="">Select text in the request</option></select>
-                  </label>
-                  <button class="secondary-action" id="fuzzerMarkCandidateButton" type="button" disabled>Mark value</button>
-                </div>
-                <div class="editor-panel" role="group" aria-labelledby="fuzzerRequestHeading">
+                <p class="fuzzer-input-label" id="fuzzerRequestHelp">Raw HTTP request · select a value, then Add §</p>
+                <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-value-tools hidden" id="fuzzerValueRow">
+                  <summary>Choose a value</summary>
+                  <div class="fuzzer-disclosure-body">
+                    <div class="fuzzer-control-row fuzzer-quick-controls">
+                      <label class="compact-field fuzzer-field-grow" for="fuzzerCandidateSelect">
+                        <span>Value</span>
+                        <select id="fuzzerCandidateSelect" disabled><option value="">Select text in the request</option></select>
+                      </label>
+                      <button class="secondary-action" id="fuzzerMarkCandidateButton" type="button" disabled>Mark value</button>
+                    </div>
+                  </div>
+                </details>
+                <div class="editor-panel" role="group" aria-labelledby="fuzzerRequestHeading" aria-describedby="fuzzerRequestHelp">
                   <div id="fuzzerRequestCM" class="cm-container" style="height:100%"></div>
                 </div>
               </section>
               <div class="fuzzer-col-resizer" id="fuzzerColResizer"></div>
               <section class="panel-card fuzzer-payloads-card">
                 <header class="panel-toolbar">
-                  <h2><label for="fuzzerPayloadsEditor">2. Payloads</label></h2>
+                  <h2><label for="fuzzerPayloadsEditor">Payloads</label></h2>
+                  <span class="fuzzer-count" id="fuzzerPayloadCount">0 payloads</span>
                   <div class="toolbar-actions">
                     <input id="fuzzerPayloadFile" type="file" accept=".txt,text/plain" hidden aria-label="Payload text file" />
-                    <button class="secondary-action" id="fuzzerImportPayloadButton" type="button" aria-controls="fuzzerPayloadFile">Import file</button>
+                    <button class="secondary-action" id="fuzzerImportPayloadButton" type="button" aria-controls="fuzzerPayloadFile" aria-describedby="fuzzerPayloadImportStatus">Import file</button>
                   </div>
                 </header>
-                <div class="fuzzer-control-row fuzzer-attack-options">
-                  <label class="compact-field" for="fuzzerAttackType">
-                    <span>Attack</span>
-                    <select id="fuzzerAttackType">
-                      <option value="sniper" selected>Sniper: one position at a time</option>
-                      <option value="battering_ram">Battering ram: every position at once</option>
+                <div class="fuzzer-payload-input-bar">
+                  <span class="fuzzer-input-label">One per line</span>
+                  <label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">
+                    <span title="Applies to imported files, presets and generated ranges">On import</span>
+                    <select id="fuzzerPayloadImportMode">
+                      <option value="append" selected>Append to list</option>
+                      <option value="replace">Replace list</option>
                     </select>
                   </label>
-                  <label class="compact-field fuzzer-concurrency-field" for="fuzzerConcurrency">
-                    <span>At once</span>
-                    <input id="fuzzerConcurrency" type="number" min="1" max="16" step="1" value="4" />
-                  </label>
-                  <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
                 </div>
-                <details class="fuzzer-disclosure fuzzer-control-disclosure">
-                  <summary>More payload options</summary>
+                <p id="fuzzerPayloadImportStatus" class="fuzzer-import-status hidden" role="status" aria-live="polite"></p>
+                <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-payload-tools" id="fuzzerPayloadTools">
+                  <summary>Generate payloads</summary>
                   <div class="fuzzer-disclosure-body">
-                    <div class="fuzzer-control-row">
-                      <label class="compact-field fuzzer-field-grow" for="fuzzerPayloadImportMode">
-                        <span>Add payloads</span>
-                        <select id="fuzzerPayloadImportMode">
-                          <option value="append" selected>Append to list</option>
-                          <option value="replace">Replace list</option>
-                        </select>
-                      </label>
-                    </div>
                     <div class="fuzzer-control-row">
                       <label class="compact-field fuzzer-field-grow" for="fuzzerPayloadPreset">
                         <span>Boundary preset</span>
@@ -1299,8 +1335,9 @@
             <section class="panel-card fuzzer-results-card" style="display:flex;flex-direction:column;min-height:0">
               <header class="panel-toolbar">
                 <div>
-                  <h2>3. Results</h2>
+                  <h2>Results</h2>
                   <p class="inline-copy" id="fuzzerMeta">No results yet.</p>
+                  <button class="secondary-action hidden" id="fuzzerRetryWorkspaceButton" type="button">Retry load</button>
                 </div>
                 <div class="toolbar-actions">
                   <button class="secondary-action" id="fuzzerCompareBaseButton" type="button" disabled title="Use the selected result as the comparison baseline">Set compare base</button>
@@ -1394,7 +1431,7 @@
                       </div>
                     </header>
                     <div class="editor-shell" style="flex:1;min-height:0">
-                      <div id="fuzzerDetailReqCM" class="cm-container"></div>
+                      <div id="fuzzerDetailReqCM" class="cm-container" data-editor-label="Fuzzer result request"></div>
                     </div>
                   </section>
                   <section class="message-pane" style="flex:1;min-width:0;display:flex;flex-direction:column">
@@ -1409,7 +1446,7 @@
                       </div>
                     </header>
                     <div class="editor-shell" style="flex:1;min-height:0">
-                      <div id="fuzzerDetailResCM" class="cm-container"></div>
+                      <div id="fuzzerDetailResCM" class="cm-container" data-editor-label="Fuzzer result response"></div>
                     </div>
                     <div id="fuzzerDetailResRenderView" class="render-view hidden" style="flex:1;min-height:0"></div>
                   </section>
@@ -1445,7 +1482,7 @@
                     <tr>
                       <th>Name</th>
                       <th>Steps</th>
-                      <th>Actions</th>
+                      <th><span class="sequence-actions-heading">Actions</span></th>
                     </tr>
                   </thead>
                   <tbody id="sequenceListBody"></tbody>
@@ -1454,8 +1491,8 @@
             </section>
 
             <section class="panel-card sequence-editor-card">
-              <header class="panel-toolbar">
-                <div>
+              <header class="panel-toolbar sequence-editor-header">
+                <div class="sequence-editor-heading">
                   <h2 id="sequenceEditorTitle">No sequence selected</h2>
                 </div>
                 <div class="toolbar-actions">
@@ -1463,6 +1500,10 @@
                   <button class="secondary-action" id="saveSequenceButton" type="button" disabled>Save</button>
                   <button class="primary-action" id="runSequenceButton" type="button" disabled>Run</button>
                 </div>
+                <label class="sequence-name-field hidden" id="sequenceNameField" for="sequenceNameInput">
+                  <span>Sequence name</span>
+                  <input id="sequenceNameInput" type="text" autocomplete="off" spellcheck="false" disabled />
+                </label>
               </header>
               <div id="sequenceStepsContainer" class="sequence-steps-container"></div>
             </section>

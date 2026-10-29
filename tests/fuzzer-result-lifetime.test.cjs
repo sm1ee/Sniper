@@ -49,21 +49,23 @@ function fixture() {
   // Use the production initial values rather than inventing request tokens.
   vm.runInNewContext(`Object.assign(state, {${appSource.slice(appSource.indexOf('  fuzzerBaseRequest: null,'), appSource.indexOf('  oastTokenClearPending:'))}})`, { state });
   let saves = 0;
-  const c = loadFunctions([
+  const c = loadFunctions(['tableArrowStep', 'isEditableTarget',
     'fuzzerResultsWorkflowState', 'fuzzerResultMetric', 'fuzzerResultFilterValidation', 'visibleFuzzerResults', 'renderFuzzerResultsWorkflow',
     'fuzzerSelectedTransactionId', 'cancelPendingFuzzerComparison',
     'currentSessionId', 'sessionQueryPath', 'transactionPath', 'jsonArray', 'escapeHtml', 'formatStatus', 'formatSize',
     'renderFuzzer', 'fuzzerSelectionKeyForResult', 'fuzzerSelectedResultIndex', 'fuzzerResultsShell',
     'renderEmptyFuzzerResults', 'renderFuzzerResultsVirtual', 'scrollFuzzerResultToIndex', 'selectFuzzerResultIndex',
     'selectFuzzerRow', 'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord',
-    'fuzzerWorkspaceAttackRecordId', 'applyFuzzerWorkspace', 'hydrateFuzzerAttackRecordById', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
+    'fuzzerWorkspaceAttackRecordId', 'applyFuzzerWorkspace', 'followRestoredFuzzerAttack', 'hydrateFuzzerAttackRecordById', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
+    'snapshotFuzzerWorkspace', 'workspaceSnapshotValueChanged', 'cloneEditableRequest', 'normalizeFuzzerTargetOverride',
     'clearFuzzerResponsePane', 'syncFuzzerResponsePreview', 'syncFuzzerDetailTabs', 'renderFuzzerDetailPanes',
     'buildRawRequest', 'buildRawResponse', 'buildRawRequestHead', 'buildRawResponseHead', 'normalizedHeaders',
     'mergeHeaders', 'headerNameEquals', 'renderBody', 'binaryBodyPlaceholder', 'prettyFormat', 'prettyJsonText',
     'resetFuzzer', 'invalidateFuzzerRun', 'updateFuzzerRequestText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',
   ], {
-    compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0,
+    workspaceLoaded: true, HTMLElement: class HTMLElement {}, getActiveModalAction: () => null, compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0, workspaceStateGeneration: 0,
+    renderFuzzerPayloadsEditor() { els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText; },
     state, els, document, mainTabs: [], _fuzzerDetailViewModes: { request: 'raw', response: 'raw' },
     FUZZER_RESULT_ROW_HEIGHT: 30, FUZZER_RESULT_BUFFER_ROWS: 5, measuredFuzzerResultRowHeight: 30,
     console: { error: (...args) => logs.push(args) },
@@ -89,8 +91,8 @@ function fixture() {
   vm.runInContext(`(() => { ${appSource.slice(start, end)} })()`, c);
   const resetBinding = appSource.match(/^  els\.resetFuzzerButton\.addEventListener\(\"click\", resetFuzzer\);$/m)?.[0];
   assert.ok(resetBinding); vm.runInContext(resetBinding, c);
-  // This is only the saved-result display initialization branch. No snapshot
-  // serialization, revision, save, or persistence code is loaded.
+  // This is only saved-result display initialization and draft-value comparison;
+  // no workspace revision, save, or persistence code is loaded.
   vm.runInContext(`function restoreSavedJob(snapshot) {
     applyFuzzerWorkspace({ fuzzerAttackRecordId: fuzzerWorkspaceAttackRecordId(snapshot.fuzzer), legacyAttackRecord: null }, snapshot.session_id);
     renderFuzzer();

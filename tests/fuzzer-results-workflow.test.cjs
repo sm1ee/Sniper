@@ -32,37 +32,38 @@ function fixture() {
     'fuzzerResultFilterBadge', 'fuzzerResultFilterSummary', 'fuzzerClearResultFiltersButton', 'fuzzerResultStatusRow', 'fuzzerCompareBaseButton', 'fuzzerCompareButton',
     'fuzzerSavedRunSelect', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton', 'fuzzerSavedRunNotice',
     'fuzzerRequestEditor', 'fuzzerPayloadsEditor', 'fuzzerResultsBody', 'fuzzerDetailPanel', 'fuzzerDetailReqCM',
-    'fuzzerDetailResCM', 'fuzzerDetailResponseMeta', 'fuzzerMeta', 'startFuzzerButton', 'resetFuzzerButton',
-    'fuzzerDetailResizer', 'compareModal', 'closeCompareButton', 'compareWithBaseBtn'];
+    'fuzzerDetailResCM', 'fuzzerDetailResponseMeta', 'fuzzerMeta', 'startFuzzerButton', 'stopFuzzerButton', 'resetFuzzerButton',
+    'fuzzerStopStatus', 'fuzzerDetailResizer', 'compareModal', 'closeCompareButton', 'compareWithBaseBtn'];
   const els = Object.fromEntries(ids.map(id => [id, node(id)])), shell = node('shell');
   els.fuzzerResultsBody.closest = () => shell;
   const state = { activeSession: { id: 'session-a' }, fuzzerDraftVersion: 0, fuzzerRunToken: 0,
     fuzzerRequestText: 'GET /typed HTTP/2\nHost: example.com', fuzzerPayloadsText: 'typed-payload', fuzzerNotice: 'typed notice',
     fuzzerBaseRequest: { host: 'example.com', path: '/typed', method: 'GET' }, fuzzerSourceTransactionId: 'source-draft',
     fuzzerTarget: { host: 'example.com', port: 8443 }, fuzzerTargetRequestText: 'https://example.com' };
-  const requests = [], confirmations = [], panes = new Map(), toasts = [];
+  const requests = [], confirmations = [], panes = new Map(), toasts = [], timers = [];
   let saves = 0, compares = 0;
   const newNames = appSource.slice(appSource.indexOf('function fuzzerResultsWorkflowState()'), appSource.indexOf('function fuzzerSelectionKeyForResult'))
     .match(/^(?:async )?function (\w+)/gm).map(line => line.match(/function (\w+)/)[1]);
-  const c = loadFunctions([...newNames,
+  const c = loadFunctions([...newNames, 'tableArrowStep', 'isEditableTarget',
     'currentSessionId', 'sessionQueryPath', 'transactionPath', 'jsonArray', 'escapeHtml', 'formatStatus', 'formatSize',
     'renderFuzzer', 'fuzzerSelectionKeyForResult', 'fuzzerSelectedResultIndex', 'fuzzerResultsShell', 'renderEmptyFuzzerResults',
     'renderFuzzerResultsVirtual', 'scrollFuzzerResultToIndex', 'selectFuzzerResultIndex', 'selectFuzzerRow',
-    'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
+    'followRestoredFuzzerAttack', 'followFuzzerAttack', 'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
     'clearFuzzerResponsePane', 'invalidateFuzzerRun', 'resetFuzzer', 'updateFuzzerRequestText', 'updateFuzzerPayloadsText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'cloneEditableRequest', 'buildEditableRawRequest', 'normalizedHeaders', 'mergeHeaders', 'headerNameEquals',
-    'setCompareBase', 'openCompareModal', 'closeCompareModal', 'splitFuzzerPayloadLines', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool',
-  ], { refreshHistoryFindings() {}, state, els, TextEncoder, document: { getElementById: id => els[id], activeElement: null },
+    'stopFuzzerAttack', 'setCompareBase', 'openCompareModal', 'closeCompareModal', 'clearCompareState', 'splitFuzzerPayloadLines', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool',
+  ], { refreshHistoryFindings() {}, workspaceLoaded: true, HTMLElement: class HTMLElement {}, state, els, TextEncoder, FUZZER_POLL_MS: 0, setTimeout: callback => { timers.push(callback); return 0; }, document: { getElementById: id => els[id], activeElement: null },
     _fuzzerAttackLoadGeneration: 0, _fuzzerDetailGeneration: 0,
     compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0,
     compareBaseRecord: null, compareTargetRecord: null, compareActiveTab: 'request', compareReturnFocus: null,
     measuredFuzzerResultRowHeight: 30, FUZZER_RESULT_ROW_HEIGHT: 30, FUZZER_RESULT_BUFFER_ROWS: 1,
     sanitizeActiveTool: value => value, closeScannerSettings() {}, scheduleUiSettingsSave() {},
-    getCMView: () => null, renderFuzzerRequestHighlight() {}, renderFuzzerDetailPanes() {}, syncFuzzerResponsePreview() {},
+    getCMView: () => null, renderFuzzerRequestHighlight() {}, renderFuzzerDetailPanes() {},
+    renderFuzzerPayloadsEditor() { els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText; }, syncFuzzerResponsePreview() {},
     updateCodePaneCM: (key, _, value) => panes.set(key, value), scheduleWorkspaceStateSave: () => saves++,
     showConfirmDialog: (message, confirm, options) => confirmations.push({ message, confirm, options }),
     getHistoryItem: () => null, getActiveModalAction: () => null, isModalVisible: el => !el.classList.contains('hidden'),
-    renderCompareModal: () => compares++, clearCompareState() { throw new Error('Unexpected clear'); },
+    renderCompareModal: () => compares++,
     showToast: message => toasts.push(message), console: { error() {} },
     requestAnimationFrame: callback => { callback(); return 1; },
     fetch(url, options) {
@@ -76,7 +77,7 @@ function fixture() {
   const end = appSource.indexOf('  // Fuzzer detail view mode tabs', start);
   vm.runInContext(`(() => { ${appSource.slice(start, end)} })()`, c);
   c.setFuzzerAttackRecord(run()); c.renderFuzzer();
-  return { c, state, els, shell, requests, confirmations, panes, toasts,
+  return { c, state, els, shell, requests, confirmations, panes, toasts, timers,
     get saves() { return saves; }, get compares() { return compares; },
     setFilter(id, value) { els[id].value = value; els[id].dispatch(/Status|Sort|Direction/.test(id) ? 'change' : 'input'); },
     pick(id) { els.fuzzerSavedRunSelect.value = id; els.fuzzerSavedRunSelect.dispatch('change'); },
@@ -187,6 +188,50 @@ test('virtualized arrow navigation follows the filtered sorted projection beyond
   assert.ok((f.els.fuzzerResultsBody.innerHTML.match(/class="fuzzer-result-row/g) || []).length < 10);
   f.key('ArrowUp'); assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-501');
 });
+for (const [index, key] of [[0, 'ArrowUp'], [1, 'ArrowDown']]) {
+  test(`boundary ${key} preserves loaded detail and comparison controls without refetching`, async () => {
+    const f = fixture(), before = draft(f.state);
+    f.select(index).resolve(response({ id: `tx-${index}` })); await tick();
+    const detail = f.state._fuzzerDetailRecord;
+    for (let repeat = 0; repeat < 5; repeat++) f.key(key);
+    f.key('Home'); f.key('End'); // These keys do not select rows in this table.
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.state._fuzzerDetailRecord, detail);
+    assert.equal(f.els.fuzzerCompareBaseButton.disabled, false);
+    assert.equal(draft(f.state), before); assert.equal(f.saves, 0);
+    // Moving in the other direction remains an intentional new selection.
+    f.key(key === 'ArrowUp' ? 'ArrowDown' : 'ArrowUp');
+    assert.equal(f.requests.length, 2);
+    assert.equal(f.state._selectedFuzzerResultKey, `tx:tx-${1 - index}`);
+  });
+}
+test('boundary arrows preserve the pending read of a single filtered result and explicit retry still works', async () => {
+  const f = fixture(); f.setFilter('fuzzerResultMinBytes', '1');
+  f.setFilter('fuzzerResultDirection', 'desc');
+  f.key('ArrowDown'); const pending = f.requests[0];
+  f.key('ArrowUp'); f.key('ArrowDown');
+  assert.equal(f.requests.length, 1);
+  pending.resolve(response(null, 404)); await tick();
+  assert.equal(f.panes.get('fuzzerDetailReq'), 'Failed to load transaction: 404');
+  f.select(0).resolve(response({ id: 'tx-1' })); await tick();
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.state._fuzzerDetailRecord.id, 'tx-1');
+});
+test('arrow boundaries use the filtered sorted order rather than source indexes', async () => {
+  const f = fixture();
+  f.c.setFuzzerAttackRecord(run('sorted', [result(0, 200, 30), result(1, 404, 20), result(2, 200, 10)]));
+  f.setFilter('fuzzerResultStatus', '2xx'); f.setFilter('fuzzerResultSort', 'bytes');
+  f.key('ArrowDown');
+  assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-2');
+  const first = f.requests[0]; f.key('ArrowUp'); assert.equal(f.requests.length, 1);
+  f.key('ArrowDown'); assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-0');
+  f.requests[1].resolve(response({ id: 'tx-0' })); await tick();
+  first.resolve(response({ id: 'tx-2' })); await tick();
+  f.key('ArrowDown'); assert.equal(f.requests.length, 2);
+  assert.equal(f.state._fuzzerDetailRecord.id, 'tx-0');
+  f.key('ArrowUp'); assert.equal(f.state._selectedFuzzerResultKey, 'tx:tx-2');
+  assert.equal(f.requests.length, 3);
+});
 test('with no results there is nothing to compare or count, and one empty message', () => {
   const f = fixture();
   for (const id of ['fuzzerCompareBaseButton', 'fuzzerCompareButton', 'fuzzerResultFilterCount']) {
@@ -272,8 +317,9 @@ for (const boundary of ['draft', 'reset', 'session-bounce', 'new-run']) test(`pe
   read.resolve(response([{ id: 'old-session-run' }])); await pending;
   assert.equal(f.c.fuzzerResultsWorkflowState().runs.length, 0);
 });
-test('Reuse waits for confirmation, clears unrelated transport/source and retains template HTTP version', async () => {
+for (const scheme of ['http', 'https']) test(`Reuse waits for confirmation, clears unrelated transport/source and retains ${scheme} template and HTTP version`, async () => {
   const f = fixture(), before = draft(f.state), saved = run('run-b'); saved.template.http_version = 'HTTP/2';
+  saved.template.scheme = scheme;
   saved.results = [{ payload: 'a' }, { payload: '' }]; f.pick('run-b'); const read = f.reuse();
   f.requests.at(-1).resolve(response(saved)); await read;
   assert.equal(draft(f.state), before); assert.equal(f.confirmations.length, 1);
@@ -281,6 +327,7 @@ test('Reuse waits for confirmation, clears unrelated transport/source and retain
   f.confirmations[0].confirm();
   assert.equal(f.state.fuzzerSourceTransactionId, null); assert.equal(f.state.fuzzerTarget, null);
   assert.equal(f.state.fuzzerTargetRequestText, null); assert.equal(f.state.fuzzerBaseRequest.http_version, 'HTTP/2');
+  assert.equal(f.state.fuzzerBaseRequest.scheme, scheme);
   assert.match(f.state.fuzzerRequestText, /^GET \/\$payload\$ HTTP\/2/);
   assert.deepEqual(Array.from(f.c.splitFuzzerPayloadLines(f.state.fuzzerPayloadsText)), ['a', '']);
   assert.equal(f.state.fuzzerAttackRecord, null); assert.equal(f.requests.length, 1);
@@ -690,4 +737,382 @@ test('Sniper slot recovery still enforces payload editor byte limits before conf
   const f = fixture(), saved = sniperSavedRun(['x'.repeat(4 * 1024 * 1024), 'B', 'C']);
   await prepareReuse(f, saved);
   assert.equal(f.confirmations.length, 0); assert.match(f.els.fuzzerSavedRunNotice.textContent, /editor limits/);
+});
+
+// Exercise the real setup listeners, not direct state mutation: these controls
+// remain usable while a retained-run GET is pending.
+function wireReuseSetupControls(f) {
+  for (const id of ['fuzzerAttackType', 'fuzzerUrlEncode', 'fuzzerConcurrency']) f.els[id] = node(id);
+  f.c.fuzzerSetupNode = id => f.els[id];
+  f.c.renderFuzzerSetup = () => {};
+  for (const name of ['markFuzzerEditorSelection', 'removeFuzzerEditorPosition', 'renderFuzzerRemoveMarkerControl', 'undoFuzzerMarker', 'clearFuzzerMarkers']) f.c[name] = () => {};
+  vm.runInContext(appSource.match(/^function finishFuzzerOptionChange\([^]*?^\}/m)[0], f.c);
+  vm.runInContext(appSource.match(/^function initFuzzerSetupControls\([^]*?^\}/m)[0], f.c);
+  f.c.initFuzzerSetupControls();
+}
+const reuseSetupEdits = [
+  ['fuzzerAttackType', 'fuzzerAttackType', 'battering_ram', 'sniper'],
+  ['fuzzerUrlEncode', 'fuzzerUrlEncode', false, true],
+  ['fuzzerConcurrency', 'fuzzerConcurrency', 12, 4],
+];
+for (const [id, field, value, original] of reuseSetupEdits) {
+  for (const boundary of ['read', 'confirmation']) test(`newer ${id} retires pending Reuse ${boundary} without hiding results`, async () => {
+    const f = fixture(); wireReuseSetupControls(f); f.state[field] = original;
+    const visible = f.state.fuzzerAttackRecord, before = draft(f.state);
+    f.pick('saved'); const pending = f.reuse();
+    if (boundary === 'confirmation') { f.requests.at(-1).resolve(response(run('saved'))); await pending; }
+    f.els[id].value = String(value); f.els[id].checked = value; f.els[id].dispatch('change');
+    assert.equal(f.state[field], value); assert.equal(f.state.fuzzerDraftVersion, 1);
+    const edited = draft(f.state);
+    if (boundary === 'read') { f.requests.at(-1).resolve(response(run('saved'))); await pending; assert.equal(f.confirmations.length, 0); }
+    else { assert.equal(f.confirmations.length, 1); f.confirmations[0].confirm(); }
+    assert.notEqual(edited, before); assert.equal(draft(f.state), edited);
+    assert.equal(f.state[field], value); assert.equal(f.state.fuzzerAttackRecord, visible);
+    assert.equal(f.requests.length, 1); assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, false);
+  });
+  test(`same-value ${id} keeps intentional Reuse owned`, async () => {
+    const f = fixture(); wireReuseSetupControls(f); f.state[field] = original;
+    f.pick('saved'); const pending = f.reuse();
+    // Fractional concurrency normalizes back to the same effective value.
+    f.els[id].value = id === 'fuzzerConcurrency' ? '4.2' : String(original);
+    f.els[id].checked = original; f.els[id].dispatch('change');
+    assert.equal(f.state.fuzzerDraftVersion, 0);
+    f.requests.at(-1).resolve(response(run('saved'))); await pending;
+    assert.equal(f.confirmations.length, 1);
+    f.els[id].dispatch('change'); f.confirmations[0].confirm();
+    assert.equal(f.state.fuzzerRequestText.includes('/$payload$'), true);
+    assert.equal(f.state.fuzzerDraftVersion, 1); assert.equal(f.requests.length, 1);
+  });
+}
+
+test('stopped Battering ram Reuse discloses the retained subset before replacement', async () => {
+  const f = fixture(), saved = run('partial-ram', [result(0), result(2)]);
+  Object.assign(saved, { attack_type: 'battering_ram', payload_count: 10, stopped: true, running: false, planned: 10 });
+  await prepareReuse(f, saved);
+  assert.equal(f.confirmations.length, 1);
+  assert.match(f.confirmations[0].message, /Only 2 of 10 original payload slots remain/);
+  assert.match(f.confirmations[0].message, /Missing payloads will not be restored/);
+  f.confirmations[0].confirm();
+  assert.deepEqual(reusedPayloads(f), ['synthetic-0', 'synthetic-2']);
+  assert.equal(f.requests.length, 1);
+});
+
+test('complete Battering ram Reuse does not claim payloads are missing', async () => {
+  const f = fixture(), saved = run('complete-ram'); saved.attack_type = 'battering_ram';
+  await prepareReuse(f, saved);
+  assert.equal(f.confirmations.length, 1);
+  assert.doesNotMatch(f.confirmations[0].message, /original payload slots remain/);
+});
+
+for (const count of [undefined, '10', -1, 10.5]) test(`legacy Battering ram count ${count} does not invent a partial count warning`, async () => {
+  const f = fixture(), saved = run('legacy-ram');
+  saved.attack_type = 'battering_ram';
+  if (count === undefined) delete saved.payload_count; else saved.payload_count = count;
+  await prepareReuse(f, saved);
+  assert.equal(f.confirmations.length, 1);
+  assert.doesNotMatch(f.confirmations[0].message, /original payload slots remain/);
+  f.confirmations[0].confirm();
+  assert.deepEqual(reusedPayloads(f), ['synthetic-0', 'synthetic-1']);
+});
+
+test('concurrency clamped to its existing upper bound keeps pending Reuse owned', async () => {
+  const f = fixture(); wireReuseSetupControls(f); f.state.fuzzerConcurrency = 16;
+  f.pick('saved'); const pending = f.reuse();
+  f.els.fuzzerConcurrency.value = '99'; f.els.fuzzerConcurrency.dispatch('change');
+  assert.equal(f.state.fuzzerConcurrency, 16); assert.equal(f.state.fuzzerDraftVersion, 0);
+  f.requests.at(-1).resolve(response(run('saved'))); await pending;
+  assert.equal(f.confirmations.length, 1);
+  f.els.fuzzerConcurrency.dispatch('change'); f.confirmations[0].confirm();
+  assert.equal(f.state.fuzzerRequestText.includes('/$payload$'), true);
+  assert.equal(f.state.fuzzerDraftVersion, 1); assert.equal(f.requests.length, 1);
+});
+
+async function viewRunningPickerRun(f, id = 'external-live') {
+  f.pick(id);
+  const pending = f.c.readFuzzerSavedRun('view');
+  f.requests.at(-1).resolve(response({ ...run(id, [result(0)]), running: true, planned: 3, payload_count: 3 }));
+  await pending;
+}
+test('picker View follows a running retained run without replacing the draft or holding the picker busy', async () => {
+  const f = fixture(), before = draft(f.state);
+  await viewRunningPickerRun(f);
+  assert.equal(draft(f.state), before);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.els.startFuzzerButton.disabled, true);
+  assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), false);
+  assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, false);
+  assert.equal(f.els.fuzzerViewRunButton.disabled, false);
+  f.timers.shift()(); await tick();
+  f.requests.at(-1).resolve(response({ ...run('external-live', [result(0), result(1), result(2)]), running: false }));
+  await tick();
+  assert.equal(f.state.fuzzerAttackRecord.results.length, 3);
+  assert.equal(f.state.fuzzerRunningAttackId, null);
+  assert.equal(f.els.startFuzzerButton.disabled, false);
+  assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), true);
+  assert.equal(draft(f.state), before);
+});
+for (const boundary of ['draft', 'completed-view', 'running-view', 'session']) {
+  test(`picker running follow preserves newer ${boundary} while retiring only its own lifecycle`, async () => {
+    const f = fixture(); await viewRunningPickerRun(f);
+    f.timers.shift()(); await tick(); const poll = f.requests.at(-1);
+    if (boundary === 'draft') f.c.updateFuzzerPayloadsText('new payload', { userEdit: true });
+    if (boundary === 'completed-view') {
+      f.pick('completed'); const pending = f.c.readFuzzerSavedRun('view');
+      f.requests.at(-1).resolve(response(run('completed'))); await pending;
+      assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+      assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), false);
+    }
+    if (boundary === 'running-view') await viewRunningPickerRun(f, 'new-live');
+    if (boundary === 'session') f.resetSession('session-b');
+    const recordBefore = JSON.stringify(f.state.fuzzerAttackRecord);
+    poll.resolve(response({ ...run('external-live', [result(0), result(1), result(2)]), running: false }));
+    await tick();
+    assert.equal(JSON.stringify(f.state.fuzzerAttackRecord), recordBefore);
+    if (boundary === 'draft') assert.equal(f.state.fuzzerPayloadsText, 'new payload');
+    if (boundary === 'running-view') {
+      assert.equal(f.state.fuzzerRunningAttackId, 'new-live');
+      assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), false);
+    } else if (boundary !== 'session') assert.equal(f.state.fuzzerRunningAttackId, null);
+  });
+}
+test('a stale picker running response cannot adopt Stop after a newer View', async () => {
+  const f = fixture(); f.pick('old-live');
+  const old = f.c.readFuzzerSavedRun('view'), request = f.requests.at(-1);
+  f.pick('completed'); const latest = f.c.readFuzzerSavedRun('view');
+  f.requests.at(-1).resolve(response(run('completed'))); await latest;
+  request.resolve(response({ ...run('old-live'), running: true })); await old;
+  assert.equal(f.state.fuzzerAttackRecordId, 'completed');
+  assert.equal(f.state.fuzzerRunningAttackId, undefined);
+  assert.equal(f.timers.length, 0);
+});
+test('revisiting the same running picker record fences the earlier terminal read', async () => {
+  const f = fixture(); await viewRunningPickerRun(f);
+  f.timers.shift()(); await tick(); const oldPoll = f.requests.at(-1);
+  await viewRunningPickerRun(f);
+  const owner = f.state.fuzzerRestoredRun;
+  oldPoll.resolve(response({ ...run('external-live'), running: false })); await tick();
+  assert.equal(f.state.fuzzerRestoredRun, owner);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.state.fuzzerAttackRecord.running, true);
+  f.timers.shift()(); await tick();
+  f.requests.at(-1).resolve(response({ ...run('external-live'), running: false })); await tick();
+  assert.equal(f.state.fuzzerRunningAttackId, null);
+  assert.equal(f.state.fuzzerAttackRecord.running, false);
+});
+
+for (const newerWorkflow of [false, true]) test(`terminal picker follow ${newerWorkflow ? 'leaves a replaced workflow alone' : 'updates only its retained summary without changing selection'}`, async () => {
+  const f = fixture(), workflow = f.c.fuzzerResultsWorkflowState();
+  const summary = { id: 'external-live', running: true, stopped: false, status: 'running', result_count: 1,
+    payload_count: 3, started_at: 'original time', host: 'example.com', path: '/original' };
+  const unrelated = { id: 'other', running: true, status: 'running', payload_count: 9 };
+  workflow.runs = [summary, unrelated];
+  await viewRunningPickerRun(f);
+  f.pick('other');
+  if (newerWorkflow) f.state.fuzzerResultsWorkflow = { ...workflow, runs: [{ ...summary }, { ...unrelated }] };
+  const before = JSON.stringify(f.state.fuzzerResultsWorkflow);
+  f.timers.shift()(); await tick();
+  f.requests.at(-1).resolve(response({ ...run('external-live', [result(0), result(1), result(2)]), running: false }));
+  await tick();
+  if (newerWorkflow) assert.equal(JSON.stringify(f.state.fuzzerResultsWorkflow), before);
+  else {
+    assert.deepEqual(summary, { id: 'external-live', running: false, stopped: false, status: 'completed', result_count: 3,
+      payload_count: 3, started_at: 'original time', host: 'example.com', path: '/original' });
+    assert.deepEqual(unrelated, { id: 'other', running: true, status: 'running', payload_count: 9 });
+    assert.equal(workflow.selectedRunId, 'other');
+    assert.match(f.els.fuzzerSavedRunSelect.innerHTML, /original time.*completed/);
+  }
+});
+
+for (const side of ['base', 'target']) for (const outcome of [404, 500, 'network', 'json']) {
+  test(`Fuzzer Compare reports current ${side} ${outcome} without extra reads or an invalid modal`, async () => {
+    const f = fixture();
+    f.select(0).resolve(response({ id: 'tx-0' })); await tick(); await f.c.useFuzzerComparisonBase();
+    f.select(1).resolve(response({ id: 'tx-1' })); await tick();
+    const before = f.requests.length, pending = f.c.compareSelectedFuzzerResult();
+    const pair = f.requests.slice(-2), failure = side === 'base' ? 0 : 1;
+    pair[1 - failure].resolve(response({ id: failure ? 'tx-0' : 'tx-1' }));
+    if (outcome === 'network') pair[failure].reject(new Error('Synthetic connection failure'));
+    else if (outcome === 'json') pair[failure].resolve({ ok: true, status: 200, json: async () => { throw new Error('Synthetic malformed body'); } });
+    else pair[failure].resolve(response({}, outcome));
+    await pending;
+    assert.equal(f.requests.length, before + 2);
+    assert.equal(f.compares, 0);
+    assert.equal(f.els.compareModal.classList.contains('hidden'), true);
+    assert.equal(f.toasts.length, 1);
+    assert.match(f.toasts[0], outcome === 404 ? /no longer available/ : /Try again/);
+    assert.match(f.toasts[0], side === 'base' ? /[Cc]omparison base/ : /[Ss]elected transaction/);
+    const cleared = side === 'base' && outcome === 404;
+    assert.equal(f.c.compareBaseId, cleared ? null : 'tx-0');
+    assert.equal(f.els.fuzzerCompareButton.disabled, cleared);
+  });
+}
+for (const boundary of ['base', 'selection', 'session', 'leave']) for (const status of [404, 500]) {
+  test(`stale Compare HTTP ${status} after ${boundary} cannot notify or clear the current pin`, async () => {
+    const f = fixture(); f.state.activeTool = 'fuzzer';
+    f.select(0).resolve(response({ id: 'tx-0' })); await tick(); await f.c.useFuzzerComparisonBase();
+    f.select(1).resolve(response({ id: 'tx-1' })); await tick();
+    const pending = f.c.compareSelectedFuzzerResult(), pair = f.requests.slice(-2);
+    if (boundary === 'base') await f.c.setCompareBase('new-base');
+    if (boundary === 'selection') f.select(0);
+    if (boundary === 'session') f.resetSession('session-b');
+    if (boundary === 'leave') f.c.setActiveTool('replay');
+    const pin = f.c.compareBaseId;
+    pair[0].resolve(response({}, status)); pair[1].resolve(response({ id: 'tx-1' })); await pending;
+    assert.deepEqual(f.toasts, []);
+    assert.equal(f.c.compareBaseId, pin);
+    assert.equal(f.compares, 0);
+  });
+}
+
+function prepareStopFixture() {
+  const f = fixture(), stops = [];
+  f.state.fuzzerRunningAttackId = 'run-a';
+  f.state.fuzzerAttackRecord.running = true;
+  f.c.fetch = (url, options) => {
+    assert.match(url, /^\/api\/fuzzer\/attacks\/run-[ab]\/stop$/);
+    assert.equal(options.method, 'POST');
+    const pending = deferred(); stops.push(pending); return pending.promise;
+  };
+  f.c.renderFuzzer();
+  return { ...f, stops };
+}
+test('Stop pending and failure stay local, retain results and offer an explicit retry', async () => {
+  const f = prepareStopFixture(), before = JSON.stringify(f.state.fuzzerAttackRecord);
+  const stop = f.c.stopFuzzerAttack();
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stopping…');
+  assert.equal(f.els.stopFuzzerButton.disabled, true);
+  await f.c.stopFuzzerAttack(); assert.equal(f.stops.length, 1);
+  f.stops[0].reject(new Error('Synthetic transport failure')); await stop;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Retry Stop');
+  assert.equal(f.els.stopFuzzerButton.disabled, false);
+  assert.match(f.els.fuzzerStopStatus.textContent, /Could not stop.*may still be running.*Retry Stop/);
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), false);
+  assert.deepEqual(f.toasts, []);
+  assert.equal(JSON.stringify(f.state.fuzzerAttackRecord), before);
+  f.c.updateFuzzerPayloadsText('changed draft', { userEdit: true });
+  f.c.renderFuzzer(); assert.match(f.els.fuzzerStopStatus.textContent, /Could not stop/);
+  assert.equal(f.state.fuzzerRunningAttackId, 'run-a');
+  const retry = f.c.stopFuzzerAttack();
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stopping…');
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), true);
+  f.stops[1].resolve(response({}, 200)); await retry;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stop');
+  assert.equal(f.state.fuzzerStopError, null);
+});
+for (const boundary of ['terminal', 'other-run', 'session']) test(`Stop failure is retired on ${boundary} independently of displayed history`, async () => {
+  const f = prepareStopFixture(), stop = f.c.stopFuzzerAttack();
+  f.stops[0].resolve(response({}, 500)); await stop;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Retry Stop');
+  f.c.setFuzzerAttackRecord(run('historical'));
+  if (boundary === 'terminal') f.state.fuzzerRunningAttackId = null;
+  if (boundary === 'other-run') f.state.fuzzerRunningAttackId = 'run-b';
+  if (boundary === 'session') f.state.activeSession = { id: 'session-b' };
+  f.c.renderFuzzer();
+  assert.equal(f.state.fuzzerStopError, null);
+  assert.equal(f.els.fuzzerStopStatus.textContent, '');
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), true);
+  assert.equal(f.state.fuzzerAttackRecordId, 'historical');
+});
+test('old Stop failure cannot overwrite a newer Stop pending label or retained error', async () => {
+  const f = prepareStopFixture(), old = f.c.stopFuzzerAttack();
+  f.state.fuzzerRunningAttackId = 'run-b';
+  const latest = f.c.stopFuzzerAttack();
+  f.stops[0].reject(new Error('old error')); await old;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stopping…');
+  assert.equal(f.state.fuzzerStopError, null);
+  f.stops[1].reject(new Error('latest error')); await latest;
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Retry Stop');
+  assert.equal(f.state.fuzzerStopError.id, 'run-b');
+});
+test('a late Stop failure cannot revive feedback after terminal polling ends the tracked run', async () => {
+  const f = prepareStopFixture(), stopping = f.c.stopFuzzerAttack();
+  f.state.fuzzerRunningAttackId = null;
+  f.c.setFuzzerAttackRecord(run('historical')); f.c.renderFuzzer();
+  f.stops[0].resolve(response({}, 503)); await stopping;
+  assert.equal(f.state.fuzzerStopError, null);
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), true);
+  assert.equal(f.els.stopFuzzerButton.classList.contains('hidden'), true);
+  assert.equal(f.state.fuzzerAttackRecordId, 'historical');
+});
+test('Stop 404 is an already-ended outcome, not a retained failure', async () => {
+  const f = prepareStopFixture(), stopping = f.c.stopFuzzerAttack();
+  f.stops[0].resolve(response({}, 404)); await stopping;
+  assert.equal(f.state.fuzzerStopError, null);
+  assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), true);
+  assert.equal(f.els.stopFuzzerButton.textContent, 'Stop');
+});
+
+// A virtualized table must not repeatedly sort its full retained run just to
+// update the count and comparison controls on an ordinary scroll frame.
+for (const selection of ['none', 'visible', 'filtered-away']) {
+  test(`one current projection per production scroll render with ${selection} selection`, () => {
+    const f = fixture();
+    const rows = Array.from({ length: 1000 }, (_, i) => result(i, i % 2 ? 404 : 200));
+    f.c.setFuzzerAttackRecord(run('many', rows));
+    const workflow = f.c.fuzzerResultsWorkflowState();
+    Object.assign(workflow, { sort: 'payload', status: '2xx' });
+    f.state._selectedFuzzerResultKey = selection === 'none' ? null : `tx:tx-${selection === 'visible' ? 2 : 1}`;
+    f.state._fuzzerDetailRecord = { id: selection === 'visible' ? 'tx-2' : 'tx-1' };
+    f.c.compareBaseId = 'another'; f.c.compareBaseSessionId = 'session-a';
+    const rowHeight = Number(appSource.match(/const FUZZER_RESULT_ROW_HEIGHT = (\d+);/)[1]);
+    const bufferRows = Number(appSource.match(/const FUZZER_RESULT_BUFFER_ROWS = (\d+);/)[1]);
+    f.c.measuredFuzzerResultRowHeight = f.c.FUZZER_RESULT_ROW_HEIGHT = rowHeight;
+    f.c.FUZZER_RESULT_BUFFER_ROWS = bufferRows;
+    f.shell.clientHeight = 600; f.shell.scrollTop = 300;
+    const original = f.c.visibleFuzzerResults; let projections = 0;
+    f.c.visibleFuzzerResults = () => { projections++; return original(); };
+    f.shell.dispatch('scroll');
+    assert.equal(projections, 1);
+    assert.equal(f.els.fuzzerResultFilterCount.textContent, '500 of 1000 results');
+    assert.equal(f.els.fuzzerCompareBaseButton.disabled, selection !== 'visible');
+    assert.equal(f.els.fuzzerCompareButton.disabled, selection !== 'visible');
+    if (selection === 'filtered-away') assert.equal(f.state._selectedFuzzerResultKey, null);
+    const rendered = (f.els.fuzzerResultsBody.innerHTML.match(/class="fuzzer-result-row/g) || []).length;
+    assert.ok(rendered > 0 && rendered <= Math.ceil(600 / rowHeight) + 2 * bufferRows + 1);
+    assert.equal(f.requests.length, 0);
+  });
+}
+for (const invalid of [false, true]) {
+  test(`empty ${invalid ? 'invalid' : 'nonmatching'} projection is shared with workflow controls`, () => {
+    const f = fixture(), workflow = f.c.fuzzerResultsWorkflowState();
+    if (invalid) workflow.minBytes = '-1'; else workflow.status = 'error';
+    f.state._selectedFuzzerResultKey = 'tx:tx-0'; f.state._fuzzerDetailRecord = { id: 'tx-0' };
+    const original = f.c.visibleFuzzerResults; let projections = 0;
+    f.c.visibleFuzzerResults = () => { projections++; return original(); };
+    f.c.renderFuzzerResultsVirtual();
+    assert.equal(projections, 1);
+    assert.match(f.els.fuzzerResultsBody.innerHTML, invalid ? /Fix the result filters/ : /No results match/);
+    assert.equal(f.state._selectedFuzzerResultKey, null);
+    assert.equal(f.els.fuzzerCompareBaseButton.disabled, true);
+  });
+}
+test('optional projection helpers use supplied rows and no-argument calls follow changed current state', () => {
+  const f = fixture(); f.state._selectedFuzzerResultKey = 'tx:tx-1'; f.state._fuzzerDetailRecord = { id: 'tx-1' };
+  const snapshot = f.c.visibleFuzzerResults();
+  assert.equal(f.c.fuzzerSelectedResultIndex(), 1); assert.equal(f.c.fuzzerSelectedTransactionId(), 'tx-1');
+  f.c.fuzzerResultsWorkflowState().direction = 'desc';
+  assert.equal(f.c.fuzzerSelectedResultIndex(), 0); assert.equal(f.c.fuzzerSelectedResultIndex(snapshot), 1);
+  f.c.fuzzerResultsWorkflowState().status = 'error';
+  assert.equal(f.c.fuzzerSelectedResultIndex(), -1); assert.equal(f.c.fuzzerSelectedTransactionId(), null);
+  assert.equal(f.c.fuzzerSelectedTransactionId(snapshot), 'tx-1');
+  f.c.renderFuzzerResultsWorkflow(snapshot); assert.equal(f.els.fuzzerResultFilterCount.textContent, '2 of 2 results');
+  f.c.renderFuzzerResultsWorkflow(); assert.equal(f.els.fuzzerResultFilterCount.textContent, '0 of 2 results');
+  f.c.fuzzerResultsWorkflowState().status = 'all'; f.c.setFuzzerAttackRecord(run('replacement', [result(2)]));
+  f.c.renderFuzzerResultsWorkflow(); assert.equal(f.els.fuzzerResultFilterCount.textContent, '1 of 1 results');
+  f.state._selectedFuzzerResultKey = 'tx:tx-2'; f.state._fuzzerDetailRecord = { id: 'tx-1' };
+  assert.equal(f.c.fuzzerSelectedTransactionId(), null, 'comparison still needs the selected detail record');
+});
+test('payload collator preserves locale comparison, natural ties and direction using one comparator per projection', () => {
+  const f = fixture(), payloads = ['p10', 'p2', 'P1', 'p1', 'p01', '', 'ä', 'a', 'é', 'e', '001', '1', '-1', '🦊', '漢字', 'p2'];
+  f.c.setFuzzerAttackRecord(run('collation', payloads.map((payload, i) => ({ ...result(i), payload }))));
+  const workflow = f.c.fuzzerResultsWorkflowState(); workflow.sort = 'payload';
+  let constructions = 0;
+  f.c.Intl = { Collator: function (...args) { constructions++; return new Intl.Collator(...args); } };
+  for (const direction of ['asc', 'desc']) {
+    workflow.direction = direction; constructions = 0;
+    const expected = payloads.map((payload, i) => ({ payload, i })).sort((a, b) =>
+      a.payload.localeCompare(b.payload, undefined, { numeric: true }) * (direction === 'desc' ? -1 : 1) || a.i - b.i).map(x => x.i);
+    assert.deepEqual(indexes(f), expected); assert.equal(constructions, 1);
+  }
+  workflow.sort = 'index'; constructions = 0; f.c.visibleFuzzerResults(); assert.equal(constructions, 0);
 });

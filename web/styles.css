@@ -1393,11 +1393,25 @@ code {
   z-index: 1;
   display: inline-flex;
   align-items: center;
-  padding: 6px 10px;
   color: var(--text-soft);
   cursor: pointer;
   font-size: var(--font-sm);
   transition: color 140ms ease;
+}
+
+.tools-tool-list li > button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: inherit;
+}
+
+.tools-tool-list li > button:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
 }
 
 .tools-tool-list li:hover {
@@ -2102,6 +2116,10 @@ code {
   white-space: nowrap;
 }
 
+.history-table td.history-index-cell {
+  padding-inline: 4px;
+}
+
 .history-table th:last-child,
 .history-table td:last-child {
   border-right: none;
@@ -2248,6 +2266,23 @@ code {
   width: 14px;
   cursor: col-resize;
   z-index: 3;
+}
+
+.column-resize-handle:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
+}
+
+.history-column-resize-help {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .column-resize-handle::after {
@@ -3230,15 +3265,15 @@ body.pane-resizing-y {
   display: flex;
   flex: 0 0 auto;
   min-height: 180px;
-  height: 40%;
+  height: 60%;
   gap: 0;
 }
 .fuzzer-template-card {
-  flex: var(--fuzzer-request-share, 0.72) 1 0px;
+  flex: var(--fuzzer-request-share, 0.65) 1 0px;
   min-width: 240px;
 }
 .fuzzer-payloads-card {
-  flex: calc(1 - var(--fuzzer-request-share, 0.72)) 1 0px;
+  flex: calc(1 - var(--fuzzer-request-share, 0.65)) 1 0px;
   min-width: 160px;
 }
 
@@ -3390,6 +3425,7 @@ body.pane-resizing-y {
 }
 .sequence-step-card .step-header input {
   flex: 1;
+  min-width: 0;
   background: var(--input-bg);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-s);
@@ -3404,8 +3440,20 @@ body.pane-resizing-y {
   cursor: pointer;
   font-size: 1rem;
 }
-.sequence-step-card .step-header button:hover {
+.sequence-step-card .step-header .step-remove:hover {
   color: var(--danger);
+}
+.sequence-step-card .step-move:not([aria-disabled="true"]):hover {
+  color: var(--accent);
+}
+.sequence-step-card .step-move[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sequence-step-card .step-move:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
 }
 .sequence-step-card textarea {
   width: 100%;
@@ -3419,28 +3467,156 @@ body.pane-resizing-y {
   padding: 6px;
   resize: vertical;
 }
+.sequence-step-card textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.sequence-step-card .step-request-error {
+  margin: 4px 0 0;
+  color: var(--danger);
+  font-size: var(--font-xs);
+  overflow-wrap: anywhere;
+}
 .sequence-step-card .step-extractions {
+  container: sequence-extractions / inline-size;
   margin-top: 6px;
-  font-size: 0.72rem;
+  font-size: var(--font-xs);
 }
 .sequence-step-card .step-extractions summary {
   cursor: pointer;
-  color: var(--fg-muted);
+  color: var(--text-soft);
 }
 .sequence-step-card .extraction-row {
   display: grid;
-  grid-template-columns: 1fr 80px 1fr auto;
+  grid-template-columns: minmax(0, 1fr) 88px minmax(0, 1.3fr) 28px;
+  align-items: end;
+  gap: 6px;
+  margin-top: 8px;
+}
+.sequence-step-card .extraction-field {
+  display: grid;
   gap: 4px;
-  margin-top: 4px;
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: var(--font-xs);
+}
+.sequence-step-card .extraction-help {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  overflow-wrap: anywhere;
 }
 .sequence-step-card .extraction-row input,
 .sequence-step-card .extraction-row select {
-  background: var(--input-bg);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-s);
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  background: var(--panel-code);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: var(--font-sm);
+  padding: 4px 6px;
+}
+.sequence-step-card .step-extractions .secondary-action {
+  min-height: 28px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: var(--font-xs);
+}
+.sequence-step-card .step-extractions .ext-add { margin-left: 8px; }
+.sequence-step-card .step-extractions .ext-remove { padding: 3px; }
+@container sequence-extractions (max-width: 400px) {
+  .sequence-step-card .extraction-row {
+    grid-template-columns: minmax(0, 1fr) 72px 28px;
+  }
+  .sequence-step-card .extraction-field:nth-child(2) { grid-column: 2 / -1; }
+  .sequence-step-card .extraction-field:nth-child(3) { grid-column: 1 / 3; }
+}
+
+
+.sequence-list-card .mini-table th:nth-child(2),
+.sequence-list-card .mini-table td:nth-child(2) {
+  width: 48px;
+  padding-inline: 6px;
+  text-align: center;
+}
+.sequence-list-card .mini-table th:nth-child(3),
+.sequence-list-card .mini-table td:nth-child(3) {
+  width: 32px;
+  padding-inline: 4px;
+  text-align: center;
+}
+.sequence-list-card .sequence-actions-heading {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.sequence-list-card .seq-delete:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: 1px;
+}
+.sequence-list-card .seq-select {
+  display: block;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
   color: inherit;
-  font-size: 0.72rem;
-  padding: 2px 4px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.sequence-list-card .seq-select:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: 3px;
+}
+
+.sequence-editor-card > .sequence-editor-header {
+  flex-wrap: wrap;
+}
+.sequence-editor-heading {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.sequence-editor-heading h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sequence-name-field {
+  display: grid;
+  flex: 1 0 100%;
+  min-width: 0;
+  gap: 4px;
+}
+.sequence-name-field span {
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+}
+.sequence-name-field input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-code);
+  color: var(--text);
+  font-size: var(--font-sm);
+}
+.sequence-name-field input:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: 2px;
 }
 
 .sequence-list-card,
@@ -3503,8 +3679,12 @@ body.pane-resizing-y {
   background: var(--panel-code);
 }
 
+/* Detail headers must wrap within each half-pane, not clip the last mode. */
 .fuzzer-detail-panel .pane-header {
   display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  min-width: 0;
   align-items: center;
   gap: 8px;
   padding: 4px 12px;
@@ -3514,6 +3694,19 @@ body.pane-resizing-y {
 
 .fuzzer-detail-panel .view-tabs {
   margin-left: auto;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Long MIME labels must not consume the selected response editor vertically. */
+#fuzzerDetailResponseMeta {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Selected fuzzer result row */
@@ -3634,7 +3827,9 @@ body.pane-resizing-y {
 }
 
 /* A start the server refused, or a draft it would refuse. */
-.fuzzer-shell #fuzzerPreflightNotice.fuzzer-notice-error {
+.fuzzer-shell #fuzzerPreflightNotice.fuzzer-notice-error,
+.fuzzer-shell #fuzzerPayloadImportStatus.fuzzer-notice-error,
+.fuzzer-shell #fuzzerStopStatus.fuzzer-notice-error {
   color: var(--danger);
 }
 
@@ -3829,7 +4024,7 @@ body.pane-resizing-y {
 }
 
 .fuzzer-results-card {
-  flex: 1 0 240px;
+  flex: 1 0 180px;
   overflow: auto;
 }
 
@@ -4596,12 +4791,6 @@ body.pane-resizing-y {
   max-height: 78px;
 }
 
-@media (max-width: 1240px) {
-  .replay-tab-rows.wrap > .replay-tab-list:not(.replay-tab-list-pinned) {
-    max-height: max(78px, calc(100vh - 805px));
-  }
-}
-
 .replay-tab-settings > summary {
   display: inline-flex;
   align-items: center;
@@ -4873,18 +5062,62 @@ button.utility-button.replay-tab-add {
   border-bottom-color: var(--point-soft);
 }
 
-.session-table {
+/* Keep Message readable in narrow windows; the existing table shell scrolls. */
+.mini-table.event-log-table {
+  min-width: 640px;
+}
+
+/* Runtime sources and messages can contain tokens with no word boundaries. */
+.event-log-table tbody td:nth-child(n + 3) {
+  overflow-wrap: anywhere;
+}
+
+/* Keep names flexible while counts and actions retain a usable budget.
+   Narrow windows scroll this table inside its existing history-table-shell. */
+.history-table.session-table {
   width: 100%;
-  min-width: 800px;
+  min-width: 1140px;
 }
 
 .session-table thead th {
+  box-sizing: border-box;
+}
+
+.session-table thead th:nth-child(2) { width: 136px; }
+.session-table thead th:nth-child(3) { width: 88px; }
+.session-table thead th:nth-child(4) { width: 104px; }
+.session-table thead th:nth-child(5) { width: 80px; }
+.session-table thead th:nth-child(6),
+.session-table thead th:nth-child(7) { width: 160px; }
+.session-table thead th:nth-child(8) { width: 180px; }
+
+.session-table thead th[data-sort-key] {
   cursor: pointer;
   user-select: none;
 }
 
-.session-table thead th:hover {
+.session-table thead th[data-sort-key]:hover {
   color: var(--text);
+}
+
+.session-table .session-sort-button {
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.session-table .session-sort-button:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: 3px;
 }
 
 .session-table thead th .sort-arrow {
@@ -4924,6 +5157,30 @@ button.utility-button.replay-tab-add {
 
 /* The session in use carries a dot; the others offer Open and Delete where
    the pointer, the keyboard or the selection is. */
+/* Native buttons expose row selection without requiring the arrow shortcut. */
+.session-table .session-select-button {
+  display: block;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 0;
+  margin: -3px 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-table :is(.session-select-button, .session-open-button, .session-delete-button):focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: 2px;
+}
+
 .session-table .session-name::before {
   content: "";
   display: inline-block;
@@ -5739,6 +5996,22 @@ button.utility-button.replay-tab-add {
   width: min(100%, 610px);
 }
 
+.replay-target-error {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--font-xs);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.replay-target-error:empty { display: none; }
+
+.replay-target-bar input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
 .compact-field {
   display: flex;
   flex-direction: column;
@@ -5887,7 +6160,7 @@ button.utility-button.replay-tab-add {
 
 .replay-workbench > .panel-card {
   grid-template-rows: auto minmax(0, 1fr) auto;
-  min-height: 300px;
+  min-height: 0;
   min-width: 0;
   width: 100%;
 }
@@ -6360,10 +6633,34 @@ button.utility-button.replay-tab-add {
   flex-direction: column;
 }
 
-/* Two buttons: the held URL beside them gives way instead. */
+#interceptQueueShell:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
+}
+
+.intercept-queue-accessibility,
+.intercept-detail-accessibility {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Keep the detail actions reachable while the selected URL gives way. */
+#interceptDetailActions,
 #interceptRequestActions,
 #responseInterceptActions {
   flex: none;
+}
+
+#interceptDetailRetryButton[aria-disabled="true"] {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .intercept-queue-tabs {
@@ -6391,8 +6688,11 @@ button.utility-button.replay-tab-add {
   border-bottom-color: var(--accent);
 }
 
-.intercept-queue-table {
+.mini-table.intercept-queue-table {
   font-size: var(--font-xs);
+  /* Keep identity columns readable in both queues; narrower panes scroll
+     inside their existing table shell instead of crushing every column. */
+  min-width: 520px;
 }
 
 .intercept-queue-table td,
@@ -6402,8 +6702,8 @@ button.utility-button.replay-tab-add {
   text-overflow: ellipsis;
 }
 
-.iq-col-method { width: 44px; max-width: 44px; }
-.iq-col-status { width: 40px; max-width: 40px; }
+.iq-col-method { width: 96px; }
+.iq-col-status { width: 70px; }
 /* Six table cells across the replace rules and both intercept queues carry
    .text-truncate, and it was never defined — so a long value in a
    table-layout:fixed cell did not shrink the column, it overflowed and printed
@@ -6416,8 +6716,10 @@ button.utility-button.replay-tab-add {
   white-space: nowrap;
 }
 
-.iq-col-host { width: 40%; max-width: 0; }
-.iq-col-path { width: 40%; max-width: 0; }
+/* Share only the space left after Method, Status and Time, rather than
+   overcommitting 80% of the table before those fixed columns are counted. */
+.iq-col-host { width: auto; max-width: 0; }
+.iq-col-path { width: auto; max-width: 0; }
 .iq-col-time { width: 120px; max-width: 120px; }
 
 .intercept-rules-header {
@@ -6602,37 +6904,22 @@ button.utility-button.replay-tab-add {
 }
 
 @media (max-width: 1240px) {
+  /* Stacked panes need more height; see the wrapped tab row cap above. */
+  .replay-tab-rows.wrap > .replay-tab-list:not(.replay-tab-list-pinned) {
+    max-height: max(78px, calc(100vh - 805px));
+  }
+
   /* .split-panel and .split-panel-tight are deliberately not here. They are
      grids that fill a fixed-height pane, so height:auto left the Intercept and
      Replay panes' content bunched at the top with the rest of the pane empty.
-     flex-direction did nothing for them either — every selector below except
-     .fuzzer-top-row is display:grid. */
+     flex-direction did nothing for them either. Fuzzer has its own narrower
+     stacking breakpoint so laptop windows retain two usable inputs. */
   .dual-code-panel,
   .modal-grid,
-  .display-settings-grid,
-  .fuzzer-top-row {
+  .display-settings-grid {
     flex-direction: column;
     height: auto !important;
     min-height: 0;
-  }
-  .fuzzer-col-resizer,
-  .fuzzer-row-resizer {
-    display: none;
-  }
-  .fuzzer-template-card,
-  .fuzzer-payloads-card {
-    flex: none !important;
-    width: auto !important;
-    min-height: 220px;
-  }
-  .fuzzer-top-row {
-    gap: 10px;
-  }
-  .fuzzer-top-row .editor-panel {
-    min-height: 100px;
-  }
-  .fuzzer-results-card {
-    flex-basis: 320px;
   }
 
   .tools-workbench {
@@ -6649,7 +6936,7 @@ button.utility-button.replay-tab-add {
 
   .replay-workbench {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(260px, 0.9fr) minmax(260px, 1.1fr);
+    grid-template-rows: minmax(0, 0.9fr) minmax(0, 1.1fr);
   }
 
   .websocket-filter-bar {
@@ -9025,4 +9312,93 @@ button.utility-button.replay-tab-add {
 .packet-inspection details { margin-top: 8px; color: var(--text-dim); }
 @container (min-width: 1100px) {
   .packet-viewer.lower-workbench { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+}
+
+/* Keep the two setup inputs together on laptop-sized windows. */
+.fuzzer-header-row { flex-wrap: wrap; gap: 8px 14px; }
+.fuzzer-header-row h2 { margin-right: 2px; }
+.fuzzer-mode-field { flex-direction: row; align-items: center; gap: 6px; }
+.fuzzer-mode-field select { max-width: 230px; }
+.fuzzer-header-row .fuzzer-preflight-summary { flex: 1 1 180px; font-weight: 600; }
+.fuzzer-preflight { align-items: flex-start; padding-top: 0; border-top: 0; gap: 0 12px; }
+.fuzzer-preflight > .fuzzer-preview-disclosure { flex-basis: auto; }
+.fuzzer-preview-disclosure { margin-top: 0; }
+.fuzzer-options { border-bottom: 0; }
+.fuzzer-preflight > details[open] { flex-basis: 100%; }
+.fuzzer-preflight > #fuzzerPreflightNotice { align-self: center; }
+.fuzzer-preflight > details > summary { padding: 3px 0; min-height: 24px; }
+.fuzzer-value-tools .fuzzer-quick-controls { padding: 0; border: 0; }
+/* Local setup helpers share the card scroll instead of nesting another scrollbar. */
+.fuzzer-top-row .fuzzer-control-disclosure > .fuzzer-disclosure-body { max-height: none; overflow: visible; }
+.fuzzer-count { color: var(--text-soft); font-size: var(--font-xs); white-space: nowrap; }
+.fuzzer-top-row .toolbar-actions { margin-left: auto; }
+.fuzzer-input-label { margin: 0; padding: 7px 10px; color: var(--text-soft); font-size: var(--font-xs); }
+.fuzzer-template-card > .fuzzer-input-label { border-bottom: 1px solid var(--line); }
+.fuzzer-payload-input-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding-right: 10px; border-bottom: 1px solid var(--line); }
+.fuzzer-import-status { margin: 0; padding: 6px 10px; font-size: var(--font-xs); color: var(--text-soft); overflow-wrap: anywhere; }
+.fuzzer-import-mode { flex-direction: row; align-items: center; gap: 6px; margin-left: auto; padding: 4px 0; }
+.fuzzer-import-mode > span { font-size: var(--font-xs); }
+.fuzzer-import-mode select { max-width: 140px; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-top-row { flex: 1 0 260px; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-row-resizer,
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card > .history-table-shell,
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card > .fuzzer-result-status,
+.fuzzer-shell.fuzzer-results-empty .fuzzer-result-filters,
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card > .panel-toolbar .toolbar-actions { display: none; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card { flex: 0 0 auto; min-height: 80px !important; margin-top: 10px; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card > .panel-toolbar { padding-bottom: 0; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-result-tools { border-bottom: 0; }
+@media (max-width: 900px) {
+  .fuzzer-top-row { flex-direction: column; height: auto !important; min-height: 0; }
+  .fuzzer-col-resizer,
+  .fuzzer-row-resizer {
+    display: none;
+  }
+  .fuzzer-template-card,
+  .fuzzer-payloads-card {
+    flex: none !important;
+    width: auto !important;
+    min-height: 220px;
+  }
+  .fuzzer-top-row {
+    gap: 10px;
+  }
+  .fuzzer-top-row .editor-panel {
+    min-height: 100px;
+  }
+  .fuzzer-results-card {
+    flex-basis: 320px;
+  }
+  .fuzzer-options .fuzzer-disclosure-body { grid-template-columns: 1fr; }
+  .fuzzer-shell.fuzzer-results-empty .fuzzer-top-row { flex: 0 0 auto; }
+}
+
+.fuzzer-target-summary { color: var(--text-soft); font: var(--font-xs) var(--mono); align-self: center; overflow-wrap: anywhere; }
+.fuzzer-target-summary:empty { display: none; }
+.fuzzer-transport-field { flex-direction: row; align-items: center; align-self: center; gap: 6px; }
+.fuzzer-transport-field select { max-width: 100px; }
+.fuzzer-transport-help { align-self: center; margin: 0; }
+
+/* A retained run needs room for both row navigation and its selected message.
+   Never let the detail pane consume the table's entire viewport. Inline drag
+   sizes still win; a short window scrolls instead of hiding result rows. */
+.fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-top-row {
+  height: 32%;
+  min-height: 180px;
+}
+.fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-results-card {
+  flex: 1 0 360px;
+}
+.fuzzer-results-card > .history-table-shell {
+  min-height: 132px !important;
+}
+.fuzzer-detail-panel {
+  flex: 0 1 160px;
+}
+.fuzzer-import-mode > span { white-space: nowrap; }
+
+/* Generic panel clipping must not trap a focus-scrolled Results header. */
+.fuzzer-shell .fuzzer-results-card {
+  overflow-y: auto;
+  overflow-x: hidden;
 }
