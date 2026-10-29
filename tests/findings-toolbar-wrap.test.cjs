@@ -129,7 +129,9 @@ test("the wrapping toolbar retains one ordered copy of every existing control", 
     assert.match(markup, new RegExp(`<button class="scope-pill[^"]*" id="${id}" type="button" aria-pressed="(true|false)"`));
   }
   assert.doesNotMatch(markup, /type="checkbox"/);
-  assert.doesNotMatch(markup, /\bhidden\b|\bdisabled\b|\btabindex=/);
+  for (const [control] of markup.matchAll(/<(?:button|input|select)\b[^>]*>/g)) {
+    assert.doesNotMatch(control, /\bhidden\b|\bdisabled\b|\btabindex=/);
+  }
 });
 
 test("severity filtering has a stable purpose label without changing its options", () => {

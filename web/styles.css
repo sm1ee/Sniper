@@ -5388,6 +5388,10 @@ button.utility-button.replay-tab-add {
   border-radius: var(--radius-md);
 }
 
+#findingsSettingsButton svg {
+  display: block;
+}
+
 /* Scanner settings modal */
 .scanner-settings-modal {
   width: min(560px, 100%);
