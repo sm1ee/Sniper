@@ -920,6 +920,9 @@ var hasher = {
         }          
 
         return escapeHtml(input);
+      },
+      calculateResult : function (input) {
+        return { value: hasher.elements.e8.calculate(input), success: true };
       }
     },
     e9: {
@@ -936,6 +939,9 @@ var hasher = {
         }          
 
         return unescapeHtml(input);
+      },
+      calculateResult : function (input) {
+        return { value: hasher.elements.e9.calculate(input), success: true };
       }
     },
     // 유니코드 변환
@@ -953,6 +959,9 @@ var hasher = {
       title: "convertFromUnicode()",
       calculate: function (input) {
         return convertFromUnicode(input);
+      },
+      calculateResult : function (input) {
+        return { value: hasher.elements.e11.calculate(input), success: true };
       }
     },
     e12: {
@@ -962,6 +971,9 @@ var hasher = {
       calculate : function (input) {
         var renc = new Rot13();
         return renc.encode(input);
+      },
+      calculateResult : function (input) {
+        return { value: hasher.elements.e12.calculate(input), success: true };
       }
     },
     morse1: {
@@ -1087,10 +1099,13 @@ var hasher = {
       tab : tabs.encode,
       title : "Base32 Decode",
       calculate : function (input) {
+        return hasher.elements.e_base32_decode.calculateResult(input).value;
+      },
+      calculateResult : function (input) {
         try {
-          return base32Decode(input);
+          return { value: base32Decode(input), success: true };
         } catch (err) {
-          return "Invalid Base32 input";
+          return { value: "Invalid Base32 input", success: false };
         }
       }
     },
@@ -1109,10 +1124,13 @@ var hasher = {
       tab : tabs.encode,
       title : "Base45 Decode",
       calculate : function (input) {
+        return hasher.elements.e_base45_decode.calculateResult(input).value;
+      },
+      calculateResult : function (input) {
          try {
-          return base45Decode(input);
+          return { value: base45Decode(input), success: true };
         } catch (err) {
-          return "Invalid Base45 input";
+          return { value: "Invalid Base45 input", success: false };
         }
       }
     },
@@ -1136,11 +1154,14 @@ var hasher = {
       tab : tabs.encode,
       title : "Base58 Decode",
       calculate : function (input) {
+        return hasher.elements.e_base58_decode.calculateResult(input).value;
+      },
+      calculateResult : function (input) {
         try {
           const decodedBytes = base58Decode(input);
-          return bytesToUtf8String(decodedBytes);
+          return { value: bytesToUtf8String(decodedBytes), success: true };
         } catch (err) {
-          return "Invalid Base58 input";
+          return { value: "Invalid Base58 input", success: false };
         }
       }
     }

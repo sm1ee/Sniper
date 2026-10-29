@@ -261,3 +261,116 @@ test("URI render status follows edits, empty input, speculative checks and rebui
   context.hasher.tab = context.tabs.encode; paint("NaN");
   assert.ok(rows.every(row => !row.classList.contains("hidden")));
 });
+
+// Remaining arbitrary-text outputs in Encode share the same rendered status contract.
+const textIds = ["e8", "e9", "e11", "e12", "e_base32_decode", "e_base45_decode", "e_base58_decode"];
+const textExamples = ["NaN", "NaN", "\\u004e\\u0061\\u004e", "AnA", "JZQU4===", "++9X1", "TKy7"];
+
+for (const [index, id] of textIds.entries()) {
+  test(`${id} displays successful error-like text with current, not speculative, status`, () => {
+    const { context, values, elements, rows, display, nodes } = fixture([id]);
+    context.hasher.tab = context.tabs.encode;
+    const paint = input => {
+      values.set("#input-value", input); context.hasher.update(); display.markEmptyDecoderOutputs();
+      assert.equal(values.get("#input-value"), input);
+    };
+    const inputs = [textExamples[index], "", textExamples[index]];
+    for (const input of inputs) {
+      paint(input);
+      const result = context.decoderCalculateResult(elements[id], input, "");
+      assert.equal(result.value, input ? "NaN" : "");
+      assert.equal(elements[id].calculate(input), result.value);
+      assert.equal(result.success, true);
+      assert.equal(display.decoderOutputShows(result.value), false, "legacy heuristic hides this value");
+      assert.equal(rows[0].classList.contains("hidden"), !input);
+      const node = nodes.get("#" + elements[id].id);
+      assert.equal(node.decoderResult.success, true);
+      context.decoderCalculateResult(elements[id], "!", "");
+      display.markEmptyDecoderOutputs();
+      assert.equal(rows[0].classList.contains("hidden"), !input);
+    }
+    const selector = "#" + elements[id].id;
+    nodes.get(selector).value = "Invalid stale value";
+    display.markEmptyDecoderOutputs();
+    assert.equal(rows[0].classList.contains("hidden"), true);
+    nodes.set(selector, { value: "NaN" });
+    display.markEmptyDecoderOutputs();
+    assert.equal(rows[0].classList.contains("hidden"), true);
+    context.hasher.tab = context.tabs.hash; context.hasher.update();
+    context.hasher.tab = context.tabs.encode; paint(textExamples[index]);
+    assert.equal(rows[0].classList.contains("hidden"), false);
+  });
+}
+
+test("text status preserves HTML single-pass, Unicode code units and ROT13 values", () => {
+  const { context, elements, display } = fixture(textIds);
+  for (const text of ["Error report", "Invalid text", "Parse error", "Out of range", "NaN",
+    "Error\r\nreport", "Invalid\rtext", "\ud800", "\ufeff", "café 한글 😀"]) {
+    const inputs = { e8: text, e9: text, e11: context.convertToUnicode(text),
+      e12: elements.e12.calculate(text) };
+    for (const id of Object.keys(inputs)) {
+      const result = context.decoderCalculateResult(elements[id], inputs[id], "");
+      assert.equal(result.value, text);
+      assert.equal(result.success, true);
+      assert.equal(display.decoderOutputShows(result.value, result), true);
+    }
+  }
+  assert.equal(elements.e9.calculate("Error &amp;lt; &lt;"), "Error &lt; <");
+  assert.equal(elements.e8.calculate("Error <&>"), "Error &lt;&amp;&gt;");
+  assert.equal(elements.e11.calculate("Error \\u004 \\uZZZZ \\u0041"), "Error \\u004 \\uZZZZ A");
+});
+
+for (const base of ["32", "45", "58"]) {
+  test(`Base${base} separates real failures from identical successful plaintext`, () => {
+    const id = `e_base${base}_decode`;
+    const { context, values, elements, rows, display, nodes } = fixture([id]);
+    context.hasher.tab = context.tabs.encode;
+    const failure = `Invalid Base${base} input`;
+    const malformed = base === "32" ? ["A", "!"] : base === "45" ? ["A", "::", ":::", "aa"] : ["0", "!", " "];
+    const encode = text => elements[`e_base${base}_encode`].calculate(text);
+    for (const input of [encode(failure), ...malformed, "", encode("Error\r\nreport"), encode(failure)]) {
+      const invalid = malformed.includes(input);
+      const result = context.decoderCalculateResult(elements[id], input, "");
+      assert.equal(result.success, !invalid);
+      assert.equal(result.value, elements[id].calculate(input));
+      if (invalid || input === encode(failure)) assert.equal(result.value, failure);
+      values.set("#input-value", input); context.hasher.update(); display.markEmptyDecoderOutputs();
+      assert.equal(rows[0].classList.contains("hidden"), invalid || !input);
+      const node = nodes.get("#" + elements[id].id);
+      assert.equal(node.decoderResult.value, node.value);
+      assert.equal(node.decoderResult.success, !invalid);
+    }
+    // Existing nonfatal UTF-8 decoding remains successful replacement text.
+    const replacementInput = base === "32" ? "74======" : base === "45" ? "U5" : "5Q";
+    const replacement = context.decoderCalculateResult(elements[id], replacementInput, "");
+    assert.equal(replacement.value, "\ufffd");
+    assert.equal(replacement.success, true);
+  });
+}
+
+test("unexpected text-transform exceptions still receive central failure status", () => {
+  const { context, elements, display } = fixture(textIds);
+  for (const id of ["e8", "e9", "e11", "e12"]) {
+    elements[id].calculate = () => { throw new Error("synthetic calculation failure"); };
+    const result = context.decoderCalculateResult(elements[id], "benign", "");
+    assert.equal(result.value, "Error: synthetic calculation failure");
+    assert.equal(result.success, false);
+    assert.equal(display.decoderOutputShows(result.value, result), false);
+  }
+});
+
+test("typed Base-N results preserve permissive text and alphabet contracts", () => {
+  const { context, elements } = fixture(textIds);
+  for (const [id, input, expected] of [
+    ["e_base32_decode", " \tj z q u 4=======\n", "NaN"],
+    ["e_base45_decode", " 0", "$"],
+    ["e_base58_decode", "11TKy7", "\0\0NaN"],
+    ["e_base58_decode", "2g", "a"],
+    ["e_base58_decode", "2G", "I"],
+  ]) {
+    const result = context.decoderCalculateResult(elements[id], input, "");
+    assert.equal(result.value, expected);
+    assert.equal(result.success, true);
+    assert.equal(elements[id].calculate(input), expected);
+  }
+});
