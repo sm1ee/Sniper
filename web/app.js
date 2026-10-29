@@ -19230,13 +19230,26 @@ async function runCurrentSequence() {
   } finally {
     if (
       state.sequenceRunGeneration === runGeneration
-      && state.selectedSequenceId === runSequenceId
       && isCurrentSequenceSession(sessionId)
     ) {
       state.sequenceRunning = false;
-      renderSequencePanel();
+      // Settling a run releases its shared control even after navigation, but
+      // must not replace an editor that now belongs to another draft.
+      if (isCurrentSequenceRun(runGeneration, runSequenceId, sessionId, runDraftVersion)) {
+        renderSequencePanel();
+      } else {
+        syncSequenceRunButton();
+      }
     }
   }
+}
+
+function syncSequenceRunButton() {
+  const runBtn = document.getElementById("runSequenceButton");
+  const editing = state.editingSequence;
+  const sequenceRunning = Boolean(state.sequenceRunning);
+  runBtn.disabled = sequenceRunning || !editing || !editing.steps?.length;
+  runBtn.textContent = sequenceRunning ? "Running..." : "Run";
 }
 
 function renderSequencePanel({ focusExtractionStepId = null } = {}) {
@@ -19311,13 +19324,11 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
   // Editor
   const editing = state.editingSequence;
   const hasSequence = !!editing;
-  const sequenceRunning = Boolean(state.sequenceRunning);
   addStepBtn.disabled = !hasSequence;
   saveBtn.disabled = !hasSequence;
   // The editor's buttons wait for a sequence to act on.
   for (const button of [addStepBtn, saveBtn, runBtn]) button.classList.toggle("hidden", !hasSequence);
-  runBtn.disabled = sequenceRunning || !hasSequence || !editing?.steps?.length;
-  runBtn.textContent = sequenceRunning ? "Running..." : "Run";
+  syncSequenceRunButton();
   editorTitle.textContent = hasSequence ? editing.name : "No sequence selected";
 
   if (hasSequence) {

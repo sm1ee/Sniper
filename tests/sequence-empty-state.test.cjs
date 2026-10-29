@@ -18,7 +18,7 @@ function fixture(definitions, editing = null) {
     sequenceDefinitions: definitions, sequencePastRuns: [], selectedSequenceId: definitions[0]?.id || null,
     editingSequence: editing, sequenceRunning: false, sequenceRunResult: null,
   };
-  const c = loadFunctions(["renderSequencePanel"], {
+  const c = loadFunctions(["renderSequencePanel", "syncSequenceRunButton"], {
     document, state, escapeHtml: String, formatTimestamp: String, normalizeSequenceRunResult: () => null,
     jsonArray: (value) => (Array.isArray(value) ? value : []),
   });
