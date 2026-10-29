@@ -379,6 +379,9 @@ pub struct AppUiSettingsSnapshot {
     pub websocket_sort_direction: String,
     pub websocket_in_scope_only: bool,
     pub websocket_live_only: bool,
+    /// Replay's tabs wrap onto as many rows as they need, as Burp's "Wrapped"
+    /// tab view does, rather than scrolling along one.
+    pub replay_tabs_wrap: bool,
     pub websocket_stack_height: Option<u16>,
     pub ws_replay_left_width: Option<u16>,
     pub ws_replay_frame_detail_height: Option<u16>,
@@ -417,6 +420,7 @@ impl Default for AppUiSettingsSnapshot {
             websocket_sort_direction: "desc".to_string(),
             websocket_in_scope_only: false,
             websocket_live_only: false,
+            replay_tabs_wrap: false,
             websocket_stack_height: None,
             ws_replay_left_width: None,
             ws_replay_frame_detail_height: None,
@@ -489,6 +493,7 @@ impl AppUiSettingsSnapshot {
             sanitize_option(self.websocket_sort_direction, "desc", &["asc", "desc"]);
         sanitized.websocket_in_scope_only = self.websocket_in_scope_only;
         sanitized.websocket_live_only = self.websocket_live_only;
+        sanitized.replay_tabs_wrap = self.replay_tabs_wrap;
         sanitized.websocket_stack_height = self
             .websocket_stack_height
             .filter(|height| *height > 0)
@@ -1620,6 +1625,7 @@ mod tests {
         snapshot.websocket_sort_direction = "asc".to_string();
         snapshot.websocket_in_scope_only = true;
         snapshot.websocket_live_only = true;
+        snapshot.replay_tabs_wrap = true;
         snapshot.websocket_stack_height = Some(345);
         snapshot.ws_replay_left_width = Some(555);
         snapshot.ws_replay_frame_detail_height = Some(222);
@@ -1667,6 +1673,7 @@ mod tests {
         assert_eq!(persisted.websocket_sort_direction, "asc");
         assert!(persisted.websocket_in_scope_only);
         assert!(persisted.websocket_live_only);
+        assert!(persisted.replay_tabs_wrap);
         assert_eq!(persisted.websocket_stack_height, Some(345));
         assert_eq!(persisted.ws_replay_left_width, Some(555));
         assert_eq!(persisted.ws_replay_frame_detail_height, Some(222));
