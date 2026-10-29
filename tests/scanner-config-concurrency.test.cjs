@@ -2,7 +2,7 @@
 // nodes and deferred fetch responses. No app, server, proxy or traffic starts.
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
+const { appSource, loadFunctions, toggleButton } = require("./frontend-test-helpers.cjs");
 
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -49,14 +49,14 @@ function fixture() {
   const els = {
     proxyShell: { getClientRects: () => [1] },
     scannerBuiltinRules: builtinNode, scannerCustomRules: customNode,
-    scannerQuickToggle: { checked: true, disabled: false },
+    scannerQuickToggle: toggleButton(true),
     scannerSettingsClose: { focus() {} },
     scannerSettingsBackdrop: { classList: { add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name) } },
   };
   const context = loadFunctions([
     "resetScannerConfigUiState", "scannerConfigContextIsCurrent", "scannerConfigSnapshot", "loadScannerConfig", "saveScannerConfig",
     "openScannerSettings", "renderCustomRulesEditor", "collectCustomRulesFromEditor", "customRuleId", "collectScannerConfig", "closeScannerSettings", "saveScannerSettingsFromModal",
-    "isModalVisible", "refreshScannerQuickToggle", "saveScannerQuickToggle", "syncQuickToggle", "sessionQueryPath", "sessionWritePath", "expectedActiveSessionIdForWrite",
+    "isModalVisible", "refreshScannerQuickToggle", "saveScannerQuickToggle", "syncQuickToggle", "setToggleButton", "sessionQueryPath", "sessionWritePath", "expectedActiveSessionIdForWrite",
     "requireOkResponse", "readApiErrorMessage", "formatStructuredApiErrorMessage",
   ], {
     state: { activeTool: "proxy", activeProxyTab: "findings" }, getActiveModalAction: () => null,
@@ -445,7 +445,7 @@ test("missing token or missing session never produces an unguarded write", async
 
 test("scanner session reset and UI actions are wired to the guarded helpers", () => {
   assert.match(appSource, /function resetSessionScopedUiState\(\)[^]*?resetScannerConfigUiState\(\);/);
-  assert.match(appSource, /scannerQuickToggle\.addEventListener\("change", \(\) => saveScannerQuickToggle\(\)\)/);
+  assert.match(appSource, /scannerQuickToggle\.addEventListener\("click", \(\) => \{\s*syncQuickToggle\(!els\.scannerQuickToggle\.classList\.contains\("active"\)\);\s*saveScannerQuickToggle\(\);/);
   assert.doesNotMatch(appSource, /preserveEnabled/);
 });
 

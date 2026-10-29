@@ -28,7 +28,7 @@ function fixture() {
     displaySettingsModal: modal(), filterModal: modal(),
     openDisplaySettingsButton: opener, closeDisplaySettingsButton: close,
     displayThemeSelect: {}, displaySizeInput: {}, displayUiFontSelect: {}, displayMonoFontSelect: {},
-    displayRenderResourcesInput: {},
+    displayRenderResourcesInput: {}, displayFindingsColorSelect: {},
   };
   const globals = {
     state, els, document, displaySettingsPreviewActive: false, compareLoadGeneration: 0, displaySettingsReturnFocus: null,
@@ -56,7 +56,7 @@ function fixture() {
     "hydrateFilterForm", "syncColorTagFilterUI", "syncHttpInScopePill", "syncHttpCapturePill",
     "renderHistoryHeader", "applyHistoryColumnWidths", "applyWsColumnWidths", "updateWebsocketSortIndicators",
     "applySavedWorkbenchPaneWidths", "applySavedWebsocketPaneWidth", "applySavedWebsocketStackHeight",
-    "applySavedWsReplayLayout", "applyWorkbenchStackHeight",
+    "applySavedWsReplayLayout", "applyWorkbenchStackHeight", "refreshHistoryFindings",
   ]) globals[name] = () => {};
   const context = loadFunctions([
     "createDefaultDisplaySettings", "sanitizeDisplaySettings", "openDisplaySettingsModal", "closeDisplaySettingsModal",
@@ -150,7 +150,7 @@ test("Apply commits a preserved appearance draft exactly once", () => {
   f.context.applyUiSettingsSnapshot(f.remote);
   f.context.saveDisplaySettingsFromForm();
   assert.equal(f.writes.length, 1);
-  assert.deepEqual(f.writes[0], { sizePx: 18, theme: "ivory", uiFont: "system", monoFont: "sfmono", renderResources: false });
+  assert.deepEqual(f.writes[0], { sizePx: 18, theme: "ivory", uiFont: "system", monoFont: "sfmono", renderResources: false, findingsColor: "severity" });
   assert.equal(f.document.body.dataset.theme, "ivory");
   assert.equal(f.rootStyles.get("--ui-root-size"), "18px");
   assert.equal(f.context.displaySettingsPreviewActive, false);

@@ -59,7 +59,7 @@ function fixture() {
     "getFindingsRowHeight", "measuredRowPitch", "severityClass", "severityLabel", "escapeHtml", "updateFindingsBadge",
     "retainedEntriesCap", "formatCappedCount", "clearFindingDetail", "updateFindingsSelection", "loadFindingDetail",
     "renderFindingDetailLoading", "setFindingDetailActionsEnabled", "showFindingDetail", "resetFindingsSearchUi",
-  ], {
+  ], { refreshHistoryFindings() {},
     state, els, URLSearchParams, BUTTON_PROGRESS_DELAY_MS: 180,
     findingsData: [], findingsBadgeCount: 0, findingsLoadPromise: null, findingsLoadSessionId: null,
     findingsStateGeneration: 0, findingsLoadGeneration: 0, findingsCountReadGeneration: 0, findingsCountAcceptedGeneration: 0,
@@ -125,7 +125,7 @@ function fixture() {
       contentHidden: els.findingsDetailContent.classList.contains("hidden"),
       request: els.findingsReqView.innerHTML, response: els.findingsResView.innerHTML,
       table: els.findingsBody.innerHTML, badge: els.findingsBadge.textContent,
-      filters: [els.findingsFilterSearch.value, els.findingsFilterSeverity.value, els.findingsFilterCategory.value, els.findingsInScopeOnly.checked],
+      filters: [els.findingsFilterSearch.value, els.findingsFilterSeverity.value, els.findingsFilterCategory.value, els.findingsInScopeOnly.classList.contains("active")],
     });
   }
   async function acknowledge(request = requests.find(item => item.options?.method === "POST")) {

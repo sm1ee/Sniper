@@ -13,7 +13,7 @@ function deferred() {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-const defaults = { size_px: 12, theme: "charcoal", ui_font: "plex", mono_font: "jetbrains", render_resources: false };
+const defaults = { size_px: 12, theme: "charcoal", ui_font: "plex", mono_font: "jetbrains", render_resources: false, findings_color: "severity" };
 function snapshot(revision, display = {}) {
   return {
     ...(revision === undefined ? {} : { server_revision: revision }),
@@ -34,7 +34,7 @@ function snapshot(revision, display = {}) {
     websocket_stack_height: null, ws_replay_left_width: null, ws_replay_frame_detail_height: null,
   };
 }
-const nondefault = { size_px: 16, theme: "paper", ui_font: "notokr", mono_font: "plexmono", render_resources: true };
+const nondefault = { size_px: 16, theme: "paper", ui_font: "notokr", mono_font: "plexmono", render_resources: true, findings_color: "purple" };
 
 function fixture() {
   const requests = [], timers = new Map(), errors = [], notices = [], styles = new Map();
@@ -65,7 +65,7 @@ function fixture() {
   }
   const els = {};
   for (const name of ["openDisplaySettingsButton", "closeDisplaySettingsButton", "applyDisplaySettingsButton", "resetDisplaySettingsButton", "retryDisplaySettingsButton", "displaySettingsLoadStatus"]) els[name] = node();
-  for (const name of ["displayThemeSelect", "displayUiFontSelect", "displayMonoFontSelect"]) els[name] = node("SELECT");
+  for (const name of ["displayThemeSelect", "displayUiFontSelect", "displayMonoFontSelect", "displayFindingsColorSelect"]) els[name] = node("SELECT");
   els.displaySizeInput = node("INPUT"); els.displaySizeInput.type = "number";
   els.displayRenderResourcesInput = node("INPUT"); els.displayRenderResourcesInput.type = "checkbox";
   for (const name of ["displaySettingsModal", "filterModal", "curlImportModal"]) {
@@ -119,6 +119,7 @@ function fixture() {
     "renderHistoryHeader", "applyHistoryColumnWidths", "applyWsColumnWidths", "updateWebsocketSortIndicators",
     "applySavedWorkbenchPaneWidths", "applySavedWebsocketPaneWidth", "applySavedWebsocketStackHeight",
     "applySavedWsReplayLayout", "applyWorkbenchStackHeight", "closeFilterModal", "applyFilterSettings", "closeCurlImportModal",
+    "refreshHistoryFindings",
   ]) globals[name] = () => {};
   const names = [
     "createDefaultDisplaySettings", "sanitizeDisplaySettings", "openDisplaySettingsModal", "closeDisplaySettingsModal",
@@ -211,7 +212,7 @@ for (const [control, away, back, field] of [
     f.edit(control, away, "input"); f.edit(control, back, "change");
     f.respond(0, snapshot(7, nondefault)); await loading;
     const values = plain(f.context.collectDisplaySettingsFormValues());
-    const wire = { size_px: values.sizePx, theme: values.theme, ui_font: values.uiFont, mono_font: values.monoFont, render_resources: values.renderResources };
+    const wire = { size_px: values.sizePx, theme: values.theme, ui_font: values.uiFont, mono_font: values.monoFont, render_resources: values.renderResources, findings_color: values.findingsColor };
     assert.deepEqual(wire, { ...nondefault, [field]: defaults[field] });
     assert.equal(f.requests.length, 1); assert.equal(f.redraws, 0);
   });
@@ -221,7 +222,7 @@ test("Reset marks all Display fields without applying or loading resources", asy
   const f = fixture(), loading = f.context.loadUiSettings(); f.context.openDisplaySettingsModal();
   f.els.resetDisplaySettingsButton.click();
   f.respond(0, snapshot(7, nondefault)); await loading;
-  assert.deepEqual(plain(f.context.collectDisplaySettingsFormValues()), { sizePx: 12, theme: "charcoal", uiFont: "plex", monoFont: "jetbrains", renderResources: false });
+  assert.deepEqual(plain(f.context.collectDisplaySettingsFormValues()), { sizePx: 12, theme: "charcoal", uiFont: "plex", monoFont: "jetbrains", renderResources: false, findingsColor: "severity" });
   assert.equal(f.document.body.dataset.theme, "charcoal"); assert.equal(f.styles.get("--ui-root-size"), "16px");
   assert.equal(f.requests.length, 1); assert.equal(f.redraws, 0);
   f.key("Escape");

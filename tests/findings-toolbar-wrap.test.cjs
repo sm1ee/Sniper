@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
-const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
+const { appSource, loadFunctions, toggleButton } = require("./frontend-test-helpers.cjs");
 
 const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
 const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
@@ -124,19 +124,21 @@ test("the wrapping toolbar retains one ordered copy of every existing control", 
   const markup = html.slice(start, end);
   assert.deepEqual([...markup.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]), ids);
   for (const id of ids) assert.equal(html.split(`id="${id}"`).length - 1, 1, id);
+  // The same outlined pill buttons as HTTP's In scope and Capturing.
   for (const id of ["findingsInScopeOnly", "scannerQuickToggle"]) {
-    assert.match(markup, new RegExp(`<label[^>]*>[\\s\\S]*?<input id="${id}" type="checkbox"`));
+    assert.match(markup, new RegExp(`<button class="scope-pill[^"]*" id="${id}" type="button" aria-pressed="(true|false)"`));
   }
+  assert.doesNotMatch(markup, /type="checkbox"/);
   assert.doesNotMatch(markup, /\bhidden\b|\bdisabled\b|\btabindex=/);
 });
 
 test("existing filter controls keep their selection and debounce through repeated edits", () => {
   const handlers = new Map(), timers = new Map();
   let nextTimer = 0;
-  const els = Object.fromEntries(ids.slice(0, 4).map(id => [id, {
-    value: "", checked: false,
-    addEventListener(type, handler) { handlers.set(`${id}:${type}`, handler); },
-  }]));
+  const els = Object.fromEntries(ids.slice(0, 4).map(id => [id, Object.assign(
+    id === "findingsInScopeOnly" ? toggleButton() : { value: "" },
+    { addEventListener(type, handler) { handlers.set(`${id}:${type}`, handler); } },
+  )]));
   const saved = Object.freeze([
     Object.freeze({ id: "match", severity: "high", category: "header", title: "Saved match",
       host: "example.com", path: "/saved" }),
@@ -144,7 +146,7 @@ test("existing filter controls keep their selection and debounce through repeate
       host: "outside.example.com", path: "/saved" }),
   ]);
   const renders = [];
-  const c = loadFunctions(["getFilteredFindings"], {
+  const c = loadFunctions(["getFilteredFindings", "setToggleButton"], {
     els, findingsData: saved, findingsSortKey: "title", findingsSortDir: "asc",
     SEVERITY_ORDER: { critical: 0, high: 1, medium: 2, low: 3, info: 4 },
     isInScopeHost: host => host === "example.com",
@@ -168,7 +170,7 @@ test("existing filter controls keep their selection and debounce through repeate
   for (let repeat = 0; repeat < 3; repeat++) {
     els.findingsFilterSeverity.value = "high"; fire("findingsFilterSeverity");
     els.findingsFilterCategory.value = "header"; fire("findingsFilterCategory");
-    els.findingsInScopeOnly.checked = true; fire("findingsInScopeOnly");
+    fire("findingsInScopeOnly", "click");
     els.findingsFilterSearch.value = "missing"; fire("findingsFilterSearch", "input");
     els.findingsFilterSearch.value = "MATCH"; fire("findingsFilterSearch", "input");
     assert.equal(timers.size, 1);
@@ -178,7 +180,7 @@ test("existing filter controls keep their selection and debounce through repeate
     assert.equal(els.findingsFilterSeverity.value, "high");
     assert.equal(els.findingsInScopeOnly.checked, true);
     for (const id of ids.slice(0, 3)) els[id].value = "";
-    els.findingsInScopeOnly.checked = false; fire("findingsInScopeOnly");
+    fire("findingsInScopeOnly", "click");
     assert.deepEqual(renders.at(-1), ["low", "match"]);
   }
   assert.equal(c.findingsData, saved);

@@ -32,7 +32,7 @@ function fixture() {
     "currentSessionId", "sessionQueryPath", "transactionPath", "loadFindingDetail", "clearFindingDetail",
     "renderFindingDetailLoading", "setFindingDetailActionsEnabled", "showFindingDetail",
     "updateFindingsSelection", "resetFindingsUiState", "severityClass", "severityLabel",
-  ], {
+  ], { refreshHistoryFindings() {},
     state, els, selectedFindingId: null, findingsDetailGeneration: 0,
     findingsStateGeneration: 0, findingsLoadGeneration: 0, findingsData: [], findingsBadgeCount: 0,
     findingsLoadPromise: null, findingsLoadSessionId: null, lastFindingsBadgePollAt: 0,

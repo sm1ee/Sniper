@@ -24,7 +24,7 @@ function fixture() {
     "scheduleFindingsBadgeRefresh", "scheduleFindingsListRefresh", "resetFindingsUiState"];
   // Also run the production commit helper once it exists; the pre-fix run tests the old handlers.
   if (/^function commitFindingsBadgeCount\(/m.test(appSource)) names.push("commitFindingsBadgeCount");
-  const context = loadFunctions(names, {
+  const context = loadFunctions(names, { refreshHistoryFindings() {},
     state, els, console: { error: (...args) => errors.push(args) },
     clearFindingDetail() {},
     renderFindings() { rendered.push(Array.from(read("findingsData"), item => item.id)); },

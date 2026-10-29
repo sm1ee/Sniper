@@ -151,6 +151,7 @@
 
             <div class="filter-actions">
               <button class="scope-pill" id="httpInScopeToggle" type="button" title="Show only in-scope hosts">In scope</button>
+              <button class="scope-pill active" id="httpFindingsToggle" type="button" aria-pressed="true" title="Mark requests with passive scan findings: severity in Notes, a row tint, and the evidence in the request and response">Findings</button>
               <button class="scope-pill scope-pill-run" id="httpCaptureToggle" type="button" title="Pause recording proxied traffic">Capturing</button>
               <button class="secondary-action" id="clearHistoryButton" type="button" title="Remove every captured request in this session">
                 Clear
@@ -585,14 +586,8 @@
                 <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search" />
               </div>
               <div class="findings-toolbar-actions">
-                <label class="scanner-quick-toggle" title="Show only in-scope findings">
-                  <input id="findingsInScopeOnly" type="checkbox" />
-                  <span class="scanner-quick-toggle-label">In scope</span>
-                </label>
-                <label class="scanner-quick-toggle" title="Toggle Passive Scan">
-                  <input id="scannerQuickToggle" type="checkbox" checked />
-                  <span class="scanner-quick-toggle-label">Passive Scan</span>
-                </label>
+                <button class="scope-pill" id="findingsInScopeOnly" type="button" aria-pressed="false" title="Show only in-scope findings">In scope</button>
+                <button class="scope-pill scope-pill-run active" id="scannerQuickToggle" type="button" aria-pressed="true" title="Scanning new traffic. Click to stop; existing findings stay.">Passive Scan</button>
                 <button class="secondary-action" id="findingsSettingsButton" type="button" title="Detection Rules">&#9881;</button>
                 <button class="secondary-action" id="findingsRescanButton" type="button" title="Scan the retained history again with the current rules">Rescan</button>
                 <button class="secondary-action" id="findingsClearButton" type="button">Clear</button>
@@ -2066,6 +2061,23 @@
                 <span>Load images, styles and fonts</span>
               </label>
               <p class="modal-copy">Off, Render draws only what the response itself holds. On, it also fetches the images, stylesheets and fonts the page names, through Sniper and the session's proxy chain. Those requests go to the target and to any other host the page names, and are not recorded in HTTP history. Scripts never run either way.</p>
+            </section>
+            <section class="filter-group">
+              <h3>Findings in HTTP</h3>
+              <label class="settings-field">
+                <span>Row color</span>
+                <select id="displayFindingsColorSelect">
+                  <option value="severity">By severity</option>
+                  <option value="red">Red</option>
+                  <option value="orange">Orange</option>
+                  <option value="yellow">Yellow</option>
+                  <option value="green">Green</option>
+                  <option value="blue">Blue</option>
+                  <option value="purple">Purple</option>
+                  <option value="none">No color</option>
+                </select>
+              </label>
+              <p class="modal-copy">For requests with passive scan findings while Findings is on in HTTP. A color tag you set on a row, and a note you wrote, show instead.</p>
             </section>
           </div>
           <div class="settings-panel-plain" data-settings-panel="shortcuts" role="tabpanel">
