@@ -113,7 +113,7 @@ test("synthetic oversized custom categories are bounded before subsequent filter
 
 const ids = [
   "findingsFilterSeverity", "findingsFilterCategory", "findingsFilterSearch",
-  "findingsInScopeOnly", "scannerQuickToggle", "findingsSettingsButton",
+  "findingsInScopeOnly", "findingsHistoryToggle", "scannerQuickToggle", "findingsSettingsButton",
   "findingsRescanButton", "findingsClearButton",
 ];
 
@@ -125,7 +125,7 @@ test("the wrapping toolbar retains one ordered copy of every existing control", 
   assert.deepEqual([...markup.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]), ids);
   for (const id of ids) assert.equal(html.split(`id="${id}"`).length - 1, 1, id);
   // The same outlined pill buttons as HTTP's In scope and Capturing.
-  for (const id of ["findingsInScopeOnly", "scannerQuickToggle"]) {
+  for (const id of ["findingsInScopeOnly", "findingsHistoryToggle", "scannerQuickToggle"]) {
     assert.match(markup, new RegExp(`<button class="scope-pill[^"]*" id="${id}" type="button" aria-pressed="(true|false)"`));
   }
   assert.doesNotMatch(markup, /type="checkbox"/);

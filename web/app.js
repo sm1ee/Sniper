@@ -1661,12 +1661,8 @@ function bindEvents() {
     clearHttpHistorySelectionPreview();
     scheduleRefresh({ resetScroll: true });
   });
-  document.getElementById("httpFindingsToggle")?.addEventListener("click", () => {
-    state.httpShowFindings = !state.httpShowFindings;
-    scheduleUiSettingsSave();
-    refreshHistoryFindings();
-    if (state.httpShowFindings) loadFindings().catch((error) => console.error(error));
-  });
+  document.getElementById("httpFindingsToggle")?.addEventListener("click", toggleHistoryFindings);
+  document.getElementById("findingsHistoryToggle")?.addEventListener("click", toggleHistoryFindings);
   onClickWithProgress(document.getElementById("httpCaptureToggle"), async (e) => {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
@@ -5822,6 +5818,9 @@ function createHistoryQueryState() {
     hiddenExtensions: String(filters.hiddenExtensions || "").trim(),
     port: String(filters.port || "").trim(),
     colorTags,
+    // The colour filter also gathers rows HTTP history tints for their findings.
+    findingColor: colorTags.length && state.httpShowFindings && state.displaySettings?.findingsColor !== "none"
+      ? state.displaySettings?.findingsColor || "severity" : "",
     advancedSearch: String(filters.searchTerm || "").trim(),
     advancedRegex: !!filters.regex,
     advancedCaseSensitive: !!filters.caseSensitive,
@@ -5861,6 +5860,7 @@ function buildTransactionsPageUrl({ limit, offset = 0, beforeSequence = null, qu
   if (queryState.hiddenExtensions) params.set("hidden_extensions", queryState.hiddenExtensions);
   if (queryState.port) params.set("port", queryState.port);
   if (queryState.colorTags.length) params.set("color_tags", queryState.colorTags.join(","));
+  if (queryState.findingColor) params.set("finding_color", queryState.findingColor);
   if (queryState.advancedSearch) {
     params.set("advanced_search", queryState.advancedSearch);
     if (queryState.advancedRegex) params.set("advanced_regex", "true");
@@ -9136,7 +9136,8 @@ function defaultSummaryPortForScheme(scheme) {
 function summaryMatchesColorTags(item, filters) {
   const tags = filters.colorTags;
   if (!tags?.size) return true;
-  return tags.has(item.color_tag || "");
+  // A colour tag wins over the findings tint, as it does on the row.
+  return tags.has(item.color_tag || state._historyFindings?.get(item.id)?.tone || "");
 }
 
 function foldHeaderSearchText(value) {
@@ -10283,9 +10284,19 @@ const historyFindingEvidence = new Map();
 const historyFindingEvidencePending = new Set();
 let historyFindingEvidenceSessionId = null;
 
+// HTTP's Findings pill and the Findings tab's "Mark in HTTP" share one setting.
+function toggleHistoryFindings() {
+  state.httpShowFindings = !state.httpShowFindings;
+  scheduleUiSettingsSave();
+  refreshHistoryFindings();
+  if (state.httpShowFindings) loadFindings().catch((error) => console.error(error));
+}
+
 function refreshHistoryFindings() {
-  const pill = document.getElementById("httpFindingsToggle");
-  if (pill) setToggleButton(pill, Boolean(state.httpShowFindings));
+  for (const id of ["httpFindingsToggle", "findingsHistoryToggle"]) {
+    const pill = document.getElementById(id);
+    if (pill) setToggleButton(pill, Boolean(state.httpShowFindings));
+  }
   const color = state.displaySettings?.findingsColor || "severity";
   let marks = null;
   if (state.httpShowFindings && findingsData.length) {
@@ -10298,11 +10309,19 @@ function refreshHistoryFindings() {
     for (const entry of marks.values()) {
       entry.findings.sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 5) - (SEVERITY_ORDER[b.severity] ?? 5));
       const tone = color === "severity" ? FINDING_SEVERITY_TONES[entry.findings[0].severity] || "blue" : color;
-      entry.rowClass = tone === "none" ? "" : ` has-finding finding-tone-${tone}`;
+      entry.tone = tone === "none" ? "" : tone;
+      entry.rowClass = entry.tone ? ` has-finding finding-tone-${entry.tone}` : "";
     }
   }
   state._historyFindings = marks;
   renderHistoryVirtual();
+  // The server gathers tinted rows into the colour filter, so a filtered list
+  // is read again once the findings or how they are drawn change.
+  const filterSignature = `${Boolean(state.httpShowFindings)}:${color}:${findingsData.length}:${findingsData[0]?.id || ""}`;
+  if (filterSignature !== state._historyFindingFilterSignature) {
+    state._historyFindingFilterSignature = filterSignature;
+    if (state.filterSettings?.colorTags?.size) scheduleRefresh();
+  }
   // The panes rerun their search on redraw, which scrolls to its first hit, so
   // redraw only when the open record's findings actually changed.
   if (state.selectedRecord && historyFindingSignature(state.selectedRecord.id) !== state._historyFindingSignature) {

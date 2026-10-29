@@ -934,6 +934,9 @@ struct TransactionQuery {
     hidden_extensions: Option<String>,
     port: Option<String>,
     color_tags: Option<String>,
+    /// HTTP history's findings colour (`severity` or a tag colour), sent while
+    /// it marks findings so `color_tags` also matches the rows it tints.
+    finding_color: Option<String>,
     advanced_search: Option<String>,
     advanced_regex: Option<bool>,
     advanced_case_sensitive: Option<bool>,
@@ -1039,6 +1042,7 @@ fn transaction_list_filters(
         mime: query.mime,
         port: query.port,
         color_tags: csv_param(query.color_tags),
+        finding_colors: Default::default(),
         advanced_search: query.advanced_search,
         advanced_regex: query.advanced_regex.unwrap_or(false),
         advanced_case_sensitive: query.advanced_case_sensitive.unwrap_or(false),
@@ -1109,7 +1113,46 @@ fn validate_transaction_query(query: &TransactionQuery) -> std::result::Result<(
         query.advanced_case_sensitive.unwrap_or(false),
     )?;
 
+    if let Some(value) = query.finding_color.as_deref() {
+        if value != "severity" && !HTTP_COLOR_TAGS.contains(&value) {
+            return Err(format!("invalid finding_color filter: {value}"));
+        }
+    }
+
     Ok(())
+}
+
+const HTTP_COLOR_TAGS: [&str; 6] = ["red", "orange", "yellow", "green", "blue", "purple"];
+
+/// The colour HTTP history tints each record with for its findings, as
+/// `refreshHistoryFindings` in web/app.js does. Only built when the colour
+/// filter asks for it.
+async fn finding_record_colors(
+    session: &SessionContext,
+    finding_color: Option<&str>,
+    color_tags: &[String],
+) -> std::collections::HashMap<Uuid, String> {
+    let Some(finding_color) = finding_color.filter(|_| !color_tags.is_empty()) else {
+        return Default::default();
+    };
+    use crate::scanner::Severity;
+    session
+        .scanner
+        .worst_severity_by_record()
+        .await
+        .into_iter()
+        .map(|(record_id, severity)| {
+            let color = match (finding_color, severity) {
+                ("severity", Severity::Critical) => "red",
+                ("severity", Severity::High) => "orange",
+                ("severity", Severity::Medium) => "yellow",
+                ("severity", Severity::Low) => "green",
+                ("severity", Severity::Info) => "blue",
+                (color, _) => color,
+            };
+            (record_id, color.to_string())
+        })
+        .collect()
 }
 
 fn validate_transaction_sort_key(sort_key: Option<&str>) -> std::result::Result<(), String> {
@@ -6769,11 +6812,14 @@ async fn list_transactions(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(
+    let finding_color = query.finding_color.clone();
+    let mut filters = transaction_list_filters(
         query,
         runtime.scope_patterns,
         runtime.excluded_scope_patterns,
     );
+    filters.finding_colors =
+        finding_record_colors(&session, finding_color.as_deref(), &filters.color_tags).await;
     Json(session.store.list(&filters).await).into_response()
 }
 
@@ -6798,11 +6844,14 @@ async fn list_transactions_page(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(
+    let finding_color = query.finding_color.clone();
+    let mut filters = transaction_list_filters(
         query,
         runtime.scope_patterns,
         runtime.excluded_scope_patterns,
     );
+    filters.finding_colors =
+        finding_record_colors(&session, finding_color.as_deref(), &filters.color_tags).await;
     let page = session.store.list_page(&filters).await;
     Json(TransactionPageResponse::from(page)).into_response()
 }
@@ -6882,11 +6931,14 @@ async fn search_transactions(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(
+    let finding_color = query.finding_color.clone();
+    let mut filters = transaction_list_filters(
         query,
         runtime.scope_patterns,
         runtime.excluded_scope_patterns,
     );
+    filters.finding_colors =
+        finding_record_colors(&session, finding_color.as_deref(), &filters.color_tags).await;
     Json(session.store.search_bodies(&filters, &request).await).into_response()
 }
 
@@ -9857,6 +9909,109 @@ mod tests {
                 );
             }
         }
+        drop(session);
+        drop(state);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    // HTTP history tints rows for their findings; its colour filter has to
+    // gather the same rows, with a colour tag still winning over the tint.
+    #[tokio::test]
+    async fn colour_filter_gathers_rows_tinted_for_their_findings() {
+        let (state, data_dir) = test_state("sniper-finding-colour-filter");
+        let session = state.session().await;
+        let record = |n: u8, color_tag: Option<&str>| -> crate::model::TransactionRecord {
+            serde_json::from_value(serde_json::json!({
+                "id": format!("00000000-0000-0000-0000-0000000000{n:02}"),
+                "started_at": "2026-01-01T00:00:00Z", "method": "GET",
+                "scheme": "https", "host": "example.com", "path": format!("/{n}"),
+                "request": { "headers": [] }, "color_tag": color_tag,
+            }))
+            .unwrap()
+        };
+        // Findings are listed once per title, so each carries its severity in it.
+        let finding = |record_id: Uuid, severity: Severity| ScannerFinding {
+            id: Uuid::new_v4(),
+            record_id,
+            found_at: Utc::now(),
+            rule_id: String::new(),
+            title: format!("Synthetic {severity:?} {record_id}"),
+            severity,
+            category: "header".into(),
+            detail: String::new(),
+            evidence: String::new(),
+            host: "example.com".into(),
+            path: "/".into(),
+            location: None,
+        };
+        let tagged = record(1, Some("green"));
+        let low = record(2, None);
+        let low_and_medium = record(3, None);
+        let tagged_low = record(4, Some("blue"));
+        for (id, severity) in [
+            (low.id, Severity::Low),
+            (low_and_medium.id, Severity::Low),
+            (low_and_medium.id, Severity::Medium),
+            (tagged_low.id, Severity::Low),
+        ] {
+            assert!(session.scanner.push(finding(id, severity)).await);
+        }
+        for record in [&tagged, &low, &low_and_medium, &tagged_low] {
+            session.store.insert(record.clone()).await;
+        }
+        let paths = |query: serde_json::Value| {
+            let state = state.clone();
+            let mut query = query;
+            query["session_id"] = serde_json::json!(session.id());
+            async move {
+                let response = super::list_transactions_page(
+                    State(state),
+                    Query(serde_json::from_value(query).unwrap()),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let page: serde_json::Value = response_json(response).await;
+                let mut paths: Vec<String> = page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| item["path"].as_str().unwrap().to_string())
+                    .collect();
+                paths.sort();
+                paths
+            }
+        };
+
+        // Without the findings colour, only colour tags count.
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "green"})).await,
+            ["/1"]
+        );
+        // By severity, the worst finding decides; the tagged row stays blue.
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "green", "finding_color": "severity"})).await,
+            ["/1", "/2"]
+        );
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "yellow", "finding_color": "severity"})).await,
+            ["/3"]
+        );
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "blue", "finding_color": "severity"})).await,
+            ["/4"]
+        );
+        // One chosen colour tints every row with findings that has no tag.
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "purple", "finding_color": "purple"})).await,
+            ["/2", "/3"]
+        );
+        let invalid = super::list_transactions_page(
+            State(state.clone()),
+            Query(serde_json::from_value(serde_json::json!({"finding_color": "rainbow"})).unwrap()),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
         drop(session);
         drop(state);
         std::fs::remove_dir_all(data_dir).unwrap();

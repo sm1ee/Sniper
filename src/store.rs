@@ -53,6 +53,10 @@ pub struct ListFilters {
     pub mime: Option<String>,
     pub port: Option<String>,
     pub color_tags: Vec<String>,
+    /// The colour HTTP history tints a record with for its passive scan
+    /// findings. A record without a colour tag of its own matches
+    /// `color_tags` by this one, so the filter gathers the rows drawn in it.
+    pub finding_colors: HashMap<Uuid, String>,
     pub advanced_search: Option<String>,
     pub advanced_regex: bool,
     pub advanced_case_sensitive: bool,
@@ -4909,7 +4913,11 @@ fn matches_filters(
         return false;
     }
 
-    if !matches_color_tags(summary.color_tag.as_deref(), &filters.color_tags) {
+    let color = summary
+        .color_tag
+        .as_deref()
+        .or_else(|| filters.finding_colors.get(&summary.id).map(String::as_str));
+    if !matches_color_tags(color, &filters.color_tags) {
         return false;
     }
 
