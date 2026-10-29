@@ -22131,6 +22131,7 @@ function renderReplayTabs(options = {}) {
     return;
   }
 
+  els.replayTabStrip._cancelReplayRenameFocus?.();
   const tabMarkup = (tab) => {
     const isActive = tab.id === state.activeReplayTabId;
     const active = isActive ? "active" : "";
@@ -22254,11 +22255,27 @@ function renderReplayTabs(options = {}) {
       nameInput.addEventListener("blur", () => {
         if (ownsRename()) commitReplayTabRename(id, nameInput.value);
       });
+      const initialFocus = document.activeElement;
+      let focusPending = true;
+      const retireFocus = () => {
+        focusPending = false;
+        document.removeEventListener("focusin", onFocusIn, true);
+        if (els.replayTabStrip._cancelReplayRenameFocus === retireFocus) els.replayTabStrip._cancelReplayRenameFocus = null;
+      };
+      // A modal can return focus to this same editor before the frame runs.
+      // Retire on the intervening move, not just a different final element.
+      const onFocusIn = (event) => { if (event.target !== initialFocus) retireFocus(); };
+      els.replayTabStrip._cancelReplayRenameFocus = retireFocus;
+      document.addEventListener("focusin", onFocusIn, true);
       requestAnimationFrame(() => {
-        if (ownsRename()) {
-          nameInput.focus();
-          nameInput.select();
-        }
+        if (!focusPending) return;
+        retireFocus();
+        if (!ownsRename() || state.activeTool !== "replay" || getActiveModalAction()
+          || document.activeElement === nameInput || document.activeElement !== initialFocus
+          || !nameInput.isConnected || nameInput.disabled || nameInput.tabIndex < 0
+          || !nameInput.getClientRects().length || window.getComputedStyle(nameInput).visibility === "hidden") return;
+        nameInput.focus();
+        nameInput.select();
       });
     }
     tabElement.querySelector(".replay-tab-button")?.addEventListener("click", () => {
