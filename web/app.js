@@ -1984,18 +1984,27 @@ function bindEvents() {
     if (deleteBtn) { deleteInterceptRule(deleteBtn.dataset.ruleDelete).catch(handleInterceptRuleError); return; }
     const saveBtn = event.target.closest("[data-rule-save]");
     if (saveBtn) { saveInterceptRuleFromRow(saveBtn.dataset.ruleSave).catch(handleInterceptRuleError); return; }
+    const editBtn = event.target.closest("[data-rule-edit]");
+    if (editBtn) { editInterceptRule(editBtn.dataset.ruleEdit, { focusScope: true }); return; }
     const row = event.target.closest("[data-rule-id]");
-    if (row && !event.target.closest("input") && !event.target.closest("button")) { editInterceptRule(row.dataset.ruleId); }
+    if (!row || row.querySelector('[data-field="scope"]')) return;
+    if (event.target.closest("input, button, select, textarea, label, a")) return;
+    editInterceptRule(row.dataset.ruleId);
   });
   document.getElementById("interceptRulesList").addEventListener("change", (event) => {
     const toggle = event.target.closest("[data-rule-toggle]");
     if (toggle) { toggleInterceptRuleEnabled(toggle.dataset.ruleToggle, toggle.checked).catch(handleInterceptRuleError); }
   });
   document.getElementById("interceptRulesList").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      const row = event.target.closest("[data-rule-id]");
-      if (row) { saveInterceptRuleFromRow(row.dataset.ruleId).catch(handleInterceptRuleError); }
-    }
+    if (event.key !== "Enter" || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
+      || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    const input = event.target;
+    if (input.tagName !== "INPUT" || input.type !== "text"
+      || !["method_filter", "host_pattern", "path_pattern"].includes(input.dataset.field)) return;
+    const row = input.closest("[data-rule-id]");
+    if (!row || row.querySelector(`[data-field="${input.dataset.field}"]`) !== input) return;
+    event.preventDefault();
+    saveInterceptRuleFromRow(row.dataset.ruleId).catch(handleInterceptRuleError);
   });
   if (els.refreshWebsocketsButton) {
     els.refreshWebsocketsButton.addEventListener("click", () => {
@@ -6755,7 +6764,7 @@ function renderInterceptRules() {
     container.innerHTML = `<div class="intercept-rules-empty">No rules: every in-scope request and response is intercepted. Add a rule to narrow it to one direction, or to specific hosts, paths or methods.</div>`;
     return;
   }
-  container.innerHTML = rules.map((rule) => {
+  container.innerHTML = rules.map((rule, index) => {
     const methods = rule.method_filter?.length ? rule.method_filter.join(", ") : "Any";
     const host = rule.host_pattern || "*";
     const path = rule.path_pattern || "*";
@@ -6763,13 +6772,14 @@ function renderInterceptRules() {
     const scopeLabel = scope === "both" ? "Req+Res" : scope === "response" ? "Res" : "Req";
     return `<div class="intercept-rule-row${rule.enabled ? "" : " disabled"}" data-rule-id="${rule.id}">
       <label class="intercept-rule-toggle" title="Enable/disable">
-        <input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" />
+        <input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" aria-label="Enable intercept rule ${index + 1}" />
       </label>
       <span class="intercept-rule-scope">${escapeHtml(scopeLabel)}</span>
       <span class="intercept-rule-methods">${escapeHtml(methods)}</span>
       <span class="intercept-rule-host">${escapeHtml(host)}</span>
       <span class="intercept-rule-path">${escapeHtml(path)}</span>
-      <button class="intercept-rule-delete" data-rule-delete="${rule.id}" title="Delete rule">&times;</button>
+      <button class="secondary-action" type="button" data-rule-edit="${rule.id}" aria-label="Edit intercept rule ${index + 1}">Edit</button>
+      <button class="intercept-rule-delete" type="button" data-rule-delete="${rule.id}" aria-label="Delete intercept rule ${index + 1}" title="Delete rule">&times;</button>
     </div>`;
   }).join("");
 }
@@ -6797,26 +6807,28 @@ async function addInterceptRule() {
   editInterceptRule(rule.id);
 }
 
-function editInterceptRule(ruleId) {
+function editInterceptRule(ruleId, { focusScope = false } = {}) {
   const rule = (state.interceptRules || []).find((r) => r.id === ruleId);
   if (!rule) return;
   const container = document.getElementById("interceptRulesList");
   const row = container.querySelector(`[data-rule-id="${ruleId}"]`);
   if (!row) return;
   const scope = rule.scope || "request";
+  const context = `intercept rule ${state.interceptRules.indexOf(rule) + 1}`;
   row.innerHTML = `
-    <label class="intercept-rule-toggle"><input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" /></label>
-    <select class="intercept-rule-input intercept-rule-scope-select" data-field="scope">
+    <label class="intercept-rule-toggle"><input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" aria-label="Enable ${context}" /></label>
+    <select class="intercept-rule-input intercept-rule-scope-select" data-field="scope" aria-label="Direction for ${context}">
       <option value="request"${scope === "request" ? " selected" : ""}>Request</option>
       <option value="response"${scope === "response" ? " selected" : ""}>Response</option>
       <option value="both"${scope === "both" ? " selected" : ""}>Both</option>
     </select>
-    <input class="intercept-rule-input" data-field="method_filter" placeholder="Methods (e.g. GET,POST)" value="${escapeHtml((rule.method_filter || []).join(", "))}" />
-    <input class="intercept-rule-input" data-field="host_pattern" placeholder="Host (e.g. *.example.com)" value="${escapeHtml(rule.host_pattern || "")}" />
-    <input class="intercept-rule-input" data-field="path_pattern" placeholder="Path contains (e.g. /api/)" value="${escapeHtml(rule.path_pattern || "")}" />
-    <button class="intercept-rule-save" data-rule-save="${rule.id}">&#10003;</button>
-    <button class="intercept-rule-delete" data-rule-delete="${rule.id}">&times;</button>
+    <input class="intercept-rule-input" type="text" data-field="method_filter" aria-label="Methods for ${context}" placeholder="Methods (e.g. GET,POST)" value="${escapeHtml((rule.method_filter || []).join(", "))}" />
+    <input class="intercept-rule-input" type="text" data-field="host_pattern" aria-label="Host pattern for ${context}" placeholder="Host (e.g. *.example.com)" value="${escapeHtml(rule.host_pattern || "")}" />
+    <input class="intercept-rule-input" type="text" data-field="path_pattern" aria-label="Path contains for ${context}" placeholder="Path contains (e.g. /api/)" value="${escapeHtml(rule.path_pattern || "")}" />
+    <button class="intercept-rule-save" type="button" data-rule-save="${rule.id}" aria-label="Save ${context}">&#10003;</button>
+    <button class="intercept-rule-delete" type="button" data-rule-delete="${rule.id}" aria-label="Delete ${context}">&times;</button>
   `;
+  if (focusScope) row.querySelector('[data-field="scope"]')?.focus();
 }
 
 async function saveInterceptRuleFromRow(ruleId) {

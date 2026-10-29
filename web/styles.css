@@ -6774,7 +6774,10 @@ button.utility-button.replay-tab-add {
   background: var(--bg-elevated);
 }
 
-.intercept-rule-row.disabled {
+.intercept-rule-row.disabled > .intercept-rule-scope,
+.intercept-rule-row.disabled > .intercept-rule-methods,
+.intercept-rule-row.disabled > .intercept-rule-host,
+.intercept-rule-row.disabled > .intercept-rule-path {
   opacity: 0.45;
 }
 
