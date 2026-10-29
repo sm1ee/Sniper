@@ -88,7 +88,7 @@ test('only passive local GET requests; map selection stays local and exact evide
   assert.equal(f.requests[1].options.method, undefined);
   f.requests[1].resolve(response(evidence())); await pending;
   assert.equal(f.state.evidence.sequence, '9007199254740993');
-  assert.match(f.els.detail.innerHTML, /Verified retained source/);
+  assert.match(f.els.detail.innerHTML, /Capture info/);
   assert.doesNotMatch(f.requests.map(request => request.url).join(' '), /\/api\/transactions\/|replay|scan|capture/);
 });
 test('selection survives endpoint insertion/reordering by case-sensitive method and exact path', async () => {
@@ -96,7 +96,7 @@ test('selection survives endpoint insertion/reordering by case-sensitive method 
   f.controller.selectOrigin(originA, 1);
   await f.load(snapshot([origin(originA, [endpoint('/new'), endpoint('/z', 'GET'), endpoint('/z', 'get', 'z'), endpoint('/a')])]));
   assert.equal(f.state.endpointIndex, 2);
-  assert.match(f.els.detail.innerHTML, />get<\/span>/);
+  assert.match(f.els.detail.innerHTML, /<span>get <strong>\/z<\/strong><\/span>/);
   await f.load(snapshot([origin(originA, [endpoint('/new'), endpoint('/z', 'GET')])]));
   assert.equal(f.state.endpointIndex, null); assert.equal(f.state.evidence, null);
 });
@@ -342,8 +342,9 @@ test('exact evidence includes source observations and any incomplete-metadata no
   const pending = f.controller.loadEvidence('evidence-one'), value = evidence();
   Object.assign(value.row, { metadata_complete: false, omitted: ['header_limit'], header_links: [{ source_origin: originB, relationship: 'origin_header' }], redirect: { target_origin: originB, target_path: '/next?private=omitted' }, technology_clues: [{ name: 'nginx', header_name: 'server' }] });
   f.requests.at(-1).resolve(response(value)); await pending;
-  assert.match(f.els.detail.innerHTML, /header_limit/); assert.match(f.els.detail.innerHTML, /Origin header:/);
-  assert.match(f.els.detail.innerHTML, /Redirect: https:\/\/api\.example\.com\/next</); assert.doesNotMatch(f.els.detail.innerHTML, /private=omitted/);
+  assert.match(f.els.detail.innerHTML, /header_limit/);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.state.evidence.header_links)), [{source_origin: originB, relationship: 'origin_header'}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.state.evidence.redirect)), {target_origin: originB, target_path: '/next'}); assert.doesNotMatch(f.els.detail.innerHTML, /private=omitted/);
 });
 
 const { loadFunctions, appSource } = require('./frontend-test-helpers.cjs');
@@ -352,6 +353,7 @@ for (const tool of ['target', 'map']) test(`${tool} loader only requests legacy 
   const requests = [], state = { activeTool: tool, activeTargetView: 'service-map', targetScopeDraftVersion: 0, targetScopeSaveToken: 0, targetScopeDirty: false };
   const ctx = loadFunctions(['loadTargetSiteMap'], {
     state, currentSessionId: () => 'session-one', workspaceStateGeneration: 0,
+    els: { targetScopeEditor: { value: '' }, targetScopeExcludeEditor: { value: '' } },
     sessionQueryPath: (path, id) => `${path}?session_id=${id}`,
     fetch: async url => { requests.push(url); return response(url.startsWith('/api/runtime') ? {} : []); },
     requireOkResponse: async () => {}, jsonArray: value => value, syncTargetScopeDraft() {}, renderInterceptStatus() {}, renderProxySettings() {}, renderTarget() {},
@@ -454,7 +456,7 @@ test('front-end technology evidence stays bound to each serving origin', async (
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(f.state.evidenceId, id);
     assert.equal(f.state.evidence.origin, source);
-    assert.match(f.els.detail.innerHTML, /Verified retained source/);
+    assert.match(f.els.detail.innerHTML, /Capture info/);
   }
 });
 
@@ -506,7 +508,7 @@ for (const transition of ['scope filter', 'history invalidation']) test(`${trans
   f.requests.at(-1).resolve(response(snapshot([origin(originA, [endpoint('/selected', 'GET'), endpoint('/other'), endpoint('/selected', 'get', 'selected')])])));
   if (refresh) await refresh; else await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.state.endpointIndex, 2);
-  assert.match(f.els.detail.innerHTML, /service-map-endpoint-summary[^]*?>get<\/span><strong>\/selected<\/strong>/);
+  assert.match(f.els.detail.innerHTML, /packet-source[^]*?<span>get <strong>\/selected<\/strong>/);
   assert.equal(f.state.evidence, null, 'a refreshed selection does not claim a newly verified source');
 });
 
@@ -529,7 +531,7 @@ test('origin search keeps selected exact evidence and explains when its card is 
     f.els.search.value = query; f.els.search.dispatch('input');
     assert.equal(f.state.selectedOrigin, originA);
     assert.equal(f.state.evidence, verified);
-    assert.match(f.els.detail.innerHTML, /Verified retained source/);
+    assert.match(f.els.detail.innerHTML, /Capture info/);
     assert.match(boundsText(f), /Selected origin is outside this filter/);
   }
   f.els.search.value = ''; f.els.search.dispatch('input');
@@ -982,6 +984,18 @@ async function resolveBodyReferences(f, payload = bodyReferences()) {
   const pending = f.controller.loadBodyReferences(); f.requests.at(-1).resolve(response(payload)); return pending;
 }
 
+// The class lets the stylesheet give a packet the inspector's height; other
+// tabs keep a plain scrolling body.
+test('only the Details tab marks its body for the packet layout', async () => {
+  const f = fixture(); await f.load(); f.controller.selectOrigin(originA);
+  assert.match(f.els.detail.innerHTML, /class="service-map-detail-body" id="serviceMapDetailBody"/);
+  const pending = f.controller.loadEvidence('evidence-one'); f.requests.at(-1).resolve(response(evidence())); await pending;
+  assert.match(f.els.detail.innerHTML, /class="service-map-detail-body packet-details" id="serviceMapDetailBody"/);
+  // The picker and the panes are one block, sized to the inspector; anything
+  // after it (inspections, peers) is below and scrolls.
+  assert.match(f.els.detail.innerHTML, /id="serviceMapDetailBody"[^>]*><div class="packet-block"><div class="packet-source">/);
+});
+
 test('body inspection is opt-in: map, source verification, tabs, filters and refresh never request bodies', async () => {
   const f = fixture(); await f.controller.loadBodyReferences(); assert.equal(f.requests.length, 0);
   await f.load(); await f.controller.loadBodyReferences(); assert.equal(f.requests.length, 1);
@@ -990,12 +1004,12 @@ test('body inspection is opt-in: map, source verification, tabs, filters and ref
   const sourceRead = f.controller.loadEvidence('evidence-one');
   assert.doesNotMatch(f.els.detail.innerHTML, /data-service-body-references/);
   f.requests.at(-1).resolve(response(evidence())); await sourceRead;
-  assert.match(f.els.detail.innerHTML, /Inspect retained body references/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /data-service-body-references="inspect"|class="service-map-body-references/);
   f.els.search.value = 'app'; f.els.search.dispatch('input');
   f.controller.setVisible(false); f.controller.setVisible(true); await f.load();
   assert.equal(f.requests.length, 3);
   assert.ok(f.requests.every(item => !item.url.includes('/body-references')));
-  f.els.panel.dispatch('click', { target: { closest: () => ({ dataset: { serviceBodyReferences: 'inspect' } }) } });
+  f.els.panel.dispatch('change', { target: { dataset: { servicePacketInspect: 'true' }, value: 'body' } });
   assert.equal(f.requests.length, 4);
   const read = f.requests.at(-1), url = new URL(read.url, 'http://localhost');
   assert.equal(url.pathname, '/api/target/service-map/body-references');
@@ -1023,12 +1037,12 @@ test('body references remain supplemental plaintext evidence', async () => {
 test('body inspection deduplicates loading clicks and retries only on an explicit request', async () => {
   const f = await verifiedBodyFixture(); const first = f.controller.loadBodyReferences();
   assert.equal(f.state.bodyReferencesLoading, true);
-  assert.match(f.els.detail.innerHTML, /data-service-body-references="inspect"[^>]*disabled/);
+  assert.match(f.els.detail.innerHTML, /aria-busy="true"/);
   await f.controller.loadBodyReferences(); await f.controller.loadBodyReferences();
   assert.equal(f.requests.length, 3);
   f.requests.at(-1).reject(new Error('private synthetic body')); await first;
   assert.match(f.els.detail.innerHTML, /Could not verify retained body references/);
-  assert.match(f.els.detail.innerHTML, /Retry retained body references/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /data-service-body-references="inspect"/);
   assert.doesNotMatch(f.els.detail.innerHTML, /private synthetic body/);
   f.els.search.dispatch('input'); f.controller.setVisible(true);
   assert.equal(f.requests.length, 3);
@@ -1176,7 +1190,7 @@ function pollRealTargetMap(f) {
 }
 
 function clickBodyInspector(f) {
-  f.els.panel.dispatch('click', { target: { closest: () => ({ dataset: { serviceBodyReferences: 'inspect' } }) } });
+  f.els.panel.dispatch('change', { target: { dataset: { servicePacketInspect: 'true' }, value: 'body' } });
 }
 test('real app background polling preserves body results produced by the delegated Inspect click', async () => {
   const f = await verifiedBodyFixture(); clickBodyInspector(f);
@@ -1323,14 +1337,14 @@ test('same-source output changes retain Coverage keyboard focus, disclosure and 
   const view = nativeInspectorModel(f), previous = view();
   previous.limits.open = true; previous.body.scrollTop = 350; previous.list.scrollTop = 110;
   f.document.activeElement = previous.summary;
-  const data = snapshot(); data.origins[0].endpoints[0].request_count = 3;
+  const data = snapshot(); data.origins[0].in_scope = false;
   const poll = pollRealTargetMap(f); f.requests.at(-1).resolve(response(data)); await poll;
   assert.notEqual(view(), previous);
   assert.equal(view().limits.open, true);
   assert.equal(view().body.scrollTop, 350); assert.equal(view().list.scrollTop, 110);
   assert.equal(f.document.activeElement, view().summary);
   assert.match(f.els.detail.innerHTML, /data-service-focus="body-references:limits"/);
-  assert.match(f.els.detail.innerHTML, /3 sampled rows/);
+  assert.match(f.els.detail.innerHTML, /Out of scope/);
 });
 
 test('source invalidation resets Coverage and nested scroll instead of transferring native state', async () => {
@@ -1339,7 +1353,7 @@ test('source invalidation resets Coverage and nested scroll instead of transferr
   view().limits.open = true; view().list.scrollTop = 110; view().body.scrollTop = 350;
   f.controller.markDirty(); assert.equal(view().limits, null);
   const verify = f.controller.loadEvidence('evidence-one'); f.requests.at(-1).resolve(response(evidence())); await verify;
-  assert.equal(view().limits.open, false); assert.equal(view().body.scrollTop, 0);
+  assert.equal(view().limits, null); assert.equal(view().body.scrollTop, 0);
   await resolveBodyReferences(f);
   assert.equal(view().limits.open, false); assert.equal(view().list.scrollTop, 0);
 });
@@ -1444,10 +1458,10 @@ test('overlay owns an immutable allowlisted exact source, safe provenance, and p
 for (const [name, refs, hint] of [
   ['zero', [], /There are no referenced origins/],
   ['self-only', bodyTargets([originA]), /Only the source origin was referenced; self-links are not drawn/],
-]) test(`${name} scan disables Show with useful copy and never creates an overlay`, async () => {
+]) test(`${name} scan omits unusable Show with useful copy and never creates an overlay`, async () => {
   const f = await verifiedBodyFixture();
   await resolveBodyReferences(f, bodyReferences({ candidates_scanned: refs.length, references: refs }));
-  assert.match(f.els.detail.innerHTML, /data-service-show-body-references="show"[^>]*disabled/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /data-service-show-body-references="show"/);
   assert.match(f.els.detail.innerHTML, hint);
   const reads = f.requests.length; clickOverlay(f);
   assert.equal(f.state.bodyReferenceOverlay, null); assert.equal(f.state.anchorOrigin, null);
@@ -1786,11 +1800,11 @@ for (const [name, patch] of [
   assert.equal(await pending, false);
   assert.equal(f.state.evidence, null); assert.equal(f.state.socketPeer, null);
   assert.match(f.els.detail.innerHTML, /Source unavailable/);
-  assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source|192\.0\.2\.10|invented_call/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /Capture info|192\.0\.2\.10|invented_call/);
   assert.equal(await f.controller.loadBodyReferences(), false); assert.equal(f.requests.length, 2);
   assert.doesNotThrow(() => f.controller.setVisible(true));
   const retry = f.controller.loadEvidence('evidence-one'); f.requests.at(-1).resolve(response(evidence()));
-  assert.equal(await retry, true); assert.match(f.els.detail.innerHTML, /Verified retained source/);
+  assert.equal(await retry, true); assert.match(f.els.detail.innerHTML, /Capture info/);
 });
 
 test('evidence render failure clears a published row and peer before rendering the safe error state', async () => {
@@ -1798,13 +1812,13 @@ test('evidence render failure clears a published row and peer before rendering t
   const descriptor = Object.getOwnPropertyDescriptor(f.els.detail, 'innerHTML');
   let failOnce = true;
   Object.defineProperty(f.els.detail, 'innerHTML', { get: descriptor.get, set(value) {
-    if (failOnce && value.includes('Verified retained source')) { failOnce = false; throw new Error('Synthetic render failure'); }
+    if (failOnce && value.includes('Capture info')) { failOnce = false; throw new Error('Synthetic render failure'); }
     descriptor.set.call(this, value);
   } });
   const pending = f.controller.loadEvidence('evidence-one');
   f.requests.at(-1).resolve(response(evidence('evidence-one', originA, { socket_peer: { status: 'not_recorded', observation: null } })));
   assert.equal(await pending, false); assert.equal(f.state.evidence, null); assert.equal(f.state.socketPeer, null);
-  assert.match(f.els.detail.innerHTML, /Source unavailable/); assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source/);
+  assert.match(f.els.detail.innerHTML, /Source unavailable/); assert.doesNotMatch(f.els.detail.innerHTML, /Capture info/);
   assert.doesNotThrow(() => f.controller.setVisible(true));
 });
 
@@ -1876,7 +1890,8 @@ test('old-server absence and new empty technology arrays remain independently co
   await f.load(value); f.controller.selectOrigin(originA);
   assert.equal(f.state.snapshot.origins[0].technology_observations.length, 0);
   const pending = f.controller.loadEvidence('evidence-one'); f.requests.at(-1).resolve(response(evidence())); assert.equal(await pending, true);
-  assert.equal(f.state.evidence.technology_observations.length, 0); assert.match(f.els.detail.innerHTML, /Observed header clues/);
+  assert.equal(f.state.evidence.technology_observations.length, 0); assert.doesNotMatch(f.els.detail.innerHTML, /Observed header clues/);
+  assert.equal(f.state.snapshot.origins[0].technology_clues[0].name, 'nginx');
   assert.doesNotMatch(f.els.detail.innerHTML, /Header-reported technologies|Reported version/);
   value.origins[0].technology_observations = []; await f.load(value);
   assert.equal(f.state.snapshot.origins[0].technology_observations.length, 0);
@@ -1898,8 +1913,8 @@ test('Apache plus PHP remains two source observations and no inferred stack rela
   assert.match(f.els.detail.innerHTML, /<strong>Apache 2\.4\.62<\/strong>/); assert.match(f.els.detail.innerHTML, /<strong>PHP 8\.3\.12<\/strong>/);
   assert.match(f.els.detail.innerHTML, /Web server · server header · 1 row/); assert.match(f.els.detail.innerHTML, /Language runtime · /);
   assert.equal(f.requests.length, 1); assert.equal(await resolveTechnologySource(f, technologyEvidence([apache, php])), true);
-  const exact = f.els.detail.innerHTML.match(/<div class="service-map-verified">([^]*?)<\/div>/)[1];
-  assert.equal((exact.match(/<strong>(?:Apache 2\.4\.62|PHP 8\.3\.12)<\/strong>/g) || []).length, 2, 'the exact source names both, apart');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.state.evidence.technology_observations)), [apache, php], 'both exact observations remain separate for the packet span adapter');
+  assert.doesNotMatch(f.els.detail.innerHTML, /service-map-verified/);
   assert.doesNotMatch(f.els.detail.innerHTML, /WEB.?→.?WAS|vulnerable|raw_header|<a\b|href=/);
   assert.equal(f.requests.length, 2); assert.doesNotMatch(f.requests.map(r => r.url).join(' '), /body-references|transactions|replay|scan|capture/);
 });
@@ -1928,7 +1943,10 @@ for (const [status, product] of [
   const f = await technologyFixture(technologySnapshot([technologyAggregate(row)]));
   assert.ok(f.els.detail.innerHTML.includes(expected));
   assert.equal(await resolveTechnologySource(f, technologyEvidence([row])), true);
-  assert.ok(f.els.detail.innerHTML.includes(expected)); assert.equal(f.state.evidence.technology_observations[0].reported_version, null);
+  assert.equal(f.state.evidence.technology_observations[0].name, product[1]);
+  assert.equal(f.state.evidence.technology_observations[0].version_status, status);
+  assert.equal(f.state.evidence.technology_observations[0].reported_version, null);
+  assert.doesNotMatch(f.els.detail.innerHTML, /service-map-verified/);
 });
 
 test('Unicode prefixes use retained UTF-8 byte offsets and header index rather than JS character positions', () => {
@@ -1999,7 +2017,7 @@ for (const [name, change] of malformedTechnologyRows) test(`malformed reported t
   if (name === 'non-array extension') value.row.technology_observations = {};
   assert.equal(await resolveTechnologySource(f, value), false);
   assert.equal(f.state.evidence, null); assert.equal(f.state.socketPeer, null); assert.match(f.els.detail.innerHTML, /Source unavailable/);
-  assert.doesNotMatch(f.els.detail.innerHTML, /must-not-publish|<img|Verified retained source|１\.２|1\.26\.2🛰/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /must-not-publish|<img|Capture info|１\.２|1\.26\.2🛰/);
   assert.equal(await f.controller.loadBodyReferences(), false); assert.equal(f.requests.length, 2);
 });
 
@@ -2055,7 +2073,7 @@ test('header evidence polls preserve exact source; observation removal clears it
   const exact = f.state.evidence, count = f.requests.length, replacements = f.els.detail.replacements;
   await f.load(payload); assert.equal(f.state.evidence, exact); assert.equal(f.els.detail.replacements, replacements); assert.equal(f.requests.length, count + 1);
   await f.load(technologySnapshot()); assert.equal(f.state.evidence, null); assert.equal(f.state.evidenceId, null);
-  assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source|nginx 1\.24\.0/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /Capture info|nginx 1\.24\.0/);
 });
 
 for (const transition of ['selection', 'session', 'deletion', 'generation', 'dirty', 'disconnect']) test(`late header evidence cannot republish after ${transition}`, async () => {
@@ -2068,7 +2086,7 @@ for (const transition of ['selection', 'session', 'deletion', 'generation', 'dir
   if (transition === 'dirty') f.controller.markDirty();
   if (transition === 'disconnect') f.controller.disconnect();
   request.resolve(response(technologyEvidence())); assert.equal(await pending, false); assert.equal(f.state.evidence, null);
-  assert.doesNotMatch(f.els.detail.innerHTML, /Verified retained source|UTF-8 product bytes/);
+  assert.doesNotMatch(f.els.detail.innerHTML, /Capture info|UTF-8 product bytes/);
   assert.equal(f.requests.some(r => /body-references|transactions|replay|scan|capture/.test(r.url)), false);
 });
 
@@ -2430,7 +2448,8 @@ for (const product of catalogV2Products) test(`v2 literal ${product[0]} is scope
     assert.equal(await resolveTechnologySource(f, withCatalog(technologyEvidence([row]))), true);
     assert.equal(f.state.evidence.technology_observations.length, 1);
     assert.equal(f.state.evidence.technology_observations[0].product_id, product[0]);
-    assert.ok(f.els.detail.innerHTML.includes(version ? `<strong>${product[1]} ${version}</strong>` : `<strong>${product[1]}</strong>`));
+    assert.deepEqual(JSON.parse(JSON.stringify(f.state.evidence.technology_observations[0])), row);
+    assert.doesNotMatch(f.els.detail.innerHTML, /service-map-verified/);
     assert.equal(await resolveTechnologySource(f, technologyEvidence([row])), false, 'a v2 map never permits v2 evidence in an unmarked response');
     assert.equal(f.requests.length, 3);
   }
@@ -2559,7 +2578,7 @@ async function resolveHtmlGenerators(f, value = htmlGenerators()) {
   const pending = f.controller.loadHtmlGenerators(); f.requests.at(-1).resolve(response(value)); return pending;
 }
 function clickHtmlInspector(f) {
-  f.els.panel.dispatch('click', { target: { closest: () => ({ dataset: { serviceHtmlGenerators: 'inspect' } }) } });
+  f.els.panel.dispatch('change', { target: { dataset: { servicePacketInspect: 'true' }, value: 'generator' } });
 }
 function htmlSection(f) { return f.els.detail.innerHTML.match(/<section[^>]*service-map-html-generators[\s\S]*?<\/section>/)?.[0] || ''; }
 
@@ -2567,7 +2586,7 @@ test('HTML generator action is independent, explicit and uses one exact token GE
   const f = await technologyFixture(withCatalog(technologySnapshot()));
   assert.equal(await f.controller.loadHtmlGenerators(), false); assert.equal(f.requests.length, 1);
   await resolveTechnologySource(f, withCatalog(technologyEvidence()));
-  assert.match(htmlSection(f), /Inspect retained HTML generators/);
+  assert.equal(htmlSection(f), ''); assert.equal(f.state.htmlGenerators, null);
   const count = f.requests.length; f.controller.setZoom(1.2); f.controller.fitGraph(); f.controller.displayChanged();
   f.controller.selectOrigin(originA, 0); await resolveTechnologySource(f, withCatalog(technologyEvidence()));
   assert.equal(f.requests.length, count + 1); assert.equal(f.requests.filter(r => /html-generators|body-references/.test(r.url)).length, 0);
@@ -2576,7 +2595,7 @@ test('HTML generator action is independent, explicit and uses one exact token GE
   assert.equal(url.pathname, '/api/target/service-map/html-generators'); assert.equal(url.searchParams.get('session_id'), technologySession);
   assert.equal(url.searchParams.get('evidence_id'), technologyToken()); assert.equal([...url.searchParams.keys()].length, 2);
   assert.equal(request.options.method || 'GET', 'GET'); assert.equal(request.options.headers, undefined); assert.equal(request.options.redirect, 'error');
-  assert.match(htmlSection(f), /data-service-html-generators="inspect"[^>]*disabled/);
+  assert.match(htmlSection(f), /aria-busy="true"/);
   request.resolve(response(htmlGenerators())); await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.state.htmlGenerators.status, 'scanned'); assert.equal(f.state.bodyReferences, null); assert.equal(f.state.bodyReferenceOverlay, null);
   assert.equal(f.requests.filter(r => r.url.includes('/html-generators')).length, 1);
@@ -2770,19 +2789,22 @@ function nativeHtmlGeneratorModel(f) {
   return () => current;
 }
 
-test('HTML generator completion and same-source markup changes preserve focus, scroll and independent native disclosures', async () => {
+test('selected HTML generator completion preserves focus and disclosure without a second default result', async () => {
   const f = await htmlGeneratorFixture(), view = nativeHtmlGeneratorModel(f);
   const pending = f.controller.loadHtmlGenerators();
-  view().limits.open = true; view().bodyLimits.open = true; view().body.scrollTop = 360; f.document.activeElement = view().summary;
+  view().limits.open = true; assert.equal(view().bodyLimits, null); view().body.scrollTop = 360; f.document.activeElement = view().summary;
   f.requests.at(-1).resolve(response(htmlGenerators())); await pending;
-  assert.equal(view().limits.open, true); assert.equal(view().bodyLimits.open, true); assert.equal(view().body.scrollTop, 360); assert.equal(f.document.activeElement, view().summary);
-  const result = f.state.htmlGenerators, previous = view(), payload = withCatalog(technologySnapshot()); payload.origins[0].technology_observations[0].row_count++;
+  assert.equal(view().limits.open, true); assert.equal(view().bodyLimits, null); assert.equal(view().body.scrollTop, 360); assert.equal(f.document.activeElement, view().summary);
+  const result = f.state.htmlGenerators, previous = view(), payload = withCatalog(technologySnapshot()); payload.origins[0].in_scope = false;
   const poll = f.controller.refresh(); f.requests.at(-1).resolve(response(payload)); await poll;
   assert.notEqual(view(), previous); assert.equal(f.state.htmlGenerators, result);
-  assert.equal(view().limits.open, true); assert.equal(view().bodyLimits.open, true); assert.equal(view().body.scrollTop, 360); assert.equal(f.document.activeElement, view().summary);
+  assert.equal(view().limits.open, true); assert.equal(view().bodyLimits, null); assert.equal(view().body.scrollTop, 360); assert.equal(f.document.activeElement, view().summary);
   const verify = f.controller.loadEvidence(technologyToken()); f.requests.at(-1).resolve(response(withCatalog(technologyEvidence()))); await verify;
-  assert.equal(f.state.htmlGenerators, null); assert.equal(view().limits.open, false); assert.equal(view().bodyLimits.open, false); assert.equal(view().body.scrollTop, 0);
-  assert.notEqual(f.document.activeElement, view().summary);
+  assert.equal(f.state.htmlGenerators, null); assert.equal(view().limits, null); assert.equal(view().bodyLimits, null); assert.equal(view().body.scrollTop, 0);
+  assert.notEqual(f.document.activeElement, previous.summary);
+  const again = f.controller.loadHtmlGenerators(); assert.equal(view().limits.open, false);
+  f.requests.at(-1).resolve(response(htmlGenerators())); await again;
+  assert.equal(view().limits.open, false); assert.equal(view().bodyLimits, null);
 });
 
 test('HTML generator normalization copies every mutable output span and reasons array', () => {

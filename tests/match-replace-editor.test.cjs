@@ -28,14 +28,16 @@ function fixture(saved = []) {
     matchReplaceEditorHeader: { classList: classes() }, matchReplaceForm: { classList: classes() },
     matchReplaceEmpty: { classList: classes() }, matchReplaceEditorPath: {}, matchReplaceEditorTitle: {},
     matchReplaceScope: field("request"), matchReplaceTarget: field("any"), matchReplaceSearch: field(),
-    matchReplaceReplace: field(), matchReplaceRegex: field(), matchReplaceCaseSensitive: field(),
+    matchReplaceReplace: field(), matchReplaceReplaceEnabled: { ...field(), checked: true },
+    matchReplaceAnnotationNote: field(), matchReplaceAnnotationColor: field(), matchReplaceAnnotation: { open: false },
+    matchReplaceRegex: field(), matchReplaceCaseSensitive: field(),
     deleteMatchReplaceRuleButton: { disabled: false }, saveMatchReplaceRuleButton: { disabled: false },
   };
   const requests = [];
-  const c = loadFunctions(["renderMatchReplaceRules", "getSelectedMatchReplaceRule", "syncMatchReplaceEditor",
+  const c = loadFunctions(["renderMatchReplaceRules", "getSelectedMatchReplaceRule", "syncMatchReplaceEditor", "matchReplaceRuleActivity", "setMatchReplaceRuleActivity", "canonicalMatchReplaceRule", "matchReplaceRulesPayload", "matchReplaceRuleActions", "matchReplaceRuleTitle", "getMatchReplaceSaveOwner", "beginMatchReplaceWrite", "matchReplaceWriteIsCurrent", "acknowledgeMatchReplaceRules", "finishMatchReplaceWrite",
     "createNewMatchReplaceRule", "updateMatchReplaceSaveState", "matchReplaceRuleUnsaved",
     "untouchedNewMatchReplaceRule", "saveMatchReplaceSwitch", "jsonArray"], {
-    state, els, escapeHtml: (value) => String(value), generateUuid: () => "new-rule",
+    state, els, TextEncoder, HTTP_COLOR_TAG_OPTIONS: new Set(["red", "orange", "yellow", "green", "blue", "purple"]), workspaceStateGeneration: 0, escapeHtml: (value) => String(value), generateUuid: () => "new-rule",
     currentSessionId: () => "session-a", sessionWritePath: (path) => path,
     requireOkResponse: async () => {}, saveMatchReplaceRules: async () => requests.push("full save"),
     fetch: async (url, options) => {

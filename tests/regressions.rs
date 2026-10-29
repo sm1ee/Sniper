@@ -47,6 +47,9 @@ async fn proxy_applies_request_match_replace_only_once() {
     session
         .match_replace
         .replace_all(vec![MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: Uuid::new_v4(),
             enabled: true,
             description: "single pass".to_string(),
@@ -172,6 +175,9 @@ async fn replay_upstream_failure_preserves_request_match_replace_provenance() {
     session
         .match_replace
         .replace_all(vec![MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: Uuid::new_v4(),
             enabled: true,
             description: "rewrite replay path".to_string(),

@@ -57,6 +57,7 @@ use crate::{
     intercept::{
         InterceptRecord, InterceptResolution, ResponseInterceptRecord, ResponseInterceptResolution,
     },
+    match_replace::{self, MatchReplaceRule},
     model::{
         BodyEncoding, EditableRequest, EditableResponse, HeaderRecord, MessageRecord,
         ObservedSocketPeer, ObservedSocketPeerRoute, OriginalRequest, RequestTargetOverride,
@@ -185,6 +186,8 @@ struct StreamedRecordContext {
     /// Kept here because the body completes in a task of its own.
     client_address: Option<IpAddr>,
     max_preview: usize,
+    request_color: Option<String>,
+    response_rules: Vec<MatchReplaceRule>,
 }
 
 struct UpstreamError {
@@ -632,7 +635,7 @@ pub async fn try_send_replay_request_for_session(
 
     let started_at = Utc::now();
     let started = Instant::now();
-    let (request, mut notes, original_request_capture) =
+    let (request, mut notes, original_request_capture, request_color) =
         apply_request_match_replace(session.as_ref(), request, state.config.body_preview_bytes)
             .await;
     let request = build_replay_exchange_request(&request, target.as_ref())
@@ -672,6 +675,8 @@ pub async fn try_send_replay_request_for_session(
         requested_http_version,
         outbound_uri_authority.as_deref(),
         SocketPeerCapture::Disabled,
+        request_color,
+        None,
     )
     .await;
 
@@ -778,7 +783,7 @@ pub(crate) async fn send_template_scan_request(
 ) -> std::result::Result<TransactionRecord, TemplateScanSendError> {
     let started_at = Utc::now();
     let started = Instant::now();
-    let (request, mut notes, original_request_capture) = if apply_match_replace {
+    let (request, mut notes, original_request_capture, request_color) = if apply_match_replace {
         let (scheme, host) = (request.scheme.clone(), request.host.clone());
         let applied =
             apply_request_match_replace(session.as_ref(), request, state.config.body_preview_bytes)
@@ -799,7 +804,7 @@ pub(crate) async fn send_template_scan_request(
         }
         applied
     } else {
-        (request, Vec::new(), None)
+        (request, Vec::new(), None, None)
     };
     notes.push(crate::model::TEMPLATE_SCAN_NOTE.to_string());
     let exchange = execute_http_exchange(
@@ -816,6 +821,8 @@ pub(crate) async fn send_template_scan_request(
         None,
         None,
         SocketPeerCapture::Disabled,
+        request_color,
+        None,
     )
     .await;
     match exchange.response {
@@ -3049,12 +3056,13 @@ async fn forward_http_request(
         };
     let intercept_original = intercept_edited
         .then(|| intercept_request_original(&client_request, state.config.body_preview_bytes));
-    let (forwarded_request, notes, match_replace_original) = apply_request_match_replace(
-        session.as_ref(),
-        intercepted_request,
-        state.config.body_preview_bytes,
-    )
-    .await;
+    let (forwarded_request, notes, match_replace_original, request_color) =
+        apply_request_match_replace(
+            session.as_ref(),
+            intercepted_request,
+            state.config.body_preview_bytes,
+        )
+        .await;
     // What the client actually sent wins: match/replace only ever saw the edited
     // request, so its capture is not the true original once intercept changed it.
     let original_request_capture = intercept_original.or(match_replace_original);
@@ -3071,7 +3079,8 @@ async fn forward_http_request(
             )
         }
     };
-    if should_stream_upstream_response(session.as_ref(), &forwarded_request).await {
+    let response_rules = session.match_replace.snapshot().await;
+    if should_stream_with_rules(session.as_ref(), &forwarded_request, &response_rules).await {
         return execute_streaming_http_exchange(
             state.clone(),
             session.clone(),
@@ -3086,6 +3095,8 @@ async fn forward_http_request(
             None,
             None,
             SocketPeerCapture::ForwardedHttp(upstream_proxy.route_snapshot()),
+            request_color,
+            response_rules,
         )
         .await;
     }
@@ -3105,6 +3116,8 @@ async fn forward_http_request(
         None,
         None,
         SocketPeerCapture::ForwardedHttp(upstream_proxy.route_snapshot()),
+        request_color,
+        Some(response_rules),
     )
     .await;
     let mut record = exchange.record.clone();
@@ -3214,12 +3227,13 @@ async fn forward_websocket_request(
         };
     let ws_intercept_original = ws_intercept_edited
         .then(|| intercept_request_original(&client_request, state.config.body_preview_bytes));
-    let (forwarded_request, request_notes, match_replace_original) = apply_request_match_replace(
-        session.as_ref(),
-        forwarded_request,
-        state.config.body_preview_bytes,
-    )
-    .await;
+    let (forwarded_request, request_notes, match_replace_original, request_color) =
+        apply_request_match_replace(
+            session.as_ref(),
+            forwarded_request,
+            state.config.body_preview_bytes,
+        )
+        .await;
     let original_request_capture = ws_intercept_original.or(match_replace_original);
 
     if !is_websocket_upgrade_editable(&forwarded_request) {
@@ -3254,6 +3268,8 @@ async fn forward_websocket_request(
             None,
             None,
             SocketPeerCapture::Disabled,
+            request_color,
+            None,
         )
         .await;
         let record = exchange.record.clone();
@@ -3305,8 +3321,12 @@ async fn forward_websocket_request(
             Some(request_http_version),
             Some(Version::HTTP_11),
         );
-        let insert_outcome =
-            insert_transaction_quiet(&session, record, "invalid edited websocket upgrade").await;
+        let insert_outcome = insert_transaction_quiet(
+            &session,
+            with_auto_color(record, request_color.clone()),
+            "invalid edited websocket upgrade",
+        )
+        .await;
         persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
         return client_response;
     }
@@ -3337,6 +3357,8 @@ async fn forward_websocket_request(
             None,
             None,
             SocketPeerCapture::Disabled,
+            request_color,
+            None,
         )
         .await;
         let record = exchange.record.clone();
@@ -3395,9 +3417,12 @@ async fn forward_websocket_request(
                 Some(request_http_version),
                 Some(Version::HTTP_11),
             );
-            let insert_outcome =
-                insert_transaction_quiet(&session, record, "websocket upstream http response")
-                    .await;
+            let insert_outcome = insert_transaction_quiet(
+                &session,
+                with_auto_color(record, request_color.clone()),
+                "websocket upstream http response",
+            )
+            .await;
             persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
             return rebuild_response(headers, status, body, &forwarded_request.method);
         }
@@ -3427,8 +3452,12 @@ async fn forward_websocket_request(
                 Some(request_http_version),
                 Some(Version::HTTP_11),
             );
-            let insert_outcome =
-                insert_transaction_quiet(&session, record, "websocket connect failure").await;
+            let insert_outcome = insert_transaction_quiet(
+                &session,
+                with_auto_color(record, request_color.clone()),
+                "websocket connect failure",
+            )
+            .await;
             persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
             return client_response;
         }
@@ -3465,8 +3494,12 @@ async fn forward_websocket_request(
                 Some(request_http_version),
                 Some(Version::HTTP_11),
             );
-            let insert_outcome =
-                insert_transaction_quiet(&session, record, "invalid websocket handshake").await;
+            let insert_outcome = insert_transaction_quiet(
+                &session,
+                with_auto_color(record, request_color.clone()),
+                "invalid websocket handshake",
+            )
+            .await;
             persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
             return client_response;
         }
@@ -3476,13 +3509,23 @@ async fn forward_websocket_request(
         &[],
         state.config.body_preview_bytes,
     );
-    let applied_response = session
-        .match_replace
-        .apply_response(response_headers, Bytes::new())
-        .await;
-    let original_response_capture =
-        (!applied_response.notes.is_empty()).then_some(original_response_capture);
-    if !applied_response.notes.is_empty() {
+    let applied_response = match_replace::apply_response_rules_with_bodyless(
+        response_headers,
+        Bytes::new(),
+        session.match_replace.snapshot().await,
+        response_must_not_include_body(StatusCode::SWITCHING_PROTOCOLS, &forwarded_request.method),
+    );
+    let response_color = applied_response
+        .annotations
+        .color
+        .clone()
+        .or(request_color.clone());
+    let mut request_notes = request_notes;
+    request_notes.extend(applied_response.annotations.notes.clone());
+    let original_response_capture = applied_response
+        .traffic_changed
+        .then_some(original_response_capture);
+    if applied_response.traffic_changed {
         session
             .event_log
             .push(
@@ -3526,8 +3569,12 @@ async fn forward_websocket_request(
             Some(request_http_version),
             Some(Version::HTTP_11),
         );
-        let insert_outcome =
-            insert_transaction_quiet(&session, record, "invalid websocket response").await;
+        let insert_outcome = insert_transaction_quiet(
+            &session,
+            with_auto_color(record, response_color.clone()),
+            "invalid websocket response",
+        )
+        .await;
         persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
         return client_response;
     }
@@ -3560,8 +3607,12 @@ async fn forward_websocket_request(
         Some(request_http_version),
         Some(Version::HTTP_11),
     );
-    let insert_outcome =
-        insert_transaction_quiet(&session, http_record, "websocket upgrade transaction").await;
+    let insert_outcome = insert_transaction_quiet(
+        &session,
+        with_auto_color(http_record, response_color),
+        "websocket upgrade transaction",
+    )
+    .await;
     persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
     session
         .event_log
@@ -3995,14 +4046,24 @@ fn transaction_journal_compaction_due(session: &SessionContext) -> bool {
     session.transaction_journal_replay_bytes() >= TRANSACTION_JOURNAL_COMPACT_BYTES
 }
 
+#[cfg(test)]
 async fn should_stream_upstream_response(
     session: &SessionContext,
     request: &EditableRequest,
 ) -> bool {
+    let rules = session.match_replace.snapshot().await;
+    should_stream_with_rules(session, request, &rules).await
+}
+
+async fn should_stream_with_rules(
+    session: &SessionContext,
+    request: &EditableRequest,
+    rules: &[MatchReplaceRule],
+) -> bool {
     if special_host::is_special_host(&request.host) {
         return false;
     }
-    if session.match_replace.has_enabled_response_rules().await {
+    if match_replace::response_replacement_enabled(rules) {
         return false;
     }
     if should_buffer_for_response_intercept(session, request).await {
@@ -4040,6 +4101,8 @@ async fn execute_streaming_http_exchange(
     requested_http_version: Option<Version>,
     outbound_uri_authority: Option<&str>,
     peer_capture: SocketPeerCapture,
+    request_color: Option<String>,
+    response_rules: Vec<MatchReplaceRule>,
 ) -> Response<Body> {
     let request_headers = header_map_from_records(&request.headers);
     let request_body = request.body_bytes();
@@ -4074,7 +4137,12 @@ async fn execute_streaming_http_exchange(
                 request_http_version,
                 Some(Version::HTTP_11),
             );
-            store_record_and_scan(&state, &session, record).await;
+            store_record_and_scan(
+                &state,
+                &session,
+                with_auto_color(record, request_color.clone()),
+            )
+            .await;
             return response;
         }
     };
@@ -4108,7 +4176,12 @@ async fn execute_streaming_http_exchange(
                 request_http_version,
                 Some(Version::HTTP_11),
             );
-            store_record_and_scan(&state, &session, record).await;
+            store_record_and_scan(
+                &state,
+                &session,
+                with_auto_color(record, request_color.clone()),
+            )
+            .await;
             return response;
         }
     };
@@ -4209,11 +4282,18 @@ async fn execute_streaming_http_exchange(
                     Some(Version::HTTP_11),
                 )
                 .with_observed_socket_peer(observed_socket_peer);
-                store_record_and_scan(&state, &session, record).await;
+                store_record_and_scan(
+                    &state,
+                    &session,
+                    with_auto_color(record, request_color.clone()),
+                )
+                .await;
                 return response;
             }
             let persist_generation = remember_persist_context(&session);
             let context = StreamedRecordContext {
+                request_color,
+                response_rules,
                 state: state.clone(),
                 session: session.clone(),
                 _session_owner: remember_active_proxy_session_owner(
@@ -4295,7 +4375,12 @@ async fn execute_streaming_http_exchange(
                 request_http_version,
                 Some(Version::HTTP_11),
             );
-            store_record_and_scan(&state, &session, record).await;
+            store_record_and_scan(
+                &state,
+                &session,
+                with_auto_color(record, request_color.clone()),
+            )
+            .await;
             response
         }
     }
@@ -4316,6 +4401,7 @@ fn stream_upstream_response_body(
         let mut upstream = response.bytes_stream();
         let mut preview = Vec::new();
         let mut body_size = 0usize;
+        let mut complete = false;
         let mut context = context;
         let mut notes = std::mem::take(&mut context.notes);
 
@@ -4346,6 +4432,7 @@ fn stream_upstream_response_body(
                             }
                         }
                         Some(Err(error)) if close_delimited && is_unexpected_eof(&error) => {
+                            complete = true;
                             notes.push(
                                 "Upstream closed the connection without a TLS close_notify; the close-delimited response body was accepted as complete.".to_string(),
                             );
@@ -4357,13 +4444,15 @@ fn stream_upstream_response_body(
                             let _ = tx.send(Err(std::io::Error::other(message))).await;
                             break;
                         }
-                        None => break,
+                        None => { complete = true; break; },
                     }
                 }
             }
         }
 
-        context.store_with_notes(preview, body_size, notes).await;
+        context
+            .store_with_notes(preview, body_size, notes, complete)
+            .await;
         forget_streamed_response_pump(pump_id);
     });
 
@@ -4432,6 +4521,11 @@ async fn read_response_body_limited(response: reqwest::Response, limit: usize) -
     Ok(body.freeze())
 }
 
+fn with_auto_color(mut record: TransactionRecord, color: Option<String>) -> TransactionRecord {
+    record.color_tag = color;
+    record
+}
+
 fn apply_streamed_record_update(stored: &mut TransactionRecord, record: &TransactionRecord) {
     stored.status = record.status;
     stored.duration_ms = record.duration_ms;
@@ -4440,6 +4534,9 @@ fn apply_streamed_record_update(stored: &mut TransactionRecord, record: &Transac
     stored.original_response = record.original_response.clone();
     stored.http_version = record.http_version.clone();
     stored.response_http_version = record.response_http_version.clone();
+    if stored.annotation_revision == 0 {
+        stored.color_tag = record.color_tag.clone();
+    }
 }
 
 impl StreamedRecordContext {
@@ -4468,11 +4565,28 @@ impl StreamedRecordContext {
 
     async fn store(self, preview: Vec<u8>, body_size: usize) {
         let notes = self.notes.clone();
-        self.store_with_notes(preview, body_size, notes).await;
+        self.store_with_notes(preview, body_size, notes, true).await;
     }
 
-    async fn store_with_notes(self, preview: Vec<u8>, body_size: usize, notes: Vec<String>) {
-        let record = self.build_record(preview, body_size, notes);
+    async fn store_with_notes(
+        self,
+        preview: Vec<u8>,
+        body_size: usize,
+        mut notes: Vec<String>,
+        complete: bool,
+    ) {
+        let annotations = match_replace::annotate_streamed_response(
+            &self.response_rules,
+            &self.response_headers,
+            &preview,
+            complete,
+            body_size,
+            self.max_preview,
+            response_must_not_include_body(self.status, &self.method),
+        );
+        notes.extend(annotations.notes);
+        let mut record = self.build_record(preview, body_size, notes);
+        record.color_tag = annotations.color.or(record.color_tag);
         if let Some(record_id) = self.record_id {
             if update_transaction_record_quiet(
                 &self.state,
@@ -4522,30 +4636,75 @@ impl StreamedRecordContext {
                 response_capture.content_decoded = false;
             }
         }
-        with_record_http_versions(
-            TransactionRecord::http(
-                self.started_at,
-                self.method.clone(),
-                self.scheme.clone(),
-                self.host.clone(),
-                self.path.clone(),
-                Some(self.status.as_u16()),
-                self.started.elapsed().as_millis() as u64,
-                self.request_capture.clone(),
-                Some(response_capture),
-                notes,
-                self.original_request_capture.clone(),
-                None,
-            ),
-            self.request_version,
-            Some(self.response_version),
+        with_auto_color(
+            with_record_http_versions(
+                TransactionRecord::http(
+                    self.started_at,
+                    self.method.clone(),
+                    self.scheme.clone(),
+                    self.host.clone(),
+                    self.path.clone(),
+                    Some(self.status.as_u16()),
+                    self.started.elapsed().as_millis() as u64,
+                    self.request_capture.clone(),
+                    Some(response_capture),
+                    notes,
+                    self.original_request_capture.clone(),
+                    None,
+                ),
+                self.request_version,
+                Some(self.response_version),
+            )
+            .with_observed_socket_peer(self.observed_socket_peer.clone())
+            .with_client_address(self.client_address),
+            self.request_color.clone(),
         )
-        .with_observed_socket_peer(self.observed_socket_peer.clone())
-        .with_client_address(self.client_address)
     }
 }
 
 async fn execute_http_exchange(
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+    client: &ProxyClient,
+    request: EditableRequest,
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+    notes: Vec<String>,
+    secure_special_host: bool,
+    original_request_capture: Option<OriginalRequest>,
+    request_http_version: Option<Version>,
+    requested_http_version: Option<Version>,
+    outbound_uri_authority: Option<&str>,
+    peer_capture: SocketPeerCapture,
+    request_color: Option<String>,
+    response_rules: Option<Vec<MatchReplaceRule>>,
+) -> ExecutedExchange {
+    let rules = match response_rules {
+        Some(rules) => rules,
+        None => session.match_replace.snapshot().await,
+    };
+    let mut exchange = execute_http_exchange_with_rules(
+        state,
+        session,
+        client,
+        request,
+        started_at,
+        started,
+        notes,
+        secure_special_host,
+        original_request_capture,
+        request_http_version,
+        requested_http_version,
+        outbound_uri_authority,
+        peer_capture,
+        rules,
+    )
+    .await;
+    exchange.record.color_tag = exchange.record.color_tag.or(request_color);
+    exchange
+}
+
+async fn execute_http_exchange_with_rules(
     state: Arc<AppState>,
     session: Arc<SessionContext>,
     client: &ProxyClient,
@@ -4559,6 +4718,7 @@ async fn execute_http_exchange(
     requested_http_version: Option<Version>,
     outbound_uri_authority: Option<&str>,
     peer_capture: SocketPeerCapture,
+    response_rules: Vec<MatchReplaceRule>,
 ) -> ExecutedExchange {
     let request_headers = header_map_from_records(&request.headers);
     let request_body = request.body_bytes();
@@ -4747,6 +4907,7 @@ async fn execute_http_exchange(
         request_http_version,
         send_result,
         peer_capture,
+        response_rules,
     )
     .await
 }
@@ -4767,6 +4928,7 @@ async fn finish_buffered_http_exchange(
     request_http_version: Option<Version>,
     send_result: std::result::Result<reqwest::Response, reqwest::Error>,
     peer_capture: FrozenSocketPeerCapture,
+    response_rules: Vec<MatchReplaceRule>,
 ) -> ExecutedExchange {
     match send_result {
         Ok(response) => {
@@ -4829,16 +4991,18 @@ async fn finish_buffered_http_exchange(
                         );
                         Some(pre)
                     };
-                    let applied_response = session
-                        .match_replace
-                        .apply_response(response_headers, response_bytes)
-                        .await;
-                    let original_response_capture = if applied_response.notes.is_empty() {
+                    let applied_response = match_replace::apply_response_rules_with_bodyless(
+                        response_headers,
+                        response_bytes,
+                        response_rules,
+                        response_must_not_include_body(status, method.as_str()),
+                    );
+                    let original_response_capture = if !applied_response.traffic_changed {
                         None
                     } else {
                         original_response_capture
                     };
-                    if !applied_response.notes.is_empty() {
+                    if applied_response.traffic_changed {
                         session
                             .event_log
                             .push(
@@ -4850,31 +5014,35 @@ async fn finish_buffered_http_exchange(
                             .await;
                     }
                     notes.extend(applied_response.notes.clone());
+                    notes.extend(applied_response.annotations.notes.clone());
                     let response_capture = MessageRecord::from_headers_and_body(
                         &applied_response.headers,
                         applied_response.body.as_ref(),
                         state.config.body_preview_bytes,
                     );
                     ExecutedExchange {
-                        record: with_record_http_versions(
-                            TransactionRecord::http(
-                                started_at,
-                                method.to_string(),
-                                request.scheme,
-                                request.host,
-                                path,
-                                Some(status.as_u16()),
-                                started.elapsed().as_millis() as u64,
-                                request_capture,
-                                Some(response_capture),
-                                notes,
-                                original_request_capture,
-                                original_response_capture,
-                            ),
-                            request_http_version,
-                            Some(resp_version),
-                        )
-                        .with_observed_socket_peer(observed_socket_peer),
+                        record: with_auto_color(
+                            with_record_http_versions(
+                                TransactionRecord::http(
+                                    started_at,
+                                    method.to_string(),
+                                    request.scheme,
+                                    request.host,
+                                    path,
+                                    Some(status.as_u16()),
+                                    started.elapsed().as_millis() as u64,
+                                    request_capture,
+                                    Some(response_capture),
+                                    notes,
+                                    original_request_capture,
+                                    original_response_capture,
+                                ),
+                                request_http_version,
+                                Some(resp_version),
+                            )
+                            .with_observed_socket_peer(observed_socket_peer),
+                            applied_response.annotations.color,
+                        ),
                         response: Ok(UpstreamResponse {
                             status,
                             headers: applied_response.headers,
@@ -4996,13 +5164,18 @@ async fn apply_request_match_replace(
     session: &SessionContext,
     request: EditableRequest,
     preview_bytes: usize,
-) -> (EditableRequest, Vec<String>, Option<OriginalRequest>) {
+) -> (
+    EditableRequest,
+    Vec<String>,
+    Option<OriginalRequest>,
+    Option<String>,
+) {
     let original_headers = header_map_from_records(&request.headers);
     let original_body = request.body_bytes();
     let original_method = request.method.clone();
     let original_path = request.path.clone();
     let applied_request = session.match_replace.apply_request(request).await;
-    if !applied_request.notes.is_empty() {
+    if applied_request.traffic_changed {
         session
             .event_log
             .push(
@@ -5013,7 +5186,7 @@ async fn apply_request_match_replace(
             )
             .await;
     }
-    let original_capture = if applied_request.notes.is_empty() {
+    let original_capture = if !applied_request.traffic_changed {
         None
     } else {
         Some(OriginalRequest {
@@ -5026,10 +5199,13 @@ async fn apply_request_match_replace(
             path: original_path,
         })
     };
+    let mut notes = applied_request.notes;
+    notes.extend(applied_request.annotations.notes);
     (
         applied_request.request,
-        applied_request.notes,
+        notes,
         original_capture,
+        applied_request.annotations.color,
     )
 }
 
@@ -7043,6 +7219,9 @@ mod tests {
                 // A non-matching response rule selects the production buffered
                 // path without changing the fixture's headers or bytes.
                 vec![crate::match_replace::MatchReplaceRule {
+                    annotation_only_enabled: None,
+                    annotation_note: None,
+                    annotation_color: None,
                     id: Uuid::new_v4(),
                     enabled: true,
                     description: "Synthetic buffering selector".into(),
@@ -7152,6 +7331,8 @@ mod tests {
         peer_capture: &FrozenSocketPeerCapture,
     ) -> StreamedRecordContext {
         StreamedRecordContext {
+            request_color: None,
+            response_rules: Vec::new(),
             _session_owner: remember_active_proxy_session_owner(
                 session.id(),
                 PROXY_WORK_STREAMED_RESPONSE,
@@ -7418,6 +7599,7 @@ mod tests {
                 Some(Version::HTTP_11),
                 Ok(response),
                 enabled_peer_capture(),
+                Vec::new(),
             )
             .await;
             assert_eq!(exchange.record.status, Some(expected_status));
@@ -7453,6 +7635,7 @@ mod tests {
             Some(Version::HTTP_11),
             Err(error),
             enabled_peer_capture(),
+            Vec::new(),
         )
         .await;
         assert!(exchange.record.observed_socket_peer.is_none());
@@ -8042,6 +8225,8 @@ mod tests {
         let request_capture = MessageRecord::from_headers_and_body(&HeaderMap::new(), &[], 1024);
         let persist_generation = remember_persist_context(&session);
         let context = StreamedRecordContext {
+            request_color: None,
+            response_rules: Vec::new(),
             state: Arc::clone(&state),
             session: Arc::clone(&session),
             _session_owner: remember_active_proxy_session_owner(
@@ -8083,6 +8268,274 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    fn auto_color_rule() -> MatchReplaceRule {
+        MatchReplaceRule {
+            id: Uuid::new_v4(),
+            enabled: false,
+            annotation_only_enabled: Some(true),
+            annotation_note: Some("flag 탐지".into()),
+            annotation_color: Some("yellow".into()),
+            description: "private rule description".into(),
+            scope: crate::match_replace::MatchReplaceScope::Response,
+            target: crate::match_replace::MatchReplaceTarget::Body,
+            search: "flag".into(),
+            replace: "changed".into(),
+            regex: false,
+            case_sensitive: true,
+        }
+    }
+
+    #[test]
+    fn streamed_auto_color_update_is_idempotent_and_preserves_manual_revision() {
+        let mut finished = captured_transaction("example.com");
+        finished.color_tag = Some("yellow".into());
+        finished.notes = vec!["Rule (response): flag 탐지".into()];
+        for revision in [0, 1, 2] {
+            for color in [None, Some("blue".to_string())] {
+                let mut stored = captured_transaction("example.com");
+                stored.annotation_revision = revision;
+                stored.color_tag = color.clone();
+                stored.user_note = Some("operator note".into());
+                apply_streamed_record_update(&mut stored, &finished);
+                apply_streamed_record_update(&mut stored, &finished);
+                assert_eq!(
+                    stored.color_tag,
+                    if revision == 0 {
+                        Some("yellow".into())
+                    } else {
+                        color
+                    }
+                );
+                assert_eq!(stored.user_note.as_deref(), Some("operator note"));
+                assert_eq!(stored.annotation_revision, revision);
+                assert_eq!(stored.notes, finished.notes);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_rule_annotations_preserve_manual_edits_and_persisted_reload() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-rule-annotations-manual");
+        let session = state.session().await;
+        let mut scanner = session.scanner.get_config().await;
+        scanner.enabled = false;
+        session.scanner.update_config(scanner).await;
+        let mut expected = Vec::new();
+        for action in ["untouched", "color", "clear", "note", "aba"] {
+            let response = synthetic_peer_response(200, reqwest::Body::from("flag"));
+            let mut context = synthetic_stream_context(
+                state.clone(),
+                session.clone(),
+                &response,
+                &enabled_peer_capture(),
+            );
+            context.request_color = Some("green".into());
+            context.response_rules = vec![auto_color_rule()];
+            context.insert_provisional_record().await;
+            let id = context.record_id.unwrap();
+            assert_eq!(
+                session.store.get(id).await.unwrap().color_tag.as_deref(),
+                Some("green")
+            );
+            match action {
+                "color" => {
+                    session
+                        .store
+                        .update_annotations_durable(id, Some(Some("blue".into())), None)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                "clear" => {
+                    session
+                        .store
+                        .update_annotations_durable(id, Some(None), None)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                "note" => {
+                    session
+                        .store
+                        .update_annotations_durable(id, None, Some(Some("manual".into())))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                "aba" => {
+                    session
+                        .store
+                        .update_annotations_durable(id, Some(Some("blue".into())), None)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    session
+                        .store
+                        .update_annotations_durable(id, Some(None), None)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                _ => {}
+            }
+            // A changed live configuration must not alter the frozen response snapshot.
+            session.match_replace.replace_all(Vec::new()).await;
+            context.store(b"flag".to_vec(), 4).await;
+            let record = session.store.get(id).await.unwrap();
+            let color = match action {
+                "untouched" => Some("yellow"),
+                "color" => Some("blue"),
+                "note" => Some("green"),
+                _ => None,
+            };
+            assert_eq!(record.color_tag.as_deref(), color);
+            assert_eq!(
+                record.user_note.as_deref(),
+                (action == "note").then_some("manual")
+            );
+            assert_eq!(record.notes, ["Rule (response): flag 탐지"]);
+            assert!(record.original_request.is_none() && record.original_response.is_none());
+            assert!(!record.summary().has_match_replace);
+            expected.push((
+                id,
+                record.color_tag.clone(),
+                record.user_note.clone(),
+                record.annotation_revision,
+            ));
+        }
+        session.persist().await.unwrap();
+        let reloaded = state.sessions.load_context_read_only(session.id()).unwrap();
+        for (id, color, note, revision) in expected {
+            let record = reloaded.store.get(id).await.unwrap();
+            assert_eq!(
+                (
+                    record.color_tag,
+                    record.user_note,
+                    record.annotation_revision
+                ),
+                (color, note, revision)
+            );
+            assert_eq!(record.notes, ["Rule (response): flag 탐지"]);
+        }
+        drain_proxy_connections(Duration::from_secs(1)).await;
+        flush_pending_session_persists(state.as_ref())
+            .await
+            .unwrap();
+        drop(reloaded);
+        drop(session);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn annotation_completion_journal_fallback_reapplies_without_duplicate_effects() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-rule-annotation-journal-fallback");
+        let metadata = state
+            .sessions
+            .create_session(Some("Synthetic annotation fallback".into()))
+            .unwrap();
+        let mut session = state.sessions.load_context(metadata.id).unwrap();
+        Arc::get_mut(&mut Arc::get_mut(&mut session).unwrap().store)
+            .unwrap()
+            .disconnect_journal_writer_for_test()
+            .unwrap();
+        let mut stored = captured_transaction("example.com");
+        stored.annotation_revision = 1;
+        stored.color_tag = None; // explicit operator clear before late completion
+        stored.user_note = Some("manual".into());
+        let id = stored.id;
+        session.store.insert(stored).await;
+        let mut finished = captured_transaction("example.com");
+        finished.color_tag = Some("yellow".into());
+        finished.notes = vec!["Rule (response): flag 탐지".into()];
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        assert!(
+            update_transaction_record_quiet(
+                &state,
+                &session,
+                id,
+                "synthetic annotation completion",
+                |record| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    apply_streamed_record_update(record, &finished);
+                }
+            )
+            .await
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let record = session.store.get(id).await.unwrap();
+        assert_eq!(record.color_tag, None);
+        assert_eq!(record.annotation_revision, 1);
+        assert_eq!(record.user_note.as_deref(), Some("manual"));
+        assert_eq!(record.notes, finished.notes);
+        let reloaded = state.sessions.load_context_read_only(metadata.id).unwrap();
+        let persisted = reloaded.store.get(id).await.unwrap();
+        assert_eq!(persisted.notes, finished.notes);
+        assert_eq!(persisted.color_tag, None);
+        drop(reloaded);
+        drop(session);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn request_annotation_only_keeps_wire_originals_and_event_log_unmodified() {
+        let (state, data_dir) = test_proxy_state("sniper-request-annotation-only");
+        let session = state.session().await;
+        let mut rule = auto_color_rule();
+        rule.scope = crate::match_replace::MatchReplaceScope::Request;
+        session.match_replace.replace_all(vec![rule]).await;
+        let mut request = captured_transaction("example.com").editable_request();
+        request.body = "flag".into();
+        request.body_encoding = BodyEncoding::Utf8;
+        request.headers = vec![HeaderRecord {
+            name: "content-length".into(),
+            value: "4".into(),
+        }];
+        let expected = serde_json::to_value(&request).unwrap();
+        let (request, notes, original, color) =
+            apply_request_match_replace(&session, request, 1024).await;
+        assert_eq!(serde_json::to_value(request).unwrap(), expected);
+        assert_eq!(notes, ["Rule (request): flag 탐지"]);
+        assert!(original.is_none());
+        assert_eq!(color.as_deref(), Some("yellow"));
+        assert!(session
+            .event_log
+            .snapshot(None)
+            .await
+            .iter()
+            .all(|entry| entry.title != "Rules applied"));
+        drop(session);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn response_annotations_do_not_select_stream_buffering() {
+        let (state, data_dir) = test_proxy_state("sniper-rule-annotation-buffer-policy");
+        let session = state.session().await;
+        let request = captured_transaction("example.com").editable_request();
+        let rule = auto_color_rule();
+        session.match_replace.replace_all(vec![rule.clone()]).await;
+        assert!(should_stream_upstream_response(&session, &request).await);
+        let mut replacement = rule;
+        replacement.annotation_only_enabled = None;
+        replacement.enabled = true;
+        session.match_replace.replace_all(vec![replacement]).await;
+        assert!(!should_stream_upstream_response(&session, &request).await);
+        assert!(response_must_not_include_body(StatusCode::OK, "HEAD"));
+        assert!(response_must_not_include_body(
+            StatusCode::NO_CONTENT,
+            "GET"
+        ));
+        assert!(!response_must_not_include_body(StatusCode::OK, "GET"));
+        drop(session);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
     #[tokio::test]
     async fn streamed_capture_provisional_record_is_updated_in_place() {
         let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
@@ -8113,6 +8566,8 @@ mod tests {
         let request_capture = MessageRecord::from_headers_and_body(&HeaderMap::new(), &[], 1024);
         let persist_generation = remember_persist_context(&session);
         let mut context = StreamedRecordContext {
+            request_color: None,
+            response_rules: Vec::new(),
             state: Arc::clone(&state),
             session: Arc::clone(&session),
             _session_owner: remember_active_proxy_session_owner(
@@ -8163,7 +8618,7 @@ mod tests {
             .expect("annotation should update");
 
         context
-            .store_with_notes(b"complete".to_vec(), 8, vec!["done".to_string()])
+            .store_with_notes(b"complete".to_vec(), 8, vec!["done".to_string()], true)
             .await;
 
         let listed = session
@@ -10071,6 +10526,8 @@ mod tests {
             SocketPeerCapture::ForwardedHttp(
                 crate::upstream_proxy::UpstreamProxy::default().route_snapshot(),
             ),
+            None,
+            None,
         )
         .await;
 

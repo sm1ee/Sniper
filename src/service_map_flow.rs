@@ -1,7 +1,7 @@
 //! The Map's Flow view: one origin's retained requests and those of the
 //! origins it links to directly, in time order, one phase per page load.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -40,7 +40,7 @@ pub struct FlowPhase {
     pub steps: Vec<FlowStep>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct FlowTarget {
     pub origin: String,
     pub path: String,
@@ -78,18 +78,26 @@ pub(crate) fn build(
 ) -> Result<ServiceMapFlow, scope::ScopeWorkLimit> {
     let MetadataSnapshot {
         rows: window,
+        considered_rows,
         stopped_by: window_stops,
         ..
     } = snapshot;
-    let considered_rows = window.len();
     let mut scope = BoundedScope::new(include, exclude)?;
     let mut rows = Vec::new();
+    let mut stopped_by: BTreeSet<String> = window_stops;
     for row in window {
         if !row.is_websocket && (!in_scope_only || scope.contains(&row.scope_host)?) {
+            // A suppressed header link can hide a neighbour, so inspect these
+            // reasons before choosing lanes, not only in the rows they retain.
+            stopped_by.extend(
+                row.omitted
+                    .iter()
+                    .filter(|reason| affects_flow(&row, reason))
+                    .cloned(),
+            );
             rows.push(row);
         }
     }
-    let mut stopped_by: BTreeSet<String> = window_stops;
     let lanes = lanes(&rows, origin, &mut stopped_by);
     rows.retain(|row| lanes.contains(&row.origin));
     rows.sort_by_key(|row| {
@@ -98,72 +106,34 @@ pub(crate) fn build(
             row.sequence.parse::<u64>().unwrap_or(u64::MAX),
         )
     });
-    let flow_rows = rows.len();
-
-    let mut phases: Vec<FlowPhase> = Vec::new();
-    for row in rows {
-        if row.request_kind == "navigation" {
-            phases.push(FlowPhase {
-                page: Some(FlowTarget {
-                    origin: row.origin.clone(),
-                    path: row.path.clone(),
-                }),
-                steps: Vec::new(),
-            });
-        } else if phases.is_empty() {
-            phases.push(FlowPhase {
-                page: None,
-                steps: Vec::new(),
-            });
-        }
-        let steps = &mut phases.last_mut().expect("a phase was pushed").steps;
-        let path = path_group(&row.path).unwrap_or(row.path);
-        let redirect = row.redirect.map(|target| FlowTarget {
-            path: path_group(&target.target_path).unwrap_or(target.target_path),
-            origin: target.target_origin,
-        });
-        let same = |step: &&mut FlowStep| {
-            step.origin == row.origin
-                && step.method == row.method
-                && step.path == path
-                && step.status == row.status
-                && step.request_kind == row.request_kind
-                && step.redirect == redirect
-        };
-        if let Some(step) = steps.iter_mut().find(same) {
-            step.count += 1;
-            step.last_seen = row.started_at;
-            step.record_id = row.record_id;
-            step.evidence.truncate(1);
-            step.evidence.push(row.evidence_id);
-        } else {
-            steps.push(FlowStep {
-                origin: row.origin,
-                method: row.method,
-                path,
-                status: row.status,
-                request_kind: row.request_kind,
-                count: 1,
-                first_seen: row.started_at,
-                last_seen: row.started_at,
-                evidence: vec![row.evidence_id],
-                record_id: row.record_id,
-                redirect,
-            });
-        }
-    }
+    let mut phases = fold_rows(rows);
     // The newest steps are the ones being looked at; drop from the oldest.
-    let mut total: usize = phases.iter().map(|phase| phase.steps.len()).sum();
-    while total > MAX_STEPS {
+    let total: usize = phases.iter().map(|phase| phase.steps.len()).sum();
+    if total > MAX_STEPS {
         stopped_by.insert("steps_limit".into());
-        let excess = total - MAX_STEPS;
-        if phases[0].steps.len() <= excess {
-            total -= phases.remove(0).steps.len();
-        } else {
-            phases[0].steps.drain(..excess);
-            total -= excess;
+        let mut excess = total - MAX_STEPS;
+        let mut whole_phases = 0;
+        for phase in &mut phases {
+            if excess == 0 {
+                break;
+            }
+            let count = phase.steps.len();
+            if count > excess {
+                phase.steps.drain(..excess);
+                break;
+            }
+            excess -= count;
+            whole_phases += 1;
         }
+        // Removing each old page separately shifts every later page each time.
+        // Keep the partial page's context, then move the retained suffix once.
+        phases.drain(..whole_phases);
     }
+    let flow_rows = phases
+        .iter()
+        .flat_map(|phase| &phase.steps)
+        .map(|step| step.count)
+        .sum();
     Ok(ServiceMapFlow {
         schema_version: 1,
         session_id,
@@ -175,6 +145,104 @@ pub(crate) fn build(
         complete: stopped_by.is_empty(),
         stopped_by: stopped_by.into_iter().collect(),
     })
+}
+
+// The index belongs to one page load. Keys retain only the exact fields the
+// old linear search compared, never bodies, headers, or whole metadata rows.
+// There is at most one key per distinct step in the current phase, bounded by
+// the projected row window. Only a new step duplicates its grouped identity.
+#[derive(Eq, Hash, PartialEq)]
+struct StepKey {
+    origin: String,
+    method: String,
+    path: String,
+    status: Option<u16>,
+    request_kind: &'static str,
+    redirect: Option<FlowTarget>,
+}
+
+fn fold_rows(rows: Vec<ServiceMapRow>) -> Vec<FlowPhase> {
+    let mut phases: Vec<FlowPhase> = Vec::new();
+    let mut index = HashMap::<StepKey, usize>::new();
+    for row in rows {
+        if row.request_kind == "navigation" {
+            phases.push(FlowPhase {
+                page: Some(FlowTarget {
+                    origin: row.origin.clone(),
+                    path: row.path.clone(),
+                }),
+                steps: Vec::new(),
+            });
+            index.clear();
+        } else if phases.is_empty() {
+            phases.push(FlowPhase {
+                page: None,
+                steps: Vec::new(),
+            });
+        }
+        let steps = &mut phases.last_mut().expect("a phase was pushed").steps;
+        let key = StepKey {
+            origin: row.origin,
+            method: row.method,
+            path: path_group(&row.path).unwrap_or(row.path),
+            status: row.status,
+            request_kind: row.request_kind,
+            redirect: row.redirect.map(|target| FlowTarget {
+                path: path_group(&target.target_path).unwrap_or(target.target_path),
+                origin: target.target_origin,
+            }),
+        };
+        match index.entry(key) {
+            Entry::Occupied(entry) => {
+                let step = &mut steps[*entry.get()];
+                step.count += 1;
+                step.last_seen = row.started_at;
+                step.record_id = row.record_id;
+                step.evidence.truncate(1);
+                step.evidence.push(row.evidence_id);
+            }
+            Entry::Vacant(entry) => {
+                let key = entry.key();
+                steps.push(FlowStep {
+                    origin: key.origin.clone(),
+                    method: key.method.clone(),
+                    path: key.path.clone(),
+                    status: key.status,
+                    request_kind: key.request_kind,
+                    count: 1,
+                    first_seen: row.started_at,
+                    last_seen: row.started_at,
+                    evidence: vec![row.evidence_id],
+                    record_id: row.record_id,
+                    redirect: key.redirect.clone(),
+                });
+                entry.insert(steps.len() - 1);
+            }
+        }
+    }
+    phases
+}
+
+fn affects_flow(row: &ServiceMapRow, reason: &str) -> bool {
+    match reason {
+        "request_header_scan_limit"
+        | "request_header_value_limit"
+        | "ambiguous_origin_header"
+        | "ambiguous_referer_header"
+        | "ambiguous_location_headers"
+        | "unsupported_location" => true,
+        "header_scan_limit" => {
+            row.redirect.is_none()
+                && row
+                    .status
+                    .is_some_and(|status| matches!(status, 300 | 301 | 302 | 303 | 307 | 308))
+        }
+        "header_value_limit" => row.redirect_value_omitted,
+        // Technology, content-type and unnamed-signal omissions do not change
+        // Flow's lanes or arrows. An unrelated oversized response header says
+        // nothing about whether a Location was present or could be read.
+        _ => false,
+    }
 }
 
 /// The selected origin, then the origins its rows link to directly by an
@@ -222,3 +290,7 @@ fn lanes(rows: &[ServiceMapRow], origin: &str, stopped_by: &mut BTreeSet<String>
         )
         .collect()
 }
+
+#[cfg(test)]
+#[path = "service_map_flow_tests.rs"]
+mod tests;

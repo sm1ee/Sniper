@@ -60,7 +60,7 @@
       maxPayloadBytes = Math.max(maxPayloadBytes, size);
       if (size > limits.payloadBytes && oversizedIndex === -1) oversizedIndex = index;
     }
-    if (oversizedIndex !== -1) errors.push(`Fuzzer payload ${oversizedIndex} cannot exceed ${limits.payloadBytes} bytes.`);
+    if (oversizedIndex !== -1) errors.push(`Payloads line ${oversizedIndex + 1} exceeds ${limits.payloadBytes / 1024} KiB (${limits.payloadBytes} bytes). Shorten this line.`);
     if (totalBytes > limits.totalPayloadBytes) errors.push(`Fuzzer payloads cannot exceed ${limits.totalPayloadBytes} total bytes.`);
     return { valid: !errors.length, errors, count: payloads.length, totalBytes, maxPayloadBytes, payloads };
   }
@@ -149,6 +149,8 @@
     const splitsCharacter = offset => offset > 0 && offset < raw.length
       && /[\uD800-\uDBFF]/.test(raw[offset - 1]) && /[\uDC00-\uDFFF]/.test(raw[offset]);
     if (splitsCharacter(start) || splitsCharacter(end)) throw new Error("Select a complete character.");
+    const splitsLineBreak = offset => raw[offset - 1] === "\r" && raw[offset] === "\n";
+    if (splitsLineBreak(start) || splitsLineBreak(end)) throw new Error("Select a value without splitting a line break.");
     for (const found of positions(raw)) {
       const index = found.index, after = index + found[0].length;
       if ((start < after && end > index) || (start === end && start > index && start < after)) {
@@ -158,7 +160,112 @@
     if (raw.slice(start, end).includes("§")) throw new Error("Select a value without §.");
     // The original stays between the marks: Sniper sends it while another
     // position takes the payload.
-    return `${raw.slice(0, start)}§${raw.slice(start, end)}§${raw.slice(end)}`;
+    const next = `${raw.slice(0, start)}§${raw.slice(start, end)}§${raw.slice(end)}`;
+    const added = positions(next);
+    if (!added.some(found => found.index === start && found[0].length === end - start + 2)
+      || added.length !== positions(raw).length + 1) {
+      throw new Error("An unmatched § would change this position. Remove it before adding markers.");
+    }
+    return next;
+  }
+
+  function clearPositions(raw) {
+    // Only recognized marker spans are syntax. A lone § is literal draft data.
+    return String(raw ?? "").replace(POSITION, (_, original) => original ?? "");
+  }
+
+  function requestFieldSpans(raw) {
+    // Locate raw spans only; the shared HTTP parser remains the validator.
+    // Matching separately matters: two literal § in different fields are not
+    // a position in the engine and must never be paired by an editor action.
+    const boundary = /\r?\n\r?\n/.exec(raw);
+    const headEnd = boundary ? boundary.index : raw.length;
+    const head = raw.slice(0, headEnd);
+    const spans = [];
+    let first = true;
+    for (const line of head.matchAll(/[^\r\n]+/g)) {
+      const offset = line.index, text = line[0];
+      if (first) {
+        first = false;
+        const request = /^(\S+)([ \t]+)(\S+)/.exec(text);
+        if (!request) continue;
+        spans.push([offset, offset + request[1].length]);
+        const start = offset + request[1].length + request[2].length;
+        const target = request[3], absolute = /^https?:\/\//i.exec(target);
+        if (absolute) {
+          const authorityStart = start + absolute[0].length;
+          const pathIndex = target.slice(absolute[0].length).search(/[/?]/);
+          const authorityEnd = pathIndex < 0 ? start + target.length : authorityStart + pathIndex;
+          spans.push([authorityStart, authorityEnd]);
+          if (authorityEnd < start + target.length) spans.push([authorityEnd, start + target.length]);
+        } else spans.push([start, start + target.length]);
+      } else {
+        const colon = text.indexOf(":");
+        if (colon < 0) continue;
+        spans.push([offset, offset + colon], [offset + colon + 1, offset + text.length]);
+      }
+    }
+    if (boundary) spans.push([boundary.index + boundary[0].length, raw.length]);
+    return spans;
+  }
+
+  function clearRequestPositions(raw) {
+    raw = String(raw ?? "");
+    let next = "", cursor = 0;
+    for (const [start, end] of requestFieldSpans(raw)) {
+      next += raw.slice(cursor, start) + clearPositions(raw.slice(start, end));
+      cursor = end;
+    }
+    return next + raw.slice(cursor);
+  }
+
+  function removeRequestSelection(raw, start, end) {
+    raw = String(raw ?? "");
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > raw.length) {
+      throw new Error("Select a marked position in the current request draft.");
+    }
+    for (const offset of [start, end]) {
+      if (offset > 0 && /[\uD800-\uDBFF]/.test(raw[offset - 1]) && /[\uDC00-\uDFFF]/.test(raw[offset] || "")) {
+        throw new Error("Select a complete character.");
+      }
+      if (raw[offset - 1] === "\r" && raw[offset] === "\n") throw new Error("Select a value without splitting a line break.");
+    }
+    const selected = [], remaining = [];
+    for (const [from, to] of requestFieldSpans(raw)) {
+      for (const match of positions(raw.slice(from, to))) {
+        const first = from + match.index, after = first + match[0].length;
+        const inside = start > first && end < after;
+        const contains = start <= first && end >= after;
+        const overlaps = start < after && end > first;
+        if (inside || contains) selected.push({ first, after, original: match[1] ?? "" });
+        else if (overlaps) throw new Error("Select the whole marked position or place the caret inside it.");
+        else remaining.push(match[0]);
+      }
+    }
+    if (!selected.length) throw new Error("Select a marked position or place the caret inside it.");
+    if (selected.some(item => positions(item.original).length)) {
+      throw new Error("Removing these markers would expose another position; edit this value directly.");
+    }
+    let text = "", cursor = 0, removed = 0;
+    for (const item of selected) {
+      text += raw.slice(cursor, item.first) + item.original;
+      removed += item.after - item.first - item.original.length;
+      cursor = item.after;
+    }
+    text += raw.slice(cursor);
+    const after = requestFieldSpans(text).flatMap(([from, to]) => positions(text.slice(from, to)).map(match => match[0]));
+    if (after.length !== remaining.length || after.some((value, index) => value !== remaining[index])) {
+      throw new Error("Removing these markers would expose another position; edit this value directly.");
+    }
+    return { text, from: selected[0].first, to: selected[selected.length - 1].after - removed };
+  }
+
+  function markRequestSelection(raw, start, end) {
+    raw = String(raw ?? "");
+    const field = requestFieldSpans(raw).find(([from, to]) => start >= from && end <= to);
+    if (!field) throw new Error("Select a value within one request field, not across headers or the request line.");
+    const [from, to] = field;
+    return raw.slice(0, from) + replaceSelection(raw.slice(from, to), start - from, end - from) + raw.slice(to);
   }
 
   const isHeader = (header, name) => header.name.toLowerCase() === name;
@@ -236,19 +343,31 @@
 
   function requestBudget(template, urlEncode = false) {
     const hasHost = template.headers.some(header => isHeader(header, "host"));
-    const fields = [template.method, template.path, template.body];
-    if (!hasHost) fields.push(template.host);
-    for (const header of template.headers) fields.push(header.name, header.value);
-    const markers = fields.reduce((sum, value) => sum + markerCount(value), 0);
-    // Match expanded_request_size, including its scheme accounting and original
-    // host bytes when Host takes precedence. These are not outbound wire bytes.
-    // An encoded payload byte can take three in the path.
-    const unmarked = value => bytes(value) - positions(value).reduce((sum, found) => sum + bytes(found[0]), 0);
-    const counted = [...fields, template.scheme];
-    const base = counted.reduce((sum, value) => sum + unmarked(value), hasHost ? bytes(template.host) : 0);
-    const pathMarkers = markerCount(template.path);
-    const otherMarkers = counted.reduce((sum, value) => sum + markerCount(value), 0) - pathMarkers;
-    return { markers, size: payloadBytes => base + otherMarkers * payloadBytes + pathMarkers * payloadBytes * (urlEncode ? 3 : 1) };
+    // Parse once in renderer position order. Admission keeps legacy authority
+    // accounting before Host/Content-Length normalization; only the renderer's
+    // final field-byte check is authoritative. URL payloads retain the 3x bound.
+    const fields = [[template.method, 1], [template.path, urlEncode ? 3 : 1]];
+    if (!hasHost) fields.push([template.host, 1]);
+    for (const header of template.headers) fields.push([header.name, 1], [header.value, 1]);
+    fields.push([template.body, 1]);
+    let base = bytes(template.scheme) + (hasHost ? bytes(template.host) : 0), originals = 0;
+    const markers = [];
+    for (const [value, multiplier] of fields) {
+      base += bytes(value);
+      for (const found of positions(value)) {
+        base -= bytes(found[0]);
+        const original = bytes(found[1] ?? "");
+        originals += original;
+        markers.push({ original, multiplier });
+      }
+    }
+    const size = (payloadBytes, position = null) => position === null
+      ? markers.reduce((total, marker) => total + payloadBytes * marker.multiplier, base)
+      : base + originals - markers[position].original + payloadBytes * markers[position].multiplier;
+    const maxSize = (payloadBytes, attackType) => attackType === "sniper" && markers.length
+      ? markers.reduce((largest, _marker, position) => Math.max(largest, size(payloadBytes, position)), 0)
+      : size(payloadBytes);
+    return { markers: markers.length, size, maxSize };
   }
 
   function authorityParts(value) {
@@ -280,11 +399,11 @@
       errors.push(`This attack would send ${plan.length} requests; an attack sends at most ${limits.requests}. Use fewer payloads or positions.`);
     }
     if (template.preview_truncated) errors.push("The request body preview is truncated. Load or supply the complete body first.");
-    const maxExpandedRequestBytes = budget.size(validation.maxPayloadBytes);
+    const maxExpandedRequestBytes = budget.maxSize(validation.maxPayloadBytes, attackType);
     if (validation.count && maxExpandedRequestBytes > limits.expandedRequestBytes) {
       errors.push(`An expanded request exceeds the ${limits.expandedRequestBytes} byte limit.`);
     }
-    if (template.body_encoding === "base64") warnings.push("The body is base64: payloads go into the encoded text.");
+    if (template.body_encoding === "base64") warnings.push("The body is base64-encoded text. Use header or query positions instead of body markers.");
     const hostHeader = template.headers.find(header => isHeader(header, "host"));
     if (markerCount(hostHeader ? hostHeader.value : template.host)) {
       warnings.push("Host markers can change the request authority by payload. Check the sample requests and connection target.");
@@ -298,7 +417,7 @@
       for (let index = 0; index < Math.min(limits.samples, plan.length); index += 1) {
         const [position, payloadIndex] = plan[index];
         const payload = validation.payloads[payloadIndex];
-        const estimatedBytes = budget.size(bytes(payload));
+        const estimatedBytes = budget.size(bytes(payload), position);
         // Host occurs both in the request model and headers after expansion.
         // Leave room for that copy and a normalized Content-Length record.
         const previewBytes = 2 * estimatedBytes + bytes(payload) + 256 + 32 * template.headers.length;
@@ -318,7 +437,7 @@
     };
   }
 
-  const api = Object.freeze({ MARKER, limits, presets, payloadLines, payloadText, validatePayloads, numericRange, candidates, replaceSelection, encodeUrlPayload, planRequests, expandTemplate, preflight });
+  const api = Object.freeze({ MARKER, limits, presets, payloadLines, payloadText, validatePayloads, numericRange, candidates, replaceSelection, clearPositions, clearRequestPositions, removeRequestSelection, markRequestSelection, encodeUrlPayload, planRequests, expandTemplate, preflight });
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.SniperFuzzerWorkflow = api;
 })(typeof window !== "undefined" ? window : null);

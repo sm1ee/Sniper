@@ -106,6 +106,7 @@ function fixture() {
     closeScannerSettings() {},
     TextDecoder,
     state,
+    appVersionReadGeneration: 0,
     els: { openUpdateButton: button, appVersionLabel: element() },
     console: { error() {} },
     fetch(url, options) {

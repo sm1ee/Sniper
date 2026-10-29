@@ -423,14 +423,25 @@ test("Save shows only while the scope has unsaved edits", () => {
   assert.equal(f.els.saveTargetScopeButton.classList.contains("hidden"), false);
 });
 
-// A mark on every host said nothing; one on the hosts left out says something.
-test("a host is marked only when it is out of scope", () => {
+// Explicit user policy: show both scope classifications without changing matching.
+test("a host shows its current scope classification in both directions", () => {
   const f = targetFixture(["in.example.com", "out.example.com"]);
   f.state.targetSiteMap[0].in_scope = true;
   f.render();
   const [inside, outside] = f.tree.innerHTML.split('<section class="target-host-card">').slice(1);
-  assert.doesNotMatch(inside, /In scope|Out of scope/);
+  assert.match(inside, /detail-chip ok">In scope/);
+  assert.doesNotMatch(inside, /Out of scope/);
   assert.match(outside, /Out of scope/);
+  f.state.targetSiteMap[0].in_scope = false;
+  f.state.targetSiteMap[1].in_scope = true;
+  f.render();
+  const [changedInside, changedOutside] = f.tree.innerHTML.split('<section class="target-host-card">').slice(1);
+  assert.match(changedInside, /Out of scope/);
+  assert.match(changedOutside, /detail-chip ok">In scope/);
+  f.state.targetSiteMap[0].in_scope = true;
+  f.state.targetSiteMap[1].in_scope = false;
+  f.render();
+  assert.match(f.tree.innerHTML.split('<section class="target-host-card">')[1], /detail-chip ok">In scope/);
 });
 
 test("the Scope screen names its two halves and has no Reload", () => {

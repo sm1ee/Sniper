@@ -39,6 +39,10 @@ enum DesktopUserEvent {
     ScrollGesturePhase {
         ended: bool,
     },
+    /// The Sniper menu's Check for Updates…. The page runs the check and shows
+    /// the result, so the menu only hands the click to the event loop.
+    #[cfg(target_os = "macos")]
+    CheckForUpdates,
     WebviewCloseFlushFinished {
         generation: u64,
         ok: bool,
@@ -329,11 +333,14 @@ fn run_desktop() -> Result<()> {
         None
     };
     let oast_task = runtime.spawn(sniper::oast::run_oast_poller_for_state(state.clone()));
+    runtime.spawn(sniper::templates::library::run_daily_update(
+        state.templates.clone(),
+    ));
 
     let event_loop = EventLoopBuilder::<DesktopUserEvent>::with_user_event().build();
     let event_proxy = event_loop.create_proxy();
     let signal_task = runtime.spawn(wait_for_desktop_shutdown_signal(event_proxy));
-    install_platform_app_menu();
+    install_platform_app_menu(event_loop.create_proxy());
     let window = with_window_icons(
         WindowBuilder::new()
             .with_title("Sniper")
@@ -545,6 +552,12 @@ fn run_desktop() -> Result<()> {
                 } else {
                     "window.__sniperScrollGesture && window.__sniperScrollGesture('began')"
                 });
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(DesktopUserEvent::CheckForUpdates) => {
+                let _ = webview.evaluate_script(
+                    "window.__sniperCheckForUpdates && window.__sniperCheckForUpdates()",
+                );
             }
             Event::UserEvent(DesktopUserEvent::WebviewCloseFlushFinished {
                 generation,
@@ -829,7 +842,7 @@ fn complete_desktop_shutdown(
 
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
-fn install_platform_app_menu() {
+fn install_platform_app_menu(proxy: EventLoopProxy<DesktopUserEvent>) {
     use cocoa::{
         appkit::{
             NSApp, NSApplication, NSApplicationActivationPolicyRegular, NSEventModifierFlags,
@@ -860,9 +873,31 @@ fn install_platform_app_menu() {
         app.setMainMenu_(menubar);
 
         let app_menu = NSMenu::new(nil).autorelease();
+        let process_name = NSProcessInfo::processInfo(nil).processName();
+        // The standard About panel reads the name, icon and version from the
+        // bundle's Info.plist, so it shows the version with no code of ours.
+        let about_item = NSMenuItem::alloc(nil)
+            .initWithTitle_action_keyEquivalent_(
+                NSString::alloc(nil)
+                    .init_str("About ")
+                    .stringByAppendingString_(process_name),
+                cocoa::base::selector("orderFrontStandardAboutPanel:"),
+                NSString::alloc(nil).init_str(""),
+            )
+            .autorelease();
+        app_menu.addItem_(about_item);
+        let check_for_updates_item = NSMenuItem::alloc(nil)
+            .initWithTitle_action_keyEquivalent_(
+                NSString::alloc(nil).init_str("Check for Updates…"),
+                cocoa::base::selector("checkForUpdates:"),
+                NSString::alloc(nil).init_str(""),
+            )
+            .autorelease();
+        check_for_updates_item.setTarget_(app_menu_target(proxy));
+        app_menu.addItem_(check_for_updates_item);
+        app_menu.addItem_(NSMenuItem::separatorItem(nil));
         let quit_prefix = NSString::alloc(nil).init_str("Quit ");
-        let quit_title =
-            quit_prefix.stringByAppendingString_(NSProcessInfo::processInfo(nil).processName());
+        let quit_title = quit_prefix.stringByAppendingString_(process_name);
         let quit_key = NSString::alloc(nil).init_str("q");
         let quit_item = NSMenuItem::alloc(nil)
             .initWithTitle_action_keyEquivalent_(
@@ -952,8 +987,51 @@ fn install_platform_app_menu() {
     }
 }
 
+/// AppKit sends a menu item's action as an Objective-C message to its target,
+/// so Check for Updates… needs an object that answers one. It passes the click
+/// to the event loop, which owns the webview.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn app_menu_target(proxy: EventLoopProxy<DesktopUserEvent>) -> cocoa::base::id {
+    use cocoa::base::{id, selector};
+    use objc::{
+        declare::ClassDecl,
+        runtime::{Class, Object, Sel},
+        Message,
+    };
+    use std::sync::{Mutex, OnceLock};
+
+    static PROXY: OnceLock<Mutex<EventLoopProxy<DesktopUserEvent>>> = OnceLock::new();
+    extern "C" fn check_for_updates(_: &Object, _: Sel, _: id) {
+        if let Some(proxy) = PROXY.get().and_then(|proxy| proxy.lock().ok()) {
+            let _ = proxy.send_event(DesktopUserEvent::CheckForUpdates);
+        }
+    }
+
+    let _ = PROXY.set(Mutex::new(proxy));
+    // objc's class!, sel! and msg_send! macros test a `cargo-clippy` cfg this
+    // crate does not declare, so each use warns; these are the calls they wrap.
+    let superclass = Class::get("NSObject").expect("NSObject is always registered");
+    // install_platform_app_menu returns early once the menu exists, so the class
+    // is declared once per process.
+    let mut decl =
+        ClassDecl::new("SniperAppMenuTarget", superclass).expect("app menu target declared once");
+    // SAFETY: the function takes the receiver, the selector and the sending menu
+    // item and returns nothing, which is the signature `checkForUpdates:` has.
+    unsafe {
+        decl.add_method(
+            selector("checkForUpdates:"),
+            check_for_updates as extern "C" fn(&Object, Sel, id),
+        );
+    }
+    let class = decl.register();
+    // SAFETY: +new returns an owned instance. It is never released: a menu item
+    // does not retain its target, and the menu lasts as long as the app.
+    unsafe { class.send_message(selector("new"), ()) }.expect("NSObject subclasses answer +new")
+}
+
 #[cfg(not(target_os = "macos"))]
-fn install_platform_app_menu() {}
+fn install_platform_app_menu(_proxy: EventLoopProxy<DesktopUserEvent>) {}
 
 /// tao does not mark its windows full-screen capable, so AppKit would leave the
 /// View > Enter Full Screen item (and its Ctrl+Cmd+F key equivalent) disabled.

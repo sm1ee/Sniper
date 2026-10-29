@@ -17,7 +17,7 @@ function fixture(replies) {
     runtime: { intercept_enabled: false, intercept_scope_only: true } };
   const reads = [], renders = [];
   const c = loadFunctions(["pollAuxiliaryData", "loadRuntimeSettings", "postRuntimeSettings", "currentSessionId", "sessionQueryPath"], {
-    state, RUNTIME_POLL_MS: 5000, _lastRuntimePoll: 0, _interceptToggleInFlight: false,
+    state, workspaceStateGeneration: 0, RUNTIME_POLL_MS: 5000, _lastRuntimePoll: 0, _interceptToggleInFlight: false,
     _lastWebsocketFallbackPoll: 0, _lastHttpHistoryFallbackPoll: 0,
     loadIntercepts: async () => {}, loadResponseIntercepts: async () => {},
     isWebsocketHistoryVisible: () => false, shouldPollFindingsBadge: () => false,

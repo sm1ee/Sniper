@@ -1,0 +1,76 @@
+{
+  "id": "d4008359-da7d-42d8-aee6-e9d11a1fb022",
+  "started_at": "2026-10-25T16:50:48.084005775Z",
+  "completed_at": "2026-10-25T16:50:48.109878753Z",
+  "status": "completed",
+  "template": {
+    "scheme": "http",
+    "host": "127.0.0.1:41815",
+    "method": "POST",
+    "path": "/owned-gap",
+    "headers": [],
+    "body": "\u00a7left\u00a7|\u00a7right\u00a7",
+    "body_encoding": "utf8",
+    "preview_truncated": false
+  },
+  "payload_count": 3,
+  "marker_count": 2,
+  "results": [
+    {
+      "index": 0,
+      "payload": "A",
+      "transaction_id": "6354827c-0012-44f0-8f8d-017c3c26d296",
+      "status": 200,
+      "duration_ms": 1,
+      "response_bytes": 2,
+      "note": null,
+      "position": 0
+    },
+    {
+      "index": 2,
+      "payload": "C",
+      "transaction_id": "659dce77-e1e6-427e-a8e5-75c71cacbb13",
+      "status": 200,
+      "duration_ms": 1,
+      "response_bytes": 2,
+      "note": null,
+      "position": 0
+    },
+    {
+      "index": 3,
+      "payload": "A",
+      "transaction_id": "d930c907-f83d-46cd-88f8-c1f15b27d514",
+      "status": 200,
+      "duration_ms": 1,
+      "response_bytes": 2,
+      "note": null,
+      "position": 1
+    },
+    {
+      "index": 4,
+      "payload": "B",
+      "transaction_id": "ceb1b09c-3a48-40ca-a1af-b847240954e7",
+      "status": 200,
+      "duration_ms": 0,
+      "response_bytes": 2,
+      "note": null,
+      "position": 1
+    },
+    {
+      "index": 5,
+      "payload": "C",
+      "transaction_id": "7a5ec468-1c5b-4e33-99aa-caff60196ec3",
+      "status": 200,
+      "duration_ms": 4,
+      "response_bytes": 2,
+      "note": null,
+      "position": 1
+    }
+  ],
+  "notes": [],
+  "attack_type": "sniper",
+  "url_encode": false,
+  "planned": 6,
+  "concurrency": 3,
+  "stopped": true
+}

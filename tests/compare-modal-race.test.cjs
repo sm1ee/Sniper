@@ -9,7 +9,7 @@ function deferred() {
 }
 
 function createFixture() {
-  const pending = [], rendered = [];
+  const pending = [], rendered = [], toasts = [];
   const classes = new Set(["hidden"]);
   const modal = { classList: {
     add: (name) => classes.add(name),
@@ -22,6 +22,7 @@ function createFixture() {
   ], {
     compareBaseId: "base", compareBaseSessionId: "session-a", compareActiveTab: "request",
     compareBaseRecord: null, compareTargetRecord: null, compareLoadGeneration: 0, compareReturnFocus: null,
+    showToast: message => toasts.push(message), renderFuzzerResultsWorkflow() {},
     els: { trafficRegion: null }, getActiveModalAction: () => ({ modal }), restoreModalFocus() {},
     sessionId: "session-a",
     transactionPath: (id, sessionId) => `${sessionId}/${id}`,
@@ -43,7 +44,7 @@ function createFixture() {
     resolve(offset + 1, target);
   };
   const hidden = () => modal.classList.contains("hidden");
-  return { context, pending, rendered, button, hidden, resolve, resolvePair };
+  return { context, pending, rendered, button, hidden, resolve, resolvePair, toasts };
 }
 
 test("a current comparison opens the requested records from its session", async () => {
@@ -263,16 +264,16 @@ test("selecting the base itself does not let an earlier comparison appear", asyn
 });
 
 test("a rejected stale request cannot alter the already displayed latest comparison", async () => {
-  const { context, pending, rendered, resolve, resolvePair } = createFixture();
+  const { context, pending, rendered, resolve, resolvePair, toasts } = createFixture();
   const older = context.openCompareModal("older-target");
   const latest = context.openCompareModal("newer-target");
   const base = { id: "base" }, target = { id: "newer-target" };
   resolvePair(2, base, target);
   await latest;
-  const rejected = assert.rejects(older, /offline fixture error/);
   pending[0].reject(new Error("offline fixture error"));
   resolve(1, { id: "older-target" });
-  await rejected;
+  await older;
+  assert.deepEqual(toasts, []);
   assert.equal(context.compareTargetRecord, target);
   assert.deepEqual(rendered, [{ base, target }]);
 });
@@ -291,5 +292,21 @@ for (const missingRecord of ["base", "target"]) {
     assert.equal(context.compareTargetRecord, target);
     assert.equal(hidden(), false);
     assert.deepEqual(rendered, [{ base, target }]);
+  });
+}
+
+for (const side of ['base', 'target']) for (const status of [404, 500]) {
+  test(`direct History comparison reports ${side} HTTP ${status} without throwing`, async () => {
+    const { context, pending, hidden, resolve, toasts, button } = createFixture();
+    const reading = context.openCompareModal('target');
+    const failure = side === 'base' ? 0 : 1;
+    pending[failure].resolve({ ok: false, status }); resolve(1 - failure, { id: failure ? 'base' : 'target' });
+    await reading;
+    assert.equal(toasts.length, 1);
+    assert.match(toasts[0], status === 404 ? /no longer available/ : /HTTP 500.*Try again/);
+    assert.equal(context.compareBaseId, side === 'base' && status === 404 ? null : 'base');
+    assert.equal(button.disabled, side === 'base' && status === 404);
+    assert.equal(hidden(), true);
+    assert.equal(pending.length, 2);
   });
 }

@@ -190,6 +190,8 @@ tagged `dos` are never sent.
   template, matcher and endpoint. **Rescan** keeps them.
 - The session keeps at most ten scans, each with up to 1,000 results, its
   counts and its warnings. Auto scan jobs give way first.
+- Progress is saved about every 750 ms, even when nothing matches. After a crash
+  an interrupted scan keeps what was saved and does not resume sending.
 
 ### Auto scan
 
@@ -204,6 +206,8 @@ Auto scan**, after turning templates on in the list's On column.
 - An origin is sent to when it is in a non-empty Scope or on the auto scan's
   own host list (patterns as Scope takes them), and never when Scope excludes
   it or it is Sniper itself. Its `{{BaseURL}}` is the origin.
+  A change to Scope or the host list applies to the next request, even one
+  already waiting for its turn.
 - One host goes at a time, at the auto scan's pace, as a scan of its own
   marked Auto. Templates with risk tags are left out, and those that need
   Interactsh are left out where the session has none. A scan you start comes
@@ -279,9 +283,8 @@ A download asks `api.github.com` for the latest release tag, then fetches that
 release's checksums file and source `.tar.gz` from `github.com`. It uses the
 environment's proxy settings and follows redirects only to GitHub hosts over
 HTTPS. If the archive does not match the release's published SHA-256, nothing
-is installed. There is no automatic update. A download needs an explicit
-acknowledgment: **Download** in the app, `"acknowledged": true` in the API,
-`--yes` in the CLI.
+is installed. A download needs an explicit acknowledgment: **Download** in the
+app, `"acknowledged": true` in the API, `--yes` in the CLI.
 
 Templates reach the repository's `main` branch weeks before a release. To take
 them, choose **Download main (unreleased)** or **Switch to main** in the ⋯ menu
@@ -292,6 +295,21 @@ library records the commit and refuses an archive that names another.
 Once templates are installed, **Download** is gone until there is something to
 download: **Check for updates** asks GitHub, about main's newest commit while
 main is installed, and **Update** appears when there is a newer one.
+
+### Daily update
+
+A library downloaded from GitHub updates itself once a day. A minute after
+launch, then every hour, Sniper looks whether a day has passed since it last
+asked GitHub or installed the library. If so, it asks for the newest release,
+or main's newest commit while main is installed, and installs it as a download
+would. Templates turned on stay on;
+new ones stay off. A running scan keeps the templates it started with.
+
+A failed check keeps the installed library. The card shows **Last check
+failed**, the status carries `check_error`, and the check runs again the next
+day. An imported archive is never updated. To stop the daily update, turn off
+**Update daily** in the card, or run
+`templates library auto-update --enabled false`.
 
 ### Import
 
@@ -305,10 +323,11 @@ id repeats, the first file wins.
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /api/templates/library` | Status: installed release, counts (`passive_supported`, `active_supported`), passive templates on, and any download or import in progress (`state`: `loading`, `idle`, `downloading`, `importing`, `failed`). |
+| `GET /api/templates/library` | Status: installed release, counts (`passive_supported`, `active_supported`), passive templates on, the daily update (`auto_update`, and `checked_at` and `check_error` from its last check), and any download or import in progress (`state`: `loading`, `idle`, `downloading`, `importing`, `failed`). |
 | `POST /api/templates/library/check` | Ask GitHub for the newest tag, or main's newest commit while main is installed; returns `channel` (`release` or `main`), `latest` (for main, a commit and its date `latest_at`), `current`, `update_available`. |
 | `POST /api/templates/library/download` | Body `{"acknowledged": true}`, plus `"channel": "main"` for main's newest commit. Starts a download; 202, or 409 while busy. |
 | `POST /api/templates/library/import` | Body: the `.tar.gz` (`application/gzip`). Starts an import; 202, or 409 while busy. |
+| `POST /api/templates/library/auto-update` | Body `{"enabled": bool}`. Turns the daily update on or off; returns the status. |
 | `GET /api/templates` | List; query `search` (a substring of the id, name, path, tags, CVEs, description or references), `severity` (comma-separated), `protocol`, `support` (`passive`, `active`, `unsupported`), `tag`, `enabled`, `sort` (`on`, `severity`, `name`, `mode`, `tags`) with `direction` (`asc`, the most severe first for severity, or `desc`), `limit` (at most 30,000), `offset`. Each template's `requests` is the most one scan sends a target before redirects; a flow can stop sooner. |
 | `GET /api/templates/:id` | One template with its description, references and YAML. |
 | `POST /api/templates/passive` | Body `{"ids": [...], "enabled": bool}` or `{"filter": {...list query...}, "enabled": bool}`. Ids that cannot run passively are ignored and counted. |
@@ -329,6 +348,7 @@ sniper-cli templates library download --dry-run
 sniper-cli templates library download --yes
 sniper-cli templates library download --main --yes
 sniper-cli templates library import --file nuclei-templates.tar.gz --yes
+sniper-cli templates library auto-update --enabled false --yes
 sniper-cli templates list --support passive --search wordpress
 sniper-cli templates get --id tech-detect
 sniper-cli templates passive set-enabled --enabled true --id tech-detect --yes

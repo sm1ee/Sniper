@@ -2,6 +2,8 @@
 
 Recon builds one endpoint inventory per session from three sources: a static crawler of the target, existing urlscan results, and the Wayback CDX index. Open **Scan ▸ Recon**, enter an absolute target URL, choose sources and optional budgets, then start. Each source reports its status, request count, discoveries, partial results and warnings. **Stop** cancels the job's local work. Jobs stay with their session when you switch sessions; deleting the session or shutting Sniper down cancels them. After a restart, unfinished jobs are marked interrupted and do not resume.
 
+Results are saved as each page, document or crawler response completes, so **Stop** keeps everything collected so far.
+
 ## Scope and consent
 
 Use Recon only against targets you are authorized to assess. By default, scope is the target's exact hostname, scheme and effective port; the subdomain checkbox adds the domain's subdomains. HTTP on port 80 may upgrade to HTTPS on port 443, never the reverse. Other hosts and ports are out of scope, and paths do not narrow it. Every URL the crawler follows and every provider result is checked against scope. WebSocket URLs may be stored but are never connected to.
@@ -21,13 +23,25 @@ Entries are deduplicated by normalized URL plus method. The query string is kept
 - live: the crawler received an HTTP response, including an error response
 - observed: a literal reference in a page, or a result of a urlscan scan you submitted; the URL may not be available now
 - history: a past urlscan or Wayback observation
-- candidate: a JavaScript URL literal, a form action and its fields, or a robots rule; never visited automatically
+- candidate: a JavaScript URL literal, form action and fields, robots rule, or unrecognized URL attribute; never visited automatically
+
+Select an endpoint and use **Copy URL** to copy its normalized URL, preserving query order and encoding. Copying does not visit the URL or create a captured request.
+
+**Open in Replay** opens the selected endpoint as a new, unsent Replay tab with its method, its URL as written, a Host header and an empty body. It copies no form fields, authentication or captured headers, and sends nothing. The HTTP version starts at HTTP/1.1. CONNECT and URLs that are not HTTP(S) are refused.
+
+**Copy filtered JSON** copies every endpoint that matches the filter, across all pages and in the current order, with its raw URLs and evidence. It sends nothing and is limited to 2 MiB; narrow the filter or use the API or CLI for more. The copy records the filter, sort, session and `copied_at`, the time you clicked. Values are copied as collected and may be sensitive.
 
 ## Budgets
 
 `max_requests`, `max_depth`, `max_endpoints` and `max_pages` default to 0, which means no limit; a positive value limits one job. `max_endpoints` counts new entries the job adds; existing entries can still gain evidence. `max_pages` applies to each history source separately. A job that stops at a budget with work left is reported as partial. `max_depth=0` used to mean the seed only; it now means no limit.
 
-Without budgets nothing caps a job, so a broad or growing target can use a lot of memory and disk. Set a budget or use Stop.
+When a result budget fills on urlscan's search summaries, no detail documents are fetched and the source is marked partial. Redirect chains stop after five hops, and a destination left unvisited marks the crawl partial.
+
+Budgets do not limit response-body size, so a broad or growing target can use a lot of memory and disk. Set a budget or use Stop.
+
+## Compressed crawler responses
+
+The crawler decodes `gzip` and `x-gzip` bodies, including stacked layers and several members, before extracting URLs. A body with another encoding, a damaged stream, or more than 16 MiB decoded is skipped and the crawl is marked partial; compressed bytes are never read as text. Decoding runs on at most two workers, for at most 15 seconds a body.
 
 ## What each source collects
 
@@ -35,9 +49,15 @@ Without budgets nothing caps a job, so a broad or growing target can use a lot o
 - Wayback: CDX records without status or MIME filters, so error responses and old resources appear too.
 - Crawler: HTML links, resources and base URLs; GET and POST form actions and field names; URL literals in inline and external JavaScript; robots hints; and sitemap indexes and URLs. It does not render pages, log in, look for source maps, evaluate JavaScript, expand wildcards or infer dynamic routes.
 
+Form candidates follow HTML's [submission rules](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-attributes): an invalid method means GET, a submit button's `formmethod` and `formaction` override the form's, and `method="dialog"` creates no endpoint. An empty submit-button action means the document URL. Normalized URLs drop fragments; the raw evidence keeps them.
+
+The crawler follows `href` on `a`, `area` and `link`; `src` on `audio`, `embed`, `iframe`, `img`, `script`, `track`, `video` and image inputs; `video[poster]`; and `object[data]`. `base[href]` sets the base for relative URLs, except inside a `<template>`. Other URL attributes become candidates with their tag and attribute recorded. This is static extraction, not a browser: scripts, custom elements and malformed markup are not interpreted.
+
 ## Scope site map
 
-**Scope → Site map** includes the active session's Recon inventory, read-only. Rows mark captured and discovered evidence and keep the Recon source and evidence kind. A row that was also captured keeps its HTTP status and capture metrics, and `request_count` counts captured traffic only. Discovered endpoints do not become proxy transactions, so a Recon-only row has no request to open or replay. The inventory is saved with its session and stays in the map after a restart.
+**Scope → Site map** includes the active session's Recon inventory, read-only. Rows mark captured and discovered evidence and keep the Recon source and evidence kind. A row that was also captured keeps its HTTP status and capture metrics, and `request_count` counts captured traffic only. Discovered endpoints do not become proxy transactions, so a Recon-only row has no captured request to open or replay. The inventory is saved with its session and stays in the map after a restart.
+
+Refreshing keeps your unsaved scope edits; **Save** applies them.
 
 ## Local API
 
@@ -152,6 +172,9 @@ cargo test --locked --release
 node --check web/recon.js
 node --test tests/recon_ui.test.cjs
 python3 tests/recon_discovery_smoke.py target/release
+python3 tests/recon_partial_state_smoke.py target/release
+python3 tests/recon_content_encoding_smoke.py target/release
+python3 tests/recon_html_attributes_smoke.py target/release
 python3 tests/recon_cli_smoke.py target/release
 ```
 

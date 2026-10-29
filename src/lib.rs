@@ -38,6 +38,7 @@ pub mod service_map_libraries;
 mod service_map_link_parser;
 pub mod service_map_links;
 pub mod service_map_openapi;
+pub mod service_map_packet;
 pub mod service_map_parameters;
 pub mod service_map_peer_matches;
 pub mod service_map_servers;
@@ -82,6 +83,9 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
     };
     let state = Arc::new(AppState::new(config.clone())?);
     let oast_task = oast::start_oast_poller_for_state(state.clone());
+    tokio::spawn(templates::library::run_daily_update(
+        state.templates.clone(),
+    ));
 
     info!(
         proxy_addr = %config.proxy_addr,

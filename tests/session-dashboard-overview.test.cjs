@@ -36,10 +36,10 @@ const sessions = [
 function render(selectedSessionId = "s-1", list = sessions) {
   const state = { sessions: list, activeSession: list[0] || null, selectedSessionId };
   const els = new Proxy({}, { get: (object, key) => object[key] ||= { querySelectorAll: () => [] } });
-  const c = loadFunctions(["renderDashboard", "sessionFindingCount", "formatSize", "formatSize"], {
+  const c = loadFunctions(["renderDashboard", "sessionFindingCount", "formatSize", "escapeHtml"], {
     state, els, document: { getElementById: () => null }, getSortedSessions: () => list,
     formatCappedCount: (value) => String(value ?? 0), retainedTransactionsCap() {}, retainedEntriesCap() {},
-    formatTimestamp: (value) => `T(${value})`, escapeHtml: (value) => String(value),
+    formatTimestamp: (value) => `T(${value})`,
   });
   c.renderDashboard();
   return els;
@@ -82,4 +82,31 @@ test("with no sessions the tiles and the detail are empty", () => {
   const els = render(null, []);
   assert.equal(els.dashboardTiles.innerHTML, "");
   assert.equal(els.dashboardDetail.innerHTML, "");
+});
+
+for (const status of ["queued", "running", "stopping", "cancelled", "interrupted", "failed"]) {
+  test(`the overview preserves ${status} scan and Recon outcomes instead of implying completion`, () => {
+    const session = { ...sessions[0], overview: overview({ activity_count: 2, activity: [
+      { kind: "manual scan", target: "https://app.example.com", started_at: "2026-10-22T12:00:00Z", status, matched: 0 },
+      { kind: "recon", target: "https://api.example.com", started_at: "2026-10-22T12:00:00Z", status },
+    ] }) };
+    const detail = render("s-1", [session]).dashboardDetail.innerHTML;
+    assert.match(detail, new RegExp(`Manual scan · ${status} · https://app\\.example\\.com · 0 matched`));
+    assert.match(detail, new RegExp(`Recon · ${status} · https://api\\.example\\.com`));
+  });
+}
+
+test("a completed activity does not gain a redundant completion label", () => {
+  const detail = render().dashboardDetail.innerHTML;
+  assert.match(detail, /Manual scan · https:\/\/app\.example\.com · 2 matched/);
+  assert.doesNotMatch(detail, /Manual scan · completed/);
+});
+
+test("an unfamiliar activity status stays escaped rather than becoming markup", () => {
+  const session = { ...sessions[0], overview: overview({ activity_count: 1, activity: [
+    { kind: "recon", target: "https://app.example.com", started_at: "2026-10-22T12:00:00Z", status: "<b>partial&unknown</b>" },
+  ] }) };
+  const detail = render("s-1", [session]).dashboardDetail.innerHTML;
+  assert.match(detail, /Recon · &lt;b&gt;partial&amp;unknown&lt;\/b&gt;/);
+  assert.doesNotMatch(detail, /<b>/);
 });

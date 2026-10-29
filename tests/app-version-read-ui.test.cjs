@@ -70,7 +70,8 @@ function fixture() {
     state, els, document,
     console: { error: (...args) => errors.push(args) },
     localStorage: { getItem() { assert.fail("Unrelated local settings must be stubbed"); } },
-    compareLoadGeneration: 0, displaySettingsReturnFocus: null, displaySettingsPreviewActive: false,
+    compareLoadGeneration: 0, appVersionReadGeneration: 0,
+    displaySettingsReturnFocus: null, displaySettingsPreviewActive: false,
     displaySettingsEditedControls: new Set(),
     fetch(url, options = {}) {
       assert.equal(url, "/api/app-version", "Only the mocked version read is allowed");
@@ -146,7 +147,7 @@ test("actual startup completes with one pending read and keeps the update action
   assert.equal(f.els.openUpdateButton.listeners.get("click")[0], f.context.performSelfUpdate);
   assert.ok(f.calls.includes("connectEvents"));
   assert.ok(f.calls.includes("initCliPathOnboarding"));
-  assert.equal(f.intervals.length, 1);
+  assert.deepEqual(f.intervals.map(interval => interval.delay).sort((a, b) => a - b), [1200, 60 * 60 * 1000]);
   f.json(0, AVAILABLE); await nextTurn();
   assert.equal(f.els.appVersionLabel.textContent, "v0.3.2");
   assert.equal(f.els.appVersionLabel.title, "Current version 0.3.2");
@@ -156,6 +157,47 @@ test("actual startup completes with one pending read and keeps the update action
   assert.equal(f.els.openUpdateButton.getAttribute("aria-disabled"), null);
   assert.equal(f.requests.length, 1);
   assert.deepEqual(f.errors, []);
+});
+
+test("an app left open checks for a new release every hour, not only at launch", async () => {
+  const f = fixture();
+  await f.context.init();
+  f.json(0, { current_version: "0.3.2", update_available: false, self_update_supported: true });
+  await nextTurn();
+  assert.equal(f.els.openUpdateButton.classList.contains("hidden"), true);
+  const hourly = f.intervals.find(interval => interval.delay === 60 * 60 * 1000);
+  assert.ok(hourly, "No hourly version check");
+  hourly.callback();
+  assert.equal(f.requests.length, 2);
+  f.json(1, AVAILABLE); await nextTurn();
+  assert.equal(f.els.openUpdateButton.classList.contains("hidden"), false);
+  assert.equal(f.els.openUpdateButton.title, "Update to v9.9.9");
+  // A failed hourly check is logged like the launch check, and the next hour retries.
+  hourly.callback();
+  f.requests[2].reject(new Error("Synthetic hourly failure")); await nextTurn();
+  assert.match(f.errors.at(-1)[0].message, /Synthetic hourly failure/);
+  assert.equal(f.els.openUpdateButton.classList.contains("hidden"), false);
+});
+
+test("a check that lands during an update leaves the Update button to the update", async () => {
+  const f = fixture();
+  await f.read({ ...AVAILABLE });
+  f.els.openUpdateButton.classList.add("is-updating");
+  f.els.openUpdateButton.title = "42%";
+  await f.read({ current_version: "0.3.2", update_available: false, self_update_supported: true });
+  assert.equal(f.els.openUpdateButton.classList.contains("hidden"), false);
+  assert.equal(f.els.openUpdateButton.title, "42%");
+});
+
+test("a slow read that finishes after a newer one cannot replace its answer", async () => {
+  const f = fixture();
+  const older = f.context.loadAppVersionInfo();
+  const newer = f.context.loadAppVersionInfo();
+  f.json(1, AVAILABLE); await newer;
+  f.json(0, { current_version: "0.3.2", update_available: false, self_update_supported: true });
+  await older;
+  assert.equal(f.state.appVersion.latest_version, "v9.9.9");
+  assert.equal(f.els.openUpdateButton.classList.contains("hidden"), false);
 });
 
 test("startup read failure is caught without failing application initialization or revealing Update", async () => {

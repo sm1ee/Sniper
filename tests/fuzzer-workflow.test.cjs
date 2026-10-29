@@ -72,6 +72,22 @@ test("payload validation uses UTF-8 bytes and Rust's single trailing-CR normaliz
   assert.match(workflow.validatePayloads(Array(65).fill("a".repeat(65536))).errors[0], /4194304 total bytes/);
 });
 
+for (const [label, prefix, suffix, line] of [
+  ["first line", "", "", 1],
+  ["second line", "small\n", "", 2],
+  ["preceding empty line", "\n", "", 2],
+  ["CRLF and whitespace lines", "\r\n \r\n", "\r\n", 3],
+  ["CR-only lines", "small\r\r", "\r", 3],
+]) test(`oversized payload guidance names the visible ${label} without changing its content`, () => {
+  const oversized = "😀".repeat(16385);
+  const payloads = workflow.payloadLines(prefix + oversized + suffix);
+  const checked = workflow.validatePayloads(payloads);
+  assert.equal(checked.valid, false);
+  assert.equal(checked.errors[0], `Payloads line ${line} exceeds 64 KiB (65536 bytes). Shorten this line.`);
+  assert.deepEqual(checked.payloads, payloads);
+  assert.equal(checked.payloads[line - 1], oversized);
+});
+
 test("generic presets include an empty payload, stay bounded, and serialize losslessly", () => {
   assert.deepEqual(workflow.presets.map(preset => preset.id), ["text-boundaries", "number-boundaries"]);
   for (const preset of workflow.presets) {
@@ -326,10 +342,77 @@ test("truncated request bodies fail setup while a base64 source warns and keeps 
   const checked = workflow.preflight(request({ body: "YQ==", body_encoding: "base64" }), ["x"]);
   assert.equal(checked.valid, true);
   assert.match(checked.warnings.join(" "), /encoded text/);
+  assert.match(checked.warnings.join(" "), /header or query positions instead of body markers/);
   assert.equal(checked.samples[0].request.body, "YQ==");
 });
 
 test("helpers reject missing validated request models without exposing traffic in errors", () => {
   assert.throws(() => workflow.preflight({}, ["x"]), /validated by the request editor/);
   assert.throws(() => workflow.expandTemplate(request(), null), /Payload must be a string/);
+});
+
+
+test('marker edits preserve originals and reject malformed pairing, surrogate and CRLF splits', () => {
+  assert.equal(workflow.clearPositions('§original§/$payload$/§§/lone§'), 'original///lone§');
+  assert.equal(workflow.clearPositions('§$payload$§'), '$payload$');
+  assert.equal(workflow.replaceSelection('abc', 1, 1), 'a§§bc');
+  assert.throws(() => workflow.replaceSelection('§abc', 2, 3), /unmatched/);
+  assert.throws(() => workflow.replaceSelection('a\r\nb', 2, 2), /line break/);
+  assert.throws(() => workflow.replaceSelection('😀', 1, 1), /complete character/);
+  assert.throws(() => workflow.replaceSelection('§abc§', 2, 2), /overlaps/);
+});
+
+test('raw request marker editing is field bounded and preserves mixed line endings', () => {
+  const raw = 'GET /§a§/literal§ HTTP/1.1\nHost: example.com\r\nX-§: value§\n\n§line\r\nbody§';
+  assert.equal(workflow.clearRequestPositions(raw), 'GET /a/literal§ HTTP/1.1\nHost: example.com\r\nX-§: value§\n\nline\r\nbody');
+  const unmarked = 'GET /literal§ HTTP/1.1\r\nHost: example.com\r\nX-Note: value\r\n\r\n';
+  const at = unmarked.indexOf('value');
+  assert.equal(workflow.markRequestSelection(unmarked, at, at + 5), unmarked.replace('value', '§value§'));
+  assert.throws(() => workflow.markRequestSelection(raw, raw.indexOf('X-'), raw.indexOf('value') + 5), /one request field/);
+  assert.equal(workflow.clearRequestPositions('GET https://example.com/§a§ HTTP/1.1\r\n\r\n'), 'GET https://example.com/a HTTP/1.1\r\n\r\n');
+});
+
+test('targeted removal keeps originals and only removes unambiguous selected positions', () => {
+  const raw = 'GET /§one§/§two§/$payload$/literal§ HTTP/1.1\r\nHost: example.com\r\n\r\n';
+  const a = raw.indexOf('§one§'), b = raw.indexOf('§two§');
+  for (const [from, to] of [[a + 1, a + 1], [a, a + 5], [a + 2, a + 3]]) {
+    const result = workflow.removeRequestSelection(raw, from, to);
+    assert.equal(result.text, raw.replace('§one§', 'one'));
+    assert.equal(result.text.slice(result.from, result.to), 'one');
+  }
+  assert.equal(workflow.removeRequestSelection(raw, a, b + 5).text, raw.replace('§one§/§two§', 'one/two'));
+  const legacy = raw.indexOf('$payload$');
+  assert.equal(workflow.removeRequestSelection(raw, legacy + 2, legacy + 2).text, raw.replace('$payload$', ''));
+  for (const [from, to] of [[a, a], [a + 5, a + 5], [0, 0], [a + 2, b + 5], [a, b + 2]]) {
+    assert.throws(() => workflow.removeRequestSelection(raw, from, to));
+  }
+  const empty = 'GET /§§ HTTP/1.1\r\n\r\n';
+  assert.equal(workflow.removeRequestSelection(empty, 6, 6).text, 'GET / HTTP/1.1\r\n\r\n');
+});
+
+test('targeted removal respects request fields, literal syntax, Unicode and unchanged raw bytes', () => {
+  const raw = 'GET /literal§ HTTP/1.1\r\nX-§: value§\nOther: §한😀글§\r\n\r\n§line\r\nbody§';
+  const from = raw.indexOf('§한'), to = raw.length;
+  assert.equal(workflow.removeRequestSelection(raw, from, to).text, raw.replace('§한😀글§', '한😀글').replace('§line\r\nbody§', 'line\r\nbody'));
+  assert.throws(() => workflow.removeRequestSelection(raw, raw.indexOf('😀') + 1, raw.indexOf('😀') + 1), /complete character/);
+  assert.throws(() => workflow.removeRequestSelection(raw, raw.lastIndexOf('\r\n') + 1, raw.lastIndexOf('\r\n') + 1), /line break/);
+  assert.throws(() => workflow.removeRequestSelection(raw, raw.indexOf('literal'), raw.indexOf('Other')), /marked position/);
+  const escaped = 'GET /\\§value\\§ HTTP/1.1\n\n';
+  assert.equal(workflow.removeRequestSelection(escaped, 8, 8).text, 'GET /\\value\\ HTTP/1.1\n\n');
+  const nested = 'GET /§$payload$§ HTTP/1.1\n\n';
+  assert.throws(() => workflow.removeRequestSelection(nested, 7, 7), /expose another position/);
+  for (const offsets of [[-1, 0], [2, 1], [0, raw.length + 1], [NaN, 1]]) assert.throws(() => workflow.removeRequestSelection(raw, ...offsets));
+});
+
+
+test('targeted removal rejects marker exposure across the removed delimiters too', () => {
+  const raw = 'GET /$pay§load§$ HTTP/1.1\r\n\r\n';
+  assert.throws(() => workflow.removeRequestSelection(raw, raw.indexOf('load'), raw.indexOf('load')), /expose another position/);
+});
+
+
+test('targeted legacy removal cannot join payload-token fragments into a new position', () => {
+  const raw = 'POST / HTTP/1.1\r\nHost: example.com\r\n\r\n$pay$payload$load$';
+  const at = raw.indexOf('$payload$');
+  assert.throws(() => workflow.removeRequestSelection(raw, at, at + 9), /expose another position/);
 });

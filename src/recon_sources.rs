@@ -100,12 +100,23 @@ async fn fetch_text(
     report: &mut SourceReport,
     retry_rate_limit: bool,
 ) -> Result<String, FetchError> {
+    fetch_text_with_progress(request, cancel, report, retry_rate_limit, |_| {}).await
+}
+
+async fn fetch_text_with_progress(
+    request: RequestBuilder,
+    cancel: &AtomicBool,
+    report: &mut SourceReport,
+    retry_rate_limit: bool,
+    on_progress: impl Fn(&SourceReport),
+) -> Result<String, FetchError> {
     for attempt in 0..=2u32 {
         if cancel.load(Ordering::Relaxed) {
             return Err(FetchError::Cancelled);
         }
         let current = request.try_clone().ok_or(FetchError::Transport)?;
         report.requests += 1;
+        on_progress(report);
         let mut response = tokio::select! {
             _ = cancelled(cancel) => return Err(FetchError::Cancelled),
             result = current.timeout(REQUEST_TIMEOUT).send() => result.map_err(|_| FetchError::Transport)?,
@@ -120,6 +131,7 @@ async fn fetch_text(
                 .unwrap_or(1 << attempt)
                 .clamp(1, 10);
             report.warn("Provider rate-limited a request; retried with bounded backoff");
+            on_progress(report);
             drop(response);
             pause(Duration::from_secs(retry_after), cancel).await?;
             continue;
@@ -236,6 +248,15 @@ fn method(value: Option<&str>) -> String {
         value.to_ascii_uppercase()
     } else {
         "GET".into()
+    }
+}
+
+fn html_form_method(value: Option<&str>) -> &'static str {
+    // HTML submission methods are enumerated, unlike observed HTTP methods.
+    match value {
+        Some(value) if value.eq_ignore_ascii_case("post") => "POST",
+        Some(value) if value.eq_ignore_ascii_case("dialog") => "DIALOG",
+        _ => "GET",
     }
 }
 
@@ -435,18 +456,47 @@ pub async fn urlscan(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
+    on_progress: impl Fn(&[Discovery], &SourceReport) + Send + Sync,
+) -> (Vec<Discovery>, SourceReport) {
+    let key = match api_key() {
+        Ok(key) => key,
+        Err(e) => {
+            let mut report = SourceReport::default();
+            report.fail(e);
+            return (Vec::new(), report);
+        }
+    };
+    read_urlscan(
+        client,
+        target,
+        include_subdomains,
+        max_pages,
+        max_results,
+        cancel,
+        on_progress,
+        &key,
+        urlscan_search_url,
+        result_url,
+    )
+    .await
+}
+
+async fn read_urlscan(
+    client: &Client,
+    target: &Url,
+    include_subdomains: bool,
+    max_pages: usize,
+    max_results: usize,
+    cancel: &AtomicBool,
+    on_progress: impl Fn(&[Discovery], &SourceReport) + Send + Sync,
+    key: &Option<HeaderValue>,
+    search_url: impl Fn(&str, bool, usize, Option<&str>) -> Url,
+    scan_url: impl Fn(&str) -> Option<Url>,
 ) -> (Vec<Discovery>, SourceReport) {
     let mut out = Vec::new();
     let mut report = SourceReport::default();
     let host = match provider_host(target) {
         Ok(host) => host,
-        Err(e) => {
-            report.fail(e);
-            return (out, report);
-        }
-    };
-    let key = match api_key() {
-        Ok(key) => key,
         Err(e) => {
             report.fail(e);
             return (out, report);
@@ -461,12 +511,13 @@ pub async fn urlscan(
     let mut page_index = 0usize;
     loop {
         page_index += 1;
-        let url = urlscan_search_url(host, include_subdomains, size, after.as_deref());
-        let text = match fetch_text(
-            authenticated(client.get(url), &key),
+        let url = search_url(host, include_subdomains, size, after.as_deref());
+        let text = match fetch_text_with_progress(
+            authenticated(client.get(url), key),
             cancel,
             &mut report,
             true,
+            |report| on_progress(&[], report),
         )
         .await
         {
@@ -498,13 +549,19 @@ pub async fn urlscan(
         }
         scanned += results.len();
         let more = urlscan_has_more(&data, results.len(), scanned, size);
+        if more && limit_reached(max_pages, page_index) {
+            report.truncated = true;
+            report.warn("urlscan search page limit reached");
+        }
+        let mut checkpoint = Vec::new();
+        let mut detail_urls = Vec::new();
         for result in results {
             if cancel.load(Ordering::Relaxed) {
                 report.fail("Cancelled");
                 break;
             }
             let uuid = text_at(result, &["/task/uuid", "/_id"]);
-            let full_url = uuid.and_then(result_url);
+            let full_url = uuid.and_then(&scan_url);
             let location = full_url
                 .as_ref()
                 .map(Url::as_str)
@@ -526,13 +583,11 @@ pub async fn urlscan(
                     report.fail("Cancelled");
                     break;
                 }
-                if !push_discovery(&mut out, &mut seen, item, max_results) {
+                if !push_discovery(&mut out, &mut seen, item.clone(), max_results) {
                     report.truncated = true;
+                } else {
+                    checkpoint.push(item);
                 }
-            }
-            if limit_reached(max_results, out.len()) {
-                report.truncated = true;
-                break;
             }
             let Some(full_url) = full_url else {
                 report.warn(
@@ -541,14 +596,26 @@ pub async fn urlscan(
                 report.truncated = true;
                 continue;
             };
-            if !scan_ids.insert(full_url.to_string()) {
-                continue;
+            if scan_ids.insert(full_url.to_string()) {
+                detail_urls.push(full_url);
             }
-            let text = match fetch_text(
-                authenticated(client.get(full_url.clone()), &key),
+        }
+        if limit_reached(max_results, out.len()) {
+            report.truncated = true;
+        }
+        // The entire search page has arrived. Retain its summaries before any
+        // detail request can stall; explicit budgets give this page priority.
+        on_progress(&checkpoint, &report);
+        if report.error.is_some() || limit_reached(max_results, out.len()) {
+            break;
+        }
+        for full_url in detail_urls {
+            let text = match fetch_text_with_progress(
+                authenticated(client.get(full_url.clone()), key),
                 cancel,
                 &mut report,
                 true,
+                |report| on_progress(&[], report),
             )
             .await
             {
@@ -585,17 +652,23 @@ pub async fn urlscan(
                 report.fail("Cancelled");
                 break;
             }
+            let mut checkpoint = Vec::new();
             for item in found {
                 if cancel.load(Ordering::Relaxed) {
                     report.fail("Cancelled");
                     break;
                 }
-                if !push_discovery(&mut out, &mut seen, item, max_results) {
+                if !push_discovery(&mut out, &mut seen, item.clone(), max_results) {
                     report.truncated = true;
+                } else {
+                    checkpoint.push(item);
                 }
             }
             if limit_reached(max_results, out.len()) {
                 report.truncated = true;
+            }
+            on_progress(&checkpoint, &report);
+            if limit_reached(max_results, out.len()) {
                 break;
             }
         }
@@ -745,6 +818,7 @@ pub async fn wayback(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
+    on_progress: impl Fn(&[Discovery], &SourceReport) + Send + Sync,
 ) -> (Vec<Discovery>, SourceReport) {
     read_wayback(
         client,
@@ -753,6 +827,7 @@ pub async fn wayback(
         max_pages,
         max_results,
         cancel,
+        on_progress,
         wayback_url,
     )
     .await
@@ -765,6 +840,7 @@ async fn read_wayback(
     max_pages: usize,
     max_results: usize,
     cancel: &AtomicBool,
+    on_progress: impl Fn(&[Discovery], &SourceReport) + Send + Sync,
     page_url: impl Fn(&str, bool, usize, Option<&str>) -> Url,
 ) -> (Vec<Discovery>, SourceReport) {
     let mut out = Vec::new();
@@ -784,13 +860,18 @@ async fn read_wayback(
         let limit = batch_size(max_results, out.len(), 1000);
         let url = page_url(host, include_subdomains, limit, resume.as_deref());
         // Deliberately never attach urlscan's key to Archive.org requests.
-        let text = match fetch_text(client.get(url), cancel, &mut report, true).await {
-            Ok(text) => text,
-            Err(e) => {
-                report.fail(e.to_string());
-                break;
-            }
-        };
+        let text =
+            match fetch_text_with_progress(client.get(url), cancel, &mut report, true, |report| {
+                on_progress(&[], report)
+            })
+            .await
+            {
+                Ok(text) => text,
+                Err(e) => {
+                    report.fail(e.to_string());
+                    break;
+                }
+            };
         let remaining = max_results.saturating_sub(out.len());
         let (found, cursor, clipped) = match parse_cdx_filtered(
             &text,
@@ -804,14 +885,22 @@ async fn read_wayback(
                 break;
             }
         };
+        let previous = out.len();
         out.extend(found);
-        if cancel.load(Ordering::Relaxed) {
-            report.fail("Cancelled");
-            break;
-        }
         report.truncated |= clipped;
         if clipped {
             report.warn("Some CDX rows were malformed or exceeded the result limit");
+        }
+        if cursor.is_some()
+            && (limit_reached(max_results, out.len()) || limit_reached(max_pages, page))
+        {
+            report.truncated = true;
+            report.warn("Wayback result or page limit reached");
+        }
+        on_progress(&out[previous..], &report);
+        if cancel.load(Ordering::Relaxed) {
+            report.fail("Cancelled");
+            break;
         }
         let Some(cursor) = cursor else {
             break;
@@ -1016,12 +1105,74 @@ fn resolve(base: &Url, literal: &str) -> Option<String> {
     matches!(url.scheme(), "http" | "https" | "ws" | "wss").then(|| url.to_string())
 }
 
+fn resolve_form_action(document: &Url, document_base: &Url, literal: &str) -> Option<String> {
+    if literal.is_empty() {
+        // An explicit empty submitter action targets the document, not its
+        // parent's action or a different URL selected by base[href].
+        return Some(document.to_string());
+    }
+    let trimmed = literal.trim();
+    if trimmed.starts_with('#') && !trimmed.chars().any(char::is_control) {
+        // A same-resource form may still supply a distinct submission method.
+        // Keep its raw fragment evidence without changing crawl-link filtering.
+        return resolve(document_base, document_base.join(trimmed).ok()?.as_str());
+    }
+    resolve(document_base, literal)
+}
+
 #[derive(Debug)]
 struct Tag {
     name: String,
     closing: bool,
     attrs: HashMap<String, String>,
     body: Option<(usize, usize)>,
+    html_context: bool,
+    in_template: bool,
+}
+
+fn html_url_attribute_label(tag: &Tag, attribute: &str) -> Option<&'static str> {
+    if !tag.html_context {
+        return None;
+    }
+    match (attribute, tag.name.as_str()) {
+        ("href", "a" | "area" | "link") => Some("link"),
+        ("src", "script") => Some("script"),
+        ("src", "audio" | "embed" | "iframe" | "img" | "track" | "video")
+        | ("poster", "video")
+        | ("data", "object") => Some("resource"),
+        ("src", "input")
+            if tag
+                .attrs
+                .get("type")
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("image")) =>
+        {
+            Some("resource")
+        }
+        // source[src] depends on a media parent, which this tokenizer does not
+        // resolve. Keep it and other unknown combinations as passive evidence.
+        _ => None,
+    }
+}
+
+fn can_inherit_form_action(tag: &Tag) -> bool {
+    // Explicit owners can refer elsewhere or to no form. This static parser
+    // must not substitute the enclosing form without resolving that ownership.
+    if tag.attrs.contains_key("disabled") || tag.attrs.contains_key("form") {
+        return false;
+    }
+    let kind = tag
+        .attrs
+        .get("type")
+        .map(|value| value.to_ascii_lowercase());
+    match tag.name.as_str() {
+        "input" => matches!(kind.as_deref(), Some("submit" | "image")),
+        "button" => match kind.as_deref() {
+            Some("submit") => true,
+            Some("button" | "reset") => false,
+            _ => !tag.attrs.contains_key("command") && !tag.attrs.contains_key("commandfor"),
+        },
+        _ => false,
+    }
 }
 
 fn attributes(source: &str, cancel: Option<&AtomicBool>) -> HashMap<String, String> {
@@ -1047,6 +1198,59 @@ fn attributes(source: &str, cancel: Option<&AtomicBool>) -> HashMap<String, Stri
     attrs
 }
 
+fn self_closing_foreign_root(source: &str, cancel: Option<&AtomicBool>) -> bool {
+    if !source.ends_with('/') || is_cancelled(cancel) {
+        return false;
+    }
+    // The slash must immediately precede '>' and be outside an unquoted
+    // attribute value. HTML attribute spacing is ASCII, not Unicode whitespace.
+    static ATTR: OnceLock<Regex> = OnceLock::new();
+    let regex = ATTR.get_or_init(|| {
+        Regex::new(r#"(?s)([^\t\n\x0c\r =/>]+)(?:[\t\n\x0c\r ]*=[\t\n\x0c\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\x0c\r >]+)))?"#)
+            .expect("foreign root attribute pattern")
+    });
+    for capture in regex.captures_iter(source) {
+        if is_cancelled(cancel)
+            || capture
+                .get(4)
+                .is_some_and(|value| value.end() == source.len())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn html_name_delimiter(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r' | b'/' | b'>')
+}
+
+fn template_context_raw_end(
+    lower_body: &str,
+    cursor: usize,
+    name: &str,
+    cancel: Option<&AtomicBool>,
+) -> usize {
+    let prefix = format!("</{name}");
+    let mut search_at = cursor;
+    while let Some(offset) = lower_body[search_at..].find(&prefix) {
+        if is_cancelled(cancel) {
+            break;
+        }
+        let start = search_at + offset;
+        let after = start + prefix.len();
+        if lower_body
+            .as_bytes()
+            .get(after)
+            .is_some_and(|byte| html_name_delimiter(*byte))
+        {
+            return start;
+        }
+        search_at = after;
+    }
+    lower_body.len()
+}
+
 /// A literal tokenizer, not a browser DOM parser. It skips comments
 /// and raw-text elements so fake tags inside scripts cannot become crawl links.
 fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
@@ -1054,6 +1258,9 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
     let lower_body = body.to_ascii_lowercase();
     let mut tags = Vec::new();
     let mut cursor = 0;
+    let mut foreign_roots = Vec::new();
+    let mut template_depth = 0usize;
+    let mut template_raw_end = 0;
     while cursor < bytes.len() {
         if is_cancelled(cancel) {
             break;
@@ -1086,6 +1293,9 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
             continue;
         }
         let name = body[name_start..index].to_ascii_lowercase();
+        let exact_name = bytes
+            .get(index)
+            .is_some_and(|byte| html_name_delimiter(*byte));
         let attr_start = index;
         let mut quote = None;
         while index < bytes.len() {
@@ -1108,11 +1318,57 @@ fn html_tags(body: &str, cancel: Option<&AtomicBool>) -> Vec<Tag> {
             break;
         }
         cursor = index + 1;
+        let foreign_root = match name.as_str() {
+            "svg" => Some("svg"),
+            "math" => Some("math"),
+            _ => None,
+        };
+        let html_context =
+            foreign_roots.is_empty() && foreign_root.is_none() && !name.contains(':');
+        // Base selection needs literal template boundaries, not a new DOM parser.
+        // Keep raw-body extraction unchanged; only ignore fake context markers
+        // there. HTML template is non-void even when its start tag ends in '/>'.
+        if html_context && exact_name && start >= template_raw_end {
+            if name == "template" {
+                template_depth = if closing {
+                    template_depth.saturating_sub(1)
+                } else {
+                    template_depth.saturating_add(1)
+                };
+            } else if !closing && name == "plaintext" {
+                template_raw_end = bytes.len();
+            } else if !closing
+                && matches!(
+                    name.as_str(),
+                    "script"
+                        | "style"
+                        | "textarea"
+                        | "title"
+                        | "iframe"
+                        | "xmp"
+                        | "noembed"
+                        | "noframes"
+                )
+            {
+                template_raw_end = template_context_raw_end(&lower_body, cursor, &name, cancel);
+            }
+        }
+        if let Some(root) = foreign_root {
+            if closing {
+                if foreign_roots.last() == Some(&root) {
+                    foreign_roots.pop();
+                }
+            } else if !self_closing_foreign_root(&body[attr_start..index], cancel) {
+                foreign_roots.push(root);
+            }
+        }
         let mut tag = Tag {
             name,
             closing,
             attrs: attributes(&body[attr_start..index], cancel),
             body: None,
+            html_context,
+            in_template: template_depth > 0,
         };
         if !closing && matches!(tag.name.as_str(), "script" | "style" | "textarea" | "title") {
             let end_prefix = format!("</{}", tag.name);
@@ -1343,16 +1599,27 @@ fn extract_document_inner(
     let tags = html_tags(body, cancel);
     let document_base = tags
         .iter()
-        .filter(|tag| !tag.closing && tag.name == "base")
+        .filter(|tag| {
+            tag.html_context
+                && !tag.closing
+                && tag.name == "base"
+                && (!tag.in_template || content_type == "application/xhtml+xml")
+        })
         .find_map(|tag| tag.attrs.get("href"))
         .and_then(|href| resolve(base, href))
         .and_then(|href| Url::parse(&href).ok())
         .unwrap_or_else(|| base.clone());
-    let mut current_form: Option<(String, String, Vec<String>)> = None;
-    let flush_form = |form: (String, String, Vec<String>),
+    let mut current_form: Option<(Option<String>, String, Vec<String>)> = None;
+    let flush_form = |form: (Option<String>, String, Vec<String>),
                       out: &mut Vec<Discovery>,
                       seen: &mut HashSet<(String, String, String)>| {
-        let (mut url, verb, names) = form;
+        let (url, verb, names) = form;
+        if verb == "DIALOG" {
+            return true;
+        }
+        let Some(mut url) = url else {
+            return true;
+        };
         if verb == "GET" && !names.is_empty() {
             if let Ok(mut parsed) = Url::parse(&url) {
                 for name in &names {
@@ -1380,7 +1647,7 @@ fn extract_document_inner(
             }
             continue;
         }
-        if tag.name == "base" {
+        if tag.html_context && tag.name == "base" {
             continue;
         }
         if tag.name == "form" {
@@ -1392,17 +1659,12 @@ fn extract_document_inner(
                 .get("action")
                 .filter(|action| !action.trim().is_empty())
             {
-                Some(literal) => match resolve(&document_base, literal) {
-                    Some(url) => url,
-                    None => continue,
-                },
-                None => base.to_string(),
+                Some(literal) => resolve_form_action(base, &document_base, literal),
+                None => Some(base.to_string()),
             };
-            let verb = match tag.attrs.get("method").map(|s| s.to_ascii_lowercase()) {
-                Some(value) if value == "post" => "POST",
-                Some(value) if value == "dialog" => continue,
-                _ => "GET",
-            };
+            // A submit button can replace an unsupported parent action while
+            // still inheriting the form's submission method.
+            let verb = html_form_method(tag.attrs.get("method").map(String::as_str));
             current_form = Some((action, verb.into(), Vec::new()));
         }
         if matches!(
@@ -1423,38 +1685,53 @@ fn extract_document_inner(
             }
             if let Some(literal) = tag.attrs.get(attr) {
                 if let Some(url) = resolve(&document_base, literal) {
-                    let label = if tag.name == "script" {
-                        "script"
-                    } else if attr == "href" {
-                        "link"
-                    } else {
-                        "resource"
+                    let item = match html_url_attribute_label(&tag, attr) {
+                        Some(label) => static_discovery(url, "GET".into(), "observed", label, base),
+                        None => static_discovery(
+                            url,
+                            "GET".into(),
+                            "candidate",
+                            &format!("attribute {}[{attr}]", tag.name),
+                            base,
+                        ),
                     };
-                    truncated |= !push_discovery(
-                        &mut out,
-                        &mut seen,
-                        static_discovery(url, "GET".into(), "observed", label, base),
-                        0,
-                    );
+                    truncated |= !push_discovery(&mut out, &mut seen, item, 0);
                 }
             }
         }
-        if let Some(action) = tag
-            .attrs
-            .get("formaction")
-            .and_then(|s| resolve(&document_base, s))
-        {
+        let action = match tag.attrs.get("formaction") {
+            Some(action)
+                if (action.is_empty() || action.trim().starts_with('#'))
+                    && (current_form.is_none() || !can_inherit_form_action(&tag)) =>
+            {
+                // Newly supported self-targets need the same recognized owner
+                // and submitter context as a method-only override. Preserve the
+                // existing passive handling of ordinary explicit URL literals.
+                None
+            }
+            Some(action) => resolve_form_action(base, &document_base, action),
+            None if tag.attrs.contains_key("formmethod") && can_inherit_form_action(&tag) => {
+                current_form
+                    .as_ref()
+                    .and_then(|(action, _, _)| action.clone())
+            }
+            None => None,
+        };
+        if let Some(action) = action {
             let verb = tag
                 .attrs
                 .get("formmethod")
                 .map(String::as_str)
                 .or_else(|| current_form.as_ref().map(|(_, m, _)| m.as_str()));
-            truncated |= !push_discovery(
-                &mut out,
-                &mut seen,
-                static_discovery(action, method(verb), "candidate", "form", base),
-                0,
-            );
+            let verb = html_form_method(verb);
+            if verb != "DIALOG" {
+                truncated |= !push_discovery(
+                    &mut out,
+                    &mut seen,
+                    static_discovery(action, verb.into(), "candidate", "form", base),
+                    0,
+                );
+            }
         }
         if tag.name == "script" {
             if let Some((start, end)) = tag.body {
@@ -1746,6 +2023,294 @@ mod tests {
             .any(|d| d.url.contains("fake-link") && is_followable(d)));
     }
 
+    fn assert_template_base(body: &str, expected: &str) {
+        let body = format!("{body}<a href='outside'>Outside</a>");
+        let (found, clipped) = extract_document(&base(), "text/html", &body);
+        assert!(!clipped, "{body}");
+        let link = found
+            .iter()
+            .find(|item| item.url.ends_with("/outside"))
+            .unwrap();
+        assert_eq!(
+            link.url,
+            format!("https://example.com{expected}/outside"),
+            "{body}"
+        );
+        assert_eq!(link.kind, "observed", "{body}");
+        assert_eq!(link.location, format!("link: {}", base()), "{body}");
+        assert!(is_followable(link), "{body}");
+    }
+
+    #[test]
+    fn html_template_base_keeps_document_order_and_literal_nesting() {
+        for (body, expected) in [
+            ("", "/folder"),
+            ("<base href='/document/'>", "/document"),
+            ("<template><base href='/template/'></template>", "/folder"),
+            ("<template><base href='/template/'></template><base href='/document/'>", "/document"),
+            ("<base href='/document/'><template><base href='/template/'></template>", "/document"),
+            ("<template><template><base href='/inner/'></template><base href='/outer/'></template><base href='/document/'>", "/document"),
+            ("</template><TeMpLaTe><base href='/template/'></tEmPlAtE><base href='/document/'>", "/document"),
+            ("<template><base href='/unclosed/'>", "/folder"),
+            ("<template/><base href='/self-closing/'>", "/folder"),
+            ("<template data-x='v'/><base href='/self-closing/'>", "/folder"),
+            ("<template data-x=/><base href='/slash-value/'>", "/folder"),
+            ("<template><div data-x='</template>'></div><base href='/quoted/'></template>", "/folder"),
+            ("<template><base href='/template/'></template/ ><base href='/document/'>", "/document"),
+        ] {
+            assert_template_base(body, expected);
+        }
+    }
+
+    #[test]
+    fn html_template_base_requires_exact_html_tag_name_boundaries() {
+        for suffix in [".foo", "_foo", "é", "-foo", ":foo", "=x", "\u{b}", "\u{a0}"] {
+            assert_template_base(
+                &format!("<template{suffix}><base href='/document/'>"),
+                "/document",
+            );
+            assert_template_base(
+                &format!("<template></template{suffix}><base href='/template/'></template>"),
+                "/folder",
+            );
+        }
+        for spacing in [" ", "\t", "\n", "\u{c}", "\r"] {
+            assert_template_base(&format!("<template{spacing}><base href='/template/'></template{spacing}><base href='/document/'>"), "/document");
+        }
+    }
+
+    #[test]
+    fn html_template_base_ignores_fake_context_markers_in_raw_text_and_comments() {
+        for raw in [
+            "script", "style", "textarea", "title", "iframe", "xmp", "noembed", "noframes",
+        ] {
+            assert_template_base(&format!("<template><{raw}></template></{raw}><base href='/template/'></template><base href='/document/'>"), "/document");
+            assert_template_base(
+                &format!("<{raw}><template></{raw}><base href='/document/'>"),
+                "/document",
+            );
+            assert_template_base(&format!("<template><{raw}></{raw}_fake></template></{raw}><base href='/template/'></template>"), "/folder");
+            assert_template_base(&format!("<template><{raw}></{raw}\u{b}></template></{raw}><base href='/template/'></template>"), "/folder");
+        }
+        assert_template_base("<!-- <template> --><base href='/document/'>", "/document");
+        assert_template_base(
+            "<template><!-- </template> --><base href='/template/'></template>",
+            "/folder",
+        );
+        assert_template_base(
+            "<template><iframe></template><base href='/raw-unclosed/'>",
+            "/folder",
+        );
+        // Protect template boundaries without broadening raw-text extraction.
+        assert_template_base(
+            "<iframe><base href='/existing-raw/'></iframe>",
+            "/existing-raw",
+        );
+        assert_template_base(
+            "<template><plaintext></template><base href='/plaintext/'>",
+            "/folder",
+        );
+        assert_template_base(
+            "<plaintext><template></plaintext><base href='/existing-raw/'>",
+            "/existing-raw",
+        );
+    }
+
+    #[test]
+    fn html_template_base_preserves_foreign_and_existing_url_evidence() {
+        assert_template_base(
+            "<svg><template><base href='/foreign/'></svg><base href='/document/'>",
+            "/document",
+        );
+        assert_template_base(
+            "<template><math></template></math><base href='/template/'></template>",
+            "/folder",
+        );
+        let body = "<template><a href='/kept-link'></a><div src='/kept-candidate'></div><iframe><img src='/kept-raw'></iframe></template>";
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        assert_eq!(found.len(), 3);
+        for (path, kind, label) in [
+            ("/kept-link", "observed", "link"),
+            ("/kept-candidate", "candidate", "attribute div[src]"),
+            ("/kept-raw", "observed", "resource"),
+        ] {
+            let item = found.iter().find(|item| item.url.ends_with(path)).unwrap();
+            assert_eq!(item.kind, kind);
+            assert_eq!(item.location, format!("{label}: {}", base()));
+            assert_eq!(is_followable(item), kind == "observed");
+        }
+    }
+
+    #[test]
+    fn html_template_base_guard_does_not_reinterpret_xhtml() {
+        let body = "<template/><base href='/existing/'><a href='outside'>Outside</a>";
+        let (found, clipped) = extract_document(&base(), "application/xhtml+xml", body);
+        assert!(!clipped);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].url, "https://example.com/existing/outside");
+        let (fallback, clipped) = extract_document(&base(), "", body);
+        assert!(!clipped);
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].url, "https://example.com/folder/outside");
+        assert_template_base(body, "/folder");
+    }
+
+    #[test]
+    fn html_url_attributes_follow_only_recognized_static_combinations() {
+        // https://html.spec.whatwg.org/multipage/indices.html#attributes-3
+        for (tag, attribute, extra, observed) in [
+            ("a", "href", "", true),
+            ("area", "href", "", true),
+            ("link", "href", "rel='stylesheet'", true),
+            ("audio", "src", "", true),
+            ("embed", "src", "", true),
+            ("iframe", "src", "", true),
+            ("img", "src", "", true),
+            ("script", "src", "", true),
+            ("track", "src", "", true),
+            ("video", "src", "", true),
+            ("video", "poster", "", true),
+            ("object", "data", "", true),
+            ("input", "src", "type='ImAgE'", true),
+            ("div", "href", "", false),
+            ("div", "src", "", false),
+            ("div", "poster", "", false),
+            ("span", "src", "", false),
+            ("custom-widget", "src", "", false),
+            ("img", "href", "", false),
+            ("a", "src", "", false),
+            ("script", "href", "", false),
+            ("img", "poster", "", false),
+            ("style", "src", "", false),
+            ("source", "src", "", false),
+            ("input", "src", "", false),
+            ("input", "src", "type='text'", false),
+            ("svg:image", "href", "", false),
+        ] {
+            let body = format!("<{tag} {attribute}='/kept?x=1&amp;x=2' {extra}></{tag}>");
+            let (found, clipped) = extract_document(&base(), "text/html", &body);
+            assert!(!clipped, "{body}");
+            assert_eq!(found.len(), 1, "{body}");
+            assert_eq!(found[0].url, "https://example.com/kept?x=1&x=2", "{body}");
+            assert_eq!(
+                found[0].kind,
+                if observed { "observed" } else { "candidate" },
+                "{body}"
+            );
+            assert_eq!(is_followable(&found[0]), observed, "{body}");
+            if !observed {
+                assert!(
+                    found[0]
+                        .location
+                        .starts_with(&format!("attribute {tag}[{attribute}]:")),
+                    "{body}"
+                );
+            }
+        }
+        assert!(
+            extract_document(&base(), "text/html", "<div data='/not-a-resource'>")
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn html_attribute_candidates_keep_provenance_when_a_real_link_shares_the_url() {
+        for body in [
+            "<div src='/same'></div><img src='/same'>",
+            "<img src='/same'><div src='/same'></div>",
+        ] {
+            let (found, clipped) = extract_document(&base(), "text/html", body);
+            assert!(!clipped);
+            assert_eq!(found.len(), 2);
+            assert_eq!(
+                found.iter().filter(|item| item.kind == "candidate").count(),
+                1
+            );
+            assert_eq!(found.iter().filter(|item| is_followable(item)).count(), 1);
+            assert!(found
+                .iter()
+                .all(|item| item.url == "https://example.com/same"));
+        }
+    }
+
+    #[test]
+    fn foreign_literal_subtrees_keep_candidates_without_changing_later_html_context() {
+        let body = r#"
+            <svg data-fixture='/'>
+                <base href='/foreign-base/'/>
+                <image href='/svg-image'/><a href='/svg-link'></a>
+                <foreignObject><img src='/foreign-html'></foreignObject>
+                <math><script src='/nested-script'></script></math>
+            </svg>
+            <base href='/html-base/'>
+            <img src='normal-image'>
+            <svg/><img src='/after-svg'>
+            <math/><script src='/after-math'></script>
+            <video><source src='/media-source'></video>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        for path in [
+            "/foreign-base/",
+            "/svg-image",
+            "/svg-link",
+            "/foreign-html",
+            "/nested-script",
+            "/media-source",
+        ] {
+            let item = found
+                .iter()
+                .find(|item| item.url == format!("https://example.com{path}"))
+                .unwrap();
+            assert_eq!(item.kind, "candidate", "{path}");
+            assert!(!is_followable(item), "{path}");
+        }
+        for path in ["/html-base/normal-image", "/after-svg", "/after-math"] {
+            let item = found
+                .iter()
+                .find(|item| item.url == format!("https://example.com{path}"))
+                .unwrap();
+            assert_eq!(item.kind, "observed", "{path}");
+            assert!(is_followable(item), "{path}");
+        }
+        assert_eq!(found.len(), 9);
+    }
+
+    #[test]
+    fn foreign_root_self_close_requires_a_delimiter_outside_attribute_values() {
+        for opening in [
+            "<svg data-x=/>",
+            "<svg data-x= />",
+            "<svg data-x=abc/>",
+            "<svg/ >",
+            "<svg data-x='v'/ >",
+            "<svg data-x=a\u{a0}/>",
+        ] {
+            let body = format!("{opening}<a href='/foreign'></a></svg><img src='/after'>");
+            let (found, clipped) = extract_document(&base(), "text/html", &body);
+            assert!(!clipped, "{opening}");
+            assert_eq!(found.len(), 2, "{opening}");
+            assert_eq!(found[0].kind, "candidate", "{opening}");
+            assert!(!is_followable(&found[0]), "{opening}");
+            assert!(is_followable(&found[1]), "{opening}");
+        }
+        for opening in [
+            "<svg/>",
+            "<svg />",
+            "<svg data-x='v'/>",
+            "<svg data-x=\"é\"/>",
+            "<svg data-x=a />",
+        ] {
+            let body = format!("{opening}<img src='/after'>");
+            let (found, clipped) = extract_document(&base(), "text/html", &body);
+            assert!(!clipped, "{opening}");
+            assert_eq!(found.len(), 1, "{opening}");
+            assert!(is_followable(&found[0]), "{opening}");
+        }
+    }
+
     #[test]
     fn html_forms_preserve_method_and_names_never_values_or_execution() {
         let (found, _) = extract_document(
@@ -1766,6 +2331,136 @@ mod tests {
         assert!(!found.iter().any(|d| d.url.contains("secret")
             || d.location.contains("secret")
             || d.location.contains("private")));
+    }
+
+    #[test]
+    fn html_form_actions_keep_fragment_targets_and_submission_methods() {
+        let document = Url::parse("https://example.com/current?b=2&a=1#old").unwrap();
+        let body = r##"
+            <form method="post" action="#save"></form>
+            <form method="DELETE" action="#invalid"></form>
+            <form method="GET" action="#search"><input name="q" value="private"></form>
+        "##;
+        let (found, clipped) = extract_document(&document, "text/html", body);
+        assert!(!clipped);
+        let actual = found
+            .iter()
+            .map(|item| (item.method.as_str(), item.url.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("POST", "https://example.com/current?b=2&a=1#save"),
+                ("GET", "https://example.com/current?b=2&a=1#invalid"),
+                ("GET", "https://example.com/current?b=2&a=1&q=#search")
+            ]
+        );
+        assert!(found.iter().all(|item| item.kind == "candidate"
+            && !is_followable(item)
+            && item.location.starts_with(&format!("form: {document}"))
+            && !item.url.contains("private")
+            && !item.location.contains("private")));
+    }
+
+    #[test]
+    fn html_form_actions_distinguish_empty_document_from_fragment_base_targets() {
+        // The selected action is resolved by the submission algorithm, not by
+        // navigation-link filtering. Empty uses the document; fragments use base.
+        // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#form-submission-algorithm
+        let document = Url::parse("https://example.com/current?doc=1#old").unwrap();
+        let body = r##"
+            <base href="/assets/?base=2">
+            <form method="post"></form>
+            <form method="post" action=""></form>
+            <form method="post" action="save?x=1#kept"></form>
+            <form method="dialog" action="/parent?owner=1">
+                <button formaction="" formmethod="GET">Document</button>
+                <button formaction="#send" formmethod="POST">Base</button>
+                <button formmethod="POST">Parent</button>
+            </form>
+        "##;
+        let (found, clipped) = extract_document(&document, "text/html", body);
+        assert!(!clipped);
+        let actual = found
+            .iter()
+            .map(|item| (item.method.as_str(), item.url.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("POST", "https://example.com/current?doc=1#old"),
+                ("POST", "https://example.com/assets/save?x=1#kept"),
+                ("GET", "https://example.com/current?doc=1#old"),
+                ("POST", "https://example.com/assets/?base=2#send"),
+                ("POST", "https://example.com/parent?owner=1")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+    }
+
+    #[test]
+    fn html_form_actions_keep_inheritance_dialog_and_link_fragment_policies() {
+        let document = Url::parse("https://example.com/current?doc=1").unwrap();
+        let body = r##"
+            <form method="POST" action="/parent">
+                <button formaction="">Empty inherited POST</button>
+                <button formaction="#send">Fragment inherited POST</button>
+                <input type="submit" formaction="#input">
+                <button formaction="" formmethod="dialog">No submission</button>
+                <button formaction="#close" formmethod="dialog">No submission</button>
+            </form>
+            <form method="dialog" action="#close"></form>
+            <form method="post" action="javascript:void(0)"></form>
+            <form method="post" action="data:text/plain,ignored"></form>
+            <a href="#navigation">Not a new crawl URL</a>
+            <script>fetch("#literal")</script>
+        "##;
+        let (found, clipped) = extract_document(&document, "text/html", body);
+        assert!(!clipped);
+        let actual = found
+            .iter()
+            .map(|item| (item.method.as_str(), item.url.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("POST", "https://example.com/current?doc=1"),
+                ("POST", "https://example.com/current?doc=1#send"),
+                ("POST", "https://example.com/current?doc=1#input"),
+                ("POST", "https://example.com/parent")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+        assert_eq!(resolve(&document, ""), None);
+        assert_eq!(resolve(&document, "#navigation"), None);
+    }
+
+    #[test]
+    fn html_form_actions_do_not_invent_unresolved_submitter_context() {
+        let body = r##"
+            <button formaction="" formmethod="POST">No enclosing owner</button>
+            <button formaction="#outside" formmethod="POST">No enclosing owner</button>
+            <form method="dialog" action="/parent">
+                <button type="button" formaction="" formmethod="POST">Not submit</button>
+                <button type="reset" formaction="#reset" formmethod="POST">Reset</button>
+                <button disabled formaction="#disabled" formmethod="POST">Disabled</button>
+                <button form="missing" formaction="" formmethod="POST">Unknown owner</button>
+                <button form="different" formaction="#other" formmethod="POST">Other owner</button>
+                <button commandfor="menu" formaction="#command" formmethod="POST">Command</button>
+                <input type="text" formaction="#text" formmethod="POST">
+                <div formaction="" formmethod="POST"></div>
+                <div formaction="#div" formmethod="POST"></div>
+                <button formaction=" " formmethod="POST">Unchanged nonempty whitespace</button>
+                <button formaction="#bad&#10;inside" formmethod="POST">Control character</button>
+            </form>
+        "##;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]
@@ -2005,6 +2700,170 @@ mod tests {
     }
 
     #[test]
+    fn html_formmethod_dialog_does_not_invent_network_candidates() {
+        // https://html.spec.whatwg.org/dev/form-control-infrastructure.html#form-submission-attributes
+        let body = r#"
+            <form method="post" action="/save">
+                <button formaction="/close" formmethod="DiAlOg">Close</button>
+            </form>
+            <form method="dialog" action="/dialog">
+                <button formaction="/inherited-dialog">Close</button>
+                <button formaction="/explicit-post" formmethod="POST">Save</button>
+            </form>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        let mut methods = found
+            .iter()
+            .map(|item| {
+                (
+                    Url::parse(&item.url).unwrap().path().to_string(),
+                    item.method.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![("/explicit-post".into(), "POST"), ("/save".into(), "POST")]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+    }
+
+    #[test]
+    fn html_formmethod_invalid_defaults_and_inheritance_are_html_specific() {
+        let body = r#"
+            <form method="pOsT" action="/save">
+                <button formaction="/inherited">Save</button>
+                <button formaction="/invalid" formmethod="DELETE">Delete</button>
+                <button formaction="/empty" formmethod="">Empty</button>
+                <button formaction="/spaced" formmethod=" post ">Spaced</button>
+                <button formaction="/get" formmethod="gEt">Get</button>
+            </form>
+            <form method="DELETE" action="/invalid-form"></form>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        let mut methods = found
+            .iter()
+            .map(|item| {
+                (
+                    Url::parse(&item.url).unwrap().path().to_string(),
+                    item.method.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![
+                ("/empty".into(), "GET"),
+                ("/get".into(), "GET"),
+                ("/inherited".into(), "POST"),
+                ("/invalid".into(), "GET"),
+                ("/invalid-form".into(), "GET"),
+                ("/save".into(), "POST"),
+                ("/spaced".into(), "GET")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+        // Observed provider traffic is not restricted to HTML submission methods.
+        assert_eq!(method(Some("DELETE")), "DELETE");
+    }
+
+    #[test]
+    fn html_formmethod_inheritance_survives_an_unsupported_parent_action() {
+        let body = r#"
+            <form method="dialog" action="javascript:void(0)">
+                <button formaction="/dialog-close">Close</button>
+                <button formaction="/explicit-post" formmethod="POST">Post</button>
+            </form>
+            <form method="post" action="javascript:void(0)">
+                <button formaction="/post-override">Post</button>
+            </form>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        let mut methods = found
+            .iter()
+            .map(|item| {
+                (
+                    Url::parse(&item.url).unwrap().path().to_string(),
+                    item.method.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![
+                ("/explicit-post".into(), "POST"),
+                ("/post-override".into(), "POST")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+    }
+
+    #[test]
+    fn html_formmethod_only_overrides_inherit_the_parent_action_without_submission() {
+        let body = r#"
+            <form method="dialog" action="/dialog-submit">
+                <button formmethod="POST">Post</button>
+            </form>
+            <form method="POST" action="/post-submit">
+                <button formmethod="get">Get</button>
+            </form>
+            <form method="dialog" action="/input-submit">
+                <input type="SuBmIt" formmethod="POST">
+                <input type="image" formmethod="GET">
+            </form>
+            <form id="different" method="POST" action="/different-owner"></form>
+            <form method="dialog" action="/no-submit">
+                <button type="button" formmethod="POST">Button</button>
+                <button type="reset" formmethod="POST">Reset</button>
+                <button commandfor="menu" formmethod="POST">Command</button>
+                <button disabled formmethod="POST">Disabled</button>
+                <button form="missing" formmethod="POST">Missing owner</button>
+                <button form="different" formmethod="GET">Different owner</button>
+                <input type="text" formmethod="POST">
+                <div formmethod="POST"></div>
+            </form>
+        "#;
+        let (found, clipped) = extract_document(&base(), "text/html", body);
+        assert!(!clipped);
+        let mut methods = found
+            .iter()
+            .map(|item| {
+                (
+                    Url::parse(&item.url).unwrap().path().to_string(),
+                    item.method.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![
+                ("/dialog-submit".into(), "POST"),
+                ("/different-owner".into(), "POST"),
+                ("/input-submit".into(), "GET"),
+                ("/input-submit".into(), "POST"),
+                ("/post-submit".into(), "GET"),
+                ("/post-submit".into(), "POST")
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.kind == "candidate" && !is_followable(item)));
+    }
+
+    #[test]
     fn warnings_and_error_preserve_partial_report() {
         let mut report = SourceReport::default();
         for i in 0..100 {
@@ -2102,9 +2961,9 @@ mod tests {
         .await;
         assert!(matches!(result, Err(FetchError::Cancelled)));
         assert_eq!(report.requests, 0);
-        let (_, report) = urlscan(&client, &base(), false, 0, 0, &cancel).await;
+        let (_, report) = urlscan(&client, &base(), false, 0, 0, &cancel, |_, _| {}).await;
         assert_eq!(report.requests, 0);
-        let (_, report) = wayback(&client, &base(), false, 0, 0, &cancel).await;
+        let (_, report) = wayback(&client, &base(), false, 0, 0, &cancel, |_, _| {}).await;
         assert_eq!(report.requests, 0);
     }
 
@@ -2192,6 +3051,7 @@ mod tests {
             max_pages,
             max_results,
             &cancel,
+            |_, _| {},
             |host, subdomains, limit, resume| {
                 let production = wayback_url(host, subdomains, limit, resume);
                 let mut local = Url::parse(&format!("http://{address}/fixture")).unwrap();
@@ -2215,6 +3075,290 @@ mod tests {
             rows.push(json!([cursor]));
         }
         serde_json::to_string(&rows).unwrap()
+    }
+
+    #[tokio::test]
+    async fn completed_provider_batches_are_checkpointed_before_a_stalled_next_request() {
+        use std::sync::{Arc, Mutex};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            sync::oneshot,
+        };
+        for source in ["wayback", "urlscan"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (waiting, next_request) = oneshot::channel();
+            let fixture = tokio::spawn(async move {
+                let bodies = if source == "wayback" {
+                    vec![
+                        cdx_page(&["one".into()], Some("next")),
+                        cdx_page(&["two".into()], Some("last")),
+                    ]
+                } else {
+                    vec![
+                        json!({"results":[{"_id":"11111111-1111-4111-8111-111111111111", "page":{"url":"https://example.com/one"}, "sort":[1]}], "has_more":true}).to_string(),
+                        json!({"page":{"url":"https://example.com/one","status":204},"lists":{"urls":["https://example.com/two"]}}).to_string(),
+                    ]
+                };
+                for body in bodies {
+                    let (mut connection, _) = listener.accept().await.unwrap();
+                    let mut request = [0u8; 4096];
+                    connection.read(&mut request).await.unwrap();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    connection.write_all(response.as_bytes()).await.unwrap();
+                }
+                let (mut connection, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                connection.read(&mut request).await.unwrap();
+                waiting.send(()).unwrap();
+                // Aborting local work must close this request, not discard the
+                // two complete documents that were already delivered.
+                let _ = tokio::time::timeout(Duration::from_secs(5), connection.read(&mut request))
+                    .await
+                    .unwrap();
+            });
+            let checkpoints = Arc::new(Mutex::new(Vec::new()));
+            let retained = checkpoints.clone();
+            let reader = tokio::spawn(async move {
+                let client = Client::builder().no_proxy().build().unwrap();
+                let cancel = AtomicBool::new(false);
+                let progress = move |batch: &[Discovery], report: &SourceReport| {
+                    if batch.is_empty() {
+                        return;
+                    }
+                    retained.lock().unwrap().push((
+                        batch
+                            .iter()
+                            .map(|item| (item.url.clone(), item.status))
+                            .collect::<Vec<_>>(),
+                        report.requests,
+                    ));
+                };
+                if source == "wayback" {
+                    read_wayback(
+                        &client,
+                        &base(),
+                        false,
+                        0,
+                        0,
+                        &cancel,
+                        progress,
+                        |_, _, _, _| Url::parse(&format!("http://{address}/page")).unwrap(),
+                    )
+                    .await
+                } else {
+                    read_urlscan(
+                        &client,
+                        &base(),
+                        false,
+                        0,
+                        0,
+                        &cancel,
+                        progress,
+                        &None,
+                        |_, _, _, _| Url::parse(&format!("http://{address}/search")).unwrap(),
+                        |_| Some(Url::parse(&format!("http://{address}/result")).unwrap()),
+                    )
+                    .await
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), next_request)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!reader.is_finished());
+            let mut second = vec![("https://example.com/two".to_string(), None)];
+            if source == "urlscan" {
+                second.insert(0, ("https://example.com/one".to_string(), Some(204)));
+            }
+            assert_eq!(
+                *checkpoints.lock().unwrap(),
+                vec![
+                    (vec![("https://example.com/one".to_string(), None)], 1),
+                    (second, 2),
+                ],
+                "{source} must publish each completed batch before awaiting another request"
+            );
+            reader.abort();
+            assert!(reader.await.unwrap_err().is_cancelled());
+            assert_eq!(checkpoints.lock().unwrap().len(), 2);
+            fixture.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn urlscan_checkpoints_all_search_summaries_limits_and_warnings_before_details() {
+        use std::sync::{Arc, Mutex};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            sync::oneshot,
+        };
+        for budget in [0, 2] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (waiting, detail_started) = oneshot::channel();
+            let fixture = tokio::spawn(async move {
+                let (mut connection, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                connection.read(&mut request).await.unwrap();
+                let body = json!({"search_date_limit_days":30,"has_more":false,"results":[
+                    {"_id":"11111111-1111-4111-8111-111111111111","page":{"url":"https://outside.example.com/not-in-scope"}},
+                    {"_id":"22222222-2222-4222-8222-222222222222","page":{"url":"https://example.com/one"}},
+                    {"_id":"33333333-3333-4333-8333-333333333333","page":{"url":"https://example.com/two"}}
+                ]}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                connection.write_all(response.as_bytes()).await.unwrap();
+                drop(connection);
+                let (mut connection, _) = listener.accept().await.unwrap();
+                connection.read(&mut request).await.unwrap();
+                waiting.send(()).unwrap();
+                let _ = tokio::time::timeout(Duration::from_secs(5), connection.read(&mut request))
+                    .await
+                    .unwrap();
+            });
+            let retained = Arc::new(Mutex::new((
+                Vec::<String>::new(),
+                0,
+                false,
+                Vec::<String>::new(),
+            )));
+            let saved = retained.clone();
+            let reader = tokio::spawn(async move {
+                let client = Client::builder().no_proxy().build().unwrap();
+                read_urlscan(
+                    &client,
+                    &base(),
+                    false,
+                    0,
+                    budget,
+                    &AtomicBool::new(false),
+                    |batch, report| {
+                        let mut saved = saved.lock().unwrap();
+                        saved.0.extend(batch.iter().map(|item| item.url.clone()));
+                        saved.1 = report.requests;
+                        saved.2 |= report.truncated;
+                        for warning in &report.warnings {
+                            if !saved.3.contains(warning) {
+                                saved.3.push(warning.clone());
+                            }
+                        }
+                    },
+                    &None,
+                    |_, _, _, _| Url::parse(&format!("http://{address}/search")).unwrap(),
+                    |uuid| Some(Url::parse(&format!("http://{address}/result/{uuid}")).unwrap()),
+                )
+                .await
+            });
+            if budget == 0 {
+                tokio::time::timeout(Duration::from_secs(5), detail_started)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!reader.is_finished());
+                reader.abort();
+                assert!(reader.await.unwrap_err().is_cancelled());
+                fixture.await.unwrap();
+            } else {
+                let (found, report) = tokio::time::timeout(Duration::from_secs(5), reader)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(found.len(), 2);
+                assert_eq!(report.requests, 1, "completed-page summaries consume the explicit budget before any detail request");
+                fixture.abort();
+                let _ = fixture.await;
+            }
+            let saved = retained.lock().unwrap();
+            assert_eq!(
+                saved.0,
+                vec!["https://example.com/one", "https://example.com/two"]
+            );
+            assert_eq!(saved.1, if budget == 0 { 2 } else { 1 });
+            assert!(saved.2);
+            assert_eq!(
+                saved.3,
+                vec!["urlscan search history is limited to the past 30 days for this account"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn urlscan_search_page_exhaustion_is_partial_while_its_detail_is_pending() {
+        use std::sync::{Arc, Mutex};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            sync::oneshot,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (waiting, detail_started) = oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            connection.read(&mut request).await.unwrap();
+            let body = json!({"has_more":true,"results":[{
+                "_id":"11111111-1111-4111-8111-111111111111",
+                "page":{"url":"https://example.com/one"},"sort":[1]
+            }]})
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            connection.write_all(response.as_bytes()).await.unwrap();
+            drop(connection);
+            let (mut connection, _) = listener.accept().await.unwrap();
+            connection.read(&mut request).await.unwrap();
+            waiting.send(()).unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), connection.read(&mut request))
+                .await
+                .unwrap();
+        });
+        let report = Arc::new(Mutex::new((0, false, Vec::new())));
+        let saved_report = report.clone();
+        let reader = tokio::spawn(async move {
+            let client = Client::builder().no_proxy().build().unwrap();
+            read_urlscan(
+                &client,
+                &base(),
+                false,
+                1,
+                0,
+                &AtomicBool::new(false),
+                |_, report| {
+                    *saved_report.lock().unwrap() =
+                        (report.requests, report.truncated, report.warnings.clone());
+                },
+                &None,
+                |_, _, _, _| Url::parse(&format!("http://{address}/search")).unwrap(),
+                |_| Some(Url::parse(&format!("http://{address}/detail")).unwrap()),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), detail_started)
+            .await
+            .unwrap()
+            .unwrap();
+        reader.abort();
+        assert!(reader.await.unwrap_err().is_cancelled());
+        fixture.await.unwrap();
+        assert_eq!(
+            *report.lock().unwrap(),
+            (
+                2,
+                true,
+                vec!["urlscan search page limit reached".to_string()]
+            )
+        );
     }
 
     #[tokio::test]

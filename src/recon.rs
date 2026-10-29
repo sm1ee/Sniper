@@ -2,11 +2,12 @@
 //! not proxy transactions: archived and static candidates never imply liveness.
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    io::{self, BufRead, Read},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -656,31 +657,58 @@ async fn run(
         let report = if source == "crawler" {
             crawl(&session, id, &request, &scope, &crawler, &cancel).await
         } else {
-            let (findings, mut report) = match source.as_str() {
-                "urlscan" => recon_sources::urlscan(&provider, &scope.target, request.include_subdomains,
-                    request.max_pages, request.max_endpoints, &cancel).await,
-                "urlscan_submit" => recon_sources::submit_urlscan(&provider, &scope.target, request.include_subdomains,
-                    request.scan_visibility.as_deref().unwrap_or("private"), request.max_endpoints, &cancel,
-                    |result_url| {
-                        session.recon.update_source(id, source, |s| s.warnings.push(format!("Accepted scan result: {result_url}. Stop cancels local polling only.")));
-                        session.schedule_state_persist();
-                    }).await,
-                _ => recon_sources::wayback(&provider, &scope.target, request.include_subdomains,
-                    request.max_pages, request.max_endpoints, &cancel).await,
+            // A provider can have many completed pages before its final return.
+            // Commit each batch before the next await so Stop cannot discard it.
+            let checkpoint = |findings: &[Discovery], report: &SourceReport| {
+                checkpoint_provider_batch(
+                    &session,
+                    id,
+                    &scope,
+                    source,
+                    findings,
+                    report,
+                    request.max_endpoints,
+                    &cancel,
+                );
             };
-            let (added, truncated) = session.recon.merge_with_cancel(
-                id,
-                &scope,
-                source,
-                findings,
-                request.max_endpoints,
-                Some(&cancel),
-            );
-            report.truncated |= truncated;
-            session
-                .recon
-                .update_source(id, source, |s| s.discovered += added);
-            report
+            match source.as_str() {
+                "urlscan" => {
+                    recon_sources::urlscan(
+                        &provider,
+                        &scope.target,
+                        request.include_subdomains,
+                        request.max_pages,
+                        request.max_endpoints,
+                        &cancel,
+                        checkpoint,
+                    )
+                    .await
+                    .1
+                }
+                "urlscan_submit" => {
+                    let (findings, report) = recon_sources::submit_urlscan(&provider, &scope.target, request.include_subdomains,
+                        request.scan_visibility.as_deref().unwrap_or("private"), request.max_endpoints, &cancel,
+                        |result_url| {
+                            session.recon.update_source(id, source, |s| s.warnings.push(format!("Accepted scan result: {result_url}. Stop cancels local polling only.")));
+                            session.schedule_state_persist();
+                        }).await;
+                    checkpoint(&findings, &report);
+                    report
+                }
+                _ => {
+                    recon_sources::wayback(
+                        &provider,
+                        &scope.target,
+                        request.include_subdomains,
+                        request.max_pages,
+                        request.max_endpoints,
+                        &cancel,
+                        checkpoint,
+                    )
+                    .await
+                    .1
+                }
+            }
         };
         failed |= report.error.is_some();
         session.recon.update_source(id, source, |s| {
@@ -692,7 +720,11 @@ async fn run(
             .into();
             s.requests = report.requests;
             s.truncated |= report.truncated;
-            s.warnings.extend(report.warnings);
+            for warning in report.warnings {
+                if !s.warnings.contains(&warning) {
+                    s.warnings.push(warning);
+                }
+            }
             if let Some(error) = report.error {
                 s.warnings.push(error);
             }
@@ -722,14 +754,287 @@ async fn run(
     session.schedule_state_persist();
 }
 
+fn checkpoint_provider_batch(
+    session: &Arc<SessionContext>,
+    id: Uuid,
+    scope: &ReconScope,
+    source: &str,
+    findings: &[Discovery],
+    report: &SourceReport,
+    limit: usize,
+    cancel: &AtomicBool,
+) {
+    let (added, truncated) =
+        session
+            .recon
+            .merge_with_cancel(id, scope, source, findings.to_vec(), limit, Some(cancel));
+    checkpoint_source_progress(session, id, source, report, added, truncated);
+}
+
+fn checkpoint_source_progress(
+    session: &Arc<SessionContext>,
+    id: Uuid,
+    source: &str,
+    report: &SourceReport,
+    added: usize,
+    truncated: bool,
+) {
+    session.recon.update_source(id, source, |s| {
+        s.requests = report.requests;
+        s.discovered += added;
+        s.truncated |= truncated || report.truncated;
+        for warning in &report.warnings {
+            if !s.warnings.contains(warning) {
+                s.warnings.push(warning.clone());
+            }
+        }
+    });
+    session.schedule_state_persist();
+}
+
+// These limits apply only to newly supported compressed response work, not to
+// Recon's existing raw body reader or its request/endpoint collection budgets.
+const RECON_DECODED_STAGE_LIMIT: usize = 16 * 1024 * 1024;
+const RECON_DECODE_TIMEOUT: Duration = Duration::from_secs(15);
+const RECON_DECODE_WORKERS: usize = 2;
+const RECON_DECODE_INPUT_CHUNK: usize = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReconCoding {
+    Gzip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReconDecodeError {
+    Unsupported,
+    Malformed,
+    Limit,
+    Timeout,
+    Cancelled,
+    Worker,
+}
+
+impl ReconDecodeError {
+    fn warning(self) -> &'static str {
+        match self {
+            Self::Unsupported => "Unsupported or invalid Content-Encoding; static extraction was skipped.",
+            Self::Malformed => "Compressed response could not be decoded completely; static extraction was skipped.",
+            Self::Limit => "Compressed response exceeded the 16 MiB decoded-stage limit; static extraction was skipped.",
+            Self::Timeout => "Compressed response decoding exceeded 15 seconds; static extraction was skipped.",
+            Self::Cancelled => "Compressed response decoding was cancelled; static extraction was skipped.",
+            Self::Worker => "Compressed response decoding could not finish; static extraction was skipped.",
+        }
+    }
+}
+
+fn recon_content_codings(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Vec<ReconCoding>, ReconDecodeError> {
+    let mut codings = Vec::new();
+    for value in headers.get_all(reqwest::header::CONTENT_ENCODING) {
+        let value = value.to_str().map_err(|_| ReconDecodeError::Unsupported)?;
+        for coding in value.split(',') {
+            let coding = coding.trim_matches([' ', '\t']);
+            if coding.is_empty() || coding.eq_ignore_ascii_case("identity") {
+                continue;
+            }
+            if coding.eq_ignore_ascii_case("gzip") || coding.eq_ignore_ascii_case("x-gzip") {
+                codings.push(ReconCoding::Gzip);
+            } else {
+                return Err(ReconDecodeError::Unsupported);
+            }
+        }
+    }
+    Ok(codings)
+}
+
+#[derive(Clone)]
+struct ReconDecodeControl {
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+impl ReconDecodeControl {
+    fn check(&self) -> Result<(), ReconDecodeError> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(ReconDecodeError::Cancelled)
+        } else if Instant::now() >= self.deadline {
+            Err(ReconDecodeError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_io(&self) -> io::Result<()> {
+        self.check().map_err(|error| {
+            io::Error::new(
+                if error == ReconDecodeError::Timeout {
+                    io::ErrorKind::TimedOut
+                } else {
+                    io::ErrorKind::Other
+                },
+                "Recon decoding stopped",
+            )
+        })
+    }
+}
+
+struct ReconDecodeOwner {
+    cancelled: Arc<AtomicBool>,
+    abort: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for ReconDecodeOwner {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(abort) = &self.abort {
+            // Prevent queued work from starting; running blocking work exits
+            // cooperatively and retains its permit until the worker returns.
+            abort.abort();
+        }
+    }
+}
+
+struct ReconDecodeInput {
+    bytes: io::Cursor<Vec<u8>>,
+    control: ReconDecodeControl,
+}
+
+impl Read for ReconDecodeInput {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.control.check_io()?;
+        let length = output.len().min(RECON_DECODE_INPUT_CHUNK);
+        self.bytes.read(&mut output[..length])
+    }
+}
+
+impl BufRead for ReconDecodeInput {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.control.check_io()?;
+        let bytes = self.bytes.fill_buf()?;
+        Ok(&bytes[..bytes.len().min(RECON_DECODE_INPUT_CHUNK)])
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.bytes.consume(amount);
+    }
+}
+
+fn decode_recon_stages(
+    mut bytes: Vec<u8>,
+    codings: &[ReconCoding],
+    limit: usize,
+    control: &ReconDecodeControl,
+) -> Result<Vec<u8>, ReconDecodeError> {
+    for coding in codings.iter().rev() {
+        control.check()?;
+        let input = ReconDecodeInput {
+            bytes: io::Cursor::new(bytes),
+            control: control.clone(),
+        };
+        let mut decoder = match coding {
+            ReconCoding::Gzip => flate2::bufread::MultiGzDecoder::new(input),
+        };
+        let mut decoded = Vec::new();
+        let mut chunk = [0; 8 * 1024];
+        loop {
+            control.check()?;
+            let count = decoder
+                .read(&mut chunk)
+                .map_err(|_| control.check().err().unwrap_or(ReconDecodeError::Malformed))?;
+            if count == 0 {
+                break;
+            }
+            if count > limit.saturating_sub(decoded.len()) {
+                return Err(ReconDecodeError::Limit);
+            }
+            decoded.extend_from_slice(&chunk[..count]);
+        }
+        bytes = decoded;
+    }
+    control.check()?;
+    Ok(bytes)
+}
+
+async fn dispatch_recon_decode<F>(
+    permits: Arc<tokio::sync::Semaphore>,
+    timeout: Duration,
+    work: F,
+) -> Result<Vec<u8>, ReconDecodeError>
+where
+    F: FnOnce(ReconDecodeControl) -> Result<Vec<u8>, ReconDecodeError> + Send + 'static,
+{
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let control = ReconDecodeControl {
+        cancelled: cancelled.clone(),
+        deadline: Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now),
+    };
+    let mut owner = ReconDecodeOwner {
+        cancelled,
+        abort: None,
+    };
+    match tokio::time::timeout(timeout, async {
+        let permit = permits
+            .acquire_owned()
+            .await
+            .map_err(|_| ReconDecodeError::Worker)?;
+        control.check()?;
+        let worker = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            control.check()?;
+            work(control)
+        });
+        owner.abort = Some(worker.abort_handle());
+        worker.await.map_err(|_| ReconDecodeError::Worker)?
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(ReconDecodeError::Timeout),
+    }
+}
+
 async fn read_body(mut response: reqwest::Response) -> Result<String, &'static str> {
+    let bodyless_status = matches!(response.status().as_u16(), 204 | 205);
+    let codings = recon_content_codings(response.headers());
+    if !bodyless_status {
+        if let Err(error) = &codings {
+            return Err(error.warning());
+        }
+    }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|_| "Response body could not be read.")?
     {
+        if !chunk.is_empty() {
+            // A nonempty 204/205 no longer qualifies for the empty-body
+            // exemption. Reject a known coding error before another wait.
+            if let Err(error) = &codings {
+                return Err(error.warning());
+            }
+        }
         bytes.extend_from_slice(&chunk);
+    }
+    if bodyless_status && bytes.is_empty() {
+        // Metadata on an empty 204/205 is not malformed gzip. Nonempty raw
+        // responses retain the existing reader behavior, even for status 205.
+        return Ok(String::new());
+    }
+    let codings = codings.map_err(ReconDecodeError::warning)?;
+    if !codings.is_empty() {
+        static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+        let permits = PERMITS
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(RECON_DECODE_WORKERS)))
+            .clone();
+        bytes = dispatch_recon_decode(permits, RECON_DECODE_TIMEOUT, move |control| {
+            decode_recon_stages(bytes, &codings, RECON_DECODED_STAGE_LIMIT, &control)
+        })
+        .await
+        .map_err(ReconDecodeError::warning)?;
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -771,6 +1076,9 @@ async fn crawl(
             break;
         }
         report.requests += 1;
+        // Stop aborts the worker at await points. Retain completed work and
+        // known limits before waiting for another response or its body.
+        checkpoint_source_progress(session, id, "crawler", &report, 0, false);
         let response = match client.get(url.clone()).send().await {
             Ok(response) => response,
             Err(_) => {
@@ -800,10 +1108,7 @@ async fn crawl(
             Some(cancel),
         );
         report.truncated |= truncated;
-        session.recon.update_source(id, "crawler", |s| {
-            s.requests = report.requests;
-            s.discovered += added;
-        });
+        checkpoint_source_progress(session, id, "crawler", &report, added, truncated);
         if response.status().is_redirection() {
             if let Some(location) = response
                 .headers()
@@ -812,11 +1117,13 @@ async fn crawl(
             {
                 if let Ok(mut next) = url.join(location) {
                     next.set_fragment(None);
-                    if scope.contains(&next) && redirects < 5 {
+                    let in_scope = scope.contains(&next);
+                    if in_scope && redirects < 5 {
                         if scheduled.insert(next.to_string()) {
                             queue.push_front((next, depth, redirects + 1));
                         }
                     } else {
+                        report.truncated |= in_scope && !scheduled.contains(next.as_str());
                         let warning = "A redirect was not followed because it left scope or exceeded five hops.";
                         if !report.warnings.iter().any(|item| item == warning) {
                             report.warnings.push(warning.into());
@@ -847,6 +1154,7 @@ async fn crawl(
                 if !report.warnings.iter().any(|item| item == error) {
                     report.warnings.push(error.into());
                 }
+                checkpoint_source_progress(session, id, "crawler", &report, 0, false);
                 continue;
             }
         };
@@ -893,10 +1201,7 @@ async fn crawl(
             Some(cancel),
         );
         report.truncated |= truncated;
-        session
-            .recon
-            .update_source(id, "crawler", |s| s.discovered += added);
-        session.schedule_state_persist();
+        checkpoint_source_progress(session, id, "crawler", &report, added, truncated);
         // Deliberately sequential and paced; forms and JS guesses are retained
         // as candidates only, never automatically executed.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1078,6 +1383,56 @@ mod tests {
     }
 
     #[test]
+    fn inventory_form_actions_normalize_fragments_without_losing_raw_evidence() {
+        let store = ReconStore::from_snapshot(ReconSnapshot::default());
+        let document = Url::parse("https://example.com/form?b=2&a=1").unwrap();
+        let scope = ReconScope::new(document.as_str(), false).unwrap();
+        let (found, clipped) = crate::recon_sources::extract_document(
+            &document,
+            "text/html",
+            r##"<form method="POST" action="#one"></form>
+                <form method="POST" action="#two"></form>
+                <form method="DELETE" action="#get"></form>"##,
+        );
+        assert!(!clipped);
+        assert_eq!(
+            store.merge(Uuid::new_v4(), &scope, "crawler", found, 0),
+            (2, false)
+        );
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.endpoints.len(), 2);
+        let post = snapshot
+            .endpoints
+            .iter()
+            .find(|item| item.method == "POST")
+            .unwrap();
+        let get = snapshot
+            .endpoints
+            .iter()
+            .find(|item| item.method == "GET")
+            .unwrap();
+        assert_eq!(post.url, "https://example.com/form?b=2&a=1");
+        assert_eq!(get.url, post.url);
+        assert_eq!(
+            post.raw_urls,
+            [
+                "https://example.com/form?b=2&a=1#one",
+                "https://example.com/form?b=2&a=1#two"
+            ]
+        );
+        assert_eq!(get.raw_urls, ["https://example.com/form?b=2&a=1#get"]);
+        assert!(snapshot
+            .endpoints
+            .iter()
+            .all(|item| item.evidence.iter().all(|e| {
+                e.source == "crawler"
+                    && e.kind == "candidate"
+                    && e.status.is_none()
+                    && e.location == format!("form: {document}")
+            })));
+    }
+
+    #[test]
     fn a_jobs_endpoint_limit_counts_its_own_finds_not_the_inventory() {
         let store = ReconStore::from_snapshot(ReconSnapshot::default());
         let scope = ReconScope::new("https://example.com", false).unwrap();
@@ -1232,6 +1587,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopped_provider_checkpoints_keep_counts_evidence_and_restart_state() {
+        let dir = std::env::temp_dir().join(format!("sniper-recon-checkpoint-{}", Uuid::new_v4()));
+        let (registry, session) =
+            crate::session::SessionRegistry::load_or_create(&dir, 32, 32).unwrap();
+        let id = Uuid::new_v4();
+        session.recon.snapshot.lock().unwrap().jobs.push(ReconJob {
+            id,
+            target_url: "https://example.com/".into(),
+            status: "running".into(),
+            started_at: Utc::now(),
+            finished_at: None,
+            error: None,
+            sources: vec![ReconSource {
+                source: "wayback".into(),
+                status: "running".into(),
+                requests: 0,
+                discovered: 0,
+                truncated: false,
+                warnings: vec![],
+            }],
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let worker_session = session.clone();
+        let (checkpointed, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let scope = ReconScope::new("https://example.com/", false).unwrap();
+            let found = |path: &str, page: &str| Discovery {
+                url: format!("https://example.com/{path}"),
+                method: "GET".into(),
+                kind: "history".into(),
+                location: page.into(),
+                timestamp: None,
+                status: Some(404),
+            };
+            checkpoint_provider_batch(
+                &worker_session,
+                id,
+                &scope,
+                "wayback",
+                &[
+                    found("retained", "page one"),
+                    found("over-budget", "page one"),
+                ],
+                &SourceReport {
+                    requests: 1,
+                    truncated: true,
+                    warnings: vec!["Known provider limit".into()],
+                    ..SourceReport::default()
+                },
+                1,
+                &worker_cancel,
+            );
+            checkpoint_provider_batch(
+                &worker_session,
+                id,
+                &scope,
+                "wayback",
+                &[found("retained", "page two")],
+                &SourceReport {
+                    requests: 2,
+                    ..SourceReport::default()
+                },
+                1,
+                &worker_cancel,
+            );
+            checkpointed.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        *session.recon.running.lock().unwrap() = Some(RunningJob { id, cancel, task });
+        ready.await.unwrap();
+        assert!(session.recon.stop(Some(id)).await);
+        session.persist_state_only().await.unwrap();
+        let restored = registry.load_context(session.id()).unwrap();
+        let snapshot = restored.recon.snapshot();
+        assert_eq!(snapshot.jobs[0].status, "cancelled");
+        assert_eq!(snapshot.jobs[0].sources[0].status, "cancelled");
+        assert_eq!(snapshot.jobs[0].sources[0].requests, 2);
+        assert_eq!(snapshot.jobs[0].sources[0].discovered, 1);
+        assert!(snapshot.jobs[0].sources[0].truncated);
+        assert!(snapshot.jobs[0].sources[0]
+            .warnings
+            .iter()
+            .any(|warning| warning == "Known provider limit"));
+        assert_eq!(snapshot.endpoints.len(), 1);
+        assert_eq!(snapshot.endpoints[0].url, "https://example.com/retained");
+        assert_eq!(snapshot.endpoints[0].evidence.len(), 2);
+        assert!(snapshot.endpoints[0]
+            .evidence
+            .iter()
+            .all(|item| item.kind == "history"));
+        assert_eq!(
+            restored.recon.site_map_endpoints()[0].kinds,
+            vec!["history"]
+        );
+    }
+
+    #[tokio::test]
     async fn crawl_obeys_redirect_scope_and_never_executes_forms_or_js_candidates() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1303,31 +1756,128 @@ mod tests {
         // real session it is left for the OS temporary-directory cleanup.
     }
 
+    #[tokio::test]
+    async fn in_scope_redirect_hop_exhaustion_is_partial_but_scope_rejection_is_not() {
+        use axum::{routing::get, Router};
+        for exhaust_hops in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let requested = Arc::new(Mutex::new(Vec::new()));
+            let captured = requested.clone();
+            let router = Router::new().fallback(get(move |uri: axum::http::Uri| {
+                captured.lock().unwrap().push(uri.path().to_string());
+                async move {
+                    let redirect = if uri.path() == "/outside-redirect" {
+                        Some(format!("http://localhost:{}/outside", address.port()))
+                    } else {
+                        uri.path()
+                            .strip_prefix("/redirect/")
+                            .and_then(|part| part.parse::<usize>().ok())
+                            .filter(|hop| *hop < 7)
+                            .map(|hop| format!("/redirect/{}", hop + 1))
+                    };
+                    (
+                        if redirect.is_some() {
+                            StatusCode::FOUND
+                        } else {
+                            StatusCode::OK
+                        },
+                        [(axum::http::header::LOCATION, redirect.unwrap_or_default())],
+                        "",
+                    )
+                }
+            }));
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let dir =
+                std::env::temp_dir().join(format!("sniper-recon-redirect-{}", Uuid::new_v4()));
+            let (_, session) =
+                crate::session::SessionRegistry::load_or_create(&dir, 32, 32).unwrap();
+            let path = if exhaust_hops {
+                "/redirect/0"
+            } else {
+                "/outside-redirect"
+            };
+            let request: StartRecon = serde_json::from_value(serde_json::json!({
+                "session_id":session.id(),"target_url":format!("http://{address}{path}"),"sources":["crawler"]
+            })).unwrap();
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let report = crawl(
+                &session,
+                Uuid::new_v4(),
+                &request,
+                &validate(&request).unwrap(),
+                &client,
+                &AtomicBool::new(false),
+            )
+            .await;
+            assert_eq!(report.truncated, exhaust_hops);
+            assert!(report.error.is_none());
+            assert!(report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("redirect")));
+            let paths = requested.lock().unwrap();
+            if exhaust_hops {
+                assert!(paths.iter().any(|path| path == "/redirect/5"));
+                assert!(!paths.iter().any(|path| path == "/redirect/6"));
+            }
+            assert!(!paths.iter().any(|path| path == "/outside"));
+            drop(paths);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
     async fn crawl_static_fixture(
         content_type: &str,
         body: &str,
         path: &str,
     ) -> (SourceReport, ReconSnapshot, Vec<String>) {
+        crawl_wire_fixture(content_type, body.as_bytes(), &[], path).await
+    }
+
+    async fn crawl_wire_fixture(
+        content_type: &str,
+        body: &[u8],
+        encodings: &[&str],
+        path: &str,
+    ) -> (SourceReport, ReconSnapshot, Vec<String>) {
         use axum::{routing::get, Router};
         let requested = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured = requested.clone();
-        let content_type = content_type.to_string();
-        let body = body.to_string();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            content_type.parse().unwrap(),
+        );
+        for encoding in encodings {
+            headers.append(
+                axum::http::header::CONTENT_ENCODING,
+                encoding.parse().unwrap(),
+            );
+        }
+        let body = body.to_vec();
         let fixture_path = path.to_string();
         let router = Router::new().fallback(get(move |uri: axum::http::Uri| {
             let captured = captured.clone();
-            let content_type = content_type.clone();
+            let headers = headers.clone();
             let body = body.clone();
             let fixture_path = fixture_path.clone();
             async move {
                 captured.lock().unwrap().push(uri.path().to_string());
                 if uri.path() == fixture_path {
-                    ([(axum::http::header::CONTENT_TYPE, content_type)], body)
+                    (headers, body)
                 } else {
-                    (
-                        [(axum::http::header::CONTENT_TYPE, "text/plain".into())],
-                        String::new(),
-                    )
+                    let mut plain = axum::http::HeaderMap::new();
+                    plain.insert(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/plain".parse().unwrap(),
+                    );
+                    (plain, Vec::new())
                 }
             }
         }));
@@ -1362,6 +1912,508 @@ mod tests {
         server.abort();
         let _ = server.await;
         (report, snapshot, paths)
+    }
+
+    fn encoded_fixture_gzip(body: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(body).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn decode_test_control() -> ReconDecodeControl {
+        ReconDecodeControl {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now() + Duration::from_secs(5),
+        }
+    }
+
+    #[test]
+    fn recon_decode_limits_apply_to_each_compressed_stage_and_all_members_only() {
+        assert_eq!(RECON_DECODED_STAGE_LIMIT, 16 * 1024 * 1024);
+        assert_eq!(RECON_DECODE_WORKERS, 2);
+        assert_eq!(RECON_DECODE_TIMEOUT, Duration::from_secs(15));
+        let decode = |bytes, codings: &[ReconCoding]| {
+            decode_recon_stages(bytes, codings, 64, &decode_test_control())
+        };
+        let gzip = [ReconCoding::Gzip];
+        assert_eq!(
+            decode(encoded_fixture_gzip(&[7; 64]), &gzip).unwrap(),
+            vec![7; 64]
+        );
+        assert_eq!(
+            decode(encoded_fixture_gzip(&[7; 65]), &gzip),
+            Err(ReconDecodeError::Limit)
+        );
+        let members = |second| {
+            [
+                encoded_fixture_gzip(&[1; 32]),
+                encoded_fixture_gzip(&vec![2; second]),
+            ]
+            .concat()
+        };
+        assert_eq!(decode(members(32), &gzip).unwrap().len(), 64);
+        assert_eq!(decode(members(33), &gzip), Err(ReconDecodeError::Limit));
+        let raw: Vec<u8> = (0..64).collect();
+        let inner = encoded_fixture_gzip(&raw);
+        assert!(inner.len() > 64);
+        assert_eq!(
+            decode(encoded_fixture_gzip(&inner), &[ReconCoding::Gzip; 2]),
+            Err(ReconDecodeError::Limit)
+        );
+        // The existing raw/identity reader has no decoded-body limit.
+        assert_eq!(decode(vec![9; 65], &[]).unwrap(), vec![9; 65]);
+        // Even an empty member must validate its trailer and true stream EOF.
+        assert_eq!(
+            decode(encoded_fixture_gzip(b""), &gzip).unwrap(),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn recon_decode_header_lists_are_local_strict_and_do_not_echo_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::CONTENT_ENCODING,
+            " GZip, identity,".parse().unwrap(),
+        );
+        headers.append(reqwest::header::CONTENT_ENCODING, "x-gzip".parse().unwrap());
+        assert_eq!(
+            recon_content_codings(&headers).unwrap(),
+            vec![ReconCoding::Gzip; 2]
+        );
+        for value in [b"secret-custom".as_slice(), b"gzip; secret", b"\xff"] {
+            headers.insert(
+                reqwest::header::CONTENT_ENCODING,
+                reqwest::header::HeaderValue::from_bytes(value).unwrap(),
+            );
+            assert_eq!(
+                recon_content_codings(&headers),
+                Err(ReconDecodeError::Unsupported)
+            );
+            assert!(!ReconDecodeError::Unsupported.warning().contains("secret"));
+        }
+    }
+
+    #[test]
+    fn recon_decode_guard_bounds_input_and_uses_non_retriable_cancellation() {
+        let control = decode_test_control();
+        let mut input = ReconDecodeInput {
+            bytes: io::Cursor::new(vec![0; 40_000]),
+            control: control.clone(),
+        };
+        assert_eq!(input.fill_buf().unwrap().len(), RECON_DECODE_INPUT_CHUNK);
+        let mut buffer = [0; 40_000];
+        assert_eq!(input.read(&mut buffer).unwrap(), RECON_DECODE_INPUT_CHUNK);
+        control.cancelled.store(true, Ordering::Release);
+        assert_eq!(
+            input.read(&mut buffer).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(
+            decode_recon_stages(
+                encoded_fixture_gzip(b"small"),
+                &[ReconCoding::Gzip],
+                64,
+                &control
+            ),
+            Err(ReconDecodeError::Cancelled)
+        );
+        let expired = ReconDecodeControl {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now(),
+        };
+        assert_eq!(
+            decode_recon_stages(
+                encoded_fixture_gzip(b"small"),
+                &[ReconCoding::Gzip],
+                64,
+                &expired
+            ),
+            Err(ReconDecodeError::Timeout)
+        );
+    }
+
+    #[tokio::test]
+    async fn recon_decode_queued_owner_drop_and_timeout_never_start_work() {
+        for timed_out in [false, true] {
+            let permits = Arc::new(tokio::sync::Semaphore::new(1));
+            let occupied = permits.clone().acquire_owned().await.unwrap();
+            let started = Arc::new(AtomicBool::new(false));
+            let observed = started.clone();
+            let worker_permits = permits.clone();
+            let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                waiting_tx.send(()).unwrap();
+                dispatch_recon_decode(worker_permits, Duration::from_millis(30), move |_| {
+                    observed.store(true, Ordering::Release);
+                    Ok(vec![])
+                })
+                .await
+            });
+            // The spawned future has polled through to the held semaphore.
+            waiting_rx.await.unwrap();
+            if timed_out {
+                assert_eq!(task.await.unwrap(), Err(ReconDecodeError::Timeout));
+            } else {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+            drop(occupied);
+            tokio::task::yield_now().await;
+            assert_eq!(permits.available_permits(), 1);
+            assert!(!started.load(Ordering::Acquire));
+        }
+    }
+
+    #[tokio::test]
+    async fn recon_decode_running_owner_keeps_permit_until_exit_without_late_publication() {
+        for timed_out in [false, true] {
+            let permits = Arc::new(tokio::sync::Semaphore::new(1));
+            let worker_permits = permits.clone();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+            let published = Arc::new(AtomicBool::new(false));
+            let late_publication = published.clone();
+            let task = tokio::spawn(async move {
+                let result =
+                    dispatch_recon_decode(worker_permits, Duration::from_secs(2), move |control| {
+                        ready_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        let checked = control.check();
+                        observed_tx.send(checked).unwrap();
+                        checked?;
+                        Ok(vec![1])
+                    })
+                    .await;
+                if result.is_ok() {
+                    late_publication.store(true, Ordering::Release);
+                }
+                result
+            });
+            tokio::time::timeout(Duration::from_secs(1), ready_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            if timed_out {
+                assert_eq!(task.await.unwrap(), Err(ReconDecodeError::Timeout));
+            } else {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+            // A dropped awaiting task must not release a still-running worker's slot.
+            assert_eq!(permits.available_permits(), 0);
+            release_tx.send(()).unwrap();
+            assert_eq!(observed_rx.await.unwrap(), Err(ReconDecodeError::Cancelled));
+            let permit =
+                tokio::time::timeout(Duration::from_secs(2), permits.clone().acquire_owned())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            drop(permit);
+            assert_eq!(permits.available_permits(), 1);
+            assert!(!published.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn recon_decode_blocking_pool_queued_task_is_aborted_before_work() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let occupied = tokio::task::spawn_blocking(move || {
+                ready_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+            ready_rx.await.unwrap();
+            let permits = Arc::new(tokio::sync::Semaphore::new(1));
+            let started = Arc::new(AtomicBool::new(false));
+            let observed = started.clone();
+            let task = tokio::spawn(dispatch_recon_decode(
+                permits.clone(),
+                Duration::from_secs(2),
+                move |_| {
+                    observed.store(true, Ordering::Release);
+                    Ok(vec![])
+                },
+            ));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while permits.available_permits() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            release_tx.send(()).unwrap();
+            occupied.await.unwrap();
+            let permit =
+                tokio::time::timeout(Duration::from_secs(2), permits.clone().acquire_owned())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            drop(permit);
+            assert!(!started.load(Ordering::Acquire));
+        });
+    }
+
+    async fn encoded_body_fixture(
+        status: u16,
+        encodings: &[&str],
+        body: &[u8],
+    ) -> Result<String, &'static str> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut response = format!(
+            "HTTP/1.1 {status} Fixture\r\nContent-Type: text/html\r\nConnection: close\r\n"
+        );
+        if status != 204 {
+            response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        for encoding in encodings {
+            response.push_str(&format!("Content-Encoding: {encoding}\r\n"));
+        }
+        response.push_str("\r\n");
+        let mut response = response.into_bytes();
+        response.extend_from_slice(body);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let mut bytes = [0; 1024];
+                let read = socket.read(&mut bytes).await.unwrap();
+                assert!(read > 0 && request.len() < 8192);
+                request.extend_from_slice(&bytes[..read]);
+            }
+            socket.write_all(&response).await.unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get_all(reqwest::header::CONTENT_ENCODING)
+                .iter()
+                .count(),
+            encodings.len()
+        );
+        let result = read_body(response).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn recon_encoded_body_rejects_known_unsupported_headers_before_body_wait() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for status in [200, 205] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let mut bytes = [0; 1024];
+                    let count = socket.read(&mut bytes).await.unwrap();
+                    assert!(count > 0 && request.len() < 8192);
+                    request.extend_from_slice(&bytes[..count]);
+                }
+                let prefix = if status == 205 { "b" } else { "" };
+                let response = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: text/html\r\nContent-Encoding: unknown\r\nContent-Length: 4\r\nConnection: close\r\n\r\n{prefix}");
+                socket.write_all(response.as_bytes()).await.unwrap();
+                release_rx.await.unwrap();
+                let _ = socket
+                    .write_all(if status == 205 { b"ody" } else { b"body" })
+                    .await;
+            });
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            // Headers are received. A 205 additionally has one byte available,
+            // proving it is nonempty, while the remaining body stays held.
+            let result =
+                tokio::time::timeout(Duration::from_millis(300), read_body(response)).await;
+            release_tx.send(()).unwrap();
+            server.await.unwrap();
+            assert_eq!(
+                result.unwrap(),
+                Err(ReconDecodeError::Unsupported.warning()),
+                "{status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn crawl_encoded_body_does_not_claim_extraction_failure_for_binary_content() {
+        let (report, snapshot, paths) = crawl_wire_fixture(
+            "application/octet-stream",
+            b"<a href='/must-not-follow'>binary</a>",
+            &["unknown"],
+            "/binary",
+        )
+        .await;
+        assert!(!report.truncated, "{report:?}");
+        assert!(!report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Content-Encoding")));
+        assert_eq!(paths.len(), 3);
+        assert!(snapshot.endpoints.iter().all(|endpoint| endpoint
+            .evidence
+            .iter()
+            .all(|evidence| evidence.kind == "live")));
+    }
+
+    #[tokio::test]
+    async fn recon_encoded_body_preserves_identity_and_bodyless_responses() {
+        let raw = b"unchanged\xffidentity";
+        for encodings in [vec![], vec!["identity"], vec![""], vec![" , identity, "]] {
+            assert_eq!(
+                encoded_body_fixture(200, &encodings, raw).await.unwrap(),
+                String::from_utf8_lossy(raw)
+            );
+        }
+        for encodings in [vec![], vec!["identity"]] {
+            assert_eq!(
+                encoded_body_fixture(205, &encodings, raw).await.unwrap(),
+                String::from_utf8_lossy(raw)
+            );
+        }
+        for status in [204, 205] {
+            assert_eq!(
+                encoded_body_fixture(status, &["gzip"], b"").await.unwrap(),
+                ""
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recon_encoded_body_decodes_gzip_aliases_without_altering_static_text() {
+        let raw =
+            b"<a href='/found?q=1&amp;q=2'>link</a><form method='POST' action='/form'></form>";
+        let encoded = encoded_fixture_gzip(raw);
+        for encoding in ["gzip", "GZip", "x-gzip", " identity , gzip , "] {
+            assert_eq!(
+                encoded_body_fixture(200, &[encoding], &encoded)
+                    .await
+                    .unwrap()
+                    .as_bytes(),
+                raw,
+                "{encoding}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recon_encoded_body_keeps_stacked_fields_and_all_concatenated_members() {
+        let raw = b"<a href='/first'>first</a><a href='/second'>second</a>";
+        let stacked = encoded_fixture_gzip(&encoded_fixture_gzip(raw));
+        for encodings in [vec!["gzip, gzip"], vec!["gzip", "x-gzip"]] {
+            assert_eq!(
+                encoded_body_fixture(200, &encodings, &stacked)
+                    .await
+                    .unwrap()
+                    .as_bytes(),
+                raw
+            );
+        }
+        let mut concatenated = encoded_fixture_gzip(&raw[..24]);
+        concatenated.extend(encoded_fixture_gzip(&raw[24..]));
+        assert_eq!(
+            encoded_body_fixture(200, &["gzip"], &concatenated)
+                .await
+                .unwrap()
+                .as_bytes(),
+            raw
+        );
+    }
+
+    #[tokio::test]
+    async fn recon_encoded_body_rejects_incomplete_or_unsupported_content_without_raw_fallback() {
+        let raw = b"<a href='/must-not-follow'>wire bytes</a>";
+        let encoded = encoded_fixture_gzip(raw);
+        let mut trailing = encoded.clone();
+        trailing.extend_from_slice(b"not-a-member");
+        let mut bad_crc = encoded.clone();
+        let crc = bad_crc.len() - 8;
+        bad_crc[crc] ^= 1;
+        for body in [
+            Vec::new(),
+            raw.to_vec(),
+            encoded[..encoded.len() - 2].to_vec(),
+            trailing,
+            bad_crc,
+        ] {
+            assert!(encoded_body_fixture(200, &["gzip"], &body).await.is_err());
+        }
+        for encodings in [
+            vec!["br"],
+            vec!["deflate"],
+            vec!["zstd"],
+            vec!["gzip, unknown"],
+            vec!["gzip;level=1"],
+        ] {
+            assert!(
+                encoded_body_fixture(200, &encodings, raw).await.is_err(),
+                "{encodings:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn crawl_encoded_body_marks_partial_and_retains_live_response_without_false_links() {
+        let (report, snapshot, paths) = crawl_wire_fixture(
+            "text/html",
+            b"<a href='/must-not-follow'>not gzip</a>",
+            &["gzip"],
+            "/encoded",
+        )
+        .await;
+        assert!(report.truncated, "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.to_ascii_lowercase().contains("decod")),
+            "{report:?}"
+        );
+        assert_eq!(report.requests, 3);
+        assert!(report.error.is_none());
+        assert!(!paths.iter().any(|path| path == "/must-not-follow"));
+        assert!(snapshot
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.url.ends_with("/encoded")
+                && endpoint
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == "live" && evidence.status == Some(200))));
+        assert!(snapshot.endpoints.iter().all(|endpoint| endpoint
+            .evidence
+            .iter()
+            .all(|evidence| evidence.kind == "live")));
     }
 
     #[tokio::test]

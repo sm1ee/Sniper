@@ -9,7 +9,7 @@ the active session.
 ## The map
 
 The Map tool has two views, Service Map and APIs. Service Map shows one card per
-origin, with origin search, an **In scope** toggle and an APIs/Evidence
+origin, with origin search, an **In scope** toggle and an APIs/Details
 inspector. Each card leads with what its origin serves:
 
 - **Front**: HTML pages, or a front-end product or CMS that a header names or
@@ -41,8 +41,8 @@ Relationship and source lists show at most 30 rows per pane, and API lists page
   zooms around the pointer.
 - Drag the bar between the map and the inspector to resize the inspector;
   double-click restores it.
-- Selecting a card or an API entry changes only the local view. **View source**
-  reads the row's safe metadata (see [One-row reads](#one-row-reads)).
+- Selecting a card or an API entry changes only the local view. **Details** and
+  its sample picker read one exact retained sample (see [Retained packet pair](#retained-packet-pair)); they send nothing to its target.
 
 ## How the map is read
 
@@ -149,7 +149,11 @@ count. The request kinds toggled under **Requests** and the Service Map filter
 apply. Click an arrow to open its newest row in HTTP history, or another lane to
 follow that origin. The lane headers stay at the top while the flow scrolls.
 **Copy Mermaid**, at the end of the legend, copies the flow as a Mermaid
-sequence diagram.
+sequence diagram. The copy keeps the row counts, stop reasons and hidden request
+kinds, and a cut-off flow is marked **Partial flow**. `considered_rows` is how
+many of the newest rows were read; `flow_rows` is how many the steps show, after
+the 300-step cap. Links or redirects that could not be read also make a flow
+partial.
 
 The view reads the newest 50,000 rows; the CLI reads 10,000 unless told
 otherwise:
@@ -290,6 +294,10 @@ that row in Replay. **Copy OpenAPI JSON** and **Open in Swagger Editor** export
 the document. At most 500 operations are listed; `info.description` says what was
 left out.
 
+`x-sniper-parameter-cap-truncated: true` marks an operation whose parameter list
+reached the 200-entry cap. Its absence does not prove the list complete:
+parameters come from each path variant's newest 20 rows.
+
 ```bash
 sniper-cli scope service-map openapi --session-id <active-session-uuid> --origin https://api.example.com > api.json
 ```
@@ -362,12 +370,15 @@ per map and 128 header tokens per row each add a `technology_…_limit` marker t
 These reads inspect one exact retained row, named by an evidence token from the
 map. Copy the token (at most 200 bytes) unchanged. A stale, edited or removed row
 returns unavailable, never another row. Check `available` before using a result,
-and `complete` and `reasons` for a partial one. None sends a request to a target.
+and `complete` and `reasons` for a partial one; a packet read reports each side
+instead (see [Retained packet pair](#retained-packet-pair)). None sends a request
+to a target.
 All except evidence need the active session and never load another.
 
 | Read | CLI | Returns |
 | --- | --- | --- |
 | Evidence | `scope service-map-evidence` | Safe metadata for the row, with no bodies or raw headers. `--include-socket-peer` adds its recorded socket peer (see [Observed socket peer](observed-socket-peer.md)). |
+| Packet | `scope service-map packet --variant current` (or `original`) | Both selected retained messages, ordered headers and body previews under one exact source key. No annotations or reconstructed wire transcript. |
 | Body references | `scope service-map body-references` | Canonical origins of literal absolute HTTP(S) URLs in a UTF-8 HTML or JavaScript response preview, with byte offsets. Nothing is decoded, parsed or run, and relative URLs are not resolved. |
 | Link declarations | `scope service-map link-declarations` | Target origins of `service-doc`, `service-desc`, `describedby` and `preconnect` in the `Link` headers of a GET or HEAD 200 response. |
 | HTML generators | `scope service-map html-generators` | WordPress or Drupal, with any version, from `<meta name="generator">` in a UTF-8 `text/html` preview. It needs explicit `html` and `head` elements, and unusual markup stops it early. |
@@ -376,12 +387,42 @@ All except evidence need the active session and never load another.
 ```bash
 sniper-cli scope service-map-evidence --session-id <returned-session-uuid> --evidence-id <returned-evidence-token>
 sniper-cli scope service-map body-references --session-id <active-session-uuid> --evidence-id <returned-evidence-token>
+sniper-cli scope service-map packet --session-id <active-session-uuid> --evidence-id <returned-evidence-token> --variant current
 ```
 
-In the GUI, **View source** opens evidence, and the inspector offers the other
-reads for that row. Offsets and spans count UTF-8 bytes of the retained preview
-or header value, not of the wire. A generator `parser_stop.byte_cursor` can fall
-inside a character, so do not slice text with it.
+In the GUI, **Details** picks the retained sample, and **Inspect** and **Find
+matching peer** run the reads above on it; picking a sample runs none of them.
+Offsets and spans count UTF-8 bytes of the retained preview or header value, not
+of the wire. A generator `parser_stop.byte_cursor` can fall inside a character,
+so do not slice text with it.
+
+## Retained packet pair
+
+**Details** shows one retained request and response in the packet viewer,
+starting in **Raw**; its sample picker chooses the row and the current or
+original version. The packet menu copies the packet, or opens a complete request
+as an unsent Replay or Fuzzer draft. A failed read offers **Retry**.
+
+`GET /api/target/service-map/packet` takes `session_id` (the active session),
+`evidence_id` and `variant=current|original`; `scope service-map packet` in the
+CLI is the same read. It sends nothing. The reply has `schema_version: 1`,
+`available`, `reason`, the source row's id, time and `sequence` (a string), and
+`request` and `response`. A side that was not kept is
+`{"status": "not_retained", "message": null}`. A kept side has its start line,
+its headers in order and a `body` with `body_preview`, `body_encoding`, sizes,
+`preview_truncated`, `content_decoded` and `content_type`; an unavailable body
+is not an empty string.
+
+These are the stored messages, not wire bytes: a body may be decoded or cut to
+the capture preview. An original has only what was kept, and nothing falls back
+to the current version.
+
+The token names one exact row. If that row changes or goes, or the session
+changes, the read is unavailable rather than another row. The reply is at most
+2 MiB, and so is the row read from disk; past either, the read is unavailable
+(`packet_view_limit`, `serialized_row_limit`). Reads share one worker and give
+up with `read_busy` after 20 seconds in its queue. Captured headers and URLs can
+hold credentials, so treat a copied packet as sensitive.
 
 ## Explicit recorded socket peer matches
 
@@ -404,13 +445,14 @@ not connections, and a shared address does not mean a shared owner.
 
 ## Session-local retained relationship collection (GUI only)
 
-After **View source** verifies a row, inspect **Body URL references**,
-**Response Link headers** or **Matching recorded socket peers**, then choose
+From the selected sample in **Details**, choose **Body references** or
+**Link references** under **Inspect**, or use **Find matching peer**, then choose
 **Show references on map** or **Show recorded address group** to add the result
 to the graph without another read. Up to eight entries can be shown at once in
 the current session; a ninth is rejected rather than evicting one. Entries are
 never saved. **Shown inspections** lists them, with **View inspected source**,
-**Remove inspection** and **Clear all inspections**.
+**Remove inspection** and **Clear all inspections**. A peer overlay sample uses
+**Verify source ›** to verify that exact retained row.
 
 Body and Link entries draw typed reference arrows. Peer entries draw undirected
 spokes through recorded-address nodes; entries sharing an address share a node
@@ -437,6 +479,7 @@ Entries are removed when their source can no longer be verified:
 - `GET /api/target/service-map/favicon?session_id=<active-uuid>&evidence_id=<origin-favicon-token>`
 - `GET /api/target/service-map/evidence?session_id=<uuid>&evidence_id=<opaque-token>`
 - `GET /api/target/service-map/socket-peer-matches?session_id=<active-uuid>&evidence_id=<opaque-token>`
+- `GET /api/target/service-map/packet?session_id=<active-uuid>&evidence_id=<opaque-token>&variant=current`
 - `GET /api/target/service-map/body-references?session_id=<active-uuid>&evidence_id=<opaque-token>`
 - `GET /api/target/service-map/html-generators?session_id=<active-uuid>&evidence_id=<opaque-token>`
 - `GET /api/target/service-map/link-declarations?session_id=<active-uuid>&evidence_id=<opaque-token>`

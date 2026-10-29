@@ -52,7 +52,7 @@ for (const [ip, port, route, label] of [['192.0.2.10', 443, 'direct', 'Direct'],
   assert.equal(new URL(f.requests.at(-1).url, 'http://example.com').searchParams.get('include_socket_peer'), 'true');
   f.requests.at(-1).resolve(response(evidence('evidence-one', originA, { socket_peer: observed(ip, port, route) }))); await pending;
   assert.equal(f.requests.length, 2); assert.equal(f.els.canvas.innerHTML, beforeCanvas);
-  assert.match(f.els.detail.innerHTML, /Upstream socket peer/); assert.ok(f.els.detail.innerHTML.includes(ip));
+  assert.match(f.els.detail.innerHTML, /<summary>Capture info<\/summary>/); assert.match(f.els.detail.innerHTML, /Recorded peer/); assert.ok(f.els.detail.innerHTML.includes(ip));
   assert.ok(f.els.detail.innerHTML.includes(label)); assert.match(f.els.detail.innerHTML, /Response headers observed at/);
   assert.doesNotMatch(f.els.canvas.innerHTML, /192\.0|2001:db8|Upstream socket peer/);
 });
@@ -72,7 +72,7 @@ const invalid = [null, {}, { status: 'not_recorded', observation: observed().obs
 for (const [i, peer] of invalid.entries()) test(`malformed peer ${i} never enters the DOM or invalidates otherwise verified metadata`, async () => {
   const f = fixture(); await f.load(); f.controller.selectOrigin(originA); const pending = f.controller.loadEvidence('evidence-one');
   f.requests.at(-1).resolve(response(evidence('evidence-one', originA, { socket_peer: peer }))); assert.equal(await pending, true);
-  assert.match(f.els.detail.innerHTML, /Verified retained source/); assert.match(f.els.detail.innerHTML, /Socket peer details could not be verified/);
+  assert.match(f.els.detail.innerHTML, /Capture info/); assert.match(f.els.detail.innerHTML, /Socket peer details could not be verified/);
   assert.doesNotMatch(f.els.detail.innerHTML, /<img|onerror|\[object Object\]|eth0|999\.2/);
 });
 test('unexpected raw fields are never copied into normalized observations', () => {

@@ -136,7 +136,7 @@ test("a racing pin save rejected with 409 keeps the existing persistent conflict
   assert.equal(f.context.workspaceUnloadPayload(f.context.snapshotWorkspaceState()), null);
   await f.adopt(remotePin(f, false, 13));
   assert.equal(f.requests.length, 1, "later external state cannot silently clear a conflict");
-  assert.equal(f.toasts.length, 1);
+  assert.equal(f.notices.length, 1);
 });
 
 test("external HTTP pin adoption does not touch WebSocket pin or live objects", async () => {

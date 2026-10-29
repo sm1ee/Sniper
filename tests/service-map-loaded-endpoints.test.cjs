@@ -114,7 +114,7 @@ test('refresh remaps selected endpoint page by exact case-sensitive method/path'
   const reordered = [endpoint('/Selected', 'GET'), old[110], ...old.filter((_, index) => index !== 110)];
   await f.load(snapshot([origin(A, reordered)]));
   assert.equal(f.state.endpointIndex, 1); assert.equal(f.state.detailPage, 0); assert.equal(f.state.endpointSelection.method, 'get');
-  tab(f, 'evidence'); assert.match(f.els.detail.innerHTML, />get<\/span><strong>\/Selected/);
+  tab(f, 'evidence'); assert.match(f.els.detail.innerHTML, /<span>get <strong>\/Selected/);
 });
 
 test('refresh remaps independent page anchors without selecting their old array offsets', async () => {
@@ -167,7 +167,7 @@ test('filters reset both pages but preserve verified evidence and graph state ou
   f.filter('method', 'POST'); f.filter('path', '/nothing');
   assert.equal(f.state.page, 0); assert.equal(f.state.detailPage, 0); assert.equal(f.state.evidence, verified);
   assert.equal(f.state.endpointSelection.path, '/path-110'); assert.equal(f.els.canvas.innerHTML, graph); assert.equal(f.state.zoomScale, zoom);
-  assert.match(f.els.detail.innerHTML, /outside the loaded endpoint filters/); assert.match(f.els.detail.innerHTML, /Verified retained source/);
+  assert.match(f.els.detail.innerHTML, /outside the loaded endpoint filters/); assert.match(f.els.detail.innerHTML, /Capture info/);
   tab(f, 'apis'); assert.match(f.els.detail.innerHTML, /No loaded endpoints match/);
   f.click({ serviceEndpointFilterClear: 'true' }); assert.equal(f.state.endpointMethod, ''); assert.equal(f.state.endpointPath, '');
   assert.equal(f.state.evidence, verified); assert.doesNotMatch(f.els.detail.innerHTML, /outside the loaded endpoint filters/);
@@ -179,7 +179,7 @@ test('filters and tab switches do not abort an in-flight exact source read', asy
   const pending = f.verify(many()[110]); f.filter('path', '/no-match'); tab(f, 'apis');
   assert.equal(f.requests.at(-1).options.signal.aborted, false); await pending;
   assert.equal(f.state.evidence.path, '/path-110'); assert.equal(f.state.detailTab, 'apis');
-  tab(f, 'evidence'); assert.match(f.els.detail.innerHTML, /Verified retained source/); assert.equal(f.requests.length, 2);
+  tab(f, 'evidence'); assert.match(f.els.detail.innerHTML, /Capture info/); assert.equal(f.requests.length, 2);
 });
 
 test('origin search remains independent and local counts disclose each filter separately', async () => {

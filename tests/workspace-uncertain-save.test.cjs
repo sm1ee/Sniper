@@ -75,8 +75,9 @@ test("typed postcommit 500 retains drafts and committed baseline behind the relo
   assert.equal(f.context.workspaceSaveLoopPromise, null);
   assert.equal(f.timers.size, 0);
   assert.equal(f.delays.includes(1000), false);
-  assert.equal(f.toasts.length, 1);
-  assert.match(f.toasts[0][0], /reload the app before retrying/i);
+  assert.equal(f.notices.length, 1);
+  assert.match(f.notices[0].message, /reload the app before retrying/i);
+  assert.equal(f.notices[0].reload, false, "only reloading the app can tell whether it committed");
 });
 
 test("newer edits and repeated save callbacks cannot retry an uncertain commit", async () => {
@@ -110,7 +111,7 @@ test("newer edits and repeated save callbacks cannot retry an uncertain commit",
   assert.equal(f.timers.size, 0);
   assert.equal(f.delays.includes(1000), false);
   assert.equal(f.context.workspaceSaveDirty, true);
-  assert.equal(f.toasts.length, 1, "callbacks do not repeat the initial barrier toast");
+  assert.equal(f.notices.length, 1, "callbacks do not repeat the initial barrier notice");
 });
 
 test("every flush waiter retains typed uncertainty and refresh guidance", async () => {
@@ -122,8 +123,8 @@ test("every flush waiter retains typed uncertainty and refresh guidance", async 
   const pending = await f.context.flushWorkspaceState().then(() => null, error => error);
   assertUncertain(pending);
   f.context.handleWorkspaceActionError(pending);
-  assert.match(f.toasts.at(-1)[0], /reload the app before retrying/i);
-  assert.doesNotMatch(f.toasts.at(-1)[0], /changed elsewhere/i);
+  assert.match(f.notices.at(-1).message, /reload the app before retrying/i);
+  assert.doesNotMatch(f.notices.at(-1).message, /changed elsewhere/i);
   assert.equal(f.requests.length, 1);
 });
 
@@ -154,7 +155,7 @@ for (const [description, payload, status] of [
   });
 }
 
-test("ordinary 409 retains existing conflict behavior and guidance", async () => {
+test("ordinary 409 keeps the conflict barrier and offers Reload", async () => {
   const f = setup(), latest = f.remote([f.a], 11), result = startSave(f);
   f.fail(0, latest, 409);
   const error = await result;
@@ -164,9 +165,11 @@ test("ordinary 409 retains existing conflict behavior and guidance", async () =>
   assert.equal(f.context.workspaceSaveDirty, true);
   assert.equal(f.state.workspaceRevision, 10);
   assert.equal(f.timers.size, 0);
-  assert.match(f.toasts[0][0], /changed elsewhere/);
+  assert.match(f.notices[0].message, /changed elsewhere/);
+  assert.equal(f.notices[0].reload, true);
   f.context.handleWorkspaceActionError(error);
-  assert.match(f.toasts.at(-1)[0], /before switching sessions/);
+  assert.match(f.notices.at(-1).message, /Reload brings in those changes and keeps your edits/);
+  assert.equal(f.toasts.length, 0, "a refused action reuses the notice instead of stacking toasts");
   await f.context.flushQueuedWorkspaceStateSave();
   assert.equal(f.requests.length, 1);
 });
@@ -352,7 +355,7 @@ for (const action of ["sendReplay", "followRedirect", "wsConnect"]) {
         assert.equal(f.a.customLabel, "newer metadata");
         assert.equal(f.a.wsEditorText, "newer websocket editor");
         assert.equal(f.els.replayRequestHighlight.innerText, "newer uncommitted DOM");
-        assert.match(f.toasts.at(-1)[0], /reload the app before retrying/i);
+        assert.match(f.notices.at(-1).message, /reload the app before retrying/i);
       }
       assert.equal(f.context.workspaceSaveConflictPending, true);
       assert.equal(f.context.workspaceSaveDirty, true);

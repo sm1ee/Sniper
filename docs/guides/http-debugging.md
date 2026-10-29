@@ -287,6 +287,12 @@ The result has `method`, `scheme`, `host`, `path`, `status`, `duration_ms`, and
 `request` and `response` objects. Each of those holds `headers`, `body_preview`,
 `body_size`, `body_encoding`, `content_type` and `preview_truncated`.
 
+A gzip body with several members is decoded as a whole. If any member is damaged,
+or the result passes the 16 MiB decoding limit, the encoded bytes are kept rather
+than a partial result. `body_size` stays the wire size; a decoded body also has
+`decoded_body_size` and `content_decoded`. Captures made before this change keep
+their previews; capture the traffic again to see the rest.
+
 ## Trusting the CA, and what that means
 
 A proxy cannot read HTTPS unless it terminates TLS. Sniper creates one root CA on

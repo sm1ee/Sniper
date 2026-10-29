@@ -33,13 +33,14 @@ function backendHistoryDefaults() {
 // Only extracted preference helpers and an inert Notes resize handle run here.
 function historyLayoutFixture() {
   const state = { historyColumnWidths: {} }, handlers = new Map(), styles = new Map(), saves = [];
+  const handle = { dataset: { columnKey: "notes" }, addEventListener: (name, callback) => handlers.set(name, callback), setAttribute() {} };
   const context = loadFunctions([
     "clamp", "createDefaultHistoryColumnWidths", "sanitizeHistoryColumnWidths",
     "bindHistoryColumnResizers", "applyHistoryColumnWidths",
   ], {
     state,
-    historyColumnHandles: [{ dataset: { columnKey: "notes" }, addEventListener: (name, callback) => handlers.set(name, callback) }],
-    els: { historyTable: { style: { setProperty: (name, value) => styles.set(name, value) } } },
+    historyColumnHandles: [handle],
+    els: { historyTable: { querySelectorAll: () => [handle], style: { setProperty: (name, value) => styles.set(name, value) } } },
     saveHistoryColumnWidths: () => saves.push({ ...state.historyColumnWidths }),
   });
   const rules = appSource.match(/^const HISTORY_COLUMN_RULES = \{[^]*?^\};/m);

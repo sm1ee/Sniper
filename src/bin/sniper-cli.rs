@@ -734,6 +734,16 @@ enum TemplatesLibraryCommand {
     Download(TemplatesDownloadArgs),
     /// Install a release archive (.tar.gz) from disk, for networks without GitHub.
     Import(TemplatesImportArgs),
+    /// Turn the daily update on or off. While on, Sniper asks GitHub once a day
+    /// for a newer release, or main's newest commit when main is installed,
+    /// and installs it. An imported archive is never updated.
+    AutoUpdate(TemplatesAutoUpdateArgs),
+}
+
+#[derive(Args, Debug)]
+struct TemplatesAutoUpdateArgs {
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
 }
 
 #[derive(Args, Debug)]
@@ -828,6 +838,7 @@ impl TemplatesCommand {
                 TemplatesLibraryCommand::Check => "templates.library.check",
                 TemplatesLibraryCommand::Download(_) => "templates.library.download",
                 TemplatesLibraryCommand::Import(_) => "templates.library.import",
+                TemplatesLibraryCommand::AutoUpdate(_) => "templates.library.set_auto_update",
             },
             Self::List(_) => "templates.list",
             Self::Get(_) => "templates.get",
@@ -1020,6 +1031,9 @@ fn templates_input_preview(command: &TemplatesCommand) -> Value {
         TemplatesCommand::Library {
             command: TemplatesLibraryCommand::Import(args),
         } => json!({ "file": args.file }),
+        TemplatesCommand::Library {
+            command: TemplatesLibraryCommand::AutoUpdate(args),
+        } => json!({ "enabled": args.enabled }),
         TemplatesCommand::Library { .. } => json!({}),
         TemplatesCommand::List(args) => {
             let mut input = templates_filter_json(&args.filter);
@@ -1087,6 +1101,11 @@ fn templates_api_preview(command: &TemplatesCommand) -> Value {
                 "POST",
                 "/api/templates/library/import",
                 Some(json!({ "file": args.file, "content_type": "application/gzip" })),
+            ),
+            TemplatesLibraryCommand::AutoUpdate(args) => api_preview(
+                "POST",
+                "/api/templates/library/auto-update",
+                Some(json!({ "enabled": args.enabled })),
             ),
         },
         TemplatesCommand::List(args) => api_preview("GET", templates_list_path(args), None),
@@ -1650,6 +1669,11 @@ fn parse_service_map_extension(value: &str) -> Result<String, String> {
 
 #[derive(Subcommand, Debug)]
 enum ServiceMapCommand {
+    /// Read both selected retained messages for one exact row, without sending traffic.
+    #[command(
+        after_help = "Requires the current active session UUID, an unchanged exact-row evidence token, and explicit current or original variant. Returns both retained messages in one read; originals are never synthesized. Inactive sessions remain unavailable. The whole serialized packet and disk row each have a 2 MiB limit. Headers and bodies may contain sensitive captured values. Stored previews are not wire transcripts. No target requests, retries, UUID fallback, decoding or activation."
+    )]
+    Packet(ServiceMapPacketArgs),
     /// Explicitly inspect one retained response preview in the active session only.
     #[command(
         after_help = "Requires the current active session UUID and an exact-row evidence token. An inactive session returns unavailable; this command never loads or activates it. Reads one retained UTF-8 HTML/JavaScript preview only, with no target requests, automatic reads, or batch reads. Literal HTTP(S) references do not establish calls or ownership; offsets address the retained preview, not wire bytes or a full body."
@@ -1941,6 +1965,17 @@ struct ServiceMapHtmlGeneratorsArgs {
     /// Complete unchanged token from Service Map for exactly one retained row.
     #[arg(long, value_parser = parse_service_map_evidence_id)]
     evidence_id: String,
+}
+
+#[derive(Args, Debug)]
+struct ServiceMapPacketArgs {
+    #[arg(long)]
+    session_id: Uuid,
+    #[arg(long, value_parser = parse_service_map_evidence_id)]
+    evidence_id: String,
+    /// Explicit retained variant; missing originals remain unavailable.
+    #[arg(long, value_parser = ["current", "original"])]
+    variant: String,
 }
 
 #[derive(Args, Debug)]
@@ -3552,6 +3587,7 @@ impl TargetCommand {
             TargetCommand::GetScope(_) => "scope.get",
             TargetCommand::SetScope(_) => "scope.set",
             TargetCommand::ServiceMap(args) => match &args.command {
+                Some(ServiceMapCommand::Packet(_)) => "target.service_map.packet.get",
                 Some(ServiceMapCommand::BodyReferences(_)) => {
                     "target.service_map.body_references.get"
                 }
@@ -3845,7 +3881,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "templates.library.status",
             "templates library status",
-            "Read the installed Nuclei template release (tag, SHA-256, whether the release's checksum verified it), template counts by what Sniper can run, the passive templates turned on, and any download or import in progress. Local; contacts nothing.",
+            "Read the installed Nuclei template release (tag, SHA-256, whether the release's checksum verified it), template counts by what Sniper can run, the passive templates turned on, whether the daily update is on and when it last asked GitHub (checked_at, check_error), and any download or import in progress. Local; contacts nothing.",
             Read,
             false,
             &[],
@@ -3877,6 +3913,15 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             true,
             &["file"],
             vec![json!({"file":"nuclei-templates.tar.gz"})],
+        ),
+        op(
+            "templates.library.set_auto_update",
+            "templates library auto-update --enabled <true|false>",
+            "Turn the daily update on or off; it starts on. While on, Sniper asks GitHub once a day for a newer nuclei-templates release, or main's newest commit when main is installed, and installs it the way download does; templates turned on stay on. A failed check keeps the installed library and shows in status as check_error. An imported archive is never updated.",
+            Write,
+            true,
+            &["enabled"],
+            vec![json!({"enabled":false}), json!({"enabled":true})],
         ),
         op(
             "templates.list",
@@ -4726,7 +4771,7 @@ fn service_map_flow_output_schema() -> Value {
     }));
     flow["properties"]["stopped_by"] = json!({
         "type":"array","items":string,
-        "description":"Why the flow is incomplete: the row window, lanes_limit (more than five linked origins) or steps_limit (the oldest steps were dropped)."
+        "description":"Why the flow is incomplete: the row window, lanes_limit (more than five linked origins), steps_limit (the oldest steps were dropped), or incomplete request-link or redirect metadata."
     });
     flow["description"] = json!("One origin's retained requests and those of the origins it links to directly, in time order, one phase per page load. A step's count folds the same request in one page load; evidence holds its first and newest rows, and record_id the newest.");
     flow
@@ -5176,11 +5221,247 @@ fn service_map_socket_peer_matches_output_schema() -> Value {
     schema
 }
 
+// Packet reads deliberately have a closed projection: never print unrelated capture annotations.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceMapPacketResponse {
+    schema_version: u32,
+    session_id: Uuid,
+    evidence_id: String,
+    variant: String,
+    available: bool,
+    status: String,
+    reason: Option<String>,
+    source: Option<ServiceMapPacketSource>,
+    limits: ServiceMapPacketLimits,
+    originals: Option<ServiceMapPacketOriginals>,
+    request: Option<ServiceMapPacketSide>,
+    response: Option<ServiceMapPacketSide>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceMapPacketSource {
+    record_id: Uuid,
+    sequence: String,
+    started_at: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceMapPacketLimits {
+    packet_bytes: usize,
+    serialized_row_bytes: usize,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceMapPacketOriginals {
+    request: bool,
+    response: bool,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceMapPacketSide {
+    status: String,
+    message: Option<ServiceMapPacketMessage>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceMapPacketMessage {
+    method: Option<String>,
+    scheme: Option<String>,
+    authority: Option<String>,
+    path: Option<String>,
+    http_version: Option<String>,
+    status_code: Option<u16>,
+    headers: Vec<HeaderRecord>,
+    body: ServiceMapPacketBody,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceMapPacketBody {
+    available: bool,
+    reason: Option<String>,
+    body_preview: Option<String>,
+    body_encoding: BodyEncoding,
+    body_size: usize,
+    decoded_body_size: Option<usize>,
+    preview_truncated: bool,
+    content_decoded: bool,
+    content_type: Option<String>,
+}
+
+const SERVICE_MAP_PACKET_UNAVAILABLE: &[&str] = &[
+    "invalid_evidence_id",
+    "session_mismatch",
+    "stale_generation",
+    "record_missing",
+    "record_changed",
+    "body_identity_unverifiable",
+    "serialized_row_limit",
+    "packet_view_limit",
+    "packet_read_failed",
+    "inactive_session",
+    "read_busy",
+    "session_source_changed",
+];
+const SERVICE_MAP_PACKET_BODY_UNAVAILABLE: &[&str] = &[
+    "body_identity_unverifiable",
+    "body_storage_unavailable",
+    "body_read_failed",
+    "malformed_retained_row",
+    "retained_preview_unavailable",
+];
+
+fn service_map_packet_output_schema() -> Value {
+    let nullable = |schema| json!({"anyOf":[{"type":"null"},schema]});
+    let string = json!({"type":"string"});
+    let boolean = json!({"type":"boolean"});
+    let count = json!({"type":"integer","minimum":0});
+    let mut body = service_map_object(json!({
+        "available":boolean,"reason":nullable(json!({"type":"string","enum":SERVICE_MAP_PACKET_BODY_UNAVAILABLE})),
+        "body_preview":nullable(string.clone()),"body_encoding":{"type":"string","enum":["utf8","base64"]},
+        "body_size":count,"decoded_body_size":nullable(count.clone()),"preview_truncated":boolean,
+        "content_decoded":boolean,"content_type":nullable(string.clone())
+    }));
+    body["oneOf"] = json!([
+        {"properties":{"available":{"enum":[true]},"reason":{"type":"null"},"body_preview":{"type":"string"}}},
+        {"properties":{"available":{"enum":[false]},"reason":{"type":"string"},"body_preview":{"type":"null"}}}
+    ]);
+    let message = service_map_object(json!({
+        "method":nullable(string.clone()),"scheme":nullable(string.clone()),"authority":nullable(string.clone()),
+        "path":nullable(string.clone()),"http_version":nullable(string.clone()),
+        "status_code":nullable(json!({"type":"integer","minimum":0,"maximum":65535})),
+        "headers":{"type":"array","items":service_map_object(json!({"name":string,"value":string}))},"body":body
+    }));
+    let mut side = service_map_object(
+        json!({"status":{"type":"string","enum":["retained","not_retained"]},"message":nullable(message)}),
+    );
+    side["oneOf"] = json!([
+        {"properties":{"status":{"enum":["retained"]},"message":{"type":"object"}}},
+        {"properties":{"status":{"enum":["not_retained"]},"message":{"type":"null"}}}
+    ]);
+    let source = service_map_object(json!({
+        "record_id":{"type":"string","format":"uuid"},"sequence":{"type":"string","pattern":"^(0|[1-9][0-9]*)$"},
+        "started_at":{"type":"string","format":"date-time"}
+    }));
+    let mut result = service_map_object(json!({
+        "schema_version":{"type":"integer","enum":[1]},"session_id":{"type":"string","format":"uuid"},
+        "evidence_id":string,"variant":{"type":"string","enum":["current","original"]},
+        "available":boolean,"status":{"type":"string","enum":["available","unavailable"]},
+        "reason":nullable(json!({"type":"string","enum":SERVICE_MAP_PACKET_UNAVAILABLE})),
+        "source":nullable(source),"limits":service_map_object(json!({
+            "packet_bytes":{"type":"integer","enum":[2097152]},"serialized_row_bytes":{"type":"integer","enum":[2097152]}
+        })),"originals":nullable(service_map_object(json!({"request":boolean,"response":boolean}))),
+        "request":nullable(side.clone()),"response":nullable(side)
+    }));
+    result["oneOf"] = json!([
+        {"properties":{"available":{"enum":[true]},"status":{"enum":["available"]},"reason":{"type":"null"},
+            "source":{"type":"object"},"originals":{"type":"object"},"request":{"type":"object"},"response":{"type":"object"}}},
+        {"properties":{"available":{"enum":[false]},"status":{"enum":["unavailable"]},"reason":{"type":"string"},
+            "source":{"type":"null"},"originals":{"type":"null"},"request":{"type":"null"},"response":{"type":"null"}}}
+    ]);
+    result["description"] = json!("Both selected retained messages from one exact key. Runtime also validates token/session/variant/source bindings and nullable original start-line restrictions. Headers preserve order and duplicates; bodies are stored UTF8/base64 previews, not wire transcripts. Missing originals are not_retained. Body-unavailable retains verified metadata with a null preview. Whole-source/limit failure clears both sides. Entire encoded response <=2097152 bytes; no per-header/body mini-limits and no clipping.");
+    result
+}
+
+fn validate_service_map_packet_response(raw: &Value, args: &ServiceMapPacketArgs) -> Result<()> {
+    let invalid = || {
+        service_map_error("INVALID_RESPONSE", "Retained packet data does not match the requested exact source, variant or bounded projection")
+    };
+    let result: ServiceMapPacketResponse =
+        serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
+    let typed = serde_json::to_value(&result).map_err(|_| invalid())?;
+    if !service_map_html_response_shape(raw, &typed)
+        || result.schema_version != 1
+        || result.session_id != args.session_id
+        || result.evidence_id != args.evidence_id
+        || result.variant != args.variant
+        || !["current", "original"].contains(&result.variant.as_str())
+        || result.limits.packet_bytes != 2 * 1024 * 1024
+        || result.limits.serialized_row_bytes != 2 * 1024 * 1024
+    {
+        return Err(invalid());
+    }
+    if !result.available {
+        return if result.status == "unavailable"
+            && result
+                .reason
+                .as_deref()
+                .is_some_and(|r| SERVICE_MAP_PACKET_UNAVAILABLE.contains(&r))
+            && result.source.is_none()
+            && result.originals.is_none()
+            && result.request.is_none()
+            && result.response.is_none()
+        {
+            Ok(())
+        } else {
+            Err(invalid())
+        };
+    }
+    parse_service_map_evidence_id(&args.evidence_id).map_err(|_| invalid())?;
+    let key: Vec<_> = args.evidence_id.split('.').collect();
+    let source = result.source.as_ref().ok_or_else(invalid)?;
+    let originals = result.originals.as_ref().ok_or_else(invalid)?;
+    if result.status != "available"
+        || result.reason.is_some()
+        || key[1] != args.session_id.to_string()
+        || source.record_id.to_string() != key[5]
+        || source.sequence != key[3]
+        || chrono::DateTime::parse_from_rfc3339(&source.started_at).is_err()
+    {
+        return Err(invalid());
+    }
+    for (is_request, side, original_present) in [
+        (true, result.request.as_ref(), originals.request),
+        (false, result.response.as_ref(), originals.response),
+    ] {
+        let side = side.ok_or_else(invalid)?;
+        let present = side.message.is_some();
+        if side.status != if present { "retained" } else { "not_retained" }
+            || (result.variant == "original" && present != original_present)
+            || (result.variant == "current" && is_request && !present)
+        {
+            return Err(invalid());
+        }
+        let Some(message) = &side.message else {
+            continue;
+        };
+        if (!is_request
+            && (message.method.is_some()
+                || message.scheme.is_some()
+                || message.authority.is_some()
+                || message.path.is_some()))
+            || (is_request && message.status_code.is_some())
+            || (result.variant == "original"
+                && (message.scheme.is_some()
+                    || message.authority.is_some()
+                    || message.http_version.is_some()
+                    || message.status_code.is_some()))
+        {
+            return Err(invalid());
+        }
+        let body = &message.body;
+        if body.available {
+            if body.reason.is_some() || body.body_preview.is_none() {
+                return Err(invalid());
+            }
+        } else if body.body_preview.is_some()
+            || !body
+                .reason
+                .as_deref()
+                .is_some_and(|r| SERVICE_MAP_PACKET_BODY_UNAVAILABLE.contains(&r))
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 fn service_map_output_schema(operation: &str) -> Option<Value> {
     if !matches!(
         operation,
         "target.service_map.get"
             | "target.service_map.evidence.get"
+            | "target.service_map.packet.get"
             | "target.service_map.body_references.get"
             | "target.service_map.html_generators.get"
             | "target.service_map.link_declarations.get"
@@ -5191,6 +5472,9 @@ fn service_map_output_schema(operation: &str) -> Option<Value> {
             | "target.service_map.unnamed.get"
     ) {
         return None;
+    }
+    if operation == "target.service_map.packet.get" {
+        return Some(service_map_packet_output_schema());
     }
     if operation == "target.service_map.unnamed.get" {
         return Some(service_map_unnamed_output_schema());
@@ -5526,6 +5810,14 @@ fn service_map_input_schema(operation: &str) -> Option<Value> {
                 "max_records":{"type":"integer","minimum":1,"maximum":50000,"default":10000,"description":"Latest retained rows considered, including the source when in-window. Counts of matches exclude the source. Omission selects 10000; null is invalid."}
             }
         })),
+        "target.service_map.packet.get" => Some(json!({
+            "type":"object","additionalProperties":false,"required":["session_id","evidence_id","variant"],
+            "properties":{
+                "session_id":legacy_uuid_input_schema(false,"Explicit active session UUID; never loads or activates another session."),
+                "evidence_id":{"type":"string","minLength":1,"maxLength":200,"pattern":evidence_pattern},
+                "variant":{"type":"string","enum":["current","original"]}
+            }
+        })),
         "target.service_map.body_references.get"
         | "target.service_map.html_generators.get"
         | "target.service_map.link_declarations.get" => Some(json!({
@@ -5627,6 +5919,17 @@ fn service_map_evidence_path(args: &ServiceMapEvidenceArgs) -> String {
     )
 }
 
+fn service_map_packet_path(args: &ServiceMapPacketArgs) -> String {
+    let query = encode_query(vec![
+        ("evidence_id".into(), args.evidence_id.clone()),
+        ("variant".into(), args.variant.clone()),
+    ]);
+    session_query_path(
+        &format!("/api/target/service-map/packet?{query}"),
+        Some(args.session_id),
+    )
+}
+
 fn service_map_body_references_path(args: &ServiceMapBodyReferencesArgs) -> String {
     let query = encode_query(vec![("evidence_id".into(), args.evidence_id.clone())]);
     session_query_path(
@@ -5699,6 +6002,15 @@ fn service_map_socket_peer_matches_path(args: &ServiceMapSocketPeerMatchesArgs) 
 
 fn service_map_manifest_operations() -> Vec<CliOperationSpec> {
     vec![
+        op(
+            "target.service_map.packet.get",
+            "scope service-map packet --session-id <uuid> --evidence-id <token> --variant <current|original>",
+            "Read both retained current or original messages for one exact evidence key in the active session. Original fields are never synthesized. Explicit unavailable and body-unavailable states distinguish retention from empty content. Sensitive stored headers/body previews are returned without decoding, target requests, retries, UUID fallback or activation. The whole serialized response and disk row each have a 2 MiB limit; retained previews are not wire transcripts.",
+            CliSideEffect::Read,
+            false,
+            &["session_id", "evidence_id", "variant"],
+            vec![json!({"session_id":"00000000-0000-0000-0000-000000000000","evidence_id":"v1.00000000-0000-0000-0000-000000000000.00000000-0000-0000-0000-000000000000.1.00000000-0000-0000-0000-000000000000.00000000-0000-0000-0000-000000000000","variant":"current"})],
+        ),
         op(
             "target.service_map.get",
             "scope service-map [--technology-catalog-version <1|2>]",
@@ -6187,6 +6499,10 @@ fn templates_input_schema(operation: &str) -> Option<Value> {
         "templates.library.import" => json!({
             "type":"object","additionalProperties":false,"required":["file"],
             "properties":{"file":{"type":"string","minLength":1,"description":"Path to a nuclei-templates release .tar.gz on this machine, at most 64 MiB."}}
+        }),
+        "templates.library.set_auto_update" => json!({
+            "type":"object","additionalProperties":false,"required":["enabled"],
+            "properties":{"enabled":{"type":"boolean","description":"Turn the daily update on (true) or off (false)."}}
         }),
         "templates.list" => {
             let mut properties = filter;
@@ -6804,6 +7120,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "templates.library.status" | "templates.library.check" => &[],
         "templates.library.download" => &["main"],
         "templates.library.import" => &["file"],
+        "templates.library.set_auto_update" => &["enabled"],
         "templates.list" => &[
             "search",
             "severity",
@@ -6895,6 +7212,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "include_socket_peer",
             "technology_catalog_version",
         ],
+        "target.service_map.packet.get" => &["session_id", "evidence_id", "variant"],
         "target.service_map.body_references.get"
         | "target.service_map.html_generators.get"
         | "target.service_map.link_declarations.get" => &["session_id", "evidence_id"],
@@ -7098,6 +7416,9 @@ fn command_input_preview(command: &Command) -> Value {
         }
         Command::Scope { command } => match command {
             TargetCommand::ServiceMap(args) => match &args.command {
+                Some(ServiceMapCommand::Packet(args)) => json!({
+                    "session_id":args.session_id,"evidence_id":args.evidence_id,"variant":args.variant,
+                }),
                 Some(ServiceMapCommand::BodyReferences(args)) => json!({
                     "session_id": args.session_id,"evidence_id":args.evidence_id,
                 }),
@@ -7523,6 +7844,9 @@ fn command_api_preview(command: &Command) -> Result<Value> {
         Command::Capture { command } => capture_api_preview(command)?,
         Command::Scope { command } => match command {
             TargetCommand::ServiceMap(args) => match &args.command {
+                Some(ServiceMapCommand::Packet(args)) => {
+                    api_preview("GET", service_map_packet_path(args), None)
+                }
                 Some(ServiceMapCommand::BodyReferences(args)) => {
                     api_preview("GET", service_map_body_references_path(args), None)
                 }
@@ -8066,6 +8390,7 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
         command.operation_name(),
         "target.service_map.get"
             | "target.service_map.evidence.get"
+            | "target.service_map.packet.get"
             | "target.service_map.body_references.get"
             | "target.service_map.html_generators.get"
             | "target.service_map.link_declarations.get"
@@ -8075,7 +8400,10 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
             | "target.service_map.flow.get"
             | "target.service_map.unnamed.get"
     ) {
-        if command.operation_name() == "target.service_map.flow.get" {
+        if command.operation_name() == "target.service_map.packet.get" {
+            notes.push("One exact-key retained packet read in the active session. Both selected messages are read together; original missing fields stay unavailable. No target requests, session activation, UUID fallback, decoding or retry.");
+            notes.push("Returned headers/body previews can contain sensitive captured data. They are stored representations, not a wire transcript. Whole response and serialized disk row are independently capped at 2 MiB; limit refusal does not mean the capture was empty.");
+        } else if command.operation_name() == "target.service_map.flow.get" {
             notes.push("Reads the map's newest max_records rows without bodies in one GET; no target requests, automatic reads, retries or fallback.");
         } else if command.operation_name() == "target.service_map.unnamed.get" {
             notes.push("Reads the session's whole map, as `scope service-map --all-rows` does, and gathers its unnamed signals locally. snapshot preserves source-map coverage; omitted_signals counts only --limit truncation after --kind. One GET; no target requests, retries or fallback.");
@@ -8179,6 +8507,7 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     match command.operation_name() {
         "templates.library.check" | "templates.library.download" => notes.push("Contacts GitHub through the environment's proxy: the latest-release API, then for a download the release's checksums file and source .tar.gz; with main, the branch API and that commit's .tar.gz. A release that does not match its published SHA-256 is not installed; main has no checksum. Dry-run contacts nothing."),
         "templates.library.import" => notes.push("Reads the local .tar.gz and uploads it to the running Sniper, which installs it; nothing contacts GitHub. Dry-run reads nothing."),
+        "templates.library.set_auto_update" => notes.push("While on, Sniper asks GitHub once a day through the environment's proxy and installs a newer release or main commit. Dry-run contacts nothing."),
         "templates.passive.set_enabled" => notes.push("Enabled passive templates judge captured responses whose host is in a non-empty Scope include list while Passive Scan is on, and never send requests. Run findings rescan to apply a change to stored history."),
         "templates.auto.set" => notes.push("While on, the auto scan sends requests to every new host the proxy captures in Scope or on its list. Dry-run contacts nothing."),
         "templates.scan.start" => notes.push("Sends the templates' requests to the targets once it runs. Dry-run contacts nothing; templates scan preview asks Sniper what would be sent and still sends nothing to a target."),
@@ -8528,6 +8857,13 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 }),
             },
         },
+        "templates.library.set_auto_update" => Command::Templates {
+            command: TemplatesCommand::Library {
+                command: TemplatesLibraryCommand::AutoUpdate(TemplatesAutoUpdateArgs {
+                    enabled: call_required(operation, input, "enabled")?,
+                }),
+            },
+        },
         "templates.list" => {
             let limit = call_optional::<u64>(operation, input, "limit")?.unwrap_or(200);
             if !(1..=30_000).contains(&limit) {
@@ -8766,6 +9102,31 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                         )?,
                         only_parameterized: call_bool(operation, input, "only_parameterized")?,
                     },
+                }),
+            }
+        }
+        "target.service_map.packet.get" => {
+            let evidence_id: String = call_required(operation, input, "evidence_id")?;
+            let evidence_id =
+                parse_service_map_evidence_id(&evidence_id).map_err(|message| anyhow!(message))?;
+            let variant: String = call_required(operation, input, "variant")?;
+            if !["current", "original"].contains(&variant.as_str()) {
+                bail!("variant must be current or original");
+            }
+            Command::Scope {
+                command: TargetCommand::ServiceMap(ServiceMapArgs {
+                    command: Some(ServiceMapCommand::Packet(ServiceMapPacketArgs {
+                        session_id: call_required(operation, input, "session_id")?,
+                        evidence_id,
+                        variant,
+                    })),
+                    session_id: None,
+                    origin: None,
+                    in_scope_only: false,
+                    max_records: 10_000,
+                    all_rows: false,
+                    technology_catalog_version: 2,
+                    filter: ServiceMapFilterArgs::default(),
                 }),
             }
         }
@@ -10130,6 +10491,7 @@ async fn run(cli: Cli) -> Result<()> {
                 command.operation_name(),
                 "target.service_map.get"
                     | "target.service_map.evidence.get"
+                    | "target.service_map.packet.get"
                     | "target.service_map.body_references.get"
                     | "target.service_map.html_generators.get"
                     | "target.service_map.link_declarations.get"
@@ -10454,6 +10816,15 @@ async fn handle_templates(api: ApiClient, command: TemplatesCommand) -> Result<(
                     );
                 }
                 print_json(&wait_for_template_library(&api).await?)
+            }
+            TemplatesLibraryCommand::AutoUpdate(args) => {
+                let status: Value = api
+                    .post_json(
+                        "/api/templates/library/auto-update",
+                        &json!({ "enabled": args.enabled }),
+                    )
+                    .await?;
+                print_json(&status)
             }
         },
         TemplatesCommand::List(args) => {
@@ -11149,6 +11520,13 @@ async fn service_map_get_with_catalog<T: DeserializeOwned>(
         if let Some(error) = service_map_refresh_error(path, status, response.headers()) {
             return Err(error.into());
         }
+        if status == StatusCode::NOT_FOUND && path.starts_with("/api/target/service-map/packet?") {
+            return Err(ServiceMapCliError {
+                code: "UNSUPPORTED_FEATURE",
+                message: "The selected API does not support retained packet reads; update the app to use this feature",
+                status: Some(404),
+            }.into());
+        }
         if status == StatusCode::NOT_FOUND
             && path.starts_with("/api/target/service-map/html-generators?")
         {
@@ -11216,6 +11594,29 @@ async fn service_map_get_with_catalog<T: DeserializeOwned>(
             status: Some(status.as_u16()),
         }
         .into());
+    }
+    if path.starts_with("/api/target/service-map/packet?") {
+        let invalid = || {
+            service_map_error(
+                "INVALID_RESPONSE",
+                "The selected API returned invalid or oversized retained packet data",
+            )
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length > 2 * 1024 * 1024)
+        {
+            return Err(invalid());
+        }
+        let mut response = response;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| invalid())? {
+            if chunk.len() > (2usize * 1024 * 1024).saturating_sub(bytes.len()) {
+                return Err(invalid());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return serde_json::from_slice(&bytes).map_err(|_| invalid());
     }
     if path.starts_with("/api/target/service-map/socket-peer-matches?") {
         use sniper::service_map_peer_matches::MAX_PROJECTION_BYTES;
@@ -12624,6 +13025,13 @@ async fn read_service_map_evidence(
 async fn handle_target(api: ApiClient, command: TargetCommand) -> Result<()> {
     match command {
         TargetCommand::ServiceMap(args) => match &args.command {
+            Some(ServiceMapCommand::Packet(args)) => {
+                let client = service_map_read_client()?;
+                let result: Value =
+                    service_map_get(&api, &client, &service_map_packet_path(args)).await?;
+                validate_service_map_packet_response(&result, args)?;
+                print_session_read_json(&result, args.session_id)
+            }
             Some(ServiceMapCommand::BodyReferences(args)) => {
                 let result = read_service_map_body_references(&api, args).await?;
                 print_session_read_json(&result, args.session_id)
@@ -19200,6 +19608,36 @@ mod label_rule_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_replace_typed_input_preserves_legacy_disabled_annotation_wire() {
+        for active in [false, true] {
+            let rule = serde_json::json!({
+                "id": uuid::Uuid::new_v4(), "enabled": true, "annotation_only_enabled": active,
+                "description": "", "scope": "response", "target": "body", "search": "flag",
+                "replace": "", "regex": false, "case_sensitive": true,
+                "annotation_note": "literal", "annotation_color": "yellow"
+            });
+            for input in [
+                serde_json::json!([rule.clone()]),
+                serde_json::json!({"rules": [rule.clone()]}),
+            ] {
+                let parsed: super::AutoReplaceInput = serde_json::from_value(input).unwrap();
+                let rules = match parsed {
+                    super::AutoReplaceInput::Rules(rules) => rules,
+                    super::AutoReplaceInput::Payload(payload) => payload.rules,
+                };
+                let wire = serde_json::to_value(super::MatchReplaceRulesPayload {
+                    session_id: None,
+                    rules,
+                })
+                .unwrap();
+                assert_eq!(wire["rules"][0]["enabled"], false);
+                assert_eq!(wire["rules"][0]["annotation_only_enabled"], active);
+                assert_eq!(wire["rules"][0]["annotation_note"], "literal");
+            }
+        }
+    }
+
     use super::validate_saved_response_binding;
     use super::{
         active_session_id_from_summaries, adopt_target_scheme_for_uncaptured_request,
@@ -19242,6 +19680,7 @@ mod tests {
         data_dir_strings_match, process_path_strings_match, validate_sniper_settings_probe,
         SniperApiProbeExpectation,
     };
+    use super::{validate_service_map_packet_response, ServiceMapPacketArgs};
     use chrono::Utc;
     use clap::Parser;
     use serde_json::{json, Value};
@@ -21538,6 +21977,33 @@ mod tests {
         }
     }
 
+    // Turning the daily update off is how an agent stops Sniper asking GitHub
+    // once a day, so the switch must name its value.
+    #[test]
+    fn the_daily_template_update_switch_names_its_value() {
+        let set = |input: Value| {
+            command_from_operation_input("templates.library.set_auto_update", &input)
+        };
+        assert!(set(json!({})).is_err());
+        let off = set(json!({"enabled": false})).unwrap();
+        assert!(off.requires_confirmation());
+        let preview = super::command_api_preview(&off).unwrap();
+        assert_eq!(preview["path"], "/api/templates/library/auto-update");
+        assert_eq!(preview["body"], json!({ "enabled": false }));
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "templates",
+            "library",
+            "auto-update",
+            "--enabled",
+            "false"
+        ])
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["sniper-cli", "templates", "library", "auto-update"]).is_err()
+        );
+    }
+
     // Turning passive templates on takes exactly one selection, so a missing
     // filter can never mean "all of them".
     #[test]
@@ -22327,6 +22793,164 @@ mod tests {
             &json!({"session_id":session,"evidence_id":"opaque&query=not-a-field"}),
         )
         .is_err());
+    }
+
+    #[test]
+    fn service_map_packet_requires_exact_explicit_variant_and_one_read() {
+        let session = "11111111-1111-1111-1111-111111111111";
+        let token = "v1.11111111-1111-1111-1111-111111111111.22222222-2222-2222-2222-222222222222.9007199254740993.33333333-3333-3333-3333-333333333333.44444444-4444-4444-4444-444444444444";
+        for variant in ["current", "original"] {
+            let input = json!({"session_id":session,"evidence_id":token,"variant":variant});
+            let direct = Cli::try_parse_from([
+                "sniper-cli",
+                "scope",
+                "service-map",
+                "packet",
+                "--session-id",
+                session,
+                "--evidence-id",
+                token,
+                "--variant",
+                variant,
+            ])
+            .unwrap()
+            .command;
+            let called =
+                command_from_operation_input("target.service_map.packet.get", &input).unwrap();
+            assert_eq!(direct.operation_name(), "target.service_map.packet.get");
+            assert_eq!(
+                command_input_preview(&direct),
+                command_input_preview(&called)
+            );
+            let plan = dry_run_command(&direct).unwrap();
+            assert_eq!(plan["side_effect"], "read");
+            assert_eq!(plan["api"]["method"], "GET");
+            assert_eq!(plan["api"]["path"], format!("/api/target/service-map/packet?evidence_id={token}&variant={variant}&session_id={session}"));
+            assert!(plan["api"]["body"].is_null());
+            assert!(!direct.requires_confirmation());
+        }
+        for input in [
+            json!({"session_id":session,"evidence_id":token}),
+            json!({"session_id":null,"evidence_id":token,"variant":"current"}),
+            json!({"session_id":session,"evidence_id":token,"variant":null}),
+            json!({"session_id":session,"evidence_id":token,"variant":"CURRENT"}),
+            json!({"session_id":session,"evidence_id":session,"variant":"current"}),
+            json!({"session_id":session,"evidence_id":token,"variant":"current","activate":true}),
+            json!({"session_id":session,"evidence_id":token,"variant":"current","technology_catalog_version":2}),
+        ] {
+            assert!(command_from_operation_input("target.service_map.packet.get", &input).is_err());
+        }
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "scope",
+            "service-map",
+            "packet",
+            "--session-id",
+            session,
+            "--evidence-id",
+            token
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "scope",
+            "service-map",
+            "--in-scope-only",
+            "packet",
+            "--session-id",
+            session,
+            "--evidence-id",
+            token,
+            "--variant",
+            "current"
+        ])
+        .is_err());
+        let spec = operation_spec("target.service_map.packet.get").unwrap();
+        assert_eq!(spec.input_schema["additionalProperties"], false);
+        assert_eq!(
+            spec.input_schema["required"],
+            json!(["session_id", "evidence_id", "variant"])
+        );
+    }
+
+    fn packet_response_fixture(variant: &str) -> (ServiceMapPacketArgs, Value) {
+        let session = Uuid::nil();
+        let token = format!("v1.{session}.{session}.9007199254740993.{session}.{session}");
+        let args = ServiceMapPacketArgs {
+            session_id: session,
+            evidence_id: token.clone(),
+            variant: variant.into(),
+        };
+        let original = variant == "original";
+        let message = json!({
+            "method":"POST","scheme":if original { Value::Null } else { json!("https") },
+            "authority":if original { Value::Null } else { json!("example.com:443") },"path":"/resource?q=one",
+            "http_version":if original { Value::Null } else { json!("HTTP/1.1") },"status_code":null,
+            "headers":[{"name":"X-Example","value":"first"},{"name":"X-Example","value":"second"}],
+            "body":{"available":true,"reason":null,"body_preview":"","body_encoding":"utf8","body_size":20,
+                "decoded_body_size":0,"preview_truncated":false,"content_decoded":true,"content_type":null}
+        });
+        let result = json!({
+            "schema_version":1,"session_id":session,"evidence_id":token,"variant":variant,"available":true,"status":"available","reason":null,
+            "source":{"record_id":session,"sequence":"9007199254740993","started_at":"2026-10-26T07:00:00Z"},
+            "limits":{"packet_bytes":2097152,"serialized_row_bytes":2097152},"originals":{"request":true,"response":false},
+            "request":{"status":"retained","message":message},"response":{"status":"not_retained","message":null}
+        });
+        (args, result)
+    }
+
+    #[test]
+    fn service_map_packet_validation_retains_nullable_originals_and_rejects_wrong_owner_or_extra_data(
+    ) {
+        for variant in ["current", "original"] {
+            let (args, good) = packet_response_fixture(variant);
+            assert!(validate_service_map_packet_response(&good, &args).is_ok());
+            for (pointer, value) in [
+                ("/source/sequence", json!(9007199254740993u64)),
+                ("/source/sequence", json!("9007199254740994")),
+                ("/session_id", json!(Uuid::new_v4())),
+                ("/variant", json!("bad")),
+                ("/request/message/body/available", json!(false)),
+                ("/limits/packet_bytes", json!(2097153)),
+            ] {
+                let mut bad = good.clone();
+                *bad.pointer_mut(pointer).unwrap() = value;
+                assert!(
+                    validate_service_map_packet_response(&bad, &args).is_err(),
+                    "{pointer}"
+                );
+            }
+            let mut extra = good.clone();
+            extra["user_note"] = json!("SYNTHETIC_PRIVATE_VALUE");
+            assert!(validate_service_map_packet_response(&extra, &args).is_err());
+            let mut missing = good.clone();
+            missing["request"]["message"]
+                .as_object_mut()
+                .unwrap()
+                .remove("http_version");
+            assert!(validate_service_map_packet_response(&missing, &args).is_err());
+            let mut unreadable = good.clone();
+            unreadable["request"]["message"]["body"]["available"] = json!(false);
+            unreadable["request"]["message"]["body"]["body_preview"] = Value::Null;
+            unreadable["request"]["message"]["body"]["reason"] =
+                json!("retained_preview_unavailable");
+            assert!(validate_service_map_packet_response(&unreadable, &args).is_ok());
+            if variant == "original" {
+                let mut invented = good.clone();
+                invented["request"]["message"]["authority"] = json!("example.com");
+                assert!(validate_service_map_packet_response(&invented, &args).is_err());
+            }
+        }
+        let (args, mut unavailable) = packet_response_fixture("current");
+        unavailable["available"] = json!(false);
+        unavailable["status"] = json!("unavailable");
+        unavailable["reason"] = json!("packet_view_limit");
+        for field in ["source", "originals", "request", "response"] {
+            unavailable[field] = Value::Null;
+        }
+        assert!(validate_service_map_packet_response(&unavailable, &args).is_ok());
+        unavailable["request"] = json!({"status":"not_retained","message":null});
+        assert!(validate_service_map_packet_response(&unavailable, &args).is_err());
     }
 
     #[test]

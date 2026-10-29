@@ -384,6 +384,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             post(crate::templates::library::start_import),
         )
         .route(
+            "/api/templates/library/auto-update",
+            post(crate::templates::library::set_auto_update),
+        )
+        .route(
             "/api/templates/passive",
             post(crate::templates::library::set_passive),
         )
@@ -504,6 +508,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route(
             "/api/target/service-map/body-references",
             get(get_target_service_map_body_references),
+        )
+        .route(
+            "/api/target/service-map/packet",
+            get(get_target_service_map_packet),
         )
         .route(
             "/api/target/service-map/html-generators",
@@ -926,6 +934,9 @@ struct TransactionQuery {
     hidden_extensions: Option<String>,
     port: Option<String>,
     color_tags: Option<String>,
+    /// HTTP history's findings colour (`severity` or a tag colour), sent while
+    /// it marks findings so `color_tags` also matches the rows it tints.
+    finding_color: Option<String>,
     advanced_search: Option<String>,
     advanced_regex: Option<bool>,
     advanced_case_sensitive: Option<bool>,
@@ -1031,6 +1042,7 @@ fn transaction_list_filters(
         mime: query.mime,
         port: query.port,
         color_tags: csv_param(query.color_tags),
+        finding_colors: Default::default(),
         advanced_search: query.advanced_search,
         advanced_regex: query.advanced_regex.unwrap_or(false),
         advanced_case_sensitive: query.advanced_case_sensitive.unwrap_or(false),
@@ -1101,7 +1113,46 @@ fn validate_transaction_query(query: &TransactionQuery) -> std::result::Result<(
         query.advanced_case_sensitive.unwrap_or(false),
     )?;
 
+    if let Some(value) = query.finding_color.as_deref() {
+        if value != "severity" && !HTTP_COLOR_TAGS.contains(&value) {
+            return Err(format!("invalid finding_color filter: {value}"));
+        }
+    }
+
     Ok(())
+}
+
+const HTTP_COLOR_TAGS: [&str; 6] = ["red", "orange", "yellow", "green", "blue", "purple"];
+
+/// The colour HTTP history tints each record with for its findings, as
+/// `refreshHistoryFindings` in web/app.js does. Only built when the colour
+/// filter asks for it.
+async fn finding_record_colors(
+    session: &SessionContext,
+    finding_color: Option<&str>,
+    color_tags: &[String],
+) -> std::collections::HashMap<Uuid, String> {
+    let Some(finding_color) = finding_color.filter(|_| !color_tags.is_empty()) else {
+        return Default::default();
+    };
+    use crate::scanner::Severity;
+    session
+        .scanner
+        .worst_severity_by_record()
+        .await
+        .into_iter()
+        .map(|(record_id, severity)| {
+            let color = match (finding_color, severity) {
+                ("severity", Severity::Critical) => "red",
+                ("severity", Severity::High) => "orange",
+                ("severity", Severity::Medium) => "yellow",
+                ("severity", Severity::Low) => "green",
+                ("severity", Severity::Info) => "blue",
+                (color, _) => color,
+            };
+            (record_id, color.to_string())
+        })
+        .collect()
 }
 
 fn validate_transaction_sort_key(sort_key: Option<&str>) -> std::result::Result<(), String> {
@@ -2602,6 +2653,33 @@ pub(crate) fn validate_sequence_definition(
 }
 
 fn validate_match_replace_rules(rules: &[MatchReplaceRule]) -> std::result::Result<(), String> {
+    let mut annotation_note_bytes = 0usize;
+    for rule in rules {
+        if rule.enabled && rule.annotation_only_enabled.is_some() {
+            return Err("annotation-only rules must set enabled to false".to_string());
+        }
+        if let Some(note) = &rule.annotation_note {
+            validate_text_field(
+                "rule annotation note",
+                note,
+                crate::match_replace::MAX_RULE_ANNOTATION_NOTE_BYTES,
+            )?;
+            if !note.is_empty() && note.trim().is_empty() {
+                return Err("rule annotation note cannot contain only whitespace".to_string());
+            }
+            annotation_note_bytes = annotation_note_bytes.saturating_add(note.len());
+        }
+        if rule
+            .annotation_color
+            .as_ref()
+            .is_some_and(|color| !ALLOWED_COLOR_TAGS.contains(&color.as_str()))
+        {
+            return Err("unsupported rule annotation color".to_string());
+        }
+    }
+    if annotation_note_bytes > crate::match_replace::MAX_RULE_ANNOTATION_NOTES_BYTES {
+        return Err("rule annotation notes exceed the configured byte limit".to_string());
+    }
     validate_serialized_size(&rules, "match-replace rules", MAX_MATCH_REPLACE_RULES_BYTES)?;
     if rules.len() > MAX_MATCH_REPLACE_RULES {
         return Err(format!(
@@ -3001,8 +3079,23 @@ async fn get_settings(State(state): State<Arc<AppState>>) -> Json<crate::state::
     Json(state.runtime_info().await)
 }
 
-async fn get_app_version(State(state): State<Arc<AppState>>) -> Json<crate::state::AppVersionInfo> {
-    Json(state.app_version_info().await)
+#[derive(Debug, Deserialize)]
+struct AppVersionQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
+async fn get_app_version(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AppVersionQuery>,
+) -> Response {
+    if !query.refresh {
+        return Json(state.app_version_info().await).into_response();
+    }
+    match state.check_app_version_now().await {
+        Ok(info) => Json(info).into_response(),
+        Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
+    }
 }
 
 async fn self_update(
@@ -5638,6 +5731,14 @@ struct ServiceMapBodyEvidenceQuery {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ServiceMapPacketQuery {
+    session_id: Uuid,
+    evidence_id: String,
+    variant: crate::service_map_packet::PacketVariant,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ServiceMapSocketPeerMatchesQuery {
     session_id: Uuid,
     evidence_id: String,
@@ -5911,6 +6012,82 @@ async fn get_target_service_map_evidence(
     }
     evidence.technology_catalog_version = catalog_marker;
     Json(evidence).into_response()
+}
+
+async fn get_target_service_map_packet(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ServiceMapPacketQuery>,
+) -> Response {
+    get_target_service_map_packet_inner(
+        state,
+        query,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn get_target_service_map_packet_inner(
+    state: Arc<AppState>,
+    query: ServiceMapPacketQuery,
+    #[cfg(test)] publication_hook: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+) -> Response {
+    use crate::service_map_packet::unavailable;
+    if crate::service_map::EvidenceKey::parse(&query.evidence_id).is_none() {
+        return (StatusCode::BAD_REQUEST, "invalid evidence_id").into_response();
+    }
+    let response =
+        |bytes: Vec<u8>| ([(header::CONTENT_TYPE, "application/json")], bytes).into_response();
+    let missing = |reason| {
+        response(unavailable(
+            query.session_id,
+            &query.evidence_id,
+            query.variant,
+            reason,
+        ))
+    };
+    let session = state.active_session_for_read().await;
+    if session.id() != query.session_id {
+        return missing("inactive_session");
+    }
+    let Some(permit) = state.service_map_read().await else {
+        return missing("read_busy");
+    };
+    if !Arc::ptr_eq(&state.active_session_for_read().await, &session)
+        || !state.sessions.contains_session(session.id())
+    {
+        return missing("session_source_changed");
+    }
+    let bytes = session
+        .store
+        .service_map_packet(session.id(), &query.evidence_id, query.variant, permit)
+        .await;
+    #[cfg(test)]
+    if let Some((paused, resume)) = publication_hook {
+        let _ = paused.send(());
+        let _ = resume.await;
+    }
+    if !Arc::ptr_eq(&state.active_session_for_read().await, &session)
+        || !state.sessions.contains_session(session.id())
+    {
+        return missing("session_source_changed");
+    }
+    if let Err(reason) = session
+        .store
+        .service_map_packet_source_status(session.id(), &query.evidence_id, &bytes)
+        .await
+    {
+        return missing(reason);
+    }
+    if state.sessions.active_session_id() != session.id()
+        || !state.sessions.contains_session(session.id())
+    {
+        return missing("session_source_changed");
+    }
+    response(bytes.bytes)
 }
 
 async fn get_target_service_map_body_references(
@@ -6635,11 +6812,14 @@ async fn list_transactions(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(
+    let finding_color = query.finding_color.clone();
+    let mut filters = transaction_list_filters(
         query,
         runtime.scope_patterns,
         runtime.excluded_scope_patterns,
     );
+    filters.finding_colors =
+        finding_record_colors(&session, finding_color.as_deref(), &filters.color_tags).await;
     Json(session.store.list(&filters).await).into_response()
 }
 
@@ -6664,11 +6844,14 @@ async fn list_transactions_page(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(
+    let finding_color = query.finding_color.clone();
+    let mut filters = transaction_list_filters(
         query,
         runtime.scope_patterns,
         runtime.excluded_scope_patterns,
     );
+    filters.finding_colors =
+        finding_record_colors(&session, finding_color.as_deref(), &filters.color_tags).await;
     let page = session.store.list_page(&filters).await;
     Json(TransactionPageResponse::from(page)).into_response()
 }
@@ -6748,11 +6931,14 @@ async fn search_transactions(
         Err(response) => return response,
     };
     let runtime = session.runtime.snapshot().await;
-    let filters = transaction_list_filters(
+    let finding_color = query.finding_color.clone();
+    let mut filters = transaction_list_filters(
         query,
         runtime.scope_patterns,
         runtime.excluded_scope_patterns,
     );
+    filters.finding_colors =
+        finding_record_colors(&session, finding_color.as_deref(), &filters.color_tags).await;
     Json(session.store.search_bodies(&filters, &request).await).into_response()
 }
 
@@ -9728,6 +9914,109 @@ mod tests {
         std::fs::remove_dir_all(data_dir).unwrap();
     }
 
+    // HTTP history tints rows for their findings; its colour filter has to
+    // gather the same rows, with a colour tag still winning over the tint.
+    #[tokio::test]
+    async fn colour_filter_gathers_rows_tinted_for_their_findings() {
+        let (state, data_dir) = test_state("sniper-finding-colour-filter");
+        let session = state.session().await;
+        let record = |n: u8, color_tag: Option<&str>| -> crate::model::TransactionRecord {
+            serde_json::from_value(serde_json::json!({
+                "id": format!("00000000-0000-0000-0000-0000000000{n:02}"),
+                "started_at": "2026-01-01T00:00:00Z", "method": "GET",
+                "scheme": "https", "host": "example.com", "path": format!("/{n}"),
+                "request": { "headers": [] }, "color_tag": color_tag,
+            }))
+            .unwrap()
+        };
+        // Findings are listed once per title, so each carries its severity in it.
+        let finding = |record_id: Uuid, severity: Severity| ScannerFinding {
+            id: Uuid::new_v4(),
+            record_id,
+            found_at: Utc::now(),
+            rule_id: String::new(),
+            title: format!("Synthetic {severity:?} {record_id}"),
+            severity,
+            category: "header".into(),
+            detail: String::new(),
+            evidence: String::new(),
+            host: "example.com".into(),
+            path: "/".into(),
+            location: None,
+        };
+        let tagged = record(1, Some("green"));
+        let low = record(2, None);
+        let low_and_medium = record(3, None);
+        let tagged_low = record(4, Some("blue"));
+        for (id, severity) in [
+            (low.id, Severity::Low),
+            (low_and_medium.id, Severity::Low),
+            (low_and_medium.id, Severity::Medium),
+            (tagged_low.id, Severity::Low),
+        ] {
+            assert!(session.scanner.push(finding(id, severity)).await);
+        }
+        for record in [&tagged, &low, &low_and_medium, &tagged_low] {
+            session.store.insert(record.clone()).await;
+        }
+        let paths = |query: serde_json::Value| {
+            let state = state.clone();
+            let mut query = query;
+            query["session_id"] = serde_json::json!(session.id());
+            async move {
+                let response = super::list_transactions_page(
+                    State(state),
+                    Query(serde_json::from_value(query).unwrap()),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let page: serde_json::Value = response_json(response).await;
+                let mut paths: Vec<String> = page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| item["path"].as_str().unwrap().to_string())
+                    .collect();
+                paths.sort();
+                paths
+            }
+        };
+
+        // Without the findings colour, only colour tags count.
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "green"})).await,
+            ["/1"]
+        );
+        // By severity, the worst finding decides; the tagged row stays blue.
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "green", "finding_color": "severity"})).await,
+            ["/1", "/2"]
+        );
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "yellow", "finding_color": "severity"})).await,
+            ["/3"]
+        );
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "blue", "finding_color": "severity"})).await,
+            ["/4"]
+        );
+        // One chosen colour tints every row with findings that has no tag.
+        assert_eq!(
+            paths(serde_json::json!({"color_tags": "purple", "finding_color": "purple"})).await,
+            ["/2", "/3"]
+        );
+        let invalid = super::list_transactions_page(
+            State(state.clone()),
+            Query(serde_json::from_value(serde_json::json!({"finding_color": "rainbow"})).unwrap()),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        drop(session);
+        drop(state);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
     #[tokio::test]
     async fn cli_path_status_is_read_only_and_deferral_is_idempotent() {
         let (state, data_dir) = test_state("sniper-cli-path-choice");
@@ -11570,8 +11859,45 @@ mod tests {
     }
 
     #[test]
+    fn match_replace_annotation_validation_checks_raw_authority_and_byte_limits() {
+        let raw = serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "enabled": true, "annotation_only_enabled": true,
+            "description": "", "scope": "response", "target": "body", "search": "flag",
+            "replace": "", "regex": false, "case_sensitive": true,
+            "annotation_note": "flag 탐지", "annotation_color": "yellow"
+        });
+        let mut rule: MatchReplaceRule = serde_json::from_value(raw.clone()).unwrap();
+        assert!(validate_match_replace_rules(&[rule.clone()])
+            .unwrap_err()
+            .contains("enabled"));
+        rule.enabled = false;
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_ok());
+        rule.annotation_note = Some("é".repeat(512));
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_ok());
+        rule.annotation_note.as_mut().unwrap().push('x');
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_err());
+        rule.annotation_note = Some("x".repeat(1024));
+        rule.annotation_only_enabled = Some(false);
+        assert!(validate_match_replace_rules(&vec![rule.clone(); 32]).is_ok());
+        assert!(validate_match_replace_rules(&vec![rule.clone(); 33]).is_err());
+        rule.annotation_note = Some("  ".into());
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_err());
+        rule.annotation_note = Some(String::new());
+        rule.annotation_color = None;
+        assert!(validate_match_replace_rules(&[rule.clone()]).is_ok());
+        rule.annotation_color = Some("arbitrary".into());
+        assert!(validate_match_replace_rules(&[rule]).is_err());
+        let mut bad_type = raw;
+        bad_type["annotation_only_enabled"] = "true".into();
+        assert!(serde_json::from_value::<MatchReplaceRule>(bad_type).is_err());
+    }
+
+    #[test]
     fn match_replace_validation_rejects_invalid_regex_search() {
         let mut rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: uuid::Uuid::new_v4(),
             enabled: true,
             description: "bad regex".to_string(),
@@ -11591,6 +11917,9 @@ mod tests {
     #[test]
     fn match_replace_validation_rejects_oversized_rule_sets() {
         let rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: uuid::Uuid::new_v4(),
             enabled: true,
             description: "large".to_string(),
@@ -11607,6 +11936,9 @@ mod tests {
 
         let rules = (0..=super::MAX_MATCH_REPLACE_RULES)
             .map(|_| MatchReplaceRule {
+                annotation_only_enabled: None,
+                annotation_note: None,
+                annotation_color: None,
                 id: uuid::Uuid::new_v4(),
                 enabled: true,
                 description: "rule".to_string(),
@@ -11651,6 +11983,9 @@ mod tests {
             Json(MatchReplaceRulesPayload {
                 session_id: None,
                 rules: vec![MatchReplaceRule {
+                    annotation_only_enabled: None,
+                    annotation_note: None,
+                    annotation_color: None,
                     id: Uuid::new_v4(),
                     enabled: true,
                     description: "invalid regex".to_string(),
@@ -15443,6 +15778,9 @@ mod tests {
         assert!(original.scanner.get_config().await.enabled);
 
         let match_rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: Uuid::new_v4(),
             enabled: true,
             description: "stale".to_string(),
@@ -16870,6 +17208,215 @@ mod tests {
         drop(session);
         drop(state);
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn service_map_packet_query_requires_exact_explicit_variant_and_rejects_unknown_fields() {
+        let id = format!("v1.{0}.{0}.1.{0}.{0}", Uuid::nil());
+        let base = format!(
+            "/api/target/service-map/packet?session_id={}&evidence_id={id}",
+            Uuid::nil()
+        );
+        for suffix in [
+            "",
+            "&variant=other",
+            "&variant=current&extra=1",
+            "&variant=current&variant=original",
+        ] {
+            assert!(
+                Query::<super::ServiceMapPacketQuery>::try_from_uri(
+                    &format!("{base}{suffix}").parse().unwrap()
+                )
+                .is_err(),
+                "{suffix}"
+            );
+        }
+        for variant in ["current", "original"] {
+            assert!(Query::<super::ServiceMapPacketQuery>::try_from_uri(
+                &format!("{base}&variant={variant}").parse().unwrap()
+            )
+            .is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn service_map_packet_api_is_active_only_strict_and_reports_read_busy_without_private_fields(
+    ) {
+        use crate::service_map_packet::PacketVariant::Current;
+        let (state, dir) = test_state("sniper-map-packet-active");
+        let session = state.active_session_for_read().await;
+        let mut record = test_replay_response_record("/packet", 200);
+        record.host = "example.com".into();
+        session.store.insert(record).await;
+        let id = session
+            .store
+            .service_map_snapshot(session.id(), 1)
+            .await
+            .rows[0]
+            .evidence_id
+            .clone();
+        let query = |session_id, evidence_id| super::ServiceMapPacketQuery {
+            session_id,
+            evidence_id,
+            variant: Current,
+        };
+        let inactive = state
+            .sessions
+            .create_session(Some("Inactive packet fixture".into()))
+            .unwrap();
+        let inactive_path = state
+            .session_storage_path(inactive.id)
+            .unwrap()
+            .join("snapshot.json");
+        std::fs::write(&inactive_path, b"SYNTHETIC_UNREADABLE").unwrap();
+        let before = std::fs::metadata(&inactive_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let unavailable: serde_json::Value = response_json(
+            super::get_target_service_map_packet(
+                State(state.clone()),
+                Query(query(inactive.id, id.clone())),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(unavailable["reason"], "inactive_session");
+        assert!(unavailable["request"].is_null() && unavailable["originals"].is_null());
+        assert_eq!(
+            std::fs::read(&inactive_path).unwrap(),
+            b"SYNTHETIC_UNREADABLE"
+        );
+        assert_eq!(
+            std::fs::metadata(&inactive_path)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
+        let held = state.try_service_map_read().unwrap();
+        let busy: serde_json::Value = response_json(
+            super::get_target_service_map_packet(
+                State(state.clone()),
+                Query(query(session.id(), id.clone())),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(busy["reason"], "read_busy");
+        assert!(busy["response"].is_null());
+        drop(held);
+        let available: serde_json::Value = response_json(
+            super::get_target_service_map_packet(
+                State(state.clone()),
+                Query(query(session.id(), id)),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(available["available"], true);
+        let invalid = super::get_target_service_map_packet(
+            State(state.clone()),
+            Query(query(session.id(), "bad".into())),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        drop(session);
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn service_map_packet_api_final_publication_rechecks_file_record_and_session_stamp() {
+        use crate::service_map_packet::PacketVariant::Current;
+        for change in ["file", "record", "session"] {
+            let (state, dir) = test_state("sniper-map-packet-publication");
+            let session = state.active_session_for_read().await;
+            let mut record = test_replay_response_record("/packet", 200);
+            record.host = "example.com".into();
+            let record_id = record.id;
+            session.store.insert(record).await;
+            let record = session.store.get(record_id).await.unwrap();
+            let storage = state.session_storage_path(session.id()).unwrap();
+            let locators = crate::session::write_transactions_file_for_test_returning_locators(
+                &storage,
+                &[record.clone()],
+            )
+            .unwrap();
+            session.store.adopt_written_locators(locators).await;
+            let id = session
+                .store
+                .service_map_snapshot(session.id(), 1)
+                .await
+                .rows[0]
+                .evidence_id
+                .clone();
+            let (paused, ready) = tokio::sync::oneshot::channel();
+            let (resume, resumed) = tokio::sync::oneshot::channel();
+            let read_state = state.clone();
+            let session_id = session.id();
+            let task = tokio::spawn(async move {
+                super::get_target_service_map_packet_inner(
+                    read_state,
+                    super::ServiceMapPacketQuery {
+                        session_id,
+                        evidence_id: id,
+                        variant: Current,
+                    },
+                    Some((paused, resumed)),
+                )
+                .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(10), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            match change {
+                "file" => {
+                    let locators =
+                        crate::session::write_transactions_file_for_test_returning_locators(
+                            &storage,
+                            &[record],
+                        )
+                        .unwrap();
+                    session.store.adopt_written_locators(locators).await;
+                }
+                "record" => {
+                    session
+                        .store
+                        .update_record(record_id, |row| row.path = "/changed".into())
+                        .await
+                        .unwrap();
+                }
+                "session" => {
+                    let next = state
+                        .sessions
+                        .create_session(Some("Other packet fixture".into()))
+                        .unwrap();
+                    state.activate_session(next.id).await.unwrap();
+                }
+                _ => unreachable!(),
+            }
+            resume.send(()).unwrap();
+            let value: serde_json::Value = response_json(task.await.unwrap()).await;
+            assert_eq!(value["available"], false, "{change}");
+            assert!(
+                value["source"].is_null()
+                    && value["request"].is_null()
+                    && value["response"].is_null()
+            );
+            assert_eq!(
+                value["reason"],
+                match change {
+                    "file" => "body_identity_unverifiable",
+                    "record" => "record_changed",
+                    _ => "session_source_changed",
+                }
+            );
+            drop(session);
+            drop(state);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]
@@ -19259,6 +19806,9 @@ mod tests {
         inactive.persist().await.unwrap();
 
         let match_rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: Uuid::new_v4(),
             enabled: true,
             description: "inactive only".to_string(),
@@ -19691,6 +20241,9 @@ mod tests {
         let inactive_id = inactive.id();
 
         let match_rule = MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
             id: Uuid::new_v4(),
             enabled: true,
             description: "body pinned inactive".to_string(),

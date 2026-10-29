@@ -45,6 +45,7 @@ function fixture() {
   const context = loadFunctions(['initializeTargetWorkspace', 'setActiveTargetView', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',
     'loadTransactionRecordById', 'openTransactionRecordInReplay'], {
     window, document, URL, URLSearchParams, AbortController, state, els, mainTabs: [],
+    packetViewerMarkup: null, mountServiceMapPacketViewer: null,
     workspaceStateGeneration: 1, compareLoadGeneration: 0, targetServiceMapController: null,
     currentSessionId: () => session, targetServiceMapEventStreamReady: () => true,
     serviceMapFilterQuery: () => ({}), serviceMapFilterSummary: () => null,

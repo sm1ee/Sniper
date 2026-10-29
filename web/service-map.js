@@ -4,10 +4,6 @@
   "use strict";
   const MAX_CARDS = 24;
   const MAX_EDGES = 40;
-  // A dense cyclic graph layers into one long chain; five columns hold a typical
-  // sign-in redirect chain. ponytail: deeper cards share the last column; wrap
-  // them into extra rows if long chains turn out to matter.
-  const MAX_COLUMNS = 5;
   const MAX_RELATION_LAYERS = 8;
   const MAX_REFERENCE_CARDS = 100;
   const MAX_REFERENCE_SOURCES = 30;
@@ -246,6 +242,62 @@
       return { ...base, header_index: item.header_index, product_span: { ...item.product_span },
         version_span: item.version_span ? { ...item.version_span } : null, offset_basis: item.offset_basis, rule_id: item.rule_id };
     });
+  }
+  function technologyLiteral(id) {
+    const entry = TECHNOLOGY_CATALOG_V2.get(id);
+    return entry ? { literal: entry[2], headers: [...entry[3]] } : null;
+  }
+  function freezePacket(value) {
+    for (const side of [value.request, value.response]) if (side) {
+      if (side.message) {
+        for (const header of side.message.headers) Object.freeze(header);
+        Object.freeze(side.message.headers); Object.freeze(side.message.body); Object.freeze(side.message);
+      }
+      Object.freeze(side);
+    }
+    if (value.source) Object.freeze(value.source);
+    if (value.originals) Object.freeze(value.originals);
+    Object.freeze(value.limits);
+    return Object.freeze(value);
+  }
+  function normalizePacket(value, owner) {
+    const fail = () => { throw new Error("Retained packet source changed"); };
+    const nullableString = item => item === null || typeof item === "string";
+    const integer = item => Number.isSafeInteger(item) && item >= 0;
+    if (!exactFields(value, ["schema_version", "session_id", "evidence_id", "variant", "available", "status", "reason", "source", "limits", "originals", "request", "response"]) || value.schema_version !== 1 || value.session_id !== owner.sessionId || value.evidence_id !== owner.evidenceId
+      || value.variant !== owner.variant || !["current", "original"].includes(value.variant)
+      || !exactFields(value.limits, ["packet_bytes", "serialized_row_bytes"]) || value.limits.packet_bytes !== 2097152 || value.limits?.serialized_row_bytes !== 2097152
+      || !validTechnologyEvidence(value.evidence_id, owner.sessionId, value.evidence_id.split(".")[2])) fail();
+    if (value.available === false) {
+      if (value.status !== "unavailable" || !["invalid_evidence_id", "session_mismatch", "stale_generation", "record_missing", "record_changed", "body_identity_unverifiable", "serialized_row_limit", "packet_view_limit", "packet_read_failed", "inactive_session", "read_busy", "session_source_changed"].includes(value.reason)
+        || value.source !== null || value.originals !== null || value.request !== null || value.response !== null) fail();
+      return freezePacket(value);
+    }
+    const source = value.source, fields = value.evidence_id.split(".");
+    if (!exactFields(source, ["record_id", "sequence", "started_at"]) || !exactFields(value.originals, ["request", "response"])) fail();
+    if (value.available !== true || value.status !== "available" || value.reason !== null
+      || source?.record_id !== owner.recordId || source?.sequence !== owner.sequence || source.record_id !== fields[5] || source.sequence !== fields[3]
+      || typeof source.started_at !== "string" || owner.startedAt && source.started_at !== owner.startedAt
+      || typeof value.originals?.request !== "boolean" || typeof value.originals?.response !== "boolean") fail();
+    for (const side of ["request", "response"]) {
+      const item = value[side];
+      if (!exactFields(item, ["status", "message"])) fail();
+      if (value.variant === "current" && side === "request" && item.status !== "retained"
+        || value.variant === "original" && (item.status === "retained") !== value.originals[side]) fail();
+      if (item.status === "not_retained" && item.message === null) continue;
+      const message = item?.message, body = message?.body;
+      if (item?.status !== "retained" || !exactFields(message, ["method", "scheme", "authority", "path", "http_version", "status_code", "headers", "body"]) || !["method", "scheme", "authority", "path", "http_version"].every(key => nullableString(message[key]))
+        || !(message.status_code === null || Number.isInteger(message.status_code) && message.status_code >= 0 && message.status_code <= 65535)
+        || !Array.isArray(message.headers) || message.headers.some(header => !exactFields(header, ["name", "value"]) || typeof header.name !== "string" || typeof header.value !== "string")
+        || !exactFields(body, ["available", "reason", "body_preview", "body_encoding", "body_size", "decoded_body_size", "preview_truncated", "content_decoded", "content_type"]) || typeof body.available !== "boolean" || !["utf8", "base64"].includes(body.body_encoding) || !integer(body.body_size)
+        || !(body.decoded_body_size === null || integer(body.decoded_body_size)) || typeof body.preview_truncated !== "boolean"
+        || typeof body.content_decoded !== "boolean" || !nullableString(body.content_type)
+        || (body.available ? typeof body.body_preview !== "string" || body.reason !== null : body.body_preview !== null || !["body_identity_unverifiable", "retained_preview_unavailable", "body_storage_unavailable", "body_read_failed", "malformed_retained_row"].includes(body.reason))) fail();
+      if (side === "request" && message.status_code !== null
+        || side === "response" && ["method", "scheme", "authority", "path"].some(key => message[key] !== null)) fail();
+      if (value.variant === "original" && (message.scheme !== null || message.authority !== null || message.http_version !== null || message.status_code !== null)) fail();
+    }
+    return freezePacket(value);
   }
   function validTechnologyEvidence(value, sessionId, generation) {
     if (typeof value !== "string" || value.length > 200) return false;
@@ -1164,35 +1216,38 @@
   // (longest-path layering), so a chain reads left to right and no arrow joins
   // two cards of one column. Two fixed columns put a real session's hub alone on
   // the left and its 23 targets in one column, drawing their 17 links to each
-  // other as loops piled on the column edge. Only a link that closes a cycle is
-  // turned around, found by a depth-first walk from the sources. Columns are
-  // centered on the tallest and sorted by their sources' rows to limit
-  // crossings; unlinked cards fill a grid below.
+  // other as loops piled on the column edge; capping the columns at five did
+  // the same to the cards past the fifth. Columns are centered on the tallest
+  // and sorted by their sources' rows to limit crossings; unlinked cards fill a
+  // grid below.
+  //
+  // A link that closes a cycle is turned around. The cards are put in order
+  // first (Eades, Lin and Smyth's greedy heuristic): sinks last, sources first,
+  // otherwise the card with the most links out over links in, the first in the
+  // map's order on a tie; a link pointing back in that order is the one turned.
+  // A depth-first walk turned whichever link closed a cycle on its path, so a
+  // front that signed in at an accounts origin put accounts behind it and every
+  // other front behind accounts. ponytail: cards that all link to each other
+  // still take a column each, 24 at most; fold columns into bands if that shows.
   function layeredSlots(visibleOrigins, connections) {
     const ids = visibleOrigins.map((origin) => origin.origin);
     const rank = new Map(ids.map((id, index) => [id, index]));
     const inspected = new Set(visibleOrigins.filter((origin) => origin.inspectedSource).map((origin) => origin.origin));
-    const next = new Map(ids.map((id) => [id, new Set()]));
-    for (const [source, target] of connections) next.get(source).add(target);
     const linked = new Set(connections.flat());
-    const targets = new Set(connections.map(([, target]) => target));
-    const visiting = new Set(), done = new Set(), forward = [];
-    const visit = (id) => {
-      visiting.add(id);
-      for (const target of next.get(id)) {
-        if (visiting.has(target)) {
-          forward.push([target, id]);
-        } else {
-          forward.push([id, target]);
-          if (!done.has(target)) visit(target);
-        }
-      }
-      visiting.delete(id);
-      done.add(id);
-    };
-    for (const id of [...ids.filter((id) => !targets.has(id)), ...ids]) {
-      if (linked.has(id) && !done.has(id)) visit(id);
+    const outs = new Map(ids.map((id) => [id, new Set()])), ins = new Map(ids.map((id) => [id, new Set()]));
+    for (const [source, target] of connections) { outs.get(source).add(target); ins.get(target).add(source); }
+    const pending = ids.filter((id) => linked.has(id)), head = [], tail = [];
+    while (pending.length) {
+      const sink = pending.find((item) => !outs.get(item).size);
+      const id = sink || pending.find((item) => !ins.get(item).size)
+        || pending.reduce((best, item) => outs.get(item).size - ins.get(item).size > outs.get(best).size - ins.get(best).size ? item : best);
+      (sink ? tail : head).push(id);
+      pending.splice(pending.indexOf(id), 1);
+      for (const target of outs.get(id)) ins.get(target).delete(id);
+      for (const source of ins.get(id)) outs.get(source).delete(id);
     }
+    const position = new Map([...head, ...tail.reverse()].map((id, index) => [id, index]));
+    const forward = connections.map(([source, target]) => position.get(source) < position.get(target) ? [source, target] : [target, source]);
     const layer = new Map([...linked].map((id) => [id, 0]));
     for (let changed = true; changed;) {
       changed = false;
@@ -1203,8 +1258,8 @@
         }
       }
     }
-    const columns = Array.from({ length: linked.size ? Math.min(MAX_COLUMNS, Math.max(...layer.values()) + 1) : 0 }, () => []);
-    for (const id of ids) if (linked.has(id)) columns[Math.min(MAX_COLUMNS - 1, layer.get(id))].push(id);
+    const columns = Array.from({ length: linked.size ? Math.max(...layer.values()) + 1 : 0 }, () => []);
+    for (const id of ids) if (linked.has(id)) columns[layer.get(id)].push(id);
     const tallest = Math.max(0, ...columns.map((column) => column.length));
     const slots = new Map();
     columns.forEach((column, index) => {
@@ -1226,7 +1281,11 @@
   // The Flow view: the selected origin's requests and those of the origins it
   // links to, in time order, a band per page load, the client on the left.
   const FLOW = Object.freeze({ gutter: 64, clientX: 136, laneWidth: 220, laneBox: 180, top: 12, header: 46, kicker: 30, step: 42, padding: 20 });
-  const FLOW_STOPS = Object.freeze({ lanes_limit: "more origins link here; the five with the most rows are shown", steps_limit: "older steps left out" });
+  const FLOW_STOPS = Object.freeze({ max_records: "older rows left out", metadata_bytes: "metadata read limit reached", lanes_limit: "more origins link here; the five with the most rows are shown", steps_limit: "older steps left out",
+    request_header_scan_limit: "request-header read limit reached", request_header_value_limit: "oversized request headers left links unproven",
+    ambiguous_origin_header: "ambiguous Origin headers", ambiguous_referer_header: "ambiguous Referer headers",
+    header_scan_limit: "response-header read limit reached", header_value_limit: "oversized response headers left redirects unproven",
+    ambiguous_location_headers: "ambiguous redirect headers", unsupported_location: "unsupported redirect target" });
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const hostOf = (origin) => { try { return new URL(origin).host; } catch { return String(origin); } };
   const flowStepLabel = (step) => `${step.method} ${step.path}${step.count > 1 ? ` ×${step.count}` : ""}${step.status == null ? "" : ` ${step.status}`}`;
@@ -1356,17 +1415,29 @@
     return Math.max(0, (viewportTop - flowTop) / (scale || 1));
   }
 
-  // Mermaid sequence diagram text; ";" and "#" would end or escape a message.
+  // Mermaid entity codes preserve label text without introducing markup or
+  // ending a message. Line separators stay on the same statement.
   function flowMermaid(flow, hiddenKinds = []) {
     const hidden = new Set(hiddenKinds);
     const ids = new Map(flow.lanes.map((origin, index) => [origin, `O${index}`]));
-    const text = (value) => String(value).replace(/[;#\r\n]/g, " ");
-    const lines = ["sequenceDiagram", "  participant C as Client", ...flow.lanes.map((origin) => `  participant ${ids.get(origin)} as ${text(hostOf(origin))}`)];
+    const text = (value) => String(value).replace(/[\r\n\u2028\u2029]/g, " ").replace(/[&<>;#]/g, (character) => `#${character.charCodeAt(0)};`);
+    const shown = flow.phases.flatMap((phase) => phase.steps).filter((step) => !hidden.has(step.kind));
+    // A copied diagram must not turn a bounded or filtered view into apparent
+    // full coverage. Keep exact bounds in the source, and truncation visible.
+    const provenance = { origin: flow.origin, considered_rows: flow.consideredRows, flow_rows: flow.flowRows, complete: flow.complete,
+      stopped_by: flow.stoppedBy, hidden_request_kinds: [...hidden], shown_steps: shown.length, shown_rows: shown.reduce((sum, step) => sum + step.count, 0) };
+    const metadata = JSON.stringify(provenance).replace(/[&<>\u2028\u2029]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    const lines = ["sequenceDiagram", `  %% Sniper Flow: ${metadata}`, "  participant C as Client", ...flow.lanes.map((origin) => `  participant ${ids.get(origin)} as ${text(hostOf(origin))}`)];
     const last = ids.get(flow.lanes.at(-1));
+    const span = last ? `C,${last}` : "C";
+    if (!flow.complete || flow.stoppedBy.length) {
+      const reasons = flow.stoppedBy.map((reason) => FLOW_STOPS[reason] || reason).join(" · ");
+      lines.push(`  Note over ${span}: ${text(`Partial flow${reasons ? `: ${reasons}` : ""}`)}`);
+    }
     for (const phase of flow.phases) {
       const steps = phase.steps.filter((step) => !hidden.has(step.kind));
       if (!steps.length) continue;
-      lines.push(`  Note over C,${last}: ${text(flowPageLabel(phase))}`);
+      lines.push(`  Note over ${span}: ${text(flowPageLabel(phase))}`);
       for (const step of steps) {
         lines.push(`  C->>${ids.get(step.origin)}: ${text(flowStepLabel(step))}`);
         if (step.redirect) lines.push(`  ${ids.get(step.origin)}-->>C: ${text(flowRedirectLabel(step))}`);
@@ -1568,7 +1639,7 @@
     }
   }
   const referenceOrigin = (id) => ({ origin: id, captured: false, in_scope: false, endpoints: [], technology_clues: [], technology_observations: [], technology_observations_present: false, redirects: [], header_links: [], references: [], referencesOmitted: 0 });
-  function createController({ elements: els, getSessionId, getEventStreamReady = () => true, getFilterQuery = () => ({}), getFilterSummary = () => null, getHiddenLinkKinds = null, setHiddenLinkKinds = null, getSiteDisplay = null, setSiteDisplay = null, request: sendRequest, copyText = null, sendToReplay = null, openInHistory = null, openUrl = null, onApiDocsOpen = null, isActiveModal = () => true, restoreFocus = null, document: doc = root.document }) {
+  function createController({ elements: els, getSessionId, getEventStreamReady = () => true, getFilterQuery = () => ({}), getFilterSummary = () => null, getHiddenLinkKinds = null, setHiddenLinkKinds = null, getSiteDisplay = null, setSiteDisplay = null, request: sendRequest, packetViewerMarkup = null, mountPacketViewer = null, copyText = null, sendToReplay = null, openInHistory = null, openUrl = null, onApiDocsOpen = null, isActiveModal = () => true, restoreFocus = null, document: doc = root.document }) {
     // Request kinds whose links are not drawn. The app keeps them in UI
     // settings; without it they live for this controller only.
     let localHiddenLinkKinds = [...DEFAULT_HIDDEN_LINK_KINDS];
@@ -1591,11 +1662,13 @@
     const request = (path, options) => sendRequest(path, { ...options, redirect: "error" });
     const productFilterContainer = els.productFilters || els.panel.querySelector?.("#serviceMapProductFilters");
     const productFilterDisclosure = productFilterContainer?.parentElement;
+    let packetAbort = null, packetViewer = null, packetViewerElement = null;
     const state = {
       sessionId: null, snapshot: null, order: [], selectedOrigin: null, selectedClient: null, selectedSite: null, selectionInitialized: false,
       query: "", scopeOnly: false, view: "service-map", detailTab: "apis", endpointIndex: null, endpointSelection: null,
       endpointMethod: "", endpointPath: "", productId: "", productVersion: "", pageAnchor: null, detailPageAnchor: null,
       expandedEndpointGroups: new Set(), loading: false, backgroundLoading: false, error: "", refreshPaused: false, requestId: 0, evidenceRequestId: 0, evidence: null,
+      packet: null, packetVariant: "current", packetOriginals: null, packetLoading: false, packetError: "", packetRequestId: 0, packetInspection: "",
       evidenceLoading: false, evidenceError: "", evidenceId: null, evidenceCatalogVersion: null, evidenceLegacyCatalog: false, socketPeer: null, page: 0, detailPage: 0,
       peerMatches: null, peerMatchesSource: null, peerMatchesLoading: false, peerMatchesError: "", peerMatchesRequestId: 0, peerEvidenceBinding: null,
       bodyReferences: null, bodyReferencesLoading: false, bodyReferencesError: "", bodyReferencesRequestId: 0,
@@ -1609,12 +1682,17 @@
     Object.defineProperty(state, "bodyReferenceOverlay", { get: () => state.relationLayers.at(-1) || null });
     let abort = null;
     let flowAbort = null;
+    let flowBinding = null;
     let evidenceAbort = null;
     let bodyReferencesAbort = null;
     let peerMatchesAbort = null;
     let htmlGeneratorsAbort = null;
     let parametersAbort = null;
-    let apiDocsCopyId = 0;
+    // Both exports target the same clipboard. Latest intent wins even when
+    // that write fails; an older fallback must not revive afterward.
+    let copyActionId = 0;
+    let flowCopyKindsVersion = 0;
+    let flowCopyKindsSignature = JSON.stringify(hiddenLinkKinds());
     let replayActionId = 0;
     let apiDocsReturnFocus = null;
     let detailRender = null;
@@ -1660,12 +1738,14 @@
       }, AUTO_REFRESH_MS);
     }
     function suspendRefresh() {
+      copyActionId += 1;
       clearRefreshTimer();
       state.requestId += 1;
       abort?.abort();
       abort = null;
       state.loading = false;
       state.backgroundLoading = false;
+      cancelFlow();
     }
     function onVisibilityChange() {
       if (!canRefresh()) suspendRefresh();
@@ -1673,6 +1753,7 @@
         if (historyPresentationPending) render();
         else renderStatus();
         historyPresentationPending = false;
+        resumeFlow();
         scheduleAutomaticRefresh();
       }
     }
@@ -2126,10 +2207,46 @@
       state.modeNotice = "";
       render();
     }
-    function leaveFlow() {
+    function cancelFlow() {
       flowAbort?.abort();
+      flowAbort = null;
+      flowBinding = null;
       state.flowRequestId += 1;
-      Object.assign(state, { flowOrigin: null, flow: null, flowLoading: false, flowError: "" });
+      Object.assign(state, { flow: null, flowLoading: false, flowError: "" });
+    }
+    function leaveFlow() {
+      cancelFlow();
+      state.flowOrigin = null;
+    }
+    function flowIsCurrent() {
+      return canRefresh() && state.view === "service-map" && state.flow && !state.flowLoading && !state.error && flowBinding
+        && state.sessionId === getSessionId() && flowBinding.sessionId === getSessionId()
+        && state.flowOrigin === flowBinding.origin && state.scopeOnly === flowBinding.scopeOnly
+        && JSON.stringify(getFilterQuery()) === flowBinding.filterSignature;
+    }
+    function syncFlowCopyKinds() {
+      const signature = JSON.stringify(hiddenLinkKinds());
+      if (signature !== flowCopyKindsSignature) {
+        flowCopyKindsSignature = signature;
+        flowCopyKindsVersion += 1;
+      }
+      return signature;
+    }
+    function copyFlow() {
+      if (!flowIsCurrent()) return;
+      const flow = state.flow, binding = flowBinding, requestId = state.flowRequestId;
+      const kinds = syncFlowCopyKinds(), kindsVersion = flowCopyKindsVersion;
+      const copyId = ++copyActionId;
+      // Native writes already issued cannot be canceled. Own only the JS
+      // fallback and feedback, without tying them to unrelated Map polling.
+      const isCurrent = () => syncFlowCopyKinds() === kinds && kindsVersion === flowCopyKindsVersion
+        && copyId === copyActionId && flow === state.flow && binding === flowBinding
+        && requestId === state.flowRequestId && flowIsCurrent();
+      copyText?.(flowMermaid(flow, hiddenLinkKinds()), "Copied the flow as a Mermaid sequence diagram", isCurrent);
+    }
+    function resumeFlow() {
+      if (canRefresh() && state.view === "service-map" && state.snapshot && state.flowOrigin && !state.flow && !state.flowLoading
+        && !state.loading && !state.stale && !state.error) loadFlow();
     }
     // Flow follows one origin: the selected one, or a lane clicked in a flow.
     function setFlowMode(origin) {
@@ -2141,15 +2258,19 @@
     }
     async function loadFlow() {
       const origin = state.flowOrigin, sessionId = getSessionId();
-      if (!origin) return;
+      if (!origin || !canRefresh() || state.view !== "service-map" || state.sessionId !== sessionId) return;
       flowAbort?.abort();
       flowAbort = new AbortController();
+      flowBinding = null;
       const requestId = ++state.flowRequestId;
-      state.flowLoading = true;
+      const scopeOnly = state.scopeOnly, filterQuery = getFilterQuery(), filterSignature = JSON.stringify(filterQuery);
+      // Same-context polling may keep its diagram in place. Destructive
+      // boundaries clear it through cancelFlow; neither can act until verified.
+      Object.assign(state, { flowError: "", flowLoading: true });
       render();
       // The newest rows the server reads at most: a flow shows what happened
       // lately, and only a row window keeps the rows' order.
-      const params = new URLSearchParams({ ...getFilterQuery(), session_id: sessionId, origin, in_scope_only: String(state.scopeOnly), max_records: "50000" });
+      const params = new URLSearchParams({ ...filterQuery, session_id: sessionId, origin, in_scope_only: String(scopeOnly), max_records: "50000" });
       let flow = null, error = "";
       try {
         const response = await request(`/api/target/service-map/flow?${params}`, { signal: flowAbort.signal });
@@ -2160,7 +2281,13 @@
         if (failure?.name === "AbortError") return;
         error = "The flow could not be read.";
       }
-      if (destroyed || requestId !== state.flowRequestId || state.flowOrigin !== origin || sessionId !== getSessionId()) return;
+      if (!canRefresh() || state.view !== "service-map" || requestId !== state.flowRequestId || state.flowOrigin !== origin || sessionId !== getSessionId()
+        || scopeOnly !== state.scopeOnly || filterSignature !== JSON.stringify(getFilterQuery())) {
+        if (requestId === state.flowRequestId) { cancelFlow(); render(); }
+        return;
+      }
+      flowAbort = null;
+      flowBinding = flow ? { sessionId, origin, scopeOnly, filterSignature } : null;
       Object.assign(state, { flow, flowError: error, flowLoading: false });
       render();
     }
@@ -2174,6 +2301,7 @@
       if (els.directRelations) els.directRelations.disabled = !state.snapshot || !state.anchorOrigin && !selected;
       if (els.flow) els.flow.disabled = !state.snapshot || !flow && !selected;
       els.flowMermaid?.classList.toggle("hidden", !flow || !state.flow);
+      if (els.flowMermaid) els.flowMermaid.disabled = !flowIsCurrent();
       els.linkKinds?.parentElement?.classList.toggle("flow-active", flow);
     }
     function renderFlow() {
@@ -2184,11 +2312,16 @@
       const flow = state.flow;
       const layout = flow && flowLayout(flow, hiddenLinkKinds());
       const shown = layout ? layout.arrows.filter((arrow) => !arrow.redirect).length : 0;
+      const steps = flow ? flow.phases.reduce((sum, phase) => sum + phase.steps.length, 0) : 0;
+      const coverage = flow ? [`${flow.flowRows} of the newest ${flow.consideredRows} rows`,
+        ...flow.stoppedBy.map((reason) => FLOW_STOPS[reason] || `stopped by ${reason}`)].join(" · ") : "";
       if (!shown) {
         currentLayout = null;
-        const message = !flow ? state.flowError || "Reading the flow…" : "No requests of the kinds shown. Turn more kinds on under Requests.";
+        const message = !flow ? state.flowError || "Reading the flow…" : steps
+          ? "No requests of the kinds shown. Turn more kinds on under Requests."
+          : "No matching requests in this row window.";
         replace(els.canvas, `<div class="service-map-empty"><span class="service-map-empty-symbol" aria-hidden="true">◎</span><h3>${escape(message)}</h3></div>`);
-        els.graphBounds.textContent = "";
+        els.graphBounds.textContent = coverage;
         if (els.graphDiagnostics) els.graphDiagnostics.textContent = "";
         updateZoomControls();
         return;
@@ -2197,9 +2330,7 @@
       replace(els.canvas, `<div class="service-map-scaled"><div class="service-map-layout">${flowMarkup(layout)}</div></div>`);
       applyGraphScale();
       pinFlowHeads();
-      const steps = flow.phases.reduce((sum, phase) => sum + phase.steps.length, 0);
-      els.graphBounds.textContent = [`${shown} / ${steps} steps in ${layout.bands.length} page loads`, `${flow.flowRows} of the newest ${flow.consideredRows} rows`,
-        ...flow.stoppedBy.map((reason) => FLOW_STOPS[reason] || `stopped by ${reason}`)].join(" · ");
+      els.graphBounds.textContent = `${shown} / ${steps} steps in ${layout.bands.length} page loads · ${coverage}`;
       if (els.graphDiagnostics) els.graphDiagnostics.textContent = "";
     }
     function focusSelection() {
@@ -2294,6 +2425,7 @@
         || !validTechnologyEvidence(row.evidence_id, sessionId, generation) || row.sequence !== row.evidence_id.split(".")[3]
         || row.record_id !== row.evidence_id.split(".")[5] || safeOrigin(row.origin) !== row.origin || observationTime(row.started_at) === null
         || !(state.peerEvidenceBinding ? peerBindingIsCurrent(state.peerEvidenceBinding) : evidenceItems(selectedOrigin()).some((item) => item.id === row.evidence_id))) return false;
+      state.packetInspection = "peer";
       cancelPeerMatches();
       const source = Object.freeze({ sessionId, generation, evidenceId: row.evidence_id, origin: row.origin, sequence: row.sequence,
         method: row.method, path: safePath(row.path), startedAt: row.started_at, observedAt: peer.observedAt,
@@ -2359,7 +2491,7 @@
       const ready = usableSocketPeer(state.socketPeer);
       const disabled = activeInspectionsBlocked() || !ready || !visible || !getEventStreamReady() || !!state.error || state.stale || state.evidenceLoading || state.peerMatchesLoading;
       const showDisabled = !scan?.available || !peerSourceIsCurrent(source) || source.evidenceId !== state.evidenceId || disabled;
-      return `<section class="service-map-body-references service-map-peer-matches" aria-label="Matching recorded socket peers" aria-busy="${state.peerMatchesLoading}"><h4>Matching recorded socket peers</h4><button class="secondary-action" type="button" data-service-peer-matches="inspect" data-service-focus="peer:inspect" ${disabled ? "disabled" : ""}>${state.peerMatchesLoading ? "Finding matching recorded peers…" : "Find matching recorded peer"}</button>${state.peerMatchesError ? `<p class="service-map-error" role="status">${escape(state.peerMatchesError)}</p>` : ""}${scan ? `<div class="service-map-body-reference-result" role="status">${scan.available ? `<p>${scan.status === "no_matches" ? "No other rows came from this address." : `${scan.counts.matching_rows.toLocaleString()} other rows came from this address.`}</p>` : `<p>Inspection unavailable. ${scan.reasons.map((reason) => escape(PEER_MATCH_REASONS[reason])).join(" · ")}</p>`}</div>` : ""}${scan?.available && scan.origins.length ? `<ul class="service-map-body-reference-list">${scan.origins.map((group) => `<li><span class="service-map-body-reference-origin">${escape(group.origin)}</span><span>${group.matching_rows} matching rows · ${group.samples.length} exact samples</span><span>Recorded first: ${escape(group.first_observed_at)} · last: ${escape(group.last_observed_at)}</span></li>`).join("")}</ul>` : ""}<button class="secondary-action" type="button" data-service-show-peer-matches="show" data-service-focus="peer:show" ${showDisabled ? "disabled" : ""}>Show recorded address group</button>${scan?.available ? `<details class="service-map-body-reference-limits"><summary data-service-focus="peer:limits">Coverage and omissions</summary>${peerCountsMarkup(scan)}<p>${PEER_PRIVACY}</p><p>Other considered rows: ${scan.counts.non_http_rows} non-HTTP · ${scan.counts.not_recorded_rows} not recorded · ${scan.counts.unavailable_observation_rows} unavailable · ${scan.counts.non_direct_rows} non-direct · ${scan.counts.invalid_observation_rows} unusable observations · ${scan.counts.different_peer_rows} different peer · ${scan.counts.invalid_metadata_rows} invalid origin metadata · ${scan.counts.scope_excluded_rows} scope excluded.</p><p>Limits: ${PEER_MATCH_LIMITS.max_records.toLocaleString()} newest retained rows · 100 origin groups · 3 samples per origin · 256 KiB result. Unreturned distinct origins are not counted. Exact samples can change after this point-in-time inspection and are verified again when opened.</p></details>` : ""}</section>`;
+      return `<section class="service-map-body-references service-map-peer-matches" aria-label="Matching recorded socket peers" aria-busy="${state.peerMatchesLoading}"><h4>Matching recorded socket peers</h4>${state.peerMatchesError ? `<p class="service-map-error" role="status">${escape(state.peerMatchesError)}</p>` : ""}${scan ? `<div class="service-map-body-reference-result" role="status">${scan.available ? `<p>${scan.status === "no_matches" ? "No other rows came from this address." : `${scan.counts.matching_rows.toLocaleString()} other rows came from this address.`}</p>` : `<p>Inspection unavailable. ${scan.reasons.map((reason) => escape(PEER_MATCH_REASONS[reason])).join(" · ")}</p>`}</div>` : ""}${scan?.available && scan.origins.length ? `<ul class="service-map-body-reference-list">${scan.origins.map((group) => `<li><span class="service-map-body-reference-origin">${escape(group.origin)}</span><span>${group.matching_rows} matching rows · ${group.samples.length} exact samples</span><span>Recorded first: ${escape(group.first_observed_at)} · last: ${escape(group.last_observed_at)}</span></li>`).join("")}</ul>` : ""}${showDisabled ? "" : `<button class="secondary-action" type="button" data-service-show-peer-matches="show" data-service-focus="peer:show" ${showDisabled ? "disabled" : ""}>Show recorded address group</button>`}${scan?.available ? `<details class="service-map-body-reference-limits"><summary data-service-focus="peer:limits">Coverage and omissions</summary>${peerCountsMarkup(scan)}<p>${PEER_PRIVACY}</p><p>Other considered rows: ${scan.counts.non_http_rows} non-HTTP · ${scan.counts.not_recorded_rows} not recorded · ${scan.counts.unavailable_observation_rows} unavailable · ${scan.counts.non_direct_rows} non-direct · ${scan.counts.invalid_observation_rows} unusable observations · ${scan.counts.different_peer_rows} different peer · ${scan.counts.invalid_metadata_rows} invalid origin metadata · ${scan.counts.scope_excluded_rows} scope excluded.</p><p>Limits: ${PEER_MATCH_LIMITS.max_records.toLocaleString()} newest retained rows · 100 origin groups · 3 samples per origin · 256 KiB result. Unreturned distinct origins are not counted. Exact samples can change after this point-in-time inspection and are verified again when opened.</p></details>` : ""}</section>`;
     }
     function peerOriginMarkup(origin) {
       return state.relationLayers.filter((layer) => layer.kind === "peer").map((overlay) => {
@@ -2423,7 +2555,80 @@
       render();
       return true;
     }
+    function cancelPacket() {
+      state.packetRequestId += 1;
+      packetAbort?.abort(); packetAbort = null;
+      packetViewer?.destroy(); packetViewer = null; packetViewerElement = null;
+      state.packet = null; state.packetLoading = false; state.packetError = "";
+    }
+    async function loadPacket(variant = state.packetVariant) {
+      if (!mountPacketViewer || !visible || destroyed || !state.evidence || state.evidenceId !== state.evidence.evidence_id
+        || state.sessionId !== getSessionId() || !["current", "original"].includes(variant)) return false;
+      cancelPacket();
+      const row = state.evidence, evidenceId = state.evidenceId, sessionId = state.sessionId, requestId = state.packetRequestId;
+      const evidenceRequestId = state.evidenceRequestId, view = state.view;
+      state.packetVariant = variant; state.packetLoading = true;
+      const owns = () => !destroyed && visible && state.view === view && requestId === state.packetRequestId && evidenceRequestId === state.evidenceRequestId
+        && sessionId === getSessionId() && state.sessionId === sessionId && state.evidence === row && state.evidenceId === evidenceId && state.packetVariant === variant;
+      packetAbort = new AbortController(); renderDetail();
+      try {
+        const params = new URLSearchParams({ session_id: sessionId, evidence_id: evidenceId, variant });
+        const response = await request(`/api/target/service-map/packet?${params}`, { signal: packetAbort.signal });
+        if (!owns()) return false;
+        if (!response.ok) throw new Error("Retained packet unavailable");
+        const value = await response.json();
+        if (!owns()) return false;
+        const packet = normalizePacket(value, { sessionId, evidenceId, variant, recordId: row.record_id, sequence: row.sequence, startedAt: row.started_at });
+        state.packet = packet.available ? packet : null;
+        if (packet.available) state.packetOriginals = packet.originals;
+        state.packetError = packet.available ? "" : packet.reason === "packet_view_limit" || packet.reason === "serialized_row_limit" ? "Retained packet exceeds the view limit." : "Retained packet unavailable.";
+      } catch (_) { if (!owns()) return false; state.packetError = "Retained packet could not be read."; }
+      if (!owns()) return false;
+      state.packetLoading = false; packetAbort = null; renderDetail();
+      return !!state.packet;
+    }
+    function selectDetails() {
+      state.detailTab = "evidence";
+      renderDetail();
+      if (!mountPacketViewer || state.evidenceLoading || state.packetLoading) return;
+      if (state.evidence) { if (!state.packet && !state.packetError) loadPacket(); return; }
+      if (state.evidenceId) return;
+      const first = evidenceItems(selectedOrigin())[0];
+      if (first) loadEvidence(first.id);
+    }
+    function mountDetailsPacket() {
+      const element = els.detail.querySelector?.("[data-service-packet]");
+      if (!element || !state.packet || !mountPacketViewer || !visible || state.detailTab !== "evidence") return;
+      if (packetViewerElement === element) return;
+      packetViewer?.destroy();
+      const packet = state.packet, requestId = state.packetRequestId, sessionId = state.sessionId, view = state.view;
+      const isCurrent = () => !destroyed && visible && state.view === view && state.detailTab === "evidence" && sessionId === getSessionId()
+        && state.sessionId === sessionId && requestId === state.packetRequestId && state.packet === packet;
+      packetViewerElement = element;
+      packetViewer = mountPacketViewer(element, { packet, row: state.evidence, isCurrent });
+    }
+    function selectedInspectionMarkup() {
+      if (state.packetVariant !== "current") return "";
+      if (state.packetInspection === "generator") return htmlGeneratorsMarkup();
+      if (state.packetInspection === "peer") return peerMatchesMarkup();
+      if (state.packetInspection === "body") return `<section class="service-map-body-references packet-inspection"><h4>Body references</h4>${bodyReferencesMarkup()}</section>`;
+      if (state.packetInspection === "link") return `<section class="service-map-body-references packet-inspection"><h4>Link references</h4>${linkDeclarationsMarkup()}</section>`;
+      return "";
+    }
+    function packetInspectOptions() {
+      if (!state.packet || state.packetVariant !== "current" || !state.packet.response?.message || state.peerEvidenceBinding) return "";
+      const message = state.packet.response.message, body = message.body;
+      const types = [];
+      if (body.available && body.body_encoding === "utf8" && /^(text\/html|application\/xhtml\+xml)(;|$)/i.test(body.content_type || "")) types.push(["generator", "HTML generators"]);
+      if (body.available && body.body_encoding === "utf8" && /^(text\/html|application\/(xhtml\+xml|javascript)|text\/javascript)(;|$)/i.test(body.content_type || "")) types.push(["body", "Body references"]);
+      if (message.headers.some(header => header.name.toLowerCase() === "link")) types.push(["link", "Link references"]);
+      // Body inspection can use a freshly reverified exact row while only
+      // aggregate counts are stale; the other existing inspectors cannot.
+      const blocked = kind => activeInspectionsBlocked() || kind !== "body" && (state.stale || state.error || !getEventStreamReady());
+      return types.length ? `<label class="packet-inspect"><select aria-label="Inspect retained response" data-service-packet-inspect="true" data-service-packet-owner="${state.packetRequestId}" ${types.every(([kind]) => blocked(kind)) ? "disabled" : ""}><option value="">Inspect</option>${types.map(([key, label]) => `<option value="${key}"${blocked(key) ? " disabled" : ""}>${label}</option>`).join("")}</select></label>` : "";
+    }
     function cancelEvidence() {
+      cancelPacket(); state.packetVariant = "current"; state.packetOriginals = null; state.packetInspection = "";
       cancelPeerMatches();
       state.peerEvidenceBinding = null;
       cancelHtmlGenerators();
@@ -2478,7 +2683,7 @@
       }
       state.detailTab = endpointIndex === null ? "apis" : "evidence";
       render();
-      if (endpoint) loadParameters(origin, endpoint);
+      if (endpoint) { loadParameters(origin, endpoint); selectDetails(); }
     }
     // An origin's API docs: its OpenAPI document laid out as Swagger UI lays
     // one out, read when asked for. Burp's OpenAPI Parser lists operations the
@@ -2539,10 +2744,13 @@
       sendToReplay?.(id, isCurrent);
     }
     function copyApiDocs(label) {
-      const apiDocs = state.apiDocs, sessionId = getSessionId(), copyId = ++apiDocsCopyId;
-      if (!apiDocs?.document) return;
-      const isCurrent = () => state.apiDocs === apiDocs && getSessionId() === sessionId && apiDocsCopyId === copyId;
+      const apiDocs = state.apiDocs;
+      if (!canRefresh() || !apiDocs?.document || apiDocs.sessionId !== getSessionId()) return false;
+      const copyId = ++copyActionId, requestId = state.apiDocsRequestId;
+      const isCurrent = () => canRefresh() && state.apiDocs === apiDocs && apiDocs.sessionId === getSessionId()
+        && requestId === state.apiDocsRequestId && copyActionId === copyId;
       copyText?.(JSON.stringify(apiDocs.document, null, 2), label, isCurrent);
+      return true;
     }
     function renderApiDocs(opening = false) {
       if (!els.apiDocs) return;
@@ -2652,6 +2860,7 @@
       // not erase an explicit inspection or continually abort its pending read.
       if (force) {
         replayActionId += 1;
+        cancelFlow();
         cancelParameters();
         clearOverlay("Temporary body references cleared by Reload. Inspect and show references again when ready.");
         closeApiDocs();
@@ -2698,6 +2907,7 @@
           && filterSignature === state.filterSignature
           && state.kindSignature === JSON.stringify(hiddenLinkKinds())
           && state.siteDisplaySignature === JSON.stringify(siteDisplay())
+          && !(state.flowOrigin && !state.flow)
           && !(state.endpointSelection && state.parametersKey === null)
           && JSON.stringify(snapshot) === JSON.stringify(state.snapshot)) {
           // Reusing serialized cache bytes must not rebuild the graph or disturb
@@ -2779,6 +2989,7 @@
         state.loading = false;
         cancelPeerMatches();
         if (failure?.status === 409) {
+          cancelFlow();
           cancelEvidence();
           closeApiDocs();
           cancelParameters();
@@ -2893,6 +3104,7 @@
           clearOverlay("Shown inspections removed: the exact inspected source is no longer available.", (layer) => layer.source.evidenceId === id);
           render();
         } else renderDetail();
+        if (state.evidence && mountPacketViewer) loadPacket("current");
         return !!state.evidence;
       } catch (_) {
         if (requestId !== state.evidenceRequestId || sessionId !== getSessionId() || selected !== state.selectedOrigin) return false;
@@ -2920,6 +3132,7 @@
       if (activeInspectionsBlocked() || state.relationshipKind !== "body" || !visible || state.sessionId !== sessionId || !row || state.evidenceId !== row.evidence_id
         || state.evidenceLoading || state.bodyReferencesLoading
         || !evidenceItems(selectedOrigin()).some((item) => item.id === row.evidence_id)) return false;
+      state.packetInspection = "body";
       cancelBodyReferences();
       const requestId = ++state.bodyReferencesRequestId;
       const evidenceId = row.evidence_id;
@@ -2968,6 +3181,7 @@
         || !validHtmlGeneratorEvidence(row.evidence_id, sessionId, generation) || row.evidence_id.split(".")[3] !== row.sequence
         || row.evidence_id.split(".")[5] !== row.record_id || safeOrigin(row.origin) !== row.origin || observationTime(row.started_at) === null
         || !evidenceItems(selectedOrigin()).some((item) => item.id === row.evidence_id)) return false;
+      state.packetInspection = "link";
       const source = Object.freeze({ sessionId, generation, evidenceId: row.evidence_id, origin: row.origin,
         method: row.method, path: safePath(row.path), sequence: row.sequence, startedAt: row.started_at });
       if (!htmlGeneratorSourceIsRetained(source)) return false;
@@ -3037,6 +3251,7 @@
         || row.evidence_id.split(".")[3] !== row.sequence || row.evidence_id.split(".")[5] !== row.record_id
         || safeOrigin(row.origin) !== row.origin || observationTime(row.started_at) === null
         || !evidenceItems(selectedOrigin()).some((item) => item.id === row.evidence_id)) return false;
+      state.packetInspection = "generator";
       const source = Object.freeze({ sessionId, generation, evidenceId: row.evidence_id, origin: row.origin,
         method: row.method, path: safePath(row.path), sequence: row.sequence, startedAt: row.started_at });
       if (!htmlGeneratorSourceIsRetained(source)) return false;
@@ -3209,6 +3424,7 @@
     }
     function renderGraph() {
       if (destroyed) return;
+      syncFlowCopyKinds();
       if (state.flowOrigin) return renderFlow();
       const selected = selectedOrigin();
       const direct = directNeighborhood();
@@ -3545,7 +3761,7 @@
         summary = `<div class="service-map-body-reference-result" role="status"><p>${escape(message)}</p>${result.reasons.length ? `<p class="service-map-muted">${result.reasons.map((reason) => escape(BODY_REFERENCE_REASONS[reason] || reason.replace(/_/g, " "))).join(" · ")}</p>` : ""}</div>
           ${result.references.length ? `<ul class="service-map-body-reference-list" aria-label="Literal URL reference origins">${result.references.map((item) => `<li><span class="service-map-body-reference-origin">${escape(item.target_origin)}</span><span>${item.occurrences.toLocaleString()} occurrence${item.occurrences === 1 ? "" : "s"}</span></li>`).join("")}</ul>` : ""}`;
       }
-      return `<div aria-busy="${state.bodyReferencesLoading}"><button class="secondary-action" type="button" data-service-body-references="inspect" data-service-focus="body-references:inspect" ${activeInspectionsBlocked() || state.bodyReferencesLoading ? "disabled" : ""}>${buttonLabel}</button>${state.bodyReferencesLoading ? '<p class="service-map-muted" role="status">Inspecting one retained preview locally…</p>' : ""}${state.bodyReferencesError ? `<p class="service-map-error" role="status">${escape(state.bodyReferencesError)}</p>` : ""}${summary}${state.bodyReferencesSource && scanned ? relationshipSourceMarkup(state.bodyReferencesSource, result, "body") : ""}<button class="secondary-action" type="button" data-service-show-body-references="show" data-service-focus="body-references:show" aria-pressed="${showing}"${showHint ? ' aria-describedby="serviceMapBodyShowHint"' : ""} ${showDisabled ? "disabled" : ""}>${showing ? "Update this shown inspection" : "Show references on map"}</button>${showHint ? `<p class="service-map-muted" id="serviceMapBodyShowHint">${showHint}</p>` : ""}<details class="service-map-body-reference-limits"><summary data-service-focus="body-references:limits">Coverage and limits</summary>${scanned ? `<p>${result.complete ? "Complete retained-preview scan" : "Partial retained-preview scan"} · ${result.scanned_bytes.toLocaleString()} / ${result.retained_preview_bytes.toLocaleString()} UTF-8 preview bytes inspected${result.omitted_reference_occurrences ? ` · ${result.omitted_reference_occurrences.toLocaleString()} reference occurrence${result.omitted_reference_occurrences === 1 ? "" : "s"} omitted` : ""}</p>` : ""}<p>Literal absolute HTTP(S) URLs only. Origins are text, never fetched. No script execution or relative URL resolution. Only Show references on map adds session-local relationships. Offsets are zero-based bytes relative to the retained UTF-8 preview, not the original response.</p><p>Scan: ${BODY_REFERENCE_LIMITS.scan_bytes.toLocaleString()} bytes · Serialized row read: ${BODY_REFERENCE_LIMITS.serialized_row_bytes.toLocaleString()} bytes · Origins: ${BODY_REFERENCE_LIMITS.origins} · URL candidates: ${BODY_REFERENCE_LIMITS.candidates.toLocaleString()} · Candidate: ${BODY_REFERENCE_LIMITS.candidate_bytes.toLocaleString()} bytes · Offsets per origin: ${BODY_REFERENCE_LIMITS.offsets_per_origin}.</p>${result ? `<p>${result.candidates_scanned.toLocaleString()} candidates inspected · Capture preview truncated: ${result.capture_preview_truncated ? "yes" : "no"} · Scan prefix truncated: ${result.scan_prefix_truncated ? "yes" : "no"}.</p>` : ""}</details></div>`;
+      return `<div aria-busy="${state.bodyReferencesLoading}">${state.bodyReferencesLoading ? '<p class="service-map-muted" role="status">Inspecting one retained preview locally…</p>' : ""}${state.bodyReferencesError ? `<p class="service-map-error" role="status">${escape(state.bodyReferencesError)}</p>` : ""}${summary}${showDisabled ? "" : `<button class="secondary-action" type="button" data-service-show-body-references="show" data-service-focus="body-references:show" aria-pressed="${showing}"${showHint ? ' aria-describedby="serviceMapBodyShowHint"' : ""} ${showDisabled ? "disabled" : ""}>${showing ? "Update this shown inspection" : "Show references on map"}</button>`}${showHint ? `<p class="service-map-muted" id="serviceMapBodyShowHint">${showHint}</p>` : ""}<details class="service-map-body-reference-limits"><summary data-service-focus="body-references:limits">Coverage</summary>${state.bodyReferencesSource && scanned ? relationshipSourceMarkup(state.bodyReferencesSource, result, "body") : ""}${scanned ? `<p>${result.complete ? "Complete retained-preview scan" : "Partial retained-preview scan"} · ${result.scanned_bytes.toLocaleString()} / ${result.retained_preview_bytes.toLocaleString()} UTF-8 preview bytes inspected${result.omitted_reference_occurrences ? ` · ${result.omitted_reference_occurrences.toLocaleString()} reference occurrence${result.omitted_reference_occurrences === 1 ? "" : "s"} omitted` : ""}</p>` : ""}<p>Literal absolute HTTP(S) URLs only. Origins are text, never fetched. No script execution or relative URL resolution. Only Show references on map adds session-local relationships. Offsets are zero-based bytes relative to the retained UTF-8 preview, not the original response.</p><p>Scan: ${BODY_REFERENCE_LIMITS.scan_bytes.toLocaleString()} bytes · Serialized row read: ${BODY_REFERENCE_LIMITS.serialized_row_bytes.toLocaleString()} bytes · Origins: ${BODY_REFERENCE_LIMITS.origins} · URL candidates: ${BODY_REFERENCE_LIMITS.candidates.toLocaleString()} · Candidate: ${BODY_REFERENCE_LIMITS.candidate_bytes.toLocaleString()} bytes · Offsets per origin: ${BODY_REFERENCE_LIMITS.offsets_per_origin}.</p>${result ? `<p>${result.candidates_scanned.toLocaleString()} candidates inspected · Capture preview truncated: ${result.capture_preview_truncated ? "yes" : "no"} · Scan prefix truncated: ${result.scan_prefix_truncated ? "yes" : "no"}.</p>` : ""}</details></div>`;
     }
     function relationshipSourceMarkup(source, result, kind) {
       return `<p class="service-map-overlay-source">${escape(source.method)} ${escape(source.origin)}${escape(source.path)}</p><p class="service-map-muted">Sequence ${escape(source.sequence)} · Captured ${escape(source.startedAt)} · ${kind === "link" ? "Response Link headers" : "Body URL references"} · ${result.complete ? "Complete" : "Partial"} inspection</p>`;
@@ -3568,7 +3784,7 @@
         : result.status === "unavailable" ? "Retained response metadata is unavailable. No Link declarations were inspected."
           : result.observations.length ? `${result.observations.length} retained Link declaration${result.observations.length === 1 ? "" : "s"} · ${new Set(result.observations.map((item) => item.target_origin)).size} target origins`
             : result.complete ? "No supported Link declarations found in the inspected retained headers." : "No supported Link declarations are available from the inspected prefix; coverage is partial.";
-      return `<div aria-busy="${state.bodyReferencesLoading}"><button class="secondary-action" type="button" data-service-link-declarations="inspect" data-service-focus="relationships:inspect" ${disabled ? "disabled" : ""}>${label}</button>${state.bodyReferencesLoading ? '<p class="service-map-muted" role="status">Inspecting retained response headers locally…</p>' : ""}${state.linkDeclarationsError ? `<p class="service-map-error" role="status">${escape(state.linkDeclarationsError)}</p>` : ""}${result ? `<div class="service-map-body-reference-result" role="status"><p>${escape(message)}</p>${result.reasons.length ? `<p>${result.reasons.map((reason) => escape(LINK_REASONS[reason])).join(" · ")}</p>` : ""}</div>` : ""}${result?.observations.length ? linkObservationsMarkup(result.observations) : ""}${scanned && source ? relationshipSourceMarkup(source, result, "link") : ""}<button class="secondary-action" type="button" data-service-show-link-declarations="show" data-service-focus="relationships:show" aria-pressed="${showing}" ${showDisabled ? "disabled" : ""}>${showing ? "Update this shown inspection" : "Show references on map"}</button>${scanned && !hasNeighbors ? `<p class="service-map-muted">${result.observations.length ? "Only the source origin was declared; self-links are not drawn." : "There are no declared target origins to show on the map."}</p>` : ""}<details class="service-map-body-reference-limits"><summary data-service-focus="relationships:limits">Coverage and limits</summary>${scanned ? `<p>${result.complete ? "Complete supported-grammar inspection" : "Partial retained-header inspection"} · ${result.counts.headers_inspected} / ${result.retained_header_count} retained headers inspected · ${result.counts.header_bytes_admitted} name/value bytes admitted</p>` : ""}<p>Literal absolute HTTP(S) targets for service-doc, service-desc, describedby and preconnect only. Complete means this bounded grammar, not every relationship or dependency. Origins are text, never fetched; no URL resolution, DNS, probes or body reads. Source spans refer to retained header value UTF-8 bytes, not original wire offsets.</p><p>Headers: 128 · Name/value bytes: 32,768 · Link field: 4,096 bytes · Target: 4,096 bytes · Candidates: 128 · Parameters and relation tokens per member: 32 each · Observations: 32 · Target origin: 268 bytes.</p>${scanned ? `<p>${result.counts.link_fields_inspected} Link fields · ${result.counts.candidates_inspected} candidates · ${result.counts.members_framed} framed members · ${result.counts.parameters_inspected} parameters · ${result.counts.relation_tokens_inspected} relation tokens · ${result.counts.unknown_relation_tokens_inspected} unknown relation tokens inspected. Counts describe inspected input only; uninspected declarations are not counted.</p>` : ""}</details></div>`;
+      return `<div aria-busy="${state.bodyReferencesLoading}">${state.bodyReferencesLoading ? '<p class="service-map-muted" role="status">Inspecting retained response headers locally…</p>' : ""}${state.linkDeclarationsError ? `<p class="service-map-error" role="status">${escape(state.linkDeclarationsError)}</p>` : ""}${result ? `<div class="service-map-body-reference-result" role="status"><p>${escape(message)}</p>${result.reasons.length ? `<p>${result.reasons.map((reason) => escape(LINK_REASONS[reason])).join(" · ")}</p>` : ""}</div>` : ""}${result?.observations.length ? linkObservationsMarkup(result.observations) : ""}${showDisabled ? "" : `<button class="secondary-action" type="button" data-service-show-link-declarations="show" data-service-focus="relationships:show" aria-pressed="${showing}" ${showDisabled ? "disabled" : ""}>${showing ? "Update this shown inspection" : "Show references on map"}</button>`}${scanned && !hasNeighbors ? `<p class="service-map-muted">${result.observations.length ? "Only the source origin was declared; self-links are not drawn." : "There are no declared target origins to show on the map."}</p>` : ""}<details class="service-map-body-reference-limits"><summary data-service-focus="relationships:limits">Coverage</summary>${scanned && source ? relationshipSourceMarkup(source, result, "link") : ""}${scanned ? `<p>${result.complete ? "Complete supported-grammar inspection" : "Partial retained-header inspection"} · ${result.counts.headers_inspected} / ${result.retained_header_count} retained headers inspected · ${result.counts.header_bytes_admitted} name/value bytes admitted</p>` : ""}<p>Literal absolute HTTP(S) targets for service-doc, service-desc, describedby and preconnect only. Complete means this bounded grammar, not every relationship or dependency. Origins are text, never fetched; no URL resolution, DNS, probes or body reads. Source spans refer to retained header value UTF-8 bytes, not original wire offsets.</p><p>Headers: 128 · Name/value bytes: 32,768 · Link field: 4,096 bytes · Target: 4,096 bytes · Candidates: 128 · Parameters and relation tokens per member: 32 each · Observations: 32 · Target origin: 268 bytes.</p>${scanned ? `<p>${result.counts.link_fields_inspected} Link fields · ${result.counts.candidates_inspected} candidates · ${result.counts.members_framed} framed members · ${result.counts.parameters_inspected} parameters · ${result.counts.relation_tokens_inspected} relation tokens · ${result.counts.unknown_relation_tokens_inspected} unknown relation tokens inspected. Counts describe inspected input only; uninspected declarations are not counted.</p>` : ""}</details></div>`;
     }
     function htmlGeneratorsMarkup() {
       const result = state.htmlGenerators, scanned = result?.status === "scanned";
@@ -3586,7 +3802,7 @@
         summary = `<div class="service-map-html-generator-result" role="status"><p>${escape(message)}</p>${result.reasons.length ? `<p class="service-map-muted">${result.reasons.map((reason) => escape(HTML_GENERATOR_REASONS[reason])).join(" · ")}</p>` : ""}</div>`;
       }
       const observations = result?.observations.length ? `<ul class="service-map-references service-map-html-generator-list" aria-label="Reported HTML generator declarations">${result.observations.map((item) => `<li><strong>${escape(productText(item))}</strong> <span class="service-map-muted">meta generator</span></li>`).join("")}</ul>` : "";
-      return `<section class="service-map-body-references service-map-html-generators" aria-label="Retained HTML generators" aria-busy="${state.htmlGeneratorsLoading}"><h4>Retained HTML generators</h4><button class="secondary-action" type="button" data-service-html-generators="inspect" data-service-focus="html-generators:inspect" ${disabled ? "disabled" : ""}>${buttonLabel}</button>${state.htmlGeneratorsLoading ? '<p class="service-map-muted" role="status">Inspecting one retained HTML preview locally…</p>' : ""}${state.htmlGeneratorsError ? `<p class="service-map-error" role="status">${escape(state.htmlGeneratorsError)}</p>` : ""}${summary}${observations}<details class="service-map-html-generator-limits"><summary data-service-focus="html-generators:limits">Generator coverage and limits</summary>${scanned ? `<p>${result.complete ? "Complete supported-head inspection" : "Partial retained-preview coverage"} · Supported explicit head closed: ${result.head_closed ? "yes" : "no"}. ${result.scan_prefix_bytes.toLocaleString()} / ${result.retained_preview_bytes.toLocaleString()} retained UTF-8 preview bytes offered to the parser. Capture preview truncated: ${result.capture_preview_truncated ? "yes" : "no"} · Scan prefix truncated: ${result.scan_prefix_truncated ? "yes" : "no"}.</p>` : ""}<p>Literal WordPress and Drupal declarations in a supported explicit HTML head only. Numeric or dotted reported versions only. No HTML recovery, entity decoding, script execution, fetching or map aggregation. A closed head can coexist with a truncated, unparsed body; overall coverage remains partial.</p><p>Prefix: ${HTML_GENERATOR_LIMITS.scan_bytes.toLocaleString()} bytes · Serialized row read: ${HTML_GENERATOR_LIMITS.serialized_row_bytes.toLocaleString()} bytes · Tag candidates: ${HTML_GENERATOR_LIMITS.tag_candidates.toLocaleString()} · Tag: ${HTML_GENERATOR_LIMITS.tag_bytes.toLocaleString()} bytes · Attributes per tag: ${HTML_GENERATOR_LIMITS.attributes} · Declarations: ${HTML_GENERATOR_LIMITS.observations} · Version and separator: ${HTML_GENERATOR_LIMITS.version_bytes} bytes each.</p>${scanned ? `<p>${result.tag_candidates_inspected.toLocaleString()} tag candidates inspected · Additional tag candidate encountered: ${result.additional_tag_candidate_encountered ? "yes" : "no"} · Additional supported declaration encountered: ${result.additional_observation_encountered ? "yes" : "no"} · Unrecognized product declarations among inspected candidates: ${result.unknown_product_declarations.toLocaleString()}. Uninspected declarations are not counted.</p>${result.parser_stop ? `<p>Parser stop: ${escape(HTML_GENERATOR_STOP_REASONS[result.parser_stop.reason])} · Raw preview byte cursor: ${result.parser_stop.byte_cursor.toLocaleString()} (not a text-slicing boundary).</p>` : ""}` : ""}</details></section>`;
+      return `<section class="service-map-body-references service-map-html-generators" aria-label="Retained HTML generators" aria-busy="${state.htmlGeneratorsLoading}"><h4>Retained HTML generators</h4>${state.htmlGeneratorsLoading ? '<p class="service-map-muted" role="status">Inspecting one retained HTML preview locally…</p>' : ""}${state.htmlGeneratorsError ? `<p class="service-map-error" role="status">${escape(state.htmlGeneratorsError)}</p>` : ""}${summary}${observations}<details class="service-map-html-generator-limits"><summary data-service-focus="html-generators:limits">Generator coverage and limits</summary>${scanned ? `<p>${result.complete ? "Complete supported-head inspection" : "Partial retained-preview coverage"} · Supported explicit head closed: ${result.head_closed ? "yes" : "no"}. ${result.scan_prefix_bytes.toLocaleString()} / ${result.retained_preview_bytes.toLocaleString()} retained UTF-8 preview bytes offered to the parser. Capture preview truncated: ${result.capture_preview_truncated ? "yes" : "no"} · Scan prefix truncated: ${result.scan_prefix_truncated ? "yes" : "no"}.</p>` : ""}<p>Literal WordPress and Drupal declarations in a supported explicit HTML head only. Numeric or dotted reported versions only. No HTML recovery, entity decoding, script execution, fetching or map aggregation. A closed head can coexist with a truncated, unparsed body; overall coverage remains partial.</p><p>Prefix: ${HTML_GENERATOR_LIMITS.scan_bytes.toLocaleString()} bytes · Serialized row read: ${HTML_GENERATOR_LIMITS.serialized_row_bytes.toLocaleString()} bytes · Tag candidates: ${HTML_GENERATOR_LIMITS.tag_candidates.toLocaleString()} · Tag: ${HTML_GENERATOR_LIMITS.tag_bytes.toLocaleString()} bytes · Attributes per tag: ${HTML_GENERATOR_LIMITS.attributes} · Declarations: ${HTML_GENERATOR_LIMITS.observations} · Version and separator: ${HTML_GENERATOR_LIMITS.version_bytes} bytes each.</p>${scanned ? `<p>${result.tag_candidates_inspected.toLocaleString()} tag candidates inspected · Additional tag candidate encountered: ${result.additional_tag_candidate_encountered ? "yes" : "no"} · Additional supported declaration encountered: ${result.additional_observation_encountered ? "yes" : "no"} · Unrecognized product declarations among inspected candidates: ${result.unknown_product_declarations.toLocaleString()}. Uninspected declarations are not counted.</p>${result.parser_stop ? `<p>Parser stop: ${escape(HTML_GENERATOR_STOP_REASONS[result.parser_stop.reason])} · Raw preview byte cursor: ${result.parser_stop.byte_cursor.toLocaleString()} (not a text-slicing boundary).</p>` : ""}` : ""}</details></section>`;
     }
     function overlayProvenanceMarkup(overlay) {
       if (!overlay) return "";
@@ -3668,24 +3884,26 @@
       return `<section class="service-map-technologies" aria-label="Front-end"><h4>Front-end</h4><ul class="service-map-references">${origin.front_technologies.map((item) => `<li><strong>${escape(item.name)}</strong>${item.version ? ` · ${escape(item.version)}` : ""}<p class="service-map-muted">${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${escape(item.source_origin)}</p><div class="service-map-evidence-list">${item.evidence.map((id, index) => `<button class="service-map-evidence-button" type="button" data-service-relation-origin="${escape(item.source_origin)}" data-service-relation-evidence="${escape(id)}" data-service-focus="library:${escape(JSON.stringify([item.product_id, item.version, id]))}"><span>${escape(item.name)}${item.version ? ` ${escape(item.version)}` : ""}</span><span>View source${item.evidence.length > 1 ? ` ${index + 1}` : ""} ›</span></button>`).join("")}</div></li>`).join("")}</ul></section>`;
     }
     function evidenceMarkup(origin) {
-      const items = evidenceItems(origin);
-      const endpoint = state.endpointIndex === null ? null : origin.endpoints[state.endpointIndex];
-      const row = state.evidence;
-      const peerOnlySource = !!row && !!state.peerEvidenceBinding && !items.some((item) => item.id === row.evidence_id);
-      const supplementaryMarkup = peerOnlySource ? "" : htmlGeneratorsMarkup() + relationshipsMarkup();
-      const observed = row ? [...array(row.header_links).filter((link) => ["origin_header", "referer_header"].includes(link.relationship)).map((link) => `<li>${link.relationship === "origin_header" ? "Origin" : "Referer"} header: ${escape(safeOrigin(link.source_origin))}</li>`),
-        ...(row.redirect ? [`<li>Redirect: ${escape(safeOrigin(row.redirect.target_origin))}${escape(safePath(row.redirect.target_path))}</li>`] : []),
-        ...array(row.technology_clues).map((clue) => `<li>${escape(clue.name)} · ${escape(clue.header_name)} header</li>`)] : [];
-      const meta = row ? `<div class="service-map-verified"><h4>Verified retained source</h4><dl><dt>Method</dt><dd>${escape(row.method)}</dd><dt>Origin</dt><dd>${escape(safeOrigin(row.origin))}</dd><dt>Path</dt><dd>${escape(safePath(row.path))}</dd><dt>Status</dt><dd>${escape(row.status ?? "No response")}</dd><dt>Sequence</dt><dd>${escape(row.sequence ?? "Unavailable")}</dd><dt>Captured</dt><dd>${escape(row.started_at || "Unavailable")}</dd><dt>Record ID</dt><dd>${escape(row.record_id || "Unavailable")}</dd></dl>${row.metadata_complete === false ? `<p class="service-map-error">Source metadata is incomplete: ${escape(array(row.omitted).join(", ") || "bounded metadata")}</p>` : ""}${array(row.omitted).includes("technology_token_scan_limit") ? '<p class="service-map-error">Header technology scan is partial: token candidate limit reached. Additional declarations may be omitted.</p>' : ""}${observed.length ? `<h4>Source observations</h4><ul class="service-map-references">${observed.join("")}</ul>` : ""}${state.evidenceLegacyCatalog ? `<p class="service-map-muted">${LEGACY_CATALOG_NOTICE}</p>` : ""}${technologyMarkup(row.technology_observations, null, row)}</div>` : "";
-      return `${endpoint ? `<div class="service-map-endpoint-summary"><span class="service-map-method" title="${escape(endpoint.method)}">${escape(endpoint.method)}</span><strong>${escape(endpoint.path)}</strong><p>${endpoint.request_count} sampled rows · Statuses: ${escape(endpoint.statuses.join(", ") || "No response")}</p></div>${parametersMarkup(origin, endpoint)}` : ""}
-        <h4>Source evidence</h4>
-        ${activeInspectionsBlocked() ? `<p class="service-map-error" role="status">${INACTIVE_SESSION_NOTICE}</p>` : ""}${state.evidenceLoading ? '<p class="service-map-muted" role="status">Verifying source…</p>' : ""}${state.evidenceError ? `<p class="service-map-error" role="status">${escape(state.evidenceError)}</p>` : ""}${meta}${peerOriginMarkup(origin)}${row ? socketPeerMarkup() + supplementaryMarkup : ""}
-        <div class="service-map-evidence-list">${items.slice(0, 30).map((item) => `<button class="service-map-evidence-button ${state.evidenceId === item.id ? "selected" : ""}" type="button" data-service-evidence="${escape(item.id)}" data-service-focus="evidence:${escape(item.id)}"><span>${escape(item.label)}</span><span>View source ›</span></button>`).join("") || `<p class="service-map-muted">${origin.peerInspectionOnly ? "No default-map samples are loaded for this origin; use the exact peer-inspection samples above." : "No source samples are available in this bounded snapshot."}</p>`}</div>${items.length > 30 ? `<p class="service-map-muted">Showing 30 of ${items.length} source samples. Select an API path to narrow the evidence.</p>` : ""}
-        ${!endpoint ? technologyMarkup(origin.technology_observations, origin) + relationshipMarkup(origin) : ""}
-        ${!endpoint && origin.technology_clues.length ? `<h4>Observed header clues</h4><p class="service-map-muted">${origin.technology_clues.map((clue) => escape(clue.name)).join(", ")}</p>` : ""}`;
+      const items = evidenceItems(origin), row = state.evidence, endpoint = state.endpointIndex === null ? null : origin.endpoints[state.endpointIndex];
+      const selected = items.some(item => item.id === state.evidenceId) ? state.evidenceId : null;
+      const options = [...items.slice(0, 30)];
+      if (row && !options.some(item => item.id === row.evidence_id)) options.unshift({ id: row.evidence_id, label: `${row.method} ${row.path}` });
+      const picker = options.length > 1 ? `<select data-service-packet-sample="true" aria-label="Captured sample">${options.map(item => `<option value="${escape(item.id)}" ${item.id === state.evidenceId ? "selected" : ""}>${escape(item.label)}</option>`).join("")}</select>` : "";
+      const variants = state.packetOriginals && (state.packetOriginals.request || state.packetOriginals.response)
+        ? `<span class="mr-toggle"><button type="button" class="mr-btn ${state.packetVariant === "current" ? "active" : ""}" data-service-packet-variant="current">Captured</button><button type="button" class="mr-btn ${state.packetVariant === "original" ? "active" : ""}" data-service-packet-variant="original">Before changes</button></span>` : "";
+      const peer = state.socketPeer;
+      const info = row ? `<details class="packet-capture-info"><summary>Capture info</summary><dl><dt>Sequence</dt><dd>${escape(row.sequence)}</dd><dt>Record</dt><dd>${escape(row.record_id)}</dd>${peer?.status === "observed" ? `<dt>Recorded peer</dt><dd>${escape(peer.ip.includes(":") ? `[${peer.ip}]` : peer.ip)}:${escape(peer.port)}</dd><dt>Route</dt><dd>${escape({ direct: "Direct", http_proxy: "HTTP proxy", socks_proxy: "SOCKS proxy", unknown: "Unknown" }[peer.route])}</dd><dt>Response headers observed at</dt><dd>${escape(peer.observedAt)}</dd>` : ""}</dl>${peer?.status === "invalid" ? '<p class="service-map-error">Socket peer details could not be verified for this read.</p>' : peer?.status === "unavailable" ? '<p class="service-map-muted">Unavailable at response headers</p>' : ""}${row.metadata_complete === false ? `<p class="service-map-error">Source metadata is incomplete: ${escape(array(row.omitted).join(", ") || "bounded metadata")}</p>` : ""}${array(row.omitted).includes("technology_token_scan_limit") ? '<p class="service-map-error">Header technology scan is partial: token candidate limit reached. Additional declarations may be omitted.</p>' : ""}${state.evidenceLegacyCatalog ? `<p class="service-map-muted">${LEGACY_CATALOG_NOTICE}</p>` : ""}${usableSocketPeer(peer) ? '<button type="button" class="secondary-action" data-service-packet-peer="true"' + (activeInspectionsBlocked() ? ' disabled' : '') + '>Find matching peer</button>' : ""}</details>` : "";
+      const message = state.evidenceLoading || state.packetLoading ? "Loading captured packet…" : state.packetError || state.evidenceError;
+      const inactive = activeInspectionsBlocked() ? `<p class="service-map-muted" role="status">${escape(INACTIVE_SESSION_NOTICE)}</p>` : "";
+      // The picker and panes are one block sized to the inspector; inspections
+      // and peers follow it, so opening one never shrinks the panes.
+      return `<div class="packet-block"><div class="packet-source">${picker}${!row && endpoint ? `<span>${escape(endpoint.method)} <strong>${escape(endpoint.path)}</strong></span>` : ""}${row ? `<span>${escape(row.method)} ${escape(row.path)} · ${escape(row.status ?? "No response")} · ${escape(row.started_at)}</span>` : ""}${variants}${info}</div>${inactive}${items.length > 30 ? `<p class="service-map-muted">30 of ${items.length} samples</p>` : ""}
+        ${message ? `<p role="status">${escape(message)}</p>${!state.evidenceLoading && !state.packetLoading ? '<button type="button" class="secondary-action" data-service-packet-retry="true">Retry</button>' : ""}` : ""}
+        ${state.packet && packetViewerMarkup ? `<div data-service-packet>${packetViewerMarkup(packetInspectOptions())}</div>` : !message && !row ? '<p class="empty-copy">Select a captured sample.</p>' : ""}</div>
+        ${selectedInspectionMarkup()}${peerOriginMarkup(origin)}`;
     }
     function replaceDetail(html) {
-      const identity = JSON.stringify([state.sessionId, state.selectedOrigin, state.endpointSelection?.method, state.endpointSelection?.path, state.detailTab, state.evidenceId]);
+      const identity = JSON.stringify([state.sessionId, state.selectedOrigin, state.endpointSelection?.method, state.endpointSelection?.path, state.detailTab, state.evidenceId, state.packetVariant]);
       const sameSource = detailRender?.identity === identity && detailRender.evidence === state.evidence;
       // Native disclosures and browser HTML serialization change innerHTML.
       // Compare our generated markup locally so unchanged polls leave the
@@ -3698,7 +3916,21 @@
       const listScroll = previousList?.scrollTop;
       const limitsOpen = previousLimits?.open;
       const generatorLimitsOpen = els.detail.querySelector?.(".service-map-html-generator-limits")?.open;
+      const retainedPacket = sameSource && state.packet && packetViewerElement?.isConnected ? packetViewerElement : null;
+      if (!retainedPacket && packetViewer) { packetViewer.destroy(); packetViewer = null; packetViewerElement = null; }
       replace(els.detail, html, !sameSource);
+      if (retainedPacket) {
+        // Keep the editor/scroll owner, but refresh action eligibility on the
+        // retained control when a supplementary read changes session status.
+        const nextInspect = els.detail.querySelector?.("[data-service-packet-inspect]");
+        const previousInspect = retainedPacket.querySelector?.("[data-service-packet-inspect]");
+        if (previousInspect && nextInspect) {
+          previousInspect.disabled = nextInspect.disabled;
+          if (previousInspect.innerHTML !== nextInspect.innerHTML) previousInspect.innerHTML = nextInspect.innerHTML;
+        }
+        els.detail.querySelector?.("[data-service-packet]")?.replaceWith(retainedPacket);
+      }
+      mountDetailsPacket();
       detailRender = { identity, evidence: state.evidence, html };
       if (sameSource) {
         const body = els.detail.querySelector?.(".service-map-detail-body");
@@ -3756,8 +3988,8 @@
       const start = state.detailPage * API_PAGE_SIZE;
       if (!state.detailPageAnchor && units[start]) state.detailPageAnchor = endpointIdentity(units[start].members[0]);
       replaceDetail(`<header class="service-map-detail-header"><div><h3 title="${escape(new URL(origin.origin).host)}">${escape(new URL(origin.origin).host)}</h3><p title="${escape(origin.origin)}">${escape(origin.origin)}</p></div><span class="detail-chip ${origin.in_scope ? "ok" : "none"}">${origin.in_scope ? "In scope" : "Out of scope"}</span></header>${originActionsMarkup(origin)}
-        <div class="service-map-detail-tabs" role="tablist" aria-label="Origin details"><button type="button" role="tab" id="serviceMapDetailApisTab" aria-controls="serviceMapDetailBody" aria-selected="${state.detailTab === "apis"}" tabindex="${state.detailTab === "apis" ? 0 : -1}" data-service-detail-tab="apis" data-service-focus="detail:apis">APIs</button><button type="button" role="tab" id="serviceMapDetailEvidenceTab" aria-controls="serviceMapDetailBody" aria-selected="${state.detailTab === "evidence"}" tabindex="${state.detailTab === "evidence" ? 0 : -1}" data-service-detail-tab="evidence" data-service-focus="detail:evidence">Evidence</button></div>
-        <div class="service-map-detail-body" id="serviceMapDetailBody" role="tabpanel" aria-labelledby="${state.detailTab === "apis" ? "serviceMapDetailApisTab" : "serviceMapDetailEvidenceTab"}">${endpointSelectionNotice(origin)}${state.detailTab === "evidence" ? evidenceMarkup(origin) : `${authMarkup(origin)}${endpointFiltersMarkup("serviceMapDetail")}${endpointCoverageMarkup(units.length, origin.endpoints.length, start, 0, 0, entries.length)}<div class="service-map-api-list">${units.slice(start, start + API_PAGE_SIZE).map((unit) => endpointUnitMarkup(unit)).join("") || '<p class="empty-copy">No loaded endpoints match these filters for this origin.</p>'}</div>${pageCount > 1 ? `<div class="service-map-pagination"><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage - 1}" ${state.detailPage === 0 ? "disabled" : ""}>Previous</button><span>${state.detailPage + 1} / ${pageCount}</span><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage + 1}" ${state.detailPage + 1 >= pageCount ? "disabled" : ""}>Next</button></div>` : ""}${peerOriginMarkup(origin)}${technologyMarkup(origin.technology_observations, origin)}${serverTechnologiesMarkup(origin)}${frontTechnologiesMarkup(origin)}${unnamedMarkup(origin)}${relationshipMarkup(origin)}<div class="service-map-evidence-summary"><h4>Evidence summary</h4><p>${origin.request_count.toLocaleString()} sampled HTTP rows in this snapshot. ${origin.redirects.length} redirect instruction${origin.redirects.length === 1 ? "" : "s"}.</p><button class="secondary-action" type="button" data-service-detail-tab="evidence" data-service-focus="view:evidence">${state.endpointSelection ? "View selected endpoint evidence" : "View evidence"}</button></div>`}</div>`);
+        <div class="service-map-detail-tabs" role="tablist" aria-label="Origin details"><button type="button" role="tab" id="serviceMapDetailApisTab" aria-controls="serviceMapDetailBody" aria-selected="${state.detailTab === "apis"}" tabindex="${state.detailTab === "apis" ? 0 : -1}" data-service-detail-tab="apis" data-service-focus="detail:apis">APIs</button><button type="button" role="tab" id="serviceMapDetailEvidenceTab" aria-controls="serviceMapDetailBody" aria-selected="${state.detailTab === "evidence"}" tabindex="${state.detailTab === "evidence" ? 0 : -1}" data-service-detail-tab="evidence" data-service-focus="detail:evidence">Details</button></div>
+        <div class="service-map-detail-body${state.detailTab === "apis" ? "" : " packet-details"}" id="serviceMapDetailBody" role="tabpanel" aria-labelledby="${state.detailTab === "apis" ? "serviceMapDetailApisTab" : "serviceMapDetailEvidenceTab"}">${endpointSelectionNotice(origin)}${state.detailTab === "evidence" ? evidenceMarkup(origin) : `${authMarkup(origin)}${state.endpointIndex === null ? "" : parametersMarkup(origin, origin.endpoints[state.endpointIndex])}${endpointFiltersMarkup("serviceMapDetail")}${endpointCoverageMarkup(units.length, origin.endpoints.length, start, 0, 0, entries.length)}<div class="service-map-api-list">${units.slice(start, start + API_PAGE_SIZE).map((unit) => endpointUnitMarkup(unit)).join("") || '<p class="empty-copy">No loaded endpoints match these filters for this origin.</p>'}</div>${pageCount > 1 ? `<div class="service-map-pagination"><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage - 1}" ${state.detailPage === 0 ? "disabled" : ""}>Previous</button><span>${state.detailPage + 1} / ${pageCount}</span><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage + 1}" ${state.detailPage + 1 >= pageCount ? "disabled" : ""}>Next</button></div>` : ""}${peerOriginMarkup(origin)}${technologyMarkup(origin.technology_observations, origin)}${serverTechnologiesMarkup(origin)}${frontTechnologiesMarkup(origin)}${unnamedMarkup(origin)}${relationshipMarkup(origin)}<div class="service-map-evidence-summary"><h4>Evidence summary</h4><p>${origin.request_count.toLocaleString()} sampled HTTP rows in this snapshot. ${origin.redirects.length} redirect instruction${origin.redirects.length === 1 ? "" : "s"}.</p><button class="secondary-action" type="button" data-service-detail-tab="evidence" data-service-focus="view:evidence">${state.endpointSelection ? "View selected endpoint details" : "View details"}</button></div>`}</div>`);
     }
     function renderCatalog() {
       const loaded = loadedEndpointEntries((state.snapshot?.origins || []).filter((origin) => !state.scopeOnly || origin.in_scope), false);
@@ -3831,7 +4063,12 @@
       replayActionId += 1;
       const flowHit = event.target.closest?.("[data-service-flow-record], [data-service-flow-lane]");
       const flowRecord = flowHit?.dataset?.serviceFlowRecord, flowLane = flowHit?.dataset?.serviceFlowLane;
-      if ((flowRecord || flowLane) && els.panel.contains(flowHit)) return flowRecord ? openInHistory?.(flowRecord) : setFlowMode(flowLane);
+      if ((flowRecord || flowLane) && els.panel.contains(flowHit)) {
+        if (!flowIsCurrent()) return;
+        if (flowRecord && state.flow.phases.some((phase) => phase.steps.some((step) => step.recordId === flowRecord))) return openInHistory?.(flowRecord);
+        if (flowLane && state.flow.lanes.includes(flowLane)) return setFlowMode(flowLane);
+        return;
+      }
       const hit = event.target.closest?.("[data-service-edge]");
       if (hit?.dataset?.serviceEdge !== undefined && els.panel.contains(hit)) return selectEdge(currentLayout?.edges[Number(hit.dataset.serviceEdge)]);
       const button = event.target.closest("button");
@@ -3864,7 +4101,10 @@
       } else if (data.serviceUnhide) saveSiteDisplay({ hidden: siteDisplay().hidden.filter((entry) => entry !== data.serviceUnhide) });
       else if (data.serviceUnhideAll) saveSiteDisplay({ hidden: [] });
       else if (data.serviceGroupSites) saveSiteDisplay({ groupSites: !siteDisplay().groupSites });
-      else if (data.serviceDetailTab) { state.detailTab = data.serviceDetailTab; renderDetail(); }
+      else if (data.serviceDetailTab) { if (data.serviceDetailTab === "evidence") selectDetails(); else { state.detailTab = data.serviceDetailTab; packetViewer?.destroy(); packetViewer = null; packetViewerElement = null; renderDetail(); } }
+      else if (data.servicePacketVariant) loadPacket(data.servicePacketVariant);
+      else if (data.servicePacketRetry) { if (state.evidence) loadPacket(); else if (state.peerEvidenceBinding) loadPeerEvidence(state.evidenceId, state.selectedOrigin); else if (state.evidenceId) loadEvidence(state.evidenceId); }
+      else if (data.servicePacketPeer) { state.packetInspection = "peer"; loadPeerMatches(); }
       else if (data.serviceEndpointGroup) {
         const groups = state.expandedEndpointGroups;
         if (groups.has(data.serviceEndpointGroup)) groups.delete(data.serviceEndpointGroup);
@@ -3895,6 +4135,18 @@
     listen(els.panel, "click", handleClick);
     listen(els.panel, "change", (event) => {
       if (event.target?.dataset?.serviceProductFilter) setProductFilter(event.target.dataset.serviceProductFilter, event.target.value);
+      else if (event.target?.dataset?.servicePacketSample) loadEvidence(event.target.value);
+      else if (event.target?.dataset?.servicePacketInspect) {
+        if (!visible || state.view !== "service-map" || state.packetVariant !== "current"
+          || activeInspectionsBlocked()
+          || event.target.isConnected === false || mountPacketViewer && (!state.packet
+            || event.target.dataset.servicePacketOwner !== String(state.packetRequestId))) return;
+        const kind = event.target.value;
+        if (kind !== "body" && (state.stale || state.error || !getEventStreamReady())) return;
+        event.target.value = "";
+        if (kind === "generator") loadHtmlGenerators();
+        else if (kind === "body" || kind === "link") { setRelationshipKind(kind); if (kind === "body") loadBodyReferences(); else loadLinkDeclarations(); }
+      }
       else if (event.target?.dataset?.serviceRelationshipKind) setRelationshipKind(event.target.value);
       else if (event.target?.dataset?.serviceEndpointFilter === "method") setEndpointFilter("method", event.target.value);
     });
@@ -3912,7 +4164,7 @@
       event.preventDefault();
       replayActionId += 1;
       state.detailTab = event.key === "Home" ? "apis" : event.key === "End" ? "evidence" : state.detailTab === "apis" ? "evidence" : "apis";
-      renderDetail();
+      if (state.detailTab === "evidence") selectDetails(); else { packetViewer?.destroy(); packetViewer = null; packetViewerElement = null; renderDetail(); }
       const next = [...els.detail.querySelectorAll('[role="tab"][data-service-detail-tab]')].find((button) => button.dataset.serviceDetailTab === state.detailTab);
       next?.focus();
     });
@@ -3926,8 +4178,7 @@
       // Swagger Editor cannot fetch the document from this app, so the click
       // copies it to paste there. Nothing is sent to the site.
       else if (data.apiDocsEditor !== undefined && state.apiDocs?.document) {
-        copyApiDocs("Copied OpenAPI; paste it into Swagger Editor");
-        openUrl?.(SWAGGER_EDITOR_URL);
+        if (copyApiDocs("Copied OpenAPI; paste it into Swagger Editor")) openUrl?.(SWAGGER_EDITOR_URL);
       }
       else if (data.apiDocsReplay) sendApiDocsToReplay(data.apiDocsReplay);
     });
@@ -4014,12 +4265,11 @@
     listen(els.allOrigins, "click", () => setMapMode(false));
     listen(els.directRelations, "click", () => setMapMode(!state.anchorOrigin));
     listen(els.flow, "click", () => setFlowMode(state.selectedOrigin));
-    listen(els.flowMermaid, "click", () => {
-      if (state.flow) copyText?.(flowMermaid(state.flow, hiddenLinkKinds()), "Copied the flow as a Mermaid sequence diagram");
-    });
+    listen(els.flowMermaid, "click", copyFlow);
     listen(els.focusSelection, "click", focusSelection);
     listen(els.search, "input", () => { replayActionId += 1; state.query = els.search.value; state.page = 0; state.pageAnchor = null; render(); });
     listen(els.scope, "click", () => {
+      cancelFlow();
       state.scopeOnly = !state.scopeOnly;
       els.scope.classList.toggle("active", state.scopeOnly);
       els.scope.setAttribute("aria-pressed", String(state.scopeOnly));
@@ -4039,6 +4289,7 @@
       // The Service Map filter changes which rows count, as the scope filter
       // does, so it drops inspections the same way; the read re-ranks the cards.
       filterChanged() {
+        cancelFlow();
         state.refreshPaused = false;
         clearOverlay("Temporary body references cleared because the Service Map filter changed.");
         state.requestId += 1;
@@ -4085,7 +4336,9 @@
         if (!value || view !== state.view) closeProductFilters();
         if (!value || view !== state.view) suspendRefresh();
         if (!value || view !== state.view) replayActionId += 1;
+        const becameActive = value && (!visible || view !== state.view);
         if (!value) cancelParameters();
+        if (!value || view !== state.view) cancelPacket();
         if (!value || view !== "service-map") {
           clearOverlay("Temporary body references cleared because the map was hidden.");
           cancelBodyReferences();
@@ -4097,7 +4350,10 @@
         state.view = view;
         if (state.sessionId !== getSessionId()) reset();
         render();
+        // Map and APIs share controller visibility, but only Map owns Details.
+        if (becameActive && view === "service-map" && state.detailTab === "evidence") selectDetails();
         historyPresentationPending = false;
+        resumeFlow();
         scheduleAutomaticRefresh();
       },
       destroy() {
@@ -4121,6 +4377,7 @@
       setViewChange(callback) { onViewChange = callback; },
       disconnect() {
         replayActionId += 1;
+        cancelFlow();
         clearOverlay("Temporary body references cleared because the session event connection was lost.");
         state.requestId += 1;
         state.historyVersion += 1;
@@ -4142,15 +4399,18 @@
         replayActionId += 1;
         state.historyVersion += 1;
         state.stale = true;
+        const flowChanged = !!state.flow || state.flowLoading;
+        cancelFlow();
         const graphChanged = clearOverlay("Shown inspections cleared because automatic cleanup removed retained history.");
         closeApiDocs();
         cancelEvidence();
         cancelParameters();
-        renderHistoryChange(graphChanged);
+        renderHistoryChange(graphChanged || flowChanged);
         scheduleAutomaticRefresh();
       },
       invalidate() {
         replayActionId += 1;
+        cancelFlow();
         clearOverlay("Temporary body references cleared because history or scope was invalidated.");
         state.requestId += 1;
         state.historyVersion += 1;
@@ -4167,8 +4427,9 @@
       getApiDocsModalAction: () => state.apiDocs && visible && els.apiDocs?.getClientRects().length
         ? { modal: els.apiDocs, close: closeApiDocs, apply: null } : null,
       // State access makes offline lifecycle tests use the same real controller.
+      loadPacket, selectDetails,
       getState: () => state,
     };
   }
-  root.SniperServiceMap = { createController, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
+  root.SniperServiceMap = { createController, normalizePacket, technologyLiteral, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
 })(typeof window === "undefined" ? globalThis : window);

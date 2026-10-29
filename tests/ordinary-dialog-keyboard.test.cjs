@@ -119,6 +119,20 @@ test("Settings Escape reverts its preview without saving and restores focus", ()
   assert.equal(f.document.activeElement, f.opener);
 });
 
+test("a confirmation that is not a deletion can name both buttons and drop the danger color", () => {
+  const f = fixture();
+  f.context.showConfirmDialog("Synthetic", () => {});
+  let modal = f.nodes.find(node => node.innerHTML?.includes("confirm-dialog-cancel"));
+  assert.match(modal.innerHTML, /class="danger-action confirm-dialog-ok"[^>]*>Delete</);
+  assert.match(modal.innerHTML, /confirm-dialog-cancel"[^>]*>Cancel</);
+  f.context.showConfirmDialog("Synthetic", () => {}, {
+    confirmLabel: "Update", cancelLabel: "Later", confirmClass: "primary-action",
+  });
+  modal = f.nodes.findLast(node => node.innerHTML?.includes("confirm-dialog-cancel"));
+  assert.match(modal.innerHTML, /class="primary-action confirm-dialog-ok"[^>]*>Update</);
+  assert.match(modal.innerHTML, /confirm-dialog-cancel"[^>]*>Later</);
+});
+
 for (const action of ["Escape", "Cancel", "backdrop", "confirm"]) {
   test(`confirmation ${action} closes, restores focus, and invokes only an explicit confirm`, () => {
     const f = fixture(); let confirmed = 0;

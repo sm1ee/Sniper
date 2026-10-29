@@ -228,7 +228,7 @@ function installWorkspaceReload(f) {
   const resetStart = appSource.indexOf('function resetSessionScopedUiState() {');
   const resetEnd = appSource.indexOf('  clearHistoryBackfill();', resetStart);
   vm.runInContext(`${appSource.slice(resetStart, resetEnd)}\n}`, f.context);
-  const settingsStart = appSource.indexOf('async function _applySettings(response) {');
+  const settingsStart = appSource.indexOf('async function _applySettings(');
   const settingsEnd = appSource.indexOf('  // Sync intercept scope pill', settingsStart);
   vm.runInContext(`${appSource.slice(settingsStart, settingsEnd)}\n}`, f.context);
   Object.assign(f.context, {

@@ -95,7 +95,7 @@ test('a hub whose targets also link to each other spreads over columns without s
   assert.equal(layout.slots.get(hub.origin).row, 2, 'a short column is centered on the tallest');
 });
 
-test('a cycle turns one link around, and a long chain stops at five columns', () => {
+test('a cycle turns one link around, and a long chain gets a column per link', () => {
   const a = origin('https://a.example.com', { redirects: [redirect('https://b.example.com')] });
   const b = origin('https://b.example.com', { redirects: [redirect(a.origin)] });
   const loop = map.graphLayout([a, b], [a.origin, b.origin]);
@@ -103,12 +103,39 @@ test('a cycle turns one link around, and a long chain stops at five columns', ()
   assert.equal(loop.edges.length, 2, 'both directions keep their arrow');
   assert.equal(sameColumnArrows(loop), 0);
 
+  // Cards past a fifth column once shared it, and their links piled up as
+  // loops on its right edge.
   const chain = Array.from({ length: 8 }, (_, i) => origin(`https://c${i}.example.com`));
   chain.forEach((item, i) => { if (chain[i + 1]) item.redirects = [redirect(chain[i + 1].origin)]; });
   const long = map.graphLayout(chain, chain.map(item => item.origin));
-  assert.deepEqual(chain.map(item => columnOf(long, item.origin)), [0, 1, 2, 3, 4, 4, 4, 4]);
-  assert.deepEqual(chain.slice(4).map(item => long.slots.get(item.origin).row), [0, 1, 2, 3], 'the shared last column keeps chain order');
-  assert.equal(long.width, 2 * map.GRAPH_GEOMETRY.padding + 4 * map.GRAPH_GEOMETRY.columnPitch + map.GRAPH_GEOMETRY.cardWidth);
+  assert.deepEqual(chain.map(item => columnOf(long, item.origin)), [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(sameColumnArrows(long), 0);
+  assert.equal(long.width, 2 * map.GRAPH_GEOMETRY.padding + 7 * map.GRAPH_GEOMETRY.columnPitch + map.GRAPH_GEOMETRY.cardWidth);
+});
+
+test('a sign-in loop leaves the fronts beside the accounts origin, not behind each other', () => {
+  // A real session's shape: a start page's chain reaches one front; every front
+  // signs in at one accounts origin, which sends it back, and calls a shared
+  // gateway. Turning around whichever link closed a cycle on a depth-first walk
+  // put accounts behind that first front and the other fronts behind accounts,
+  // seven columns deep, so the last five cards shared one column.
+  const id = name => `https://${name}.example.com`;
+  const fronts = ['shop', 'business', 'booking', 'ads'];
+  const origins = [
+    origin(id('portal')),
+    origin(id('landing'), { header_links: [referer(id('portal'))] }),
+    ...fronts.map((name, i) => origin(id(name), { redirects: [redirect(id('accounts'))], header_links: [referer(id('accounts')), ...(i ? [] : [referer(id('landing'))])] })),
+    origin(id('accounts'), { redirects: fronts.map(name => redirect(id(name))), header_links: fronts.map(name => referer(id(name))) }),
+    origin(id('gateway'), { header_links: fronts.slice(1).map(name => referer(id(name))) }),
+    origin(id('api'), { header_links: [referer(id('gateway'))] }),
+  ];
+  const layout = map.graphLayout(origins, map.relationshipOrder(origins));
+  assert.equal(sameColumnArrows(layout), 0);
+  const at = name => columnOf(layout, id(name));
+  assert.deepEqual(['portal', 'landing', 'shop'].map(at), [0, 1, 2], 'the start page chain still reads left to right');
+  assert.equal(at('accounts'), 0, 'the origin every front signs in at leads its loop');
+  assert.deepEqual(fronts.slice(1).map(at), [1, 1, 1], 'the fronts it sends back sit one column right of it');
+  assert.deepEqual(['gateway', 'api'].map(at), [2, 3]);
 });
 
 test('a self declaration links nothing and reference-only origins stay after captured ones', () => {
@@ -721,10 +748,16 @@ test('opening an endpoint shows its parameters: name, where sent, rows and value
   f.controller.selectOrigin(app, 0);
   assert.equal(f.requests.length, before + 1, 'read on opening, with no button to press');
   assert.equal(f.requests.at(-1).path, '/api/target/service-map/parameters?session_id=session-one&origin=https%3A%2F%2Fx-app.example.com&method=GET&path=%2Fsearch');
+  assert.equal(f.state.detailTab, 'evidence');
+  const tab = { dataset: { serviceDetailTab: 'apis' } };
+  f.els.panel.dispatch('click', { target: { closest: () => tab } });
+  assert.equal(f.requests.length, before + 1);
   assert.match(f.els.detail.innerHTML, /Reading parameters…/);
   assert.doesNotMatch(f.els.detail.innerHTML, /Show parameters/);
   f.controller.selectOrigin(app, 0);
   assert.equal(f.requests.length, before + 1, 'reopening the endpoint being read reads nothing more');
+  f.els.panel.dispatch('click', { target: { closest: () => tab } });
+  assert.equal(f.requests.length, before + 1);
   f.requests.at(-1).resolve(response({ schema_version: 1, session_id: 'session-one', available: true, origin: app, method: 'GET', path: '/search', rows: 2, more_rows: false, omitted_parameters: 0,
     parameters: [{ name: 'q', location: 'query', rows: 2, examples: ['shoes', '<b>'] }, { name: 'x', location: 'cookie', rows: 1, examples: [] }] }));
   await new Promise(resolve => setImmediate(resolve));

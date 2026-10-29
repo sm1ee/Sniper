@@ -172,8 +172,10 @@ pub struct ActivityEntry {
 
 /// What tells sessions apart without opening them: the scope set, where the
 /// traffic went, what the operator marked, pinned, rewrote and scanned, and
-/// what was found. Stored with the counts on a full save; a loaded session
-/// reports live values. Labels are the operator's own (a pinned tab's name, a
+/// what was found. Ordinary state-mutation saves refresh state-derived fields;
+/// full saves also refresh the traffic fields. A loaded session reports live
+/// values. Background state-only and workspace-only saves do not refresh this
+/// registry overview. Labels are the operator's own (a pinned tab's name, a
 /// rule's description) or a method, host and path without its query, so no
 /// captured value or rule text is copied into the registry.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,7 +253,7 @@ impl SessionOverview {
         let rules: Vec<_> = state
             .match_replace_rules
             .iter()
-            .filter(|rule| rule.enabled)
+            .filter(|rule| rule.is_enabled())
             .collect();
         let mut activity: Vec<_> = state
             .template_scans
@@ -435,6 +437,7 @@ struct StoredSessionSnapshot {
     transaction_event_sequence: u64,
     websockets: Vec<WebSocketSessionRecord>,
     event_log: Vec<EventLogEntry>,
+    #[serde(default, deserialize_with = "deserialize_restored_match_replace_rules")]
     match_replace_rules: Vec<MatchReplaceRule>,
     #[serde(alias = "intruder_attacks")]
     fuzzer_attacks: Vec<FuzzerAttackRecord>,
@@ -536,6 +539,21 @@ enum WebSocketJournalCommand {
     },
 }
 
+// Normalize raw saved contradictions before any snapshot serialization can
+// mask legacy enabled and accidentally turn them into active annotation rules.
+fn deserialize_restored_match_replace_rules<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<MatchReplaceRule>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut rules = Vec::<MatchReplaceRule>::deserialize(deserializer)?;
+    for rule in &mut rules {
+        rule.normalize_restored_activation();
+    }
+    Ok(rules)
+}
+
 fn deserialize_workspace_state_lossy<'de, D>(
     deserializer: D,
 ) -> std::result::Result<WorkspaceStateSnapshot, D::Error>
@@ -623,9 +641,11 @@ pub struct SessionContext {
     mutation_lock: Arc<AsyncMutex<()>>,
     persist_lock: Arc<AsyncMutex<()>>,
     confirmed_transaction_compaction_sequence: Arc<AtomicU64>,
-    /// Set while a state-only persist is already queued, so a burst of small
-    /// changes costs one write instead of one write each.
+    /// Held through the write, not just the debounce: a slow disk must not
+    /// accumulate a new context-owning task every debounce interval.
     state_persist_scheduled: AtomicBool,
+    /// A change since the current worker started taking its snapshot.
+    state_persist_dirty: AtomicBool,
     #[cfg(test)]
     workspace_write_fault: std::sync::Mutex<Option<WorkspaceWriteFault>>,
     #[cfg(test)]
@@ -637,6 +657,11 @@ pub struct SessionContext {
     workspace_commit_gate: std::sync::Mutex<Option<WorkspaceCommitGate>>,
     #[cfg(test)]
     snapshot_gate: std::sync::Mutex<Option<SnapshotTestGate>>,
+    #[cfg(test)]
+    state_persist_gate: std::sync::Mutex<Option<SnapshotTestGate>>,
+    #[cfg(test)]
+    state_persist_handoff_gate:
+        std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     #[cfg(test)]
     snapshot_capture_gate: std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
@@ -799,6 +824,7 @@ impl SessionContext {
             persist_lock: Arc::new(AsyncMutex::new(())),
             confirmed_transaction_compaction_sequence: Arc::new(AtomicU64::new(0)),
             state_persist_scheduled: AtomicBool::new(false),
+            state_persist_dirty: AtomicBool::new(false),
             #[cfg(test)]
             workspace_write_fault: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -809,6 +835,10 @@ impl SessionContext {
             workspace_commit_gate: std::sync::Mutex::new(None),
             #[cfg(test)]
             snapshot_gate: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            state_persist_gate: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            state_persist_handoff_gate: std::sync::Mutex::new(None),
             #[cfg(test)]
             snapshot_capture_gate: std::sync::Mutex::new(None),
         }
@@ -823,17 +853,39 @@ impl SessionContext {
     /// state when it runs, so anything that changes meanwhile is either included
     /// or queues the next one.
     pub fn schedule_state_persist(self: &Arc<Self>) {
+        self.state_persist_dirty.store(true, Ordering::SeqCst);
         if self.state_persist_scheduled.swap(true, Ordering::SeqCst) {
             return;
         }
         let session = Arc::clone(self);
         tokio::spawn(async move {
-            tokio::time::sleep(STATE_PERSIST_DEBOUNCE).await;
-            session
-                .state_persist_scheduled
-                .store(false, Ordering::SeqCst);
-            if let Err(error) = session.persist_state_only().await {
-                warn!(?error, session_id = %session.id, "failed to persist session state");
+            loop {
+                tokio::time::sleep(STATE_PERSIST_DEBOUNCE).await;
+                session.state_persist_dirty.store(false, Ordering::SeqCst);
+                if let Err(error) = session.persist_state_only().await {
+                    warn!(?error, session_id = %session.id, "failed to persist session state");
+                }
+                // Release ownership before checking for later changes. A caller
+                // either leaves dirty work for this worker to reclaim, or owns
+                // the next worker itself. Keeping the flag set while returning
+                // would lose that caller's wakeup; clearing it before the write
+                // would let blocked writers accumulate without a bound.
+                session
+                    .state_persist_scheduled
+                    .store(false, Ordering::SeqCst);
+                #[cfg(test)]
+                {
+                    let gate = session.state_persist_handoff_gate.lock().unwrap().take();
+                    if let Some((entered, resume)) = gate {
+                        let _ = entered.send(());
+                        let _ = resume.await;
+                    }
+                }
+                if !session.state_persist_dirty.load(Ordering::SeqCst)
+                    || session.state_persist_scheduled.swap(true, Ordering::SeqCst)
+                {
+                    break;
+                }
             }
         });
     }
@@ -1316,6 +1368,28 @@ impl SessionContext {
     }
 
     #[cfg(test)]
+    fn pause_next_state_write(&self) -> (oneshot::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, ready) = oneshot::channel();
+        let (resume, release) = mpsc::channel();
+        *self.state_persist_gate.lock().unwrap() = Some(SnapshotTestGate {
+            phase: SnapshotTestPhase::Prepared,
+            gate: WorkspaceCommitGate {
+                entered,
+                resume: release,
+            },
+        });
+        (ready, resume)
+    }
+
+    #[cfg(test)]
+    fn pause_next_state_handoff(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, ready) = oneshot::channel();
+        let (resume, release) = oneshot::channel();
+        *self.state_persist_handoff_gate.lock().unwrap() = Some((entered, release));
+        (ready, resume)
+    }
+
+    #[cfg(test)]
     pub(crate) fn pause_next_snapshot(
         &self,
         phase: SnapshotTestPhase,
@@ -1395,10 +1469,14 @@ impl SessionContext {
             .build_state_snapshot(self.workspace.snapshot().await)
             .await;
         let storage_dir = self.storage_dir.clone();
+        #[cfg(test)]
+        let mut state_gate = self.state_persist_gate.lock().unwrap().take();
         // Recon inventories can be several MiB; keep fsync and serialization off
         // the async runtime, while retaining the permit through publication.
         tokio::task::spawn_blocking(move || {
             let _persist_guard = persist_guard;
+            #[cfg(test)]
+            wait_snapshot_gate(&mut state_gate, SnapshotTestPhase::Prepared);
             ensure_existing_private_session_dir(&storage_dir)?;
             write_json(&state_path(&storage_dir), &state)
         })
@@ -1431,6 +1509,17 @@ impl SessionContext {
         metadata.event_count = state.event_log.len();
         metadata.fuzzer_count = state.fuzzer_attacks.len();
         metadata.rule_count = state.match_replace_rules.len();
+        // Reuse the last full save's traffic summary rather than traversing
+        // history for a small-component write. Derive the other fields from
+        // the exact state being acknowledged, not a later live snapshot.
+        metadata.overview = SessionOverview::new(
+            TrafficOverview {
+                top_hosts: metadata.overview.top_hosts.clone(),
+                last_captured_at: metadata.overview.last_captured_at,
+                marked_requests: metadata.overview.marked_requests,
+            },
+            &state,
+        );
         let storage_dir = self.storage_dir.clone();
         tokio::task::spawn_blocking(move || {
             let _persist_guard = persist_guard;
@@ -5245,6 +5334,38 @@ fn sync_directory(path: &Path, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_annotation_rules_normalize_raw_before_snapshot_serialization() {
+        for mode in [serde_json::Value::Null, false.into(), true.into()] {
+            for legacy_enabled in [false, true] {
+                let raw = serde_json::json!({
+                    "match_replace_rules": [{"id": uuid::Uuid::new_v4(), "enabled": legacy_enabled,
+                        "annotation_only_enabled": mode, "annotation_note": "literal", "annotation_color": "yellow",
+                        "description": "", "scope": "response", "target": "body", "search": "flag",
+                        "replace": "", "regex": false, "case_sensitive": true}],
+                    "runtime": {"scope_patterns": ["example.com"]}
+                });
+                let restored: super::StoredSessionSnapshot = serde_json::from_value(raw).unwrap();
+                let rule = &restored.match_replace_rules[0];
+                let expected = if mode.is_null() {
+                    legacy_enabled
+                } else {
+                    !legacy_enabled && mode == true
+                };
+                assert_eq!(rule.is_enabled(), expected);
+                if !mode.is_null() && legacy_enabled {
+                    assert_eq!(rule.annotation_only_enabled, Some(false));
+                }
+                assert_eq!(restored.runtime.scope_patterns, ["example.com"]);
+                let reloaded: super::StoredSessionSnapshot =
+                    serde_json::from_value(serde_json::to_value(&restored).unwrap()).unwrap();
+                assert_eq!(reloaded.match_replace_rules[0].is_enabled(), expected);
+                let overview = super::SessionOverview::new(Default::default(), &restored);
+                assert_eq!(overview.replace_rule_count, usize::from(expected));
+            }
+        }
+    }
+
     use std::collections::{HashMap, HashSet, VecDeque};
 
     use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -5271,6 +5392,211 @@ mod tests {
         },
         ws_replay::WsReplayFrame,
     };
+
+    #[tokio::test]
+    async fn scheduled_state_writes_stay_bounded_behind_a_blocked_writer() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        let references = std::sync::Arc::strong_count(&session);
+        let writer = session.persist_lock.clone().lock_owned().await;
+        let mut pending_references = Vec::new();
+        for step in 0..4 {
+            session
+                .runtime
+                .update(RuntimeSettingsUpdate {
+                    scope_patterns: Some(vec![format!("step-{step}.example.com")]),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            session.schedule_state_persist();
+            // The writer lock is the barrier; this only advances the existing
+            // debounce, not a disk-speed or scheduler-throughput assertion.
+            tokio::time::sleep(
+                super::STATE_PERSIST_DEBOUNCE + std::time::Duration::from_millis(50),
+            )
+            .await;
+            pending_references.push(std::sync::Arc::strong_count(&session) - references);
+        }
+        drop(writer);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let state = std::fs::read(super::state_path(session.storage_dir()))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                if state.is_some_and(|state| {
+                    state["runtime"]["scope_patterns"] == serde_json::json!(["step-3.example.com"])
+                }) && std::sync::Arc::strong_count(&session) == references
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the latest state did not persist after releasing the writer");
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            pending_references.iter().all(|count| *count <= 2),
+            "at most one writer and one coalesced pending task, not an accumulating queue: {pending_references:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_state_write_keeps_changes_after_its_snapshot_was_captured() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        let references = std::sync::Arc::strong_count(&session);
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["before.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (entered, resume) = session.pause_next_state_write();
+        session.schedule_state_persist();
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+            .await
+            .expect("the state-only writer did not reach its capture barrier")
+            .unwrap();
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["late.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session.schedule_state_persist();
+        resume.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let state = std::fs::read(super::state_path(session.storage_dir()))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                if state.is_some_and(|state| {
+                    state["runtime"]["scope_patterns"] == serde_json::json!(["late.example.com"])
+                }) && std::sync::Arc::strong_count(&session) == references
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a state change during the prior write was not checkpointed");
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scheduled_state_write_hands_off_to_a_new_caller_without_losing_its_change() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        let references = std::sync::Arc::strong_count(&session);
+        let (entered, resume) = session.pause_next_state_handoff();
+        session.schedule_state_persist();
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+            .await
+            .expect("the first writer did not release its scheduler ownership")
+            .unwrap();
+        assert!(!session
+            .state_persist_scheduled
+            .load(std::sync::atomic::Ordering::SeqCst));
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["handoff.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session.schedule_state_persist();
+        assert_eq!(std::sync::Arc::strong_count(&session) - references, 2);
+        resume.send(()).unwrap();
+        wait_scheduled_scope(&session, references, "handoff.example.com").await;
+        drop(session);
+        drop(registry);
+        let (registry, session) = SessionRegistry::load_or_create(&root, 32, 32).unwrap();
+        assert_eq!(
+            session.runtime.snapshot().await.scope_patterns,
+            vec!["handoff.example.com"]
+        );
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scheduled_state_write_releases_ownership_after_error_and_retries_a_later_change() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        let references = std::sync::Arc::strong_count(&session);
+        let path = super::state_path(session.storage_dir());
+        // An owned fixture directory at the destination makes atomic rename
+        // fail, without changing permissions or depending on disk capacity.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let (entered, resume) = session.pause_next_state_handoff();
+        session.schedule_state_persist();
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+            .await
+            .expect("the failed writer did not release its scheduler ownership")
+            .unwrap();
+        assert!(
+            path.is_dir(),
+            "the deliberately failing destination remains"
+        );
+        assert!(!session
+            .state_persist_scheduled
+            .load(std::sync::atomic::Ordering::SeqCst));
+        resume.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while std::sync::Arc::strong_count(&session) != references {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("an unchanged failed write must not spin or retain a worker");
+        std::fs::remove_dir(&path).unwrap();
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["retry.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session.schedule_state_persist();
+        wait_scheduled_scope(&session, references, "retry.example.com").await;
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn wait_scheduled_scope(
+        session: &std::sync::Arc<super::SessionContext>,
+        references: usize,
+        scope: &str,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let state = std::fs::read(super::state_path(session.storage_dir()))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                if state.is_some_and(|state| {
+                    state["runtime"]["scope_patterns"] == serde_json::json!([scope])
+                }) && std::sync::Arc::strong_count(session) == references
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the latest scheduled state did not persist and release its worker");
+    }
 
     #[tokio::test]
     async fn peer_capture_eligibility_matches_status_after_runtime_and_gate_changes() {
@@ -9577,6 +9903,9 @@ mod tests {
             .expect("snapshot should deserialize");
         snapshot.match_replace_rules = (0..=crate::match_replace::MAX_MATCH_REPLACE_RULES)
             .map(|index| MatchReplaceRule {
+                annotation_only_enabled: None,
+                annotation_note: None,
+                annotation_color: None,
                 id: Uuid::new_v4(),
                 enabled: true,
                 description: format!("rule {index}"),
@@ -12871,6 +13200,9 @@ mod tests {
         ];
         let rule =
             |description: &str, enabled: bool, target: MatchReplaceTarget| MatchReplaceRule {
+                annotation_only_enabled: None,
+                annotation_note: None,
+                annotation_color: None,
                 id: Uuid::new_v4(),
                 enabled,
                 description: description.into(),
@@ -12977,6 +13309,434 @@ mod tests {
             10,
             10
         ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_state_save_keeps_inactive_scope_overview_after_restart() {
+        let (root, state) = metadata_commit_test_state();
+        let session = state.session().await;
+        let id = session.id();
+        let other = state
+            .create_session(Some("Scope control".into()))
+            .await
+            .unwrap();
+        assert_ne!(id, other.id);
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["example.com".into()]),
+                excluded_scope_patterns: Some(vec!["static.example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        {
+            let _guard = session.mutation_guard().await;
+            state
+                .persist_session_state_mutation_locked(&session)
+                .await
+                .unwrap();
+        }
+        let saved: super::StoredSessionSnapshot = serde_json::from_slice(
+            &std::fs::read(super::state_path(session.storage_dir())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.runtime.scope_patterns, ["example.com"]);
+        let config = state.config.clone();
+        drop(session);
+        drop(state);
+        let restarted = crate::state::AppState::new(config).unwrap();
+        // List before opening/reading the inactive context; a loaded overlay
+        // would conceal stale registry metadata.
+        let listed = restarted.list_session_listings().await;
+        let inactive = listed.iter().find(|item| item.summary.id == id).unwrap();
+        assert!(!inactive.summary.active);
+        assert_eq!(inactive.overview.scope, ["example.com"]);
+        assert_eq!(inactive.overview.excluded_scope, ["static.example.com"]);
+        assert_eq!(inactive.summary.request_count, 0);
+        assert_eq!(restarted.active_session_summary().await.id, other.id);
+        let loaded = restarted.read_session_context_for_id(id).await.unwrap();
+        assert_eq!(loaded.overview().await, inactive.overview);
+        drop(loaded);
+        drop(restarted);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_state_save_keeps_cleared_findings_overview_after_restart() {
+        let (root, state) = metadata_commit_test_state();
+        let session = state.session().await;
+        session
+            .scanner
+            .update_config(ScannerConfig {
+                enabled: false,
+                ..ScannerConfig::default()
+            })
+            .await;
+        // Stored synthetic findings only: never invoke a scanner or capture.
+        session
+            .scanner
+            .replace_all(vec![overview_finding(Severity::High)])
+            .await;
+        state.persist_active_session().await.unwrap();
+        let id = session.id();
+        let other = state
+            .create_session(Some("Finding control".into()))
+            .await
+            .unwrap();
+        assert_eq!(session.overview().await.findings.high, 1);
+        session.scanner.clear().await;
+        {
+            let _guard = session.mutation_guard().await;
+            state
+                .persist_session_state_mutation_locked(&session)
+                .await
+                .unwrap();
+        }
+        let saved: super::StoredSessionSnapshot = serde_json::from_slice(
+            &std::fs::read(super::state_path(session.storage_dir())).unwrap(),
+        )
+        .unwrap();
+        assert!(saved.scanner_findings.is_empty());
+        let config = state.config.clone();
+        drop(session);
+        drop(state);
+        let restarted = crate::state::AppState::new(config).unwrap();
+        let listed = restarted.list_session_listings().await;
+        let inactive = listed.iter().find(|item| item.summary.id == id).unwrap();
+        assert!(!inactive.summary.active);
+        assert_eq!(inactive.overview.findings, super::SeverityCounts::default());
+        assert_eq!(inactive.summary.request_count, 0);
+        assert_eq!(restarted.active_session_summary().await.id, other.id);
+        let loaded = restarted.read_session_context_for_id(id).await.unwrap();
+        assert_eq!(loaded.scanner.count().await, 0);
+        drop(loaded);
+        drop(restarted);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn ordinary_state_save_traffic_files(
+        storage: &std::path::Path,
+    ) -> Vec<Option<(Vec<u8>, std::time::SystemTime)>> {
+        [
+            "snapshot.json",
+            "transactions.ndjson",
+            "transactions.meta.ndjson",
+            "transactions.journal",
+            "transactions.journal.checkpoint",
+            "websockets.journal",
+        ]
+        .iter()
+        .map(|name| match std::fs::read(storage.join(name)) {
+            Ok(bytes) => Some((
+                bytes,
+                std::fs::metadata(storage.join(name))
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("cannot read synthetic traffic file {name}: {error}"),
+        })
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn ordinary_state_save_preserves_full_save_traffic_without_reading_bodies() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        let mut first = overview_record("GET", "first.example.com", "/", 1);
+        first.user_note = Some("Synthetic marked row".into());
+        first.request.body_preview = "synthetic retained body".into();
+        first.request.body_size = first.request.body_preview.len();
+        session.store.insert(first).await;
+        let mut before = session.persist().await.unwrap();
+        // A nonzero cached WebSocket count must survive without starting a
+        // transport or replacing the count from this empty state-only snapshot.
+        before.websocket_count = 3;
+        session.replace_metadata(before.clone());
+        registry.update_metadata(before.clone()).unwrap();
+        // Later live traffic must not become a partial new traffic snapshot
+        // just because an unrelated state component was saved.
+        session
+            .store
+            .insert(overview_record("GET", "later.example.com", "/", 2))
+            .await;
+        assert_eq!(session.store.len().await, 2);
+        let files = ordinary_state_save_traffic_files(session.storage_dir());
+        assert!(files[0].is_some() && files[1].is_some());
+        let body_path = super::transactions_path(session.storage_dir());
+        let held_body = session
+            .storage_dir()
+            .join("synthetic-held-transactions.ndjson");
+        std::fs::rename(&body_path, &held_body).unwrap();
+        // A full rewrite or lazy body read cannot use this path. The state-only
+        // save must succeed without touching it, not fall back to empty bodies.
+        std::fs::create_dir(&body_path).unwrap();
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let after = {
+            let _guard = session.mutation_guard().await;
+            session.persist_state_mutation_locked().await.unwrap()
+        };
+        assert!(body_path.is_dir());
+        assert_eq!(
+            std::fs::read(&held_body).unwrap(),
+            files[1].as_ref().unwrap().0.clone()
+        );
+        std::fs::remove_dir(&body_path).unwrap();
+        std::fs::rename(&held_body, &body_path).unwrap();
+        assert_eq!(
+            ordinary_state_save_traffic_files(session.storage_dir()),
+            files
+        );
+        assert_eq!(after.request_count, before.request_count);
+        assert_eq!(after.websocket_count, before.websocket_count);
+        assert_eq!(after.overview.top_hosts, before.overview.top_hosts);
+        assert_eq!(
+            after.overview.last_captured_at,
+            before.overview.last_captured_at
+        );
+        assert_eq!(
+            after.overview.marked_requests,
+            before.overview.marked_requests
+        );
+        assert_eq!(after.overview.scope, ["example.com"]);
+        assert_eq!(after.name, before.name);
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.last_opened_at, before.last_opened_at);
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_state_save_failed_write_does_not_publish_overview() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        session
+            .store
+            .insert(overview_record("GET", "example.com", "/", 1))
+            .await;
+        registry
+            .update_metadata(session.persist().await.unwrap())
+            .unwrap();
+        let before = session.metadata.read().unwrap().clone();
+        let registry_before = std::fs::read(&registry.registry_path).unwrap();
+        let files = ordinary_state_save_traffic_files(session.storage_dir());
+        let path = super::state_path(session.storage_dir());
+        let held_state = session.storage_dir().join("synthetic-held-state.json");
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::rename(&path, &held_state).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some(vec!["example.com".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        {
+            let _guard = session.mutation_guard().await;
+            assert!(session.persist_state_mutation_locked().await.is_err());
+        }
+        assert_eq!(
+            serde_json::to_value(&*session.metadata.read().unwrap()).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(&registry.registry_path).unwrap(),
+            registry_before
+        );
+        assert_eq!(std::fs::read(&held_state).unwrap(), bytes);
+        assert_eq!(
+            ordinary_state_save_traffic_files(session.storage_dir()),
+            files
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&held_state, &path).unwrap();
+        let retry = {
+            let _guard = session.mutation_guard().await;
+            session.persist_state_mutation_locked().await.unwrap()
+        };
+        assert_eq!(retry.overview.scope, ["example.com"]);
+        registry.update_metadata(retry).unwrap();
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_state_save_reports_registry_failures_after_state_publication() {
+        for after_replacement in [false, true] {
+            let (root, state) = metadata_commit_test_state();
+            let session = state.session().await;
+            session
+                .runtime
+                .update(RuntimeSettingsUpdate {
+                    scope_patterns: Some(vec!["example.com".into()]),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            state.sessions.fail_next_metadata_write(
+                super::SessionMetadataWrite::Update,
+                metadata_commit_fault(after_replacement),
+            );
+            let error = {
+                let _guard = session.mutation_guard().await;
+                state
+                    .persist_session_state_mutation_locked(&session)
+                    .await
+                    .unwrap_err()
+            };
+            assert!(error.to_string().contains(if after_replacement {
+                "finalization"
+            } else {
+                "before replacement"
+            }));
+            // State persistence precedes registry publication; an error must
+            // not be reported as success or misrepresented as a full rollback.
+            let saved: super::StoredSessionSnapshot = serde_json::from_slice(
+                &std::fs::read(super::state_path(session.storage_dir())).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved.runtime.scope_patterns, ["example.com"]);
+            assert_eq!(
+                session.metadata.read().unwrap().overview.scope,
+                ["example.com"]
+            );
+            let expected = if after_replacement {
+                vec!["example.com"]
+            } else {
+                Vec::new()
+            };
+            let listed = state.sessions.listings();
+            assert_eq!(listed[0].overview.scope, expected);
+            let disk = metadata_commit_disk(&state.sessions);
+            assert_eq!(
+                metadata_commit_entry(&disk, session.id())["overview"]["scope"],
+                serde_json::json!(expected)
+            );
+            drop(session);
+            drop(state);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_state_save_bounds_state_overview_and_omits_request_values() {
+        let (root, registry, session) = snapshot_correction_fixture().await;
+        session
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                scope_patterns: Some((0..10).map(|n| format!("host-{n}.example.com")).collect()),
+                excluded_scope_patterns: Some(
+                    (0..10).map(|n| format!("skip-{n}.example.com")).collect(),
+                ),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut workspace = session.workspace.snapshot().await;
+        workspace.replay.tabs = (0..7)
+            .map(|n| ReplayTabState {
+                id: format!("synthetic-{n}"),
+                pinned: true,
+                base_request: Some(EditableRequest {
+                    scheme: "https".into(),
+                    host: "example.com".into(),
+                    method: "GET".into(),
+                    path: format!("/{}?synthetic-query-value", "x".repeat(100)),
+                    headers: Vec::new(),
+                    body: "synthetic-body-value".into(),
+                    body_encoding: BodyEncoding::Utf8,
+                    preview_truncated: false,
+                }),
+                ..Default::default()
+            })
+            .collect();
+        session.workspace.replace_snapshot(workspace).await;
+        session
+            .match_replace
+            .replace_all(
+                (0..7)
+                    .map(|_| MatchReplaceRule {
+                        annotation_only_enabled: None,
+                        annotation_note: None,
+                        annotation_color: None,
+                        id: Uuid::new_v4(),
+                        enabled: true,
+                        description: "Rule ".repeat(30),
+                        scope: MatchReplaceScope::Request,
+                        target: MatchReplaceTarget::Body,
+                        search: "synthetic-search-value".into(),
+                        replace: "synthetic-replacement-value".into(),
+                        regex: false,
+                        case_sensitive: false,
+                    })
+                    .collect(),
+            )
+            .await;
+        // The store groups by issue, not UUID or severity. Seed two distinct
+        // synthetic issues so both severity assertions exercise saved metadata.
+        let mut high = overview_finding(Severity::High);
+        high.rule_id = "overview-fixture-high".into();
+        high.title = "Synthetic high issue".into();
+        let mut low = overview_finding(Severity::Low);
+        low.rule_id = "overview-fixture-low".into();
+        low.title = "Synthetic low issue".into();
+        session.scanner.replace_all(vec![high, low]).await;
+        assert_eq!(session.scanner.count().await, 2);
+        let seeded = super::SeverityCounts::count(&session.scanner.snapshot(None).await);
+        assert_eq!(seeded.high, 1);
+        assert_eq!(seeded.low, 1);
+        let metadata = {
+            let _guard = session.mutation_guard().await;
+            session.persist_state_mutation_locked().await.unwrap()
+        };
+        let overview = &metadata.overview;
+        assert_eq!((overview.scope.len(), overview.scope_count), (8, 10));
+        assert_eq!(
+            (overview.excluded_scope.len(), overview.excluded_scope_count),
+            (8, 10)
+        );
+        assert_eq!(
+            (overview.pinned_replays.len(), overview.pinned_replay_count),
+            (5, 7)
+        );
+        assert_eq!(
+            (overview.replace_rules.len(), overview.replace_rule_count),
+            (5, 7)
+        );
+        assert!(overview
+            .pinned_replays
+            .iter()
+            .chain(&overview.replace_rules)
+            .all(|label| label.chars().count() <= 80));
+        assert_eq!(overview.findings.high, 1);
+        assert_eq!(overview.findings.low, 1);
+        let json = serde_json::to_string(&metadata).unwrap();
+        for omitted in [
+            "synthetic-query-value",
+            "synthetic-body-value",
+            "synthetic-search-value",
+            "synthetic-replacement-value",
+        ] {
+            assert!(
+                !json.contains(omitted),
+                "request/rule value entered registry metadata"
+            );
+        }
+        registry.update_metadata(metadata).unwrap();
+        drop(session);
+        drop(registry);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

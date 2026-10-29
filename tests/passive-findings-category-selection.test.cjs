@@ -2,7 +2,7 @@
 // filtering against synthetic metadata; never boot the app or make API calls.
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { loadFunctions } = require("./frontend-test-helpers.cjs");
+const { loadFunctions, toggleButton } = require("./frontend-test-helpers.cjs");
 
 function categorySelect() {
   const options = [];
@@ -39,14 +39,14 @@ function fixture(data) {
   const els = {
     findingsBody: { innerHTML: "" }, findingsFilterCategory: category,
     findingsFilterSearch: { value: "" }, findingsFilterSeverity: { value: "" },
-    findingsInScopeOnly: { checked: false },
+    findingsInScopeOnly: toggleButton(),
   };
   const state = { _findingsEntries: [] };
   let clearCount = 0;
   const c = loadFunctions([
     "renderFindings", "updateCategoryFilter", "ensureFindingsCategoryOption", "getFilteredFindings",
     "resetFindingsUiState",
-  ], {
+  ], { refreshHistoryFindings() {},
     els, state, findingsData: Object.freeze(data), selectedFindingId: null,
     findingsStateGeneration: 0, findingsLoadGeneration: 0, findingsBadgeCount: data.length,
     findingsLoadPromise: null, findingsLoadSessionId: null, lastFindingsBadgePollAt: 0,

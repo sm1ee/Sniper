@@ -118,8 +118,8 @@ pub struct FuzzerAttackRecord {
     pub planned: usize,
     #[serde(default = "one")]
     pub concurrency: usize,
-    /// Still sending. Never on disk: a restart does not resume an attack, so a
-    /// running one is left out of the session state until it ends.
+    /// Still sending. Checkpoints keep its results as a stopped attack: a
+    /// restart must neither discard completed work nor resume network traffic.
     #[serde(default, skip_serializing_if = "is_false")]
     pub running: bool,
     /// Stopped before every request was sent.
@@ -252,15 +252,25 @@ impl FuzzerStore {
             .cloned()
     }
 
-    /// The attacks the session state keeps: a running one waits until it ends.
+    /// Checkpoint running attacks without changing the live worker. Restoring
+    /// this snapshot keeps completed results but never resumes the requests.
     pub async fn snapshot(&self, limit: Option<usize>) -> Vec<FuzzerAttackRecord> {
-        self.attacks
+        let records: Vec<_> = self
+            .attacks
             .read()
             .await
             .iter()
-            .filter(|attack| !attack.running)
             .take(limit.unwrap_or(self.max_entries).min(self.max_entries))
             .cloned()
+            .collect();
+        records
+            .into_iter()
+            .map(|mut attack| {
+                if attack.running {
+                    end_record(&mut attack, true);
+                }
+                attack
+            })
             .collect()
     }
 
@@ -395,7 +405,12 @@ pub(crate) fn plan_attack(
         return Err(anyhow!("Fuzzer needs at least one payload"));
     }
     validate_fuzzer_payloads(&payloads)?;
-    validate_fuzzer_expanded_request_budget(template, &payloads, options.url_encode)?;
+    validate_fuzzer_expanded_request_budget(
+        template,
+        &payloads,
+        options.attack_type,
+        options.url_encode,
+    )?;
     let requests = plan_requests(options.attack_type, positions, payloads.len());
     if requests.len() > MAX_FUZZER_REQUESTS {
         return Err(anyhow!(
@@ -502,6 +517,7 @@ pub async fn start_attack(
         cancel,
         task,
     });
+    session.schedule_state_persist();
     Ok(record)
 }
 
@@ -537,6 +553,7 @@ impl AttackRun {
                             .fuzzer
                             .update(run.id, |record| record.results.push(result))
                             .await;
+                        run.session.schedule_state_persist();
                     }
                 }
             })
@@ -727,58 +744,110 @@ fn validate_fuzzer_payloads(payloads: &[String]) -> Result<()> {
 fn validate_fuzzer_expanded_request_budget(
     template: &EditableRequest,
     payloads: &[String],
+    attack_type: FuzzerAttackType,
     url_encode: bool,
 ) -> Result<()> {
+    let budget = RequestExpansionBudget::new(template, url_encode);
     for (index, payload) in payloads.iter().enumerate() {
-        let request_bytes = expanded_request_size(template, payload.len(), url_encode);
+        let request_bytes = budget.max_size(payload.len(), attack_type);
         if request_bytes > MAX_FUZZER_EXPANDED_REQUEST_BYTES {
             return Err(anyhow!(
-                "Fuzzer payload {index} expands the request to {request_bytes} bytes, above the {MAX_FUZZER_EXPANDED_REQUEST_BYTES} byte limit"
+                "Fuzzer payload {index} expands the request to an estimated {request_bytes} bytes, above the {MAX_FUZZER_EXPANDED_REQUEST_BYTES} byte limit"
             ));
         }
     }
     Ok(())
 }
 
-fn expanded_request_size(
-    template: &EditableRequest,
-    payload_len: usize,
-    url_encode: bool,
-) -> usize {
-    let path_payload_len = if url_encode {
-        payload_len.saturating_mul(3)
-    } else {
-        payload_len
-    };
-    let host_bytes = if has_literal_host_header(template) {
-        template.host.len()
-    } else {
-        expanded_value_len(&template.host, payload_len)
-    };
-    let mut bytes = expanded_value_len(&template.scheme, payload_len)
-        .saturating_add(host_bytes)
-        .saturating_add(expanded_value_len(&template.method, payload_len))
-        .saturating_add(expanded_value_len(&template.path, path_payload_len))
-        .saturating_add(expanded_value_len(&template.body, payload_len));
-
-    for header in &template.headers {
-        bytes = bytes
-            .saturating_add(expanded_value_len(&header.name, payload_len))
-            .saturating_add(expanded_value_len(&header.value, payload_len));
-    }
-    bytes
+// Admission estimates keep the legacy pre-normalization field accounting and
+// conservative 3x URL allowance. Host/Content-Length normalization can change
+// that size; build_request checks the actual normalized fields before sending.
+struct RequestExpansionBudget {
+    unmarked: usize,
+    originals: usize,
+    positions: Vec<(usize, usize)>, // original UTF-8 bytes, payload multiplier
 }
 
-fn expanded_value_len(value: &str, payload_len: usize) -> usize {
-    let (count, marked) = MARKER_REGEX
-        .find_iter(value)
-        .fold((0usize, 0usize), |(count, marked), found| {
-            (count + 1, marked + found.len())
-        });
-    value
-        .len()
-        .saturating_sub(marked)
-        .saturating_add(count.saturating_mul(payload_len))
+impl RequestExpansionBudget {
+    fn new(template: &EditableRequest, url_encode: bool) -> Self {
+        let mut budget = Self {
+            // Scheme is literal: the renderer never fills its markers.
+            unmarked: template.scheme.len(),
+            originals: 0,
+            positions: Vec::new(),
+        };
+        let mut field = |value: &str, multiplier| {
+            let mut unmarked = value.len();
+            for captures in MARKER_REGEX.captures_iter(value) {
+                unmarked -= captures.get(0).unwrap().len();
+                let original = captures.get(1).map_or(0, |found| found.len());
+                budget.originals = budget.originals.saturating_add(original);
+                budget.positions.push((original, multiplier));
+            }
+            budget.unmarked = budget.unmarked.saturating_add(unmarked);
+        };
+        // Keep the renderer's position order, excluding authority positions
+        // when a literal Host header takes precedence.
+        field(&template.method, 1);
+        field(&template.path, if url_encode { 3 } else { 1 });
+        let literal_host = has_literal_host_header(template);
+        if !literal_host {
+            field(&template.host, 1);
+        }
+        for header in &template.headers {
+            field(&header.name, 1);
+            field(&header.value, 1);
+        }
+        field(&template.body, 1);
+        if literal_host {
+            budget.unmarked = budget.unmarked.saturating_add(template.host.len());
+        }
+        budget
+    }
+
+    fn size(&self, payload_len: usize, position: Option<usize>) -> usize {
+        if let Some(position) = position {
+            let (original, multiplier) = self.positions[position];
+            self.unmarked
+                .saturating_add(self.originals.saturating_sub(original))
+                .saturating_add(payload_len.saturating_mul(multiplier))
+        } else {
+            self.positions
+                .iter()
+                .fold(self.unmarked, |bytes, (_, multiplier)| {
+                    bytes.saturating_add(payload_len.saturating_mul(*multiplier))
+                })
+        }
+    }
+
+    fn max_size(&self, payload_len: usize, attack_type: FuzzerAttackType) -> usize {
+        match attack_type {
+            FuzzerAttackType::BatteringRam => self.size(payload_len, None),
+            // A replacement can shrink every original. Do not clamp this max
+            // to the unchanged template or a valid shrink-to-fit attack fails.
+            FuzzerAttackType::Sniper => (0..self.positions.len())
+                .map(|position| self.size(payload_len, Some(position)))
+                .max()
+                .unwrap_or(self.unmarked),
+        }
+    }
+}
+
+fn rendered_request_size(request: &EditableRequest) -> usize {
+    request.headers.iter().fold(
+        request
+            .scheme
+            .len()
+            .saturating_add(request.host.len())
+            .saturating_add(request.method.len())
+            .saturating_add(request.path.len())
+            .saturating_add(request.body.len()),
+        |bytes, header| {
+            bytes
+                .saturating_add(header.name.len())
+                .saturating_add(header.value.len())
+        },
+    )
 }
 
 #[cfg(test)]
@@ -836,6 +905,14 @@ pub(crate) fn build_request(
         request.host = host;
     }
     request.normalize_content_length();
+    // Count the UTF-8 model fields, including encoded body text, not decoded
+    // body or wire bytes. Match and Replace runs later in the proxy.
+    let request_bytes = rendered_request_size(&request);
+    if request_bytes > MAX_FUZZER_EXPANDED_REQUEST_BYTES {
+        return Err(anyhow!(
+            "Rendered Fuzzer request is {request_bytes} bytes, above the {MAX_FUZZER_EXPANDED_REQUEST_BYTES} byte field limit"
+        ));
+    }
     Ok(request)
 }
 
@@ -1091,12 +1168,15 @@ mod tests {
         assert!(marker_count <= MAX_FUZZER_MARKERS_PER_REQUEST);
         request.body = "$payload$".repeat(marker_count);
         let payloads = vec!["x".repeat(MAX_FUZZER_PAYLOAD_BYTES)];
-        assert!(
-            validate_fuzzer_expanded_request_budget(&request, &payloads, false)
-                .unwrap_err()
-                .to_string()
-                .contains("expands the request")
-        );
+        assert!(validate_fuzzer_expanded_request_budget(
+            &request,
+            &payloads,
+            FuzzerAttackType::BatteringRam,
+            false
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("expands the request"));
     }
 
     #[tokio::test]
@@ -1175,8 +1255,13 @@ mod tests {
         };
 
         let payload = "d".repeat(MAX_FUZZER_PAYLOAD_BYTES);
-        validate_fuzzer_expanded_request_budget(&request, std::slice::from_ref(&payload), false)
-            .unwrap();
+        validate_fuzzer_expanded_request_budget(
+            &request,
+            std::slice::from_ref(&payload),
+            FuzzerAttackType::BatteringRam,
+            false,
+        )
+        .unwrap();
         let applied = apply_payload_to_request(&request, &payload).unwrap();
 
         assert!(applied.host.starts_with("header-dddd"));
@@ -1282,6 +1367,214 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn running_attack_checkpoint_keeps_partial_results_without_stopping_the_worker() {
+        let store = FuzzerStore::new(4);
+        let started_at = Utc::now();
+        let id = Uuid::new_v4();
+        let transaction_id = Uuid::new_v4();
+        let record = FuzzerAttackRecord {
+            id,
+            started_at,
+            completed_at: started_at,
+            status: FuzzerAttackStatus::Completed,
+            template: local_template("127.0.0.1:1".parse().unwrap(), "/$payload$"),
+            payload_count: 3,
+            marker_count: 1,
+            results: vec![
+                FuzzerAttackResult {
+                    index: 1,
+                    payload: "invalid".to_string(),
+                    transaction_id: None,
+                    status: None,
+                    duration_ms: None,
+                    response_bytes: 0,
+                    note: Some("Not sent: synthetic invalid request".to_string()),
+                    position: None,
+                },
+                FuzzerAttackResult {
+                    index: 0,
+                    payload: "ok".to_string(),
+                    transaction_id: Some(transaction_id),
+                    status: Some(200),
+                    duration_ms: Some(1),
+                    response_bytes: 2,
+                    note: None,
+                    position: None,
+                },
+            ],
+            notes: Vec::new(),
+            attack_type: FuzzerAttackType::BatteringRam,
+            url_encode: true,
+            planned: 3,
+            concurrency: 2,
+            running: true,
+            stopped: false,
+        };
+        store.insert(record).await;
+        assert!(store.snapshot(Some(0)).await.is_empty());
+        let checkpoint = store.snapshot(None).await;
+        assert_eq!(
+            checkpoint.len(),
+            1,
+            "completed partial work must not be omitted"
+        );
+        let saved = &checkpoint[0];
+        assert_eq!(saved.id, id);
+        assert!(!saved.running);
+        assert!(saved.stopped);
+        assert_eq!(saved.planned, 3);
+        assert_eq!(saved.results.len(), 2);
+        assert_eq!(saved.results[0].transaction_id, Some(transaction_id));
+        assert_eq!(saved.results[1].index, 1);
+        assert_eq!(saved.status, FuzzerAttackStatus::Failed);
+        assert_eq!(saved.notes, ["Not sent: synthetic invalid request"]);
+
+        let live = store.get(id).await.unwrap();
+        assert!(live.running, "checkpointing must not cancel a live attack");
+        assert!(!live.stopped);
+        assert_eq!(live.results[0].index, 1, "only the checkpoint is sorted");
+        assert!(live.notes.is_empty());
+
+        let bytes = serde_json::to_vec(&checkpoint).unwrap();
+        let restored = FuzzerStore::from_attacks(4, serde_json::from_slice(&bytes).unwrap());
+        assert!(!restored.is_running());
+        let restored = restored.get(id).await.unwrap();
+        assert!(!restored.running);
+        assert!(restored.stopped);
+        assert_eq!(restored.results[0].transaction_id, Some(transaction_id));
+    }
+
+    #[tokio::test]
+    #[ignore = "synthetic checkpoint allocation and timing qualification"]
+    async fn large_running_attack_checkpoint_qualification() {
+        let count = 16_384;
+        let mut record: FuzzerAttackRecord = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(),
+            "started_at": Utc::now(),
+            "completed_at": Utc::now(),
+            "status": "completed",
+            "template": local_template("127.0.0.1:1".parse().unwrap(), "/$payload$"),
+            "running": true,
+            "planned": count + 1
+        }))
+        .unwrap();
+        record.results = (0..count)
+            .rev()
+            .map(|index| FuzzerAttackResult {
+                index,
+                payload: "x".repeat(1024),
+                transaction_id: None,
+                status: Some(200),
+                duration_ms: Some(1),
+                response_bytes: 2,
+                note: None,
+                position: None,
+            })
+            .collect();
+        let store = FuzzerStore::new(1);
+        store.insert(record).await;
+        let start = std::time::Instant::now();
+        let checkpoint = store.snapshot(None).await;
+        let snapshot_ms = start.elapsed().as_millis();
+        let start = std::time::Instant::now();
+        let bytes = serde_json::to_vec(&checkpoint).unwrap();
+        println!(
+            "checkpoint results={count} payload_bytes={} serialized_bytes={} snapshot_ms={snapshot_ms} serialize_ms={}",
+            count * 1024,
+            bytes.len(),
+            start.elapsed().as_millis()
+        );
+        assert_eq!(checkpoint[0].results.len(), count);
+        assert_eq!(checkpoint[0].results[0].index, 0);
+        assert!(checkpoint[0].stopped);
+        assert!(store.get(checkpoint[0].id).await.unwrap().running);
+    }
+
+    #[tokio::test]
+    async fn completed_fuzzer_results_are_checkpointed_before_the_next_request_finishes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (second_started, second_waiting) = tokio::sync::oneshot::channel();
+        let upstream = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 1024];
+            first.read(&mut buffer).await.unwrap();
+            first
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .await
+                .unwrap();
+            drop(first);
+            let (mut second, _) = listener.accept().await.unwrap();
+            second.read(&mut buffer).await.unwrap();
+            second_started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (state, session, data_dir) = scratch_state("checkpoint-restart").await;
+        let config = state.config.clone();
+        let started = start_attack(
+            Arc::clone(&state),
+            Arc::clone(&session),
+            local_template(addr, "/$payload$"),
+            vec!["completed".to_string(), "waiting".to_string()],
+            None,
+            None,
+            None,
+            FuzzerAttackOptions {
+                attack_type: FuzzerAttackType::BatteringRam,
+                url_encode: true,
+                concurrency: 1,
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), second_waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let state_path = session.storage_dir().join("state.json");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(bytes) = std::fs::read(&state_path) {
+                    let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    if saved["fuzzer_attacks"][0]["results"]
+                        .as_array()
+                        .is_some_and(|results| results.len() == 1)
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the completed result should be saved while the next request is waiting");
+        assert!(session.fuzzer.get(started.id).await.unwrap().running);
+
+        // No graceful stop/final save: model a worker lost after its checkpoint.
+        let running = session.fuzzer.running.lock().unwrap().take().unwrap();
+        running.task.abort();
+        let _ = running.task.await;
+        upstream.abort();
+        let _ = upstream.await;
+        drop(session);
+        drop(state);
+        let reopened = AppState::new(config).unwrap();
+        let restored_session = reopened.session().await;
+        let restored = restored_session.fuzzer.get(started.id).await.unwrap();
+        assert!(!restored.running);
+        assert!(restored.stopped);
+        assert_eq!(restored.planned, 2);
+        assert_eq!(restored.results.len(), 1);
+        assert_eq!(restored.results[0].payload, "completed");
+        let transaction_id = restored.results[0].transaction_id.unwrap();
+        assert!(restored_session.store.get(transaction_id).await.is_some());
+        assert!(!restored_session.fuzzer.is_running());
+        drop(restored_session);
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
     async fn sniper_runs_in_the_background_and_ends_with_each_position_in_order() {
         let addr = upstream(Duration::ZERO).await;
         let (state, session, data_dir) = scratch_state("sniper").await;
@@ -1304,10 +1597,10 @@ mod tests {
         .unwrap();
         assert!(started.running);
         assert_eq!(started.planned, 4);
-        assert!(
-            session.fuzzer.snapshot(None).await.is_empty(),
-            "a running attack stays out of the session state"
-        );
+        let checkpoint = session.fuzzer.snapshot(None).await;
+        assert_eq!(checkpoint.len(), 1);
+        assert!(!checkpoint[0].running);
+        assert!(checkpoint[0].stopped);
 
         let attack = wait_for_end(&session, started.id).await;
         assert_eq!(attack.status, FuzzerAttackStatus::Completed);
@@ -1640,5 +1933,343 @@ mod tests {
             Some(old.id)
         );
         assert!(store.get(new.id).await.is_none());
+    }
+
+    fn sizing_fields(request: &EditableRequest) -> usize {
+        [
+            &request.scheme,
+            &request.host,
+            &request.method,
+            &request.path,
+            &request.body,
+        ]
+        .into_iter()
+        .map(|field| field.len())
+        .sum::<usize>()
+            + request
+                .headers
+                .iter()
+                .map(|header| header.name.len() + header.value.len())
+                .sum::<usize>()
+    }
+
+    fn sizing_template(body: String) -> EditableRequest {
+        EditableRequest {
+            scheme: "http".into(),
+            host: "example.com".into(),
+            method: "POST".into(),
+            path: "/".into(),
+            headers: Vec::new(),
+            body,
+            body_encoding: BodyEncoding::Utf8,
+            preview_truncated: false,
+        }
+    }
+
+    #[test]
+    fn sizing_sniper_does_not_charge_every_empty_position_at_once() {
+        let template = sizing_template("$payload$".repeat(65));
+        let payload = "x".repeat(MAX_FUZZER_PAYLOAD_BYTES);
+        let rendered = build_request(&template, &payload, Some(0), false).unwrap();
+        assert_eq!(sizing_fields(&rendered), 65_556);
+        let options = FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::Sniper,
+            url_encode: false,
+            concurrency: 1,
+        };
+        let plan = plan_attack(&template, vec![payload.clone()], options)
+            .expect("each selected-position request fits the existing limit");
+        assert_eq!(plan.requests.len(), 65);
+        assert!(
+            plan_attack(
+                &template,
+                vec![payload],
+                FuzzerAttackOptions {
+                    attack_type: FuzzerAttackType::BatteringRam,
+                    ..options
+                }
+            )
+            .is_err(),
+            "Battering ram still expands every position"
+        );
+    }
+
+    #[test]
+    fn sizing_sniper_estimate_keeps_distinct_utf8_originals() {
+        let mut template = sizing_template(format!("§{}§", "body😀".repeat(128)));
+        template.path = "/§a§/§éé§".into();
+        template.headers.push(HeaderRecord {
+            name: "X-Value".into(),
+            value: "§original-header§".into(),
+        });
+        for encoded in [false, true] {
+            let payload = "é😀";
+            let actual_max = (0..count_request_markers(&template))
+                .map(|position| {
+                    sizing_fields(
+                        &build_request(&template, payload, Some(position), encoded).unwrap(),
+                    )
+                })
+                .max()
+                .unwrap();
+            // Distinct retained originals must be counted for each selected
+            // position; the all-position estimate misses this rendered bound.
+            let estimate = RequestExpansionBudget::new(&template, encoded)
+                .max_size(payload.len(), FuzzerAttackType::Sniper);
+            assert!(
+                estimate >= actual_max,
+                "estimated {estimate}, rendered {actual_max}, encoded={encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn sizing_scheme_is_literal_and_never_a_position() {
+        let mut template = sizing_template("$payload$".into());
+        template.scheme = "http§literal§".into();
+        let rendered = build_request(&template, "x", Some(0), false).unwrap();
+        assert_eq!(rendered.scheme, template.scheme);
+        assert_eq!(count_request_markers(&template), 1);
+        assert!(
+            RequestExpansionBudget::new(&template, false).max_size(1, FuzzerAttackType::Sniper)
+                >= sizing_fields(&rendered)
+        );
+    }
+
+    #[test]
+    fn sizing_final_guard_accepts_exact_field_cap_and_rejects_one_more_byte() {
+        let payload = "x".repeat(MAX_FUZZER_PAYLOAD_BYTES - 1);
+        let mut template = sizing_template("$payload$".repeat(64));
+        let overhead = sizing_fields(&sizing_template(String::new()));
+        let padding = MAX_FUZZER_EXPANDED_REQUEST_BYTES - overhead - 64 * payload.len();
+        template.body.push_str(&"p".repeat(padding));
+        plan_attack(
+            &template,
+            vec![payload.clone()],
+            FuzzerAttackOptions {
+                attack_type: FuzzerAttackType::BatteringRam,
+                url_encode: false,
+                concurrency: 1,
+            },
+        )
+        .unwrap();
+        let rendered = build_request(&template, &payload, None, false).unwrap();
+        assert_eq!(sizing_fields(&rendered), MAX_FUZZER_EXPANDED_REQUEST_BYTES);
+        drop(rendered);
+        template.body.push('p');
+        assert!(
+            build_request(&template, &payload, None, false).is_err(),
+            "the final rendered request must not exceed the field-byte cap"
+        );
+    }
+
+    #[test]
+    fn sizing_normalization_controls_preserve_host_content_length_and_base64_text() {
+        let mut host = sizing_template(String::new());
+        host.headers.push(HeaderRecord {
+            name: "$payload$".into(),
+            value: "other.example.com".into(),
+        });
+        let rendered = build_request(&host, "Host", Some(0), false).unwrap();
+        assert_eq!(rendered.host, "other.example.com");
+        assert_eq!(sizing_fields(&rendered), 4 + 17 + 4 + 1 + 4 + 17);
+        let mut length = sizing_template("é😀".into());
+        length.headers.push(HeaderRecord {
+            name: "$payload$".into(),
+            value: "99999".into(),
+        });
+        let rendered = build_request(&length, "Content-Length", Some(0), false).unwrap();
+        assert_eq!(rendered.headers[0].name, "Content-Length");
+        assert_eq!(rendered.headers[0].value, "6");
+        let mut encoded = sizing_template("YQ==$payload$".into());
+        encoded.body_encoding = BodyEncoding::Base64;
+        encoded.headers.push(HeaderRecord {
+            name: "Content-Length".into(),
+            value: "999".into(),
+        });
+        let rendered = build_request(&encoded, "", Some(0), false).unwrap();
+        assert_eq!(rendered.body, "YQ==");
+        assert_eq!(rendered.body_bytes(), b"a");
+        assert_eq!(rendered.headers[0].value, "1");
+        assert_eq!(
+            sizing_fields(&rendered),
+            20 + 4 + "Content-Length".len() + 1
+        );
+    }
+
+    #[test]
+    fn sizing_selected_positions_follow_renderer_order_and_allow_shrinking() {
+        let mut template = sizing_template("§body©§".to_string());
+        template.method = "§GET§".to_string();
+        template.path = "/§pathé§".to_string();
+        template.host = "§example.com§".to_string();
+        template.headers.push(HeaderRecord {
+            name: "§X-Test§".to_string(),
+            value: "§value😀§".to_string(),
+        });
+        for encoded in [false, true] {
+            let budget = RequestExpansionBudget::new(&template, encoded);
+            for position in 0..6 {
+                let rendered = build_request(&template, "x", Some(position), encoded).unwrap();
+                // The encoded estimate deliberately charges 3 bytes for "x".
+                let extra = if encoded && position == 1 { 2 } else { 0 };
+                assert_eq!(
+                    budget.size(1, Some(position)),
+                    sizing_fields(&rendered) + extra,
+                    "position {position}"
+                );
+            }
+        }
+        // Every replacement shrinks. A max initialized to the originals would
+        // over-reject this exact-limit request despite its only position fitting.
+        let mut template = sizing_template(format!(
+            "{}§long-original§",
+            "x".repeat(MAX_FUZZER_EXPANDED_REQUEST_BYTES - 21)
+        ));
+        let options = FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::Sniper,
+            url_encode: false,
+            concurrency: 1,
+        };
+        plan_attack(&template, vec!["x".to_string()], options).unwrap();
+        let rendered = build_request(&template, "x", Some(0), false).unwrap();
+        assert_eq!(sizing_fields(&rendered), MAX_FUZZER_EXPANDED_REQUEST_BYTES);
+        drop(rendered);
+        template.body.push('x');
+        assert!(plan_attack(&template, vec!["x".to_string()], options).is_err());
+        assert!(build_request(&template, "x", Some(0), false).is_err());
+    }
+
+    #[test]
+    fn sizing_preserved_originals_reject_overlimit_sniper_but_not_battering_ram() {
+        let template = sizing_template(format!(
+            "$payload$§{}§",
+            "r".repeat(MAX_FUZZER_EXPANDED_REQUEST_BYTES)
+        ));
+        let mut options = FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::Sniper,
+            url_encode: false,
+            concurrency: 1,
+        };
+        assert!(plan_attack(&template, vec!["x".to_string()], options).is_err());
+        options.attack_type = FuzzerAttackType::BatteringRam;
+        plan_attack(&template, vec!["x".to_string()], options).unwrap();
+        assert_eq!(
+            sizing_fields(&build_request(&template, "x", None, false).unwrap()),
+            22
+        );
+    }
+
+    #[test]
+    fn sizing_dynamic_host_is_checked_after_legacy_admission_accounting() {
+        let mut template = sizing_template(String::new());
+        template.headers.push(HeaderRecord {
+            name: "$payload$".to_string(),
+            value: "other.example.com".to_string(),
+        });
+        let budget = RequestExpansionBudget::new(&template, false)
+            .max_size(4, FuzzerAttackType::BatteringRam);
+        template.body = "x".repeat(MAX_FUZZER_EXPANDED_REQUEST_BYTES - budget);
+        plan_attack(
+            &template,
+            vec!["Host".to_string()],
+            FuzzerAttackOptions {
+                attack_type: FuzzerAttackType::BatteringRam,
+                url_encode: false,
+                concurrency: 1,
+            },
+        )
+        .unwrap();
+        let error = build_request(&template, "Host", None, false).unwrap_err();
+        assert!(error.to_string().contains("byte field limit"));
+    }
+
+    #[tokio::test]
+    async fn sizing_final_guard_returns_not_sent_without_connecting_then_allows_valid_control() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (state, session, data_dir) = scratch_state("sizing-final-guard").await;
+        let mut template = local_template(addr, "/");
+        template.method = "POST".to_string();
+        template.headers.push(HeaderRecord {
+            name: "$payload$".to_string(),
+            value: "0".to_string(),
+        });
+        let payload = "Content-Length".to_string();
+        let budget = RequestExpansionBudget::new(&template, false)
+            .max_size(payload.len(), FuzzerAttackType::BatteringRam);
+        template.body = "x".repeat(MAX_FUZZER_EXPANDED_REQUEST_BYTES - budget);
+        let options = FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::BatteringRam,
+            url_encode: false,
+            concurrency: 1,
+        };
+        plan_attack(&template, vec![payload.clone()], options)
+            .expect("legacy pre-normalization admission fits exactly");
+        // Content-Length normalization adds six digits. The complete request is
+        // otherwise runnable; only the final field-byte cap must stop this send.
+        let mut normalized = template.clone();
+        normalized.headers[0].name = payload.clone();
+        normalized.normalize_content_length();
+        assert_eq!(
+            sizing_fields(&normalized),
+            MAX_FUZZER_EXPANDED_REQUEST_BYTES + 6
+        );
+        sendable(&normalized, None).unwrap();
+        drop(normalized);
+        let mut run = AttackRun {
+            state,
+            session: Arc::clone(&session),
+            id: Uuid::new_v4(),
+            template,
+            payloads: vec![payload],
+            source_transaction_id: None,
+            http_version: None,
+            target: None,
+            url_encode: false,
+        };
+        let (_cancel, mut cancellation) = watch::channel(false);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run.send(0, None, 0, &mut cancellation),
+        )
+        .await
+        .expect("the rendered-size guard must reject before waiting on the upstream")
+        .unwrap();
+        assert!(!*cancellation.borrow());
+        assert_eq!(result.transaction_id, None);
+        assert_eq!(result.status, None);
+        assert_eq!(result.note.as_deref(), Some("Not sent: Rendered Fuzzer request is 4194310 bytes, above the 4194304 byte field limit"));
+        assert_eq!(session.store.len().await, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "oversized request must never connect"
+        );
+
+        run.template.body = "small".to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 1024];
+            let n = stream.read(&mut buffer).await.unwrap();
+            assert!(n > 0);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .await
+                .unwrap();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run.send(1, None, 0, &mut cancellation),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.status, Some(200));
+        assert!(result.transaction_id.is_some());
+        assert_eq!(session.store.len().await, 1);
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

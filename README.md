@@ -158,6 +158,9 @@ Hold a request on its way out, edit it, then forward or drop it.
 
 Send payload lists at marked positions and compare status, length and timing.
 
+[Fuzzer quick start (한국어)](docs/guides/fuzzer-assisted-workflow.ko.md) shows what
+to paste into Request and Payloads, how to mark a value, and how to preview before sending.
+
 <p align="center">
   <img src="docs/assets/sniper-v0.3.2-fuzzer.jpg" width="800" alt="The Fuzzer with a marked page parameter and its results sorted by status: quote payloads answered 500, others 400" />
 </p>
@@ -165,6 +168,10 @@ Send payload lists at marked positions and compare status, length and timing.
 ### Findings
 
 Passive checks and template matches, each with its evidence highlighted.
+With **Findings** on in HTTP (or **Mark in HTTP** here), the same requests carry
+a severity badge in Notes, a row tint (Settings ▸ Display) that the colour filter
+gathers them by, and the highlighted evidence. A note or colour tag you set wins
+over them.
 
 <p align="center">
   <img src="docs/assets/sniper-v0.3.2-findings.jpg" width="800" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" />
@@ -298,7 +305,8 @@ bruteforce and the like, or that send PUT, DELETE or PATCH, run only if you
 allow each risk, and `dos` templates never run. Out-of-band templates
 (`{{interactsh-url}}`) are sent where the session has an Interactsh server
 (**Capture ▸ OAST**) and match when the target calls back. Findings appear
-under `nuclei`.
+under `nuclei`. A library downloaded from GitHub updates itself once a day;
+**Update daily** in the library card turns that off.
 
 ```bash
 sniper-cli templates library status
