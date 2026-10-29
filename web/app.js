@@ -16271,13 +16271,14 @@ function renderMatchReplaceRules() {
   const selected = getSelectedMatchReplaceRule();
   els.matchReplaceTableBody.innerHTML = state.matchReplaceRules.length
     ? state.matchReplaceRules
-        .map((rule) => {
+        .map((rule, index) => {
           const active = rule.id === state.selectedMatchReplaceRuleId ? "selected" : "";
+          const controlContext = escapeHtml(`rule ${index + 1}: ${rule.scope} / ${rule.target}`);
           return `
             <tr class="history-row ${active}" data-id="${rule.id}">
-              <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${matchReplaceRuleActivity(rule) ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
+              <td><label class="mini-toggle"><input type="checkbox" aria-label="Enable ${controlContext}" data-rule-toggle="${rule.id}" ${matchReplaceRuleActivity(rule) ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
               <td>${escapeHtml(rule.scope)}</td>
-              <td>${escapeHtml(rule.target)}</td>
+              <td><button type="button" class="match-replace-edit-rule" aria-label="Edit ${controlContext}">${escapeHtml(rule.target)}</button></td>
               <td class="text-truncate" title="${escapeHtml(rule.search || "")}">${escapeHtml(rule.search || "—")}</td>
               <td class="text-truncate" title="${escapeHtml(matchReplaceRuleActions(rule))}">${escapeHtml(matchReplaceRuleActions(rule))}</td>
               <td>${rule.regex ? "✓" : ""}</td>
@@ -16295,6 +16296,7 @@ function renderMatchReplaceRules() {
   Array.from(els.matchReplaceTableBody.querySelectorAll(".history-row")).forEach((row) => {
     row.addEventListener("click", (event) => {
       if (event.target.closest(".mini-toggle")) return;
+      const editButton = event.target.closest(".match-replace-edit-rule");
       // A new rule left empty goes away rather than waiting to be saved blank.
       const untouched = untouchedNewMatchReplaceRule();
       if (untouched && untouched.id !== row.dataset.id) {
@@ -16302,6 +16304,8 @@ function renderMatchReplaceRules() {
       }
       state.selectedMatchReplaceRuleId = row.dataset.id;
       renderMatchReplaceRules();
+      // The table button is replaced by rendering; continue in the stable editor.
+      if (editButton) els.matchReplaceSearch.focus();
     });
   });
 

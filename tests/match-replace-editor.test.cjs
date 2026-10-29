@@ -20,10 +20,10 @@ function fixture(saved = []) {
     activeSession: { id: "session-a" },
   };
   const rows = new Map();
-  const row = (id) => rows.get(id) || rows.set(id, { dataset: { id }, classList: classes(), title: "" }).get(id);
+  const row = (id) => rows.get(id) || rows.set(id, { dataset: { id }, classList: classes(), title: "", listeners: {}, addEventListener(name, handler) { this.listeners[name] = handler; } }).get(id);
   const field = (value = "") => ({ value, checked: false, focused: false, focus() { this.focused = true; } });
   const els = {
-    matchReplaceTableBody: { innerHTML: "", querySelectorAll: (selector) => (selector === "tr[data-id]"
+    matchReplaceTableBody: { innerHTML: "", querySelectorAll: (selector) => ((selector === "tr[data-id]" || selector === ".history-row")
       ? state.matchReplaceRules.map((item) => row(item.id)) : []) },
     matchReplaceEditorHeader: { classList: classes() }, matchReplaceForm: { classList: classes() },
     matchReplaceEmpty: { classList: classes() }, matchReplaceEditorPath: {}, matchReplaceEditorTitle: {},
@@ -37,7 +37,7 @@ function fixture(saved = []) {
   const c = loadFunctions(["renderMatchReplaceRules", "getSelectedMatchReplaceRule", "syncMatchReplaceEditor", "matchReplaceRuleActivity", "setMatchReplaceRuleActivity", "canonicalMatchReplaceRule", "matchReplaceRulesPayload", "matchReplaceRuleActions", "matchReplaceRuleTitle", "getMatchReplaceSaveOwner", "beginMatchReplaceWrite", "matchReplaceWriteIsCurrent", "acknowledgeMatchReplaceRules", "finishMatchReplaceWrite",
     "createNewMatchReplaceRule", "updateMatchReplaceSaveState", "matchReplaceRuleUnsaved",
     "untouchedNewMatchReplaceRule", "saveMatchReplaceSwitch", "jsonArray"], {
-    state, els, TextEncoder, HTTP_COLOR_TAG_OPTIONS: new Set(["red", "orange", "yellow", "green", "blue", "purple"]), workspaceStateGeneration: 0, escapeHtml: (value) => String(value), generateUuid: () => "new-rule",
+    state, els, TextEncoder, HTTP_COLOR_TAG_OPTIONS: new Set(["red", "orange", "yellow", "green", "blue", "purple"]), workspaceStateGeneration: 0, escapeHtml: (value) => String(value).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`), generateUuid: () => "new-rule",
     currentSessionId: () => "session-a", sessionWritePath: (path) => path,
     requireOkResponse: async () => {}, saveMatchReplaceRules: async () => requests.push("full save"),
     fetch: async (url, options) => {
@@ -128,4 +128,67 @@ test("only a new rule with nothing typed in it counts as untouched", () => {
   assert.equal(f.c.untouchedNewMatchReplaceRule()?.id, "new-rule");
   f.edit("matchReplaceSearch", "foo.example.com");
   assert.equal(f.c.untouchedNewMatchReplaceRule(), null);
+});
+
+// Only local selection is exercised here: any request/save path fails closed.
+function localSelectionFixture(saved) {
+  const f = fixture(saved);
+  const forbidden = () => { throw new Error("Selection must not save or request"); };
+  f.c.fetch = forbidden;
+  f.c.saveMatchReplaceRules = forbidden;
+  f.c.saveMatchReplaceSwitch = forbidden;
+  f.c.renderMatchReplaceRules();
+  return f;
+}
+
+test("rule controls have escaped payload-free names and native edit buttons", () => {
+  const f = localSelectionFixture([
+    rule("a", { scope: 'request"<', target: 'body&', search: "private-search", replace: "private-replacement" }),
+    rule("b", { annotation_only_enabled: false, annotation_note: "private-note", target: "header_value" }),
+  ]);
+  const html = f.els.matchReplaceTableBody.innerHTML;
+  assert.match(html, /<button type="button" class="match-replace-edit-rule" aria-label="Edit rule 1: request&#34;&#60; \/ body&#38;">body&#38;<\/button>/);
+  assert.match(html, /aria-label="Enable rule 2: request \/ header_value"/);
+  const labels = [...html.matchAll(/aria-label="([^"]*)"/g)].map(m => m[1]);
+  assert.equal(labels.length, 4);
+  assert.equal(new Set(labels).size, 4);
+  assert.ok(labels.every(label => !/private-|a.example.com|b.example.com/.test(label)));
+  assert.doesNotMatch(html, /<tr[^>]*(?:tabindex|role)=/);
+  const empty = localSelectionFixture([]);
+  assert.doesNotMatch(empty.els.matchReplaceTableBody.innerHTML, /match-replace-edit-rule|data-rule-toggle/);
+});
+
+test("native rule edit activation selects once then focuses the rendered Search field", () => {
+  const f = localSelectionFixture([rule("a"), rule("b")]);
+  let renders = 0;
+  const render = f.c.renderMatchReplaceRules;
+  f.c.renderMatchReplaceRules = () => { renders++; render(); };
+  f.els.matchReplaceSearch.focus = () => {
+    assert.equal(f.state.selectedMatchReplaceRuleId, "b");
+    assert.equal(f.els.matchReplaceSearch.value, "b.example.com");
+    assert.equal(renders, 1);
+    f.els.matchReplaceSearch.focused = true;
+  };
+  f.row("b").listeners.click({ target: { closest: selector => selector === ".match-replace-edit-rule" ? {} : null } });
+  assert.equal(f.els.matchReplaceSearch.focused, true);
+  assert.equal(f.state.matchReplaceDirty, false);
+  assert.deepEqual(f.requests, []);
+});
+
+test("ordinary rule clicks retain focus behavior and toggle clicks never select", () => {
+  const f = localSelectionFixture([rule("a"), rule("b")]);
+  f.row("b").listeners.click({ target: { closest: () => null } });
+  assert.equal(f.state.selectedMatchReplaceRuleId, "b");
+  assert.equal(f.els.matchReplaceSearch.focused, false);
+  f.row("a").listeners.click({ target: { closest: selector => selector === ".mini-toggle" ? {} : null } });
+  assert.equal(f.state.selectedMatchReplaceRuleId, "b");
+  assert.equal(f.state.matchReplaceDirty, false);
+  assert.deepEqual(f.requests, []);
+});
+
+test("rule table edit buttons and transparent toggles expose scoped keyboard focus", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /#matchReplaceTableBody \.match-replace-edit-rule:focus-visible,\s*#matchReplaceTableBody \.mini-toggle input:focus-visible \+ \.mini-toggle-track\s*\{[^}]*outline: 2px solid var\(--point\);/);
 });

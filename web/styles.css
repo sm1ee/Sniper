@@ -6572,6 +6572,23 @@ button.utility-button.replay-tab-add {
   background: #50c878;
 }
 
+#matchReplaceTableBody .match-replace-edit-rule {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+#matchReplaceTableBody .match-replace-edit-rule:focus-visible,
+#matchReplaceTableBody .mini-toggle input:focus-visible + .mini-toggle-track {
+  outline: 2px solid var(--point);
+  outline-offset: 2px;
+}
+
 #matchReplacePanel .mini-table thead th {
   text-transform: none;
 }
