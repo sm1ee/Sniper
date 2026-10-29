@@ -18935,6 +18935,7 @@ async function createNewSequence() {
   state.editingSequence = JSON.parse(JSON.stringify(def));
   state.sequenceDirty = false;
   bumpSequenceDraftVersion();
+  state.sequenceRunResult = null;
   renderSequencePanel();
   return true;
 }
