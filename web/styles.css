@@ -6967,10 +6967,6 @@ button.utility-button.replay-tab-add {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 0.9fr) minmax(0, 1.1fr);
   }
-
-  .websocket-filter-bar {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (max-width: 760px) {

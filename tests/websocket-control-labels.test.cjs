@@ -210,3 +210,85 @@ test("empty, notice-only and non-WebSocket setup queues retain visibility behavi
   assert.equal(renderSetupQueue({ type: "http", wsSetupQueue: [{ label: "Fixture" }] }).hidden, true);
   assert.equal(renderSetupQueue(null).hidden, true);
 });
+
+
+// Source cascade contract, not browser geometry: only the two equal-specificity
+// toolbar selectors are evaluated. Rendering/font fit is verified separately.
+function toolbarColumnRules(source, conditions = []) {
+  const rules = [];
+  source = source.replace(/\/\*[^]*?\*\//g, "");
+  let cursor = 0;
+  while (cursor < source.length) {
+    const open = source.indexOf("{", cursor);
+    if (open < 0) break;
+    let end = open + 1, depth = 1;
+    while (end < source.length && depth) {
+      if (source[end] === "{") depth++;
+      if (source[end] === "}") depth--;
+      end++;
+    }
+    assert.equal(depth, 0);
+    const selector = source.slice(cursor, open).trim();
+    const body = source.slice(open + 1, end - 1);
+    if (selector.startsWith("@media")) {
+      rules.push(...toolbarColumnRules(body, [...conditions, selector]));
+    } else if ([".filter-bar", ".websocket-filter-bar"].includes(selector)) {
+      const columns = body.match(/grid-template-columns:\s*([^;]+);/);
+      if (columns) rules.push({ selector, conditions, columns: columns[1].trim() });
+    }
+    cursor = end;
+  }
+  return rules;
+}
+
+test("captured WebSocket toolbar keeps desktop columns and existing narrow fallback", () => {
+  const rules = toolbarColumnRules(css);
+  assert.deepEqual(rules.filter(rule => rule.selector === ".websocket-filter-bar"), [{
+    selector: ".websocket-filter-bar", conditions: [],
+    columns: "minmax(0, 1fr) minmax(200px, 320px) auto",
+  }]);
+  assert.ok(rules.some(rule => rule.selector === ".filter-bar"
+    && rule.conditions.includes("@media (max-width: 980px)") && rule.columns === "1fr"));
+  for (const [width, height] of [[1184, 757], [1120, 720], [900, 568], [981, 720], [980, 720]]) {
+    const applicable = rules.filter(rule => rule.conditions.every(condition => {
+      const match = condition.match(/^@media \(max-(width|height): (\d+)px\)$/);
+      assert.ok(match, `Review new toolbar condition: ${condition}`);
+      return (match[1] === "width" ? width : height) <= Number(match[2]);
+    }));
+    assert.equal(applicable.at(-1).columns,
+      width > 980 ? "minmax(0, 1fr) minmax(200px, 320px) auto" : "1fr");
+  }
+});
+
+test("toolbar change retains the original stack allocation and lower-pane minima", () => {
+  assert.match(css, /\.stack-panel > \.panel-card-top\s*\{\s*flex: 0 1 25%;\s*min-height: 120px;\s*overflow: hidden;\s*\}/);
+  assert.match(css, /\.stack-panel > \.websocket-workbench\s*\{\s*flex: 1 1 75%;\s*min-height: 220px;\s*\}/);
+  assert.match(css, /grid-template-rows: minmax\(240px, 0\.95fr\) minmax\(220px, 1\.05fr\);/);
+});
+
+test("explicit WebSocket split preferences survive reapplication and reset restores CSS", () => {
+  const style = { removeProperty(name) { delete this[name]; } };
+  const state = { websocketStackHeight: 240 };
+  const { appSource } = require("./frontend-test-helpers.cjs");
+  assert.match(appSource, /const WEBSOCKET_STACK_MIN_HEIGHTS = \{\s*sessions: 160,\s*workbench: 220,\s*\};/);
+  const context = loadFunctions(["clamp", "sanitizeWebsocketStackHeight", "websocketSessionsCard",
+    "applyWebsocketStackHeight", "resetWebsocketStackHeight", "applySavedWebsocketStackHeight"], {
+    state, els: { websocketPanel: { querySelector: () => ({ style }) } },
+    WEBSOCKET_STACK_MIN_HEIGHTS: { sessions: 160, workbench: 220 },
+  });
+  for (const saved of [160, 240, 360]) {
+    state.websocketStackHeight = saved;
+    context.applySavedWebsocketStackHeight();
+    context.applySavedWebsocketStackHeight();
+    assert.equal(style.flex, "none");
+    assert.equal(style.height, `${saved}px`);
+    assert.equal(state.websocketStackHeight, saved);
+  }
+  context.resetWebsocketStackHeight();
+  assert.equal(state.websocketStackHeight, null);
+  assert.equal(style.height, undefined);
+  assert.equal(style.flex, undefined);
+  context.applySavedWebsocketStackHeight();
+  assert.equal(style.height, undefined);
+  assert.equal(style.flex, undefined);
+});
