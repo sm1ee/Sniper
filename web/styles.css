@@ -4951,6 +4951,16 @@ button.utility-button.replay-tab-add {
   border-bottom-color: var(--point-soft);
 }
 
+/* Keep Message readable in narrow windows; the existing table shell scrolls. */
+.mini-table.event-log-table {
+  min-width: 640px;
+}
+
+/* Runtime sources and messages can contain tokens with no word boundaries. */
+.event-log-table tbody td:nth-child(n + 3) {
+  overflow-wrap: anywhere;
+}
+
 /* Keep names flexible while counts and actions retain a usable budget.
    Narrow windows scroll this table inside its existing history-table-shell. */
 .history-table.session-table {
