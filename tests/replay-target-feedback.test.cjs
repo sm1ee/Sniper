@@ -159,3 +159,109 @@ for (const clear of ['no tab', 'cleared session']) {
     assert.equal(f.els.replayHostInput.value, ''); assert.equal(f.els.replayPortInput.value, '');
   });
 }
+
+function setupIpLiteralInput() {
+  const f = setup();
+  let dispatches = 0;
+  const noDispatch = () => { dispatches++; throw new Error('IP literal input must not dispatch a request'); };
+  f.context.fetch = noDispatch;
+  f.context.sendReplay = noDispatch;
+  f.context.navigator.sendBeacon = noDispatch;
+  f.assertNoDispatch = () => {
+    assert.equal(dispatches, 0);
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.beacons.length, 0);
+  };
+  return f;
+}
+
+const invalidIpMessage = 'Target host is not a valid IPv6 address. Use IPv4 without brackets.';
+for (const host of [
+  '[not-an-ip]', '[]', '[2001:db8::1', '2001:db8::1]', '[2001:db8::1]]',
+  '[[2001:db8::1]]', '[2001:db8::1]extra', 'example.com]', '[example.com]',
+  '2001:db8::zz', '2001:db8:::1', ':::', '1:2:3:4:5:6:7:8:9',
+  '[192.0.2.1]', 'fe80::1%eth0', '[fe80::1%25eth0]',
+]) {
+  test(`malformed bare IP target ${host} keeps the draft and shows a Host-specific error`, async () => {
+    const f = setupIpLiteralInput(), before = JSON.stringify(f.a), response = f.a.responseRecord;
+    const saveVersion = f.context.workspaceSaveVersion;
+    await f.input('replayHostInput', host);
+    assertFeedback(f, invalidIpMessage);
+    assert.equal(f.els.replayHostInput.value, host);
+    assert.equal(f.document.activeElement, f.els.replayHostInput);
+    assert.equal(JSON.stringify(f.a), before);
+    assert.equal(f.a.responseRecord, response);
+    assert.equal(f.context.workspaceSaveVersion, saveVersion);
+    f.assertNoDispatch();
+  });
+}
+
+for (const [host, targetHost] of [
+  ['::', '::'], ['::1', '::1'], ['2001:db8::1', '2001:db8::1'],
+  ['2001:db8::443', '2001:db8::443'], ['2001:db8:0:0:0:0:0:8443', '2001:db8:0:0:0:0:0:8443'],
+  ['::ffff:192.0.2.1', '::ffff:192.0.2.1'], ['[::ffff:192.0.2.1]', '::ffff:c000:201'],
+  ['[2001:db8::1]', '2001:db8::1'], ['192.0.2.1', '192.0.2.1'],
+  ['example.com', 'example.com'], ['custom_host', 'custom_host'],
+  ['https://example.com', 'example.com'], ['https://[2001:db8::1]:443', '2001:db8::1'],
+]) {
+  test(`supported target ${host} clears Host feedback without changing address semantics`, async () => {
+    const f = setupIpLiteralInput();
+    await f.input('replayHostInput', '[not-an-ip]');
+    assertFeedback(f, invalidIpMessage);
+    await f.input('replayHostInput', host);
+    assertFeedback(f);
+    assert.equal(f.a.targetHost, targetHost);
+    assert.equal(f.a.targetPort, '443');
+    f.assertNoDispatch();
+  });
+}
+
+for (const host of ['example.com:8443', '[2001:db8::1]:8443', '[2001:db8::1]:80', '[2001:db8::1]:bad']) {
+  test(`explicit bare port ${host} still directs the user to the Port field`, async () => {
+    const f = setupIpLiteralInput(), before = JSON.stringify(f.a);
+    await f.input('replayHostInput', host);
+    assertFeedback(f, 'Target host must not include a port; use the Port field.');
+    assert.equal(JSON.stringify(f.a), before);
+    f.assertNoDispatch();
+  });
+}
+
+test('removing a malformed URL scheme does not falsely clear Host feedback', async () => {
+  const f = setupIpLiteralInput(), before = JSON.stringify(f.a);
+  await f.input('replayHostInput', 'https://[not-an-ip]');
+  assertFeedback(f, 'Target host is not a valid URL.');
+  await f.input('replayHostInput', '[not-an-ip]');
+  assertFeedback(f, invalidIpMessage);
+  assert.equal(JSON.stringify(f.a), before);
+  await f.input('replayHostInput', '[2001:db8::1]');
+  assertFeedback(f);
+  assert.equal(f.a.targetHost, '2001:db8::1');
+  f.assertNoDispatch();
+});
+
+test('correcting an IP literal leaves an independent Port error until that field is corrected', async () => {
+  const f = setupIpLiteralInput(), before = JSON.stringify(f.a);
+  await f.input('replayPortInput', '70000');
+  await f.input('replayHostInput', '[not-an-ip]');
+  assertFeedback(f, invalidIpMessage, 'Port must be a number from 1 to 65535.');
+  await f.input('replayHostInput', '[2001:db8::1]');
+  assertFeedback(f, '', 'Port must be a number from 1 to 65535.');
+  assert.equal(JSON.stringify(f.a), before);
+  await f.input('replayPortInput', '443');
+  assertFeedback(f);
+  assert.equal(f.a.targetHost, '2001:db8::1');
+  f.assertNoDispatch();
+});
+
+test('URL default-port conflict stays associated with Port after IP validation changes', async () => {
+  const f = setupIpLiteralInput();
+  await f.input('replayPortInput', '8443');
+  const before = JSON.stringify(f.a);
+  await f.input('replayHostInput', 'https://[2001:db8::1]:443');
+  assertFeedback(f, '', 'Port conflicts with target URL port 443.');
+  assert.equal(JSON.stringify(f.a), before);
+  await f.input('replayPortInput', '443');
+  assertFeedback(f);
+  assert.equal(f.a.targetHost, '2001:db8::1');
+  f.assertNoDispatch();
+});

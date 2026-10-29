@@ -22997,7 +22997,24 @@ function validateManualRepeaterTargetInput(host, port) {
       }
     } else if (/[/?#]/.test(rawHost)) {
       hostError = "Target host must not include path, query, or fragment.";
-    } else if (rawHost.includes(":") && !isLikelyIpv6Literal(rawHost)) {
+    } else if (/[\[\]]/.test(rawHost) || isLikelyIpv6Literal(rawHost)) {
+      const invalidIpMessage = "Target host is not a valid IPv6 address. Use IPv4 without brackets.";
+      const closingBracket = rawHost.indexOf("]");
+      const bracketed = rawHost.startsWith("[") && closingBracket >= 0;
+      const address = bracketed ? rawHost.slice(0, closingBracket + 1) : `[${rawHost}]`;
+      try {
+        // Check runnable IP-literal syntax without normalizing the user's draft.
+        // Raw IPv6's final numeric segment is an address, not a separate port.
+        new URL(`http://${address}`);
+        if (bracketed && closingBracket !== rawHost.length - 1) {
+          hostError = rawHost[closingBracket + 1] === ":"
+            ? "Target host must not include a port; use the Port field."
+            : invalidIpMessage;
+        }
+      } catch (_error) {
+        hostError = invalidIpMessage;
+      }
+    } else if (rawHost.includes(":")) {
       hostError = "Target host must not include a port; use the Port field.";
     }
   }
