@@ -23951,8 +23951,10 @@ function renderHistoryHeader() {
 
 function renderHistoryCell(colKey, item, entry) {
   switch (colKey) {
-    case "index":
-      return `<td>${item.sequence != null ? item.sequence : entry.index + 1}</td>`;
+    case "index": {
+      const value = escapeHtml(item.sequence != null ? item.sequence : entry.index + 1);
+      return `<td class="history-index-cell" title="${value}">${value}</td>`;
+    }
     case "host":
       return `<td class="cell-host">${escapeHtml(item.host)}</td>`;
     case "method":

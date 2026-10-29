@@ -2114,6 +2114,10 @@ code {
   white-space: nowrap;
 }
 
+.history-table td.history-index-cell {
+  padding-inline: 4px;
+}
+
 .history-table th:last-child,
 .history-table td:last-child {
   border-right: none;
