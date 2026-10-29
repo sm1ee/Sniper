@@ -65,10 +65,40 @@ test('every stacked breakpoint hides ineffective drag handles and keeps editor m
 });
 
 test('retained runs reserve table navigation beside selected detail rather than collapsing rows', () => {
-  assert.match(css, /\.fuzzer-shell:not\(\.fuzzer-results-empty\) \.fuzzer-top-row\s*\{[^}]*height: 32%;[^}]*min-height: 180px;/);
+  assert.match(css, /\.fuzzer-shell:not\(\.fuzzer-results-empty\) \.fuzzer-top-row\s*\{[^}]*height: max\(32%, 224px\);[^}]*min-height: 180px;/);
   assert.match(css, /\.fuzzer-shell:not\(\.fuzzer-results-empty\) \.fuzzer-results-card\s*\{[^}]*flex: 1 0 360px;/);
   assert.match(css, /\.fuzzer-results-card > \.history-table-shell\s*\{[^}]*min-height: 132px !important;/);
   assert.match(css, /\.fuzzer-detail-panel\s*\{\s*flex: 0 1 160px;/);
+});
+
+test('the larger retained setup default leaves explicit heights, stacking and empty-state sizing authoritative', () => {
+  const rule = css.match(/\.fuzzer-shell:not\(\.fuzzer-results-empty\) \.fuzzer-top-row\s*\{([^}]+)\}/)?.[1] ?? '';
+  assert.match(rule, /height: max\(32%, 224px\);/);
+  assert.doesNotMatch(rule, /!important/);
+  assert.match(rule, /min-height: 180px;/);
+  assert.match(css, /\.fuzzer-shell\.fuzzer-results-empty \.fuzzer-top-row\s*\{\s*flex: 1 0 260px;/);
+  assert.match(css, /\.fuzzer-top-row\s*\{[^}]*flex-direction: column;[^}]*height: auto !important;/);
+  assert.match(css, /\.fuzzer-top-row \.editor-panel\s*\{[^}]*flex: 1 0 80px;[^}]*min-height: 80px;/);
+});
+
+for (const layoutHeight of [400, 800]) test(`row dragging in a ${layoutHeight}px layout can still choose 180px and reset only its inline height`, () => {
+  const handle = node(0), top = node(0), body = node(0), listeners = new Map();
+  top.offsetHeight = 224; top.closest = () => ({ offsetHeight: layoutHeight });
+  top.style.setProperty('--fuzzer-request-share', '0.6');
+  const document = { body, getElementById: id => id === 'fuzzerRowResizer' ? handle : null,
+    querySelector: selector => selector === '.fuzzer-top-row' ? top : null,
+    addEventListener: (type, callback) => listeners.set(type, callback), removeEventListener: type => listeners.delete(type) };
+  const c = loadFunctions(['initFuzzerResizers'], { document,
+    window: { addEventListener() {}, removeEventListener() {} }, els: { fuzzerDetailPanel: null } });
+  c.initFuzzerResizers();
+  handle.listeners.get('mousedown')({ clientY: 500, preventDefault() {} });
+  listeners.get('mousemove')({ clientY: 456, buttons: 1 });
+  assert.equal(top.style.height, '180px');
+  listeners.get('mouseup')(); assert.equal(listeners.size, 0);
+  handle.listeners.get('dblclick')();
+  assert.equal(top.style.height, '');
+  assert.equal(top.properties.get('--fuzzer-request-share'), '0.6');
+  assert.equal(body.classList.contains('pane-resizing-y'), false);
 });
 
 test('detail resize reserves measured chrome and a usable table viewport', () => {

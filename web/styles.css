@@ -9383,7 +9383,7 @@ button.utility-button.replay-tab-add {
    Never let the detail pane consume the table's entire viewport. Inline drag
    sizes still win; a short window scrolls instead of hiding result rows. */
 .fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-top-row {
-  height: 32%;
+  height: max(32%, 224px);
   min-height: 180px;
 }
 .fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-results-card {
