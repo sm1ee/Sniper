@@ -7355,6 +7355,8 @@ button.utility-button.replay-tab-add {
      band; here it has to sit level with the payload field. */
   min-height: var(--control-h);
   padding: 0 10px;
+  width: auto;
+  flex: 0 0 auto;
 }
 
 .oast-payload-input {
