@@ -36,7 +36,7 @@ function fixture() {
   container.querySelectorAll = selector => selector === '.sequence-step-card' ? cards : selector === '.ext-add' ? cards.map(card => card.add) : [];
   const nodes = new Map([['sequenceStepsContainer', container]]);
   document.getElementById = id => nodes.get(id) || nodes.set(id, node()).get(id);
-  const c = loadFunctions(['renderSequencePanel', 'syncSequenceRunButton', 'addExtractionRule', 'removeExtractionRule', 'removeSequenceStep',
+  const c = loadFunctions(['renderSequencePanel', 'renderSequenceList', 'syncSequenceRunButton', 'addExtractionRule', 'removeExtractionRule', 'removeSequenceStep',
     'markSequenceDraftDirty', 'bumpSequenceDraftVersion', 'syncSequenceStepFromDom'], {
     state, document, replayHttpVersionFromText: () => '', parseEditableRawRequest() { throw new Error('Invalid request'); }, escapeHtml: String, formatTimestamp: String, normalizeReplayHttpVersion: () => '',
     normalizeSequenceRunResult: () => null, jsonArray: value => Array.isArray(value) ? value : [],

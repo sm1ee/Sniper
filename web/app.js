@@ -18902,10 +18902,20 @@ function handleSequenceActionError(error) {
 }
 
 async function createNewSequence() {
-  if (!(await flushSequenceDraft())) {
+  const selectionGeneration = (state.sequenceSelectionGeneration || 0) + 1;
+  state.sequenceSelectionGeneration = selectionGeneration;
+  const sessionId = currentSequenceSessionId();
+  const selectedBeforeCreate = state.selectedSequenceId;
+  const draftVersion = state.sequenceDraftVersion || 0;
+  const runGeneration = state.sequenceRunGeneration || 0;
+  const ownsSelection = () => state.sequenceSelectionGeneration === selectionGeneration
+    && isCurrentSequenceSession(sessionId)
+    && state.selectedSequenceId === selectedBeforeCreate
+    && (state.sequenceDraftVersion || 0) === draftVersion
+    && (state.sequenceRunGeneration || 0) === runGeneration;
+  if (!(await flushSequenceDraft()) || !ownsSelection()) {
     return false;
   }
-  const sessionId = currentSequenceSessionId();
   const def = {
     id: generateUuid(),
     name: "New sequence",
@@ -18929,6 +18939,13 @@ async function createNewSequence() {
   }
   const loaded = await loadSequences({ sessionId });
   if (!loaded) {
+    return false;
+  }
+  if (!ownsSelection()) {
+    // Creation already succeeded; show it without replacing a newer editor.
+    // Import callers must not append their request to that newer selection.
+    renderSequenceList();
+    showToast("New sequence created in the list. Kept your current sequence open.");
     return false;
   }
   state.selectedSequenceId = def.id;
@@ -19253,28 +19270,8 @@ function syncSequenceRunButton() {
   runBtn.textContent = sequenceRunning ? "Running..." : "Run";
 }
 
-function renderSequencePanel({ focusExtractionStepId = null } = {}) {
+function renderSequenceList() {
   const listBody = document.getElementById("sequenceListBody");
-  const editorTitle = document.getElementById("sequenceEditorTitle");
-  const stepsContainer = document.getElementById("sequenceStepsContainer");
-  const addStepBtn = document.getElementById("addSequenceStepButton");
-  const saveBtn = document.getElementById("saveSequenceButton");
-  const runBtn = document.getElementById("runSequenceButton");
-  const runMeta = document.getElementById("sequenceRunMeta");
-  const resultsBody = document.getElementById("sequenceRunResultsBody");
-  const pastBody = document.getElementById("sequencePastRunsBody");
-
-  // DOM expansion belongs to this sequence in this session, not to an index
-  // that may now identify a different step after removal.
-  const expansionOwner = JSON.stringify([state.activeSession?.id || null, state.editingSequence?.id || null]);
-  const expandedSteps = new Set();
-  if (stepsContainer._sequenceExpansionOwner === expansionOwner) {
-    stepsContainer.querySelectorAll(".sequence-step-card").forEach((card) => {
-      if (card.querySelector(".step-extractions")?.open) expandedSteps.add(card.dataset.stepId);
-    });
-  }
-  stepsContainer._sequenceExpansionOwner = expansionOwner;
-
   // With no sequence there is nothing to list, edit or run: a line on what a
   // sequence does and the button that makes one stand in for the panes.
   const none = !state.sequenceDefinitions.length;
@@ -19321,6 +19318,29 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
     const controls = Array.from(listBody.querySelectorAll(selector));
     controls.find((control) => (control.dataset.seqSelect || control.dataset.seqDelete) === restoreListFocus.id)?.focus();
   }
+}
+
+function renderSequencePanel({ focusExtractionStepId = null } = {}) {
+  const editorTitle = document.getElementById("sequenceEditorTitle");
+  const stepsContainer = document.getElementById("sequenceStepsContainer");
+  const addStepBtn = document.getElementById("addSequenceStepButton");
+  const saveBtn = document.getElementById("saveSequenceButton");
+  const runBtn = document.getElementById("runSequenceButton");
+  const runMeta = document.getElementById("sequenceRunMeta");
+  const resultsBody = document.getElementById("sequenceRunResultsBody");
+  const pastBody = document.getElementById("sequencePastRunsBody");
+
+  // DOM expansion belongs to this sequence in this session, not to an index
+  // that may now identify a different step after removal.
+  const expansionOwner = JSON.stringify([state.activeSession?.id || null, state.editingSequence?.id || null]);
+  const expandedSteps = new Set();
+  if (stepsContainer._sequenceExpansionOwner === expansionOwner) {
+    stepsContainer.querySelectorAll(".sequence-step-card").forEach((card) => {
+      if (card.querySelector(".step-extractions")?.open) expandedSteps.add(card.dataset.stepId);
+    });
+  }
+  stepsContainer._sequenceExpansionOwner = expansionOwner;
+  renderSequenceList();
 
   // Editor
   const editing = state.editingSequence;
