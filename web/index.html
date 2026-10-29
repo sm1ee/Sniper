@@ -421,7 +421,7 @@
                     <button class="ws-swap-btn" id="wsSwapPanes" type="button" title="Swap panels">⇄</button>
                   </header>
                   <div class="editor-shell" style="flex:1;min-height:0">
-                    <div id="websocketHandshakeCM" class="cm-container"></div>
+                    <div id="websocketHandshakeCM" class="cm-container" data-editor-label="Captured WebSocket handshake"></div>
                   </div>
                   <footer class="pane-footer">
                     <label class="pane-search" aria-label="Search handshake">
@@ -2161,9 +2161,9 @@
     <div class="modal-backdrop hidden" id="serviceMapApiDocs"></div>
 
     <div class="modal-backdrop hidden" id="curlImportModal">
-      <div class="modal-card">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="curlImportTitle">
         <header class="modal-header">
-          <h2>Import cURL</h2>
+          <h2 id="curlImportTitle">Import cURL</h2>
         </header>
         <div class="modal-body">
           <textarea id="curlImportInput" class="curl-import-textarea" rows="10" spellcheck="false" placeholder="Paste a cURL command here...&#10;&#10;curl -X POST https://api.example.com/login \&#10;  -H 'Content-Type: application/json' \&#10;  -d '{&quot;user&quot;:&quot;admin&quot;}'" aria-label="cURL command"></textarea>
