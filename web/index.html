@@ -569,7 +569,7 @@
             <div class="findings-toolbar">
               <!-- Filter controls -->
               <div class="findings-filter-bar">
-                <select id="findingsFilterSeverity" class="findings-filter-select">
+                <select id="findingsFilterSeverity" class="findings-filter-select" aria-label="Filter findings by severity">
                   <option value="">All severities</option>
                   <option value="critical">Critical</option>
                   <option value="high">High+</option>
@@ -577,7 +577,7 @@
                   <option value="low">Low+</option>
                   <option value="info">Info+</option>
                 </select>
-                <select id="findingsFilterCategory" class="findings-filter-select">
+                <select id="findingsFilterCategory" class="findings-filter-select" aria-label="Filter findings by category">
                   <option value="">All categories</option>
                   <option value="jwt">JWT</option>
                   <option value="header">Headers</option>
@@ -590,13 +590,13 @@
                   <option value="info">Information</option>
                   <option value="auth">Authentication</option>
                 </select>
-                <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search" />
+                <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search" aria-label="Search findings" />
               </div>
               <div class="findings-toolbar-actions">
                 <button class="scope-pill" id="findingsInScopeOnly" type="button" aria-pressed="false" title="Show only in-scope findings">In scope</button>
                 <button class="scope-pill active" id="findingsHistoryToggle" type="button" aria-pressed="true" title="Mark these requests in HTTP history: severity in Notes, a row tint, and the evidence">Mark in HTTP</button>
                 <button class="scope-pill scope-pill-run active" id="scannerQuickToggle" type="button" aria-pressed="true" title="Scanning new traffic. Click to stop; existing findings stay.">Passive Scan</button>
-                <button class="secondary-action" id="findingsSettingsButton" type="button" title="Detection Rules">&#9881;</button>
+                <button class="secondary-action" id="findingsSettingsButton" type="button" title="Detection Rules" aria-label="Detection Rules">&#9881;</button>
                 <button class="secondary-action" id="findingsRescanButton" type="button" title="Scan the retained history again with the current rules">Rescan</button>
                 <button class="secondary-action" id="findingsClearButton" type="button">Clear</button>
               </div>
