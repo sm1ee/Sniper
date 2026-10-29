@@ -2301,6 +2301,8 @@ function bindEvents() {
     createNewSequence().catch(handleSequenceActionError));
   onClickWithProgress(document.getElementById("sequenceEmptyNewButton"), () =>
     createNewSequence().catch(handleSequenceActionError));
+  document.getElementById("sequenceNameInput").addEventListener("input", updateSequenceNameFromInput);
+  document.getElementById("sequenceNameInput").addEventListener("change", updateSequenceNameFromInput);
   document.getElementById("addSequenceStepButton").addEventListener("click", addSequenceStep);
   onClickWithProgress(document.getElementById("saveSequenceButton"), () =>
     saveCurrentSequence().catch(handleSequenceActionError));
@@ -18989,6 +18991,28 @@ function markSequenceDraftDirty() {
   bumpSequenceDraftVersion();
 }
 
+function sequenceDisplayName(value) {
+  const name = String(value ?? "");
+  return name.trim() ? name : "Unnamed sequence";
+}
+
+function sequenceNameInputValue(value) {
+  return String(value ?? "").replace(/[\r\n]/g, "");
+}
+
+function updateSequenceNameFromInput() {
+  const editing = state.editingSequence;
+  const input = document.getElementById("sequenceNameInput");
+  if (!editing || input.disabled || input.value === sequenceNameInputValue(editing.name)) return;
+  // Only a visible edit replaces the raw name: rendering a single-line input
+  // must not normalize names loaded from another client during an unrelated save.
+  editing.name = input.value;
+  markSequenceDraftDirty();
+  const title = document.getElementById("sequenceEditorTitle");
+  title.textContent = sequenceDisplayName(editing.name);
+  title.title = title.textContent;
+}
+
 function addSequenceStep() {
   if (!state.editingSequence) return;
   state.editingSequence.steps.push({
@@ -19294,10 +19318,11 @@ function renderSequenceList() {
   listBody.innerHTML = state.sequenceDefinitions.length
     ? state.sequenceDefinitions.map((def) => {
         const selected = def.id === state.selectedSequenceId ? "selected" : "";
+        const displayName = sequenceDisplayName(def.name);
         return `<tr class="history-row ${selected}" data-seq-id="${def.id}">
-          <td><button type="button" class="seq-select" data-seq-select="${escapeHtml(def.id)}" aria-pressed="${def.id === state.selectedSequenceId}">${escapeHtml(def.name)}</button></td>
+          <td><button type="button" class="seq-select" data-seq-select="${escapeHtml(def.id)}" aria-pressed="${def.id === state.selectedSequenceId}">${escapeHtml(displayName)}</button></td>
           <td>${def.steps.length}</td>
-          <td><button type="button" class="secondary-action seq-delete" data-seq-delete="${escapeHtml(def.id)}" aria-label="Delete sequence ${escapeHtml(def.name)}" style="font-size:0.7rem;padding:2px 6px">&times;</button></td>
+          <td><button type="button" class="secondary-action seq-delete" data-seq-delete="${escapeHtml(def.id)}" aria-label="Delete sequence ${escapeHtml(displayName)}" style="font-size:0.7rem;padding:2px 6px">&times;</button></td>
         </tr>`;
       }).join("")
     : `<tr class="empty-row"><td colspan="3">No sequences yet.</td></tr>`;
@@ -19350,7 +19375,13 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
   // The editor's buttons wait for a sequence to act on.
   for (const button of [addStepBtn, saveBtn, runBtn]) button.classList.toggle("hidden", !hasSequence);
   syncSequenceRunButton();
-  editorTitle.textContent = hasSequence ? editing.name : "No sequence selected";
+  editorTitle.textContent = hasSequence ? sequenceDisplayName(editing.name) : "No sequence selected";
+  editorTitle.title = hasSequence ? editorTitle.textContent : "";
+  const nameInput = document.getElementById("sequenceNameInput");
+  document.getElementById("sequenceNameField").classList.toggle("hidden", !hasSequence);
+  nameInput.disabled = !hasSequence;
+  const nameValue = sequenceNameInputValue(editing?.name);
+  if (nameInput.value !== nameValue) nameInput.value = nameValue;
 
   if (hasSequence) {
     stepsContainer.innerHTML = editing.steps.map((step, idx) => {

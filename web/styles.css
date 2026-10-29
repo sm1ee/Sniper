@@ -3530,6 +3530,45 @@ body.pane-resizing-y {
   outline-offset: 3px;
 }
 
+.sequence-editor-card > .sequence-editor-header {
+  flex-wrap: wrap;
+}
+.sequence-editor-heading {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.sequence-editor-heading h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sequence-name-field {
+  display: grid;
+  flex: 1 0 100%;
+  min-width: 0;
+  gap: 4px;
+}
+.sequence-name-field span {
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+}
+.sequence-name-field input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-code);
+  color: var(--text);
+  font-size: var(--font-sm);
+}
+.sequence-name-field input:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: 2px;
+}
+
 .sequence-list-card,
 .sequence-editor-card,
 .sequence-results-card {

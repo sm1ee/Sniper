@@ -60,7 +60,7 @@ function fixture() {
   const reply = url => ({ ok: true, json: async () => url.startsWith('/api/sequence-runs')
     ? structuredClone(history) : structuredClone([...remote.values()]) });
   const c = loadFunctions(['createNewSequence', 'loadSequences', 'currentSequenceSessionId', 'isCurrentSequenceSession',
-    'sequenceSessionPath', 'bumpSequenceDraftVersion', 'markSequenceDraftDirty', 'renderSequencePanel', 'renderSequenceList',
+    'sequenceSessionPath', 'bumpSequenceDraftVersion', 'markSequenceDraftDirty', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue',
     'syncSequenceRunButton', 'normalizeSequenceRunResult', 'selectSequence', 'onClickWithProgress', 'withButtonProgress',
     'flushSequenceDraft', 'syncSequenceStepFromDom', 'requireOkResponse', 'showToast', 'handleSequenceActionError',
     'runCurrentSequence', 'isCurrentSequenceRun', 'sendRecordToSequence'], {

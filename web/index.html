@@ -1481,8 +1481,8 @@
             </section>
 
             <section class="panel-card sequence-editor-card">
-              <header class="panel-toolbar">
-                <div>
+              <header class="panel-toolbar sequence-editor-header">
+                <div class="sequence-editor-heading">
                   <h2 id="sequenceEditorTitle">No sequence selected</h2>
                 </div>
                 <div class="toolbar-actions">
@@ -1490,6 +1490,10 @@
                   <button class="secondary-action" id="saveSequenceButton" type="button" disabled>Save</button>
                   <button class="primary-action" id="runSequenceButton" type="button" disabled>Run</button>
                 </div>
+                <label class="sequence-name-field hidden" id="sequenceNameField" for="sequenceNameInput">
+                  <span>Sequence name</span>
+                  <input id="sequenceNameInput" type="text" autocomplete="off" spellcheck="false" disabled />
+                </label>
               </header>
               <div id="sequenceStepsContainer" class="sequence-steps-container"></div>
             </section>

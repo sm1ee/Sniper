@@ -35,7 +35,7 @@ function fixture({ name = 'New sequence', flush = 'success', delayLoad = false }
   const loadResponse = (url, ok = true) => ({ ok,
     json: async () => url.startsWith('/api/sequence-runs') ? structuredClone(history) : structuredClone(savedDefinitions) });
   const c = loadFunctions(['createNewSequence', 'loadSequences', 'currentSequenceSessionId',
-    'isCurrentSequenceSession', 'sequenceSessionPath', 'bumpSequenceDraftVersion', 'renderSequencePanel', 'renderSequenceList',
+    'isCurrentSequenceSession', 'sequenceSessionPath', 'bumpSequenceDraftVersion', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue',
     'syncSequenceRunButton', 'normalizeSequenceRunResult', 'selectSequence', 'onClickWithProgress',
     'withButtonProgress', 'requireOkResponse', 'handleSequenceActionError'], {
     state, document, generateUuid: () => `new-${++uuid}`,
