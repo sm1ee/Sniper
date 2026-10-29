@@ -39,7 +39,7 @@ function fixture(message = {}, mode = "hex", legacy = false) {
   const c = loadFunctions([
     "renderReplay", "renderReplayResponseOnly", "renderReplayViewContent", "renderReplayResponseView", "renderReplayEmptyResponse",
     "buildRawResponse", "buildRawResponseHead", "normalizedHeaders", "headerNameEquals",
-    "renderBody", "binaryBodyPlaceholder", "formatSize", "formatStatus", "prettyFormat", "prettyJsonText",
+    "renderBody", "binaryBodyPlaceholder", "formatSize", "formatStatus", "prettyFormat", "prettyJsonText", "replayRequestEditorText",
     "toHexDump", "buildMessageHexPresentation", "toHexDumpFromHttpParts", "messageBodyBytes",
     "base64ToBytes", "toHexDumpFromBytes", "renderCodeHtml", "renderHexHtml", "wrapCodeLine", "escapeHtml",
   ], {

@@ -2434,7 +2434,7 @@ function bindEvents() {
       renderReplayTabs();
       scheduleWorkspaceStateSave();
       if (cv && state.replayMessageViews.request !== "hex") {
-        cv.setContent(newText);
+        cv.setContent(replayRequestEditorText(newText));
         updateReplaySearchPane("request", newText);
         return;
       }
@@ -3649,7 +3649,7 @@ function replayTabHasUncommittedEditorState(tab) {
   const editor = getCMView("replayReq");
   const text = editor ? editor.getContent()
     : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value ?? null);
-  if (typeof text === "string" && !replayRequestTextsEquivalent(text, tab.requestText)) return true;
+  if (typeof text === "string" && !replayEditorShowsDraft(text, tab.requestText)) return true;
   const target = getRepeaterTargetConfig(tab);
   if ((els.replayHostInput && els.replayHostInput.value !== target.host)
     || (els.replayPortInput && els.replayPortInput.value !== target.port)
@@ -4748,7 +4748,7 @@ function syncActiveHttpReplayDraftFromDom() {
     const requestText = cv
       ? cv.getContent()
       : (els.replayRequestEditor?.value ?? els.replayRequestHighlight?.innerText ?? null);
-    if (typeof requestText === "string" && !replayRequestTextsEquivalent(requestText, tab.requestText)) {
+    if (typeof requestText === "string" && !replayEditorShowsDraft(requestText, tab.requestText)) {
       // The hidden legacy mirror can differ from the visible editor. Only skip
       // this passive read when both still show the exact captured source.
       const visibleText = cv ? requestText : (els.replayRequestCM ? null
@@ -14923,7 +14923,7 @@ function renderReplay(options = {}) {
         tab.requestBytes = null;
         tab.requestOriginalBytes = null;
       }
-      updateCodePaneCM("replayReq", els.replayRequestCM, tab.requestText, {
+      updateCodePaneCM("replayReq", els.replayRequestCM, replayRequestEditorText(tab.requestText), {
         mode: "http", readOnly: false, owner: draftOwner.editorOwner,
         onChange: syncReplayRequestTextFromEditor,
       });
@@ -15079,6 +15079,22 @@ function replayRequestTextsEquivalent(left, right) {
   return String(left ?? "").replace(/\r\n/g, "\n") === String(right ?? "").replace(/\r\n/g, "\n");
 }
 
+// Pretty view shows a JSON body reformatted, but the draft keeps the request as
+// captured: a signed or byte-compared body must not change because someone looked
+// at it. Once the operator edits the text, what they see becomes the draft.
+// ponytail: edit-then-undo keeps the formatted text, not the captured bytes.
+function replayRequestEditorText(draft) {
+  const text = draft || "";
+  if (state.replayMessageViews.request !== "pretty") return text;
+  const normalized = text.replace(/\r\n/g, "\n");
+  const pretty = prettyFormat(normalized, {});
+  return pretty === normalized ? text : pretty;
+}
+
+function replayEditorShowsDraft(shown, draft) {
+  return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft);
+}
+
 function syncReplayRequestTextFromEditor(newText) {
   const activeTab = getActiveReplayTab();
   if (!activeTab || activeTab.type === "websocket") {
@@ -15087,6 +15103,8 @@ function syncReplayRequestTextFromEditor(newText) {
   // Input synchronization invalidates an earlier capture even after edit-and-revert.
   if (renderedHttpReplayDraftOwner?.tab === activeTab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
   const previousText = activeTab.requestText;
+  const rendered = replayRequestEditorText(previousText);
+  if (rendered !== previousText && newText === rendered) return;
   let nextText = newText;
   let parsed = null;
   try {
@@ -15298,7 +15316,7 @@ function renderReplayViewContent(target) {
           tab.requestBytes = null;
           tab.requestOriginalBytes = null;
         }
-        updateCodePaneCM("replayReq", els.replayRequestCM, tab.requestText, {
+        updateCodePaneCM("replayReq", els.replayRequestCM, replayRequestEditorText(tab.requestText), {
           mode: "http",
           readOnly: false,
           owner: getRenderedHttpReplayDraftOwner(tab)?.editorOwner,
@@ -19690,7 +19708,7 @@ async function sendReplay() {
     requestText = request._normalizedRawText || replayReqText;
     if (requestText !== replayReqText) {
       tab.requestText = requestText;
-      setReplayRequestEditorText(requestText, { preserveSelection: true });
+      setReplayRequestEditorText(replayRequestEditorText(requestText), { preserveSelection: true });
       scheduleWorkspaceStateSave();
     }
     target = getRepeaterTargetConfig(tab, request);
@@ -20133,7 +20151,7 @@ async function followRedirect() {
   tab.responseRecord = null;
   tab.notice = "Following redirect...";
   if (getCMView("replayReq")) {
-    getCMView("replayReq").setContent(requestText);
+    getCMView("replayReq").setContent(replayRequestEditorText(requestText));
   } else if (els.replayRequestEditor) {
     els.replayRequestEditor.value = requestText;
     renderReplayRequestHighlight(requestText);
@@ -20920,7 +20938,7 @@ function preserveActiveHttpReplayDraftBeforeNavigation(tab, action) {
   const visibleText = hexMode ? null : (editor ? editor.getContent()
     : legacyText);
   let textChanged = typeof visibleText === "string"
-    && !replayRequestTextsEquivalent(visibleText, tab.requestText);
+    && !replayEditorShowsDraft(visibleText, tab.requestText);
   let requestText = textChanged ? visibleText : (tab.requestText || "");
   const target = getRepeaterTargetConfig(tab);
   const host = els.replayHostInput?.value ?? target.host;
@@ -29739,7 +29757,7 @@ function syncReplayRequestEditorForTab(tab) {
   }
   const cv = getCMView("replayReq");
   if (cv) {
-    cv.setContent(tab.requestText);
+    cv.setContent(replayRequestEditorText(tab.requestText));
   } else if (els.replayRequestEditor) {
     els.replayRequestEditor.value = tab.requestText;
     renderReplayRequestHighlight(tab.requestText);
@@ -29755,9 +29773,10 @@ function changeReplayMethod(newMethod, tabId = state.activeReplayTabId) {
 
   const isActiveTab = state.activeReplayTabId === tab.id;
   const cv = isActiveTab ? getCMView("replayReq") : null;
-  const text = cv
+  const shown = cv
     ? cv.getContent()
     : (isActiveTab && els.replayRequestEditor ? els.replayRequestEditor.value : tab.requestText) || "";
+  const text = replayEditorShowsDraft(shown, tab.requestText) ? tab.requestText || "" : shown;
   tab.requestText = requestTextWithMethod(text, newMethod);
   clearReplayResponseForDraftChange(tab);
   syncReplayRequestEditorForTab(tab);

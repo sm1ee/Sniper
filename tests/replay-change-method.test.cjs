@@ -101,9 +101,10 @@ test("other changes only replace the method", () => {
 test("the menu applies the change to the tab and clears its stale response", () => {
   const tab = { id: "r1", requestText: lines("POST /a HTTP/1.1", "Host: example.com", "Content-Type: application/x-www-form-urlencoded", "", "b=1") };
   const calls = [];
-  const menu = loadFunctions(["changeReplayMethod", "requestTextWithMethod", "splitRawHttpMessage", "editableRequestBodyLength"], {
+  const menu = loadFunctions(["changeReplayMethod", "requestTextWithMethod", "splitRawHttpMessage", "editableRequestBodyLength",
+    "replayEditorShowsDraft", "replayRequestTextsEquivalent", "replayRequestEditorText"], {
     TextEncoder,
-    state: { activeReplayTabId: "other" },
+    state: { activeReplayTabId: "other", replayMessageViews: { request: "raw" } },
     els: {},
     getReplayTabById: () => tab,
     getCMView: () => null,

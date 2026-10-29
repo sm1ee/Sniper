@@ -15,6 +15,7 @@ const functions = [
   "normalizePortValue", "normalizeRepeaterTargetInput", "authorityToTargetState", "stripIpv6Brackets", "defaultHttpPortForScheme",
   "cloneEditableRequest", "normalizedHeaders", "cloneTransactionRecord", "createDefaultEditableRequest",
   "buildEditableRawRequest", "mergeHeaders", "headerNameEquals", "replayRequestTextsEquivalent",
+  "replayRequestEditorText", "replayEditorShowsDraft", "prettyFormat", "prettyJsonText",
   "getRepeaterTargetConfig", "getActiveReplayTab", "getReplayTabVisualOrder", "isReplayTabSending", "sessionQueryPath",
   "createReplayTab", "ensureRepeaterTab", "currentSessionId", "workspaceSnapshotMatchesActiveSession",
   "closeRepeaterTab", "preserveActiveHttpReplayDraftBeforeNavigation", "preserveActiveHttpReplayDraftBeforeSessionChange",
