@@ -1290,8 +1290,10 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
+/* max-content, not auto: WebKit sizes an auto row once and keeps it when the
+   window width changes, so wrapped tab rows left a gap or ran over the toolbar. */
 .replay-shell {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: max-content max-content minmax(0, 1fr);
 }
 
 /* No tab: below the strip, one line on how to start one. */
