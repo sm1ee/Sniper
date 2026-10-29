@@ -46,7 +46,7 @@ function fixture(data) {
   const c = loadFunctions([
     "renderFindings", "updateCategoryFilter", "ensureFindingsCategoryOption", "getFilteredFindings",
     "resetFindingsUiState",
-  ], {
+  ], { refreshHistoryFindings() {},
     els, state, findingsData: Object.freeze(data), selectedFindingId: null,
     findingsStateGeneration: 0, findingsLoadGeneration: 0, findingsBadgeCount: data.length,
     findingsLoadPromise: null, findingsLoadSessionId: null, lastFindingsBadgePollAt: 0,

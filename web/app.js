@@ -37,6 +37,7 @@ function createDefaultDisplaySettings() {
     uiFont: "plex",
     monoFont: "jetbrains",
     renderResources: false,
+    findingsColor: "severity",
   };
 }
 
@@ -433,6 +434,8 @@ function createWebsocketPagingState() {
 
 const state = {
   items: [],
+  // HTTP history marks requests with passive scan findings (the Findings pill).
+  httpShowFindings: true,
   selectedId: null,
   selectedRecord: null,
   loadingDetailId: null,
@@ -802,6 +805,7 @@ const els = {
   displayUiFontSelect: document.getElementById("displayUiFontSelect"),
   displayMonoFontSelect: document.getElementById("displayMonoFontSelect"),
   displayRenderResourcesInput: document.getElementById("displayRenderResourcesInput"),
+  displayFindingsColorSelect: document.getElementById("displayFindingsColorSelect"),
   settingsSpecialHostHttp: document.getElementById("settingsSpecialHostHttp"),
   certificateName: document.getElementById("certificateName"),
   certificateExpiry: document.getElementById("certificateExpiry"),
@@ -1654,6 +1658,12 @@ function bindEvents() {
     clearHttpHistorySelectionPreview();
     scheduleRefresh({ resetScroll: true });
   });
+  document.getElementById("httpFindingsToggle")?.addEventListener("click", () => {
+    state.httpShowFindings = !state.httpShowFindings;
+    scheduleUiSettingsSave();
+    refreshHistoryFindings();
+    if (state.httpShowFindings) loadFindings().catch((error) => console.error(error));
+  });
   onClickWithProgress(document.getElementById("httpCaptureToggle"), async (e) => {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
@@ -1839,6 +1849,7 @@ function bindEvents() {
     els.displayUiFontSelect.value = defaults.uiFont;
     els.displayMonoFontSelect.value = defaults.monoFont;
     els.displayRenderResourcesInput.checked = defaults.renderResources;
+    els.displayFindingsColorSelect.value = defaults.findingsColor;
     displaySettingsFormControls().forEach((control) => displaySettingsEditedControls.add(control));
     previewDisplaySettingsFromForm();
   });
@@ -8123,7 +8134,10 @@ async function pollAuxiliaryData() {
   if (state.activeTool === "proxy" && state.activeProxyTab === "findings") {
     tasks.push(loadFindings());
   } else if (shouldPollFindingsBadge(now)) {
-    tasks.push(updateFindingsBadgeOnly());
+    // HTTP history only needs the list when findings arrive, so its fallback
+    // read keeps the badge's slow pace rather than Findings' every tick.
+    const marksHistory = state.activeTool === "proxy" && state.activeProxyTab === "http-history" && state.httpShowFindings;
+    tasks.push(marksHistory ? loadFindings() : updateFindingsBadgeOnly());
   }
 
   if (state.activeTool === "proxy" && state.activeProxyTab === "oast") {
@@ -8412,7 +8426,8 @@ function connectEvents() {
     if (eventSessionId !== currentSessionId()) {
       return;
     }
-    if (state.activeTool === "proxy" && state.activeProxyTab === "findings") {
+    if (state.activeTool === "proxy" && (state.activeProxyTab === "findings"
+      || (state.activeProxyTab === "http-history" && state.httpShowFindings))) {
       scheduleFindingsListRefresh();
     } else {
       scheduleFindingsBadgeRefresh();
@@ -10003,6 +10018,7 @@ async function loadFindings() {
         return;
       }
       findingsData = findings;
+      refreshHistoryFindings();
       const badgeAccepted = commitFindingsBadgeCount(
         fullCount == null ? findings.length : Math.max(fullCount, findings.length),
         countRead,
@@ -10133,7 +10149,8 @@ function handleFindingEvent(event) {
   } catch (error) {
     console.error("Failed to parse finding event:", error);
   }
-  if (state.activeTool === "proxy" && state.activeProxyTab === "findings") {
+  if (state.activeTool === "proxy" && (state.activeProxyTab === "findings"
+    || (state.activeProxyTab === "http-history" && state.httpShowFindings))) {
     scheduleFindingsListRefresh();
   } else {
     scheduleFindingsBadgeRefresh(1000);
@@ -10222,6 +10239,7 @@ function resetFindingsUiState() {
   clearFindingDetail();
   renderFindings();
   updateFindingsBadge();
+  refreshHistoryFindings();
 }
 
 function resetFindingsSearchUi(options = {}) {
@@ -10237,6 +10255,90 @@ function resetFindingsSearchUi(options = {}) {
     else if (legacyView) clearSearchHighlights(legacyView);
     if (meta) meta.innerHTML = buildSearchMeta(lineCount, 0);
   }
+}
+
+// Findings drawn over HTTP history: a severity badge in Notes, a row tint and the
+// evidence in the detail panes. Derived from the Findings list on every change and
+// never written to a record, so a note or colour tag the operator set stays theirs.
+// ponytail: built from the newest FINDINGS_LIST_LIMIT findings the Findings tab
+// holds; a record whose findings are older is unmarked. Ask the server per record
+// if sessions outgrow that.
+const FINDING_SEVERITY_TONES = { critical: "red", high: "orange", medium: "yellow", low: "green", info: "blue" };
+const historyFindingEvidence = new Map();
+const historyFindingEvidencePending = new Set();
+let historyFindingEvidenceSessionId = null;
+
+function refreshHistoryFindings() {
+  const pill = document.getElementById("httpFindingsToggle");
+  if (pill) setToggleButton(pill, Boolean(state.httpShowFindings));
+  const color = state.displaySettings?.findingsColor || "severity";
+  let marks = null;
+  if (state.httpShowFindings && findingsData.length) {
+    marks = new Map();
+    for (const finding of findingsData) {
+      const entry = marks.get(finding.record_id);
+      if (entry) entry.findings.push(finding);
+      else marks.set(finding.record_id, { findings: [finding] });
+    }
+    for (const entry of marks.values()) {
+      entry.findings.sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 5) - (SEVERITY_ORDER[b.severity] ?? 5));
+      const tone = color === "severity" ? FINDING_SEVERITY_TONES[entry.findings[0].severity] || "blue" : color;
+      entry.rowClass = tone === "none" ? "" : ` has-finding finding-tone-${tone}`;
+    }
+  }
+  state._historyFindings = marks;
+  renderHistoryVirtual();
+  // The panes rerun their search on redraw, which scrolls to its first hit, so
+  // redraw only when the open record's findings actually changed.
+  if (state.selectedRecord && historyFindingSignature(state.selectedRecord.id) !== state._historyFindingSignature) {
+    renderMessagePanes();
+  }
+}
+
+function historyFindingSignature(recordId) {
+  return state._historyFindings?.get(recordId)?.findings.map((finding) => finding.id).join() || "";
+}
+
+// The list carries no evidence, so the open record's findings are read one by one.
+function historyFindingEvidenceRanges(recordId, side, text, mode) {
+  const marks = state._historyFindings?.get(recordId);
+  if (!marks || mode === "hex" || mode === "diff") return [];
+  const sessionId = currentSessionId();
+  if (historyFindingEvidenceSessionId !== sessionId) {
+    historyFindingEvidenceSessionId = sessionId;
+    historyFindingEvidence.clear();
+  }
+  const ranges = [];
+  const missing = [];
+  for (const finding of marks.findings) {
+    // A finding with no location points at nothing here, such as a missing header.
+    if (normalizeFindingLocation(finding.location)?.side !== side) continue;
+    if (!historyFindingEvidence.has(finding.id)) {
+      missing.push(finding);
+      continue;
+    }
+    ranges.push(...findingEvidenceRanges(text, { ...finding, evidence: historyFindingEvidence.get(finding.id) }));
+  }
+  if (missing.length) loadHistoryFindingEvidence(recordId, missing, sessionId);
+  return ranges;
+}
+
+function loadHistoryFindingEvidence(recordId, findings, sessionId) {
+  const pending = findings.filter((finding) => !historyFindingEvidencePending.has(finding.id));
+  if (!pending.length) return;
+  pending.forEach((finding) => historyFindingEvidencePending.add(finding.id));
+  Promise.all(pending.map(async (finding) => {
+    try {
+      const response = await fetch(sessionQueryPath(`/api/findings/${encodeURIComponent(finding.id)}`, sessionId));
+      // A cleared finding falls back to the title's keywords instead of reloading.
+      const evidence = response.ok ? String((await response.json()).evidence || "") : "";
+      if (historyFindingEvidenceSessionId === sessionId) historyFindingEvidence.set(finding.id, evidence);
+    } finally {
+      historyFindingEvidencePending.delete(finding.id);
+    }
+  })).then(() => {
+    if (sessionId === currentSessionId() && state.selectedRecord?.id === recordId) renderMessagePanes();
+  }).catch((error) => console.error(error));
 }
 
 function severityClass(severity) {
@@ -11991,7 +12093,7 @@ function renderProxyPanels() {
 
   if (showWebsockets) applySavedWebsocketPaneWidth();
   if (showMatchReplace) renderMatchReplaceRules();
-  if (showFindings) loadFindings();
+  if (showFindings || (showHistory && state.httpShowFindings)) loadFindings();
   if (!showPlaceholder) return;
 
   const label = humanizeProxyTab(state.activeProxyTab);
@@ -12189,7 +12291,9 @@ function renderHistoryVirtual() {
       const entry = entries[i];
       const item = entry.item;
       const selected = item.id === state.selectedId ? "selected" : "";
-      const tagClass = item.color_tag ? ` tagged-${escapeHtml(item.color_tag)}` : "";
+      const tagClass = item.color_tag
+        ? ` tagged-${escapeHtml(item.color_tag)}`
+        : state._historyFindings?.get(item.id)?.rowClass || "";
       const cells = state.historyColumnOrder.map((colKey) => renderHistoryCell(colKey, item, entry)).join("");
       rows.push(`<tr class="history-row ${selected}${tagClass}" data-id="${item.id}">${cells}</tr>`);
     }
@@ -13069,9 +13173,17 @@ function renderMessagePanes() {
       }))
     : [];
 
+  // Findings evidence, the way the Findings tab marks it, while HTTP shows findings.
+  const findings = record && state._historyFindings?.has(record.id);
+  state._historyFindingSignature = findings ? historyFindingSignature(record.id) : "";
+  const requestEvidence = findings ? historyFindingEvidenceRanges(record.id, "request", requestText, reqMode) : [];
+  const responseEvidence = findings ? historyFindingEvidenceRanges(record.id, "response", responseText, resMode) : [];
+
   const viewer = getHistoryPacketViewer();
-  viewer.update("request", requestText, { mode: reqMode, query: state.messageSearch.request, changedRanges: requestChanged });
+  viewer.update("request", requestText, { mode: reqMode, query: state.messageSearch.request, changedRanges: requestChanged,
+    evidenceRanges: requestEvidence });
   viewer.update("response", responseText, { mode: resMode, query: state.messageSearch.response, changedRanges: responseChanged,
+    evidenceRanges: responseEvidence,
     renderSubject: responseRecord ? { response: responseRecord.response || null,
       key: `${responseRecord.id}:${state.showOriginal.response}`, url: recordPageUrl(responseRecord) }
       : { note: state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected.") } });
@@ -22527,6 +22639,8 @@ function sanitizeDisplaySettings(candidate) {
     uiFont: DISPLAY_UI_FONT_OPTIONS.has(candidate?.uiFont) ? candidate.uiFont : defaults.uiFont,
     monoFont: DISPLAY_MONO_FONT_OPTIONS.has(candidate?.monoFont) ? candidate.monoFont : defaults.monoFont,
     renderResources: candidate?.renderResources === true,
+    findingsColor: ["severity", "red", "orange", "yellow", "green", "blue", "purple", "none"].includes(candidate?.findingsColor)
+      ? candidate.findingsColor : defaults.findingsColor,
   };
 }
 
@@ -22781,10 +22895,23 @@ function renderHistoryCell(colKey, item, entry) {
       const body = preview
         ? `<span class="note-preview">${escapeHtml(preview)}</span>${extra}`
         : (item.note_count ? ` ${item.note_count}` : "");
-      const cellAttrs = hasNotes
-        ? ` data-col="notes" class="notes-cell-actionable" title="${escapeHtml(preview || "Double-click to edit this note")}"`
-        : ' data-col="notes"';
-      return `<td${cellAttrs}>${noteIndicator}${body}</td>`;
+      // Passive scan findings fill a cell the operator left empty; beside a note
+      // they wrote, only the severity badge shows and the titles move to the tooltip.
+      const marks = state._historyFindings?.get(item.id);
+      let findingsHtml = "";
+      let title = hasNotes ? preview || "Double-click to edit this note" : "";
+      if (marks) {
+        const [top] = marks.findings;
+        findingsHtml = `<span class="severity-badge finding-note-badge ${severityClass(top.severity)}">${severityLabel(top.severity)}</span>`;
+        if (!hasNotes) {
+          findingsHtml += `<span class="finding-note">${escapeHtml(top.title)}</span>`
+            + (marks.findings.length > 1 ? `<span class="note-more">+${marks.findings.length - 1}</span>` : "");
+        }
+        const titles = marks.findings.map((finding) => `${severityLabel(finding.severity)}: ${finding.title}`).join("\n");
+        title = title ? `${title}\n\n${titles}` : titles;
+      }
+      const cellAttrs = ` data-col="notes"${hasNotes ? ' class="notes-cell-actionable"' : ""}${title ? ` title="${escapeHtml(title)}"` : ""}`;
+      return `<td${cellAttrs}>${findingsHtml}${noteIndicator}${body}</td>`;
     }
     case "tls": {
       const tls = isTlsRecord(item) ? '<span class="tls-badge">TLS</span>' : '<span class="tls-badge empty">-</span>';
@@ -22887,12 +23014,13 @@ function persistWorkbenchLayout(height) {
 
 function displaySettingsFormControls() {
   return [els.displayThemeSelect, els.displaySizeInput, els.displayUiFontSelect,
-    els.displayMonoFontSelect, els.displayRenderResourcesInput];
+    els.displayMonoFontSelect, els.displayRenderResourcesInput, els.displayFindingsColorSelect];
 }
 
 function hydrateDisplaySettingsForm({ preserveDraft = false } = {}) {
   const values = [state.displaySettings.theme, String(state.displaySettings.sizePx),
-    state.displaySettings.uiFont, state.displaySettings.monoFont, state.displaySettings.renderResources];
+    state.displaySettings.uiFont, state.displaySettings.monoFont, state.displaySettings.renderResources,
+    state.displaySettings.findingsColor];
   displaySettingsFormControls().forEach((control, index) => {
     if (preserveDraft && displaySettingsEditedControls.has(control)) return;
     if (control === els.displayRenderResourcesInput) control.checked = values[index];
@@ -22925,6 +23053,7 @@ function collectDisplaySettingsFormValues() {
     uiFont: els.displayUiFontSelect.value,
     monoFont: els.displayMonoFontSelect.value,
     renderResources: els.displayRenderResourcesInput.checked,
+    findingsColor: els.displayFindingsColorSelect.value,
   });
 }
 
@@ -22942,12 +23071,15 @@ function previewDisplaySettingsFromForm() {
 
 function saveDisplaySettingsFromForm() {
   if (!displaySettingsReady) return;
-  const renderResourcesBefore = state.displaySettings.renderResources;
+  const { renderResources: renderResourcesBefore, findingsColor: findingsColorBefore } = state.displaySettings;
   state.displaySettings = collectDisplaySettingsFormValues();
   pendingDisplaySettingsApply = { ...state.displaySettings };
   applyDisplaySettingsState();
   if (state.displaySettings.renderResources !== renderResourcesBefore) {
     redrawResponsePreviews();
+  }
+  if (state.displaySettings.findingsColor !== findingsColorBefore) {
+    refreshHistoryFindings();
   }
   displaySettingsPreviewActive = false;
   window.clearTimeout(uiSettingsSaveTimer);
@@ -23042,7 +23174,9 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
     uiFont: snapshot?.display_settings?.ui_font,
     monoFont: snapshot?.display_settings?.mono_font,
     renderResources: snapshot?.display_settings?.render_resources,
+    findingsColor: snapshot?.display_settings?.findings_color,
   });
+  state.httpShowFindings = snapshot?.http_show_findings !== false;
   const activeTool = sanitizeActiveTool(snapshot?.active_tool);
   const activeProxyTab = sanitizeActiveProxyTab(snapshot?.active_proxy_tab);
   if (activeTool !== state.activeTool || activeProxyTab !== state.activeProxyTab) {
@@ -23110,6 +23244,7 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   }
   syncHttpInScopePill();
   syncHttpCapturePill();
+  refreshHistoryFindings();
   document.getElementById("wsInScopeOnly")?.classList.toggle("active", state.websocketInScopeOnly);
   document.getElementById("wsHideClosed")?.classList.toggle("active", state.websocketLiveOnly);
   const displayOpen = isModalVisible(els.displaySettingsModal);
@@ -23148,6 +23283,7 @@ function snapshotUiSettings() {
       ui_font: state.displaySettings.uiFont,
       mono_font: state.displaySettings.monoFont,
       render_resources: state.displaySettings.renderResources,
+      findings_color: state.displaySettings.findingsColor,
     },
     active_tool: sanitizeActiveTool(state.activeTool),
     active_proxy_tab: sanitizeActiveProxyTab(state.activeProxyTab),
@@ -23159,6 +23295,7 @@ function snapshotUiSettings() {
     http_sort_key: sanitizeHttpSortKey(state.sortKey),
     http_sort_direction: sanitizeHttpSortDirection(state.sortDirection),
     http_filter_settings: serializeHttpFilterSettings(),
+    http_show_findings: Boolean(state.httpShowFindings),
     service_map_filter_settings: serializeHttpFilterSettings(state.serviceMapFilterSettings),
     service_map_hidden_link_kinds: Array.isArray(state.serviceMapHiddenLinkKinds) ? [...state.serviceMapHiddenLinkKinds] : ["frame", "script", "static"],
     service_map_group_sites: state.serviceMapSiteDisplay?.groupSites !== false,

@@ -7728,6 +7728,35 @@ button.utility-button.replay-tab-add {
   background: color-mix(in srgb, var(--row-tag) 24%, var(--point-soft));
 }
 
+/* Passive scan findings: a fainter wash than a colour tag and no edge, so a row
+   the operator tagged by hand still stands out from the scanner's marks. */
+.history-row.finding-tone-red { --row-finding: #e05252; }
+.history-row.finding-tone-orange { --row-finding: #e0943a; }
+.history-row.finding-tone-yellow { --row-finding: #d4c04e; }
+.history-row.finding-tone-green { --row-finding: #50c878; }
+.history-row.finding-tone-blue { --row-finding: #5b9bd5; }
+.history-row.finding-tone-purple { --row-finding: #a678c8; }
+
+.history-row.has-finding > td {
+  background: color-mix(in srgb, var(--row-finding) 7%, transparent);
+}
+
+.history-row.has-finding:hover > td {
+  background: color-mix(in srgb, var(--row-finding) 13%, transparent);
+}
+
+.history-row.has-finding.selected > td {
+  background: color-mix(in srgb, var(--row-finding) 14%, var(--point-soft));
+}
+
+.finding-note-badge {
+  margin-right: 6px;
+}
+
+.finding-note {
+  color: var(--text-dim);
+}
+
 .note-icon {
   display: inline-block;
   opacity: 0.5;

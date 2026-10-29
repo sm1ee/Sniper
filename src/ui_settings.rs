@@ -80,6 +80,11 @@ const HTTP_HISTORY_METHOD_OPTIONS: &[&str] = &[
     "", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
 ];
 const HTTP_COLOR_TAG_OPTIONS: &[&str] = &["red", "orange", "yellow", "green", "blue", "purple"];
+/// How HTTP history tints a row with passive scan findings: by its worst
+/// severity, one of the colour tags, or not at all.
+const FINDINGS_ROW_COLOR_OPTIONS: &[&str] = &[
+    "severity", "red", "orange", "yellow", "green", "blue", "purple", "none",
+];
 const UI_SETTINGS_CLIENT_ID_MAX_CHARS: usize = 128;
 const WEBSOCKET_QUERY_MAX_CHARS: usize = 512;
 const HTTP_QUERY_MAX_CHARS: usize = 512;
@@ -99,6 +104,7 @@ pub struct DisplaySettingsSnapshot {
     /// Off by default: each one is a request to the target, or to any host the
     /// page chooses, that the operator did not send.
     pub render_resources: bool,
+    pub findings_color: String,
 }
 
 impl Default for DisplaySettingsSnapshot {
@@ -109,6 +115,7 @@ impl Default for DisplaySettingsSnapshot {
             ui_font: "plex".to_string(),
             mono_font: "jetbrains".to_string(),
             render_resources: false,
+            findings_color: "severity".to_string(),
         }
     }
 }
@@ -121,6 +128,11 @@ impl DisplaySettingsSnapshot {
             ui_font: sanitize_option(self.ui_font, "plex", DISPLAY_UI_FONT_OPTIONS),
             mono_font: sanitize_option(self.mono_font, "jetbrains", DISPLAY_MONO_FONT_OPTIONS),
             render_resources: self.render_resources,
+            findings_color: sanitize_option(
+                self.findings_color,
+                "severity",
+                FINDINGS_ROW_COLOR_OPTIONS,
+            ),
         }
     }
 }
@@ -355,6 +367,9 @@ pub struct AppUiSettingsSnapshot {
     pub http_sort_key: String,
     pub http_sort_direction: String,
     pub http_filter_settings: HttpFilterSettingsSnapshot,
+    /// Marks HTTP history rows that have passive scan findings. A display
+    /// overlay only: it never writes a record's notes or colour tag.
+    pub http_show_findings: bool,
     /// Service Map's own display filter, as Burp keeps one for its site map: the
     /// HTTP history conditions, set apart so each view hides what suits it.
     pub service_map_filter_settings: HttpFilterSettingsSnapshot,
@@ -403,6 +418,7 @@ impl Default for AppUiSettingsSnapshot {
             http_sort_key: "index".to_string(),
             http_sort_direction: "desc".to_string(),
             http_filter_settings: HttpFilterSettingsSnapshot::default(),
+            http_show_findings: true,
             service_map_filter_settings: HttpFilterSettingsSnapshot::default(),
             service_map_hidden_link_kinds: vec!["frame".into(), "script".into(), "static".into()],
             service_map_group_sites: true,
@@ -451,6 +467,7 @@ impl AppUiSettingsSnapshot {
         sanitized.http_sort_direction =
             sanitize_option(self.http_sort_direction, "desc", &["asc", "desc"]);
         sanitized.http_filter_settings = self.http_filter_settings.sanitized();
+        sanitized.http_show_findings = self.http_show_findings;
         sanitized.service_map_filter_settings = self.service_map_filter_settings.sanitized();
         sanitized.service_map_hidden_link_kinds = crate::service_map::REQUEST_KINDS
             .iter()
@@ -1964,6 +1981,8 @@ mod tests {
         snapshot.display_settings.theme = "neon".to_string();
         snapshot.display_settings.ui_font = "comic".to_string();
         snapshot.display_settings.mono_font = "fantasy".to_string();
+        snapshot.display_settings.findings_color = "rainbow".to_string();
+        snapshot.http_show_findings = false;
         snapshot.active_tool = "missing-tool".to_string();
         snapshot.active_proxy_tab = "missing-tab".to_string();
         snapshot.http_query = format!("  {}  ", "q".repeat(super::HTTP_QUERY_MAX_CHARS + 8));
@@ -2010,6 +2029,8 @@ mod tests {
         assert_eq!(persisted.display_settings.theme, "charcoal");
         assert_eq!(persisted.display_settings.ui_font, "plex");
         assert_eq!(persisted.display_settings.mono_font, "jetbrains");
+        assert_eq!(persisted.display_settings.findings_color, "severity");
+        assert!(!persisted.http_show_findings);
         assert_eq!(persisted.active_tool, "proxy");
         assert_eq!(persisted.active_proxy_tab, "http-history");
         assert_eq!(
@@ -2084,6 +2105,9 @@ mod tests {
         assert_eq!(snapshot.display_settings.size_px, 12);
         assert_eq!(snapshot.display_settings.ui_font, "plex");
         assert_eq!(snapshot.display_settings.mono_font, "jetbrains");
+        // Settings saved before findings were marked in HTTP history turn it on.
+        assert_eq!(snapshot.display_settings.findings_color, "severity");
+        assert!(snapshot.http_show_findings);
         assert_eq!(snapshot.history_column_widths.get("host"), Some(&320));
         assert_eq!(snapshot.ws_column_widths.get("host"), Some(&260));
         assert_eq!(snapshot.history_column_order, vec!["host".to_string()]);

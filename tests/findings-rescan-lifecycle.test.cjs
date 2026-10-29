@@ -59,7 +59,7 @@ function fixture() {
     "getFindingsRowHeight", "measuredRowPitch", "severityClass", "severityLabel", "escapeHtml", "updateFindingsBadge",
     "retainedEntriesCap", "formatCappedCount", "clearFindingDetail", "updateFindingsSelection", "loadFindingDetail",
     "renderFindingDetailLoading", "setFindingDetailActionsEnabled", "showFindingDetail", "resetFindingsSearchUi",
-  ], {
+  ], { refreshHistoryFindings() {},
     state, els, URLSearchParams, BUTTON_PROGRESS_DELAY_MS: 180,
     findingsData: [], findingsBadgeCount: 0, findingsLoadPromise: null, findingsLoadSessionId: null,
     findingsStateGeneration: 0, findingsLoadGeneration: 0, findingsCountReadGeneration: 0, findingsCountAcceptedGeneration: 0,
