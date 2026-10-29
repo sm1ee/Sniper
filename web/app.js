@@ -519,6 +519,7 @@ const state = {
   websocketSortDirection: "desc",
   websocketInScopeOnly: false,
   websocketLiveOnly: false,
+  replayTabsWrap: false,
   websocketStackHeight: null,
   selectedWebsocketId: null,
   selectedWebsocketRecord: null,
@@ -668,6 +669,8 @@ const els = {
   toolsOutputHint: document.getElementById("toolsOutputHint"),
   replayTabStrip: document.getElementById("replayTabStrip"),
   newReplayTabButton: document.getElementById("newReplayTabButton"),
+  replayTabSettings: document.getElementById("replayTabSettings"),
+  replayTabsWrapInput: document.getElementById("replayTabsWrapInput"),
   replayEmptyState: document.getElementById("replayEmptyState"),
   replayEmptyNewTabButton: document.getElementById("replayEmptyNewTabButton"),
   replayEmptyImportCurlButton: document.getElementById("replayEmptyImportCurlButton"),
@@ -2108,6 +2111,18 @@ function bindEvents() {
   });
   els.newReplayTabButton.addEventListener("click", () => {
     openBlankReplayTab();
+  });
+  els.replayTabsWrapInput.addEventListener("change", () => {
+    state.replayTabsWrap = els.replayTabsWrapInput.checked;
+    els.replayTabStrip.classList.toggle("wrap", state.replayTabsWrap);
+    els.replayTabSettings.open = false;
+    scheduleUiSettingsSave();
+    scrollActiveReplayTabIntoView();
+  });
+  document.addEventListener("click", (event) => {
+    if (els.replayTabSettings.open && !els.replayTabSettings.contains(event.target)) {
+      els.replayTabSettings.open = false;
+    }
   });
   els.replayEmptyNewTabButton.addEventListener("click", () => openBlankReplayTab());
   els.replayEmptyImportCurlButton.addEventListener("click", () => openCurlImportModal());
@@ -20439,14 +20454,13 @@ function getReplayTabVisualOrder() {
 
 // ─── Replay tab drag reorder ───
 
-// Pinned tabs are drawn as their own run at the head of the strip, so a drop is
-// only accepted between tabs that share the dragged tab's pinned state. Letting
-// a drop cross the boundary would have to either silently flip the pin — turning
-// "move this left" into "pin this" — or land the tab somewhere it was not
-// dropped. Neither is what the operator asked for, so the crossing is refused.
+// Pinned tabs sit on their own row above the others, so which row a tab is
+// dropped on says whether it is pinned: dragging between the rows pins or
+// unpins it, the way dragging within a row reorders it.
 let replayTabDragId = null;
 
 function clearReplayTabDropSlot() {
+  els.replayTabStrip?.classList.remove("tab-dragging", "pin-zone");
   els.replayTabStrip?.querySelectorAll(".replay-tab").forEach((element) => {
     element.classList.remove("dragging");
   });
@@ -20462,17 +20476,20 @@ function animateReplayTabStrip(mutate) {
     return;
   }
   const tabs = Array.from(strip.querySelectorAll(".replay-tab"));
-  const before = tabs.map((tab) => tab.getBoundingClientRect().left);
+  const before = tabs.map((tab) => tab.getBoundingClientRect());
   mutate();
   if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
   tabs.forEach((tab, index) => {
-    const delta = before[index] - tab.getBoundingClientRect().left;
-    if (!delta) return;
+    // Vertical too: wrapped rows and the pinned row move tabs between lines.
+    const after = tab.getBoundingClientRect();
+    const dx = before[index].left - after.left;
+    const dy = before[index].top - after.top;
+    if (!dx && !dy) return;
     // Web Animations rather than a transition on an inline transform: releasing
     // one of those needs requestAnimationFrame, which does not run while the
     // window is hidden or occluded — the strip would stay frozen mid-slide with
     // the tabs offset. This also leaves no inline styles to clean up.
-    tab.animate([{ transform: `translateX(${delta}px)` }, { transform: "none" }], {
+    tab.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], {
       duration: 180,
       easing: "cubic-bezier(0.2, 0, 0, 1)",
     });
@@ -20481,14 +20498,6 @@ function animateReplayTabStrip(mutate) {
 
 function replayTabById(id) {
   return state.replayTabs.find((tab) => tab.id === id) || null;
-}
-
-function replayTabDropIsAllowed(targetId) {
-  if (!replayTabDragId || !targetId || replayTabDragId === targetId) return false;
-  const dragged = replayTabById(replayTabDragId);
-  const target = replayTabById(targetId);
-  if (!dragged || !target) return false;
-  return !!dragged.pinned === !!target.pinned;
 }
 
 function moveReplayTabBeside(draggedId, targetId, placeAfter) {
@@ -20510,20 +20519,57 @@ function moveReplayTabBeside(draggedId, targetId, placeAfter) {
 // already sitting where the operator dropped it.
 function commitReplayTabDrag() {
   const draggedId = replayTabDragId;
+  const tab = replayTabById(draggedId);
   const slot = els.replayTabStrip?.querySelector(".replay-tab.dragging");
   let moved = false;
-  if (draggedId && slot) {
+  let previousPinned = null;
+  if (tab && slot) {
     const before = slot.previousElementSibling?.dataset?.replayTabId;
     const after = slot.nextElementSibling?.dataset?.replayTabId;
-    if (replayTabDropIsAllowed(before)) moved = moveReplayTabBeside(draggedId, before, true);
-    else if (replayTabDropIsAllowed(after)) moved = moveReplayTabBeside(draggedId, after, false);
+    if (before) moved = moveReplayTabBeside(draggedId, before, true);
+    else if (after) moved = moveReplayTabBeside(draggedId, after, false);
+    const pinned = slot.parentElement?.dataset?.replayTabRow === "pinned";
+    if (!!tab.pinned !== pinned) {
+      previousPinned = !!tab.pinned;
+      tab.pinned = pinned;
+    }
   }
   replayTabDragId = null;
   clearReplayTabDropSlot();
   // Always re-render: the preview moved the element in the DOM, so a cancelled
   // drag has to be put back too.
   renderReplayTabs({ keepScroll: true });
-  if (moved) scheduleWorkspaceStateSave();
+  // A pin changed by dragging saves the way the pin button does.
+  if (previousPinned !== null) persistReplayTabMetadataEdit(tab, "pinned", previousPinned);
+  else if (moved) scheduleWorkspaceStateSave();
+}
+
+// Which row the pointer is aiming at. Stacked rows split at the gap between
+// them; a pin zone opened beside the tabs (see dragstart) splits sideways.
+function replayTabDropRow(event) {
+  const [pinnedRow, tabRow] = els.replayTabStrip.querySelectorAll(".replay-tab-list");
+  if (!pinnedRow || !tabRow) return tabRow || null;
+  const pinned = pinnedRow.getBoundingClientRect();
+  const rest = tabRow.getBoundingClientRect();
+  if (!pinned.width) return tabRow;
+  const aimsAtPin = pinned.bottom <= rest.top
+    ? event.clientY < (pinned.bottom + rest.top) / 2
+    : event.clientX < (pinned.right + rest.left) / 2;
+  return aimsAtPin ? pinnedRow : tabRow;
+}
+
+// The tab that should follow the dropped one in this row: the first one on a
+// line below the pointer, or on its line and right of it. The pointer's height
+// is held inside the row's lines so that the bar's padding, or the + button
+// past the end, still lands on the nearest line.
+function replayTabDropAnchor(row, slot, event) {
+  const run = Array.from(row.querySelectorAll(".replay-tab")).filter((element) => element !== slot);
+  const bounds = run.map((element) => element.getBoundingClientRect());
+  const centers = bounds.map((box) => (box.top + box.bottom) / 2);
+  const y = Math.min(Math.max(event.clientY, Math.min(...centers)), Math.max(...centers));
+  const index = bounds.findIndex((box) => box.top > y
+    || (box.bottom >= y && event.clientX < box.left + box.width / 2));
+  return index === -1 ? null : run[index];
 }
 
 // dragover and drop are wired on the whole tab bar, not on each tab. The drop
@@ -20541,25 +20587,15 @@ function wireReplayTabStripDragCleanup() {
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     const slot = els.replayTabStrip?.querySelector(".replay-tab.dragging");
-    if (!slot) return;
-    // The tab goes before the first tab in its run whose midpoint the pointer
-    // has not passed, and after the last one otherwise. Scanning the run beats
-    // looking at whatever is under the pointer: past the last tab, over the +
-    // button, or in the bar's padding there is nothing under it, and the drag
-    // would just stop moving — which is what "I dragged it to the end and it
-    // stayed put" was.
-    const run = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab"))
-      .filter((element) => element !== slot && replayTabDropIsAllowed(element.dataset.replayTabId));
-    if (!run.length) return;
-    const nextIndex = run.findIndex((element) => {
-      const bounds = element.getBoundingClientRect();
-      return event.clientX < bounds.left + bounds.width / 2;
-    });
-    // Landing after the run's last tab is not the same as appending to the
-    // strip: a pinned run ends in the middle of it.
-    const anchor = nextIndex === -1 ? run[run.length - 1].nextElementSibling : run[nextIndex];
-    if (anchor !== slot) {
-      animateReplayTabStrip(() => els.replayTabStrip.insertBefore(slot, anchor));
+    const row = slot && replayTabDropRow(event);
+    if (!row) return;
+    // Scanning the row's tabs beats looking at whatever is under the pointer:
+    // past the last tab, over the + button, or in the bar's padding there is
+    // nothing under it, and the drag would just stop moving — which is what "I
+    // dragged it to the end and it stayed put" was.
+    const anchor = replayTabDropAnchor(row, slot, event);
+    if (slot.parentElement !== row || slot.nextElementSibling !== anchor) {
+      animateReplayTabStrip(() => row.insertBefore(slot, anchor));
     }
   });
 
@@ -20587,7 +20623,14 @@ function wireReplayTabDragReorder(tabElement, id) {
     // the element as it is at the end of this handler, and an already-emptied
     // one gives it nothing to carry.
     setTimeout(() => {
-      if (replayTabDragId === id) tabElement.classList.add("dragging");
+      if (replayTabDragId !== id) return;
+      tabElement.classList.add("dragging");
+      // With nothing pinned the pinned row is hidden, so the drag opens a pin
+      // zone for it — beside the tabs, not on a row above them: a new row would
+      // push every tab down a line under the still pointer, which would then
+      // be aiming at the pin zone before it had moved.
+      els.replayTabStrip.classList.add("tab-dragging");
+      els.replayTabStrip.classList.toggle("pin-zone", !els.replayTabStrip.querySelector(".replay-tab.pinned"));
     }, 0);
     event.dataTransfer.effectAllowed = "move";
     // Firefox will not start a drag without data on the transfer, but the type
@@ -20608,7 +20651,9 @@ function wireReplayTabDragReorder(tabElement, id) {
 }
 
 function renderReplayTabs(options = {}) {
-  const preserveScrollLeft = options.keepScroll ? els.replayTabStrip.scrollLeft : null;
+  const preserveScrollLeft = options.keepScroll
+    ? Array.from(els.replayTabStrip.querySelectorAll(".replay-tab-list"), (row) => row.scrollLeft)
+    : null;
   const sortedTabs = getReplayTabVisualOrder();
   const renamingTab = sortedTabs.find((tab) => tab.id === state.replayRenamingTabId);
   const renameInput = renamingTab && els.replayTabStrip.querySelector(
@@ -20626,33 +20671,38 @@ function renderReplayTabs(options = {}) {
     return;
   }
 
-  els.replayTabStrip.innerHTML = sortedTabs
-    .map((tab) => {
-      const isActive = tab.id === state.activeReplayTabId;
-      const active = isActive ? "active" : "";
-      const pinned = tab.pinned ? "pinned" : "";
-      const pinBtnState = tab.pinned ? "on" : (!isActive ? "idle" : "");
-      const pinHiddenAttrs = pinBtnState === "idle" ? 'tabindex="-1"' : "";
-      const pinLabel = tab.pinned ? "Unpin tab" : "Pin tab";
-      const pinBtn = `<button class="replay-tab-pin-btn ${pinBtnState}" type="button" aria-label="${pinLabel}" title="${pinLabel}" aria-pressed="${tab.pinned ? "true" : "false"}" ${pinHiddenAttrs}>\uD83D\uDCCC</button>`;
-      const autoLabel = replayTabAutoLabel(tab);
-      const label = replayTabLabel(tab);
-      const title = replayTabTooltipLabel(tab, label, autoLabel);
-      const labelControl = state.replayRenamingTabId === tab.id
-        ? `<input class="replay-tab-name-input" type="text" value="${escapeHtml(tab.customLabel || "")}" placeholder="${escapeHtml(autoLabel)}" maxlength="80" aria-label="Replay tab name">`
-        : `<button class="replay-tab-button" type="button" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
-      // Not draggable while the name is being edited: a draggable ancestor stops
-      // the browser letting you select text inside the input.
-      const dragAttr = state.replayRenamingTabId === tab.id ? "" : ' draggable="true"';
-      return `
-        <div class="replay-tab ${active} ${pinned}" data-replay-tab-id="${tab.id}"${dragAttr}>
-          ${pinBtn}
-          ${labelControl}
-          <button class="replay-tab-close" type="button" aria-label="Close replay tab">\u00d7</button>
-        </div>
-      `;
-    })
-    .join("");
+  const tabMarkup = (tab) => {
+    const isActive = tab.id === state.activeReplayTabId;
+    const active = isActive ? "active" : "";
+    const pinned = tab.pinned ? "pinned" : "";
+    const pinBtnState = tab.pinned ? "on" : (!isActive ? "idle" : "");
+    const pinHiddenAttrs = pinBtnState === "idle" ? 'tabindex="-1"' : "";
+    const pinLabel = tab.pinned ? "Unpin tab" : "Pin tab";
+    const pinBtn = `<button class="replay-tab-pin-btn ${pinBtnState}" type="button" aria-label="${pinLabel}" title="${pinLabel}" aria-pressed="${tab.pinned ? "true" : "false"}" ${pinHiddenAttrs}>\uD83D\uDCCC</button>`;
+    const autoLabel = replayTabAutoLabel(tab);
+    const label = replayTabLabel(tab);
+    const title = replayTabTooltipLabel(tab, label, autoLabel);
+    const labelControl = state.replayRenamingTabId === tab.id
+      ? `<input class="replay-tab-name-input" type="text" value="${escapeHtml(tab.customLabel || "")}" placeholder="${escapeHtml(autoLabel)}" maxlength="80" aria-label="Replay tab name">`
+      : `<button class="replay-tab-button" type="button" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+    // Not draggable while the name is being edited: a draggable ancestor stops
+    // the browser letting you select text inside the input.
+    const dragAttr = state.replayRenamingTabId === tab.id ? "" : ' draggable="true"';
+    return `
+      <div class="replay-tab ${active} ${pinned}" data-replay-tab-id="${tab.id}"${dragAttr}>
+        ${pinBtn}
+        ${labelControl}
+        <button class="replay-tab-close" type="button" aria-label="Close replay tab">\u00d7</button>
+      </div>
+    `.trim();
+  };
+  // The pinned row renders with nothing in it when nothing is pinned, so that
+  // :empty hides it and a drag can still drop into it.
+  const pinnedTabs = sortedTabs.filter((tab) => tab.pinned);
+  const otherTabs = sortedTabs.filter((tab) => !tab.pinned);
+  els.replayTabStrip.innerHTML =
+    `<div class="replay-tab-list replay-tab-list-pinned" data-replay-tab-row="pinned" aria-label="Pinned tabs">${pinnedTabs.map(tabMarkup).join("")}</div>`
+    + `<div class="replay-tab-list" data-replay-tab-row="tabs">${otherTabs.map(tabMarkup).join("")}</div>`;
 
   Array.from(els.replayTabStrip.querySelectorAll(".replay-tab")).forEach((tabElement) => {
     const id = tabElement.dataset.replayTabId;
@@ -20760,8 +20810,10 @@ function renderReplayTabs(options = {}) {
   // the tab they dragged is usually not the active one, so jumping to the active
   // tab throws the strip somewhere they were not looking. Put the scroll back
   // where innerHTML dropped it instead.
-  if (preserveScrollLeft != null) {
-    els.replayTabStrip.scrollLeft = preserveScrollLeft;
+  if (preserveScrollLeft) {
+    els.replayTabStrip.querySelectorAll(".replay-tab-list").forEach((row, index) => {
+      row.scrollLeft = preserveScrollLeft[index] || 0;
+    });
   } else {
     scrollActiveReplayTabIntoView();
   }
@@ -23074,6 +23126,9 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   state.websocketSortDirection = sanitizeWebsocketSortDirection(snapshot?.websocket_sort_direction);
   state.websocketInScopeOnly = Boolean(snapshot?.websocket_in_scope_only);
   state.websocketLiveOnly = Boolean(snapshot?.websocket_live_only);
+  state.replayTabsWrap = snapshot?.replay_tabs_wrap === true;
+  els.replayTabStrip?.classList?.toggle("wrap", state.replayTabsWrap);
+  if (els.replayTabsWrapInput) els.replayTabsWrapInput.checked = state.replayTabsWrap;
   state.websocketStackHeight = sanitizeWebsocketStackHeight(snapshot?.websocket_stack_height);
   state.wsReplayLeftWidth = sanitizeWsReplayLeftWidth(snapshot?.ws_replay_left_width);
   state.wsReplayFrameDetailHeight = sanitizeWsReplayFrameDetailHeight(snapshot?.ws_replay_frame_detail_height);
@@ -23158,6 +23213,7 @@ function snapshotUiSettings() {
     websocket_sort_direction: sanitizeWebsocketSortDirection(state.websocketSortDirection),
     websocket_in_scope_only: Boolean(state.websocketInScopeOnly),
     websocket_live_only: Boolean(state.websocketLiveOnly),
+    replay_tabs_wrap: state.replayTabsWrap === true,
     websocket_stack_height: state.websocketStackHeight > 0 ? state.websocketStackHeight : null,
     ws_replay_left_width: state.wsReplayLeftWidth > 0 ? state.wsReplayLeftWidth : null,
     ws_replay_frame_detail_height: state.wsReplayFrameDetailHeight > 0 ? state.wsReplayFrameDetailHeight : null,

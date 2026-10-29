@@ -4490,8 +4490,11 @@ body.pane-resizing-y {
   overflow: hidden;
 }
 
+/* Wraps so the pinned row can take a line of its own above the tabs. Not
+   overflow:hidden: that would clip the tab settings menu. */
 .replay-tab-strip {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-height: 34px;
@@ -4499,7 +4502,6 @@ body.pane-resizing-y {
   padding: 4px 8px;
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.02);
-  overflow: hidden;
 }
 
 .replay-tab-list {
@@ -4534,6 +4536,68 @@ body.pane-resizing-y {
 
 .replay-tab-list::-webkit-scrollbar-thumb:hover {
   background: var(--rule-strong, var(--line));
+}
+
+/* The rows are laid out as items of the strip itself, beside + and the gear. */
+.replay-tab-rows {
+  display: contents;
+}
+
+.replay-tab-list-pinned {
+  flex: 1 0 100%;
+  width: auto;
+}
+
+.replay-tab-list-pinned:empty {
+  display: none;
+}
+
+/* While a tab is dragged the pinned row stays up as a drop target, even when
+   the tab being dragged was the only one on it. */
+.replay-tab-rows.tab-dragging > .replay-tab-list-pinned {
+  display: flex;
+  min-height: 26px;
+  border-radius: 8px;
+  outline: 1px dashed var(--point-border);
+  outline-offset: -1px;
+}
+
+/* Nothing was pinned: the zone opens at the head of the tabs' own line. */
+.replay-tab-rows.pin-zone > .replay-tab-list-pinned {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 96px;
+  padding-bottom: 0;
+}
+
+.replay-tab-rows.tab-dragging > .replay-tab-list-pinned:empty::before {
+  content: "Drop to pin";
+  padding: 0 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* Burp's "Wrapped" tab view: every tab on screen, on as many lines as needed. */
+.replay-tab-rows.wrap > .replay-tab-list {
+  flex-wrap: wrap;
+  overflow: visible;
+  padding-bottom: 0;
+}
+
+.replay-tab-settings > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.replay-tab-settings > summary:not(:hover) {
+  border-color: transparent;
+  background: none;
+  color: var(--text-soft);
+}
+
+.replay-tab-wrap-option {
+  align-items: center;
 }
 
 .replay-tab {
