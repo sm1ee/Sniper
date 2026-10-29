@@ -37,7 +37,7 @@ const record = (id = 'saved-tx-a', label = 'current') => ({ id, kind: 'http', ho
 const response = (value, status = 200) => ({ ok: status < 400, status, json: async () => value,
   headers: { get: () => 'text/plain' }, text: async () => 'Synthetic read error.' });
 function fixture() {
-  const nodes = new Map(), requests = [], panes = new Map(), previews = [], logs = [];
+  const nodes = new Map(), requests = [], panes = new Map(), previews = [], logs = [], confirmations = [];
   for (const [, attrs, id] of html.matchAll(/<[^>]*\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
     nodes.set(id, element(id, attrs.match(/\bclass="([^"]*)"/)?.[1]));
   }
@@ -61,7 +61,8 @@ function fixture() {
     'clearFuzzerResponsePane', 'syncFuzzerResponsePreview', 'syncFuzzerDetailTabs', 'renderFuzzerDetailPanes',
     'buildRawRequest', 'buildRawResponse', 'buildRawRequestHead', 'buildRawResponseHead', 'normalizedHeaders',
     'mergeHeaders', 'headerNameEquals', 'renderBody', 'binaryBodyPlaceholder', 'prettyFormat', 'prettyJsonText',
-    'resetFuzzer', 'invalidateFuzzerRun', 'updateFuzzerRequestText', 'markFuzzerDraftChanged',
+    'confirmFuzzerReset', 'resetFuzzer', 'fuzzerRequestTextForAction', 'buildEditableRawRequest',
+    'invalidateFuzzerRun', 'updateFuzzerRequestText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',
   ], {
     workspaceLoaded: true, HTMLElement: class HTMLElement {}, getActiveModalAction: () => null, compareBaseId: null, compareBaseSessionId: null, compareLoadGeneration: 0, workspaceStateGeneration: 0,
@@ -73,6 +74,7 @@ function fixture() {
     updateCodePaneCM: (key, container, text) => panes.set(key, text),
     renderResponsePreview: (...args) => previews.push(args), recordPageUrl: () => 'https://example.com/',
     scheduleWorkspaceStateSave() { saves++; }, scheduleUiSettingsSave() {}, closeScannerSettings() {},
+    showConfirmDialog(_message, confirm) { confirmations.push(confirm); },
     sanitizeActiveTool: value => value, renderProxyPanels() {},
     requestAnimationFrame: callback => { callback(); return 1; },
     fetch(url, options) {
@@ -89,7 +91,7 @@ function fixture() {
   const end = appSource.indexOf('  // Fuzzer detail view mode tabs', start);
   assert.ok(start >= 0 && end > start);
   vm.runInContext(`(() => { ${appSource.slice(start, end)} })()`, c);
-  const resetBinding = appSource.match(/^  els\.resetFuzzerButton\.addEventListener\(\"click\", resetFuzzer\);$/m)?.[0];
+  const resetBinding = appSource.match(/^  els\.resetFuzzerButton\.addEventListener\(\"click\", confirmFuzzerReset\);$/m)?.[0];
   assert.ok(resetBinding); vm.runInContext(resetBinding, c);
   // This is only saved-result display initialization and draft-value comparison;
   // no workspace revision, save, or persistence code is loaded.
@@ -117,7 +119,7 @@ function fixture() {
     key: key => shell.dispatch('keydown', { key }),
     navigate(tool) { c.setActiveTool(tool); c.renderToolPanels(); },
     restore(id = 'saved-job-a') { c.restoreSavedJob({ session_id: state.activeSession.id, fuzzer: { attack_record_id: id } }); return requests.at(-1); },
-    reset() { els.resetFuzzerButton.dispatch('click'); },
+    reset() { els.resetFuzzerButton.dispatch('click'); confirmations.pop()?.(); },
     resetSession(id) { state.activeSession = { id }; c.resetSessionDisplay(); },
   };
 }

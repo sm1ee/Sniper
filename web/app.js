@@ -2248,7 +2248,7 @@ function bindEvents() {
       console.error("Fuzzer start error:", error);
     });
   });
-  els.resetFuzzerButton.addEventListener("click", resetFuzzer);
+  els.resetFuzzerButton.addEventListener("click", confirmFuzzerReset);
   els.fuzzerRetryWorkspaceButton?.addEventListener("click", retryFuzzerWorkspaceLoad);
   els.stopFuzzerButton?.addEventListener("click", () => {
     stopFuzzerAttack().catch((error) => console.error("Fuzzer stop error:", error));
@@ -18746,6 +18746,49 @@ function initFuzzerResizers() {
       detailPanel.style.flex = "";
     });
   }
+}
+
+function confirmFuzzerReset() {
+  if (!workspaceLoaded || state.fuzzerRunning || state.fuzzerRunningAttackId) return false;
+  const requestText = fuzzerRequestTextForAction();
+  const resetText = state.fuzzerBaseRequest ? buildEditableRawRequest(state.fuzzerBaseRequest) : "";
+  const savedRequestText = state.fuzzerRequestText;
+  const savedPayloadsText = state.fuzzerPayloadsText;
+  const currentPayloadsText = () => String(els.fuzzerPayloadsEditor?.value ?? state.fuzzerPayloadsText ?? "");
+  const payloadsText = currentPayloadsText();
+  const hasResults = state.fuzzerAttackRecord || state.fuzzerAttackRecordId
+    || state._selectedFuzzerResultKey || state._fuzzerDetailRecord;
+  if (requestText === resetText && !payloadsText && !savedPayloadsText && !hasResults) return resetFuzzer();
+
+  const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftVersion = state.fuzzerDraftVersion || 0;
+  const runToken = state.fuzzerRunToken || 0;
+  const resultGeneration = _fuzzerAttackLoadGeneration;
+  const detailGeneration = _fuzzerDetailGeneration;
+  const selectedResult = state._selectedFuzzerResultKey;
+  const workflow = fuzzerResultsWorkflowState();
+  // Accepted external drafts can change back to identical text without moving
+  // the local draft/run counters. Their existing read owner still retires them.
+  const readGeneration = workflow.readGeneration;
+  showConfirmDialog(
+    "Reset the request template, clear the payload list, and hide the current results?\n\nConnection overrides, run options, and saved runs will be kept.",
+    () => {
+      if (!workspaceLoaded || state.fuzzerRunning || state.fuzzerRunningAttackId
+        || currentSessionId() !== sessionId || workspaceStateGeneration !== workspaceGeneration
+        || (state.fuzzerDraftVersion || 0) !== draftVersion || (state.fuzzerRunToken || 0) !== runToken
+        || _fuzzerAttackLoadGeneration !== resultGeneration || _fuzzerDetailGeneration !== detailGeneration
+        || state._selectedFuzzerResultKey !== selectedResult
+        || state.fuzzerResultsWorkflow !== workflow || workflow.readGeneration !== readGeneration
+        || fuzzerRequestTextForAction() !== requestText || currentPayloadsText() !== payloadsText
+        || state.fuzzerRequestText !== savedRequestText || state.fuzzerPayloadsText !== savedPayloadsText) {
+        showToast("Reset canceled because the Fuzzer draft, results, or workspace changed. Review them and try again.", "info");
+        return false;
+      }
+      return resetFuzzer();
+    },
+    { title: "Reset Fuzzer draft?", confirmLabel: "Reset draft" },
+  );
 }
 
 function resetFuzzer() {
