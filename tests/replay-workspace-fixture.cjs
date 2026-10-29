@@ -27,6 +27,7 @@ const functions = [
   "snapshotReplayTabsState", "cloneReplayTabState", "cloneRepeaterHistoryEntry", "restoreReplayTabsState",
   "scheduleWorkspaceStateSave", "flushQueuedWorkspaceStateSave", "runQueuedWorkspaceStateSaves", "saveWorkspaceState",
   "flushWorkspaceState", "clearBypassableWorkspaceConflict", "isActiveSessionChangedConflict", "isTooManyReplayTabsError",
+  "showWorkspaceConflictError", "reconcileWorkspaceConflict",
   "flushWorkspaceStateOnUnload", "requestWorkspaceUnloadPrompt", "workspaceUnloadPayload", "utf8ByteLength",
 ];
 function deferred() {
@@ -35,7 +36,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 function fixture() {
-  const requests = [], toasts = [], renders = [], beacons = [], timers = new Map();
+  const requests = [], toasts = [], notices = [], renders = [], beacons = [], timers = new Map();
   const state = {
     activeSession: { id: "session-a" }, workspaceRevision: 10, replayTabs: [], replayTabSequence: 0,
     activeReplayTabId: null, replayRenamingTabId: null, replayMessageViews: { request: "raw" },
@@ -75,6 +76,8 @@ function fixture() {
     syncReplayDraftsBeforeWorkspaceClose() {}, disconnectWsReplayTabsOnUnload() {},
     handleWorkspaceActionError(error) { throw error; },
     showToast: (...args) => toasts.push(args),
+    showWorkspaceConflictNotice: (message, options = {}) => notices.push({ message, reload: options.reload !== false }),
+    dismissWorkspaceConflictNotice() { notices.push({ dismissed: true }); },
     fetch: (url, options) => { const pending = { url, options, ...deferred() }; requests.push(pending); return pending.promise; },
   });
   vm.runInContext(appSource.match(/^class WorkspaceStateConflictError[^]*?^\}/m)[0], context);
@@ -109,7 +112,7 @@ function fixture() {
   }
   const succeed = (index, snapshot) => requests[index].resolve({ ok: true, status: 200, json: async () => plain(snapshot) });
   const adopt = async snapshot => { const index = requests.length; const pending = context.adoptExternalWorkspace(); if (requests.length > index) succeed(index, snapshot); await pending; };
-  return { context, state, els, document, versionSelect, requests, toasts, renders, beacons, timers, tab, seed, remote, succeed, adopt, syncDom,
+  return { context, state, els, document, versionSelect, requests, toasts, notices, renders, beacons, timers, tab, seed, remote, succeed, adopt, syncDom,
     setEditor: value => { editor = { getContent: () => value }; }, plain };
 }
 module.exports = { fixture, functions, plain, deferred };

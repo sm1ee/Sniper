@@ -103,6 +103,7 @@ function fixture({ render = true } = {}) {
   });
   for (const name of [
     "clearReplaySendInFlight", "closeContextMenu", "clearHistoryBackfill", "cancelHistoryDetailLoading",
+    "dismissWorkspaceConflictNotice",
     "invalidateVisibleEntriesCache", "renderIntercepts", "renderResponseIntercepts", "renderInterceptRules",
     "updateInterceptQueueBadges", "resetWebsocketFrameScroll", "cancelWebsocketDetailLoading",
     "clearWebsocketQueryBackfill", "clearFilteredWebsocketReload", "clearWebsocketSearchReload", "resetEventLogUiState",

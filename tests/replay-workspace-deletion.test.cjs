@@ -110,8 +110,8 @@ for (const [name, mutate] of Object.entries(conflicts)) {
     assert.equal(f.state.replayTabs[0], f.a);
     assert.deepEqual(plain(f.state), state); assert.deepEqual(plain(f.els), dom);
     assert.deepEqual(plain(f.context.workspaceSaveCommittedSnapshot), baseline);
-    assert.equal(f.renders.length, 0); assert.equal(f.toasts.length, 1);
-    assert.match(f.toasts[0][0], /unsaved; copy them before reloading/);
+    assert.equal(f.renders.length, 0); assert.equal(f.toasts.length, 0); assert.equal(f.notices.length, 1);
+    assert.match(f.notices[0].message, /closed elsewhere, so your edits are not saved yet/);
     await f.adopt(f.remote([f.b, f.tab("another")], 13));
     assert.equal(f.requests.length, 1, "later events cannot advance or clear the conflict");
     assert.equal(f.state.workspaceRevision, 10);

@@ -7151,6 +7151,29 @@ button.utility-button.replay-tab-add {
   background: #cb2431;
 }
 
+.workspace-conflict-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 520px;
+}
+
+.workspace-conflict-notice button {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.workspace-conflict-notice button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: translateY(0); }

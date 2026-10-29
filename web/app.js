@@ -1063,6 +1063,7 @@ let workspaceSaveCommittedSnapshot = null;
 const workspaceClientId = createWorkspaceClientId();
 let workspaceSaveLoopPromise = null;
 let workspaceSaveConflictPending = false;
+let workspaceConflictNotice = null;
 let workspaceStateGeneration = 0;
 let renderedHttpReplayDraftOwner = null;
 let historyPacketViewer = null;
@@ -3515,8 +3516,10 @@ function fuzzerWorkspaceChanged(left, right) {
 // Reconcile saved HTTP tab deletions and the Fuzzer before following another
 // writer's revision. A full save at that revision would otherwise put a
 // CLI-closed tab, or the Fuzzer as it was before the CLI changed it, back.
-async function adoptExternalWorkspace() {
-  if (!workspaceLoaded || workspaceSaveConflictPending) return;
+// `keepLocal` is reconcileWorkspaceConflict's Reload: it runs during a conflict
+// and keeps the local side of the two conflicts below instead of stopping.
+async function adoptExternalWorkspace({ keepLocal = false } = {}) {
+  if (!workspaceLoaded || (workspaceSaveConflictPending && !keepLocal)) return;
   const sessionId = currentSessionId();
   if (!sessionId) return;
   const stateGeneration = workspaceStateGeneration;
@@ -3525,7 +3528,7 @@ async function adoptExternalWorkspace() {
   if (!response.ok) return;
   const snapshot = await response.json();
   if (
-    !workspaceLoaded || workspaceSaveConflictPending
+    !workspaceLoaded || (workspaceSaveConflictPending && !keepLocal)
     || sessionId !== currentSessionId() || stateGeneration !== workspaceStateGeneration
     || snapshot?.session_id !== sessionId
     || loadGeneration < workspaceExternalAppliedGeneration
@@ -3538,16 +3541,17 @@ async function adoptExternalWorkspace() {
   const incomingFuzzerSnapshot = snapshotFuzzerWorkspace(incomingFuzzer);
   const fuzzerBaseline = workspaceSaveCommittedSnapshot?.fuzzer;
   const fuzzerChanged = fuzzerWorkspaceChanged(incomingFuzzerSnapshot, fuzzerBaseline);
-  if (fuzzerChanged && fuzzerWorkspaceChanged(snapshotFuzzerWorkspace(state), incomingFuzzerSnapshot)
-    && (state.fuzzerRunning || fuzzerWorkspaceChanged(snapshotFuzzerWorkspace(state), fuzzerBaseline))) {
+  const fuzzerConflict = fuzzerChanged && fuzzerWorkspaceChanged(snapshotFuzzerWorkspace(state), incomingFuzzerSnapshot)
+    && (state.fuzzerRunning || fuzzerWorkspaceChanged(snapshotFuzzerWorkspace(state), fuzzerBaseline));
+  if (fuzzerConflict && !keepLocal) {
     workspaceSaveConflictPending = true;
     workspaceSaveConflictLatest = snapshot;
     workspaceSaveDirty = true;
     window.clearTimeout(workspaceSaveTimer);
     workspaceSaveTimer = null;
-    showToast(
-      "The Fuzzer was changed elsewhere. Local edits are unsaved; copy them before reloading the workspace to reconcile.",
-      "error", 6000,
+    showWorkspaceConflictNotice(
+      "The Fuzzer was changed elsewhere while you edited it here, so your edits are not saved yet. "
+        + "Reload brings in the other changes and keeps your Fuzzer.",
     );
     return;
   }
@@ -3563,6 +3567,8 @@ async function adoptExternalWorkspace() {
     if (existing && (existing.type === "websocket"
       || replayTabHasUncommittedEditorState(existing)
       || workspaceSnapshotValueChanged(snapshotHttpReplayTab(existing), baseline))) {
+      // Kept open here; the next save puts it back.
+      if (keepLocal) continue;
       // Do not render, sync the DOM, stop activity, or partly advance a baseline
       // when the closed tab still contains a local draft.
       workspaceSaveConflictPending = true;
@@ -3570,9 +3576,9 @@ async function adoptExternalWorkspace() {
       workspaceSaveDirty = true;
       window.clearTimeout(workspaceSaveTimer);
       workspaceSaveTimer = null;
-      showToast(
-        "A replay tab was closed elsewhere. Local edits are unsaved; copy them before reloading the workspace to reconcile.",
-        "error", 6000,
+      showWorkspaceConflictNotice(
+        "A replay tab you edited here was closed elsewhere, so your edits are not saved yet. "
+          + "Reload brings in the other changes and keeps the tab.",
       );
       return;
     }
@@ -3639,12 +3645,13 @@ async function adoptExternalWorkspace() {
     workspaceSaveCommittedSnapshot.replay.tabs = workspaceSaveCommittedSnapshot.replay.tabs
       .filter((tab) => !removed.has(tab.id));
   }
-  if (fuzzerChanged) {
+  if (fuzzerChanged && !fuzzerConflict) {
     applyFuzzerWorkspace(incomingFuzzer, sessionId, { keepShownRun: true });
-    if (workspaceSaveCommittedSnapshot) {
-      workspaceSaveCommittedSnapshot.fuzzer = cloneWorkspaceSnapshotForBaseline(incomingFuzzerSnapshot);
-    }
     renderFuzzer();
+  }
+  // A kept local Fuzzer now reads as an edit against the newer baseline.
+  if (fuzzerChanged && workspaceSaveCommittedSnapshot) {
+    workspaceSaveCommittedSnapshot.fuzzer = cloneWorkspaceSnapshotForBaseline(incomingFuzzerSnapshot);
   }
   state.workspaceRevision = snapshot.revision;
   // An unload must not reuse a pre-adoption in-flight full snapshot.
@@ -4201,6 +4208,7 @@ function clearBypassableWorkspaceConflict(options = {}) {
     workspaceSaveConflictPending = false;
     workspaceSaveConflictLatest = null;
     workspaceSaveDirty = true;
+    dismissWorkspaceConflictNotice();
     return true;
   }
   return false;
@@ -4296,12 +4304,7 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
         wsTranscriptFirstDirtyAt = 0;
         workspaceSaveLastSnapshot = null;
       }
-      showToast(
-        error.commitUncertain ? error.message
-          : "Workspace changed elsewhere; local workspace edits were not saved. Reload the workspace to reconcile.",
-        "error",
-        6000,
-      );
+      showWorkspaceConflictError(error);
       return;
     } finally {
       workspaceSaveInFlight = false;
@@ -4466,15 +4469,77 @@ class WorkspaceStateConflictError extends Error {
 function handleWorkspaceActionError(error) {
   console.error(error);
   if (error instanceof WorkspaceStateConflictError) {
-    showToast(
-      error.commitUncertain ? error.message
-        : "Workspace changed elsewhere. Reload the workspace before switching sessions.",
-      "error",
-      7000,
-    );
+    showWorkspaceConflictError(error);
     return;
   }
   showToast(error?.message || "Workspace action failed.", "error", 6000);
+}
+
+function showWorkspaceConflictError(error, refused = "your edits here are not saved yet") {
+  if (error.commitUncertain) {
+    // The file may already hold this save; only reloading the app can tell.
+    showWorkspaceConflictNotice(error.message, { reload: false });
+  } else if (isActiveSessionChangedConflict(error.latest)) {
+    showWorkspaceConflictNotice(`The active session changed elsewhere, so ${refused}.`, { reload: false });
+  } else {
+    showWorkspaceConflictNotice(
+      `Workspace changed elsewhere (another window or sniper-cli), so ${refused}. `
+        + "Reload brings in those changes and keeps your edits.",
+    );
+  }
+}
+
+// One notice for as long as the conflict lasts. Each refused action used to add
+// a toast of its own, so a few clicks stacked a column of identical errors.
+function showWorkspaceConflictNotice(message, { reload = true } = {}) {
+  const container = document.getElementById("toastContainer");
+  if (!container) return;
+  if (!workspaceConflictNotice?.isConnected) {
+    workspaceConflictNotice = document.createElement("div");
+    workspaceConflictNotice.className = "toast toast-error workspace-conflict-notice";
+    workspaceConflictNotice.setAttribute("role", "alert");
+    container.appendChild(workspaceConflictNotice);
+  }
+  const text = document.createElement("span");
+  text.textContent = message;
+  const parts = [text];
+  if (reload) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Reload";
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      reconcileWorkspaceConflict().catch((error) => {
+        console.error(error);
+        button.disabled = false;
+        showToast(error?.message || "Workspace reload failed.", "error", 6000);
+      });
+    });
+    parts.push(button);
+  }
+  workspaceConflictNotice.replaceChildren(...parts);
+}
+
+function dismissWorkspaceConflictNotice() {
+  workspaceConflictNotice?.remove();
+  workspaceConflictNotice = null;
+}
+
+// Reload without discarding anything local: take the other writer's workspace
+// as its workspace_state event would, except that where both sides changed the
+// same thing (the Fuzzer, a tab closed elsewhere but edited here) the local edit
+// wins. The next save then lands on the newer revision.
+async function reconcileWorkspaceConflict() {
+  const latest = workspaceSaveConflictLatest;
+  if (!workspaceSaveConflictPending || latest?.code === "WORKSPACE_COMMIT_UNCERTAIN"
+    || isActiveSessionChangedConflict(latest)) return;
+  const stateGeneration = workspaceStateGeneration;
+  await adoptExternalWorkspace({ keepLocal: true });
+  if (stateGeneration !== workspaceStateGeneration || !workspaceSaveConflictPending) return;
+  workspaceSaveConflictPending = false;
+  workspaceSaveConflictLatest = null;
+  dismissWorkspaceConflictNotice();
+  scheduleWorkspaceStateSave();
 }
 
 async function flushWorkspaceState(options = {}) {
@@ -5322,6 +5387,7 @@ function resetSessionScopedUiState() {
   workspaceSaveCommittedSnapshot = null;
   workspaceSaveConflictPending = false;
   workspaceSaveConflictLatest = null;
+  dismissWorkspaceConflictNotice();
   clearHistoryBackfill();
   window.clearTimeout(_incrementalTimer);
   _incrementalTimer = 0;
@@ -20062,21 +20128,13 @@ async function readWorkspaceRevisionConflictPayload(response) {
 function handleReplayWorkspaceRevisionConflict(snapshot = null) {
   workspaceSaveConflictPending = true;
   workspaceSaveConflictLatest = snapshot || null;
-  showToast(
-    "Workspace changed elsewhere; replay was not sent. Reload the workspace to reconcile.",
-    "error",
-    6000,
-  );
+  showWorkspaceConflictError(new WorkspaceStateConflictError(snapshot), "the replay was not sent");
 }
 
 function handleFuzzerWorkspaceRevisionConflict(snapshot = null) {
   workspaceSaveConflictPending = true;
   workspaceSaveConflictLatest = snapshot || null;
-  showToast(
-    "Workspace changed elsewhere; fuzzer was not started. Reload the workspace to reconcile.",
-    "error",
-    6000,
-  );
+  showWorkspaceConflictError(new WorkspaceStateConflictError(snapshot), "the fuzzer was not started");
 }
 
 async function readReplaySendError(response) {
@@ -21305,10 +21363,14 @@ async function closeRepeaterTab(id, pendingRename = null) {
     } else if (!state.replayRenamingTabId) {
       renderReplayTabs();
     }
-    showToast(
-      "Replay tab close could not be confirmed. The tab is restored locally; changes are unsaved. Copy local edits before reloading the workspace to reconcile.",
-      "error", 7000,
-    );
+    if (error instanceof WorkspaceStateConflictError) {
+      showWorkspaceConflictError(error, "closing the tab was not saved and the tab is back");
+    } else {
+      showToast(
+        "Replay tab close could not be confirmed. The tab is restored locally; changes are unsaved. Copy local edits before reloading the workspace to reconcile.",
+        "error", 7000,
+      );
+    }
     return;
   } finally {
     // An older session's callback must not clear a newer close of the same ID.

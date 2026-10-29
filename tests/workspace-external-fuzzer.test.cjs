@@ -38,8 +38,8 @@ test("a Fuzzer edit here and another writer's Fuzzer change stop at a conflict i
   assert.equal(f.context.workspaceSaveConflictPending, true);
   assert.equal(f.state.fuzzerPayloadsText, "local-draft");
   assert.equal(f.state.workspaceRevision, 10, "a save at the old revision is refused, not taken over theirs");
-  assert.equal(f.toasts.length, 1);
-  assert.match(f.toasts[0][0], /Fuzzer was changed elsewhere/);
+  assert.equal(f.notices.length, 1);
+  assert.match(f.notices[0].message, /Fuzzer was changed elsewhere/);
 });
 
 test("the same Fuzzer change made here and elsewhere is no conflict", async () => {
