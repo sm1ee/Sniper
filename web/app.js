@@ -29652,10 +29652,10 @@ function renderWsSetupQueue() {
     const sentClass = item.sent ? "sent" : "";
     const checked = item.autoSend ? "checked" : "";
     return `<div class="ws-setup-row ${sentClass}" data-idx="${i}">
-      <input type="checkbox" class="ws-setup-check" data-idx="${i}" ${checked} />
+      <input type="checkbox" class="ws-setup-check" data-idx="${i}" aria-label="Auto-send setup message ${i + 1}" ${checked} />
       <span class="ws-setup-index">#${i + 1}</span>
       <span class="ws-setup-label" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</span>
-      <button class="ws-setup-send" data-idx="${i}" title="Send this message">▶</button>
+      <button class="ws-setup-send" data-idx="${i}" aria-label="Send setup message ${i + 1}" title="Send this message">▶</button>
       ${item.sent ? '<span class="ws-setup-sent-badge">✓</span>' : ""}
     </div>`;
   }).join("");
