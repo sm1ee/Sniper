@@ -16977,7 +16977,10 @@ async function refreshFuzzerSavedRuns() {
   const ownsRead = fuzzerSavedReadOwner(workflow, generation, "listGeneration");
   workflow.listBusy = true;
   const loadingNotice = "Loading retained runs...";
-  workflow.notice = loadingNotice;
+  // Refresh may update the picker while View/Reuse is pending, but must not
+  // hide that read's progress or its eventual failure/confirmation notice.
+  const preserveReadNotice = workflow.readBusy;
+  if (!preserveReadNotice) workflow.notice = loadingNotice;
   renderFuzzerResultsWorkflow();
   try {
     const response = await fetch(sessionQueryPath("/api/fuzzer/attacks", workflow.sessionId));
@@ -16986,20 +16989,25 @@ async function refreshFuzzerSavedRuns() {
     const runs = await response.json();
     if (!ownsRead()) return;
     workflow.runs = jsonArray(runs).filter((run) => typeof run?.id === "string" && run.id);
-    if (!workflow.runs.some((run) => run.id === workflow.selectedRunId)) {
+    const selectionUnavailable = !workflow.runs.some((run) => run.id === workflow.selectedRunId);
+    const selectionRemoved = !!workflow.selectedRunId && selectionUnavailable;
+    if (selectionUnavailable) {
       workflow.selectedRunId = "";
       workflow.readGeneration += 1;
       workflow.readBusy = false;
     }
-    workflow.notice = workflow.runs.length
-      ? `${workflow.runs.length} retained run${workflow.runs.length === 1 ? "" : "s"}. View keeps the current draft; Reuse asks before replacing it.`
-      : "No retained fuzzer runs are available in this session.";
+    if (!preserveReadNotice || selectionUnavailable) {
+      workflow.notice = workflow.runs.length
+        ? preserveReadNotice && selectionRemoved ? "The selected run is no longer listed. Choose another retained run."
+          : `${workflow.runs.length} retained run${workflow.runs.length === 1 ? "" : "s"}. View keeps the current draft; Reuse asks before replacing it.`
+        : "No retained fuzzer runs are available in this session.";
+    }
   } catch (error) {
-    if (ownsRead()) workflow.notice = error?.message || "Failed to list saved fuzzer runs.";
+    if (ownsRead() && !preserveReadNotice) workflow.notice = error?.message || "Failed to list saved fuzzer runs.";
   } finally {
     if (workflow === state.fuzzerResultsWorkflow && workflow.listGeneration === generation) {
       workflow.listBusy = false;
-      if (workflow.notice === loadingNotice) workflow.notice = "";
+      if (!preserveReadNotice && workflow.notice === loadingNotice) workflow.notice = "";
       renderFuzzerResultsWorkflow();
     }
   }
