@@ -28,6 +28,30 @@ for (const [id, name, className] of [
   });
 }
 
+for (const [id, name, className, type, placeholder] of [
+  ["wsHostInput", "WebSocket host", "compact-field-inline ws-host-field", "text", "host"],
+  ["wsPortInput", "WebSocket port", "compact-field-inline ws-port-field", "number", "443"],
+  ["wsPathInput", "WebSocket path", "compact-field-inline ws-path-field", "text", "/path"],
+]) {
+  test(`${id} has a stable purpose name without changing its native input or example`, () => {
+    const matches = [...html.matchAll(new RegExp(`<input\\b([^>]*\\bid="${id}"[^>]*)/>`, "g"))];
+    assert.equal(matches.length, 1, `Expected one input with id ${id}`);
+    const attrs = Object.fromEntries([...matches[0][1].matchAll(/([^\s=]+)(?:="([^"]*)")?/g)]
+      .map(([, name, value]) => [name, value ?? ""]));
+    assert.deepEqual(attrs, { id, class: className, type, placeholder, "aria-label": name });
+  });
+}
+
+test("handshake headers has a stable name and retains its native textarea", () => {
+  const control = elementById("wsHandshakeHeaders");
+  assert.equal(control.tag, "textarea");
+  assert.deepEqual(control.attrs, {
+    id: "wsHandshakeHeaders", class: "ws-handshake-editor", rows: "4",
+    placeholder: "header-name: value", spellcheck: "false", "aria-label": "WebSocket handshake headers",
+  });
+  assert.equal(control.content, "");
+});
+
 test("the named selectors retain their existing option order and implicit defaults", () => {
   for (const [id, expected] of [
     ["wsSchemeSelect", [["wss", "WSS"], ["ws", "WS"]]],

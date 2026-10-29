@@ -1043,11 +1043,11 @@
                     <option value="wss">WSS</option>
                     <option value="ws">WS</option>
                   </select>
-                  <input id="wsHostInput" class="compact-field-inline ws-host-field" type="text" placeholder="host" />
-                  <input id="wsPortInput" class="compact-field-inline ws-port-field" type="number" placeholder="443" />
+                  <input id="wsHostInput" class="compact-field-inline ws-host-field" type="text" placeholder="host" aria-label="WebSocket host" />
+                  <input id="wsPortInput" class="compact-field-inline ws-port-field" type="number" placeholder="443" aria-label="WebSocket port" />
                 </div>
                 <div class="ws-path-bar">
-                  <input id="wsPathInput" class="compact-field-inline ws-path-field" type="text" placeholder="/path" />
+                  <input id="wsPathInput" class="compact-field-inline ws-path-field" type="text" placeholder="/path" aria-label="WebSocket path" />
                 </div>
                 <div class="ws-action-bar">
                   <div class="ws-action-buttons">
@@ -1084,7 +1084,7 @@
               </div>
               <details class="ws-handshake-section">
                 <summary>Handshake headers</summary>
-                <textarea id="wsHandshakeHeaders" class="ws-handshake-editor" rows="4" placeholder="header-name: value" spellcheck="false"></textarea>
+                <textarea id="wsHandshakeHeaders" class="ws-handshake-editor" rows="4" placeholder="header-name: value" spellcheck="false" aria-label="WebSocket handshake headers"></textarea>
               </details>
             </div>
             <div class="pane-resizer" id="wsReplayPaneResizer" aria-hidden="true"></div>
