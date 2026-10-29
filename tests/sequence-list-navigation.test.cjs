@@ -30,7 +30,7 @@ function fixture() {
   const nodes = new Map([['sequenceListBody', list]]);
   document.getElementById = id => nodes.get(id) || nodes.set(id, node()).get(id);
   let flush = async () => true; let saves = 0; let deletes = 0; let errors = 0;
-  const c = loadFunctions(['renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue', 'syncSequenceRunButton', 'selectSequence', 'bumpSequenceDraftVersion'], {
+  const c = loadFunctions(['sequenceExtractionGuidance', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue', 'syncSequenceRunButton', 'selectSequence', 'bumpSequenceDraftVersion'], {
     document, state, escapeHtml: value => String(value).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;'),
     formatTimestamp: String, normalizeSequenceRunResult: () => null, jsonArray: v => Array.isArray(v) ? v : [],
     flushSequenceDraft: () => { saves++; return flush(); }, syncSequenceStepFromDom() {},

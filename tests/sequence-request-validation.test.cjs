@@ -77,7 +77,7 @@ function fixture({ labels = ['Start', 'Sign in', 'Finish'], invalid = [1], store
   } });
   container.querySelectorAll = selector => selector === '.sequence-step-card' ? cards
     : selector === '.step-move' ? cards.flatMap(card => card.moves) : [];
-  const names = ['renderSequencePanel', 'sequenceDisplayName', 'sequenceNameInputValue', 'updateSequenceNameFromInput',
+  const names = ['sequenceExtractionGuidance', 'renderSequencePanel', 'sequenceDisplayName', 'sequenceNameInputValue', 'updateSequenceNameFromInput',
     'syncSequenceRunButton', 'normalizeSequenceRunResult', 'addSequenceStep', 'moveSequenceStep', 'markSequenceDraftDirty',
     'bumpSequenceDraftVersion', 'syncSequenceStepFromDom', 'currentSequenceSessionId', 'isCurrentSequenceSession',
     'isCurrentSequenceRun', 'runCurrentSequence', 'buildEditableRawRequest', 'parseEditableRawRequest', 'splitRawHttpMessage',

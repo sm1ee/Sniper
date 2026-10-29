@@ -3466,7 +3466,7 @@ body.pane-resizing-y {
 }
 .sequence-step-card .extraction-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 72px minmax(0, 1.3fr) 28px;
+  grid-template-columns: minmax(0, 1fr) 88px minmax(0, 1.3fr) 28px;
   align-items: end;
   gap: 6px;
   margin-top: 8px;
@@ -3477,6 +3477,13 @@ body.pane-resizing-y {
   min-width: 0;
   color: var(--text-soft);
   font-size: var(--font-xs);
+}
+.sequence-step-card .extraction-help {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  overflow-wrap: anywhere;
 }
 .sequence-step-card .extraction-row input,
 .sequence-step-card .extraction-row select {

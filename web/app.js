@@ -19123,6 +19123,20 @@ function removeExtractionRule(stepIndex, ruleIndex) {
   renderSequencePanel();
 }
 
+function sequenceExtractionGuidance(rule) {
+  if (rule.source === "response_header") {
+    return { label: "Header name", placeholder: "X-Example", help: "Name only; saves its full value." };
+  }
+  // Imported rules can use group 0 or a later capture; do not describe every
+  // rule as the UI's group-1 default or normalize its saved group.
+  const group = rule.group ?? 1;
+  return {
+    label: "Body regex",
+    placeholder: group === 1 ? "csrf=([a-z]+)" : group === 0 ? "csrf=[a-z]+" : `Regex with capture group ${group}`,
+    help: group === 0 ? "Saves the whole match (group 0)." : `Saves capture group ${group}.`,
+  };
+}
+
 function sequenceRequestErrorMessage(step, index, error) {
   const label = String(step.label || "").trim();
   return `Step ${index + 1}${label ? ` (${label})` : ""} raw HTTP request: ${error}`;
@@ -19173,6 +19187,14 @@ function syncSequenceStepFromDom({ allowInvalidRequests = false } = {}) {
       if (varInput) rule.variable_name = varInput.value;
       if (sourceSelect) rule.source = sourceSelect.value;
       if (patternInput) rule.pattern = patternInput.value;
+      // Source changes update this row in place, keeping every live draft
+      // control and caret intact rather than rebuilding the editor.
+      const guidance = sequenceExtractionGuidance(rule);
+      const patternLabel = row.querySelector(".ext-pattern-label");
+      const patternHelp = row.querySelector(".extraction-help");
+      if (patternLabel) patternLabel.textContent = guidance.label;
+      if (patternInput) patternInput.placeholder = guidance.placeholder;
+      if (patternHelp) patternHelp.textContent = guidance.help;
     });
   });
   // Finish syncing every draft before reporting the first invalid request.
@@ -19495,10 +19517,13 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
         ? sequenceRequestErrorMessage(step, idx, step.request_parse_error)
         : "";
       const requestErrorId = `sequenceStepRequestError-${idx}`;
-      const extractionsHtml = step.extractions.map((rule, rIdx) => `
+      const extractionsHtml = step.extractions.map((rule, rIdx) => {
+        const guidance = sequenceExtractionGuidance(rule);
+        const helpId = `sequenceExtractionHelp-${idx}-${rIdx}`;
+        return `
         <div class="extraction-row">
-          <label class="extraction-field"><span>Variable</span>
-            <input class="ext-var" placeholder="Variable name" value="${escapeHtml(rule.variable_name)}" />
+          <label class="extraction-field"><span>Variable name</span>
+            <input class="ext-var" placeholder="token" value="${escapeHtml(rule.variable_name)}" />
           </label>
           <label class="extraction-field"><span>Source</span>
             <select class="ext-source">
@@ -19506,12 +19531,14 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
               <option value="response_header"${rule.source === "response_header" ? " selected" : ""}>Header</option>
             </select>
           </label>
-          <label class="extraction-field"><span>Pattern / header</span>
-            <input class="ext-pattern" placeholder="Regex / header name" value="${escapeHtml(rule.pattern)}" />
+          <label class="extraction-field"><span class="ext-pattern-label">${escapeHtml(guidance.label)}</span>
+            <input class="ext-pattern" placeholder="${escapeHtml(guidance.placeholder)}" aria-describedby="${helpId}" value="${escapeHtml(rule.pattern)}" />
           </label>
           <button class="secondary-action ext-remove" data-step="${idx}" data-rule="${rIdx}" title="Remove extraction" aria-label="Remove extraction ${rIdx + 1} from step ${idx + 1}">&times;</button>
+          <p class="extraction-help" id="${helpId}">${escapeHtml(guidance.help)}</p>
         </div>
-      `).join("");
+      `;
+      }).join("");
 
       return `<div class="sequence-step-card" data-step-idx="${idx}" data-step-id="${escapeHtml(step.id)}">
         <div class="step-header">

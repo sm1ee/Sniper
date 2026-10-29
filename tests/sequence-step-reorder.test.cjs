@@ -72,7 +72,7 @@ function fixture(count = 3) {
   const requests = [], saves = [], creates = [], runs = [], errors = [], notices = [];
   const savePromises = [], newPromises = [], runPromises = [];
   let uuid = 0;
-  const c = loadFunctions(['moveSequenceStep', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue',
+  const c = loadFunctions(['moveSequenceStep', 'sequenceExtractionGuidance', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue',
     'syncSequenceRunButton', 'normalizeSequenceRunResult', 'sequenceRequestErrorMessage', 'markSequenceDraftDirty', 'bumpSequenceDraftVersion', 'syncSequenceStepFromDom',
     'currentSequenceSessionId', 'isCurrentSequenceSession', 'sequenceSessionPath', 'loadSequences', 'flushSequenceDraft', 'createNewSequence',
     'runCurrentSequence', 'isCurrentSequenceRun', 'onClickWithProgress', 'withButtonProgress', 'requireOkResponse', 'escapeHtml'], {

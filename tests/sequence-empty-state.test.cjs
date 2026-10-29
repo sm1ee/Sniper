@@ -22,7 +22,7 @@ function fixture(definitions, editing = null) {
   };
   let nextId = 0;
   const c = loadFunctions([
-    "renderSequencePanel", "renderSequenceList", "sequenceDisplayName", "sequenceNameInputValue", "syncSequenceRunButton",
+    "sequenceExtractionGuidance", "renderSequencePanel", "renderSequenceList", "sequenceDisplayName", "sequenceNameInputValue", "syncSequenceRunButton",
     "addSequenceStep", "removeSequenceStep", "markSequenceDraftDirty", "bumpSequenceDraftVersion", "escapeHtml",
   ], {
     document, state, formatTimestamp: String, normalizeSequenceRunResult: () => null,

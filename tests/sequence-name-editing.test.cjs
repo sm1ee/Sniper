@@ -61,7 +61,7 @@ function fixture(name = 'Original name') {
   } });
   container.querySelectorAll = selector => selector === '.sequence-step-card' ? cards : [];
   nodes.set('sequenceStepsContainer', container);
-  const c = loadFunctions(['renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue',
+  const c = loadFunctions(['sequenceExtractionGuidance', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue',
     'updateSequenceNameFromInput', 'syncSequenceRunButton', 'normalizeSequenceRunResult', 'bumpSequenceDraftVersion',
     'markSequenceDraftDirty', 'syncSequenceStepFromDom', 'currentSequenceSessionId', 'isCurrentSequenceSession',
     'sequenceSessionPath', 'loadSequences', 'flushSequenceDraft', 'selectSequence', 'createNewSequence',

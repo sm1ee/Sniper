@@ -50,7 +50,7 @@ function fixture({ delaySave = false } = {}) {
   } });
   container.querySelectorAll = selector => selector === '.sequence-step-card' ? cards : [];
   nodes.set('sequenceStepsContainer', container);
-  const c = loadFunctions(['runCurrentSequence', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue', 'syncSequenceRunButton',
+  const c = loadFunctions(['runCurrentSequence', 'sequenceExtractionGuidance', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue', 'syncSequenceRunButton',
     'selectSequence', 'flushSequenceDraft', 'bumpSequenceDraftVersion', 'markSequenceDraftDirty',
     'currentSequenceSessionId', 'isCurrentSequenceSession', 'isCurrentSequenceRun',
     'normalizeSequenceRunResult', 'syncSequenceStepFromDom', 'sequenceRequestErrorMessage'], {
