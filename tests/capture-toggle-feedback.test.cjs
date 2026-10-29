@@ -130,6 +130,128 @@ async function deferCaptureBody(f) {
 
 for (const capturing of [true, false]) {
   const action = capturing ? "pause" : "resume";
+  for (const [shape, runtime] of [
+    ["null", null], ["missing field", {}], ["array", []],
+    ["null field", { http_capture_enabled: null }],
+    ["string field", { http_capture_enabled: "false" }],
+    ["numeric field", { http_capture_enabled: 0 }],
+  ]) {
+    for (const alreadyUnconfirmed of [false, true]) {
+      test(`${action} successful ${shape} JSON cannot confirm capture${alreadyUnconfirmed ? " or clear earlier uncertainty" : ""}`, async () => {
+        const f = fixture(capturing), lastConfirmed = f.state.runtime;
+        if (alreadyUnconfirmed) await makeUnconfirmed(f);
+        const pending = f.click();
+        f.requests.at(-1).resolve({ ok: true, json: async () => runtime });
+        await pending;
+        assert.equal(f.state.runtime, lastConfirmed);
+        assert.equal(f.scopeChanges.length, 0, "invalid response cannot reach runtime consumers");
+        assertIdle(f, capturing, { unconfirmed: true });
+        assert.deepEqual(f.toasts.at(-1), ["Capture may have changed, but its current state could not be confirmed.", "error", 7000]);
+        assert.equal(f.reads.length, 0);
+        assert.equal(f.requests.length, alreadyUnconfirmed ? 2 : 1);
+      });
+    }
+
+    for (const reader of ["loadRuntimeSettings", "loadTargetSiteMap"]) {
+      test(`${action} ${reader} ${shape} JSON cannot replace runtime, clear uncertainty or advance acceptance`, async () => {
+        const f = fixture(capturing), lastConfirmed = f.state.runtime;
+        await makeUnconfirmed(f);
+        f.state._runtimeReadVersion = 7;
+        f.state._runtimeReadAcceptedVersion = 7;
+        f.state._runtimeReadAcceptedSessionId = "session-a";
+        const read = f.c[reader]();
+        f.reads[0].resolve({ ok: true, json: async () => runtime });
+        await assert.rejects(read, /valid capture state/i);
+        assert.equal(f.state.runtime, lastConfirmed);
+        assert.equal(f.state._runtimeReadAcceptedVersion, 7);
+        assert.equal(f.state._runtimeReadAcceptedSessionId, "session-a");
+        assert.equal(f.scopeChanges.length, 0);
+        assertIdle(f, capturing, { unconfirmed: true });
+      });
+
+      test(`${action} ${reader} ${shape} JSON during pending Capture response cannot suppress its later failure`, async () => {
+        const f = fixture(capturing), lastConfirmed = f.state.runtime;
+        const { pending, body } = await deferCaptureBody(f);
+        const read = f.c[reader]();
+        f.reads[0].resolve({ ok: true, json: async () => runtime });
+        await assert.rejects(read, /valid capture state/i);
+        body.reject(new Error("Delayed Capture response failed"));
+        await pending;
+        assert.equal(f.state.runtime, lastConfirmed);
+        assert.equal(f.state._runtimeReadAcceptedVersion || 0, 0);
+        assert.equal(f.state._runtimeReadAcceptedSessionId, undefined);
+        assertIdle(f, capturing, { unconfirmed: true });
+        assert.equal(f.toasts.length, 1);
+      });
+    }
+  }
+
+  for (const confirmed of [true, false]) {
+    test(`${action} minimal successful Boolean ${confirmed} remains a valid Capture response`, async () => {
+      const f = fixture(capturing);
+      await makeUnconfirmed(f);
+      const pending = f.click(), runtime = { http_capture_enabled: confirmed };
+      f.requests.at(-1).resolve({ ok: true, json: async () => runtime });
+      await pending;
+      assert.equal(f.state.runtime, runtime);
+      assertIdle(f, confirmed);
+      assert.equal(f.toasts.length, 1, "only the earlier unreadable response reports uncertainty");
+    });
+  }
+
+  test(`${action} invalid Capture response from a stale session cannot disturb its successor`, async () => {
+    const f = fixture(capturing), pending = f.click();
+    f.changeSession();
+    const runtime = f.state.runtime;
+    f.requests[0].resolve({ ok: true, json: async () => null });
+    await pending;
+    assert.equal(f.state.runtime, runtime);
+    assert.deepEqual(f.toasts, []);
+    assert.equal(f.scopeChanges.length, 0);
+    assertIdle(f, capturing);
+  });
+
+  for (const reader of ["loadRuntimeSettings", "loadTargetSiteMap"]) {
+    for (const owner of ["session", "workspace"]) {
+      test(`${action} invalid ${reader} response with stale ${owner} retains existing no-op behavior`, async () => {
+        const f = fixture(capturing), runtime = f.state.runtime;
+        await makeUnconfirmed(f);
+        const read = f.c[reader]();
+        if (owner === "session") f.changeSession();
+        else f.c.workspaceStateGeneration += 1;
+        f.reads[0].resolve({ ok: true, json: async () => ({}) });
+        await read;
+        if (owner === "session") {
+          assertIdle(f, capturing);
+          f.state.activeSession = { id: "session-a" };
+          f.state.runtime = runtime;
+          f.c.syncHttpCapturePill();
+        }
+        assert.equal(f.state.runtime, runtime);
+        assert.equal(f.state._runtimeReadAcceptedVersion || 0, 0);
+        assert.equal(f.state._runtimeReadAcceptedSessionId, undefined);
+        assert.equal(f.scopeChanges.length, 0);
+        assertIdle(f, capturing, { unconfirmed: true });
+      });
+    }
+  }
+
+  test(`${action} invalid compound Scope runtime cannot adopt otherwise successful paths`, async () => {
+    const f = fixture(capturing), runtime = f.state.runtime;
+    await makeUnconfirmed(f);
+    f.state.activeTool = "target";
+    const paths = f.state.targetSiteMap = [{ host: "cached.example.com" }];
+    const read = f.c.loadTargetSiteMap();
+    f.reads[0].resolve({ ok: true, json: async () => ({}) });
+    f.paths[0].resolve({ ok: true, json: async () => [{ host: "new.example.com" }] });
+    await assert.rejects(read, /valid capture state/i);
+    assert.equal(f.state.runtime, runtime);
+    assert.equal(f.state.targetSiteMap, paths);
+    assert.equal(f.state._runtimeReadAcceptedVersion || 0, 0);
+    assert.equal(f.scopeChanges.length, 0);
+    assertIdle(f, capturing, { unconfirmed: true });
+  });
+
   test(`${action} preserves confirmed status and blocks repeat clicks until success`, async () => {
     const f = fixture(capturing), initialRuntime = f.state.runtime;
     const pending = f.click();

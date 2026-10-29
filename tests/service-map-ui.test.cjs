@@ -355,7 +355,7 @@ for (const tool of ['target', 'map']) test(`${tool} loader only requests legacy 
     state, currentSessionId: () => 'session-one', workspaceStateGeneration: 0,
     els: { targetScopeEditor: { value: '' }, targetScopeExcludeEditor: { value: '' } },
     sessionQueryPath: (path, id) => `${path}?session_id=${id}`,
-    fetch: async url => { requests.push(url); return response(url.startsWith('/api/runtime') ? {} : []); },
+    fetch: async url => { requests.push(url); return response(url.startsWith('/api/runtime') ? { http_capture_enabled: true } : []); },
     requireOkResponse: async () => {}, jsonArray: value => value, syncTargetScopeDraft() {}, renderInterceptStatus() {}, renderProxySettings() {}, renderTarget() {},
   });
   await ctx.loadTargetSiteMap();

@@ -1690,6 +1690,7 @@ function bindEvents() {
       acceptedReadVersion = state._runtimeReadAcceptedVersion || 0;
       readingCaptureResponse = true;
       const runtime = await response.json();
+      if (typeof runtime?.http_capture_enabled !== "boolean") throw new Error("Runtime response did not include a valid capture state.");
       readingCaptureResponse = false;
       if (sessionId !== currentSessionId()) return;
       if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
@@ -5985,6 +5986,7 @@ async function loadRuntimeSettings() {
     // Both runtime readers share this watermark. A newer pending/failed read
     // does not invalidate useful data; only a newer accepted result does.
     if (!ownsRead() || readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof runtime?.http_capture_enabled !== "boolean") throw new Error("Runtime response did not include a valid capture state.");
     if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
     state._runtimeReadAcceptedVersion = readVersion;
     state._runtimeReadAcceptedSessionId = sessionId;
@@ -8327,6 +8329,7 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
     // Reject the whole compound result: old paths carry old scope badges.
     // This is a successful no-op, not a failed acknowledged scope save.
     if (readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof runtime?.http_capture_enabled !== "boolean") throw new Error("Runtime response did not include a valid capture state.");
     if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
     state._runtimeReadAcceptedVersion = readVersion;
     state._runtimeReadAcceptedSessionId = sessionId;
