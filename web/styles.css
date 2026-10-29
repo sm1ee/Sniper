@@ -3404,6 +3404,7 @@ body.pane-resizing-y {
 }
 .sequence-step-card .step-header input {
   flex: 1;
+  min-width: 0;
   background: var(--input-bg);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-s);
@@ -3418,8 +3419,20 @@ body.pane-resizing-y {
   cursor: pointer;
   font-size: 1rem;
 }
-.sequence-step-card .step-header button:hover {
+.sequence-step-card .step-header .step-remove:hover {
   color: var(--danger);
+}
+.sequence-step-card .step-move:not([aria-disabled="true"]):hover {
+  color: var(--accent);
+}
+.sequence-step-card .step-move[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sequence-step-card .step-move:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
 }
 .sequence-step-card textarea {
   width: 100%;

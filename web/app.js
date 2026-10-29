@@ -19036,6 +19036,56 @@ function removeSequenceStep(index) {
   renderSequencePanel();
 }
 
+function moveSequenceStep(index, direction) {
+  const steps = state.editingSequence?.steps;
+  if (!Array.isArray(steps) || !Number.isInteger(index) || ![-1, 1].includes(direction)) return false;
+  const nextIndex = index + direction;
+  if (index < 0 || index >= steps.length || nextIndex < 0 || nextIndex >= steps.length) return false;
+
+  const container = document.getElementById("sequenceStepsContainer");
+  const nameFocused = document.activeElement === document.getElementById("sequenceNameInput");
+  const selections = new Map();
+  container.querySelectorAll(".sequence-step-card").forEach((card) => {
+    selections.set(card.dataset.stepId, Array.from(card.querySelectorAll("input, textarea, select"), (field) => ({
+      focused: field === document.activeElement,
+      start: field.selectionStart,
+      end: field.selectionEnd,
+      direction: field.selectionDirection,
+    })));
+  });
+  // DOM fields still correspond to the old order. Sync before moving whole
+  // objects so invalid request drafts and extraction edits follow their step.
+  syncSequenceStepFromDom({ allowInvalidRequests: true });
+  const [moved] = steps.splice(index, 1);
+  steps.splice(nextIndex, 0, moved);
+  markSequenceDraftDirty();
+  renderSequencePanel();
+
+  let restoredFieldFocus = false;
+  let movedCard = null;
+  container.querySelectorAll(".sequence-step-card").forEach((card) => {
+    if (card.dataset.stepId === moved.id) movedCard = card;
+    const previous = selections.get(card.dataset.stepId) || [];
+    card.querySelectorAll("input, textarea, select").forEach((field, fieldIndex) => {
+      const selection = previous[fieldIndex];
+      if (!selection) return;
+      if (selection.focused) {
+        field.focus({ preventScroll: true });
+        restoredFieldFocus = true;
+      }
+      if (typeof selection.start === "number" && typeof selection.end === "number") {
+        field.setSelectionRange(selection.start, selection.end, selection.direction);
+      }
+    });
+  });
+  // Keep keyboard activation on the same action even at an unavailable edge:
+  // repeated Enter/Space must neither reverse the move nor type into a label.
+  if (!restoredFieldFocus && !nameFocused) {
+    movedCard?.querySelector(`.step-move[data-move-direction="${direction}"]`)?.focus();
+  }
+  return true;
+}
+
 function addExtractionRule(stepIndex) {
   if (!state.editingSequence) return;
   const step = state.editingSequence.steps[stepIndex];
@@ -19413,6 +19463,8 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
         <div class="step-header">
           <span class="step-number">#${idx + 1}</span>
           <input class="step-label" value="${escapeHtml(step.label)}" placeholder="Step label" aria-label="Step ${idx + 1} label" />
+          <button class="step-move" type="button" data-move-step="${idx}" data-move-direction="-1" title="Move step ${idx + 1} up" aria-label="Move step ${idx + 1} up" aria-disabled="${idx === 0}">&uarr;</button>
+          <button class="step-move" type="button" data-move-step="${idx}" data-move-direction="1" title="Move step ${idx + 1} down" aria-label="Move step ${idx + 1} down" aria-disabled="${idx === editing.steps.length - 1}">&darr;</button>
           <button class="step-remove" data-remove-step="${idx}" title="Remove step" aria-label="Remove step ${idx + 1}">&times;</button>
         </div>
         <textarea class="step-request-text" spellcheck="false" aria-label="Step ${idx + 1} raw HTTP request">${escapeHtml(reqText)}</textarea>
@@ -19433,6 +19485,11 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
       stepsContainer.addEventListener("change", markSequenceDirty);
     }
 
+    stepsContainer.querySelectorAll(".step-move").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        moveSequenceStep(Number(btn.dataset.moveStep), Number(btn.dataset.moveDirection));
+      });
+    });
     stepsContainer.querySelectorAll(".step-remove").forEach((btn) => {
       btn.addEventListener("click", () => {
         syncSequenceStepFromDom({ allowInvalidRequests: true });
