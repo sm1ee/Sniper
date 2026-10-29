@@ -92,4 +92,3 @@ test('manual first use joins initialized editor inputs to preflight without an i
   assert.equal(typeof f.c.runFuzzerAttack,'undefined');
   assert.equal(f.requests,0);
 });
-
