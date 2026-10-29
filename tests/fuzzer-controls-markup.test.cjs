@@ -115,15 +115,15 @@ function disclosureDepthAt(id) {
   const prefix = fuzzer.slice(0, fuzzer.indexOf(`id="${id}"`));
   return [...prefix.matchAll(/<details\b[^>]*>|<\/details>/g)].reduce((depth, [tag]) => depth + (tag.startsWith('</') ? -1 : 1), 0);
 }
-test('common value and file actions are immediate while advanced options and explanations stay collapsed', () => {
-  for (const id of ['fuzzerPayloadImportMode', 'fuzzerMarkSelectionButton', 'fuzzerRemoveMarkerButton', 'fuzzerClearMarkersButton', 'fuzzerImportPayloadButton', 'startFuzzerButton']) {
+test('common value and file actions and payload guidance are immediate while advanced tools stay collapsed', () => {
+  for (const id of ['fuzzerPayloadImportMode', 'fuzzerMarkSelectionButton', 'fuzzerRemoveMarkerButton', 'fuzzerClearMarkersButton', 'fuzzerImportPayloadButton', 'startFuzzerButton', 'fuzzerPayloadHelp']) {
     assert.equal(disclosureDepthAt(id), 0, `${id} should not require opening a disclosure`);
   }
-  for (const id of ['fuzzerCandidateSelect', 'fuzzerMarkCandidateButton', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadPreset', 'fuzzerRangeStart', 'fuzzerPreviewNotes', 'fuzzerPayloadHelp']) {
+  for (const id of ['fuzzerCandidateSelect', 'fuzzerMarkCandidateButton', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'fuzzerPayloadPreset', 'fuzzerRangeStart', 'fuzzerPreviewNotes']) {
     assert.equal(disclosureDepthAt(id), 1, `${id} should remain in a closed disclosure`);
   }
   assert.doesNotMatch(fuzzer, /Send a captured request to Fuzzer, mark positions, load payloads/);
-  assert.match(fuzzer, /placeholder="Paste payloads, one per line"/);
+  assert.match(fuzzer, /placeholder="One replacement value per line"/);
 });
 
 test('active-filter indication remains in summary and one-click clearing is outside closed details', () => {
@@ -189,14 +189,47 @@ test('value helper is a candidate-hidden closed disclosure beside the Request ed
   assert.match(fuzzer, /id="fuzzerValueRow"[^>]*>\s*<summary>Choose a value<\/summary>/);
 });
 
-test('existing generators and payload help belong to a closed Payloads-local disclosure', () => {
+test('existing generators remain in a closed Payloads-local disclosure', () => {
   assert.equal(byId('fuzzerPayloadTools').tag, 'details');
   assert.ok(!('open' in byId('fuzzerPayloadTools').attrs));
-  for (const id of ['fuzzerPayloadPreset', 'fuzzerApplyPresetButton', 'fuzzerRangeStart', 'fuzzerRangeEnd', 'fuzzerRangeStep', 'fuzzerGenerateRangeButton', 'fuzzerPayloadHelp']) {
+  for (const id of ['fuzzerPayloadPreset', 'fuzzerApplyPresetButton', 'fuzzerRangeStart', 'fuzzerRangeEnd', 'fuzzerRangeStep', 'fuzzerGenerateRangeButton']) {
     assert.equal(inCard(id, 'fuzzer-payloads-card'), true, id);
     assert.equal(disclosureDepthAt(id), 1);
   }
   assert.match(fuzzer, /id="fuzzerPayloadTools"[^>]*>\s*<summary>Generate payloads<\/summary>/);
+});
+
+test('manual payload input names replacement values without opening a generator', () => {
+  assert.match(fuzzer, /<div class="fuzzer-payload-input-bar">\s*<span class="fuzzer-input-label">Replace with<\/span>/);
+  assert.match(fuzzer, /<h2><label for="fuzzerPayloadsEditor">Payloads<\/label><\/h2>/);
+  assert.equal(disclosureDepthAt('fuzzerPayloadsEditor'), 0);
+  assert.equal(byId('fuzzerPayloadsEditor').tag, 'textarea');
+  assert.equal(byId('fuzzerPayloadsEditor').attrs.placeholder, 'One replacement value per line');
+  assert.equal(byId('fuzzerPayloadsEditor').attrs.spellcheck, 'false');
+});
+
+test('payload whitespace guidance stays outside the generator after the editor and remains its accessible description', () => {
+  const help = byId('fuzzerPayloadHelp');
+  assert.equal(inCard('fuzzerPayloadHelp', 'fuzzer-payloads-card'), true);
+  assert.equal(disclosureDepthAt('fuzzerPayloadHelp'), 0, 'pasted text needs the same guidance as generated payloads');
+  assert.equal(help.tag, 'p');
+  assert.match(help.attrs.class, /\bfuzzer-help\b/);
+  assert.match(help.attrs.class, /\bfuzzer-editor-help\b/);
+  assert.ok(!('hidden' in help.attrs)); assert.ok(!('tabindex' in help.attrs));
+  assert.notEqual(help.attrs['aria-hidden'], 'true');
+  assert.equal(byId('fuzzerPayloadsEditor').attrs['aria-describedby'], help.attrs.id);
+  assert.match(fuzzer, /<textarea id="fuzzerPayloadsEditor"[^>]*><\/textarea>\s*<\/div>\s*<p class="fuzzer-help fuzzer-editor-help" id="fuzzerPayloadHelp">One payload per line\. Spaces are preserved\. Blank lines are empty payloads; a final line break is ignored\.<\/p>/);
+  assert.ok(fuzzer.indexOf('id="fuzzerPayloadsEditor"') < fuzzer.indexOf('id="fuzzerPayloadHelp"'), 'the input must precede the explanatory text at short heights');
+});
+
+test('visible payload guidance uses compact wrapping help without reducing editor minimums or adding a scroller', () => {
+  assert.match(css, /\.fuzzer-shell \.fuzzer-help\s*\{[^}]*font-size: var\(--font-xs\);[^}]*line-height: 1\.5;[^}]*overflow-wrap: anywhere;/);
+  assert.match(css, /\.fuzzer-shell \.fuzzer-editor-help\s*\{[^}]*flex: 0 0 auto;[^}]*padding: 6px 10px;/);
+  assert.match(css, /\.fuzzer-payload-input-bar\s*\{[^}]*flex-wrap: wrap;/);
+  assert.match(css, /\.fuzzer-top-row \.editor-panel\s*\{[^}]*flex: 1 0 80px;[^}]*min-height: 80px;/);
+  const narrow = css.slice(css.indexOf('@media (max-width: 900px)'));
+  assert.match(narrow, /\.fuzzer-top-row \.editor-panel\s*\{[^}]*min-height: 100px;/);
+  assert.match(css, /\.fuzzer-top-row > \.fuzzer-template-card,\s*\.fuzzer-top-row > \.fuzzer-payloads-card\s*\{[^}]*overflow: auto;/);
 });
 
 test('only execution settings remain in Options and local helpers share one card scroller', () => {

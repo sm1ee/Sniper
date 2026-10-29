@@ -1289,7 +1289,7 @@
                   </div>
                 </header>
                 <div class="fuzzer-payload-input-bar">
-                  <span class="fuzzer-input-label">One per line</span>
+                  <span class="fuzzer-input-label">Replace with</span>
                   <label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">
                     <span title="Applies to imported files, presets and generated ranges">On import</span>
                     <select id="fuzzerPayloadImportMode">
@@ -1321,12 +1321,12 @@
                       </div>
                       <button class="secondary-action" id="fuzzerGenerateRangeButton" type="button">Generate range</button>
                     </fieldset>
-                    <p class="fuzzer-help" id="fuzzerPayloadHelp">One payload per line. Spaces are preserved. Blank lines are empty payloads; a final line break is ignored.</p>
                   </div>
                 </details>
                 <div class="editor-panel">
-                  <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="Paste payloads, one per line" aria-describedby="fuzzerPayloadHelp"></textarea>
+                  <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="One replacement value per line" aria-describedby="fuzzerPayloadHelp"></textarea>
                 </div>
+                <p class="fuzzer-help fuzzer-editor-help" id="fuzzerPayloadHelp">One payload per line. Spaces are preserved. Blank lines are empty payloads; a final line break is ignored.</p>
               </section>
             </div>
             <!-- Horizontal resizer between top row and results -->
