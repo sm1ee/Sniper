@@ -1404,9 +1404,10 @@
               </div>
               <div class="fuzzer-result-status" id="fuzzerResultStatusRow">
                 <p class="fuzzer-help fuzzer-filter-count" id="fuzzerResultFilterCount" role="status" aria-live="polite">No results to filter.</p>
+                <span class="fuzzer-help" id="fuzzerResultKeyboardHelp">↑/↓ select · Enter reopens selected details.</span>
                 <button class="secondary-action hidden" id="fuzzerClearResultFiltersButton" type="button">Clear filters</button>
               </div>
-              <div class="history-table-shell" style="flex:1;min-height:0;overflow:auto">
+              <div class="history-table-shell" style="flex:1;min-height:0;overflow:auto" aria-describedby="fuzzerResultKeyboardHelp" title="↑/↓ select · Enter reopens selected details.">
                 <table class="mini-table fuzzer-results-table">
                   <thead id="fuzzerResultsHead">
                     <tr>

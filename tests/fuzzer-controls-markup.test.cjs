@@ -23,6 +23,24 @@ function values(id) {
   return [...contents.matchAll(/<option value="([^"]*)"/g)].map(([, value]) => value);
 }
 
+test('result keyboard help is concise, visible and linked consistently to the focusable shell', () => {
+  const hint = byId('fuzzerResultKeyboardHelp');
+  assert.equal(hint.tag, 'span');
+  assert.deepEqual(hint.attrs, { class: 'fuzzer-help', id: 'fuzzerResultKeyboardHelp' });
+  assert.equal((html.match(/\bid="fuzzerResultKeyboardHelp"/g) || []).length, 1);
+  const text = '↑/↓ select · Enter reopens selected details.';
+  assert.match(fuzzer, new RegExp(`<span class="fuzzer-help" id="fuzzerResultKeyboardHelp">${text}</span>`));
+  const shell = tags.filter(node => node.attrs['aria-describedby'] === 'fuzzerResultKeyboardHelp');
+  assert.equal(shell.length, 1);
+  assert.equal(shell[0].attrs.class, 'history-table-shell');
+  assert.equal(shell[0].attrs.title, text);
+  assert.equal(shell[0].attrs.style, 'flex:1;min-height:0;overflow:auto');
+  const status = fuzzer.slice(fuzzer.indexOf('<div class="fuzzer-result-status"'), fuzzer.indexOf('<table class="mini-table fuzzer-results-table">'));
+  assert.match(status, /id="fuzzerResultKeyboardHelp"/);
+  assert.match(css, /\.fuzzer-result-status\s*\{[^}]*flex-wrap:\s*wrap;/);
+  assert.match(css, /\.fuzzer-shell\.fuzzer-results-empty \.fuzzer-results-card > \.fuzzer-result-status/);
+});
+
 const buttons = ['resetFuzzerButton', 'stopFuzzerButton', 'startFuzzerButton', 'fuzzerMarkSelectionButton', 'fuzzerRemoveMarkerButton', 'fuzzerClearMarkersButton', 'fuzzerUndoMarkerButton',
   'fuzzerMarkCandidateButton', 'fuzzerImportPayloadButton', 'fuzzerApplyPresetButton', 'fuzzerGenerateRangeButton',
   'fuzzerCompareBaseButton', 'fuzzerCompareButton', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton'];

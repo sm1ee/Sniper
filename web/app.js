@@ -2292,7 +2292,7 @@ function bindEvents() {
     }
   });
 
-  // Fuzzer results keyboard navigation (↑↓)
+  // Fuzzer results keyboard navigation (↑↓) and selected-row activation (Enter)
   if (fuzzerResultsShell) {
     fuzzerResultsShell.setAttribute("tabindex", "0");
     let fuzzerScrollRaf = 0;
@@ -2304,6 +2304,19 @@ function bindEvents() {
       });
     });
     fuzzerResultsShell.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        if (e.repeat || e.defaultPrevented || e.isComposing
+          || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey
+          || getActiveModalAction() || e.target !== fuzzerResultsShell
+          || document.activeElement !== fuzzerResultsShell || isEditableTarget(e.target)) return;
+        const results = visibleFuzzerResults();
+        const selectedIndex = fuzzerSelectedResultIndex(results);
+        if (selectedIndex < 0 || selectedIndex >= results.length) return;
+        e.preventDefault();
+        // Pointer reactivation already retries a selected row's failed detail.
+        selectFuzzerResultIndex(selectedIndex, { scroll: true });
+        return;
+      }
       const step = e.isComposing ? 0 : tableArrowStep(e);
       if (!step) return;
       e.preventDefault();
