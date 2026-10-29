@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const vm = require("node:vm");
-const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
+const { appSource, loadFunctions, toggleButton } = require("./frontend-test-helpers.cjs");
 
 const emptyMessage = "No findings yet. Browse with the proxy to start scanning.";
 const filteredMessage = "No findings match your filters.";
@@ -28,7 +28,7 @@ function fixture(data = [row("alpha", "Alpha saved entry"), row("beta", "Beta sa
     findingsFilterSeverity: { value: "" },
     findingsFilterCategory: { value: "", options: [{ value: "", dataset: {} }, { value: "header", dataset: {} }] },
     findingsFilterSearch: { value: "", addEventListener: (name, handler) => handlers.set(name, handler) },
-    findingsInScopeOnly: { checked: false },
+    findingsInScopeOnly: toggleButton(),
     findingsBadge: { textContent: "", title: "", classList: {
       toggle(name, enabled) { if (enabled) badgeClasses.add(name); else badgeClasses.delete(name); },
     } },

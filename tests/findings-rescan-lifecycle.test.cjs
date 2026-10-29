@@ -125,7 +125,7 @@ function fixture() {
       contentHidden: els.findingsDetailContent.classList.contains("hidden"),
       request: els.findingsReqView.innerHTML, response: els.findingsResView.innerHTML,
       table: els.findingsBody.innerHTML, badge: els.findingsBadge.textContent,
-      filters: [els.findingsFilterSearch.value, els.findingsFilterSeverity.value, els.findingsFilterCategory.value, els.findingsInScopeOnly.checked],
+      filters: [els.findingsFilterSearch.value, els.findingsFilterSeverity.value, els.findingsFilterCategory.value, els.findingsInScopeOnly.classList.contains("active")],
     });
   }
   async function acknowledge(request = requests.find(item => item.options?.method === "POST")) {

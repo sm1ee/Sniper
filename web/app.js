@@ -10265,7 +10265,7 @@ function getFilteredFindings() {
   const sevFilter = els.findingsFilterSeverity ? els.findingsFilterSeverity.value : "";
   const catFilter = els.findingsFilterCategory ? els.findingsFilterCategory.value : "";
   const searchTerm = els.findingsFilterSearch ? els.findingsFilterSearch.value.toLowerCase().trim() : "";
-  const inScopeOnly = els.findingsInScopeOnly ? els.findingsInScopeOnly.checked : false;
+  const inScopeOnly = els.findingsInScopeOnly ? els.findingsInScopeOnly.classList.contains("active") : false;
 
   let filtered = findingsData.filter((f) => {
     if (inScopeOnly && !isInScopeHost(f.host)) return false;
@@ -11345,7 +11345,7 @@ async function saveScannerQuickToggle() {
     syncQuickToggle(scannerQuickTogglePending.enabled);
     return;
   }
-  const enabled = els.scannerQuickToggle.checked;
+  const enabled = els.scannerQuickToggle.classList.contains("active");
   const sessionId = currentSessionId();
   if (!sessionId) {
     syncQuickToggle(!enabled);
@@ -11380,8 +11380,17 @@ async function saveScannerQuickToggle() {
 
 function syncQuickToggle(enabled) {
   if (els.scannerQuickToggle) {
-    els.scannerQuickToggle.checked = enabled;
+    setToggleButton(els.scannerQuickToggle, enabled);
+    els.scannerQuickToggle.title = enabled
+      ? "Scanning new traffic. Click to stop; existing findings stay."
+      : "Not scanning new traffic. Click to resume.";
   }
+}
+
+// The toolbar's on/off pills: "active" draws the state, aria-pressed reads it out.
+function setToggleButton(button, on) {
+  button.classList.toggle("active", on);
+  button.setAttribute("aria-pressed", String(on));
 }
 
 function updateFindingsSelection(newId) {
@@ -11731,7 +11740,10 @@ function bindFindingsEvents() {
     });
   }
   if (els.findingsInScopeOnly) {
-    els.findingsInScopeOnly.addEventListener("change", () => renderFindings());
+    els.findingsInScopeOnly.addEventListener("click", () => {
+      setToggleButton(els.findingsInScopeOnly, !els.findingsInScopeOnly.classList.contains("active"));
+      renderFindings();
+    });
   }
 
   // Arrow key navigation
@@ -11790,7 +11802,11 @@ function bindFindingsEvents() {
 
   // Quick toggle (on/off in toolbar)
   if (els.scannerQuickToggle) {
-    els.scannerQuickToggle.addEventListener("change", () => saveScannerQuickToggle());
+    // A button does not flip itself the way a checkbox did before "change".
+    els.scannerQuickToggle.addEventListener("click", () => {
+      syncQuickToggle(!els.scannerQuickToggle.classList.contains("active"));
+      saveScannerQuickToggle();
+    });
     // Sync initial state from server
     refreshScannerQuickToggle();
   }

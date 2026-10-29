@@ -5041,32 +5041,6 @@ button.utility-button.replay-tab-add {
   margin-left: auto;
 }
 
-.scanner-quick-toggle {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: var(--radius-md);
-  font-size: var(--font-xs);
-  color: var(--text-secondary);
-  user-select: none;
-}
-
-.scanner-quick-toggle:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.scanner-quick-toggle input[type="checkbox"] {
-  cursor: pointer;
-}
-
-.scanner-quick-toggle-label {
-  white-space: nowrap;
-}
-
-/* (findings-scope-toggle moved to toolbar-actions as scanner-quick-toggle) */
-
 .findings-toolbar .secondary-action,
 .findings-toolbar-actions .secondary-action {
   min-height: var(--control-h);

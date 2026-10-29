@@ -1,7 +1,7 @@
 // Saved list metadata only; no scanner, application runtime, or network calls.
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { loadFunctions } = require("./frontend-test-helpers.cjs");
+const { loadFunctions, toggleButton } = require("./frontend-test-helpers.cjs");
 
 const base = "2026-10-07T00:00:00";
 const record = (id, found_at, extra = {}) => ({
@@ -114,7 +114,7 @@ test("Findings time sorting preserves filters and excludes no additional saved r
   ];
   const c = fixture(rows, "asc", { els: {
     findingsFilterSeverity: { value: "high" }, findingsFilterCategory: { value: "header" },
-    findingsFilterSearch: { value: " Saved entry " }, findingsInScopeOnly: { checked: true },
+    findingsFilterSearch: { value: " Saved entry " }, findingsInScopeOnly: toggleButton(true),
   } });
   assert.deepEqual(ids(c.getFilteredFindings()), ["early", "late"]);
 });

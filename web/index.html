@@ -585,14 +585,8 @@
                 <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search" />
               </div>
               <div class="findings-toolbar-actions">
-                <label class="scanner-quick-toggle" title="Show only in-scope findings">
-                  <input id="findingsInScopeOnly" type="checkbox" />
-                  <span class="scanner-quick-toggle-label">In scope</span>
-                </label>
-                <label class="scanner-quick-toggle" title="Toggle Passive Scan">
-                  <input id="scannerQuickToggle" type="checkbox" checked />
-                  <span class="scanner-quick-toggle-label">Passive Scan</span>
-                </label>
+                <button class="scope-pill" id="findingsInScopeOnly" type="button" aria-pressed="false" title="Show only in-scope findings">In scope</button>
+                <button class="scope-pill scope-pill-run active" id="scannerQuickToggle" type="button" aria-pressed="true" title="Scanning new traffic. Click to stop; existing findings stay.">Passive Scan</button>
                 <button class="secondary-action" id="findingsSettingsButton" type="button" title="Detection Rules">&#9881;</button>
                 <button class="secondary-action" id="findingsRescanButton" type="button" title="Scan the retained history again with the current rules">Rescan</button>
                 <button class="secondary-action" id="findingsClearButton" type="button">Clear</button>
