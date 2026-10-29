@@ -288,8 +288,8 @@ for (const capturing of [true, false]) {
         await pending;
         assert.equal(f.state.runtime, currentRuntime);
         assert.deepEqual(f.scopeChanges, []);
-        assertIdle(f, capturing, { unconfirmed: failure === "JSON" && !stale });
-        const feedback = failure === "JSON"
+        assertIdle(f, capturing, { unconfirmed: ["network", "JSON"].includes(failure) && !stale });
+        const feedback = ["network", "JSON"].includes(failure)
           ? ["Capture may have changed, but its current state could not be confirmed.", "error", 7000]
           : [failure === "HTTP body" ? "Failed to change capture." : `Fixture ${failure} failure`, "error"];
         assert.deepEqual(f.toasts, stale ? [] : [feedback]);
@@ -297,14 +297,102 @@ for (const capturing of [true, false]) {
     }
   }
 
-  test(`${action} current-session failure without a message keeps the fallback feedback`, async () => {
+  test(`${action} response-less failure without a message reports uncertainty rather than definite failure`, async () => {
     const f = fixture(capturing), pending = f.click(), currentRuntime = f.state.runtime;
     f.requests[0].reject(new Error(""));
     await pending;
     assert.equal(f.state.runtime, currentRuntime);
-    assert.deepEqual(f.toasts, [["Failed to change capture.", "error"]]);
-    assertIdle(f, capturing);
+    assert.deepEqual(f.toasts, [["Capture may have changed, but its current state could not be confirmed.", "error", 7000]]);
+    assertIdle(f, capturing, { unconfirmed: true });
   });
+
+  test(`${action} fake acceptance with no response cannot leave a definitive old pill`, async () => {
+    const f = fixture(capturing), runtime = f.state.runtime, pending = f.click();
+    await f.click();
+    assert.equal(f.requests.length, 1, "repeated click cannot dispatch while outcome is pending");
+    const fakeAcceptedState = JSON.parse(f.requests[0].options.body).http_capture_enabled;
+    assert.equal(fakeAcceptedState, !capturing);
+    f.requests[0].reject(new TypeError("Response lost after fake acceptance"));
+    await pending;
+    assert.equal(f.state.runtime, runtime, "do not optimistically claim the fake outcome is confirmed");
+    assertIdle(f, capturing, { unconfirmed: true });
+    f.c.syncHttpCapturePill();
+    assertIdle(f, capturing, { unconfirmed: true });
+    assert.equal(f.reads.length, 0, "a transport failure never starts a reconciliation read");
+    assert.equal(f.requests.length, 1, "a transport failure never retries automatically");
+    assert.deepEqual(f.toasts, [["Capture may have changed, but its current state could not be confirmed.", "error", 7000]]);
+  });
+
+  test(`${action} transport uncertainty survives a repeated transport failure and definite refusal until explicit success`, async () => {
+    const f = fixture(capturing), runtime = f.state.runtime;
+    for (let index = 0; index < 2; index++) {
+      const pending = f.click();
+      f.requests[index].reject(new TypeError("No response"));
+      await pending;
+      assert.equal(f.state.runtime, runtime);
+      assertIdle(f, capturing, { unconfirmed: true });
+    }
+    const refused = f.click();
+    const refuse = await deferFailure(f.requests[2], "HTTP");
+    refuse(); await refused;
+    assert.deepEqual(f.toasts.at(-1), ["Fixture HTTP failure", "error"]);
+    assertIdle(f, capturing, { unconfirmed: true });
+    const retry = f.click();
+    f.requests[3].resolve({ ok: true, json: async () => ({ http_capture_enabled: !capturing }) });
+    await retry;
+    assertIdle(f, !capturing);
+    assert.equal(f.reads.length, 0);
+    assert.equal(f.requests.length, 4, "only the four explicit actions dispatched");
+  });
+
+  for (const reader of ["loadRuntimeSettings", "loadTargetSiteMap"]) {
+    test(`${action} accepted ${reader} while POST is unresolved cannot settle a later no-response failure`, async () => {
+      const f = fixture(capturing), pending = f.click();
+      const read = f.c[reader]();
+      const runtime = { http_capture_enabled: capturing, marker: "before fake acceptance" };
+      f.reads[0].resolve({ ok: true, json: async () => runtime });
+      await read;
+      assert.equal(f.state._runtimeReadAcceptedVersion, 1);
+      assert.equal(f.state._runtimeReadAcceptedSessionId, "session-a");
+      // The fake server can apply the POST after this read but lose its reply.
+      const fakeAcceptedState = JSON.parse(f.requests[0].options.body).http_capture_enabled;
+      assert.equal(fakeAcceptedState, !capturing);
+      f.requests[0].reject(new TypeError("Lost response after fake acceptance"));
+      await pending;
+      assert.equal(f.state.runtime, runtime);
+      assertIdle(f, capturing, { unconfirmed: true });
+      assert.equal(f.toasts.length, 1);
+      assert.equal(f.requests.length, 1);
+      assert.equal(f.reads.length, 1);
+    });
+
+    test(`${action} old ${reader} finishing after transport failure cannot clear its uncertainty`, async () => {
+      const f = fixture(capturing), runtime = f.state.runtime, pending = f.click();
+      const oldRead = f.c[reader]();
+      f.requests[0].reject(new TypeError("No response"));
+      await pending;
+      assertIdle(f, capturing, { unconfirmed: true });
+      f.reads[0].resolve({ ok: true, json: async () => ({ http_capture_enabled: capturing }) });
+      await oldRead;
+      assert.equal(f.state.runtime, runtime);
+      assert.equal(f.state._runtimeReadAcceptedVersion || 0, 0);
+      assertIdle(f, capturing, { unconfirmed: true });
+    });
+
+    test(`${action} existing ${reader} started after transport failure can confirm capture`, async () => {
+      const f = fixture(capturing), pending = f.click();
+      f.requests[0].reject(new TypeError("No response"));
+      await pending;
+      assertIdle(f, capturing, { unconfirmed: true });
+      const read = f.c[reader](), runtime = { http_capture_enabled: !capturing };
+      f.reads[0].resolve({ ok: true, json: async () => runtime });
+      await read;
+      assert.equal(f.state.runtime, runtime);
+      assertIdle(f, !capturing);
+      assert.equal(f.requests.length, 1);
+      assert.equal(f.reads.length, 1);
+    });
+  }
 
   test(`${action} a failure after a readable response is not mislabeled as unconfirmed capture`, async () => {
     const f = fixture(capturing), pending = f.click();

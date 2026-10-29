@@ -1682,10 +1682,12 @@ function bindEvents() {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
     const next = !state.runtime?.http_capture_enabled;
+    let receivedCaptureResponse = false;
     let readingCaptureResponse = false;
     let acceptedReadVersion = 0;
     try {
       const response = await postRuntimeSettings(sessionWritePath("/api/runtime", sessionId), { http_capture_enabled: next });
+      receivedCaptureResponse = true;
       await requireOkResponse(response, "Failed to change capture.");
       acceptedReadVersion = state._runtimeReadAcceptedVersion || 0;
       readingCaptureResponse = true;
@@ -1699,10 +1701,10 @@ function bindEvents() {
     } catch (error) {
       if (sessionId !== currentSessionId()) return;
       console.error(error);
-      if (readingCaptureResponse) {
-        // A later accepted GET already confirmed the state while this response
-        // body was pending. Its result must not become uncertain again.
-        if (state._runtimeReadAcceptedSessionId === sessionId
+      if (!receivedCaptureResponse || readingCaptureResponse) {
+        // Only a read accepted after successful headers can settle a body
+        // failure. A read during a response-less POST may predate its mutation.
+        if (receivedCaptureResponse && state._runtimeReadAcceptedSessionId === sessionId
           && (state._runtimeReadAcceptedVersion || 0) > acceptedReadVersion) {
           syncHttpCapturePill({ confirmed: true });
           return;
