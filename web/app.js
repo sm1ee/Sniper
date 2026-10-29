@@ -21856,13 +21856,29 @@ function renderReplayTabs(options = {}) {
         if (!ownsRename()) return;
         // Composition keys edit the label, rather than commit or cancel it.
         if (event.isComposing) return;
+        if (event.key !== "Enter" && event.key !== "Escape") return;
+        const restoreFocus = document.activeElement === nameInput;
+        event.preventDefault();
         if (event.key === "Enter") {
-          event.preventDefault();
           commitReplayTabRename(id, nameInput.value);
-        } else if (event.key === "Escape") {
-          event.preventDefault();
+        } else {
           state.replayRenamingTabId = null;
           renderReplayTabs();
+        }
+        // Only keyboard completion returns to the label. A blur belongs to its
+        // destination, and a newer workspace, modal or focus must keep control.
+        if (restoreFocus && owner.sessionId === currentSessionId()
+          && owner.generation === workspaceStateGeneration && state.replayTabs.includes(owner.tab)
+          && owner.activeTabId === state.activeReplayTabId && state.activeTool === "replay"
+          && !state.replayRenamingTabId && !getActiveModalAction()
+          && (document.activeElement === document.body
+            || document.activeElement === nameInput && !nameInput.isConnected)) {
+          const button = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab"))
+            .find((element) => element.dataset.replayTabId === id)?.querySelector(".replay-tab-button");
+          if (button?.isConnected && !button.disabled && button.tabIndex >= 0
+            && button.getClientRects().length && window.getComputedStyle(button).visibility !== "hidden") {
+            button.focus({ preventScroll: true });
+          }
         }
       });
       nameInput.addEventListener("blur", () => {
