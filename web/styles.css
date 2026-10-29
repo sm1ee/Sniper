@@ -4579,11 +4579,27 @@ body.pane-resizing-y {
   white-space: nowrap;
 }
 
-/* Burp's "Wrapped" tab view: every tab on screen, on as many lines as needed. */
+/* Burp's "Wrapped" tab view: every tab on screen, on as many lines as needed.
+   Each row scrolls in place past what the window can spare. The request and
+   response panes keep a minimum height (side by side, or stacked at 1240px and
+   below), and a taller strip pushed them past the window, where a focus change
+   scrolled the strip out of sight. Three lines always stay visible. */
 .replay-tab-rows.wrap > .replay-tab-list {
   flex-wrap: wrap;
-  overflow: visible;
+  max-height: max(78px, calc(100vh - 550px));
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-bottom: 0;
+}
+
+.replay-tab-rows.wrap > .replay-tab-list-pinned {
+  max-height: 78px;
+}
+
+@media (max-width: 1240px) {
+  .replay-tab-rows.wrap > .replay-tab-list:not(.replay-tab-list-pinned) {
+    max-height: max(78px, calc(100vh - 805px));
+  }
 }
 
 .replay-tab-settings > summary {
