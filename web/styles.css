@@ -9156,3 +9156,9 @@ button.utility-button.replay-tab-add {
   flex: 0 1 160px;
 }
 .fuzzer-import-mode > span { white-space: nowrap; }
+
+/* Generic panel clipping must not trap a focus-scrolled Results header. */
+.fuzzer-shell .fuzzer-results-card {
+  overflow-y: auto;
+  overflow-x: hidden;
+}

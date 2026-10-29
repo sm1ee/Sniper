@@ -127,3 +127,16 @@ test('response metadata is bounded without consuming the detail editor or removi
   const modes = [...html.matchAll(/<button\b[^>]*data-fuzzer-detail-target="response"[^>]*data-fuzzer-detail-view="([^"]+)"[^>]*>/g)].map(match => match[1]);
   assert.deepEqual(modes, ['pretty', 'raw', 'hex', 'render']);
 });
+
+test('results card vertical scrolling wins over generic panel clipping without changing sizing', () => {
+  // Check the effective late override, not the earlier overflow:auto which lost
+  // to .panel-card's later shorthand and left a focus-scrolled header hidden.
+  const selector = '.fuzzer-shell .fuzzer-results-card';
+  const rule = [...css.matchAll(/\.fuzzer-shell \.fuzzer-results-card\s*\{([^}]+)\}/g)].at(-1);
+  assert.ok(rule, 'Expected a scoped results-card scrolling override');
+  assert.ok(rule.index > css.lastIndexOf('.panel-card {'), 'Override follows generic panel-card clipping');
+  assert.deepEqual(rule[1].trim().split(';').map(s => s.trim()).filter(Boolean), ['overflow-y: auto', 'overflow-x: hidden']);
+  assert.equal(css.lastIndexOf(selector + ' {'), rule.index, 'No later identical selector supersedes the override');
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  assert.match(html, /class="history-table-shell" style="flex:1;min-height:0;overflow:auto"/);
+});
