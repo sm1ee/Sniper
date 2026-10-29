@@ -75,6 +75,7 @@ function layoutFixture() {
   const document = eventTarget(), window = eventTarget(), handle = eventTarget();
   document.body = { classList: { add() {}, remove() {} } };
   handle.dataset = { columnKey: "index" };
+  handle.setAttribute = () => {};
   handle.classList = { add() {}, remove() {} };
   handle.closest = () => ({ getBoundingClientRect: () => ({ width: state.historyColumnWidths.index }) });
   const c = loadFunctions([
@@ -82,7 +83,7 @@ function layoutFixture() {
     "bindHistoryColumnResizers", "applyHistoryColumnWidths",
   ], {
     state, document, window, historyColumnHandles: [handle],
-    els: { historyTable: { style: { setProperty(key, value) { styles[key] = value; } } } },
+    els: { historyTable: { querySelectorAll: () => [handle], style: { setProperty(key, value) { styles[key] = value; } } } },
     saveHistoryColumnWidths() { saves.push({ ...state.historyColumnWidths }); },
   });
   vm.runInContext(appSource.match(/^const HISTORY_COLUMN_RULES = \{[^]*?^\};/m)[0]

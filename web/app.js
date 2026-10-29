@@ -23880,6 +23880,11 @@ function applyHistoryColumnWidths() {
     totalWidth += width;
   });
   els.historyTable.style.setProperty("--history-table-width", `${Math.max(totalWidth, 1160)}px`);
+  els.historyTable.querySelectorAll(".column-resize-handle").forEach((handle) => {
+    const width = state.historyColumnWidths[handle.dataset.columnKey];
+    handle.setAttribute("aria-valuenow", String(width));
+    handle.setAttribute("aria-valuetext", `${width} pixels`);
+  });
 }
 
 function sanitizeHistoryColumnOrder(candidate) {
@@ -23919,17 +23924,23 @@ function renderHistoryHeader() {
   const thead = els.historyTable?.querySelector("thead tr");
   if (!thead) return;
 
+  const previousFocus = document.activeElement;
+  const restoreColumn = previousFocus?.classList?.contains("column-resize-handle") && thead.contains(previousFocus)
+    ? previousFocus.dataset.columnKey : null;
   thead.innerHTML = state.historyColumnOrder
     .map((colKey) => {
       const def = HISTORY_COLUMN_DEFS[colKey];
-      if (!def) return "";
+      const limits = HISTORY_COLUMN_RULES[colKey];
+      if (!def || !limits) return "";
+      const width = state.historyColumnWidths[colKey] ?? limits.default;
+      const columnName = colKey === "index" ? "sequence number" : def.label;
       return `
         <th class="${def.cssClass}" data-column-key="${colKey}" draggable="true">
           <button class="sort-header" data-sort-key="${def.sortKey}" type="button">
             <span>${def.label}</span>
             <span class="sort-indicator" aria-hidden="true">\u2195</span>
           </button>
-          <span class="column-resize-handle" data-column-key="${colKey}" aria-hidden="true"></span>
+          <span class="column-resize-handle" data-column-key="${colKey}" role="separator" tabindex="0" aria-orientation="vertical" aria-label="Resize ${columnName} column" aria-valuemin="${limits.min}" aria-valuemax="${limits.max}" aria-valuenow="${width}" aria-valuetext="${width} pixels" aria-describedby="historyColumnResizeHelp" title="Drag to resize. Left/Right: 8 pixels. Enter: reset this column."></span>
         </th>
       `;
     })
@@ -23947,6 +23958,12 @@ function renderHistoryHeader() {
   bindHistoryColumnResizers();
   bindColumnDragAndDrop();
   renderSortHeaders();
+  // Settings adoption can replace these nodes. Restore only the handle this
+  // render removed, not focus the user or another callback moved elsewhere.
+  if (restoreColumn && !thead.contains(previousFocus)
+      && (!document.activeElement || document.activeElement === document.body || document.activeElement === previousFocus)) {
+    historyColumnHandles.find((handle) => handle.dataset.columnKey === restoreColumn)?.focus({ preventScroll: true });
+  }
 }
 
 function renderHistoryCell(colKey, item, entry) {
@@ -26171,8 +26188,36 @@ function bindWsColumnResizers() {
 }
 
 function bindHistoryColumnResizers() {
+  const table = els.historyTable;
+  // A settings/header replacement already owns its incoming widths. Retire
+  // the old drag without treating that replacement as a user preference save.
+  table._cancelHistoryColumnResize?.();
   let finishResize = null;
   historyColumnHandles.forEach((handle) => {
+    handle.addEventListener("keydown", (event) => {
+      if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      // A focused column boundary must not send vertical arrows to History's
+      // row-selection shortcuts; leave native scrolling available instead.
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.stopPropagation();
+        return;
+      }
+      if (!["ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) return;
+      const key = handle.dataset.columnKey;
+      const limits = HISTORY_COLUMN_RULES[key];
+      if (!limits) return;
+      event.preventDefault();
+      event.stopPropagation();
+      finishResize?.();
+      const current = state.historyColumnWidths[key] ?? limits.default;
+      const next = event.key === "Enter" ? limits.default
+        : clamp(Math.round(current + (event.key === "ArrowLeft" ? -8 : 8)), limits.min, limits.max);
+      if (next === current) return;
+      state.historyColumnWidths[key] = next;
+      applyHistoryColumnWidths();
+      saveHistoryColumnWidths();
+    });
+
     handle.addEventListener("dblclick", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -26180,6 +26225,8 @@ function bindHistoryColumnResizers() {
       if (!key || !HISTORY_COLUMN_RULES[key]) {
         return;
       }
+      finishResize?.();
+      if (state.historyColumnWidths[key] === HISTORY_COLUMN_RULES[key].default) return;
       state.historyColumnWidths[key] = HISTORY_COLUMN_RULES[key].default;
       applyHistoryColumnWidths();
       saveHistoryColumnWidths();
@@ -26202,6 +26249,7 @@ function bindHistoryColumnResizers() {
       handle.classList.add("active");
 
       const onMove = (moveEvent) => {
+        if (finishResize !== onUp) return;
         if (moveEvent.buttons === 0) {
           onUp();
           return;
@@ -26215,18 +26263,22 @@ function bindHistoryColumnResizers() {
         applyHistoryColumnWidths();
       };
 
-      const onUp = () => {
+      const finish = (save) => {
         if (finishResize !== onUp) return;
         finishResize = null;
+        if (table._cancelHistoryColumnResize === cancelResize) table._cancelHistoryColumnResize = null;
         document.body.classList.remove("pane-resizing-x");
         handle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         window.removeEventListener("blur", onUp);
-        saveHistoryColumnWidths();
+        if (save) saveHistoryColumnWidths();
       };
+      const onUp = () => finish(true);
+      const cancelResize = () => finish(false);
 
       finishResize = onUp;
+      table._cancelHistoryColumnResize = cancelResize;
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
       window.addEventListener("blur", onUp);
