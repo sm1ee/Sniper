@@ -61,10 +61,14 @@ function decoderCalculateResult(element, input, password) {
 }
 
 function safeUriTransform(transform, input) {
+  return safeUriTransformResult(transform, input).value;
+}
+
+function safeUriTransformResult(transform, input) {
   try {
-    return transform(input);
+    return { value: transform(input), success: true };
   } catch (err) {
-    return "Parse error";
+    return { value: "Parse error", success: false };
   }
 }
 
@@ -863,6 +867,9 @@ var hasher = {
       title : "encodeURI()",
       calculate : function (input) {
         return encodeURI(input);
+      },
+      calculateResult : function (input) {
+        return { value: encodeURI(input), success: true };
       }
     },
     e5: {
@@ -871,6 +878,9 @@ var hasher = {
       title : "encodeURIComponent()",
       calculate : function (input) {
         return encodeURIComponent(input);
+      },
+      calculateResult : function (input) {
+        return { value: encodeURIComponent(input), success: true };
       }
     },
     e6: {
@@ -879,6 +889,9 @@ var hasher = {
       title : "decodeURI()",
       calculate : function (input) {
         return safeUriTransform(decodeURI, input);
+      },
+      calculateResult : function (input) {
+        return safeUriTransformResult(decodeURI, input);
       }
     },
     e7: {
@@ -887,6 +900,9 @@ var hasher = {
       title : "decodeURIComponent()",
       calculate : function (input) {
         return safeUriTransform(decodeURIComponent, input);
+      },
+      calculateResult : function (input) {
+        return safeUriTransformResult(decodeURIComponent, input);
       }
     },
     e8: {

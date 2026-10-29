@@ -7,7 +7,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 const { loadFunctions } = require("./frontend-test-helpers.cjs");
 
-function fixture() {
+function fixture(rowIds = ["e2", "e3"]) {
   const values = new Map([["#input-value", ""], ["#input-password", ""]]);
   const nodes = new Map();
   const context = vm.createContext({
@@ -39,7 +39,7 @@ function fixture() {
       contains(name) { return classes.has(name); },
     } };
   };
-  const rows = [elements.e2, elements.e3].map(element => Object.assign(node(), {
+  const rows = rowIds.map(id => elements[id]).map(element => Object.assign(node(), {
     querySelector: () => nodes.get("#" + element.id),
   }));
   const output = { querySelectorAll: () => rows };
@@ -182,4 +182,82 @@ test("typed results guide category availability without changing legacy error fi
   assert.equal(c.decoderOutputShows(failed.value, failed), false);
   const legacy = context.decoderCalculateResult({ calculate: () => "Parse error" }, "", "");
   assert.equal(c.decoderOutputShows(legacy.value, legacy), false);
+});
+
+const uriIds = ["e4", "e5", "e6", "e7"];
+const uriNative = [encodeURI, encodeURIComponent, decodeURI, decodeURIComponent];
+
+for (const [index, id] of uriIds.entries()) {
+  test(`${id} preserves successful URI data even when its output resembles an error`, () => {
+    const { context, elements } = fixture(uriIds);
+    const display = loadFunctions(["decoderOutputShows"]);
+    for (const input of ["Error report", "Invalid text", "NaN", "Parse error", "Out of range",
+      "Error%20report", "Invalid%20text", "Parse%20error", "", "café 한글 😀", "\ufeff",
+      "Error\r\nreport", "%2F", "%3F", "%23", "%25", "https://example.com/a?b=c#d"]) {
+      const expected = uriNative[index](input);
+      assert.equal(elements[id].calculate(input), expected);
+      const result = context.decoderCalculateResult(elements[id], input, "");
+      assert.equal(result.value, expected);
+      assert.equal(result.success, true);
+      assert.equal(display.decoderOutputShows(result.value, result), expected.length > 0);
+    }
+  });
+}
+
+test("URI failures retain legacy strings/throws but receive explicit failure status", () => {
+  const { context, elements } = fixture(uriIds);
+  for (const id of ["e4", "e5"]) {
+    for (const input of ["\ud800", "\udfff", "a\ud800b"]) {
+      assert.throws(() => elements[id].calculate(input), { name: "URIError" });
+      const result = context.decoderCalculateResult(elements[id], input, "");
+      assert.match(result.value, /^Error: /);
+      assert.equal(result.success, false);
+    }
+  }
+  for (const id of ["e6", "e7"]) {
+    for (const input of ["%", "%G0", "%0", "%FF", "%C0%AF", "%ED%A0%80", "%E2%82", "%F4%90%80%80"]) {
+      assert.equal(elements[id].calculate(input), "Parse error");
+      const result = context.decoderCalculateResult(elements[id], input, "");
+      assert.equal(result.value, "Parse error");
+      assert.equal(result.success, false);
+    }
+    // Native decoders preserve literal lone surrogates; only malformed encoded UTF-8 fails.
+    assert.equal(context.decoderCalculateResult(elements[id], "\ud800", "").success, true);
+  }
+  assert.equal(context.safeUriTransform(decodeURI, "%"), "Parse error");
+  assert.equal(context.safeUriTransform(decodeURI, "Parse error"), "Parse error");
+  assert.equal(elements.e6.calculate("%2F"), "%2F");
+  assert.equal(elements.e7.calculate("%2F"), "/");
+});
+
+test("URI render status follows edits, empty input, speculative checks and rebuilt outputs", () => {
+  const { context, values, elements, rows, display, nodes } = fixture(uriIds);
+  context.hasher.tab = context.tabs.encode;
+  const paint = input => {
+    values.set("#input-value", input); context.hasher.update(); display.markEmptyDecoderOutputs();
+    assert.equal(values.get("#input-value"), input);
+  };
+  for (const input of ["NaN", "%", "Error report", "\ud800", "Invalid text", "", "Parse error", "Error\r\nreport"]) {
+    paint(input);
+    for (const [index, id] of uriIds.entries()) {
+      const node = nodes.get("#" + elements[id].id);
+      const expected = context.decoderCalculateResult(elements[id], input, "");
+      assert.equal(node.decoderResult.value, node.value);
+      assert.equal(node.decoderResult.success, expected.success);
+      assert.equal(rows[index].classList.contains("hidden"), !expected.success || !expected.value.length);
+      context.decoderCalculateResult(elements[id], id === "e4" || id === "e5" ? "\ud800" : "%", "");
+      assert.equal(node.decoderResult.success, expected.success);
+    }
+    display.markEmptyDecoderOutputs();
+  }
+  paint("Error report");
+  for (const id of uriIds) nodes.get("#" + elements[id].id).value = "Invalid stale value";
+  display.markEmptyDecoderOutputs();
+  assert.ok(rows.every(row => row.classList.contains("hidden")));
+  for (const id of uriIds) nodes.set("#" + elements[id].id, { value: "NaN" });
+  display.markEmptyDecoderOutputs();
+  assert.ok(rows.every(row => row.classList.contains("hidden")));
+  context.hasher.tab = context.tabs.hash; context.hasher.update();
+  context.hasher.tab = context.tabs.encode; paint("NaN");
+  assert.ok(rows.every(row => !row.classList.contains("hidden")));
 });
