@@ -1661,12 +1661,8 @@ function bindEvents() {
     clearHttpHistorySelectionPreview();
     scheduleRefresh({ resetScroll: true });
   });
-  document.getElementById("httpFindingsToggle")?.addEventListener("click", () => {
-    state.httpShowFindings = !state.httpShowFindings;
-    scheduleUiSettingsSave();
-    refreshHistoryFindings();
-    if (state.httpShowFindings) loadFindings().catch((error) => console.error(error));
-  });
+  document.getElementById("httpFindingsToggle")?.addEventListener("click", toggleHistoryFindings);
+  document.getElementById("findingsHistoryToggle")?.addEventListener("click", toggleHistoryFindings);
   onClickWithProgress(document.getElementById("httpCaptureToggle"), async (e) => {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
@@ -10283,9 +10279,19 @@ const historyFindingEvidence = new Map();
 const historyFindingEvidencePending = new Set();
 let historyFindingEvidenceSessionId = null;
 
+// HTTP's Findings pill and the Findings tab's "Mark in HTTP" share one setting.
+function toggleHistoryFindings() {
+  state.httpShowFindings = !state.httpShowFindings;
+  scheduleUiSettingsSave();
+  refreshHistoryFindings();
+  if (state.httpShowFindings) loadFindings().catch((error) => console.error(error));
+}
+
 function refreshHistoryFindings() {
-  const pill = document.getElementById("httpFindingsToggle");
-  if (pill) setToggleButton(pill, Boolean(state.httpShowFindings));
+  for (const id of ["httpFindingsToggle", "findingsHistoryToggle"]) {
+    const pill = document.getElementById(id);
+    if (pill) setToggleButton(pill, Boolean(state.httpShowFindings));
+  }
   const color = state.displaySettings?.findingsColor || "severity";
   let marks = null;
   if (state.httpShowFindings && findingsData.length) {
