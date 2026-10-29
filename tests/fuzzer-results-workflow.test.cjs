@@ -1041,3 +1041,78 @@ test('Stop 404 is an already-ended outcome, not a retained failure', async () =>
   assert.equal(f.els.fuzzerStopStatus.classList.contains('hidden'), true);
   assert.equal(f.els.stopFuzzerButton.textContent, 'Stop');
 });
+
+// A virtualized table must not repeatedly sort its full retained run just to
+// update the count and comparison controls on an ordinary scroll frame.
+for (const selection of ['none', 'visible', 'filtered-away']) {
+  test(`one current projection per production scroll render with ${selection} selection`, () => {
+    const f = fixture();
+    const rows = Array.from({ length: 1000 }, (_, i) => result(i, i % 2 ? 404 : 200));
+    f.c.setFuzzerAttackRecord(run('many', rows));
+    const workflow = f.c.fuzzerResultsWorkflowState();
+    Object.assign(workflow, { sort: 'payload', status: '2xx' });
+    f.state._selectedFuzzerResultKey = selection === 'none' ? null : `tx:tx-${selection === 'visible' ? 2 : 1}`;
+    f.state._fuzzerDetailRecord = { id: selection === 'visible' ? 'tx-2' : 'tx-1' };
+    f.c.compareBaseId = 'another'; f.c.compareBaseSessionId = 'session-a';
+    const rowHeight = Number(appSource.match(/const FUZZER_RESULT_ROW_HEIGHT = (\d+);/)[1]);
+    const bufferRows = Number(appSource.match(/const FUZZER_RESULT_BUFFER_ROWS = (\d+);/)[1]);
+    f.c.measuredFuzzerResultRowHeight = f.c.FUZZER_RESULT_ROW_HEIGHT = rowHeight;
+    f.c.FUZZER_RESULT_BUFFER_ROWS = bufferRows;
+    f.shell.clientHeight = 600; f.shell.scrollTop = 300;
+    const original = f.c.visibleFuzzerResults; let projections = 0;
+    f.c.visibleFuzzerResults = () => { projections++; return original(); };
+    f.shell.dispatch('scroll');
+    assert.equal(projections, 1);
+    assert.equal(f.els.fuzzerResultFilterCount.textContent, '500 of 1000 results');
+    assert.equal(f.els.fuzzerCompareBaseButton.disabled, selection !== 'visible');
+    assert.equal(f.els.fuzzerCompareButton.disabled, selection !== 'visible');
+    if (selection === 'filtered-away') assert.equal(f.state._selectedFuzzerResultKey, null);
+    const rendered = (f.els.fuzzerResultsBody.innerHTML.match(/class="fuzzer-result-row/g) || []).length;
+    assert.ok(rendered > 0 && rendered <= Math.ceil(600 / rowHeight) + 2 * bufferRows + 1);
+    assert.equal(f.requests.length, 0);
+  });
+}
+for (const invalid of [false, true]) {
+  test(`empty ${invalid ? 'invalid' : 'nonmatching'} projection is shared with workflow controls`, () => {
+    const f = fixture(), workflow = f.c.fuzzerResultsWorkflowState();
+    if (invalid) workflow.minBytes = '-1'; else workflow.status = 'error';
+    f.state._selectedFuzzerResultKey = 'tx:tx-0'; f.state._fuzzerDetailRecord = { id: 'tx-0' };
+    const original = f.c.visibleFuzzerResults; let projections = 0;
+    f.c.visibleFuzzerResults = () => { projections++; return original(); };
+    f.c.renderFuzzerResultsVirtual();
+    assert.equal(projections, 1);
+    assert.match(f.els.fuzzerResultsBody.innerHTML, invalid ? /Fix the result filters/ : /No results match/);
+    assert.equal(f.state._selectedFuzzerResultKey, null);
+    assert.equal(f.els.fuzzerCompareBaseButton.disabled, true);
+  });
+}
+test('optional projection helpers use supplied rows and no-argument calls follow changed current state', () => {
+  const f = fixture(); f.state._selectedFuzzerResultKey = 'tx:tx-1'; f.state._fuzzerDetailRecord = { id: 'tx-1' };
+  const snapshot = f.c.visibleFuzzerResults();
+  assert.equal(f.c.fuzzerSelectedResultIndex(), 1); assert.equal(f.c.fuzzerSelectedTransactionId(), 'tx-1');
+  f.c.fuzzerResultsWorkflowState().direction = 'desc';
+  assert.equal(f.c.fuzzerSelectedResultIndex(), 0); assert.equal(f.c.fuzzerSelectedResultIndex(snapshot), 1);
+  f.c.fuzzerResultsWorkflowState().status = 'error';
+  assert.equal(f.c.fuzzerSelectedResultIndex(), -1); assert.equal(f.c.fuzzerSelectedTransactionId(), null);
+  assert.equal(f.c.fuzzerSelectedTransactionId(snapshot), 'tx-1');
+  f.c.renderFuzzerResultsWorkflow(snapshot); assert.equal(f.els.fuzzerResultFilterCount.textContent, '2 of 2 results');
+  f.c.renderFuzzerResultsWorkflow(); assert.equal(f.els.fuzzerResultFilterCount.textContent, '0 of 2 results');
+  f.c.fuzzerResultsWorkflowState().status = 'all'; f.c.setFuzzerAttackRecord(run('replacement', [result(2)]));
+  f.c.renderFuzzerResultsWorkflow(); assert.equal(f.els.fuzzerResultFilterCount.textContent, '1 of 1 results');
+  f.state._selectedFuzzerResultKey = 'tx:tx-2'; f.state._fuzzerDetailRecord = { id: 'tx-1' };
+  assert.equal(f.c.fuzzerSelectedTransactionId(), null, 'comparison still needs the selected detail record');
+});
+test('payload collator preserves locale comparison, natural ties and direction using one comparator per projection', () => {
+  const f = fixture(), payloads = ['p10', 'p2', 'P1', 'p1', 'p01', '', 'ä', 'a', 'é', 'e', '001', '1', '-1', '🦊', '漢字', 'p2'];
+  f.c.setFuzzerAttackRecord(run('collation', payloads.map((payload, i) => ({ ...result(i), payload }))));
+  const workflow = f.c.fuzzerResultsWorkflowState(); workflow.sort = 'payload';
+  let constructions = 0;
+  f.c.Intl = { Collator: function (...args) { constructions++; return new Intl.Collator(...args); } };
+  for (const direction of ['asc', 'desc']) {
+    workflow.direction = direction; constructions = 0;
+    const expected = payloads.map((payload, i) => ({ payload, i })).sort((a, b) =>
+      a.payload.localeCompare(b.payload, undefined, { numeric: true }) * (direction === 'desc' ? -1 : 1) || a.i - b.i).map(x => x.i);
+    assert.deepEqual(indexes(f), expected); assert.equal(constructions, 1);
+  }
+  workflow.sort = 'index'; constructions = 0; f.c.visibleFuzzerResults(); assert.equal(constructions, 0);
+});

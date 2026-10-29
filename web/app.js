@@ -16460,12 +16460,13 @@ function visibleFuzzerResults() {
     if (view.sort === "duration") return fuzzerResultMetric(result.duration_ms);
     return fuzzerResultMetric(result.index) ?? sourceIndex;
   };
+  const payloadCollator = view.sort === "payload" ? new Intl.Collator(undefined, { numeric: true }) : null;
   filtered.sort((a, b) => {
     const left = valueFor(a), right = valueFor(b);
     // Unknown metrics remain at the end in either direction; ties keep run order.
     if (left == null || right == null) return left == right ? a.sourceIndex - b.sourceIndex : left == null ? 1 : -1;
     // Payloads read as people number them: p2 before p10.
-    const order = typeof left === "string" ? left.localeCompare(right, undefined, { numeric: true }) : left - right;
+    const order = typeof left === "string" ? payloadCollator.compare(left, right) : left - right;
     return order * (view.direction === "desc" ? -1 : 1) || a.sourceIndex - b.sourceIndex;
   });
   return filtered;
@@ -16529,13 +16530,13 @@ function initFuzzerResultsWorkflow() {
   els.fuzzerCompareButton?.addEventListener("click", () => compareSelectedFuzzerResult());
 }
 
-function fuzzerSelectedTransactionId() {
-  const entry = visibleFuzzerResults()[fuzzerSelectedResultIndex()];
+function fuzzerSelectedTransactionId(results = visibleFuzzerResults()) {
+  const entry = results[fuzzerSelectedResultIndex(results)];
   const transactionId = entry?.result?.transaction_id;
   return transactionId && state._fuzzerDetailRecord?.id === transactionId ? transactionId : null;
 }
 
-function renderFuzzerResultsWorkflow() {
+function renderFuzzerResultsWorkflow(results = visibleFuzzerResults()) {
   const workflow = fuzzerResultsWorkflowState();
   const validation = fuzzerResultFilterValidation(workflow);
   const fields = {
@@ -16561,7 +16562,7 @@ function renderFuzzerResultsWorkflow() {
   const resultCount = jsonArray(state.fuzzerAttackRecord?.results).length;
   if (els.fuzzerResultFilterCount) {
     els.fuzzerResultFilterCount.textContent = validation.valid
-      ? `${visibleFuzzerResults().length} of ${resultCount} results`
+      ? `${results.length} of ${resultCount} results`
       : `Invalid filters: ${validation.message}`;
   }
   // Counting and comparing wait for results; the table says there are none.
@@ -16577,7 +16578,7 @@ function renderFuzzerResultsWorkflow() {
   els.fuzzerClearResultFiltersButton?.classList.toggle("hidden", !activeFilterCount);
   // Their row goes too while neither shows, so it leaves no gap.
   els.fuzzerResultStatusRow?.classList.toggle("hidden", resultCount === 0 && !activeFilterCount);
-  const transactionId = fuzzerSelectedTransactionId();
+  const transactionId = fuzzerSelectedTransactionId(results);
   if (els.fuzzerCompareBaseButton) els.fuzzerCompareBaseButton.disabled = !transactionId;
   if (els.fuzzerCompareButton) {
     els.fuzzerCompareButton.disabled = !transactionId || !compareBaseId
@@ -16811,9 +16812,9 @@ function fuzzerSelectionKeyForResult(result, rowIndex) {
   return txId ? `tx:${txId}` : `row:${rowIndex}`;
 }
 
-function fuzzerSelectedResultIndex() {
+function fuzzerSelectedResultIndex(results) {
   const selectionKey = String(state._selectedFuzzerResultKey || "");
-  return selectionKey ? visibleFuzzerResults().findIndex(({ result, sourceIndex }) =>
+  return selectionKey ? (results ?? visibleFuzzerResults()).findIndex(({ result, sourceIndex }) =>
     fuzzerSelectionKeyForResult(result, sourceIndex) === selectionKey) : -1;
 }
 
@@ -16821,7 +16822,7 @@ function fuzzerResultsShell() {
   return els.fuzzerResultsBody?.closest(".history-table-shell") || null;
 }
 
-function renderEmptyFuzzerResults(message) {
+function renderEmptyFuzzerResults(message, results) {
   if (els.fuzzerResultsBody) {
     els.fuzzerResultsBody.innerHTML = `
       <tr class="empty-row">
@@ -16835,10 +16836,12 @@ function renderEmptyFuzzerResults(message) {
   }
   state._selectedFuzzerResultKey = null;
   hideFuzzerDetailPanel();
-  renderFuzzerResultsWorkflow();
+  renderFuzzerResultsWorkflow(results);
 }
 
 function renderFuzzerResultsVirtual() {
+  // Share this projection with counts and selection checks; scrolling must not
+  // repeatedly sort every retained result just to paint the visible rows.
   const results = visibleFuzzerResults();
   if (!els.fuzzerResultsBody) {
     return;
@@ -16847,7 +16850,7 @@ function renderFuzzerResultsVirtual() {
     const validation = fuzzerResultFilterValidation();
     renderEmptyFuzzerResults(!validation.valid ? `Fix the result filters. ${validation.message}`
       : jsonArray(state.fuzzerAttackRecord?.results).length
-        ? "No results match these filters." : "No fuzzer results are available for this run.");
+        ? "No results match these filters." : "No fuzzer results are available for this run.", results);
     return;
   }
   const shell = fuzzerResultsShell();
@@ -16855,11 +16858,11 @@ function renderFuzzerResultsVirtual() {
     return;
   }
 
-  if (state._selectedFuzzerResultKey && fuzzerSelectedResultIndex() < 0) {
+  if (state._selectedFuzzerResultKey && fuzzerSelectedResultIndex(results) < 0) {
     state._selectedFuzzerResultKey = null;
     hideFuzzerDetailPanel();
   }
-  renderFuzzerResultsWorkflow();
+  renderFuzzerResultsWorkflow(results);
 
   const rowHeight = measuredFuzzerResultRowHeight || FUZZER_RESULT_ROW_HEIGHT;
   const headerHeight = els.fuzzerResultsHead?.offsetHeight || 0;
