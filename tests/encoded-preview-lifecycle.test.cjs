@@ -27,7 +27,7 @@ test("each decoded layer has a Copy button that copies its text and keeps the pr
   const f = fixture("hello%20world"); open(f);
   const copied = [];
   f.context.copyTextToClipboard = async value => { copied.push(value); };
-  const copy = visible(f).children[1].children.find(node => node.className === "encoded-preview-copy");
+  const copy = visible(f).children[0].children.find(node => node.className === "encoded-preview-copy");
   assert.ok(copy, "the layer's label carries a Copy button");
   assert.equal(copy.textContent, "Copy");
   f.document.fire("pointerdown", { target: copy });
@@ -207,7 +207,7 @@ for (const origin of ["editor", "button"]) test(`pointer selection from focused 
   const f = fixture();
   if (origin === "editor") { f.contentDOM.focus(); open(f); }
   else { f.controller.button.focus(); f.controller.button.fire("click"); }
-  const tooltip = visible(f), value = tooltip.children[2], original = f.view.state;
+  const tooltip = visible(f), value = tooltip.children[1], original = f.view.state;
   const events = [];
   tooltip.focus = options => {
     events.push("tooltip focus");
@@ -268,8 +268,8 @@ test("focused preview native copy and scroll bypass the actual app-wide read-sel
   f.document.addEventListener("keydown", f.context.appReadKeys);
   f.controller.button.fire("click");
   const tooltip = visible(f), original = f.view.state;
-  f.document.fire("pointerdown", { target: tooltip.children[2] });
-  for (const target of [tooltip, tooltip.children[2]]) {
+  f.document.fire("pointerdown", { target: tooltip.children[1] });
+  for (const target of [tooltip, tooltip.children[1]]) {
     for (const key of ["ArrowDown", "ArrowUp", "c"]) {
       const event = f.document.fire("keydown", { target, key, ctrlKey: key === "c" });
       assert.equal(event.defaultPrevented, false, "Keep native preview scroll/copy");

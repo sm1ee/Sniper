@@ -8825,7 +8825,7 @@ button.utility-button.replay-tab-add {
   font: 12px/1.45 var(--sans);
   user-select: text;
 }
-.encoded-preview-title { color: var(--text-soft); font-weight: 600; }
+.encoded-preview-label:first-child { margin-top: 0; }
 .encoded-preview-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; color: var(--point); font-size: 11px; }
 /* Matches the Decode button that opens the preview. */
 .encoded-preview-copy {

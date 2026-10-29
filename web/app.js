@@ -31728,13 +31728,8 @@ class EncodedPreviewController {
     tooltip.tabIndex = -1;
     tooltip.id = `encoded-preview-${++encodedPreviewId}`;
     tooltip.setAttribute("role", "tooltip");
+    tooltip.setAttribute("aria-label", "Decoded preview");
     if (keyboard) tooltip.setAttribute("aria-live", "polite");
-    const title = this.document.createElement("div");
-    title.className = "encoded-preview-title";
-    title.textContent = keyboard
-      ? "Decoded preview · Arrow keys to scroll · Esc to close"
-      : "Decoded preview · Esc to close";
-    tooltip.appendChild(title);
     for (const layer of result.layers) {
       const label = this.document.createElement("div");
       label.className = "encoded-preview-label";
