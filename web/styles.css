@@ -3446,6 +3446,15 @@ body.pane-resizing-y {
   padding: 6px;
   resize: vertical;
 }
+.sequence-step-card textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+.sequence-step-card .step-request-error {
+  margin: 4px 0 0;
+  color: var(--danger);
+  font-size: var(--font-xs);
+  overflow-wrap: anywhere;
+}
 .sequence-step-card .step-extractions {
   container: sequence-extractions / inline-size;
   margin-top: 6px;

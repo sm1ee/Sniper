@@ -39,7 +39,10 @@ function fixture({ delaySave = false } = {}) {
     this.markup = html;
     if (cards.some(card => card.request === document.activeElement)) document.activeElement = null;
     cards = (state.editingSequence?.steps || []).map(step => {
-      const request = { value: step.request_text, focus() { document.activeElement = this; } };
+      const request = { value: step.request_text, focus() { document.activeElement = this; },
+        selectionStart: 0, selectionEnd: 0, selectionDirection: 'none',
+        setSelectionRange(start, end, direction) { this.selectionStart = start; this.selectionEnd = end; this.selectionDirection = direction; },
+        scrollIntoView() {} };
       const fields = { '.step-request-text': request, '.step-label': { value: step.label }, '.step-extractions': { open: false } };
       return { dataset: { stepId: step.id }, request,
         querySelector: selector => fields[selector], querySelectorAll: () => [] };
@@ -50,7 +53,7 @@ function fixture({ delaySave = false } = {}) {
   const c = loadFunctions(['runCurrentSequence', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue', 'syncSequenceRunButton',
     'selectSequence', 'flushSequenceDraft', 'bumpSequenceDraftVersion', 'markSequenceDraftDirty',
     'currentSequenceSessionId', 'isCurrentSequenceSession', 'isCurrentSequenceRun',
-    'normalizeSequenceRunResult', 'syncSequenceStepFromDom'], {
+    'normalizeSequenceRunResult', 'syncSequenceStepFromDom', 'sequenceRequestErrorMessage'], {
     state, document, escapeHtml: String, formatTimestamp: String, normalizeReplayHttpVersion: () => '',
     replayHttpVersionFromText: () => '', parseEditableRawRequest(text) {
       if (text.startsWith('invalid')) throw new Error('Invalid request');

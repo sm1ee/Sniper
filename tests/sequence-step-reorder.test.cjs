@@ -25,7 +25,7 @@ function fixture(count = 3) {
   const node = () => ({ innerHTML: '', textContent: '', disabled: false, listeners: {},
     classList: { toggle() {}, add() {}, remove() {}, contains: () => false }, querySelectorAll: () => [],
     addEventListener(type, callback) { this.listeners[type] = callback; },
-    focus() { document.activeElement = this; } });
+    focus() { document.activeElement = this; }, scrollIntoView() {} });
   const field = (value, tagName = 'INPUT') => Object.assign(node(), { value, tagName,
     selectionStart: tagName === 'SELECT' ? undefined : 0, selectionEnd: tagName === 'SELECT' ? undefined : 0,
     selectionDirection: 'none', setSelectionRange(start, end, direction) {
@@ -73,7 +73,7 @@ function fixture(count = 3) {
   const savePromises = [], newPromises = [], runPromises = [];
   let uuid = 0;
   const c = loadFunctions(['moveSequenceStep', 'renderSequencePanel', 'renderSequenceList', 'sequenceDisplayName', 'sequenceNameInputValue',
-    'syncSequenceRunButton', 'normalizeSequenceRunResult', 'markSequenceDraftDirty', 'bumpSequenceDraftVersion', 'syncSequenceStepFromDom',
+    'syncSequenceRunButton', 'normalizeSequenceRunResult', 'sequenceRequestErrorMessage', 'markSequenceDraftDirty', 'bumpSequenceDraftVersion', 'syncSequenceStepFromDom',
     'currentSequenceSessionId', 'isCurrentSequenceSession', 'sequenceSessionPath', 'loadSequences', 'flushSequenceDraft', 'createNewSequence',
     'runCurrentSequence', 'isCurrentSequenceRun', 'onClickWithProgress', 'withButtonProgress', 'requireOkResponse', 'escapeHtml'], {
     state, document, currentSessionId: () => state.activeSession.id, workspaceStateGeneration: 1,

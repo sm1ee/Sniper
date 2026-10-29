@@ -19123,11 +19123,17 @@ function removeExtractionRule(stepIndex, ruleIndex) {
   renderSequencePanel();
 }
 
+function sequenceRequestErrorMessage(step, index, error) {
+  const label = String(step.label || "").trim();
+  return `Step ${index + 1}${label ? ` (${label})` : ""} raw HTTP request: ${error}`;
+}
+
 function syncSequenceStepFromDom({ allowInvalidRequests = false } = {}) {
   if (!state.editingSequence) return;
   const container = document.getElementById("sequenceStepsContainer");
   if (!container) return;
   const cards = container.querySelectorAll(".sequence-step-card");
+  let firstInvalidRequest = null;
   cards.forEach((card, i) => {
     const step = state.editingSequence.steps[i];
     if (!step) return;
@@ -19145,9 +19151,17 @@ function syncSequenceStepFromDom({ allowInvalidRequests = false } = {}) {
         delete step.request_parse_error;
       } catch (error) {
         step.request_parse_error = error?.message || "Invalid request";
-        if (!allowInvalidRequests) {
-          throw error;
+        if (!allowInvalidRequests && !firstInvalidRequest) {
+          firstInvalidRequest = { card, input: reqTextarea, message: sequenceRequestErrorMessage(step, i, step.request_parse_error) };
         }
+      }
+      const errorEl = card.querySelector(".step-request-error");
+      if (errorEl) {
+        // Typing and draft saves stay quiet until Run has exposed this error.
+        const showError = Boolean(step.request_parse_error && (!allowInvalidRequests || errorEl.textContent));
+        errorEl.textContent = showError ? sequenceRequestErrorMessage(step, i, step.request_parse_error) : "";
+        errorEl.classList.toggle("hidden", !showError);
+        reqTextarea.setAttribute("aria-invalid", String(showError));
       }
     }
     card.querySelectorAll(".extraction-row").forEach((row, j) => {
@@ -19161,6 +19175,19 @@ function syncSequenceStepFromDom({ allowInvalidRequests = false } = {}) {
       if (patternInput) rule.pattern = patternInput.value;
     });
   });
+  // Finish syncing every draft before reporting the first invalid request.
+  // Focus the live field synchronously; no async completion may steal it later.
+  if (firstInvalidRequest) {
+    const { card, input, message } = firstInvalidRequest;
+    const { selectionStart, selectionEnd, selectionDirection } = input;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+    input.scrollIntoView({ block: "nearest", inline: "nearest" });
+    // The editor clips overflow: revealing its final textarea alone can leave
+    // the explanation just below the viewport after the toast has disappeared.
+    card.querySelector(".step-request-error")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    throw new Error(message);
+  }
 }
 
 async function saveCurrentSequence({
@@ -19270,6 +19297,14 @@ async function deleteSequence(id) {
 
 async function runCurrentSequence() {
   if (!state.editingSequence || state.sequenceRunning) return;
+  // Invalid local drafts must keep their live controls, focus and caret. Check
+  // before busy rendering replaces the editor or any save/run can be dispatched.
+  try {
+    syncSequenceStepFromDom();
+  } catch (error) {
+    showToast(`Sequence error: ${error.message}`, "error");
+    return;
+  }
   state.sequenceRunning = true;
   renderSequencePanel();
   const runSequenceId = state.editingSequence.id;
@@ -19279,7 +19314,6 @@ async function runCurrentSequence() {
   let runDraftVersion = null;
 
   try {
-    syncSequenceStepFromDom();
     const saved = await saveCurrentSequence();
     if (!saved) {
       return;
@@ -19423,9 +19457,11 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
   // that may now identify a different step after removal.
   const expansionOwner = JSON.stringify([state.activeSession?.id || null, state.editingSequence?.id || null]);
   const expandedSteps = new Set();
+  const requestErrorSteps = new Set();
   if (stepsContainer._sequenceExpansionOwner === expansionOwner) {
     stepsContainer.querySelectorAll(".sequence-step-card").forEach((card) => {
       if (card.querySelector(".step-extractions")?.open) expandedSteps.add(card.dataset.stepId);
+      if (card.querySelector(".step-request-error")?.textContent) requestErrorSteps.add(card.dataset.stepId);
     });
   }
   stepsContainer._sequenceExpansionOwner = expansionOwner;
@@ -19455,6 +19491,10 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
           || step.request?.http_version,
       };
       const reqText = step.request_text ?? buildEditableRawRequest(requestForRender);
+      const requestError = requestErrorSteps.has(step.id) && step.request_parse_error
+        ? sequenceRequestErrorMessage(step, idx, step.request_parse_error)
+        : "";
+      const requestErrorId = `sequenceStepRequestError-${idx}`;
       const extractionsHtml = step.extractions.map((rule, rIdx) => `
         <div class="extraction-row">
           <label class="extraction-field"><span>Variable</span>
@@ -19481,7 +19521,8 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
           <button class="step-move" type="button" data-move-step="${idx}" data-move-direction="1" title="Move step ${idx + 1} down" aria-label="Move step ${idx + 1} down" aria-disabled="${idx === editing.steps.length - 1}">&darr;</button>
           <button class="step-remove" data-remove-step="${idx}" title="Remove step" aria-label="Remove step ${idx + 1}">&times;</button>
         </div>
-        <textarea class="step-request-text" spellcheck="false" aria-label="Step ${idx + 1} raw HTTP request">${escapeHtml(reqText)}</textarea>
+        <textarea class="step-request-text" spellcheck="false" aria-label="Step ${idx + 1} raw HTTP request" aria-invalid="${Boolean(requestError)}" aria-describedby="${requestErrorId}">${escapeHtml(reqText)}</textarea>
+        <p class="step-request-error${requestError ? "" : " hidden"}" id="${requestErrorId}">${escapeHtml(requestError)}</p>
         <details class="step-extractions"${expandedSteps.has(step.id) || focusExtractionStepId === step.id ? " open" : ""}>
           <summary>Extractions (${step.extractions.length}) <button class="secondary-action ext-add" data-add-ext="${idx}" aria-label="Add extraction to step ${idx + 1}">+ Extract</button></summary>
           ${extractionsHtml}
