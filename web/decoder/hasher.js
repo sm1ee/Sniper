@@ -351,11 +351,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "AES-256 decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci7.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.AES.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -364,11 +367,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "DES decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci8.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.DES.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -377,11 +383,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "TripleDES decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci9.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.TripleDES.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -390,11 +399,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "Rabbit decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci10.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.Rabbit.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -403,11 +415,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "RC4 decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci11.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.RC4.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -416,11 +431,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "RC4Drop decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci12.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.RC4Drop.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
