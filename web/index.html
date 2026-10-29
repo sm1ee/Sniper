@@ -385,7 +385,7 @@
                     Loading captured WebSocket sessions.
                   </div>
                   <label class="search-box" for="websocketSearchInput">
-                    <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" />
+                    <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" aria-label="Search captured WebSocket sessions" />
                   </label>
                   <div class="filter-actions">
                     <button class="scope-pill" id="wsInScopeOnly" type="button" title="Show only in-scope hosts">In scope</button>
@@ -709,7 +709,7 @@
                 </header>
                 <div id="oastPayloadDisplay" class="oast-payload-display">
                   <span class="oast-payload-label">Payload:</span>
-                  <input id="oastPayloadText" class="oast-payload-input" type="text" placeholder="Generate or paste your OAST subdomain here" spellcheck="false" />
+                  <input id="oastPayloadText" class="oast-payload-input" type="text" placeholder="Generate or paste your OAST subdomain here" spellcheck="false" aria-label="OAST payload" />
                   <button class="utility-button" id="oastCopyPayloadButton" type="button" title="Copy">📋</button>
                 </div>
                 <div class="history-table-shell">
@@ -860,7 +860,7 @@
                   <div class="settings-field" id="oastTokenField">
                     <span>OAST token</span>
                     <div class="settings-inline-control">
-                      <input id="proxySettingOastToken" type="text" placeholder="Server authentication token (optional)" />
+                      <input id="proxySettingOastToken" type="text" placeholder="Server authentication token (optional)" aria-label="OAST token" />
                       <button class="secondary-action" id="proxySettingOastClearToken" type="button">Clear</button>
                     </div>
                     <small id="proxySettingOastTokenHint"></small>
@@ -2166,7 +2166,7 @@
           <h2>Import cURL</h2>
         </header>
         <div class="modal-body">
-          <textarea id="curlImportInput" class="curl-import-textarea" rows="10" spellcheck="false" placeholder="Paste a cURL command here...&#10;&#10;curl -X POST https://api.example.com/login \&#10;  -H 'Content-Type: application/json' \&#10;  -d '{&quot;user&quot;:&quot;admin&quot;}'"></textarea>
+          <textarea id="curlImportInput" class="curl-import-textarea" rows="10" spellcheck="false" placeholder="Paste a cURL command here...&#10;&#10;curl -X POST https://api.example.com/login \&#10;  -H 'Content-Type: application/json' \&#10;  -d '{&quot;user&quot;:&quot;admin&quot;}'" aria-label="cURL command"></textarea>
         </div>
         <footer class="modal-footer">
           <button class="secondary-action" id="closeCurlImportButton" type="button">Cancel</button>

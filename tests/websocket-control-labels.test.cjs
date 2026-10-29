@@ -42,6 +42,17 @@ for (const [id, name, className, type, placeholder] of [
   });
 }
 
+test("captured WebSocket search names the session filter rather than frame contents", () => {
+  const matches = [...html.matchAll(/<input\b([^>]*\bid="websocketSearchInput"[^>]*)\/>/g)];
+  assert.equal(matches.length, 1);
+  const attrs = Object.fromEntries([...matches[0][1].matchAll(/([^\s=]+)(?:="([^"]*)")?/g)]
+    .map(([, name, value]) => [name, value ?? ""]));
+  assert.deepEqual(attrs, {
+    id: "websocketSearchInput", type: "search", placeholder: "Host, path, status", autocomplete: "off",
+    "aria-label": "Search captured WebSocket sessions",
+  });
+});
+
 test("handshake headers has a stable name and retains its native textarea", () => {
   const control = elementById("wsHandshakeHeaders");
   assert.equal(control.tag, "textarea");

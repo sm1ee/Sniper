@@ -9,6 +9,19 @@ const vm = require('node:vm');
 const { appSource, loadFunctions } = require('./frontend-test-helpers.cjs');
 const indexSource = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
 
+test('cURL command textarea has a stable name independent of its example placeholder', () => {
+  const matches = [...indexSource.matchAll(/<textarea\b([^>]*\bid="curlImportInput"[^>]*)>([^]*?)<\/textarea>/g)];
+  assert.equal(matches.length, 1);
+  const attrs = matches[0][1];
+  assert.match(attrs, /\baria-label="cURL command"/);
+  assert.match(attrs, /\bclass="curl-import-textarea"/);
+  assert.match(attrs, /\brows="10"/);
+  assert.match(attrs, /\bspellcheck="false"/);
+  assert.match(attrs, /\bplaceholder="Paste a cURL command here/);
+  assert.doesNotMatch(attrs, /\b(?:aria-labelledby|hidden|disabled|readonly|tabindex)\b/);
+  assert.equal(matches[0][2], '');
+});
+
 function fixture() {
   const nodes = new Map(), listeners = new Map(), actions = [];
   const document = { activeElement: null, readyState: 'loading' };

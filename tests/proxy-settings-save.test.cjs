@@ -3,8 +3,24 @@
 // form was filled (sniper-cli turning intercept on, an agent's scope edit) was
 // put back by a save of something else.
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const { loadFunctions } = require("./frontend-test-helpers.cjs");
+
+const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+for (const [id, expected] of [
+  ["oastPayloadText", { id: "oastPayloadText", class: "oast-payload-input", type: "text",
+    placeholder: "Generate or paste your OAST subdomain here", spellcheck: "false", "aria-label": "OAST payload" }],
+  ["proxySettingOastToken", { id: "proxySettingOastToken", type: "text",
+    placeholder: "Server authentication token (optional)", "aria-label": "OAST token" }],
+]) test(`${id} has a stable name without changing its native field or supplying a value`, () => {
+  const matches = [...html.matchAll(new RegExp(`<input\\b([^>]*\\bid="${id}"[^>]*)/>`, "g"))];
+  assert.equal(matches.length, 1);
+  const attrs = Object.fromEntries([...matches[0][1].matchAll(/([^\s=]+)(?:="([^"]*)")?/g)]
+    .map(([, name, value]) => [name, value ?? ""]));
+  assert.deepEqual(attrs, expected);
+});
 
 function fixture() {
   const elements = new Map();
