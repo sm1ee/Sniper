@@ -736,16 +736,18 @@ var hasher = {
       tab : tabs.string,
       title: "Hex to ASCII",
       calculate: function (input) {
+        return hasher.elements.s2.calculateResult(input).value;
+      },
+      calculateResult: function (input) {
         if (input.length % 2 !== 0 || /[^0-9a-f]/i.test(input)) {
-          return "NaN";
+          return { value: "NaN", success: false };
         }
         try {
           var words = CryptoJS.enc.Hex.parse(input);
-          return CryptoJS.enc.Latin1.stringify(words);
+          return { value: CryptoJS.enc.Latin1.stringify(words), success: true };
         } catch (err) {
-          return "Parse error";
+          return { value: "Parse error", success: false };
         }
-        return "";
       }
     },
     s3 : {
@@ -767,16 +769,18 @@ var hasher = {
       tab : tabs.string,
       title: "Hex to UTF-8",
       calculate: function (input) {
+        return hasher.elements.s4.calculateResult(input).value;
+      },
+      calculateResult: function (input) {
         if (input.length % 2 !== 0 || /[^0-9a-f]/i.test(input)) {
-          return "NaN";
+          return { value: "NaN", success: false };
         }
         try {
           var words = CryptoJS.enc.Hex.parse(input);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "Parse error";
+          return { value: "Parse error", success: false };
         }
-        return "";
       }
     },
     s5 : {
@@ -798,16 +802,18 @@ var hasher = {
       tab : tabs.string,
       title: "Hex to UTF-16",
       calculate: function (input) {
+        return hasher.elements.s6.calculateResult(input).value;
+      },
+      calculateResult: function (input) {
         if (input.length % 4 !== 0 || /[^0-9a-f]/i.test(input)) {
-          return "NaN";
+          return { value: "NaN", success: false };
         }
         try {
           var words = CryptoJS.enc.Hex.parse(input);
-          return CryptoJS.enc.Utf16.stringify(words);
+          return { value: CryptoJS.enc.Utf16.stringify(words), success: true };
         } catch (err) {
-          return "Parse error";
+          return { value: "Parse error", success: false };
         }
-        return "";
       }
     },
 
