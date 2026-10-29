@@ -10581,30 +10581,17 @@ function showFindingDetail(finding, record) {
   }
 }
 
+// The evidence is its own decoration layer, not a search: drawn through the
+// search slot, the first query typed replaced it and clearing that query left
+// the pane with no evidence at all.
 function updateFindingsCodePaneCM(key, container, text, evidence, finding, searchInput, searchMeta) {
-  const highlightQueries = findingHighlightQueries(evidence, finding);
-  let result = null;
-  for (const highlightQuery of highlightQueries) {
-    result = updateCodePaneCM(key, container, text, {
-      mode: "http",
-      search: highlightQuery,
-      searchClasses: {
-        hit: "tok-finding-evidence-hit",
-        active: "tok-finding-evidence-active",
-      },
-    });
-    if (result.matchCount > 0 || highlightQuery === highlightQueries[highlightQueries.length - 1]) {
-      break;
-    }
-  }
-  if (!result) {
-    result = updateCodePaneCM(key, container, text, { mode: "http" });
-  }
+  const evidenceRanges = findingEvidenceRanges(text, { ...finding, evidence });
+  const result = updateCodePaneCM(key, container, text, { mode: "http", evidenceRanges });
   if (searchInput) searchInput.value = "";
   if (searchMeta) searchMeta.innerHTML = buildSearchMeta(result.lineCount, result.matchCount);
   const cv = getCMView(key);
-  const firstMatchLine = cv && result.matchPositions?.length
-    ? cv.view.state.doc.lineAt(result.matchPositions[0]).number
+  const firstMatchLine = cv && evidenceRanges.length
+    ? cv.view.state.doc.lineAt(evidenceRanges[0].from).number
     : null;
   return {
     ...result,
@@ -10713,6 +10700,18 @@ function findingHighlightQueries(evidence, finding) {
     if (keyword.length >= 3) queries.push(keyword);
   }
   return [...new Set(queries)];
+}
+
+// Every match of the first query that matches at all, as offsets into the
+// CodeMirror document, which stores each line break as "\n".
+function findingEvidenceRanges(text, finding) {
+  const doc = String(text || "").replace(/\r\n?/g, "\n");
+  for (const query of findingHighlightQueries(finding.evidence, finding)) {
+    const ranges = [];
+    forEachCodeSearchMatch(doc, query, (from, to) => ranges.push({ from, to }));
+    if (ranges.length) return ranges;
+  }
+  return [];
 }
 
 function firstUsableFindingQuery(value) {
@@ -31165,7 +31164,6 @@ const sniperCMTheme = CM.EditorView.theme({
   ".tok-search-hit":   { background: "rgba(132, 151, 173, 0.42)", borderRadius: "4px", padding: "0 1px", boxShadow: "inset 0 0 0 1px rgba(170, 190, 214, 0.72)" },
   ".tok-search-active": { background: "rgba(201, 169, 110, 0.62)", borderRadius: "4px", padding: "0 1px", boxShadow: "inset 0 0 0 1px rgba(232, 201, 141, 0.9)" },
   ".tok-finding-evidence-hit": { color: "#f3e7cc", background: "rgba(201, 169, 110, 0.24)", borderRadius: "3px", padding: "0 2px", fontWeight: "700", boxShadow: "0 0 0 1px rgba(201, 169, 110, 0.44), 0 0 0 1px rgba(0, 0, 0, 0.18)" },
-  ".tok-finding-evidence-active": { color: "#fff3cf", background: "rgba(201, 169, 110, 0.34)", borderRadius: "3px", padding: "0 2px", fontWeight: "800", boxShadow: "0 0 0 1px rgba(230, 199, 139, 0.58), 0 0 8px rgba(201, 169, 110, 0.12)" },
 }, { dark: true });
 
 // ─── HTTP decoration plugin ─────────────────────────────────────────────────
