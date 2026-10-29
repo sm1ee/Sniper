@@ -275,3 +275,106 @@ test("empty OAST payload remains a silent no-op", async () => {
   assert.equal(writes, 0); assert.deepEqual(f.toasts, []); assert.deepEqual(f.calls, []);
   assert.equal(f.button.disabled, false); assert.equal(f.attached.size, 0);
 });
+
+// Only initialized Replay menu action registrations and the production clipboard
+// helper run here. All clipboard/document APIs are the inert fixture above.
+function replayCopyFixture(action, options = {}) {
+  const f = fixture(options), toasts = [], exports = [], urls = [];
+  const tab = { id: "synthetic-tab", requestText: "GET /synthetic HTTP/1.1" };
+  let click, closes = 0;
+  const button = { dataset: { replayAction: action },
+    addEventListener(type, handler) { assert.equal(type, "click"); click = handler; } };
+  const forbidden = () => assert.fail("No network, native or request action is permitted");
+  Object.assign(f.context, {
+    getReplayContextMenu: () => ({ querySelectorAll(selector) {
+      assert.equal(selector, "[data-replay-action]"); return [button];
+    } }),
+    replayContextMenuTabId: tab.id, getReplayTabById: id => id === tab.id ? tab : null,
+    getReplayExportTarget: selected => {
+      assert.equal(selected, tab); return { scheme: "https", host: "example.com", port: "" };
+    },
+    buildUrlFromTarget: (...args) => { urls.push(args); return "https://example.com/synthetic"; },
+    replayRequestToFormat: (format, selected) => {
+      assert.equal(selected, tab); exports.push(format); return `synthetic ${format} export text`;
+    },
+    closeReplayContextMenu: () => closes++, showToast: (...args) => toasts.push(args),
+    fetch: forbidden, sendReplay: forbidden, openCurlImportModal: forbidden,
+  });
+  const copyUrl = appSource.match(/^function copyReplayUrl\([^]*?^\}/m);
+  assert.ok(copyUrl);
+  vm.runInContext(copyUrl[0], f.context);
+  const init = appSource.indexOf("function initReplayContextMenu() {");
+  const start = appSource.indexOf("  // Action buttons\n", init);
+  const end = appSource.indexOf("  // Close on outside click\n", start);
+  assert.ok(init >= 0 && start > init && end > start);
+  vm.runInContext(appSource.slice(start, end), f.context);
+  return { ...f, toasts, exports, urls, tab, click, closes: () => closes };
+}
+
+for (const action of ["copy-url", "copy-as-curl", "copy-as-python", "copy-as-fetch", "copy-as-powershell"]) {
+  for (const outcome of ["modern success", "fallback success", "false", "select", "copy"]) {
+    test(`Replay ${action} actual binding settles ${outcome} with truthful feedback`, async () => {
+      const pending = pendingWrite(), modernWrites = [];
+      const error = new Error("synthetic private clipboard detail");
+      const f = replayCopyFixture(action, {
+        modern: text => { modernWrites.push(text); return pending.promise; },
+        copied: outcome !== "false",
+        selectError: outcome === "select" ? error : undefined,
+        copyError: outcome === "copy" ? error : undefined,
+      });
+      const original = f.tab.requestText;
+      assert.equal(f.click(), undefined);
+      assert.equal(f.closes(), 1, "menu closes immediately, not after clipboard settlement");
+      assert.deepEqual(f.toasts, [], "no notification while modern clipboard is pending");
+      assert.equal(f.attached.size, 0);
+      assert.deepEqual(modernWrites, [action === "copy-url" ? "https://example.com/synthetic" : `synthetic ${action.replace("copy-as-", "")} export text`]);
+      assert.deepEqual(f.urls, action === "copy-url" ? [["https", "example.com", "", "/synthetic"]] : []);
+      assert.deepEqual(f.exports, action !== "copy-url" ? [action.replace("copy-as-", "")] : []);
+      if (outcome === "modern success") pending.resolve();
+      else pending.reject(error);
+      await finishCopyTurn();
+      const success = outcome.endsWith("success");
+      assert.deepEqual(f.toasts, [success
+        ? [action === "copy-url" ? "Copied URL" : `Copied as ${action.replace("copy-as-", "")}`]
+        : ["Failed to copy", "error"]]);
+      assert.equal(f.attached.size, 0);
+      assert.equal(f.closes(), 1);
+      assert.equal(f.tab.requestText, original);
+      assert.deepEqual(f.calls, outcome === "modern success" ? [] : outcome === "select"
+        ? ["select", "remove"] : ["select", "copy", "remove"]);
+    });
+  }
+}
+
+for (const action of ["copy-url", "copy-as-curl", "copy-as-python", "copy-as-fetch", "copy-as-powershell"]) {
+  test(`Replay ${action} failed attempt can be retried successfully`, async () => {
+    let attempt = 0;
+    const f = replayCopyFixture(action, { copied: false, modern: async () => {
+      if (++attempt === 1) throw new Error("synthetic refusal");
+    } });
+    f.click(); await finishCopyTurn();
+    f.click(); await finishCopyTurn();
+    assert.deepEqual(f.toasts, [
+      ["Failed to copy", "error"],
+      [action === "copy-url" ? "Copied URL" : `Copied as ${action.replace("copy-as-", "")}`],
+    ]);
+    assert.equal(f.closes(), 2); assert.equal(f.attached.size, 0);
+  });
+}
+
+
+for (const action of ["copy-url", "copy-as-curl", "copy-as-python", "copy-as-fetch", "copy-as-powershell"]) {
+  test(`Replay ${action} missing menu tab stays a silent no-op`, async () => {
+    const f = replayCopyFixture(action, { modern: () => assert.fail("must not copy") });
+    f.context.replayContextMenuTabId = "missing";
+    f.click(); await finishCopyTurn();
+    assert.deepEqual(f.toasts, []); assert.deepEqual(f.calls, []); assert.equal(f.closes(), 1);
+  });
+}
+
+for (const action of ["copy-as-curl", "copy-as-python", "copy-as-fetch", "copy-as-powershell"]) test(`Replay empty ${action} export stays a silent no-op`, async () => {
+  const f = replayCopyFixture(action, { modern: () => assert.fail("must not copy") });
+  f.context.replayRequestToFormat = () => "";
+  f.click(); await finishCopyTurn();
+  assert.deepEqual(f.toasts, []); assert.deepEqual(f.calls, []); assert.equal(f.closes(), 1);
+});

@@ -32008,7 +32008,7 @@ function copyReplayUrl(tab = getActiveReplayTab()) {
   const match = text.match(/^[A-Z]+\s+(\S+)/i);
   const path = match ? match[1] : "/";
   const url = buildUrlFromTarget(scheme, host, port, path);
-  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => {});
+  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => showToast("Failed to copy", "error"));
 }
 
 function parseCurlCommand(text) {
@@ -32647,7 +32647,7 @@ function initReplayContextMenu() {
         const format = action.replace("copy-as-", "");
         const text = replayRequestToFormat(format, tab);
         if (text) {
-          copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => {});
+          copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => showToast("Failed to copy", "error"));
         }
       } else if (action === "import-curl") {
         openCurlImportModal();
