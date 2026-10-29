@@ -27,7 +27,7 @@ const run = (id = 'run-a', results = [result(0), result(1)]) => ({ id, status: '
 const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body,
   headers: { get: () => 'text/plain' }, text: async () => 'Synthetic read failure.' });
 function fixture() {
-  const ids = ['fuzzerResultStatus', 'fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs',
+  const ids = ['fuzzerShell', 'fuzzerResultStatus', 'fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs',
     'fuzzerResultSort', 'fuzzerResultDirection', 'fuzzerResultFilterCount', 'fuzzerResultsHead',
     'fuzzerResultFilterBadge', 'fuzzerResultFilterSummary', 'fuzzerClearResultFiltersButton', 'fuzzerResultStatusRow', 'fuzzerCompareBaseButton', 'fuzzerCompareButton',
     'fuzzerSavedRunSelect', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton', 'fuzzerSavedRunNotice',
@@ -391,6 +391,40 @@ test('with no results there is nothing to compare or count, and one empty messag
   f.setFilter('fuzzerResultMinBytes', '1');
   assert.equal(f.els.fuzzerResultStatusRow.classList.contains('hidden'), false);
   assert.equal(f.els.fuzzerClearResultFiltersButton.classList.contains('hidden'), false);
+});
+
+test('modeled no-run rendering and visible loaded-run filters keep distinct messages', () => {
+  const f = fixture();
+  f.state.fuzzerNotice = '';
+  f.c.clearFuzzerAttackRecord(); f.c.renderFuzzer();
+  const message = () => f.els.fuzzerResultsBody.innerHTML;
+  for (const status of ['5xx', 'all']) {
+    f.setFilter('fuzzerResultStatus', status);
+    assert.match(message(), /Results appear here after running\./);
+  }
+  f.setFilter('fuzzerResultMinBytes', '-1');
+  assert.match(message(), /Fix the result filters/);
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.match(message(), /Results appear here after running\./);
+  f.state.fuzzerNotice = 'Fuzzer draft changed. Start a new run to see results for the current template.';
+  f.setFilter('fuzzerResultMinBytes', '1');
+  assert.ok(message().includes(f.state.fuzzerNotice));
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.ok(message().includes(f.state.fuzzerNotice));
+
+  f.c.setFuzzerAttackRecord(run('empty-run', [])); f.c.renderFuzzer();
+  f.setFilter('fuzzerResultStatus', '5xx');
+  assert.match(message(), /No fuzzer results are available for this run\./);
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.match(message(), /No fuzzer results are available for this run\./);
+  f.c.setFuzzerAttackRecord(run()); f.c.renderFuzzer();
+  f.setFilter('fuzzerResultStatus', '5xx');
+  assert.match(message(), /No results match these filters\./);
+  assert.equal(f.els.fuzzerResultFilterCount.textContent, '0 of 2 results');
+  f.setFilter('fuzzerResultMinBytes', '-1');
+  assert.match(message(), /Fix the result filters/);
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.equal(f.els.fuzzerResultFilterCount.textContent, '2 of 2 results');
 });
 
 test('comparison requires a selected fetched transaction and uses existing pinned transaction reads', async () => {
@@ -974,6 +1008,35 @@ async function viewRunningPickerRun(f, id = 'external-live') {
   f.requests.at(-1).resolve(response({ ...run(id, [result(0)]), running: true, planned: 3, payload_count: 3 }));
   await pending;
 }
+test('visible filters preserve the draft notice after editing a viewed running retained run', async () => {
+  const f = fixture();
+  const inputStart = appSource.indexOf('    els.fuzzerRequestEditor.addEventListener("input", () => {');
+  const inputEnd = appSource.indexOf('    els.fuzzerRequestEditor.addEventListener("scroll",', inputStart);
+  assert.ok(inputStart >= 0 && inputEnd > inputStart);
+  vm.runInContext(appSource.slice(inputStart, inputEnd), f.c);
+  await viewRunningPickerRun(f);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.els.fuzzerShell.classList.contains('fuzzer-results-empty'), false);
+  f.els.fuzzerRequestEditor.value += '\nX-Synthetic: edited';
+  f.els.fuzzerRequestEditor.dispatch('input');
+  assert.equal(f.state.fuzzerAttackRecord, null);
+  assert.equal(f.state.fuzzerAttackRecordId, null);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.els.fuzzerShell.classList.contains('fuzzer-results-empty'), false,
+    'the running retained run keeps the filter and table surfaces visible after a local draft edit');
+  const notice = 'Draft changed. The current run is still active; edits apply to the next run.';
+  assert.equal(f.state.fuzzerNotice, notice);
+  const reads = f.requests.length, saves = f.saves;
+  f.setFilter('fuzzerResultStatus', '5xx');
+  assert.ok(f.els.fuzzerResultsBody.innerHTML.includes(notice));
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.ok(f.els.fuzzerResultsBody.innerHTML.includes(notice));
+  assert.equal(f.els.fuzzerShell.classList.contains('fuzzer-results-empty'), false);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.requests.length, reads);
+  assert.equal(f.saves, saves);
+});
+
 test('picker View follows a running retained run without replacing the draft or holding the picker busy', async () => {
   const f = fixture(), before = draft(f.state);
   await viewRunningPickerRun(f);

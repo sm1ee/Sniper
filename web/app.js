@@ -17202,7 +17202,10 @@ function renderFuzzerResultsVirtual() {
     const validation = fuzzerResultFilterValidation();
     renderEmptyFuzzerResults(!validation.valid ? `Fix the result filters. ${validation.message}`
       : jsonArray(state.fuzzerAttackRecord?.results).length
-        ? "No results match these filters." : "No fuzzer results are available for this run.", results);
+        ? "No results match these filters."
+        : !state.fuzzerAttackRecord
+          ? state.fuzzerNotice || "Results appear here after running."
+          : "No fuzzer results are available for this run.", results);
     return;
   }
   const shell = fuzzerResultsShell();
