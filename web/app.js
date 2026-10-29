@@ -1973,8 +1973,11 @@ function bindEvents() {
   });
 
   els.closeInspectorButton?.addEventListener("click", () => {
+    const ownsFocus = els.closeInspectorButton.closest(".inspector-main")?.contains(document.activeElement);
+    const returnFocus = railTabs.find((tab) => tab.dataset.inspectorTab === state.activeInspectorTab);
     state.inspectorCollapsed = true;
     renderInspectorPanels();
+    if (ownsFocus) focusPaneCloseTarget(returnFocus);
   });
 
   onClickWithProgress(document.getElementById("addInterceptRuleButton"), () =>
@@ -2011,7 +2014,12 @@ function bindEvents() {
       loadWebsocketsPageRefresh(true).catch((error) => console.error(error));
     });
   }
-  els.frameDetailClose.addEventListener("click", hideFrameDetail);
+  els.frameDetailClose.addEventListener("click", () => {
+    const ownsFocus = els.frameDetailPanel.contains(document.activeElement);
+    const returnFocus = document.getElementById("websocketFramesColumn");
+    hideFrameDetail();
+    if (ownsFocus) focusPaneCloseTarget(returnFocus);
+  });
   initFrameDetailResizer();
   document.querySelectorAll(".ws-sort").forEach((btn) => {
     btn.addEventListener("click", () => toggleWebsocketSort(btn.dataset.wsSortKey));
@@ -24139,6 +24147,18 @@ function closeFilterModal() {
 
 function isModalVisible(modal) {
   return Boolean(modal) && !modal.classList.contains("hidden");
+}
+
+// Explicit pane dismissal may return to a programmatic-only region without
+// adding a Tab stop or changing the focus policy of background pane cleanup.
+function focusPaneCloseTarget(target) {
+  if (target?.isConnected && !target.disabled
+    && (target.tabIndex >= 0 || target.getAttribute("tabindex") === "-1")
+    && target.getClientRects().length && window.getComputedStyle(target).visibility !== "hidden") {
+    target.focus({ preventScroll: true });
+  } else {
+    restoreModalFocus(null);
+  }
 }
 
 function restoreModalFocus(previous, fallback = document.querySelector(".main-tab.active")) {

@@ -243,7 +243,7 @@
                       <strong id="detailTitle">Inspector</strong>
                       <div class="detail-tags" id="detailTags"></div>
                     </div>
-                    <button class="pane-close" id="closeInspectorButton" type="button">&times;</button>
+                    <button class="pane-close" id="closeInspectorButton" type="button" aria-label="Close inspector">&times;</button>
                   </header>
                   <div class="inspector-content" id="inspectorContent">
                     <section class="inspector-section">
@@ -432,7 +432,7 @@
                 </section>
                 <div class="pane-resizer" id="websocketSplitResizer" aria-hidden="true"></div>
 
-                <section class="panel-card websocket-frames-column" id="websocketFramesColumn">
+                <section class="panel-card websocket-frames-column" id="websocketFramesColumn" tabindex="-1" aria-label="WebSocket frames">
                   <header class="panel-toolbar panel-toolbar-compact">
                     <p class="placeholder-kicker">Frames</p>
                   </header>
@@ -454,7 +454,7 @@
                   <div class="frame-detail-panel hidden" id="frameDetailPanel">
                     <header class="frame-detail-header">
                       <div class="frame-detail-meta" id="frameDetailMeta"></div>
-                      <button class="frame-detail-close" id="frameDetailClose" type="button" title="Close">&times;</button>
+                      <button class="frame-detail-close" id="frameDetailClose" type="button" title="Close" aria-label="Close frame detail">&times;</button>
                     </header>
                     <pre class="simple-code-view frame-detail-body" id="frameDetailBody" tabindex="0"></pre>
                   </div>

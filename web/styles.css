@@ -4409,6 +4409,11 @@ body.pane-resizing-y {
   margin-right: 12px;
 }
 
+#websocketFramesColumn:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
+}
+
 .frame-detail-close {
   width: 22px;
   height: 22px;

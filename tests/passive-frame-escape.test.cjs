@@ -264,3 +264,105 @@ for (const [label, state] of [
     assert.equal(f.document.activeElement, f.opener);
   });
 }
+
+// Exercise only the two explicit Close bindings, never app initialization.
+function paneCloseFixture() {
+  const document = { activeElement: null };
+  function element(tabIndex = 0, explicitTabindex = null) {
+    const classes = new Set();
+    return {
+      isConnected: true, disabled: false, tabIndex, visible: true, visibility: "visible", children: [], dataset: {},
+      classList: { add: value => classes.add(value), remove: value => classes.delete(value), contains: value => classes.has(value) },
+      contains(target) { return this === target || this.children.includes(target); },
+      getAttribute: name => name === "tabindex" ? explicitTabindex : null,
+      getClientRects() { return this.visible ? [1] : []; },
+      focus(options) { document.activeElement = this; this.focusOptions = options; },
+      querySelectorAll() { return []; },
+      addEventListener(type, handler) { assert.equal(type, "click"); this.click = handler; },
+    };
+  }
+  const inspector = element(), closeInspectorButton = element(), inspectorChild = element();
+  inspector.children = [closeInspectorButton, inspectorChild];
+  closeInspectorButton.closest = selector => { assert.equal(selector, ".inspector-main"); return inspector; };
+  const frameDetailPanel = element(), frameDetailClose = element(), frameChild = element();
+  frameDetailPanel.children = [frameDetailClose, frameChild];
+  const frames = element(-1, "-1"), fallback = element(), outside = element();
+  const railTabs = [element(), element()];
+  railTabs[0].dataset.inspectorTab = "inspector";
+  railTabs[1].dataset.inspectorTab = "notes";
+  const els = { closeInspectorButton, frameDetailPanel, frameDetailClose, frameDetailResizer: element(), websocketFramesBody: element() };
+  const state = { activeInspectorTab: "inspector", inspectorCollapsed: false, selectedFrameIdx: 7, wsKeyboardFocus: "frames" };
+  document.getElementById = id => { assert.equal(id, "websocketFramesColumn"); return frames; };
+  document.querySelector = selector => { assert.equal(selector, ".main-tab.active"); return fallback; };
+  const context = loadFunctions(["focusPaneCloseTarget", "restoreModalFocus", "hideFrameDetail"], {
+    document, els, state, railTabs,
+    window: { getComputedStyle: target => ({ visibility: target.visibility }) },
+    renderInspectorPanels() { inspector.visible = false; },
+  });
+  for (const marker of ['  els.closeInspectorButton?.addEventListener("click", () => {', '  els.frameDetailClose.addEventListener("click", () => {']) {
+    const start = appSource.indexOf(marker);
+    const end = appSource.indexOf("\n  });", start) + "\n  });".length;
+    assert.ok(start >= 0 && end > start);
+    vm.runInContext(appSource.slice(start, end), context);
+  }
+  return { document, context, els, state, railTabs, inspector, inspectorChild, frameChild, frames, fallback, outside, element };
+}
+
+for (const tab of ["inspector", "notes"]) {
+  for (const origin of ["button", "descendant", "outside"]) {
+    test(`explicit Inspector Close returns ${origin} focus only when owned, to active ${tab} rail`, () => {
+      const f = paneCloseFixture(); f.state.activeInspectorTab = tab;
+      const before = origin === "button" ? f.els.closeInspectorButton : origin === "descendant" ? f.inspectorChild : f.outside;
+      before.focus(); f.els.closeInspectorButton.click();
+      assert.equal(f.state.inspectorCollapsed, true);
+      const expected = origin === "outside" ? before : f.railTabs.find(item => item.dataset.inspectorTab === tab);
+      assert.equal(f.document.activeElement, expected);
+      if (origin !== "outside") assert.equal(expected.focusOptions.preventScroll, true);
+    });
+  }
+}
+for (const origin of ["button", "descendant", "outside"]) {
+  test(`explicit frame Close restores ${origin} focus only when owned without changing navigation mode`, () => {
+    const f = paneCloseFixture();
+    const before = origin === "button" ? f.els.frameDetailClose : origin === "descendant" ? f.frameChild : f.outside;
+    before.focus(); f.els.frameDetailClose.click();
+    assert.equal(f.document.activeElement, origin === "outside" ? before : f.frames);
+    assert.equal(f.els.frameDetailPanel.classList.contains("hidden"), true);
+    assert.equal(f.state.selectedFrameIdx, null);
+    assert.equal(f.state.wsKeyboardFocus, "frames");
+    if (origin !== "outside") assert.equal(f.frames.focusOptions.preventScroll, true);
+  });
+}
+for (const invalid of ["disconnected", "disabled", "no-rects", "hidden", "implicit-negative"]) {
+  test(`pane Close rejects ${invalid} return target and uses existing fallback`, () => {
+    const f = paneCloseFixture();
+    if (invalid === "disconnected") f.frames.isConnected = false;
+    if (invalid === "disabled") f.frames.disabled = true;
+    if (invalid === "no-rects") f.frames.visible = false;
+    if (invalid === "hidden") f.frames.visibility = "hidden";
+    if (invalid === "implicit-negative") f.frames.getAttribute = () => null;
+    f.frameChild.focus(); f.els.frameDetailClose.click();
+    assert.equal(f.document.activeElement, f.fallback);
+    assert.equal(f.fallback.focusOptions.preventScroll, true);
+  });
+}
+test("generic frame hiding never restores focus, including a focused detail descendant", () => {
+  const f = paneCloseFixture(); f.frameChild.focus(); f.context.hideFrameDetail();
+  assert.equal(f.document.activeElement, f.frameChild);
+  assert.equal(f.state.wsKeyboardFocus, "frames");
+});
+test("pane Close captures active rail before rendering changes active Inspector state", () => {
+  const f = paneCloseFixture(); f.state.activeInspectorTab = "notes";
+  f.context.renderInspectorPanels = () => { f.state.activeInspectorTab = "inspector"; };
+  f.inspectorChild.focus(); f.els.closeInspectorButton.click();
+  assert.equal(f.document.activeElement, f.railTabs[1]);
+});
+test("explicit pane Close controls are named and Frames is programmatic-only with inset focus styling", () => {
+  const fs = require("node:fs"), path = require("node:path");
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(html, /<button[^>]*id="closeInspectorButton"[^>]*aria-label="Close inspector"/);
+  assert.match(html, /<button[^>]*id="frameDetailClose"[^>]*aria-label="Close frame detail"/);
+  assert.match(html, /<section[^>]*id="websocketFramesColumn"[^>]*tabindex="-1"[^>]*aria-label="WebSocket frames"/);
+  assert.match(css, /#websocketFramesColumn:focus-visible\s*\{[^}]*outline: 2px solid var\(--point\);[^}]*outline-offset: -2px;/);
+});
