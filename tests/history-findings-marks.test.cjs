@@ -16,24 +16,30 @@ const FINDINGS = Object.freeze([
   finding("f-info", "rec-b", "info", "Email address in response"),
 ]);
 
-function fixture({ show = true, color = "severity" } = {}) {
-  const pill = toggleButton(!show);
-  const reads = [], redraws = { rows: 0, panes: 0 };
+function fixture({ show = true, color = "severity", colorTags = [] } = {}) {
+  // HTTP's Findings pill and the Findings tab's Mark in HTTP show one setting.
+  const pills = { httpFindingsToggle: toggleButton(!show), findingsHistoryToggle: toggleButton(!show) };
+  const pill = pills.httpFindingsToggle;
+  const reads = [], redraws = { rows: 0, panes: 0, lists: 0 };
   const state = {
     httpShowFindings: show, displaySettings: { findingsColor: color },
     activeSession: { id: "session-a" }, selectedRecord: null,
+    query: "", filterSettings: { colorTags: new Set(colorTags) },
   };
   const context = loadFunctions([
     "refreshHistoryFindings", "historyFindingSignature", "historyFindingEvidenceRanges", "loadHistoryFindingEvidence",
     "findingEvidenceRanges", "findingHighlightQueries", "firstUsableFindingQuery", "extractFindingKeywords",
     "forEachCodeSearchMatch", "normalizeFindingLocation", "setToggleButton", "renderHistoryCell",
     "severityClass", "severityLabel", "escapeHtml", "currentSessionId", "sessionQueryPath",
+    "summaryMatchesColorTags", "createHistoryQueryState", "buildTransactionsPageUrl",
+    "selectedStatusClasses", "selectedMimeTypes",
   ], {
     state, findingsData: FINDINGS, URLSearchParams,
     SEVERITY_ORDER: { critical: 0, high: 1, medium: 2, low: 3, info: 4 },
     historyFindingEvidence: new Map(), historyFindingEvidencePending: new Set(), historyFindingEvidenceSessionId: null,
-    document: { getElementById: id => (id === "httpFindingsToggle" ? pill : null) },
+    document: { getElementById: id => pills[id] || null }, HTTP_HISTORY_PAGE_SIZE: 5000,
     renderHistoryVirtual: () => redraws.rows++, renderMessagePanes: () => redraws.panes++,
+    scheduleRefresh: () => redraws.lists++,
     fetch(url) {
       reads.push(url);
       return Promise.resolve({ ok: true, json: async () => ({ evidence: "set-cookie: sid=abc; Path=/" }) });
@@ -41,7 +47,7 @@ function fixture({ show = true, color = "severity" } = {}) {
   });
   vm.runInContext(appSource.match(/^const FINDING_SEVERITY_TONES = .*$/m)[0], context);
   context.refreshHistoryFindings();
-  return { context, state, pill, reads, redraws };
+  return { context, state, pill, pills, reads, redraws };
 }
 
 test("records are marked by their worst finding, in the chosen colour, only while shown", () => {
@@ -60,6 +66,8 @@ test("records are marked by their worst finding, in the chosen colour, only whil
   const hidden = fixture({ show: false });
   assert.equal(hidden.state._historyFindings, null);
   assert.equal(hidden.pill.checked, false);
+  assert.equal(hidden.pills.findingsHistoryToggle.checked, false);
+  assert.equal(f.pills.findingsHistoryToggle.checked, true);
 });
 
 test("Notes shows the worst finding in an empty cell and only its badge beside the operator's note", () => {
@@ -93,4 +101,25 @@ test("the open record's evidence is read once and marked on the side the finding
   assert.deepEqual(Array.from(f.context.historyFindingEvidenceRanges("rec-a", "request", "GET / HTTP/1.1", "raw")), []);
   assert.deepEqual(Array.from(f.context.historyFindingEvidenceRanges("rec-a", "response", text, "hex")), []);
   assert.equal(f.reads.length, 1);
+});
+
+test("the colour filter gathers rows by the colour they are drawn in", () => {
+  const f = fixture({ colorTags: ["yellow"] });
+  const url = () => new URL(f.context.buildTransactionsPageUrl(), "http://example.com").searchParams;
+  assert.equal(url().get("color_tags"), "yellow");
+  assert.equal(url().get("finding_color"), "severity");
+  assert.equal(f.redraws.lists, 1, "a filtered list is read again when its findings change");
+  f.context.refreshHistoryFindings();
+  assert.equal(f.redraws.lists, 1, "unchanged findings do not reread it");
+
+  const matches = item => f.context.summaryMatchesColorTags(item, f.state.filterSettings);
+  assert.equal(matches({ id: "rec-a" }), true);
+  assert.equal(matches({ id: "rec-b" }), false);
+  assert.equal(matches({ id: "rec-a", color_tag: "blue" }), false, "a colour tag wins over the tint");
+  assert.equal(matches({ id: "rec-c", color_tag: "yellow" }), true);
+
+  // Without marks, or with no tint, the server is not asked to count findings.
+  assert.equal(fixture({ colorTags: ["yellow"], show: false }).context.createHistoryQueryState().findingColor, "");
+  assert.equal(fixture({ colorTags: ["yellow"], color: "none" }).context.createHistoryQueryState().findingColor, "");
+  assert.equal(fixture().context.createHistoryQueryState().findingColor, "");
 });

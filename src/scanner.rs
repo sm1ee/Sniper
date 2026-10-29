@@ -400,6 +400,23 @@ impl ScannerStore {
         entries.iter().find(|f| f.id == id).cloned()
     }
 
+    /// Each record's most severe finding, which is what HTTP history tints it by.
+    pub async fn worst_severity_by_record(&self) -> HashMap<Uuid, Severity> {
+        let entries = self.entries.read().await;
+        let mut worst: HashMap<Uuid, Severity> = HashMap::new();
+        for finding in entries.iter() {
+            worst
+                .entry(finding.record_id)
+                .and_modify(|severity| {
+                    if finding.severity > *severity {
+                        *severity = finding.severity.clone();
+                    }
+                })
+                .or_insert_with(|| finding.severity.clone());
+        }
+        worst
+    }
+
     pub async fn clear(&self) {
         self.clear_generation.fetch_add(1, Ordering::AcqRel);
         self.entries.write().await.clear();

@@ -165,9 +165,10 @@ Send payload lists at marked positions and compare status, length and timing.
 ### Findings
 
 Passive checks and template matches, each with its evidence highlighted.
-With **Findings** on in HTTP, the same requests carry a severity badge in Notes,
-a row tint (Settings ▸ Display) and the highlighted evidence. A note or colour
-tag you set wins over them.
+With **Findings** on in HTTP (or **Mark in HTTP** here), the same requests carry
+a severity badge in Notes, a row tint (Settings ▸ Display) that the colour filter
+gathers them by, and the highlighted evidence. A note or colour tag you set wins
+over them.
 
 <p align="center">
   <img src="docs/assets/sniper-v0.3.2-findings.jpg" width="800" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" />
