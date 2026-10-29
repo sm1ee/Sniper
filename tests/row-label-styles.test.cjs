@@ -4,7 +4,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+// Windows checkouts use CRLF; the rules below are matched line by line.
+const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
 const rule = (selector) => css.match(new RegExp(`^${selector.replace(/[.()[\]]/g, "\\$&")} \\{([^}]*)\\}`, "m"))?.[1] ?? "";
 
 // A bordered pill on every row was louder than the data, as it was for
