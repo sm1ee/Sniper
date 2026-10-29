@@ -9,13 +9,17 @@ const { loadFunctions } = require("./frontend-test-helpers.cjs");
 
 function fixture() {
   const values = new Map([["#input-value", ""], ["#input-password", ""]]);
+  const nodes = new Map();
   const context = vm.createContext({
     TextEncoder, TextDecoder, Uint8Array, document: {}, autoScroll() {}, ipCalc: function () {},
     $(selector) {
+      if (!nodes.has(selector)) nodes.set(selector, { value: "" });
+      const node = nodes.get(selector);
       return {
+        0: node,
         val(value) {
           if (!arguments.length) return values.get(selector) || "";
-          values.set(selector, value); return this;
+          values.set(selector, value); node.value = String(value).replace(/\r\n?/g, "\n"); return this;
         },
         hide() { return this; }, removeClass() { return this; }, attr() { return this; },
         text() { return this; }, html() { return this; },
@@ -36,14 +40,14 @@ function fixture() {
     } };
   };
   const rows = [elements.e2, elements.e3].map(element => Object.assign(node(), {
-    querySelector: () => ({ value: values.get("#" + element.id) }),
+    querySelector: () => nodes.get("#" + element.id),
   }));
   const output = { querySelectorAll: () => rows };
   const hint = node();
   const display = loadFunctions(["decoderOutputShows", "markEmptyDecoderOutputs"], {
     document: { getElementById: () => output }, els: { toolsOutputHint: hint },
   });
-  return { context, values, elements, rows, hint, display };
+  return { context, values, elements, rows, hint, display, nodes };
 }
 
 const invalidInputs = [
@@ -119,4 +123,63 @@ test("actual Tools updates hide fabricated or stale Base64 results and recover w
     assert.equal(hint.classList.contains("hidden"), visible.some(Boolean));
     assert.equal(values.get("#input-value"), input);
   }
+});
+
+
+test("successful Base64 plaintext is not confused with legacy error messages", () => {
+  const { context, values, elements, rows, display, nodes } = fixture();
+  context.hasher.tab = context.tabs.encode;
+  for (const text of ["Error report", "Invalid text", "NaN", "Invalid Base64 input",
+    "Parse error", "Out of range", "Error\r\nreport", "Invalid\rtext"]) {
+    values.set("#input-value", Buffer.from(text).toString("base64"));
+    context.hasher.update(); display.markEmptyDecoderOutputs();
+    assert.equal(elements.e2.calculate(values.get("#input-value")), text);
+    assert.equal(rows[0].classList.contains("hidden"), false, text);
+    const node = nodes.get("#" + elements.e2.id);
+    assert.equal(node.decoderResult.value, node.value);
+    assert.equal(node.decoderResult.success, true);
+  }
+});
+
+test("Base64 status follows edits, clearing and repainting, not speculative calculations", () => {
+  const { context, values, elements, rows, display, nodes } = fixture();
+  context.hasher.tab = context.tabs.encode;
+  for (const [input, visible, success] of [["TmFO", true, true], ["!", false, false],
+    ["", false, true], ["RXJyb3IgcmVwb3J0", true, true]]) {
+    values.set("#input-value", input); context.hasher.update();
+    const node = nodes.get("#" + elements.e2.id);
+    context.decoderCalculateResult(elements.e2, "!", "");
+    display.markEmptyDecoderOutputs();
+    assert.equal(rows[0].classList.contains("hidden"), !visible);
+    assert.equal(node.decoderResult.success, success);
+  }
+  const id = "#" + elements.e2.id;
+  // A changed value cannot inherit a previous success, even before repaint.
+  nodes.get(id).value = "Invalid Base64 input";
+  display.markEmptyDecoderOutputs();
+  assert.equal(rows[0].classList.contains("hidden"), true);
+  // Replacing a DOM node (tab rerender) starts without metadata.
+  nodes.set(id, { value: "NaN" });
+  display.markEmptyDecoderOutputs();
+  assert.equal(rows[0].classList.contains("hidden"), true);
+  context.hasher.tab = context.tabs.hash;
+  context.hasher.update();
+  context.hasher.tab = context.tabs.encode;
+  context.hasher.update(); display.markEmptyDecoderOutputs();
+  assert.equal(rows[0].classList.contains("hidden"), false);
+  assert.equal(nodes.get(id).decoderResult.value, "Error report");
+});
+
+test("typed results guide category availability without changing legacy error filtering", () => {
+  const { context, elements } = fixture();
+  const c = loadFunctions(["decoderOutputShows"]);
+  for (const input of ["TmFO", "RXJyb3IgcmVwb3J0", "SW52YWxpZCB0ZXh0"]) {
+    const result = context.decoderCalculateResult(elements.e2, input, "");
+    assert.equal(c.decoderOutputShows(result.value, result), true);
+    assert.equal(c.decoderOutputShows(result.value), false);
+  }
+  const failed = context.decoderCalculateResult(elements.e2, "!", "");
+  assert.equal(c.decoderOutputShows(failed.value, failed), false);
+  const legacy = context.decoderCalculateResult({ calculate: () => "Parse error" }, "", "");
+  assert.equal(c.decoderOutputShows(legacy.value, legacy), false);
 });

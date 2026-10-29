@@ -80,3 +80,31 @@ test("a category with nothing to show for the input is idle, except the one in u
   assert.deepEqual(["encode", "number", "jwt", "json"].map(idle), [false, false, false, false]);
   assert.deepEqual(["encode", "number", "jwt", "json"].map(name => document.getElementById(name).button.disabled), [false, false, false, false]);
 });
+
+test("category availability uses typed Base64 status without caching speculative results", () => {
+  const buttons = new Map();
+  const inputs = { "input-value": { value: "TmFO" }, "input-password": { value: "" } };
+  const document = { getElementById(id) {
+    if (inputs[id]) return inputs[id];
+    if (!buttons.has(id)) buttons.set(id, { button: {}, classList: { toggle() {} },
+      querySelector() { return this.button; } });
+    const item = buttons.get(id);
+    item.button.setAttribute = () => {};
+    return item;
+  } };
+  const window = { tabs: { encode: 7, hash: 1 }, hasher: { tab: 1,
+    elements: { decode: { tab: 7 } } },
+    decoderCalculateResult() {
+      return inputs["input-value"].value === "TmFO"
+        ? { value: "NaN", success: true }
+        : { value: "Invalid Base64 input", success: false };
+    },
+  };
+  const c = loadFunctions(["markIdleDecoderTabs", "decoderOutputShows"], { document, window });
+  c.markIdleDecoderTabs();
+  assert.equal(buttons.get("encode").button.disabled, false);
+  inputs["input-value"].value = "!";
+  c.markIdleDecoderTabs();
+  assert.equal(buttons.get("encode").button.disabled, true);
+  assert.deepEqual(Object.keys(window.hasher.elements.decode), ["tab"]);
+});

@@ -9745,7 +9745,10 @@ function syncDecoderToolMeta() {
 
 // The decoder library's words for a transform that does not apply: nothing,
 // NaN, and its parse, range and input errors.
-function decoderOutputShows(value) {
+function decoderOutputShows(value, result) {
+  if (result && typeof result.success === "boolean" && result.value === value) {
+    return result.success && String(value ?? "").length > 0;
+  }
   return !/^(?:|NaN|Parse error|Out of range|Invalid\b.*|Error\b.*)$/s.test(String(value ?? ""));
 }
 
@@ -9762,7 +9765,10 @@ function markIdleDecoderTabs() {
   for (const element of judged ? Object.values(window.hasher.elements) : []) {
     if (shown.has(element.tab)) continue;
     try {
-      if (decoderOutputShows(element.calculate(input, password))) shown.add(element.tab);
+      const result = typeof window.decoderCalculateResult === "function"
+        ? window.decoderCalculateResult(element, input, password)
+        : { value: element.calculate(input, password) };
+      if (decoderOutputShows(result.value, result)) shown.add(element.tab);
     } catch {
       // A transform that throws has nothing to show.
     }
@@ -9820,7 +9826,8 @@ function markEmptyDecoderOutputs() {
   if (!output) return;
   let shown = 0;
   for (const element of output.querySelectorAll(".element")) {
-    const empty = !decoderOutputShows(element.querySelector("textarea")?.value);
+    const textarea = element.querySelector("textarea");
+    const empty = !decoderOutputShows(textarea?.value, textarea?.decoderResult);
     element.classList.toggle("hidden", empty);
     if (!empty) shown += 1;
   }
