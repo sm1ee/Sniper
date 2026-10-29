@@ -1682,17 +1682,35 @@ function bindEvents() {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
     const next = !state.runtime?.http_capture_enabled;
+    let readingCaptureResponse = false;
+    let acceptedReadVersion = 0;
     try {
       const response = await postRuntimeSettings(sessionWritePath("/api/runtime", sessionId), { http_capture_enabled: next });
       await requireOkResponse(response, "Failed to change capture.");
+      acceptedReadVersion = state._runtimeReadAcceptedVersion || 0;
+      readingCaptureResponse = true;
       const runtime = await response.json();
+      readingCaptureResponse = false;
       if (sessionId !== currentSessionId()) return;
       if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
       state.runtime = runtime;
-      syncHttpCapturePill();
+      syncHttpCapturePill({ confirmed: true });
     } catch (error) {
       if (sessionId !== currentSessionId()) return;
       console.error(error);
+      if (readingCaptureResponse) {
+        // A later accepted GET already confirmed the state while this response
+        // body was pending. Its result must not become uncertain again.
+        if (state._runtimeReadAcceptedSessionId === sessionId
+          && (state._runtimeReadAcceptedVersion || 0) > acceptedReadVersion) {
+          syncHttpCapturePill({ confirmed: true });
+          return;
+        }
+        (state.httpCaptureUnconfirmedSessions ||= new Set()).add(sessionId);
+        syncHttpCapturePill();
+        showToast("Capture may have changed, but its current state could not be confirmed.", "error", 7000);
+        return;
+      }
       showToast(error?.message || "Failed to change capture.", "error");
     }
   });
@@ -5969,7 +5987,9 @@ async function loadRuntimeSettings() {
     if (!ownsRead() || readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
     if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
     state._runtimeReadAcceptedVersion = readVersion;
+    state._runtimeReadAcceptedSessionId = sessionId;
     state.runtime = runtime;
+    if (state.httpCaptureUnconfirmedSessions?.has(sessionId)) syncHttpCapturePill({ confirmed: true });
     if (typeof templatesController !== "undefined") templatesController?.scopeChanged?.();
     renderInterceptStatus();
     renderProxySettings();
@@ -8309,7 +8329,9 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
     if (readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
     if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
     state._runtimeReadAcceptedVersion = readVersion;
+    state._runtimeReadAcceptedSessionId = sessionId;
     state.runtime = runtime;
+    if (state.httpCaptureUnconfirmedSessions?.has(sessionId)) syncHttpCapturePill({ confirmed: true });
     if (siteMap) state.targetSiteMap = siteMap;
     if (typeof targetServiceMapController !== "undefined" && state.activeTool === "map") {
       targetServiceMapController?.refresh();
@@ -25154,13 +25176,21 @@ function syncHttpInScopePill() {
 
 // Paused is the state worth announcing: an empty history with capture off looks
 // exactly like an empty history with nothing happening.
-function syncHttpCapturePill() {
+function syncHttpCapturePill({ confirmed = false } = {}) {
+  // Only explicit Capture success or an ownership-accepted runtime GET clears
+  // this local warning. Other settings/workspace refreshes are conservative.
+  if (confirmed) state.httpCaptureUnconfirmedSessions?.delete(currentSessionId());
   const pill = document.getElementById("httpCaptureToggle");
   if (!pill) return;
+  const unconfirmed = state.httpCaptureUnconfirmedSessions?.has(currentSessionId()) || false;
   const capturing = state.runtime?.http_capture_enabled !== false;
-  pill.classList.toggle("active", capturing);
-  pill.classList.toggle("paused", !capturing);
-  pill.textContent = capturing ? "Capturing" : "Paused";
+  pill.classList.toggle("active", capturing && !unconfirmed);
+  pill.classList.toggle("paused", !capturing && !unconfirmed);
+  pill.textContent = unconfirmed ? "Capture unconfirmed" : capturing ? "Capturing" : "Paused";
+  if (unconfirmed) {
+    pill.title = `Capture state is unconfirmed. Last confirmed: ${capturing ? "Capturing" : "Paused"}. Click to request capture ${capturing ? "off" : "on"}. Traffic still passes through.`;
+    return;
+  }
   pill.title = capturing
     ? "Recording proxied traffic. Click to pause; traffic still passes through."
     : "Not recording. Traffic still passes through. Click to resume.";
