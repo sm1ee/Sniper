@@ -20,7 +20,7 @@ function fixture() {
     "loadEventLog", "resetEventLogUiState", "applyEventLogEntry", "clearEventLog", "mergeEventLogEntries",
     "jsonArray", "requireOkResponse", "renderEventLog", "escapeHtml", "withButtonProgress",
   ], {
-    state, els, session: "fixture-session-a", EVENT_LOG_LIMIT: 500,
+    state, els, session: "fixture-session-a", workspaceStateGeneration: 0, EVENT_LOG_LIMIT: 500,
     _eventLogLoadGeneration: 0, _eventLogMutationGeneration: 0, _eventLogClearGeneration: 0,
     BUTTON_PROGRESS_DELAY_MS: 180,
     fetch(path, options) { const request = { path, options, ...deferred() }; requests.push(request); return request.promise; },

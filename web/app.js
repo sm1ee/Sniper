@@ -8015,15 +8015,22 @@ function mergeEventLogEntries(primaryEntries, fallbackEntries) {
 
 async function clearEventLog() {
   const sessionId = currentSessionId();
-  const response = await fetch(sessionWritePath("/api/event-log", sessionId), { method: "DELETE" });
-  await requireOkResponse(response, "Failed to clear event log.");
-  if (sessionId !== currentSessionId()) {
-    return;
+  const workspaceGeneration = workspaceStateGeneration;
+  // A reset can return to the same session ID before this acknowledgment arrives.
+  const ownsWorkspace = () => sessionId === currentSessionId()
+    && workspaceGeneration === workspaceStateGeneration;
+  try {
+    const response = await fetch(sessionWritePath("/api/event-log", sessionId), { method: "DELETE" });
+    await requireOkResponse(response, "Failed to clear event log.");
+    if (!ownsWorkspace()) return;
+    _eventLogMutationGeneration += 1;
+    _eventLogClearGeneration += 1;
+    state.eventLog = [];
+    renderEventLog();
+  } catch (error) {
+    if (!ownsWorkspace()) return;
+    throw error;
   }
-  _eventLogMutationGeneration += 1;
-  _eventLogClearGeneration += 1;
-  state.eventLog = [];
-  renderEventLog();
 }
 
 async function loadMatchReplaceRules() {
