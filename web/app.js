@@ -6009,6 +6009,8 @@ async function fetchTransactionPage(offsetOrOptions = 0) {
   const options = typeof offsetOrOptions === "object"
     ? offsetOrOptions
     : { offset: offsetOrOptions };
+  const isCurrent = options.isCurrent || (() => true);
+  if (!isCurrent()) return null;
   const queryState = options.queryState || createHistoryQueryState();
   const querySignature = options.querySignature || historyQuerySignature(queryState);
   const response = await fetch(buildTransactionsPageUrl({
@@ -6017,9 +6019,10 @@ async function fetchTransactionPage(offsetOrOptions = 0) {
     beforeSequence: options.beforeSequence ?? null,
     queryState,
   }));
+  if (!isCurrent()) return null;
   if (!response.ok) {
     const message = await response.text();
-    if (retentionEpoch !== (state._historyRetentionEpoch || 0) || !isCurrentHistoryQuerySignature(querySignature)) {
+    if (!isCurrent() || retentionEpoch !== (state._historyRetentionEpoch || 0) || !isCurrentHistoryQuerySignature(querySignature)) {
       return null;
     }
     if (els.historyMeta) els.historyMeta.textContent = `HTTP History filter error: ${message}`;
@@ -6030,7 +6033,7 @@ async function fetchTransactionPage(offsetOrOptions = 0) {
     throw new Error(message);
   }
   const page = await response.json();
-  if (retentionEpoch !== (state._historyRetentionEpoch || 0) || !isCurrentHistoryQuerySignature(querySignature)) {
+  if (!isCurrent() || retentionEpoch !== (state._historyRetentionEpoch || 0) || !isCurrentHistoryQuerySignature(querySignature)) {
     return null;
   }
   return page;
@@ -6205,7 +6208,8 @@ async function loadTransactions(preserveSelection = true, options = {}) {
   }
 }
 
-async function loadTransactionDetail(id) {
+async function loadTransactionDetail(id, { isCurrent = () => true } = {}) {
+  if (!isCurrent()) return null;
   const generation = ++_historyDetailGeneration;
   const sessionId = currentSessionId();
   const reconcileRetention = state._historyRetentionReconcile === true;
@@ -6213,7 +6217,7 @@ async function loadTransactionDetail(id) {
     while (true) {
       const annotationGeneration = state._historyDetailAnnotationGeneration || 0;
       const response = await fetch(transactionPath(id, sessionId));
-      if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
+      if (!isCurrent() || generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
         return null;
       }
       if (annotationGeneration !== (state._historyDetailAnnotationGeneration || 0)) continue;
@@ -6245,7 +6249,7 @@ async function loadTransactionDetail(id) {
       }
 
       const record = await response.json();
-      if (generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
+      if (!isCurrent() || generation !== _historyDetailGeneration || state.selectedId !== id || sessionId !== currentSessionId()) {
         return null;
       }
       if (record?.id !== id) {
@@ -6270,7 +6274,7 @@ async function loadTransactionDetail(id) {
   } catch (_error) {
     // A failed read owns the placeholder only while its selection and session
     // are current; a late rejection must not erase a newer row or retry.
-    if (generation === _historyDetailGeneration && state.selectedId === id && sessionId === currentSessionId()) {
+    if (isCurrent() && generation === _historyDetailGeneration && state.selectedId === id && sessionId === currentSessionId()) {
       renderEmptyDetail("Failed to load selected transaction. Select the row again to retry.");
     }
     return null;
@@ -11012,6 +11016,12 @@ function extractFindingKeywords(finding) {
 
 function jumpToTransaction(recordId) {
   state._historySelectionGeneration = (state._historySelectionGeneration || 0) + 1;
+  const selectionGeneration = state._historySelectionGeneration;
+  const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const isCurrent = () => selectionGeneration === state._historySelectionGeneration
+    && sessionId === currentSessionId() && workspaceGeneration === workspaceStateGeneration
+    && state.selectedId === recordId;
   setActiveTool("proxy");
   setActiveProxyTab("http-history");
   const hadRenderedDetail = Boolean(state.selectedRecord?.id);
@@ -11023,20 +11033,20 @@ function jumpToTransaction(recordId) {
   scheduleHistoryDetailLoading(recordId, "Loading selected transaction...", {
     immediate: !hadRenderedDetail,
   });
-  loadTransactionDetail(recordId).then(async (record) => {
-    if (!record || state.selectedId !== recordId) return;
-    const revealed = await ensureHistoryWindowContainsRecord(record);
+  loadTransactionDetail(recordId, { isCurrent }).then(async (record) => {
+    if (!record || !isCurrent()) return;
+    const revealed = await ensureHistoryWindowContainsRecord(record, { isCurrent });
+    // A superseded reveal is not a failed current jump, even when IDs match.
+    if (revealed === null || !isCurrent()) return;
     if (!revealed) {
-      if (state.selectedId === recordId) {
-        state.selectedId = null;
-        state.selectedRecord = null;
-        renderEmptyDetail();
-        renderHistory();
-      }
+      state.selectedId = null;
+      state.selectedRecord = null;
+      renderEmptyDetail();
+      renderHistory();
       return;
     }
     focusHistoryRecord(recordId);
-  }).catch((error) => console.error(error));
+  }).catch((error) => { if (isCurrent()) console.error(error); });
 }
 
 function sequenceCursorAfter(sequence) {
@@ -11053,7 +11063,8 @@ function sequenceCursorAfter(sequence) {
   return String(Math.trunc(numeric) + 1);
 }
 
-async function ensureHistoryWindowContainsRecord(record) {
+async function ensureHistoryWindowContainsRecord(record, { isCurrent = () => true } = {}) {
+  if (!isCurrent()) return null;
   if (!record?.id || getHistoryItem(record.id)) {
     return true;
   }
@@ -11076,19 +11087,13 @@ async function ensureHistoryWindowContainsRecord(record) {
   paging.generation = generation;
   paging.querySignature = querySignature;
   paging.loading = true;
+  const ownsPaging = () => state.historyPaging === paging && paging.generation === generation
+    && paging.querySignature === querySignature;
+  const ownsReveal = () => isCurrent() && ownsPaging() && sessionId === currentSessionId()
+    && state.selectedId === record.id && isCurrentHistoryQuerySignature(querySignature);
   try {
-    const page = await fetchTransactionPage({ beforeSequence, queryState, querySignature });
-    if (!page || sessionId !== currentSessionId() || state.selectedId !== record.id) {
-      return false;
-    }
-    if (
-      state.historyPaging !== paging
-      || paging.generation !== generation
-      || paging.querySignature !== querySignature
-      || !isCurrentHistoryQuerySignature(querySignature)
-    ) {
-      return false;
-    }
+    const page = await fetchTransactionPage({ beforeSequence, queryState, querySignature, isCurrent: ownsReveal });
+    if (!page || !ownsReveal()) return null;
 
     const pageItems = jsonArray(page.items);
     if (!pageItems.some((item) => item?.id === record.id)) {
@@ -11105,13 +11110,15 @@ async function ensureHistoryWindowContainsRecord(record) {
     paging.fullyLoaded = !paging.hasMore;
     return true;
   } catch (error) {
+    if (!ownsReveal()) return null;
     console.error("Failed to reveal history transaction:", error);
     showToast(error?.message || "Failed to reveal transaction in HTTP History.", "error", 5000);
     return false;
   } finally {
-    if (state.historyPaging === paging && paging.generation === generation && paging.querySignature === querySignature) {
+    // Release our slot after selection changes without repainting the newer UI.
+    if (ownsPaging()) {
       paging.loading = false;
-      if (isCurrentHistoryQuerySignature(querySignature)) renderHistory();
+      if (ownsReveal()) renderHistory();
     }
   }
 }

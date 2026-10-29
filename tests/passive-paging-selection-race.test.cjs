@@ -42,7 +42,7 @@ function historyFixture({ size = 5, start = 0, total = size + 1, cursor = false 
     'applyPendingAnnotationsToItems', 'clearHttpHistorySelectionPreview',
     'jumpToTransaction', 'ensureHistoryWindowContainsRecord',
   ], {
-    state, els: {}, query: 'query-a', session: 'session-a', HTTP_HISTORY_MAX_LOADED_ITEMS: size,
+    state, els: {}, query: 'query-a', session: 'session-a', workspaceStateGeneration: 0, HTTP_HISTORY_MAX_LOADED_ITEMS: size,
     console: quietConsole, buildTransactionsPageUrl: options => options,
     fetch(options) {
       const available = options.beforeSequence == null ? records : records.filter(row => row.sequence < options.beforeSequence);
