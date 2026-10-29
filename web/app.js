@@ -19487,7 +19487,7 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
           ${extractionsHtml}
         </details>
       </div>`;
-    }).join("");
+    }).join("") || '<p class="empty-copy">No steps yet. Choose <strong>+ Step</strong>, then paste a raw HTTP request into the step.</p>';
 
     if (!stepsContainer._sequenceDraftSyncWired) {
       stepsContainer._sequenceDraftSyncWired = true;
