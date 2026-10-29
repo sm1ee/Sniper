@@ -94,12 +94,12 @@ test("OAST Copy overrides both generic mobile utility rules without changing oth
 });
 
 for (const value of ["", "synthetic.example.com"]) {
-  test(`OAST Copy actual binding ${value ? "copies the displayed synthetic value" : "keeps empty input a no-op"}`, () => {
+  test(`OAST Copy actual binding ${value ? "copies the displayed synthetic value" : "keeps empty input a no-op"}`, async () => {
     const handlers = new Map(), copies = [], notices = [];
     const els = { oastPayloadText: { value },
       oastCopyPayloadButton: { addEventListener: (type, callback) => handlers.set(type, callback) } };
     const forbidden = () => assert.fail("No OAST service, network or real clipboard action is permitted");
-    const context = vm.createContext({ els, copyTextToClipboard: text => copies.push(text),
+    const context = vm.createContext({ els, copyTextToClipboard: async text => { copies.push(text); },
       showToast: text => notices.push(text), fetch: forbidden, generateOastPayload: forbidden,
       navigator: { clipboard: { writeText: forbidden } } });
     const start = appSource.indexOf("  if (els.oastCopyPayloadButton) {");
@@ -108,8 +108,10 @@ for (const value of ["", "synthetic.example.com"]) {
     vm.runInContext(appSource.slice(start, end), context);
     assert.deepEqual([...handlers.keys()], ["click"]);
     assert.deepEqual(copies, []);
-    handlers.get("click")();
+    assert.equal(handlers.get("click")(), undefined);
     assert.deepEqual(copies, value ? [value] : []);
+    assert.deepEqual(notices, []);
+    await finishCopyTurn();
     assert.deepEqual(notices, value ? ["Copied OAST payload"] : []);
     assert.equal(els.oastPayloadText.value, value);
   });
@@ -141,8 +143,8 @@ function fixture({ modern, selectError, copyError, copied = true } = {}) {
   };
   const navigator = {};
   if (modern) navigator.clipboard = { writeText: modern };
-  const { copyTextToClipboard } = loadFunctions(["copyTextToClipboard"], { document, navigator });
-  return { copyTextToClipboard, attached, writes, calls };
+  const context = loadFunctions(["copyTextToClipboard"], { document, navigator });
+  return { copyTextToClipboard: context.copyTextToClipboard, context, attached, writes, calls };
 }
 
 test("modern clipboard success does not create a fallback node", async () => {
@@ -193,4 +195,83 @@ test("nullish input stays a no-op and other values retain string conversion", as
   await f.copyTextToClipboard("");
   assert.deepEqual(f.writes, ["0", ""]);
   assert.equal(f.attached.size, 0);
+});
+
+// Evaluate only the actual initialized OAST Copy registration. The helper and
+// fallback are real source; navigator/document above are exclusively inert.
+function oastCopyFixture(options = {}) {
+  const f = fixture(options), toasts = [];
+  let click;
+  const button = {
+    disabled: false,
+    addEventListener(type, handler) { assert.equal(type, "click"); click = handler; },
+  };
+  f.context.els = { oastCopyPayloadButton: button, oastPayloadText: { value: "synthetic.example.com" } };
+  f.context.showToast = (...args) => toasts.push(args);
+  const start = appSource.indexOf("  if (els.oastCopyPayloadButton) {");
+  const end = appSource.indexOf("  if (els.oastTableBody) {", start);
+  assert.ok(start > 0 && end > start);
+  vm.runInContext(appSource.slice(start, end), f.context);
+  return { ...f, button, toasts, click, payload: f.context.els.oastPayloadText };
+}
+
+function pendingWrite() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+// A full event-loop turn drains the promise chain and lets node:test detect
+// any unhandled rejection; the tests do not attach their own rejection catch.
+const finishCopyTurn = () => new Promise(resolve => setImmediate(resolve));
+
+test("OAST copy waits for modern success without returning a pending click promise", async () => {
+  const pending = pendingWrite(), values = [];
+  const f = oastCopyFixture({ modern: text => { values.push(text); return pending.promise; } });
+  const result = f.click();
+  const immediateToasts = [...f.toasts];
+  assert.equal(result, undefined); assert.equal(f.button.disabled, false);
+  pending.resolve(); await finishCopyTurn();
+  assert.deepEqual(immediateToasts, [], "no success before clipboard fulfillment");
+  assert.deepEqual(f.toasts, [["Copied OAST payload"]]);
+  assert.deepEqual(values, ["synthetic.example.com"]);
+  assert.deepEqual(f.calls, []); assert.equal(f.attached.size, 0);
+});
+
+for (const modernRejected of [false, true]) test(`OAST copy announces successful fallback after settlement (modern rejected: ${modernRejected})`, async () => {
+  const f = oastCopyFixture({ modern: modernRejected ? async () => { throw new Error("synthetic unavailable"); } : undefined });
+  assert.equal(f.click(), undefined); assert.deepEqual(f.toasts, []);
+  await finishCopyTurn();
+  assert.deepEqual(f.toasts, [["Copied OAST payload"]]);
+  assert.deepEqual(f.writes, ["synthetic.example.com"]);
+  assert.deepEqual(f.calls, ["select", "copy", "remove"]); assert.equal(f.attached.size, 0);
+});
+
+test("OAST copy handles pending modern refusal and failed fallback without any success toast", async () => {
+  const pending = pendingWrite();
+  const f = oastCopyFixture({ modern: () => pending.promise, copied: false });
+  assert.equal(f.click(), undefined); assert.deepEqual(f.toasts, []); assert.equal(f.button.disabled, false);
+  pending.reject(new Error("synthetic clipboard refusal")); await finishCopyTurn();
+  assert.deepEqual(f.toasts, [["Failed to copy OAST payload", "error"]]);
+  assert.deepEqual(f.calls, ["select", "copy", "remove"]); assert.equal(f.attached.size, 0);
+});
+
+for (const failure of ["false", "select", "copy"]) test(`OAST copy handles ${failure} fallback failure and retains temporary-node cleanup`, async () => {
+  const error = new Error(`synthetic ${failure} failure`);
+  const options = failure === "false" ? { copied: false } : failure === "select" ? { selectError: error } : { copyError: error };
+  const f = oastCopyFixture(options);
+  assert.equal(f.click(), undefined); assert.deepEqual(f.toasts, []);
+  await finishCopyTurn();
+  assert.deepEqual(f.toasts, [["Failed to copy OAST payload", "error"]]);
+  assert.equal(f.attached.size, 0);
+  assert.deepEqual(f.calls, failure === "select" ? ["select", "remove"] : ["select", "copy", "remove"]);
+});
+
+test("empty OAST payload remains a silent no-op", async () => {
+  let writes = 0;
+  const f = oastCopyFixture({ modern: async () => { writes++; } });
+  f.payload.value = "";
+  assert.equal(f.click(), undefined); await finishCopyTurn();
+  assert.equal(writes, 0); assert.deepEqual(f.toasts, []); assert.deepEqual(f.calls, []);
+  assert.equal(f.button.disabled, false); assert.equal(f.attached.size, 0);
 });

@@ -2479,7 +2479,11 @@ function bindEvents() {
   if (els.oastCopyPayloadButton) {
     els.oastCopyPayloadButton.addEventListener("click", () => {
       const text = els.oastPayloadText?.value;
-      if (text) { copyTextToClipboard(text); showToast("Copied OAST payload"); }
+      if (text) {
+        copyTextToClipboard(text)
+          .then(() => showToast("Copied OAST payload"))
+          .catch(() => showToast("Failed to copy OAST payload", "error"));
+      }
     });
   }
   if (els.oastTableBody) {
