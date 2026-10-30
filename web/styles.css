@@ -895,12 +895,17 @@ code {
   text-decoration: none;
 }
 
-/* While updating, the button is disabled and holds the width it had; its content
-   becomes a ring. The percentage is drawn inside it, and the steps that cannot be
-   measured spin an arc instead. */
+/* Keep every update state aligned with the neighboring browser launcher. */
+#openUpdateButton {
+  height: max(var(--control-h), calc(var(--font-xs) * 1.45 + 10px));
+  min-height: var(--control-h);
+  padding: 0 11px;
+  font-size: var(--font-xs);
+}
+
+/* While updating, the button holds its idle width and becomes a ring. The
+   percentage stays in the tooltip; unmeasured steps spin an arc instead. */
 .utility-button.is-updating {
-  /* The ring is taller than the label it replaces; without this the button would
-     grow past its row and push the header down. */
   padding-block: 0;
   cursor: default;
 }
@@ -912,8 +917,8 @@ code {
 
 .update-ring {
   display: block;
-  width: 24px;
-  height: 24px;
+  width: 18px;
+  height: 18px;
 }
 
 .update-ring svg {
