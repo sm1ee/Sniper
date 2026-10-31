@@ -1629,23 +1629,32 @@
         <section class="recon-shell hidden" id="reconShell" aria-labelledby="reconTitle">
           <section class="panel-card recon-setup">
             <header class="panel-toolbar">
-              <div><p class="placeholder-kicker">Endpoint discovery</p><h2 id="reconTitle">Recon</h2></div>
+              <h2 id="reconTitle">Discover endpoints</h2>
               <button class="secondary-action" id="reconRefresh" type="button">Refresh</button>
             </header>
             <form id="reconForm" class="recon-form">
               <label class="recon-field recon-target-field" for="reconTarget">Target URL
                 <input id="reconTarget" type="url" placeholder="https://example.com/" required autocomplete="off" spellcheck="false" />
               </label>
-              <label class="recon-check"><input id="reconSubdomains" type="checkbox" /> Include subdomains on the same port</label>
+              <label class="recon-check"><input id="reconSubdomains" type="checkbox" /> Include subdomains · same port</label>
               <p class="recon-help" id="reconScope">Discovery stays on the URL's scheme, host and port.</p>
               <fieldset class="recon-sources">
-                <legend>Sources</legend>
-                <label class="recon-check"><input id="reconCrawler" type="checkbox" checked /> Static HTML / JavaScript crawler</label>
-                <label class="recon-check"><input id="reconUrlscan" type="checkbox" /> urlscan.io historical search</label>
-                <label class="recon-check"><input id="reconWayback" type="checkbox" /> Wayback Machine history</label>
-                <label class="recon-check"><input id="reconUrlscanSubmit" type="checkbox" /> Submit a new urlscan.io browser scan</label>
+                <legend>Crawl target</legend>
+                <label class="recon-check recon-source-row"><input id="reconCrawler" type="checkbox" checked /><span>HTML / JavaScript<small>GET only · No browser or forms</small></span></label>
               </fieldset>
-              <p class="recon-help">The crawler only sends GET requests: no browser, no forms. Historical and candidate endpoints may not be live. Only test targets you are authorized to access.</p>
+              <fieldset class="recon-sources">
+                <legend>External services</legend>
+                <div class="recon-source-group" role="group" aria-label="Historical URLs">
+                  <span class="recon-source-label">History</span>
+                  <label class="recon-check"><input id="reconUrlscan" type="checkbox" /> urlscan.io</label>
+                  <label class="recon-check"><input id="reconWayback" type="checkbox" /> Wayback Machine</label>
+                </div>
+                <div class="recon-source-group" role="group" aria-label="New browser scan">
+                  <span class="recon-source-label">New scan</span>
+                  <label class="recon-check"><input id="reconUrlscanSubmit" type="checkbox" /> urlscan.io browser</label>
+                </div>
+              </fieldset>
+              <p class="recon-help recon-authorization">Authorized targets only. History and candidate URLs may be offline.</p>
               <label class="recon-check recon-history-consent hidden" id="reconHistoryConsentRow"><input id="reconHistoryConsent" type="checkbox" /><span id="reconHistoryConsentText">Allow sending the target domain to the selected history services.</span></label>
               <div id="reconScanOptions" class="recon-scan-options hidden">
                 <label class="recon-field" for="reconScanVisibility">New scan visibility<select id="reconScanVisibility"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></label>
@@ -1653,8 +1662,8 @@
                 <label class="recon-check"><input id="reconScanConsent" type="checkbox" /><span id="reconScanConsentText">Allow a new urlscan.io scan of this URL with the selected visibility.</span></label>
               </div>
               <details class="recon-limits">
-                <summary>Optional discovery budgets</summary>
-                <p class="recon-help">0 means no limit. Stop ends a job early.</p>
+                <summary>Limits</summary>
+                <p class="recon-help">0 = unlimited</p>
                 <div class="recon-limit-fields">
                   <label class="recon-field" for="reconMaxRequests">Crawler requests<input id="reconMaxRequests" type="number" min="0" step="1" value="0" /></label>
                   <label class="recon-field" for="reconMaxDepth">Crawl depth<input id="reconMaxDepth" type="number" min="0" step="1" value="0" /></label>
@@ -1668,11 +1677,11 @@
           </section>
           <section class="panel-card recon-jobs-panel" aria-labelledby="reconJobsTitle">
             <header class="panel-toolbar"><h2 id="reconJobsTitle">Jobs</h2><span id="reconJobsMeta" class="recon-help"></span></header>
-            <div id="reconJobs" class="recon-jobs"><p class="recon-empty">No discovery jobs in this session.</p></div>
+            <div id="reconJobs" class="recon-jobs"><p class="recon-empty">No jobs yet.</p></div>
           </section>
           <section class="panel-card recon-inventory" aria-labelledby="reconInventoryTitle">
             <header class="panel-toolbar recon-inventory-toolbar">
-              <div><h2 id="reconInventoryTitle">Endpoint inventory</h2><p id="reconInventoryMeta" class="recon-help" role="status" aria-live="polite">Open Recon to load this session.</p></div>
+              <div><h2 id="reconInventoryTitle">Endpoint inventory</h2><p id="reconInventoryMeta" class="recon-help" role="status" aria-live="polite">0 endpoints</p></div>
               <div class="recon-search-controls">
                 <label class="recon-sr-only" for="reconSearch">Search endpoints and evidence</label>
                 <input id="reconSearch" type="search" placeholder="Search URL, method, source or evidence" autocomplete="off" />
@@ -1690,7 +1699,7 @@
                 </table>
               </div>
               <div class="pane-resizer list-detail-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the list and its details" tabindex="0" title="Drag to resize; double-click to reset"></div>
-              <aside class="recon-detail" id="reconDetail" aria-labelledby="reconDetailTitle"><h3 id="reconDetailTitle">Endpoint details</h3><p class="recon-help">Select an endpoint to inspect its raw URLs and provenance.</p></aside>
+              <aside class="recon-detail" id="reconDetail" aria-labelledby="reconDetailTitle"><h3 id="reconDetailTitle">Endpoint details</h3><p class="recon-help">Select an endpoint.</p></aside>
             </div>
             <footer class="recon-pagination">
               <span id="reconPageMeta">0 endpoints</span>
@@ -1699,60 +1708,8 @@
           </section>
         </section>
 
-        <section class="templates-shell hidden" id="templatesShell" aria-labelledby="templatesTitle">
+        <section class="templates-shell hidden" id="templatesShell" aria-label="Active Scan">
           <div class="templates-side">
-          <section class="panel-card templates-library" aria-labelledby="templatesTitle">
-            <header class="panel-toolbar">
-              <h2 id="templatesTitle">Templates</h2>
-              <div class="toolbar-actions">
-                <button class="secondary-action hidden" id="templatesCheck" type="button">Check for updates</button>
-                <details class="more-menu" id="templatesMore">
-                  <summary class="secondary-action" aria-label="More">⋯</summary>
-                  <div class="context-menu more-menu-list" role="menu">
-                    <button class="context-menu-item" id="templatesSwitch" type="button" role="menuitem">Download main (unreleased)</button>
-                    <button class="context-menu-item" id="templatesImportMenu" type="button" role="menuitem">Import archive…</button>
-                  </div>
-                </details>
-              </div>
-            </header>
-            <div class="recon-form">
-              <div class="templates-version" id="templatesVersion"><strong>Loading…</strong></div>
-              <div class="templates-update hidden" id="templatesUpdate">
-                <span id="templatesUpdateLabel">Update daily</span>
-                <span class="recon-help" id="templatesUpdateNote"></span>
-                <button class="switch" id="templatesAutoUpdate" type="button" role="switch" aria-checked="false" aria-labelledby="templatesUpdateLabel"></button>
-              </div>
-              <p class="recon-help" id="templatesStatus"></p>
-              <p class="recon-notice hidden" id="templatesProgress" role="status"></p>
-              <progress class="templates-progress hidden" id="templatesProgressBar" aria-labelledby="templatesProgress"></progress>
-              <div class="templates-actions">
-                <button class="primary-action hidden" id="templatesDownload" type="button">Download</button>
-                <button class="secondary-action hidden" id="templatesImport" type="button" title="Import a release .tar.gz">Import…</button>
-                <input class="hidden" id="templatesImportFile" type="file" accept=".gz,.tgz,application/gzip" />
-              </div>
-              <p class="recon-notice recon-warning hidden" id="templatesScopeNote">Scope is empty, so the templates turned on check nothing.</p>
-              <p class="recon-notice hidden" id="templatesNotice" role="status"></p>
-            </div>
-          </section>
-          <section class="panel-card templates-auto" aria-labelledby="templatesAutoTitle">
-            <header class="panel-toolbar">
-              <h2 id="templatesAutoTitle" title="Sends the Scan templates turned on in the list to each new host the proxy captures in Scope or listed here, once a host. Only for hosts you may test.">Auto scan</h2>
-              <div class="toolbar-actions"><button class="switch" id="templatesAutoToggle" type="button" role="switch" aria-checked="false" aria-label="Auto scan" disabled></button></div>
-            </header>
-            <div class="recon-form">
-              <p class="recon-help" id="templatesAutoSummary">Loading…</p>
-              <details class="recon-limits templates-options" id="templatesAutoOptions">
-                <summary>Options</summary>
-                <div class="templates-auto-fields">
-                  <label class="recon-field" for="templatesAutoHosts">Extra hosts
-                    <textarea id="templatesAutoHosts" rows="1" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
-                  </label>
-                  <label class="recon-field" for="templatesAutoRate">Requests/s<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
-                </div>
-              </details>
-              <p class="recon-notice hidden" id="templatesAutoNotice" role="status" aria-live="polite"></p>
-            </div>
-          </section>
           <section class="panel-card templates-scan" aria-labelledby="templatesScanTitle">
             <header class="panel-toolbar">
               <h2 id="templatesScanTitle">Manual scan</h2>
@@ -1791,13 +1748,65 @@
                   <label class="recon-field" for="templatesScanMaxRequests">Max requests<input id="templatesScanMaxRequests" type="number" min="1" max="50000" value="10000" /></label>
                 </div>
                 <label class="recon-check"><input id="templatesScanMatchReplace" type="checkbox" /> Apply Match &amp; Replace</label>
-                <label class="recon-check"><input id="templatesScanKeepAll" type="checkbox" checked /> Keep every request in HTTP history</label>
+                <label class="recon-check"><input id="templatesScanKeepAll" type="checkbox" checked /> Save all requests to HTTP history</label>
               </details>
               <p class="recon-help" id="templatesScanPlan" aria-live="polite"></p>
-              <div class="templates-actions"><button class="primary-action" id="templatesScanStart" type="button" disabled>Start scan</button></div>
+              <div class="templates-actions templates-run-actions"><button class="primary-action" id="templatesScanStart" type="button" disabled>Start scan</button></div>
               <p class="recon-notice hidden" id="templatesScanNotice" role="status" aria-live="polite"></p>
             </div>
             <div class="recon-jobs" id="templatesScanJobs"></div>
+          </section>
+          <section class="panel-card templates-library" aria-labelledby="templatesTitle">
+            <header class="panel-toolbar">
+              <h2 id="templatesTitle">Template library</h2>
+              <div class="toolbar-actions">
+                <button class="secondary-action hidden" id="templatesCheck" type="button">Check for updates</button>
+                <details class="more-menu" id="templatesMore">
+                  <summary class="secondary-action" aria-label="More">⋯</summary>
+                  <div class="context-menu more-menu-list" role="menu">
+                    <button class="context-menu-item" id="templatesSwitch" type="button" role="menuitem">Download main (unreleased)</button>
+                    <button class="context-menu-item" id="templatesImportMenu" type="button" role="menuitem">Import archive…</button>
+                  </div>
+                </details>
+              </div>
+            </header>
+            <div class="recon-form">
+              <div class="templates-version" id="templatesVersion"><strong>Loading…</strong></div>
+              <div class="templates-update hidden" id="templatesUpdate">
+                <span id="templatesUpdateLabel">Update daily</span>
+                <span class="recon-help" id="templatesUpdateNote"></span>
+                <button class="switch" id="templatesAutoUpdate" type="button" role="switch" aria-checked="false" aria-labelledby="templatesUpdateLabel"></button>
+              </div>
+              <p class="recon-help" id="templatesStatus"></p>
+              <p class="recon-notice hidden" id="templatesProgress" role="status"></p>
+              <progress class="templates-progress hidden" id="templatesProgressBar" aria-labelledby="templatesProgress"></progress>
+              <div class="templates-actions">
+                <button class="primary-action hidden" id="templatesDownload" type="button">Download</button>
+                <button class="secondary-action hidden" id="templatesImport" type="button" title="Import a release .tar.gz">Import…</button>
+                <input class="hidden" id="templatesImportFile" type="file" accept=".gz,.tgz,application/gzip" />
+              </div>
+              <p class="recon-notice recon-warning hidden" id="templatesScopeNote">Scope empty · Passive checks inactive</p>
+              <p class="recon-notice hidden" id="templatesNotice" role="status"></p>
+            </div>
+          </section>
+          <section class="panel-card templates-auto" aria-labelledby="templatesAutoTitle">
+            <header class="panel-toolbar">
+              <h2 id="templatesAutoTitle" title="Sends the Scan templates turned on in the list to each new host the proxy captures in Scope or listed here, once a host. Only for hosts you may test.">Auto scan</h2>
+              <div class="toolbar-actions"><button class="switch" id="templatesAutoToggle" type="button" role="switch" aria-checked="false" aria-label="Auto scan" disabled></button></div>
+            </header>
+            <div class="recon-form">
+              <p class="recon-help" id="templatesAutoSummary">Loading…</p>
+              <details class="recon-limits templates-options" id="templatesAutoOptions">
+                <summary>Options</summary>
+                <div class="templates-auto-fields">
+                  <label class="recon-field" for="templatesAutoHosts">Extra hosts
+                    <textarea id="templatesAutoHosts" rows="1" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
+                  </label>
+                  <label class="recon-field" for="templatesAutoRate">Requests/s<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
+                </div>
+              </details>
+              <p class="recon-notice hidden" id="templatesAutoNotice" role="status" aria-live="polite"></p>
+            </div>
           </section>
           </div>
           <section class="panel-card recon-inventory templates-list">

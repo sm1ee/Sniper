@@ -1527,3 +1527,23 @@ for (const first of ["accepted", "invalid target"]) test(`Recon controller to ac
   f.node('Detail').emit('click',{target:action});assert.equal(w.state.replayTabs.length,2);assert.equal(saves.length,1);assert.equal(uiSaves.length,1);
   assert.equal(f.calls.length,reads);assert.equal(w.requests.length,0);f.controller.dispose();
 });
+
+test('scan layout separates local discovery from external sources without weakening consent', () => {
+  const html = require('node:fs').readFileSync(require('node:path').join(__dirname, '../web/index.html'), 'utf8');
+  const form = html.slice(html.indexOf('<form id="reconForm"'), html.indexOf('</form>', html.indexOf('<form id="reconForm"')));
+  assert.match(form, /<legend>Crawl target<\/legend>[\s\S]*id="reconCrawler"[\s\S]*<\/fieldset>\s*<fieldset[^>]*>\s*<legend>External services<\/legend>/);
+  assert.match(form, /aria-label="Historical URLs"[\s\S]*id="reconUrlscan"[\s\S]*id="reconWayback"/);
+  assert.match(form, /aria-label="New browser scan"[\s\S]*id="reconUrlscanSubmit"/);
+  for (const id of ['reconHistoryConsent', 'reconScanConsent', 'reconScanVisibility']) assert.equal((form.match(new RegExp(`id="${id}"`, 'g')) || []).length, 1);
+  assert.match(form, /Public results are visible to everyone; unlisted ones are not private/);
+  assert.match(form, /Allow sending the target domain to the selected history services/);
+  assert.match(form, /Allow a new urlscan.io scan of this URL with the selected visibility/);
+  assert.match(form, /Authorized targets only/);
+});
+
+test('scan layout keeps runtime empty states concise while leaving errors available', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../web/recon.js'), 'utf8');
+  for (const copy of ['No jobs yet.', 'Select an endpoint.', 'No endpoints yet.', 'No matching endpoints.']) assert.ok(source.includes(copy), copy);
+  assert.ok(!source.includes('Choose a target and start discovery.'));
+  assert.match(source, /showNotice\(els.ActionStatus, actionMessage, actionError\)/);
+});

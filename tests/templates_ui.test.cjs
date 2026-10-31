@@ -885,3 +885,18 @@ test("Recon and Active Scan are the Scan tab's own tabs", () => {
   const app = fs.readFileSync(path.join(__dirname, "../web/app.js"), "utf8");
   assert.match(app, /scanShell: document\.getElementById\("scanShell"\)/);
 });
+
+test('scan layout places targets and execution before library maintenance and automation', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  const side = html.slice(html.indexOf('<div class="templates-side">'), html.indexOf('<section class="panel-card recon-inventory templates-list">'));
+  assert.ok(side.indexOf('id="templatesScanTitle"') < side.indexOf('id="templatesTitle"'));
+  assert.ok(side.indexOf('id="templatesScanStart"') < side.indexOf('id="templatesTitle"'));
+  assert.ok(side.indexOf('id="templatesTitle"') < side.indexOf('id="templatesAutoTitle"'));
+  assert.ok(side.indexOf('id="templatesScanTargets"') < side.indexOf('id="templatesScanSelection"'));
+  assert.ok(side.indexOf('id="templatesScanPlan"') < side.indexOf('id="templatesScanStart"'));
+  for (const id of ['templatesScanTargets', 'templatesScanSelection', 'templatesScanRisks', 'templatesScanStart', 'templatesAutoToggle', 'templatesDownload']) {
+    assert.equal((html.match(new RegExp(`id="${id}"`, 'g')) || []).length, 1, id);
+  }
+  assert.match(side, /id="templatesAutoToggle"[^>]*disabled/);
+  assert.match(side, /id="templatesScanStart"[^>]*disabled/);
+});
