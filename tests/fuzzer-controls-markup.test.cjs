@@ -66,7 +66,7 @@ test('payload controls declare append default, exact presets and accessible file
   assert.deepEqual(values('fuzzerPayloadImportMode'), ['append', 'replace']);
   assert.match(fuzzer, /<option value="append" selected>Append<\/option>/);
   assert.match(fuzzer, /<option value="replace">Replace<\/option>/);
-  assert.match(fuzzer, /<label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">\s*<span[^>]*>On import<\/span>/);
+  assert.match(fuzzer, /<label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">\s*<span[^>]*>List action<\/span>/);
   assert.deepEqual(values('fuzzerPayloadPreset'), ['text-boundaries', 'number-boundaries']);
   assert.equal(byId('fuzzerPayloadFile').attrs.type, 'file');
   assert.ok('hidden' in byId('fuzzerPayloadFile').attrs);
@@ -282,9 +282,14 @@ test('setup follows request and payload inputs, then run controls, then results'
 });
 
 
-test('the single layout fills the shell and import action shares its mode row', () => {
+test('the shared list action sits in the Payloads header above file and generator controls', () => {
   assert.match(css, /\.fuzzer-shell \{ grid-template-rows: minmax\(0, 1fr\); \}/);
-  for (const id of ['fuzzerImportPayloadButton', 'fuzzerPayloadImportMode']) {
-    assert.ok(ancestorNodesAt(id).some(node => node.attrs.includes('fuzzer-payload-input-bar')));
+  assert.ok(ancestorNodesAt('fuzzerPayloadImportMode').some(node => node.tag === 'header' && node.attrs.includes('panel-toolbar')));
+  assert.equal(inCard('fuzzerPayloadImportMode', 'fuzzer-payloads-card'), true);
+  for (const id of ['fuzzerImportPayloadButton', 'fuzzerPayloadTools', 'fuzzerApplyPresetButton', 'fuzzerGenerateRangeButton']) {
+    assert.ok(fuzzer.indexOf('id="fuzzerPayloadImportMode"') < fuzzer.indexOf(`id="${id}"`));
+    assert.equal(inCard(id, 'fuzzer-payloads-card'), true);
   }
+  assert.match(css, /\.fuzzer-payloads-card > \.panel-toolbar \{ flex-wrap: wrap; \}/);
+  assert.doesNotMatch(fuzzer, /On import|Applies to imported files/);
 });

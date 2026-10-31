@@ -1246,20 +1246,19 @@
                 <header class="panel-toolbar">
                   <h2><label for="fuzzerPayloadsEditor">Payloads</label></h2>
                   <span class="fuzzer-count" id="fuzzerPayloadCount">0 payloads</span>
-
+                  <label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">
+                    <span>List action</span>
+                    <select id="fuzzerPayloadImportMode">
+                      <option value="append" selected>Append</option>
+                      <option value="replace">Replace</option>
+                    </select>
+                  </label>
                 </header>
                 <div class="fuzzer-payload-input-bar">
                   <div class="toolbar-actions">
                     <input id="fuzzerPayloadFile" type="file" accept=".txt,text/plain" hidden aria-label="Payload text file" />
                     <button class="secondary-action" id="fuzzerImportPayloadButton" type="button" aria-controls="fuzzerPayloadFile" aria-describedby="fuzzerPayloadImportStatus">Import file</button>
                   </div>
-                  <label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">
-                    <span title="Applies to imported files, presets and generated ranges">On import</span>
-                    <select id="fuzzerPayloadImportMode">
-                      <option value="append" selected>Append</option>
-                      <option value="replace">Replace</option>
-                    </select>
-                  </label>
                 </div>
                 <p id="fuzzerPayloadImportStatus" class="fuzzer-import-status hidden" role="status" aria-live="polite"></p>
                 <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-payload-tools" id="fuzzerPayloadTools">

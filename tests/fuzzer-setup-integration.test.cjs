@@ -745,3 +745,33 @@ test('setup repaints preserve local helper disclosure state and focused range co
   assert.equal(valueDisclosure.open, true, 'visibility updates do not reset the user-controlled disclosure state');
   assert.equal(payloadDisclosure.open, true);
 });
+
+for (const action of ['file', 'preset', 'range']) for (const mode of ['append', 'replace', '']) {
+  test(`shared list action ${mode || 'default append'} governs ${action} through its bound control`, async () => {
+    const f = fixture(), nodes = setupNodes(f);
+    const values = {
+      fuzzerPayloadImportMode: mode, fuzzerPayloadPreset: workflow.presets[0].id,
+      fuzzerRangeStart: '1', fuzzerRangeEnd: '2', fuzzerRangeStep: '1',
+      fuzzerPayloadFile: '', fuzzerApplyPresetButton: '', fuzzerGenerateRangeButton: '',
+    };
+    for (const [id, value] of Object.entries(values)) nodes[id] = {
+      value, listeners: {}, addEventListener(name, callback) { this.listeners[name] = callback; },
+    };
+    f.c.fuzzerSetupError = error => { throw error; };
+    f.c.initFuzzerSetupControls();
+    const incoming = action === 'preset' ? [...workflow.presets[0].payloads] : action === 'range' ? ['1', '2'] : ['file-a', 'file-b'];
+    if (action === 'file') {
+      const bytes = new TextEncoder().encode(incoming.join('\n'));
+      nodes.fuzzerPayloadFile.files = [{ size: bytes.length, arrayBuffer: async () => bytes }];
+      const importer = f.c.importFuzzerPayloadFile;
+      let pendingImport;
+      f.c.importFuzzerPayloadFile = (...args) => (pendingImport = importer(...args));
+      nodes.fuzzerPayloadFile.listeners.change({ target: nodes.fuzzerPayloadFile });
+      await pendingImport;
+      assert.equal(nodes.fuzzerPayloadFile.value, '');
+    } else nodes[action === 'preset' ? 'fuzzerApplyPresetButton' : 'fuzzerGenerateRangeButton'].listeners.click();
+    assert.deepEqual(Array.from(f.c.splitFuzzerPayloadLines(f.state.fuzzerPayloadsText)), mode === 'replace' ? incoming : ['x', ...incoming]);
+    assert.equal(nodes.fuzzerPayloadImportMode.value, mode);
+    assert.equal(f.requests.length, 0);
+  });
+}

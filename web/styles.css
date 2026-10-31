@@ -9479,3 +9479,7 @@ button.utility-button.replay-tab-add {
 .fuzzer-template-card > #fuzzerRequestHelp:empty { display: none; }
 
 .fuzzer-shell { grid-template-rows: minmax(0, 1fr); }
+
+/* One list action governs file import, presets and ranges below this header. */
+.fuzzer-payloads-card > .panel-toolbar { flex-wrap: wrap; }
+.fuzzer-payloads-card > .panel-toolbar > .fuzzer-import-mode { flex: 0 0 auto; }
