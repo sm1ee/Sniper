@@ -64,7 +64,9 @@ test('Fuzzer controls retain unique IDs and keyboard-native button actions', () 
 
 test('payload controls declare append default, exact presets and accessible file picker', () => {
   assert.deepEqual(values('fuzzerPayloadImportMode'), ['append', 'replace']);
-  assert.match(fuzzer, /<option value="append" selected>Append to list<\/option>/);
+  assert.match(fuzzer, /<option value="append" selected>Append<\/option>/);
+  assert.match(fuzzer, /<option value="replace">Replace<\/option>/);
+  assert.match(fuzzer, /<label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">\s*<span[^>]*>On import<\/span>/);
   assert.deepEqual(values('fuzzerPayloadPreset'), ['text-boundaries', 'number-boundaries']);
   assert.equal(byId('fuzzerPayloadFile').attrs.type, 'file');
   assert.ok('hidden' in byId('fuzzerPayloadFile').attrs);
