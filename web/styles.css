@@ -3769,7 +3769,7 @@ body.pane-resizing-y {
 }
 
 /* Keep setup helpers collapsed by default so the request and results stay central. */
-.fuzzer-shell > .fuzzer-workflow-header {
+.fuzzer-layout > .fuzzer-workflow-header {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -9452,3 +9452,30 @@ button.utility-button.replay-tab-add {
   overflow-y: auto;
   overflow-x: hidden;
 }
+
+/* Request → replacement payloads → execution → results, in document order. */
+.fuzzer-layout > .fuzzer-workflow-header {
+  flex: 0 0 auto;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+}
+.fuzzer-request-target {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.fuzzer-request-target .fuzzer-target-summary { flex: 1 1 160px; }
+.fuzzer-request-target .fuzzer-transport-help { flex-basis: 100%; }
+.fuzzer-template-card > #fuzzerRequestHelp { padding-block: 4px; }
+.fuzzer-payload-input-bar { justify-content: space-between; padding-left: 10px; }
+.fuzzer-payload-input-bar > .toolbar-actions { margin-left: 0; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card { margin-top: 0; }
+
+.fuzzer-template-card > #fuzzerRequestHelp:empty { display: none; }
+
+.fuzzer-shell { grid-template-rows: minmax(0, 1fr); }

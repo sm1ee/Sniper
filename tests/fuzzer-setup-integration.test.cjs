@@ -237,8 +237,8 @@ for (const body of ['$payload$', '§YQ==§', 'not base64!']) test(`base64 body g
   f.c.renderFuzzerSetup();
   assert.equal(nodes.startFuzzerButton.disabled, true);
   assert.equal(nodes.fuzzerPreflightNotice.textContent, message);
-  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Raw HTTP request · Body format: base64. Select a header or query value, then Add §.');
-  assert.match(nodes.fuzzerPreviewNotes.textContent, /Body format: base64/);
+  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Base64 body · header and query positions only');
+  assert.match(nodes.fuzzerPreviewNotes.textContent, /Base64 body/);
   assert.equal(f.state.fuzzerRequestText, before);
   assert.equal(f.state.fuzzerPayloadsText, 'x');
   assert.equal(f.state.fuzzerBaseRequest.body, 'YQ==');
@@ -248,7 +248,7 @@ for (const body of ['$payload$', '§YQ==§', 'not base64!']) test(`base64 body g
   f.c.renderFuzzerSetup();
   assert.equal(nodes.startFuzzerButton.disabled, false);
   assert.equal(nodes.fuzzerPreflightNotice.textContent, '');
-  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Raw HTTP request · Body format: base64. Select a header or query value, then Add §.');
+  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Base64 body · header and query positions only');
 });
 
 test('base64 guidance does not tighten decoding or replace unrelated parser errors', () => {
@@ -284,12 +284,12 @@ for (const position of ['query', 'header']) test(`base64 request ${position} pos
   f.c.renderFuzzerSetup();
   assert.equal(nodes.startFuzzerButton.disabled, false);
   assert.equal(nodes.fuzzerPreflightNotice.textContent, '');
-  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Raw HTTP request · Body format: base64. Select a header or query value, then Add §.');
+  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Base64 body · header and query positions only');
   assert.match(nodes.fuzzerPreviewNotes.textContent, /header or query positions instead of body markers/);
   assert.equal(f.state.fuzzerRequestText, marked);
   f.state.fuzzerBaseRequest.body_encoding = 'utf8';
   f.c.renderFuzzerSetup();
-  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Raw HTTP request · select a value, then Add §');
+  assert.equal(nodes.fuzzerRequestHelp.textContent, '');
   assert.doesNotMatch(nodes.fuzzerPreviewNotes.textContent, /base64/);
 });
 
@@ -326,7 +326,7 @@ test('empty setup gives one actionable next step; running state remains honest',
   const f = fixture(), nodes = setupNodes(f);
   f.state.fuzzerRequestText = ''; f.state.fuzzerPayloadsText = '';
   f.c.renderFuzzerSetup();
-  assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Paste a raw HTTP request, or send one from History / Replay.');
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, '');
   f.state.fuzzerRequestText = raw; f.c.renderFuzzerSetup();
   assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Select a value to replace.');
   f.state.fuzzerRequestText = raw.replace('one', '$payload$'); f.c.renderFuzzerSetup();
@@ -508,7 +508,7 @@ test('clearing a failed request removes error styling from the empty-editor guid
   f.state.fuzzerNotice = 'Previous start failed'; f.state.fuzzerNoticeError = true;
   f.c.renderFuzzerSetup(); assert.equal(classes.has('fuzzer-notice-error'), true);
   f.c.updateFuzzerRequestText('', { userEdit: true }); f.c.renderFuzzerSetup();
-  assert.equal(nodes.fuzzerPreflightNotice.textContent, 'Paste a raw HTTP request, or send one from History / Replay.');
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, '');
   assert.equal(classes.has('fuzzer-notice-error'), false);
   f.c.updateFuzzerRequestText('not a request', { userEdit: true }); f.c.renderFuzzerSetup();
   assert.equal(classes.has('fuzzer-notice-error'), true);

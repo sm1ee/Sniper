@@ -18086,8 +18086,9 @@ function renderFuzzerTransport(raw = fuzzerRequestTextForAction(), template = un
   select.disabled = transport.disabled;
   const help = fuzzerSetupNode("fuzzerTransportHelp");
   if (help) {
-    help.textContent = transport.help;
-    help.classList.toggle("hidden", !transport.help);
+    const message = workspaceLoaded && !raw.trim() ? "" : transport.help;
+    help.textContent = message;
+    help.classList.toggle("hidden", !message);
   }
 }
 
@@ -18135,10 +18136,10 @@ function renderFuzzerSetup() {
   const raw = fuzzerRequestTextForAction();
   // Source encoding still applies when the edited body cannot be parsed.
   const bodyEncodingHelp = workspaceLoaded && state.fuzzerBaseRequest?.body_encoding === "base64"
-    ? "Body format: base64. Select a header or query value, then Add §." : "";
+    ? "Base64 body · header and query positions only" : "";
   const requestHelp = fuzzerSetupNode("fuzzerRequestHelp");
   if (requestHelp) requestHelp.textContent = bodyEncodingHelp
-    ? `Raw HTTP request · ${bodyEncodingHelp}` : "Raw HTTP request · select a value, then Add §";
+    ? bodyEncodingHelp : "";
   const select = fuzzerSetupNode("fuzzerCandidateSelect");
   let candidates = [];
   let template = null;
@@ -18212,8 +18213,8 @@ function renderFuzzerSetup() {
     return;
   }
   if (!model) {
-    summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "No request selected.";
-    notice.textContent = raw.trim() ? error : "Paste a raw HTTP request, or send one from History / Replay.";
+    summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "";
+    notice.textContent = raw.trim() ? error : "";
     notice.classList?.toggle("fuzzer-notice-error", !!raw.trim() && !!error);
     if (previewNotes) previewNotes.textContent = bodyEncodingHelp;
     if (samples) samples.textContent = "Add a valid request and payloads to preview.";

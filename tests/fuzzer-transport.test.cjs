@@ -259,3 +259,16 @@ test('native selector change is wired to transport edit and guarded after loadin
   f.c.workspaceLoaded = false; select.value = 'https'; select.listeners.change({ target: select });
   assert.equal(f.state.fuzzerBaseRequest.scheme, 'http');
 });
+
+test('initialized empty draft does not repeat the editor prompt in transport help', () => {
+  const f = fixture();
+  f.state.fuzzerRequestText = '';
+  f.c.renderFuzzerTransport();
+  assert.equal(f.nodes.fuzzerTransportSelect.disabled, true);
+  assert.equal(f.nodes.fuzzerTransportHelp.textContent, '');
+  assert.equal(f.nodes.fuzzerTransportHelp.classList.contains('hidden'), true);
+  f.state.fuzzerRequestText = 'not a request';
+  f.c.renderFuzzerTransport();
+  assert.equal(f.nodes.fuzzerTransportHelp.textContent, 'Fix the request to choose transport.');
+  assert.equal(f.nodes.fuzzerTransportHelp.classList.contains('hidden'), false);
+});
