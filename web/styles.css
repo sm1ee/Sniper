@@ -9499,3 +9499,14 @@ button.utility-button.replay-tab-add {
 /* One list action governs file import, presets and ranges below this header. */
 .fuzzer-payloads-card > .panel-toolbar { flex-wrap: wrap; }
 .fuzzer-payloads-card > .panel-toolbar > .fuzzer-import-mode { flex: 0 0 auto; }
+
+/* Work panes share one flat surface; nested sections retain their own cues. */
+#matchReplacePanel > .split-panel > .panel-card,
+#fuzzerShell .fuzzer-top-row > .fuzzer-template-card,
+#fuzzerShell .fuzzer-top-row > .fuzzer-payloads-card,
+#fuzzerShell > .fuzzer-layout > .fuzzer-results-card,
+#templatesShell > .templates-side,
+#templatesShell > .templates-list {
+  background: var(--panel);
+  border-radius: var(--radius-md);
+}
