@@ -1578,6 +1578,11 @@ code {
   background: rgba(255, 255, 255, 0.04);
 }
 
+.tools-output-list .value:focus-within {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
+}
+
 .tools-output-list .value textarea {
   width: 100%;
   min-height: 0;

@@ -161,3 +161,22 @@ test("Strings typed text survives updates, row rebuilds and newline normalizatio
     }
   }
 });
+
+test("readonly outputs retain keyboard focusability and a scoped container focus cue", () => {
+  const f = fixture();
+  for (const tab of Object.values(f.context.tabs)) {
+    f.hasher.tab = tab;
+    f.hasher.updateUI();
+    for (const row of f.rows) {
+      assert.notEqual(row.textarea.attributes.tabindex, "-1");
+      assert.doesNotMatch(row.html.match(/<textarea\b([^>]*)>/)[1], /\sdisabled(?:\s|=|$)/);
+      assertLabels(f);
+    }
+  }
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const rule = css.match(/\.tools-output-list \.value:focus-within\s*\{([^}]+)\}/)?.[1];
+  assert.ok(rule);
+  assert.match(rule, /outline:\s*2px solid var\(--point\)/);
+  assert.match(rule, /outline-offset:\s*-2px/, "inset cue cannot be clipped by the output scroller");
+  assert.doesNotMatch(rule, /(?:padding|margin|border|width|height|pointer-events)\s*:/, "focus must not change size or copy pointer handling");
+});
