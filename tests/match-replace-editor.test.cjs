@@ -2,7 +2,7 @@
 // and lets the On switch save only itself. Synthetic rules only.
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { loadFunctions } = require("./frontend-test-helpers.cjs");
+const { loadFunctions, appSource } = require("./frontend-test-helpers.cjs");
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const classes = () => {
@@ -239,4 +239,25 @@ test("compact rule controls target only five single-line fields and retain horiz
   assert.deepEqual(fields, ["matchReplaceScope", "matchReplaceTarget", "matchReplaceSearch", "matchReplaceReplace", "matchReplaceAnnotationColor"]);
   assert.match(css, /\.settings-field select \{[^}]*padding: 10px 12px;/);
   assert.match(css, /--control-h: max\(22px, calc\(var\(--ui-root-size\) \+ 14px\)\);/);
+});
+
+test("Replace categorical columns scale with text while long-content columns share remaining space", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const table = html.match(/<table class="mini-table match-replace-rules-table">([\s\S]*?)<\/table>/)[1];
+  const columns = [...table.matchAll(/<col(?: class="([^"]+)")? \/>/g)].map(match => match[1] || "auto");
+  assert.deepEqual(columns, ["match-replace-col-on", "match-replace-col-scope", "match-replace-col-target", "auto", "auto", "match-replace-col-flag", "match-replace-col-flag"]);
+  assert.doesNotMatch(table, /<th style=/);
+  assert.deepEqual([...table.matchAll(/<th>([^<]+)<\/th>/g)].map(match => match[1]), ["On", "Scope", "Target", "Search", "Actions", "Re", "Cs"]);
+  assert.match(css, /#matchReplacePanel \.match-replace-rules-table \{\s*min-width: calc\(200px \+ 42ch\);\s*\}/);
+  for (const [name, width] of [["on", "56px"], ["scope", "calc(10ch + 24px)"], ["target", "calc(13ch + 24px)"], ["flag", "calc(2.5ch + 24px)"]]) {
+    assert.ok(css.includes(`#matchReplacePanel .match-replace-col-${name} { width: ${width}; }`));
+  }
+  // Two automatic columns each retain at least 7ch + 24px at the table minimum.
+  assert.equal(56 + 6 * 24, 200);
+  assert.equal(10 + 13 + 2 * 2.5 + 2 * 7, 42);
+  assert.match(appSource, /<td class="text-truncate" title="\$\{escapeHtml\(rule\.search/);
+  assert.match(appSource, /<td class="text-truncate" title="\$\{escapeHtml\(matchReplaceRuleActions/);
 });

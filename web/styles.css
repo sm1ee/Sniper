@@ -9506,6 +9506,15 @@ button.utility-button.replay-tab-add {
   padding-block: 4px;
 }
 
+/* Reserve categorical text and its padding; only long content shares the remainder. */
+#matchReplacePanel .match-replace-rules-table {
+  min-width: calc(200px + 42ch);
+}
+#matchReplacePanel .match-replace-col-on { width: 56px; }
+#matchReplacePanel .match-replace-col-scope { width: calc(10ch + 24px); }
+#matchReplacePanel .match-replace-col-target { width: calc(13ch + 24px); }
+#matchReplacePanel .match-replace-col-flag { width: calc(2.5ch + 24px); }
+
 /* Work panes share one flat surface; nested sections retain their own cues. */
 #matchReplacePanel > .split-panel > .panel-card,
 #fuzzerShell .fuzzer-top-row > .fuzzer-template-card,
