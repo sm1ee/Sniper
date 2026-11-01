@@ -119,9 +119,7 @@ body {
   height: 100%;
   min-height: 100%;
   font-size: var(--ui-root-size);
-  background:
-    radial-gradient(circle at top left, var(--bg-glow), transparent 30%),
-    linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+  background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
 }
@@ -845,9 +843,8 @@ code {
   padding: 6px 11px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.02) 100%);
+  background: var(--panel-elevated);
   color: var(--text);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .metric-pill {
@@ -882,6 +879,10 @@ code {
 .modal-list dt,
 .modal-list dd {
   font-size: var(--font-sm);
+}
+
+.metric-pill span {
+  color: var(--text-soft);
 }
 
 .metric-pill strong {
@@ -6383,8 +6384,7 @@ button.utility-button.replay-tab-add {
   padding: 28px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%), var(--panel);
-  box-shadow: var(--shadow);
+  background: var(--panel);
 }
 
 .placeholder-card h2 {
@@ -6440,7 +6440,7 @@ button.utility-button.replay-tab-add {
   max-height: calc(100svh - 40px);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%), var(--panel);
+  background: var(--panel);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
@@ -6472,7 +6472,7 @@ button.utility-button.replay-tab-add {
 
 .primary-action {
   border-color: var(--point-border);
-  background: linear-gradient(180deg, var(--point-border) 0%, var(--point-soft) 100%);
+  background: var(--point-soft);
   color: var(--text);
   font-weight: 700;
 }
