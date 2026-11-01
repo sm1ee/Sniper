@@ -9500,6 +9500,12 @@ button.utility-button.replay-tab-add {
 .fuzzer-payloads-card > .panel-toolbar { flex-wrap: wrap; }
 .fuzzer-payloads-card > .panel-toolbar > .fuzzer-import-mode { flex: 0 0 auto; }
 
+/* Keep single-line rule controls compact without fixing their height. */
+#matchReplaceForm .settings-field > :is(input[type="text"], select) {
+  min-height: var(--control-h);
+  padding-block: 4px;
+}
+
 /* Work panes share one flat surface; nested sections retain their own cues. */
 #matchReplacePanel > .split-panel > .panel-card,
 #fuzzerShell .fuzzer-top-row > .fuzzer-template-card,

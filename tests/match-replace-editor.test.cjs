@@ -221,3 +221,22 @@ test("search options wrap without imposing fixed widths", () => {
   assert.match(options, /flex-wrap:\s*wrap/);
   assert.doesNotMatch(options, /(?:min-|max-)?width\s*:/);
 });
+
+
+test("compact rule controls target only five single-line fields and retain horizontal padding", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  const selector = '#matchReplaceForm .settings-field > :is(input[type="text"], select)';
+  assert.equal(css.split(selector).length - 1, 1);
+  const block = css.slice(css.indexOf(selector)).match(/\{([^}]+)\}/)[1];
+  assert.deepEqual(block.trim().split("\n").map(line => line.trim()), ["min-height: var(--control-h);", "padding-block: 4px;"]);
+  const form = html.slice(html.indexOf('id="matchReplaceForm"'), html.indexOf('<section class="proxy-panel hidden" id="findingsPanel"'));
+  const fields = [...form.matchAll(/<(input|select)\b([^>]+)>/g)]
+    .filter(([, tag, attrs]) => tag === "select" || /type="text"/.test(attrs))
+    .map(([, , attrs]) => attrs.match(/id="([^"]+)"/)[1]);
+  assert.deepEqual(fields, ["matchReplaceScope", "matchReplaceTarget", "matchReplaceSearch", "matchReplaceReplace", "matchReplaceAnnotationColor"]);
+  assert.match(css, /\.settings-field select \{[^}]*padding: 10px 12px;/);
+  assert.match(css, /--control-h: max\(22px, calc\(var\(--ui-root-size\) \+ 14px\)\);/);
+});
