@@ -6607,6 +6607,17 @@ button.utility-button.replay-tab-add {
   text-transform: none;
 }
 
+.match-replace-search-group {
+  display: grid;
+  gap: 8px;
+}
+
+.match-replace-search-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
 .match-replace-replace-head {
   display: flex;
   align-items: center;

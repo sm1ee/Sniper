@@ -523,10 +523,22 @@
                       <option value="body">Body</option>
                     </select>
                   </label>
-                  <label class="settings-field">
-                    <span>Search</span>
-                    <input id="matchReplaceSearch" type="text" placeholder="foo.example.com" />
-                  </label>
+                  <div class="match-replace-search-group">
+                    <label class="settings-field">
+                      <span>Search</span>
+                      <input id="matchReplaceSearch" type="text" placeholder="foo.example.com" />
+                    </label>
+                    <div class="match-replace-search-options">
+                      <label class="settings-toggle">
+                        <input id="matchReplaceRegex" type="checkbox" />
+                        <span>Regex</span>
+                      </label>
+                      <label class="settings-toggle">
+                        <input id="matchReplaceCaseSensitive" type="checkbox" />
+                        <span>Case sensitive</span>
+                      </label>
+                    </div>
+                  </div>
                   <div class="settings-field">
                     <label class="match-replace-replace-head"><span>Replace</span><span class="mini-toggle"><input id="matchReplaceReplaceEnabled" type="checkbox" role="switch" checked /><span class="mini-toggle-track"></span></span></label>
                     <input id="matchReplaceReplace" type="text" aria-label="Replacement" placeholder="bar.example.com" />
@@ -552,14 +564,6 @@
                       </label>
                     </div>
                   </details>
-                  <label class="settings-toggle">
-                    <input id="matchReplaceRegex" type="checkbox" />
-                    <span>Regex</span>
-                  </label>
-                  <label class="settings-toggle">
-                    <input id="matchReplaceCaseSensitive" type="checkbox" />
-                    <span>Case sensitive</span>
-                  </label>
                 </div>
               </section>
             </div>

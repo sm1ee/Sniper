@@ -192,3 +192,32 @@ test("rule table edit buttons and transparent toggles expose scoped keyboard foc
   const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
   assert.match(css, /#matchReplaceTableBody \.match-replace-edit-rule:focus-visible,\s*#matchReplaceTableBody \.mini-toggle input:focus-visible \+ \.mini-toggle-track\s*\{[^}]*outline: 2px solid var\(--point\);/);
 });
+
+test("search options sit next to Search before replacement and annotation actions", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  const form = html.slice(html.indexOf('id="matchReplaceForm"'), html.indexOf('<section class="proxy-panel hidden" id="findingsPanel"'));
+  const ordered = ["matchReplaceSearch", "matchReplaceRegex", "matchReplaceCaseSensitive", "matchReplaceReplaceEnabled", "matchReplaceAnnotation"];
+  let previous = -1;
+  for (const id of ordered) {
+    const marker = `id="${id}"`;
+    assert.equal(form.split(marker).length - 1, 1, `${id} must remain unique`);
+    const index = form.indexOf(marker);
+    assert.ok(index > previous, `${id} must follow the prior control`);
+    previous = index;
+  }
+  assert.match(form, /class="match-replace-search-group"[\s\S]*?<label class="settings-field">\s*<span>Search<\/span>\s*<input id="matchReplaceSearch"/);
+  assert.match(form, /class="match-replace-search-options">\s*<label class="settings-toggle">\s*<input id="matchReplaceRegex" type="checkbox" \/>\s*<span>Regex<\/span>\s*<\/label>\s*<label class="settings-toggle">\s*<input id="matchReplaceCaseSensitive" type="checkbox" \/>\s*<span>Case sensitive<\/span>/);
+});
+
+test("search options wrap without imposing fixed widths", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const options = css.match(/\.match-replace-search-options\s*\{([^}]+)\}/)?.[1];
+  assert.ok(options);
+  assert.match(options, /display:\s*flex/);
+  assert.match(options, /flex-wrap:\s*wrap/);
+  assert.doesNotMatch(options, /(?:min-|max-)?width\s*:/);
+});
