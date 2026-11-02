@@ -60,7 +60,7 @@ test('manual first use joins initialized editor inputs to preflight without an i
   const f=fixture();
   assert.equal(f.cv().view.state.facet(CM.EditorState.readOnly),false);
   assert.equal(f.nodes.startFuzzerButton.disabled,true);
-  assert.match(f.nodes.fuzzerPreflightNotice.textContent,/Paste a raw HTTP request.*History \/ Replay/);
+  assert.equal(f.nodes.fuzzerPreflightNotice.textContent, '');
   f.type('https://example.com/synthetic');
   assert.equal(f.state.fuzzerRequestText,'https://example.com/synthetic');
   assert.equal(f.nodes.fuzzerPreflightNotice.textContent,'Invalid request line in editor');

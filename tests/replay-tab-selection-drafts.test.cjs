@@ -101,6 +101,7 @@ function setup() {
     tab: f.a, sessionId: f.context.currentSessionId(), generation: f.context.workspaceStateGeneration,
   };
   f.document.addEventListener = (type, callback) => { if (type === 'keydown') f.keyHandler = callback; };
+  f.document.removeEventListener = () => {};
   bindListener(f, '  document.addEventListener("keydown", (event) => {');
   f.context.renderReplayTabs();
   const event = target => ({

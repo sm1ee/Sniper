@@ -389,7 +389,7 @@
     function renderJobs() {
       const fragment = doc.createDocumentFragment();
       els.JobsMeta.textContent = jobs.length ? `${number(jobs.length)} job${jobs.length === 1 ? "" : "s"}` : "";
-      if (!jobs.length) fragment.append(element("p", "recon-empty", loaded ? "No discovery jobs in this session." : "Loading jobs…"));
+      if (!jobs.length) fragment.append(element("p", "recon-empty", loaded ? "No jobs yet." : "Loading jobs…"));
       for (const job of jobs) {
         const card = element("article", "recon-job");
         const header = element("div", "recon-job-header");
@@ -430,7 +430,7 @@
       title.id = "reconDetailTitle";
       const nodes = [title];
       if (!selected) {
-        nodes.push(element("p", "recon-help", "Select an endpoint to inspect its raw URLs and provenance."));
+        nodes.push(element("p", "recon-help", "Select an endpoint."));
       } else {
         if (options.copyText) {
           const copy = element("button", "secondary-action", "Copy URL");
@@ -490,7 +490,7 @@
       }
       if (!current.items.length) {
         const row = element("tr", "");
-        const cell = element("td", "recon-empty", !loaded ? "Loading endpoints…" : endpoints.length ? "No endpoints match these filters." : "No endpoints discovered yet. Choose a target and start discovery.");
+        const cell = element("td", "recon-empty", !loaded ? "Loading endpoints…" : endpoints.length ? "No matching endpoints." : "No endpoints yet.");
         cell.colSpan = 4;
         row.append(cell);
         fragment.append(row);

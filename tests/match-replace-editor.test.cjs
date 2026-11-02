@@ -2,7 +2,7 @@
 // and lets the On switch save only itself. Synthetic rules only.
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { loadFunctions } = require("./frontend-test-helpers.cjs");
+const { loadFunctions, appSource } = require("./frontend-test-helpers.cjs");
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const classes = () => {
@@ -20,10 +20,10 @@ function fixture(saved = []) {
     activeSession: { id: "session-a" },
   };
   const rows = new Map();
-  const row = (id) => rows.get(id) || rows.set(id, { dataset: { id }, classList: classes(), title: "" }).get(id);
+  const row = (id) => rows.get(id) || rows.set(id, { dataset: { id }, classList: classes(), title: "", listeners: {}, addEventListener(name, handler) { this.listeners[name] = handler; } }).get(id);
   const field = (value = "") => ({ value, checked: false, focused: false, focus() { this.focused = true; } });
   const els = {
-    matchReplaceTableBody: { innerHTML: "", querySelectorAll: (selector) => (selector === "tr[data-id]"
+    matchReplaceTableBody: { innerHTML: "", querySelectorAll: (selector) => ((selector === "tr[data-id]" || selector === ".history-row")
       ? state.matchReplaceRules.map((item) => row(item.id)) : []) },
     matchReplaceEditorHeader: { classList: classes() }, matchReplaceForm: { classList: classes() },
     matchReplaceEmpty: { classList: classes() }, matchReplaceEditorPath: {}, matchReplaceEditorTitle: {},
@@ -37,7 +37,7 @@ function fixture(saved = []) {
   const c = loadFunctions(["renderMatchReplaceRules", "getSelectedMatchReplaceRule", "syncMatchReplaceEditor", "matchReplaceRuleActivity", "setMatchReplaceRuleActivity", "canonicalMatchReplaceRule", "matchReplaceRulesPayload", "matchReplaceRuleActions", "matchReplaceRuleTitle", "getMatchReplaceSaveOwner", "beginMatchReplaceWrite", "matchReplaceWriteIsCurrent", "acknowledgeMatchReplaceRules", "finishMatchReplaceWrite",
     "createNewMatchReplaceRule", "updateMatchReplaceSaveState", "matchReplaceRuleUnsaved",
     "untouchedNewMatchReplaceRule", "saveMatchReplaceSwitch", "jsonArray"], {
-    state, els, TextEncoder, HTTP_COLOR_TAG_OPTIONS: new Set(["red", "orange", "yellow", "green", "blue", "purple"]), workspaceStateGeneration: 0, escapeHtml: (value) => String(value), generateUuid: () => "new-rule",
+    state, els, TextEncoder, HTTP_COLOR_TAG_OPTIONS: new Set(["red", "orange", "yellow", "green", "blue", "purple"]), workspaceStateGeneration: 0, escapeHtml: (value) => String(value).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`), generateUuid: () => "new-rule",
     currentSessionId: () => "session-a", sessionWritePath: (path) => path,
     requireOkResponse: async () => {}, saveMatchReplaceRules: async () => requests.push("full save"),
     fetch: async (url, options) => {
@@ -128,4 +128,136 @@ test("only a new rule with nothing typed in it counts as untouched", () => {
   assert.equal(f.c.untouchedNewMatchReplaceRule()?.id, "new-rule");
   f.edit("matchReplaceSearch", "foo.example.com");
   assert.equal(f.c.untouchedNewMatchReplaceRule(), null);
+});
+
+// Only local selection is exercised here: any request/save path fails closed.
+function localSelectionFixture(saved) {
+  const f = fixture(saved);
+  const forbidden = () => { throw new Error("Selection must not save or request"); };
+  f.c.fetch = forbidden;
+  f.c.saveMatchReplaceRules = forbidden;
+  f.c.saveMatchReplaceSwitch = forbidden;
+  f.c.renderMatchReplaceRules();
+  return f;
+}
+
+test("rule controls have escaped payload-free names and native edit buttons", () => {
+  const f = localSelectionFixture([
+    rule("a", { scope: 'request"<', target: 'body&', search: "private-search", replace: "private-replacement" }),
+    rule("b", { annotation_only_enabled: false, annotation_note: "private-note", target: "header_value" }),
+  ]);
+  const html = f.els.matchReplaceTableBody.innerHTML;
+  assert.match(html, /<button type="button" class="match-replace-edit-rule" aria-label="Edit rule 1: request&#34;&#60; \/ body&#38;">body&#38;<\/button>/);
+  assert.match(html, /aria-label="Enable rule 2: request \/ header_value"/);
+  const labels = [...html.matchAll(/aria-label="([^"]*)"/g)].map(m => m[1]);
+  assert.equal(labels.length, 4);
+  assert.equal(new Set(labels).size, 4);
+  assert.ok(labels.every(label => !/private-|a.example.com|b.example.com/.test(label)));
+  assert.doesNotMatch(html, /<tr[^>]*(?:tabindex|role)=/);
+  const empty = localSelectionFixture([]);
+  assert.doesNotMatch(empty.els.matchReplaceTableBody.innerHTML, /match-replace-edit-rule|data-rule-toggle/);
+});
+
+test("native rule edit activation selects once then focuses the rendered Search field", () => {
+  const f = localSelectionFixture([rule("a"), rule("b")]);
+  let renders = 0;
+  const render = f.c.renderMatchReplaceRules;
+  f.c.renderMatchReplaceRules = () => { renders++; render(); };
+  f.els.matchReplaceSearch.focus = () => {
+    assert.equal(f.state.selectedMatchReplaceRuleId, "b");
+    assert.equal(f.els.matchReplaceSearch.value, "b.example.com");
+    assert.equal(renders, 1);
+    f.els.matchReplaceSearch.focused = true;
+  };
+  f.row("b").listeners.click({ target: { closest: selector => selector === ".match-replace-edit-rule" ? {} : null } });
+  assert.equal(f.els.matchReplaceSearch.focused, true);
+  assert.equal(f.state.matchReplaceDirty, false);
+  assert.deepEqual(f.requests, []);
+});
+
+test("ordinary rule clicks retain focus behavior and toggle clicks never select", () => {
+  const f = localSelectionFixture([rule("a"), rule("b")]);
+  f.row("b").listeners.click({ target: { closest: () => null } });
+  assert.equal(f.state.selectedMatchReplaceRuleId, "b");
+  assert.equal(f.els.matchReplaceSearch.focused, false);
+  f.row("a").listeners.click({ target: { closest: selector => selector === ".mini-toggle" ? {} : null } });
+  assert.equal(f.state.selectedMatchReplaceRuleId, "b");
+  assert.equal(f.state.matchReplaceDirty, false);
+  assert.deepEqual(f.requests, []);
+});
+
+test("rule table edit buttons and transparent toggles expose scoped keyboard focus", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /#matchReplaceTableBody \.match-replace-edit-rule:focus-visible,\s*#matchReplaceTableBody \.mini-toggle input:focus-visible \+ \.mini-toggle-track\s*\{[^}]*outline: 2px solid var\(--point\);/);
+});
+
+test("search options sit next to Search before replacement and annotation actions", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  const form = html.slice(html.indexOf('id="matchReplaceForm"'), html.indexOf('<section class="proxy-panel hidden" id="findingsPanel"'));
+  const ordered = ["matchReplaceSearch", "matchReplaceRegex", "matchReplaceCaseSensitive", "matchReplaceReplaceEnabled", "matchReplaceAnnotation"];
+  let previous = -1;
+  for (const id of ordered) {
+    const marker = `id="${id}"`;
+    assert.equal(form.split(marker).length - 1, 1, `${id} must remain unique`);
+    const index = form.indexOf(marker);
+    assert.ok(index > previous, `${id} must follow the prior control`);
+    previous = index;
+  }
+  assert.match(form, /class="match-replace-search-group"[\s\S]*?<label class="settings-field">\s*<span>Search<\/span>\s*<input id="matchReplaceSearch"/);
+  assert.match(form, /class="match-replace-search-options">\s*<label class="settings-toggle">\s*<input id="matchReplaceRegex" type="checkbox" \/>\s*<span>Regex<\/span>\s*<\/label>\s*<label class="settings-toggle">\s*<input id="matchReplaceCaseSensitive" type="checkbox" \/>\s*<span>Case sensitive<\/span>/);
+});
+
+test("search options wrap without imposing fixed widths", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const options = css.match(/\.match-replace-search-options\s*\{([^}]+)\}/)?.[1];
+  assert.ok(options);
+  assert.match(options, /display:\s*flex/);
+  assert.match(options, /flex-wrap:\s*wrap/);
+  assert.doesNotMatch(options, /(?:min-|max-)?width\s*:/);
+});
+
+
+test("compact rule controls target only five single-line fields and retain horizontal padding", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  const selector = '#matchReplaceForm .settings-field > :is(input[type="text"], select)';
+  assert.equal(css.split(selector).length - 1, 1);
+  const block = css.slice(css.indexOf(selector)).match(/\{([^}]+)\}/)[1];
+  assert.deepEqual(block.trim().split("\n").map(line => line.trim()), ["min-height: var(--control-h);", "padding-block: 4px;"]);
+  const form = html.slice(html.indexOf('id="matchReplaceForm"'), html.indexOf('<section class="proxy-panel hidden" id="findingsPanel"'));
+  const fields = [...form.matchAll(/<(input|select)\b([^>]+)>/g)]
+    .filter(([, tag, attrs]) => tag === "select" || /type="text"/.test(attrs))
+    .map(([, , attrs]) => attrs.match(/id="([^"]+)"/)[1]);
+  assert.deepEqual(fields, ["matchReplaceScope", "matchReplaceTarget", "matchReplaceSearch", "matchReplaceReplace", "matchReplaceAnnotationColor"]);
+  assert.match(css, /\.settings-field select \{[^}]*padding: 10px 12px;/);
+  assert.match(css, /--control-h: max\(22px, calc\(var\(--ui-root-size\) \+ 14px\)\);/);
+});
+
+test("Replace categorical columns scale with text while long-content columns share remaining space", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const table = html.match(/<table class="mini-table match-replace-rules-table">([\s\S]*?)<\/table>/)[1];
+  const columns = [...table.matchAll(/<col(?: class="([^"]+)")? \/>/g)].map(match => match[1] || "auto");
+  assert.deepEqual(columns, ["match-replace-col-on", "match-replace-col-scope", "match-replace-col-target", "auto", "auto", "match-replace-col-flag", "match-replace-col-flag"]);
+  assert.doesNotMatch(table, /<th style=/);
+  assert.deepEqual([...table.matchAll(/<th>([^<]+)<\/th>/g)].map(match => match[1]), ["On", "Scope", "Target", "Search", "Actions", "Re", "Cs"]);
+  assert.match(css, /#matchReplacePanel \.match-replace-rules-table \{\s*min-width: calc\(200px \+ 42ch\);\s*\}/);
+  for (const [name, width] of [["on", "56px"], ["scope", "calc(10ch + 24px)"], ["target", "calc(13ch + 24px)"], ["flag", "calc(2.5ch + 24px)"]]) {
+    assert.ok(css.includes(`#matchReplacePanel .match-replace-col-${name} { width: ${width}; }`));
+  }
+  // Two automatic columns each retain at least 7ch + 24px at the table minimum.
+  assert.equal(56 + 6 * 24, 200);
+  assert.equal(10 + 13 + 2 * 2.5 + 2 * 7, 42);
+  assert.match(appSource, /<td class="text-truncate" title="\$\{escapeHtml\(rule\.search/);
+  assert.match(appSource, /<td class="text-truncate" title="\$\{escapeHtml\(matchReplaceRuleActions/);
 });

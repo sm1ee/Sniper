@@ -27,7 +27,7 @@ const run = (id = 'run-a', results = [result(0), result(1)]) => ({ id, status: '
 const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body,
   headers: { get: () => 'text/plain' }, text: async () => 'Synthetic read failure.' });
 function fixture() {
-  const ids = ['fuzzerResultStatus', 'fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs',
+  const ids = ['fuzzerShell', 'fuzzerResultStatus', 'fuzzerResultMinBytes', 'fuzzerResultMaxBytes', 'fuzzerResultMinMs', 'fuzzerResultMaxMs',
     'fuzzerResultSort', 'fuzzerResultDirection', 'fuzzerResultFilterCount', 'fuzzerResultsHead',
     'fuzzerResultFilterBadge', 'fuzzerResultFilterSummary', 'fuzzerClearResultFiltersButton', 'fuzzerResultStatusRow', 'fuzzerCompareBaseButton', 'fuzzerCompareButton',
     'fuzzerSavedRunSelect', 'fuzzerRefreshRunsButton', 'fuzzerViewRunButton', 'fuzzerReuseRunButton', 'fuzzerSavedRunNotice',
@@ -92,6 +92,147 @@ function draft(state) {
     'fuzzerTargetRequestText', 'fuzzerRequestText', 'fuzzerPayloadsText', 'fuzzerNotice', 'fuzzerDraftVersion', 'fuzzerRunToken'].map(key => [key, state[key]])));
 }
 function indexes(f) { return Array.from(f.c.visibleFuzzerResults(), entry => entry.sourceIndex); }
+
+const retainedNoticeRuns = [{ id: 'run-a', host: 'example.com', path: '/a' }, { id: 'run-b', host: 'example.com', path: '/b' }];
+async function retainedNoticeFixture() {
+  const f = fixture(); f.state.activeTool = 'fuzzer';
+  const listing = f.els.fuzzerRefreshRunsButton.dispatch('click');
+  f.requests.at(-1).resolve(response(retainedNoticeRuns)); await listing;
+  f.pick('run-b'); return f;
+}
+
+for (const action of ['view', 'reuse']) for (const outcome of ['success', 'failure']) {
+  test(`retained notice: pending ${action} keeps loading feedback through list ${outcome}`, async () => {
+    const f = await retainedNoticeFixture(), before = draft(f.state), read = f[action](), selected = f.requests.at(-1);
+    assert.equal(f.els.fuzzerRefreshRunsButton.disabled, false);
+    const listing = f.els.fuzzerRefreshRunsButton.dispatch('click');
+    assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run...');
+    const updated = [...retainedNoticeRuns, { id: 'run-c', host: 'example.com', path: '/c' }];
+    f.requests.at(-1).resolve(response(outcome === 'success' ? updated : null, outcome === 'success' ? 200 : 500));
+    await listing;
+    assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run...');
+    assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, true); assert.equal(f.els.fuzzerViewRunButton.disabled, true);
+    assert.equal(f.els.fuzzerReuseRunButton.disabled, true); assert.equal(f.els.fuzzerRefreshRunsButton.disabled, false);
+    assert.equal(f.c.fuzzerResultsWorkflowState().runs.length, outcome === 'success' ? 3 : 2);
+    assert.equal(f.state.fuzzerAttackRecordId, 'run-a'); assert.equal(draft(f.state), before); assert.equal(f.saves, 0);
+    selected.resolve(response(run('run-b'))); await read;
+    assert.match(f.els.fuzzerSavedRunNotice.textContent, action === 'view' ? /Viewing retained results/ : /Reuse requires confirmation/);
+    assert.equal(f.state.fuzzerAttackRecordId, action === 'view' ? 'run-b' : 'run-a'); assert.equal(draft(f.state), before);
+  });
+}
+
+for (const action of ['view', 'reuse']) for (const status of [404, 500]) for (const outcome of ['success', 'failure']) {
+  test(`retained notice: settled ${action} ${status} remains after concurrent list ${outcome}`, async () => {
+    const f = await retainedNoticeFixture(), before = draft(f.state), read = f[action](), selected = f.requests.at(-1);
+    const listing = f.els.fuzzerRefreshRunsButton.dispatch('click'), listRead = f.requests.at(-1);
+    selected.resolve(response(null, status)); await read;
+    const notice = f.els.fuzzerSavedRunNotice.textContent;
+    assert.match(notice, status === 404 ? /no longer available/ : /Synthetic read failure/);
+    if (outcome === 'success') listRead.resolve(response(retainedNoticeRuns));
+    else listRead.reject(new Error('Retained-list refresh failed.'));
+    await listing;
+    assert.equal(f.els.fuzzerSavedRunNotice.textContent, notice);
+    assert.equal(f.els.fuzzerViewRunButton.disabled, false); assert.equal(f.els.fuzzerReuseRunButton.disabled, false);
+    assert.equal(f.state.fuzzerAttackRecordId, 'run-a'); assert.equal(draft(f.state), before); assert.equal(f.saves, 0);
+    // A later explicit Refresh may own feedback normally after the read has settled.
+    const retry = f.els.fuzzerRefreshRunsButton.dispatch('click'); assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading retained runs...');
+    if (outcome === 'success') f.requests.at(-1).resolve(response(retainedNoticeRuns));
+    else f.requests.at(-1).reject(new Error('Fresh retained-list refresh failed.'));
+    await retry;
+    assert.match(f.els.fuzzerSavedRunNotice.textContent, outcome === 'success' ? /^2 retained runs/ : /Fresh retained-list refresh failed/);
+  });
+}
+
+for (const action of ['view', 'reuse']) for (const outcome of ['success', 'failure']) {
+  test(`retained notice: settled ${action} success remains after concurrent list ${outcome}`, async () => {
+    const f = await retainedNoticeFixture(), before = draft(f.state), read = f[action](), selected = f.requests.at(-1);
+    const listing = f.els.fuzzerRefreshRunsButton.dispatch('click'), listRead = f.requests.at(-1);
+    selected.resolve(response(run('run-b'))); await read;
+    const notice = f.els.fuzzerSavedRunNotice.textContent;
+    assert.match(notice, action === 'view' ? /Viewing retained results/ : /Reuse requires confirmation/);
+    if (outcome === 'success') listRead.resolve(response(retainedNoticeRuns));
+    else listRead.reject(new Error('Retained-list refresh failed.'));
+    await listing;
+    assert.equal(f.els.fuzzerSavedRunNotice.textContent, notice); assert.equal(draft(f.state), before);
+    assert.equal(f.confirmations.length, action === 'reuse' ? 1 : 0);
+  });
+}
+
+for (const action of ['view', 'reuse']) for (const empty of [false, true]) for (const outcome of ['success', 'failure']) {
+  test(`retained notice: ${empty ? 'empty' : 'changed'} list retires removed ${action} selection before late ${outcome}`, async () => {
+    const f = await retainedNoticeFixture(), before = draft(f.state), read = f[action](), selected = f.requests.at(-1);
+    const listing = f.els.fuzzerRefreshRunsButton.dispatch('click');
+    f.requests.at(-1).resolve(response(empty ? [] : [retainedNoticeRuns[0]])); await listing;
+    const workflow = f.c.fuzzerResultsWorkflowState(), notice = f.els.fuzzerSavedRunNotice.textContent;
+    assert.equal(workflow.selectedRunId, ''); assert.equal(workflow.readBusy, false);
+    assert.equal(f.els.fuzzerViewRunButton.disabled, true); assert.equal(f.els.fuzzerReuseRunButton.disabled, true);
+    assert.match(notice, empty ? /No retained fuzzer runs/ : /selected run is no longer listed.*Choose another retained run/);
+    assert.doesNotMatch(notice, /Loading/);
+    if (outcome === 'success') selected.resolve(response(run('run-b'))); else selected.reject(new Error('Retired read failed'));
+    await read;
+    assert.equal(f.els.fuzzerSavedRunNotice.textContent, notice); assert.equal(f.state.fuzzerAttackRecordId, 'run-a');
+    assert.equal(draft(f.state), before); assert.equal(f.saves, 0); assert.equal(f.confirmations.length, 0);
+  });
+}
+
+for (const outcome of ['success', 'failure']) test(`retained notice: newer replacement View owns feedback over list ${outcome}`, async () => {
+  const f = await retainedNoticeFixture(), old = f.view(), oldRead = f.requests.at(-1);
+  const listing = f.els.fuzzerRefreshRunsButton.dispatch('click'), listRead = f.requests.at(-1);
+  f.pick('run-a'); const current = f.view(), currentRead = f.requests.at(-1);
+  listRead.resolve(response(outcome === 'success' ? [] : null, outcome === 'success' ? 200 : 500)); await listing;
+  assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run...'); assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, true);
+  oldRead.resolve(response(run('run-b'))); await old; assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run...');
+  currentRead.resolve(response(run('run-a'))); await current;
+  assert.match(f.els.fuzzerSavedRunNotice.textContent, /Viewing retained results/); assert.equal(f.state.fuzzerAttackRecordId, 'run-a');
+});
+
+for (const action of ['view', 'reuse']) for (const empty of [false, true]) {
+  test(`retained notice: ${empty ? 'empty' : 'changed'} list clears a removed selection after its ${action} failure`, async () => {
+    const f = await retainedNoticeFixture(), before = draft(f.state), read = f[action](), selected = f.requests.at(-1);
+    const listing = f.els.fuzzerRefreshRunsButton.dispatch('click'), listRead = f.requests.at(-1);
+    selected.resolve(response(null, 500)); await read;
+    assert.match(f.els.fuzzerSavedRunNotice.textContent, /Synthetic read failure/);
+    listRead.resolve(response(empty ? [] : [retainedNoticeRuns[0]])); await listing;
+    assert.match(f.els.fuzzerSavedRunNotice.textContent, empty ? /No retained fuzzer runs/ : /selected run is no longer listed.*Choose another retained run/);
+    assert.equal(f.c.fuzzerResultsWorkflowState().selectedRunId, ''); assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, false);
+    assert.equal(f.els.fuzzerViewRunButton.disabled, true); assert.equal(f.state.fuzzerAttackRecordId, 'run-a');
+    assert.equal(draft(f.state), before); assert.equal(f.saves, 0);
+  });
+}
+
+for (const action of ['view', 'reuse']) for (const outcome of ['success', 'failure']) {
+  test(`retained notice: clearing the picker keeps truthful list guidance before late ${action} ${outcome}`, async () => {
+    const f = await retainedNoticeFixture(), before = draft(f.state), read = f[action](), selected = f.requests.at(-1);
+    const listing = f.els.fuzzerRefreshRunsButton.dispatch('click'), listRead = f.requests.at(-1);
+    f.pick('');
+    listRead.resolve(response(retainedNoticeRuns)); await listing;
+    const notice = f.els.fuzzerSavedRunNotice.textContent, workflow = f.c.fuzzerResultsWorkflowState();
+    assert.match(notice, /^2 retained runs/); assert.doesNotMatch(notice, /Loading|no longer listed/);
+    assert.equal(workflow.selectedRunId, ''); assert.equal(workflow.readBusy, false);
+    assert.equal(workflow.runs.some(saved => saved.id === 'run-b'), true);
+    assert.equal(f.els.fuzzerViewRunButton.disabled, true); assert.equal(f.els.fuzzerReuseRunButton.disabled, true);
+    if (outcome === 'success') selected.resolve(response(run('run-b'))); else selected.reject(new Error('Retired read failed'));
+    await read;
+    assert.equal(f.els.fuzzerSavedRunNotice.textContent, notice); assert.equal(f.state.fuzzerAttackRecordId, 'run-a');
+    assert.equal(draft(f.state), before); assert.equal(f.saves, 0); assert.equal(f.confirmations.length, 0);
+  });
+}
+
+for (const outcome of ['success', 'empty', 'failure']) test(`retained notice: plain Refresh still reports ${outcome}`, async () => {
+  const f = fixture(), listing = f.els.fuzzerRefreshRunsButton.dispatch('click');
+  assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading retained runs...');
+  f.requests.at(-1).resolve(response(outcome === 'success' ? retainedNoticeRuns : outcome === 'empty' ? [] : null, outcome === 'failure' ? 500 : 200));
+  await listing;
+  assert.match(f.els.fuzzerSavedRunNotice.textContent, outcome === 'success' ? /^2 retained runs/ : outcome === 'empty' ? /No retained fuzzer runs/ : /Synthetic read failure/);
+});
+
+test('retained notice: earlier Refresh is already fenced by a newer View generation', async () => {
+  const f = await retainedNoticeFixture(), listing = f.els.fuzzerRefreshRunsButton.dispatch('click'), listRead = f.requests.at(-1);
+  const read = f.view(); f.requests.at(-1).resolve(response(null, 404)); await read;
+  const notice = f.els.fuzzerSavedRunNotice.textContent;
+  listRead.resolve(response(retainedNoticeRuns)); await listing;
+  assert.match(notice, /no longer available/); assert.equal(f.els.fuzzerSavedRunNotice.textContent, notice);
+});
 
 test('status, byte and time filters are local, inclusive and leave the run untouched', () => {
   const f = fixture(), saved = run('run-a', [result(0, 200, 0, 0), result(1, 204, 10, 5), result(2, 404, 20, 10),
@@ -250,6 +391,40 @@ test('with no results there is nothing to compare or count, and one empty messag
   f.setFilter('fuzzerResultMinBytes', '1');
   assert.equal(f.els.fuzzerResultStatusRow.classList.contains('hidden'), false);
   assert.equal(f.els.fuzzerClearResultFiltersButton.classList.contains('hidden'), false);
+});
+
+test('modeled no-run rendering and visible loaded-run filters keep distinct messages', () => {
+  const f = fixture();
+  f.state.fuzzerNotice = '';
+  f.c.clearFuzzerAttackRecord(); f.c.renderFuzzer();
+  const message = () => f.els.fuzzerResultsBody.innerHTML;
+  for (const status of ['5xx', 'all']) {
+    f.setFilter('fuzzerResultStatus', status);
+    assert.match(message(), /Results appear here after running\./);
+  }
+  f.setFilter('fuzzerResultMinBytes', '-1');
+  assert.match(message(), /Fix the result filters/);
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.match(message(), /Results appear here after running\./);
+  f.state.fuzzerNotice = 'Fuzzer draft changed. Start a new run to see results for the current template.';
+  f.setFilter('fuzzerResultMinBytes', '1');
+  assert.ok(message().includes(f.state.fuzzerNotice));
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.ok(message().includes(f.state.fuzzerNotice));
+
+  f.c.setFuzzerAttackRecord(run('empty-run', [])); f.c.renderFuzzer();
+  f.setFilter('fuzzerResultStatus', '5xx');
+  assert.match(message(), /No fuzzer results are available for this run\./);
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.match(message(), /No fuzzer results are available for this run\./);
+  f.c.setFuzzerAttackRecord(run()); f.c.renderFuzzer();
+  f.setFilter('fuzzerResultStatus', '5xx');
+  assert.match(message(), /No results match these filters\./);
+  assert.equal(f.els.fuzzerResultFilterCount.textContent, '0 of 2 results');
+  f.setFilter('fuzzerResultMinBytes', '-1');
+  assert.match(message(), /Fix the result filters/);
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.equal(f.els.fuzzerResultFilterCount.textContent, '2 of 2 results');
 });
 
 test('comparison requires a selected fetched transaction and uses existing pinned transaction reads', async () => {
@@ -833,6 +1008,35 @@ async function viewRunningPickerRun(f, id = 'external-live') {
   f.requests.at(-1).resolve(response({ ...run(id, [result(0)]), running: true, planned: 3, payload_count: 3 }));
   await pending;
 }
+test('visible filters preserve the draft notice after editing a viewed running retained run', async () => {
+  const f = fixture();
+  const inputStart = appSource.indexOf('    els.fuzzerRequestEditor.addEventListener("input", () => {');
+  const inputEnd = appSource.indexOf('    els.fuzzerRequestEditor.addEventListener("scroll",', inputStart);
+  assert.ok(inputStart >= 0 && inputEnd > inputStart);
+  vm.runInContext(appSource.slice(inputStart, inputEnd), f.c);
+  await viewRunningPickerRun(f);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.els.fuzzerShell.classList.contains('fuzzer-results-empty'), false);
+  f.els.fuzzerRequestEditor.value += '\nX-Synthetic: edited';
+  f.els.fuzzerRequestEditor.dispatch('input');
+  assert.equal(f.state.fuzzerAttackRecord, null);
+  assert.equal(f.state.fuzzerAttackRecordId, null);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.els.fuzzerShell.classList.contains('fuzzer-results-empty'), false,
+    'the running retained run keeps the filter and table surfaces visible after a local draft edit');
+  const notice = 'Draft changed. The current run is still active; edits apply to the next run.';
+  assert.equal(f.state.fuzzerNotice, notice);
+  const reads = f.requests.length, saves = f.saves;
+  f.setFilter('fuzzerResultStatus', '5xx');
+  assert.ok(f.els.fuzzerResultsBody.innerHTML.includes(notice));
+  f.els.fuzzerClearResultFiltersButton.dispatch('click');
+  assert.ok(f.els.fuzzerResultsBody.innerHTML.includes(notice));
+  assert.equal(f.els.fuzzerShell.classList.contains('fuzzer-results-empty'), false);
+  assert.equal(f.state.fuzzerRunningAttackId, 'external-live');
+  assert.equal(f.requests.length, reads);
+  assert.equal(f.saves, saves);
+});
+
 test('picker View follows a running retained run without replacing the draft or holding the picker busy', async () => {
   const f = fixture(), before = draft(f.state);
   await viewRunningPickerRun(f);

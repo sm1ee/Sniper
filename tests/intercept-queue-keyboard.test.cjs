@@ -230,3 +230,116 @@ test("queue keys exclude modifiers, composition, consumed events, editors, modal
   for (const key of ["Enter", " ", "Tab", "Escape"]) assert.equal(f.key(key).defaultPrevented, false);
   assert.equal(f.requests.length, 0); assert.deepEqual(f.mutations, []);
 });
+
+// Rule editor controls: production local delegates only. Every mutation is a
+// counter stub; no real action body, bootstrap, browser or network is evaluated.
+function ruleControlsFixture() {
+  const counts = { save: 0, delete: 0, toggle: 0 }, listeners = {};
+  const document = { activeElement: null, getElementById: () => list };
+  const row = { dataset: { ruleId: 'rule-a' }, writes: 0, fields: {},
+    querySelector(selector) { return this.fields[selector.match(/data-field="([^"]+)"/)?.[1]] || null; },
+    set innerHTML(value) {
+      this.html = value; this.writes++; this.fields = {};
+      for (const field of ['scope', 'method_filter', 'host_pattern', 'path_pattern']) {
+        this.fields[field] = control(field === 'scope' ? 'SELECT' : 'INPUT', { field });
+      }
+    }, get innerHTML() { return this.html; } };
+  function control(tagName, dataset = {}) {
+    return { tagName, type: tagName === 'INPUT' ? 'text' : 'button', dataset, value: '',
+      focus() { document.activeElement = this; },
+      closest(selector) {
+        if (selector === '[data-rule-id]') return row;
+        for (const [attribute, key] of [['delete', 'ruleDelete'], ['save', 'ruleSave'], ['edit', 'ruleEdit'], ['toggle', 'ruleToggle']]) {
+          if (selector === `[data-rule-${attribute}]`) return this.dataset[key] ? this : null;
+        }
+        return selector.split(', ').includes(tagName.toLowerCase()) ? this : null;
+      } };
+  }
+  const list = { html: '', addEventListener: (name, fn) => listeners[name] = fn,
+    querySelector: () => row, set innerHTML(value) { this.html = value; }, get innerHTML() { return this.html; } };
+  const c = loadFunctions(['renderInterceptRules', 'editInterceptRule'], {
+    document, state: { interceptRules: [{ id: 'rule-a', enabled: true, scope: 'request', host_pattern: 'example.com', path_pattern: '/api', method_filter: ['GET'] }] },
+    escapeHtml: String, fetch() { assert.fail('Network forbidden'); },
+    saveInterceptRuleFromRow: async () => { counts.save++; },
+    deleteInterceptRule: async () => { counts.delete++; },
+    toggleInterceptRuleEnabled: async () => { counts.toggle++; },
+    addInterceptRule() { assert.fail('Add forbidden'); }, handleInterceptRuleError(error) { throw error; },
+  });
+  const start = appSource.indexOf('  document.getElementById("interceptRulesList").addEventListener("click"');
+  const end = appSource.indexOf('  if (els.refreshWebsocketsButton)', start);
+  assert.ok(start > 0 && end > start); vm.runInContext(appSource.slice(start, end), c);
+  const click = target => listeners.click({ target });
+  const key = (target, options = {}) => { const event = { target, key: 'Enter', defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; }, ...options }; listeners.keydown(event); return event; };
+  return { c, counts, row, list, document, control, click, key, listeners };
+}
+
+test('Intercept rule native Edit opens locally with scope focus and descriptive control names', () => {
+  const f = ruleControlsFixture(); f.c.renderInterceptRules();
+  assert.match(f.list.innerHTML, /type="button" data-rule-edit="rule-a" aria-label="Edit intercept rule 1"/);
+  assert.match(f.list.innerHTML, /aria-label="Enable intercept rule 1"/);
+  const edit = f.control('BUTTON', { ruleEdit: 'rule-a' });
+  for (const key of ['Enter', ' ']) {
+    const before = f.row.writes;
+    assert.equal(f.key(edit, { key }).defaultPrevented, false);
+    assert.equal(f.row.writes, before);
+    // Explicit native-activation simulation: a real browser is not used here.
+    f.click(edit); assert.equal(f.row.writes, before + 1);
+    assert.equal(f.document.activeElement, f.row.fields.scope);
+  }
+  for (const label of ['Enable', 'Direction for', 'Methods for', 'Host pattern for', 'Path contains for', 'Save', 'Delete']) {
+    assert.ok(f.row.innerHTML.includes(`aria-label="${label} intercept rule 1"`));
+  }
+  assert.deepEqual(f.counts, { save: 0, delete: 0, toggle: 0 });
+});
+
+test('Intercept rule plain text Enter is one save; native controls and guarded events never double-dispatch', () => {
+  const f = ruleControlsFixture(); f.c.editInterceptRule('rule-a');
+  for (const field of ['method_filter', 'host_pattern', 'path_pattern']) {
+    assert.equal(f.key(f.row.fields[field]).defaultPrevented, true);
+  }
+  assert.equal(f.counts.save, 3); f.counts.save = 0;
+  for (const options of [{ key: ' ' }, { repeat: true }, { isComposing: true }, { keyCode: 229 },
+    { defaultPrevented: true }, { metaKey: true }, { ctrlKey: true }, { altKey: true }, { shiftKey: true }]) {
+    const event = f.key(f.row.fields.host_pattern, options);
+    assert.equal(event.defaultPrevented, !!options.defaultPrevented);
+  }
+  const detached = f.control('INPUT', { field: 'host_pattern' }); f.key(detached);
+  const checkbox = f.control('INPUT', { ruleToggle: 'rule-a' }); checkbox.type = 'checkbox';
+  for (const target of [f.row.fields.scope, checkbox, f.control('BUTTON', { ruleEdit: 'rule-a' })]) {
+    assert.equal(f.key(target).defaultPrevented, false);
+  }
+  for (const [action, data] of [['save', 'ruleSave'], ['delete', 'ruleDelete']]) {
+    const button = f.control('BUTTON', { [data]: 'rule-a' });
+    for (const key of ['Enter', ' ']) {
+      const before = f.counts[action];
+      assert.equal(f.key(button, { key }).defaultPrevented, false);
+      assert.equal(f.counts[action], before);
+      f.click(button); assert.equal(f.counts[action], before + 1);
+    }
+  }
+  assert.deepEqual(f.counts, { save: 2, delete: 2, toggle: 0 });
+});
+
+test('Intercept rule editor select, label and padding preserve drafts; summary click still opens', () => {
+  const f = ruleControlsFixture(); const summary = f.control('SPAN');
+  const label = f.control('LABEL'); f.click(label); assert.equal(f.row.writes, 0);
+  f.click(summary); assert.equal(f.row.writes, 1); assert.equal(f.document.activeElement, null);
+  f.row.fields.host_pattern.value = 'draft.example.com'; const fields = f.row.fields;
+  for (const target of [fields.scope, fields.host_pattern, label, summary, f.control('DIV')]) f.click(target);
+  f.listeners.change({ target: fields.scope });
+  assert.equal(f.row.writes, 1); assert.equal(f.row.fields, fields);
+  assert.equal(fields.host_pattern.value, 'draft.example.com');
+  const toggle = f.control('INPUT', { ruleToggle: 'rule-a' }); toggle.type = 'checkbox';
+  f.click(toggle); f.listeners.change({ target: toggle });
+  assert.equal(f.row.writes, 1); assert.equal(fields.host_pattern.value, 'draft.example.com');
+  assert.deepEqual(f.counts, { save: 0, delete: 0, toggle: 1 });
+});
+
+test('Inactive intercept rules dim summary text, not editable fields or native actions', () => {
+  const css = fs.readFileSync(require('node:path').join(__dirname, '../web/styles.css'), 'utf8');
+  assert.doesNotMatch(css, /\.intercept-rule-row\.disabled\s*\{/);
+  const rule = css.match(/(\.intercept-rule-row\.disabled[^{}]+)\{\s*opacity:\s*0\.45;\s*\}/);
+  assert.ok(rule, 'Inactive summary styling remains available');
+  assert.deepEqual(rule[1].trim().split(/,\s*/), ['scope', 'methods', 'host', 'path'].map(name => `.intercept-rule-row.disabled > .intercept-rule-${name}`));
+});

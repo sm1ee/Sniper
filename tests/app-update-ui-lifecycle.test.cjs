@@ -9,6 +9,34 @@ const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 const RELEASE_TITLE = "Update to v9.9.9";
 
+test("the update button uses the browser launcher's control height in every state", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const sizing = css.match(/#openUpdateButton\s*\{([^}]+)\}/)?.[1];
+  assert.ok(sizing);
+  assert.match(sizing, /\bheight:\s*max\(var\(--control-h\), calc\(var\(--font-xs\) \* 1\.45 \+ 10px\)\);/);
+  assert.match(sizing, /min-height:\s*var\(--control-h\);/);
+  assert.match(sizing, /padding:\s*0 11px;/);
+  assert.match(sizing, /font-size:\s*var\(--font-xs\);/);
+  assert.match(css, /\.browser-launch-main,\s*\.browser-launch-caret\s*\{[^}]*min-height:\s*var\(--control-h\);/);
+  assert.equal((css.match(/#openUpdateButton\s*\{/g) || []).length, 1);
+  // The shared utility controls, including other toolbar actions, keep their
+  // original sizing. Only the header updater opts into the compact height.
+  assert.match(css, /\.metric-pill,\s*\.utility-button,\s*\.status-pill\s*\{[^}]*min-height:\s*36px;/);
+});
+
+test("the update ring fits inside the smallest shared control height", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const ring = css.match(/\.update-ring\s*\{([^}]+)\}/)?.[1];
+  assert.match(ring, /width:\s*18px;/);
+  assert.match(ring, /height:\s*18px;/);
+  assert.match(css, /--control-h:\s*max\(22px,/);
+  assert.ok(18 + 2 < 22, "ring plus borders fits without increasing control height");
+});
+
 function element() {
   const classes = new Set();
   const attributes = new Map();

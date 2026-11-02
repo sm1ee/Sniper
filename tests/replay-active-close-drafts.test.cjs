@@ -220,6 +220,8 @@ test('partially typed visible text is retained verbatim and invalidates its old 
 });
 
 function renameClosePointerdown(f) {
+  f.document.addEventListener = () => {};
+  f.document.removeEventListener = () => {};
   const render = f.context.renderReplayTabs, listeners = {};
   for (const name of ['renderReplayTabs', 'commitReplayTabRename']) {
     const source = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'))[0];

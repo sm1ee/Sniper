@@ -119,9 +119,7 @@ body {
   height: 100%;
   min-height: 100%;
   font-size: var(--ui-root-size);
-  background:
-    radial-gradient(circle at top left, var(--bg-glow), transparent 30%),
-    linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+  background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
 }
@@ -845,9 +843,8 @@ code {
   padding: 6px 11px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.02) 100%);
+  background: var(--panel-elevated);
   color: var(--text);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .metric-pill {
@@ -884,6 +881,10 @@ code {
   font-size: var(--font-sm);
 }
 
+.metric-pill span {
+  color: var(--text-soft);
+}
+
 .metric-pill strong {
   color: var(--text);
   font-weight: 600;
@@ -895,12 +896,17 @@ code {
   text-decoration: none;
 }
 
-/* While updating, the button is disabled and holds the width it had; its content
-   becomes a ring. The percentage is drawn inside it, and the steps that cannot be
-   measured spin an arc instead. */
+/* Keep every update state aligned with the neighboring browser launcher. */
+#openUpdateButton {
+  height: max(var(--control-h), calc(var(--font-xs) * 1.45 + 10px));
+  min-height: var(--control-h);
+  padding: 0 11px;
+  font-size: var(--font-xs);
+}
+
+/* While updating, the button holds its idle width and becomes a ring. The
+   percentage stays in the tooltip; unmeasured steps spin an arc instead. */
 .utility-button.is-updating {
-  /* The ring is taller than the label it replaces; without this the button would
-     grow past its row and push the header down. */
   padding-block: 0;
   cursor: default;
 }
@@ -912,8 +918,8 @@ code {
 
 .update-ring {
   display: block;
-  width: 24px;
-  height: 24px;
+  width: 18px;
+  height: 18px;
 }
 
 .update-ring svg {
@@ -1571,6 +1577,11 @@ code {
 
 .tools-output-list .value:hover {
   background: rgba(255, 255, 255, 0.04);
+}
+
+.tools-output-list .value:focus-within {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
 }
 
 .tools-output-list .value textarea {
@@ -3764,7 +3775,7 @@ body.pane-resizing-y {
 }
 
 /* Keep setup helpers collapsed by default so the request and results stay central. */
-.fuzzer-shell > .fuzzer-workflow-header {
+.fuzzer-layout > .fuzzer-workflow-header {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -4407,6 +4418,11 @@ body.pane-resizing-y {
 
 .frame-detail-meta span {
   margin-right: 12px;
+}
+
+#websocketFramesColumn:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
 }
 
 .frame-detail-close {
@@ -5388,6 +5404,10 @@ button.utility-button.replay-tab-add {
   border-radius: var(--radius-md);
 }
 
+#findingsSettingsButton svg {
+  display: block;
+}
+
 /* Scanner settings modal */
 .scanner-settings-modal {
   width: min(560px, 100%);
@@ -6364,8 +6384,7 @@ button.utility-button.replay-tab-add {
   padding: 28px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%), var(--panel);
-  box-shadow: var(--shadow);
+  background: var(--panel);
 }
 
 .placeholder-card h2 {
@@ -6421,7 +6440,7 @@ button.utility-button.replay-tab-add {
   max-height: calc(100svh - 40px);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%), var(--panel);
+  background: var(--panel);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
@@ -6453,7 +6472,7 @@ button.utility-button.replay-tab-add {
 
 .primary-action {
   border-color: var(--point-border);
-  background: linear-gradient(180deg, var(--point-border) 0%, var(--point-soft) 100%);
+  background: var(--point-soft);
   color: var(--text);
   font-weight: 700;
 }
@@ -6568,12 +6587,40 @@ button.utility-button.replay-tab-add {
   background: #50c878;
 }
 
+#matchReplaceTableBody .match-replace-edit-rule {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+#matchReplaceTableBody .match-replace-edit-rule:focus-visible,
+#matchReplaceTableBody .mini-toggle input:focus-visible + .mini-toggle-track {
+  outline: 2px solid var(--point);
+  outline-offset: 2px;
+}
+
 #matchReplacePanel .mini-table thead th {
   text-transform: none;
 }
 
 #matchReplacePanel .settings-field span {
   text-transform: none;
+}
+
+.match-replace-search-group {
+  display: grid;
+  gap: 8px;
+}
+
+.match-replace-search-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
 }
 
 .match-replace-replace-head {
@@ -6753,7 +6800,10 @@ button.utility-button.replay-tab-add {
   background: var(--bg-elevated);
 }
 
-.intercept-rule-row.disabled {
+.intercept-rule-row.disabled > .intercept-rule-scope,
+.intercept-rule-row.disabled > .intercept-rule-methods,
+.intercept-rule-row.disabled > .intercept-rule-host,
+.intercept-rule-row.disabled > .intercept-rule-path {
   opacity: 0.45;
 }
 
@@ -6937,10 +6987,6 @@ button.utility-button.replay-tab-add {
   .replay-workbench {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 0.9fr) minmax(0, 1.1fr);
-  }
-
-  .websocket-filter-bar {
-    grid-template-columns: 1fr;
   }
 }
 
@@ -7351,6 +7397,8 @@ button.utility-button.replay-tab-add {
      band; here it has to sit level with the payload field. */
   min-height: var(--control-h);
   padding: 0 10px;
+  width: auto;
+  flex: 0 0 auto;
 }
 
 .oast-payload-input {
@@ -9031,6 +9079,20 @@ button.utility-button.replay-tab-add {
   .recon-inventory { flex: 0 0 650px; }
   .recon-pagination { flex-wrap: wrap; }
 }
+/* Source groups expose the distinction between local crawl and external work. */
+.recon-sources { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 10px 0 0; margin: 0; }
+.recon-sources legend { padding: 0 7px 0 0; font-size: var(--font-xs); color: var(--text-dim); }
+.recon-source-row > span { display: grid; gap: 3px; }
+.recon-source-row small { font-size: var(--font-xs); color: var(--text-dim); }
+.recon-source-group { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 7px 10px; }
+.recon-source-group + .recon-source-group { border-top: 1px solid var(--line); padding-top: 9px; }
+.recon-source-label { grid-row: 1 / span 2; font-size: var(--font-xs); color: var(--text-dim); }
+.recon-source-group .recon-check { grid-column: 2; }
+.recon-authorization { font-size: var(--font-xs); }
+.recon-start { justify-self: stretch; }
+.recon-setup .panel-toolbar { padding: 10px 14px; }
+.recon-setup .recon-form { gap: 10px; }
+
 .recon-scan-options { display: grid; gap: 10px; padding: 10px; border: 1px solid var(--point-border); background: var(--point-soft); border-radius: 5px; }
 .recon-scan-options .recon-check { overflow-wrap: anywhere; }
 /* Recon and Active Scan share the Scan tab: its own tabs, then whichever is open. */
@@ -9065,7 +9127,7 @@ button.utility-button.replay-tab-add {
 }
 .templates-side .panel-card { flex: 0 0 auto; border: 0; border-radius: 0; background: none; overflow: visible; }
 .templates-side .panel-card + .panel-card { border-top: 1px solid var(--line); }
-.templates-side .panel-toolbar { padding: 14px 16px 0; border-bottom: 0; background: none; }
+.templates-side .panel-toolbar { padding: 10px 14px 0; border-bottom: 0; background: none; }
 .templates-side .panel-toolbar h2 { font-size: var(--font-md); }
 /* Its header actions stay quiet until pointed at. */
 .templates-side .panel-toolbar .secondary-action:not(:hover) { border-color: transparent; background: none; color: var(--text-soft); }
@@ -9082,7 +9144,11 @@ button.utility-button.replay-tab-add {
    column like the form's controls, the search box shrinks to nothing. */
 .templates-shell .recon-search-controls select { width: auto; min-width: 130px; }
 .templates-shell .panel-toolbar { align-items: center; }
-.templates-shell .recon-form { gap: 10px; padding: 8px 16px 16px; }
+.templates-shell .recon-form { gap: 10px; padding: 8px 14px 12px; }
+.templates-run-actions > button { width: 100%; }
+.templates-scan textarea { min-height: 5em; }
+.templates-scan #templatesScanPlan:empty { display: none; }
+.templates-library #templatesStatus:empty { display: none; }
 .templates-shell .recon-field { gap: 4px; color: var(--text-dim); font-size: var(--font-xs); }
 .templates-shell .recon-check { align-items: center; }
 .templates-shell .recon-check input { margin: 0; }
@@ -9383,7 +9449,7 @@ button.utility-button.replay-tab-add {
    Never let the detail pane consume the table's entire viewport. Inline drag
    sizes still win; a short window scrolls instead of hiding result rows. */
 .fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-top-row {
-  height: 32%;
+  height: max(32%, 224px);
   min-height: 180px;
 }
 .fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-results-card {
@@ -9401,4 +9467,61 @@ button.utility-button.replay-tab-add {
 .fuzzer-shell .fuzzer-results-card {
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* Request → replacement payloads → execution → results, in document order. */
+.fuzzer-layout > .fuzzer-workflow-header {
+  flex: 0 0 auto;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+}
+.fuzzer-request-target {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.fuzzer-request-target .fuzzer-target-summary { flex: 1 1 160px; }
+.fuzzer-request-target .fuzzer-transport-help { flex-basis: 100%; }
+.fuzzer-template-card > #fuzzerRequestHelp { padding-block: 4px; }
+.fuzzer-payload-input-bar { justify-content: space-between; padding-left: 10px; }
+.fuzzer-payload-input-bar > .toolbar-actions { margin-left: 0; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card { margin-top: 0; }
+
+.fuzzer-template-card > #fuzzerRequestHelp:empty { display: none; }
+
+.fuzzer-shell { grid-template-rows: minmax(0, 1fr); }
+
+/* One list action governs file import, presets and ranges below this header. */
+.fuzzer-payloads-card > .panel-toolbar { flex-wrap: wrap; }
+.fuzzer-payloads-card > .panel-toolbar > .fuzzer-import-mode { flex: 0 0 auto; }
+
+/* Keep single-line rule controls compact without fixing their height. */
+#matchReplaceForm .settings-field > :is(input[type="text"], select) {
+  min-height: var(--control-h);
+  padding-block: 4px;
+}
+
+/* Reserve categorical text and its padding; only long content shares the remainder. */
+#matchReplacePanel .match-replace-rules-table {
+  min-width: calc(200px + 42ch);
+}
+#matchReplacePanel .match-replace-col-on { width: 56px; }
+#matchReplacePanel .match-replace-col-scope { width: calc(10ch + 24px); }
+#matchReplacePanel .match-replace-col-target { width: calc(13ch + 24px); }
+#matchReplacePanel .match-replace-col-flag { width: calc(2.5ch + 24px); }
+
+/* Work panes share one flat surface; nested sections retain their own cues. */
+#matchReplacePanel > .split-panel > .panel-card,
+#fuzzerShell .fuzzer-top-row > .fuzzer-template-card,
+#fuzzerShell .fuzzer-top-row > .fuzzer-payloads-card,
+#fuzzerShell > .fuzzer-layout > .fuzzer-results-card,
+#templatesShell > .templates-side,
+#templatesShell > .templates-list {
+  background: var(--panel);
+  border-radius: var(--radius-md);
 }

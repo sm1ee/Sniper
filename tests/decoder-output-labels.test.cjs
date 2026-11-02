@@ -13,6 +13,7 @@ function fixture() {
     TextEncoder, TextDecoder, Uint8Array, document: {}, autoScroll() {}, ipCalc: function () {},
     $(selector) {
       return {
+        get 0() { return rows.find(row => "#" + row.textarea.attributes.id === selector)?.textarea; },
         val(value) {
           if (!arguments.length) return values.get(selector) || "";
           values.set(selector, value); return this;
@@ -25,7 +26,7 @@ function fixture() {
           const title = html.match(/<span id="([^"]+)" class="title">([^]*?)<\/span>/);
           const classes = new Set();
           const textarea = { attributes, readonly: /\sreadonly(?:\s|$)/.test(textareaMarkup),
-            get value() { return values.get("#" + attributes.id) || ""; } };
+            get value() { return (values.get("#" + attributes.id) || "").replace(/\r\n?/g, "\n"); } };
           values.set("#" + attributes.id, "");
           rows.push({ html, textarea, title: { id: title[1], html: title[2] },
             querySelector: () => textarea,
@@ -128,4 +129,54 @@ test("title markup stays in its title span and output remains literal textarea c
   assert.equal(row.html.includes(input), false, "output is assigned by val(), not inserted as HTML");
   assert.equal(row.textarea.attributes["aria-label"], undefined, "title content is not duplicated into an attribute");
   assert.equal(row.textarea.attributes["aria-labelledby"], "special-output-title");
+});
+
+
+test("Strings typed text survives updates, row rebuilds and newline normalization without stale status", () => {
+  const f = fixture();
+  f.hasher.tab = f.context.tabs.string;
+  for (const key of ["s2", "s4", "s6"]) {
+    for (const rebuild of [false, true]) {
+      f.hasher.updateUI();
+      for (const text of ["NaN", "Invalid text", "Error\r\nreport", "Parse error", "Out of range", "", "Error"]) {
+        const bytes = Buffer.from(text, key === "s6" ? "utf16le" : "utf8");
+        const encoded = (key === "s6" ? bytes.swap16() : bytes).toString("hex");
+        for (const input of [encoded, "gg", encoded, "0", ""]) {
+          f.values.set("#input-value", input);
+          if (rebuild) f.hasher.updateUI(); else f.hasher.update();
+          f.display.markEmptyDecoderOutputs();
+          const row = f.rows.find(row => row.textarea.attributes.id === f.hasher.elements[key].id);
+          const result = f.context.decoderCalculateResult(f.hasher.elements[key], input);
+          assert.equal(row.textarea.value, result.value.replace(/\r\n?/g, "\n"));
+          assert.equal(row.textarea.decoderResult.value, row.textarea.value);
+          assert.equal(row.textarea.decoderResult.success, result.success);
+          assert.equal(row.classList.contains("hidden"), !(result.success && result.value.length));
+          assert.equal(f.values.get("#input-value"), input);
+          assertLabels(f);
+          f.values.set("#" + f.hasher.elements[key].id, "Invalid stale value");
+          f.display.markEmptyDecoderOutputs();
+          assert.equal(row.classList.contains("hidden"), true, "mismatched status falls back rather than blesses new text");
+        }
+      }
+    }
+  }
+});
+
+test("readonly outputs retain keyboard focusability and a scoped container focus cue", () => {
+  const f = fixture();
+  for (const tab of Object.values(f.context.tabs)) {
+    f.hasher.tab = tab;
+    f.hasher.updateUI();
+    for (const row of f.rows) {
+      assert.notEqual(row.textarea.attributes.tabindex, "-1");
+      assert.doesNotMatch(row.html.match(/<textarea\b([^>]*)>/)[1], /\sdisabled(?:\s|=|$)/);
+      assertLabels(f);
+    }
+  }
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const rule = css.match(/\.tools-output-list \.value:focus-within\s*\{([^}]+)\}/)?.[1];
+  assert.ok(rule);
+  assert.match(rule, /outline:\s*2px solid var\(--point\)/);
+  assert.match(rule, /outline-offset:\s*-2px/, "inset cue cannot be clipped by the output scroller");
+  assert.doesNotMatch(rule, /(?:padding|margin|border|width|height|pointer-events)\s*:/, "focus must not change size or copy pointer handling");
 });

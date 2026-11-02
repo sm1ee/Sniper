@@ -40,3 +40,40 @@ test("Settings keeps its existing compact button geometry", () => {
   }
   assert.match(rule[1], /padding:\s*0;/);
 });
+
+const findingsButton = html.match(/<button\b[^>]*\bid="findingsSettingsButton"[^>]*>([^]*?)<\/button>/);
+assert.ok(findingsButton, "Missing Detection Rules button");
+
+test("Detection Rules retains its accessible native action independently of its gear", () => {
+  const tag = findingsButton[0].slice(0, findingsButton[0].indexOf(">") + 1);
+  const attrs = Object.fromEntries([...tag.matchAll(/([\w:-]+)="([^"]*)"/g)].map(([, key, value]) => [key, value]));
+  assert.deepEqual(attrs, {
+    class: "secondary-action", id: "findingsSettingsButton", type: "button",
+    title: "Detection Rules", "aria-label": "Detection Rules",
+  });
+  assert.equal((html.match(/\bid="findingsSettingsButton"/g) || []).length, 1);
+});
+
+test("Detection Rules uses the same monochrome gear geometry without an OS emoji glyph", () => {
+  const svg = findingsButton[1].match(/^\s*<svg\b([^>]*)>([^]*?)<\/svg>\s*$/);
+  assert.ok(svg, "Detection Rules must contain only an inline SVG");
+  for (const attribute of [
+    'width="16"', 'height="16"', 'viewBox="0 0 24 24"',
+    'fill="currentColor"', 'aria-hidden="true"', 'focusable="false"',
+  ]) assert.ok(svg[1].includes(attribute), `Missing SVG ${attribute}`);
+  assert.equal(svg[2].trim(), button[1].match(/<svg\b[^>]*>([^]*?)<\/svg>/)[1].trim());
+  assert.doesNotMatch(html, /\u2699|&#(?:9881|x2699);/i);
+  assert.doesNotMatch(svg[0], /[\ufe0e\ufe0f]|<(?:text|image|use|foreignObject|script)\b|\b(?:href|src|tabindex|on\w+)\s*=/i);
+  assert.doesNotMatch(svg[2], /\b(?:fill|stroke)="(?!currentColor")/);
+});
+
+test("Detection Rules SVG avoids an inline baseline without overriding toolbar dimensions or theme color", () => {
+  const rule = css.match(/#findingsSettingsButton svg\s*\{([^}]+)\}/);
+  assert.ok(rule, "Missing compact SVG alignment rule");
+  assert.equal(rule[1].trim(), "display: block;");
+  const toolbar = css.match(/\.findings-toolbar-actions \.secondary-action\s*\{([^}]+)\}/);
+  assert.ok(toolbar);
+  assert.match(toolbar[1], /min-height:\s*var\(--control-h\);/);
+  assert.match(toolbar[1], /padding:\s*4px 12px;/);
+  assert.match(css, /\.modal-close,\s*\.secondary-action\s*\{[^}]*color:\s*var\(--text\);/);
+});

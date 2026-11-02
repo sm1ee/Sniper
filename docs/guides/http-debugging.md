@@ -1,7 +1,7 @@
 # Debugging HTTP with Sniper
 
 Sniper is an intercepting proxy. A client sends its traffic to Sniper, which
-forwards it and keeps a copy of every request and response. This guide shows how
+forwards it and can record requests and responses. This guide shows how
 to see what a client sent, what came back, and what happens when you change a
 request. The desktop UI and `sniper-cli` drive the same running process.
 
@@ -244,8 +244,17 @@ server has updated it. Use the persistent profile, which keeps the newer server.
 
 ## Watching requests arrive
 
-In the UI, open the **Capture** tab, **HTTP** sub-tab. Rows appear as traffic
-flows. From the CLI:
+In the UI, open the **Capture** tab, **HTTP** sub-tab. Rows show recorded
+traffic that matches the current filters. The capture control reports:
+
+- **Capturing**: HTTP capture is enabled.
+- **Paused**: HTTP capture is disabled; traffic still passes through.
+- **Capture unconfirmed**: Sniper could not confirm the outcome of an explicit
+  Capture change. This does not confirm that recording is on or off. The tooltip
+  shows the last confirmed state and what another click will request. Sniper
+  does not retry the change automatically.
+
+From the CLI:
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact \

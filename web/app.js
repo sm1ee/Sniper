@@ -1682,17 +1682,38 @@ function bindEvents() {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
     const next = !state.runtime?.http_capture_enabled;
+    let receivedCaptureResponse = false;
+    let readingCaptureResponse = false;
+    let acceptedReadVersion = 0;
     try {
       const response = await postRuntimeSettings(sessionWritePath("/api/runtime", sessionId), { http_capture_enabled: next });
+      receivedCaptureResponse = true;
       await requireOkResponse(response, "Failed to change capture.");
+      acceptedReadVersion = state._runtimeReadAcceptedVersion || 0;
+      readingCaptureResponse = true;
       const runtime = await response.json();
+      if (typeof runtime?.http_capture_enabled !== "boolean") throw new Error("Runtime response did not include a valid capture state.");
+      readingCaptureResponse = false;
       if (sessionId !== currentSessionId()) return;
       if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
       state.runtime = runtime;
-      syncHttpCapturePill();
+      syncHttpCapturePill({ confirmed: true });
     } catch (error) {
       if (sessionId !== currentSessionId()) return;
       console.error(error);
+      if (!receivedCaptureResponse || readingCaptureResponse) {
+        // Only a read accepted after successful headers can settle a body
+        // failure. A read during a response-less POST may predate its mutation.
+        if (receivedCaptureResponse && state._runtimeReadAcceptedSessionId === sessionId
+          && (state._runtimeReadAcceptedVersion || 0) > acceptedReadVersion) {
+          syncHttpCapturePill({ confirmed: true });
+          return;
+        }
+        (state.httpCaptureUnconfirmedSessions ||= new Set()).add(sessionId);
+        syncHttpCapturePill();
+        showToast("Capture may have changed, but its current state could not be confirmed.", "error", 7000);
+        return;
+      }
       showToast(error?.message || "Failed to change capture.", "error");
     }
   });
@@ -1952,8 +1973,11 @@ function bindEvents() {
   });
 
   els.closeInspectorButton?.addEventListener("click", () => {
+    const ownsFocus = els.closeInspectorButton.closest(".inspector-main")?.contains(document.activeElement);
+    const returnFocus = railTabs.find((tab) => tab.dataset.inspectorTab === state.activeInspectorTab);
     state.inspectorCollapsed = true;
     renderInspectorPanels();
+    if (ownsFocus) focusPaneCloseTarget(returnFocus);
   });
 
   onClickWithProgress(document.getElementById("addInterceptRuleButton"), () =>
@@ -1963,25 +1987,39 @@ function bindEvents() {
     if (deleteBtn) { deleteInterceptRule(deleteBtn.dataset.ruleDelete).catch(handleInterceptRuleError); return; }
     const saveBtn = event.target.closest("[data-rule-save]");
     if (saveBtn) { saveInterceptRuleFromRow(saveBtn.dataset.ruleSave).catch(handleInterceptRuleError); return; }
+    const editBtn = event.target.closest("[data-rule-edit]");
+    if (editBtn) { editInterceptRule(editBtn.dataset.ruleEdit, { focusScope: true }); return; }
     const row = event.target.closest("[data-rule-id]");
-    if (row && !event.target.closest("input") && !event.target.closest("button")) { editInterceptRule(row.dataset.ruleId); }
+    if (!row || row.querySelector('[data-field="scope"]')) return;
+    if (event.target.closest("input, button, select, textarea, label, a")) return;
+    editInterceptRule(row.dataset.ruleId);
   });
   document.getElementById("interceptRulesList").addEventListener("change", (event) => {
     const toggle = event.target.closest("[data-rule-toggle]");
     if (toggle) { toggleInterceptRuleEnabled(toggle.dataset.ruleToggle, toggle.checked).catch(handleInterceptRuleError); }
   });
   document.getElementById("interceptRulesList").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      const row = event.target.closest("[data-rule-id]");
-      if (row) { saveInterceptRuleFromRow(row.dataset.ruleId).catch(handleInterceptRuleError); }
-    }
+    if (event.key !== "Enter" || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
+      || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    const input = event.target;
+    if (input.tagName !== "INPUT" || input.type !== "text"
+      || !["method_filter", "host_pattern", "path_pattern"].includes(input.dataset.field)) return;
+    const row = input.closest("[data-rule-id]");
+    if (!row || row.querySelector(`[data-field="${input.dataset.field}"]`) !== input) return;
+    event.preventDefault();
+    saveInterceptRuleFromRow(row.dataset.ruleId).catch(handleInterceptRuleError);
   });
   if (els.refreshWebsocketsButton) {
     els.refreshWebsocketsButton.addEventListener("click", () => {
       loadWebsocketsPageRefresh(true).catch((error) => console.error(error));
     });
   }
-  els.frameDetailClose.addEventListener("click", hideFrameDetail);
+  els.frameDetailClose.addEventListener("click", () => {
+    const ownsFocus = els.frameDetailPanel.contains(document.activeElement);
+    const returnFocus = document.getElementById("websocketFramesColumn");
+    hideFrameDetail();
+    if (ownsFocus) focusPaneCloseTarget(returnFocus);
+  });
   initFrameDetailResizer();
   document.querySelectorAll(".ws-sort").forEach((btn) => {
     btn.addEventListener("click", () => toggleWebsocketSort(btn.dataset.wsSortKey));
@@ -2248,7 +2286,7 @@ function bindEvents() {
       console.error("Fuzzer start error:", error);
     });
   });
-  els.resetFuzzerButton.addEventListener("click", resetFuzzer);
+  els.resetFuzzerButton.addEventListener("click", confirmFuzzerReset);
   els.fuzzerRetryWorkspaceButton?.addEventListener("click", retryFuzzerWorkspaceLoad);
   els.stopFuzzerButton?.addEventListener("click", () => {
     stopFuzzerAttack().catch((error) => console.error("Fuzzer stop error:", error));
@@ -2271,7 +2309,7 @@ function bindEvents() {
     }
   });
 
-  // Fuzzer results keyboard navigation (↑↓)
+  // Fuzzer results keyboard navigation (↑↓) and selected-row activation (Enter)
   if (fuzzerResultsShell) {
     fuzzerResultsShell.setAttribute("tabindex", "0");
     let fuzzerScrollRaf = 0;
@@ -2283,6 +2321,19 @@ function bindEvents() {
       });
     });
     fuzzerResultsShell.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        if (e.repeat || e.defaultPrevented || e.isComposing
+          || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey
+          || getActiveModalAction() || e.target !== fuzzerResultsShell
+          || document.activeElement !== fuzzerResultsShell || isEditableTarget(e.target)) return;
+        const results = visibleFuzzerResults();
+        const selectedIndex = fuzzerSelectedResultIndex(results);
+        if (selectedIndex < 0 || selectedIndex >= results.length) return;
+        e.preventDefault();
+        // Pointer reactivation already retries a selected row's failed detail.
+        selectFuzzerResultIndex(selectedIndex, { scroll: true });
+        return;
+      }
       const step = e.isComposing ? 0 : tableArrowStep(e);
       if (!step) return;
       e.preventDefault();
@@ -2458,7 +2509,11 @@ function bindEvents() {
   if (els.oastCopyPayloadButton) {
     els.oastCopyPayloadButton.addEventListener("click", () => {
       const text = els.oastPayloadText?.value;
-      if (text) { copyTextToClipboard(text); showToast("Copied OAST payload"); }
+      if (text) {
+        copyTextToClipboard(text)
+          .then(() => showToast("Copied OAST payload"))
+          .catch(() => showToast("Failed to copy OAST payload", "error"));
+      }
     });
   }
   if (els.oastTableBody) {
@@ -5967,9 +6022,12 @@ async function loadRuntimeSettings() {
     // Both runtime readers share this watermark. A newer pending/failed read
     // does not invalidate useful data; only a newer accepted result does.
     if (!ownsRead() || readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof runtime?.http_capture_enabled !== "boolean") throw new Error("Runtime response did not include a valid capture state.");
     if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
     state._runtimeReadAcceptedVersion = readVersion;
+    state._runtimeReadAcceptedSessionId = sessionId;
     state.runtime = runtime;
+    if (state.httpCaptureUnconfirmedSessions?.has(sessionId)) syncHttpCapturePill({ confirmed: true });
     if (typeof templatesController !== "undefined") templatesController?.scopeChanged?.();
     renderInterceptStatus();
     renderProxySettings();
@@ -6714,7 +6772,7 @@ function renderInterceptRules() {
     container.innerHTML = `<div class="intercept-rules-empty">No rules: every in-scope request and response is intercepted. Add a rule to narrow it to one direction, or to specific hosts, paths or methods.</div>`;
     return;
   }
-  container.innerHTML = rules.map((rule) => {
+  container.innerHTML = rules.map((rule, index) => {
     const methods = rule.method_filter?.length ? rule.method_filter.join(", ") : "Any";
     const host = rule.host_pattern || "*";
     const path = rule.path_pattern || "*";
@@ -6722,13 +6780,14 @@ function renderInterceptRules() {
     const scopeLabel = scope === "both" ? "Req+Res" : scope === "response" ? "Res" : "Req";
     return `<div class="intercept-rule-row${rule.enabled ? "" : " disabled"}" data-rule-id="${rule.id}">
       <label class="intercept-rule-toggle" title="Enable/disable">
-        <input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" />
+        <input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" aria-label="Enable intercept rule ${index + 1}" />
       </label>
       <span class="intercept-rule-scope">${escapeHtml(scopeLabel)}</span>
       <span class="intercept-rule-methods">${escapeHtml(methods)}</span>
       <span class="intercept-rule-host">${escapeHtml(host)}</span>
       <span class="intercept-rule-path">${escapeHtml(path)}</span>
-      <button class="intercept-rule-delete" data-rule-delete="${rule.id}" title="Delete rule">&times;</button>
+      <button class="secondary-action" type="button" data-rule-edit="${rule.id}" aria-label="Edit intercept rule ${index + 1}">Edit</button>
+      <button class="intercept-rule-delete" type="button" data-rule-delete="${rule.id}" aria-label="Delete intercept rule ${index + 1}" title="Delete rule">&times;</button>
     </div>`;
   }).join("");
 }
@@ -6756,26 +6815,28 @@ async function addInterceptRule() {
   editInterceptRule(rule.id);
 }
 
-function editInterceptRule(ruleId) {
+function editInterceptRule(ruleId, { focusScope = false } = {}) {
   const rule = (state.interceptRules || []).find((r) => r.id === ruleId);
   if (!rule) return;
   const container = document.getElementById("interceptRulesList");
   const row = container.querySelector(`[data-rule-id="${ruleId}"]`);
   if (!row) return;
   const scope = rule.scope || "request";
+  const context = `intercept rule ${state.interceptRules.indexOf(rule) + 1}`;
   row.innerHTML = `
-    <label class="intercept-rule-toggle"><input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" /></label>
-    <select class="intercept-rule-input intercept-rule-scope-select" data-field="scope">
+    <label class="intercept-rule-toggle"><input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" aria-label="Enable ${context}" /></label>
+    <select class="intercept-rule-input intercept-rule-scope-select" data-field="scope" aria-label="Direction for ${context}">
       <option value="request"${scope === "request" ? " selected" : ""}>Request</option>
       <option value="response"${scope === "response" ? " selected" : ""}>Response</option>
       <option value="both"${scope === "both" ? " selected" : ""}>Both</option>
     </select>
-    <input class="intercept-rule-input" data-field="method_filter" placeholder="Methods (e.g. GET,POST)" value="${escapeHtml((rule.method_filter || []).join(", "))}" />
-    <input class="intercept-rule-input" data-field="host_pattern" placeholder="Host (e.g. *.example.com)" value="${escapeHtml(rule.host_pattern || "")}" />
-    <input class="intercept-rule-input" data-field="path_pattern" placeholder="Path contains (e.g. /api/)" value="${escapeHtml(rule.path_pattern || "")}" />
-    <button class="intercept-rule-save" data-rule-save="${rule.id}">&#10003;</button>
-    <button class="intercept-rule-delete" data-rule-delete="${rule.id}">&times;</button>
+    <input class="intercept-rule-input" type="text" data-field="method_filter" aria-label="Methods for ${context}" placeholder="Methods (e.g. GET,POST)" value="${escapeHtml((rule.method_filter || []).join(", "))}" />
+    <input class="intercept-rule-input" type="text" data-field="host_pattern" aria-label="Host pattern for ${context}" placeholder="Host (e.g. *.example.com)" value="${escapeHtml(rule.host_pattern || "")}" />
+    <input class="intercept-rule-input" type="text" data-field="path_pattern" aria-label="Path contains for ${context}" placeholder="Path contains (e.g. /api/)" value="${escapeHtml(rule.path_pattern || "")}" />
+    <button class="intercept-rule-save" type="button" data-rule-save="${rule.id}" aria-label="Save ${context}">&#10003;</button>
+    <button class="intercept-rule-delete" type="button" data-rule-delete="${rule.id}" aria-label="Delete ${context}">&times;</button>
   `;
+  if (focusScope) row.querySelector('[data-field="scope"]')?.focus();
 }
 
 async function saveInterceptRuleFromRow(ruleId) {
@@ -8307,9 +8368,12 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
     // Reject the whole compound result: old paths carry old scope badges.
     // This is a successful no-op, not a failed acknowledged scope save.
     if (readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof runtime?.http_capture_enabled !== "boolean") throw new Error("Runtime response did not include a valid capture state.");
     if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
     state._runtimeReadAcceptedVersion = readVersion;
+    state._runtimeReadAcceptedSessionId = sessionId;
     state.runtime = runtime;
+    if (state.httpCaptureUnconfirmedSessions?.has(sessionId)) syncHttpCapturePill({ confirmed: true });
     if (siteMap) state.targetSiteMap = siteMap;
     if (typeof targetServiceMapController !== "undefined" && state.activeTool === "map") {
       targetServiceMapController?.refresh();
@@ -9701,7 +9765,10 @@ function syncDecoderToolMeta() {
 
 // The decoder library's words for a transform that does not apply: nothing,
 // NaN, and its parse, range and input errors.
-function decoderOutputShows(value) {
+function decoderOutputShows(value, result) {
+  if (result && typeof result.success === "boolean" && result.value === value) {
+    return result.success && String(value ?? "").length > 0;
+  }
   return !/^(?:|NaN|Parse error|Out of range|Invalid\b.*|Error\b.*)$/s.test(String(value ?? ""));
 }
 
@@ -9718,7 +9785,10 @@ function markIdleDecoderTabs() {
   for (const element of judged ? Object.values(window.hasher.elements) : []) {
     if (shown.has(element.tab)) continue;
     try {
-      if (decoderOutputShows(element.calculate(input, password))) shown.add(element.tab);
+      const result = typeof window.decoderCalculateResult === "function"
+        ? window.decoderCalculateResult(element, input, password)
+        : { value: element.calculate(input, password) };
+      if (decoderOutputShows(result.value, result)) shown.add(element.tab);
     } catch {
       // A transform that throws has nothing to show.
     }
@@ -9776,7 +9846,8 @@ function markEmptyDecoderOutputs() {
   if (!output) return;
   let shown = 0;
   for (const element of output.querySelectorAll(".element")) {
-    const empty = !decoderOutputShows(element.querySelector("textarea")?.value);
+    const textarea = element.querySelector("textarea");
+    const empty = !decoderOutputShows(textarea?.value, textarea?.decoderResult);
     element.classList.toggle("hidden", empty);
     if (!empty) shown += 1;
   }
@@ -16220,13 +16291,14 @@ function renderMatchReplaceRules() {
   const selected = getSelectedMatchReplaceRule();
   els.matchReplaceTableBody.innerHTML = state.matchReplaceRules.length
     ? state.matchReplaceRules
-        .map((rule) => {
+        .map((rule, index) => {
           const active = rule.id === state.selectedMatchReplaceRuleId ? "selected" : "";
+          const controlContext = escapeHtml(`rule ${index + 1}: ${rule.scope} / ${rule.target}`);
           return `
             <tr class="history-row ${active}" data-id="${rule.id}">
-              <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${matchReplaceRuleActivity(rule) ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
+              <td><label class="mini-toggle"><input type="checkbox" aria-label="Enable ${controlContext}" data-rule-toggle="${rule.id}" ${matchReplaceRuleActivity(rule) ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
               <td>${escapeHtml(rule.scope)}</td>
-              <td>${escapeHtml(rule.target)}</td>
+              <td><button type="button" class="match-replace-edit-rule" aria-label="Edit ${controlContext}">${escapeHtml(rule.target)}</button></td>
               <td class="text-truncate" title="${escapeHtml(rule.search || "")}">${escapeHtml(rule.search || "—")}</td>
               <td class="text-truncate" title="${escapeHtml(matchReplaceRuleActions(rule))}">${escapeHtml(matchReplaceRuleActions(rule))}</td>
               <td>${rule.regex ? "✓" : ""}</td>
@@ -16244,6 +16316,7 @@ function renderMatchReplaceRules() {
   Array.from(els.matchReplaceTableBody.querySelectorAll(".history-row")).forEach((row) => {
     row.addEventListener("click", (event) => {
       if (event.target.closest(".mini-toggle")) return;
+      const editButton = event.target.closest(".match-replace-edit-rule");
       // A new rule left empty goes away rather than waiting to be saved blank.
       const untouched = untouchedNewMatchReplaceRule();
       if (untouched && untouched.id !== row.dataset.id) {
@@ -16251,6 +16324,8 @@ function renderMatchReplaceRules() {
       }
       state.selectedMatchReplaceRuleId = row.dataset.id;
       renderMatchReplaceRules();
+      // The table button is replaced by rendering; continue in the stable editor.
+      if (editButton) els.matchReplaceSearch.focus();
     });
   });
 
@@ -16955,7 +17030,10 @@ async function refreshFuzzerSavedRuns() {
   const ownsRead = fuzzerSavedReadOwner(workflow, generation, "listGeneration");
   workflow.listBusy = true;
   const loadingNotice = "Loading retained runs...";
-  workflow.notice = loadingNotice;
+  // Refresh may update the picker while View/Reuse is pending, but must not
+  // hide that read's progress or its eventual failure/confirmation notice.
+  const preserveReadNotice = workflow.readBusy;
+  if (!preserveReadNotice) workflow.notice = loadingNotice;
   renderFuzzerResultsWorkflow();
   try {
     const response = await fetch(sessionQueryPath("/api/fuzzer/attacks", workflow.sessionId));
@@ -16964,20 +17042,25 @@ async function refreshFuzzerSavedRuns() {
     const runs = await response.json();
     if (!ownsRead()) return;
     workflow.runs = jsonArray(runs).filter((run) => typeof run?.id === "string" && run.id);
-    if (!workflow.runs.some((run) => run.id === workflow.selectedRunId)) {
+    const selectionUnavailable = !workflow.runs.some((run) => run.id === workflow.selectedRunId);
+    const selectionRemoved = !!workflow.selectedRunId && selectionUnavailable;
+    if (selectionUnavailable) {
       workflow.selectedRunId = "";
       workflow.readGeneration += 1;
       workflow.readBusy = false;
     }
-    workflow.notice = workflow.runs.length
-      ? `${workflow.runs.length} retained run${workflow.runs.length === 1 ? "" : "s"}. View keeps the current draft; Reuse asks before replacing it.`
-      : "No retained fuzzer runs are available in this session.";
+    if (!preserveReadNotice || selectionUnavailable) {
+      workflow.notice = workflow.runs.length
+        ? preserveReadNotice && selectionRemoved ? "The selected run is no longer listed. Choose another retained run."
+          : `${workflow.runs.length} retained run${workflow.runs.length === 1 ? "" : "s"}. View keeps the current draft; Reuse asks before replacing it.`
+        : "No retained fuzzer runs are available in this session.";
+    }
   } catch (error) {
-    if (ownsRead()) workflow.notice = error?.message || "Failed to list saved fuzzer runs.";
+    if (ownsRead() && !preserveReadNotice) workflow.notice = error?.message || "Failed to list saved fuzzer runs.";
   } finally {
     if (workflow === state.fuzzerResultsWorkflow && workflow.listGeneration === generation) {
       workflow.listBusy = false;
-      if (workflow.notice === loadingNotice) workflow.notice = "";
+      if (!preserveReadNotice && workflow.notice === loadingNotice) workflow.notice = "";
       renderFuzzerResultsWorkflow();
     }
   }
@@ -17150,7 +17233,10 @@ function renderFuzzerResultsVirtual() {
     const validation = fuzzerResultFilterValidation();
     renderEmptyFuzzerResults(!validation.valid ? `Fix the result filters. ${validation.message}`
       : jsonArray(state.fuzzerAttackRecord?.results).length
-        ? "No results match these filters." : "No fuzzer results are available for this run.", results);
+        ? "No results match these filters."
+        : !state.fuzzerAttackRecord
+          ? state.fuzzerNotice || "Results appear here after running."
+          : "No fuzzer results are available for this run.", results);
     return;
   }
   const shell = fuzzerResultsShell();
@@ -18000,8 +18086,9 @@ function renderFuzzerTransport(raw = fuzzerRequestTextForAction(), template = un
   select.disabled = transport.disabled;
   const help = fuzzerSetupNode("fuzzerTransportHelp");
   if (help) {
-    help.textContent = transport.help;
-    help.classList.toggle("hidden", !transport.help);
+    const message = workspaceLoaded && !raw.trim() ? "" : transport.help;
+    help.textContent = message;
+    help.classList.toggle("hidden", !message);
   }
 }
 
@@ -18049,10 +18136,10 @@ function renderFuzzerSetup() {
   const raw = fuzzerRequestTextForAction();
   // Source encoding still applies when the edited body cannot be parsed.
   const bodyEncodingHelp = workspaceLoaded && state.fuzzerBaseRequest?.body_encoding === "base64"
-    ? "Body format: base64. Select a header or query value, then Add §." : "";
+    ? "Base64 body · header and query positions only" : "";
   const requestHelp = fuzzerSetupNode("fuzzerRequestHelp");
   if (requestHelp) requestHelp.textContent = bodyEncodingHelp
-    ? `Raw HTTP request · ${bodyEncodingHelp}` : "Raw HTTP request · select a value, then Add §";
+    ? bodyEncodingHelp : "";
   const select = fuzzerSetupNode("fuzzerCandidateSelect");
   let candidates = [];
   let template = null;
@@ -18126,8 +18213,8 @@ function renderFuzzerSetup() {
     return;
   }
   if (!model) {
-    summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "No request selected.";
-    notice.textContent = raw.trim() ? error : "Paste a raw HTTP request, or send one from History / Replay.";
+    summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "";
+    notice.textContent = raw.trim() ? error : "";
     notice.classList?.toggle("fuzzer-notice-error", !!raw.trim() && !!error);
     if (previewNotes) previewNotes.textContent = bodyEncodingHelp;
     if (samples) samples.textContent = "Add a valid request and payloads to preview.";
@@ -18746,6 +18833,49 @@ function initFuzzerResizers() {
       detailPanel.style.flex = "";
     });
   }
+}
+
+function confirmFuzzerReset() {
+  if (!workspaceLoaded || state.fuzzerRunning || state.fuzzerRunningAttackId) return false;
+  const requestText = fuzzerRequestTextForAction();
+  const resetText = state.fuzzerBaseRequest ? buildEditableRawRequest(state.fuzzerBaseRequest) : "";
+  const savedRequestText = state.fuzzerRequestText;
+  const savedPayloadsText = state.fuzzerPayloadsText;
+  const currentPayloadsText = () => String(els.fuzzerPayloadsEditor?.value ?? state.fuzzerPayloadsText ?? "");
+  const payloadsText = currentPayloadsText();
+  const hasResults = state.fuzzerAttackRecord || state.fuzzerAttackRecordId
+    || state._selectedFuzzerResultKey || state._fuzzerDetailRecord;
+  if (requestText === resetText && !payloadsText && !savedPayloadsText && !hasResults) return resetFuzzer();
+
+  const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftVersion = state.fuzzerDraftVersion || 0;
+  const runToken = state.fuzzerRunToken || 0;
+  const resultGeneration = _fuzzerAttackLoadGeneration;
+  const detailGeneration = _fuzzerDetailGeneration;
+  const selectedResult = state._selectedFuzzerResultKey;
+  const workflow = fuzzerResultsWorkflowState();
+  // Accepted external drafts can change back to identical text without moving
+  // the local draft/run counters. Their existing read owner still retires them.
+  const readGeneration = workflow.readGeneration;
+  showConfirmDialog(
+    "Reset the request template, clear the payload list, and hide the current results?\n\nConnection overrides, run options, and saved runs will be kept.",
+    () => {
+      if (!workspaceLoaded || state.fuzzerRunning || state.fuzzerRunningAttackId
+        || currentSessionId() !== sessionId || workspaceStateGeneration !== workspaceGeneration
+        || (state.fuzzerDraftVersion || 0) !== draftVersion || (state.fuzzerRunToken || 0) !== runToken
+        || _fuzzerAttackLoadGeneration !== resultGeneration || _fuzzerDetailGeneration !== detailGeneration
+        || state._selectedFuzzerResultKey !== selectedResult
+        || state.fuzzerResultsWorkflow !== workflow || workflow.readGeneration !== readGeneration
+        || fuzzerRequestTextForAction() !== requestText || currentPayloadsText() !== payloadsText
+        || state.fuzzerRequestText !== savedRequestText || state.fuzzerPayloadsText !== savedPayloadsText) {
+        showToast("Reset canceled because the Fuzzer draft, results, or workspace changed. Review them and try again.", "info");
+        return false;
+      }
+      return resetFuzzer();
+    },
+    { title: "Reset Fuzzer draft?", confirmLabel: "Reset draft" },
+  );
 }
 
 function resetFuzzer() {
@@ -22088,6 +22218,7 @@ function renderReplayTabs(options = {}) {
     return;
   }
 
+  els.replayTabStrip._cancelReplayRenameFocus?.();
   const tabMarkup = (tab) => {
     const isActive = tab.id === state.activeReplayTabId;
     const active = isActive ? "active" : "";
@@ -22211,11 +22342,27 @@ function renderReplayTabs(options = {}) {
       nameInput.addEventListener("blur", () => {
         if (ownsRename()) commitReplayTabRename(id, nameInput.value);
       });
+      const initialFocus = document.activeElement;
+      let focusPending = true;
+      const retireFocus = () => {
+        focusPending = false;
+        document.removeEventListener("focusin", onFocusIn, true);
+        if (els.replayTabStrip._cancelReplayRenameFocus === retireFocus) els.replayTabStrip._cancelReplayRenameFocus = null;
+      };
+      // A modal can return focus to this same editor before the frame runs.
+      // Retire on the intervening move, not just a different final element.
+      const onFocusIn = (event) => { if (event.target !== initialFocus) retireFocus(); };
+      els.replayTabStrip._cancelReplayRenameFocus = retireFocus;
+      document.addEventListener("focusin", onFocusIn, true);
       requestAnimationFrame(() => {
-        if (ownsRename()) {
-          nameInput.focus();
-          nameInput.select();
-        }
+        if (!focusPending) return;
+        retireFocus();
+        if (!ownsRename() || state.activeTool !== "replay" || getActiveModalAction()
+          || document.activeElement === nameInput || document.activeElement !== initialFocus
+          || !nameInput.isConnected || nameInput.disabled || nameInput.tabIndex < 0
+          || !nameInput.getClientRects().length || window.getComputedStyle(nameInput).visibility === "hidden") return;
+        nameInput.focus();
+        nameInput.select();
       });
     }
     tabElement.querySelector(".replay-tab-button")?.addEventListener("click", () => {
@@ -22907,7 +23054,24 @@ function validateManualRepeaterTargetInput(host, port) {
       }
     } else if (/[/?#]/.test(rawHost)) {
       hostError = "Target host must not include path, query, or fragment.";
-    } else if (rawHost.includes(":") && !isLikelyIpv6Literal(rawHost)) {
+    } else if (/[\[\]]/.test(rawHost) || isLikelyIpv6Literal(rawHost)) {
+      const invalidIpMessage = "Target host is not a valid IPv6 address. Use IPv4 without brackets.";
+      const closingBracket = rawHost.indexOf("]");
+      const bracketed = rawHost.startsWith("[") && closingBracket >= 0;
+      const address = bracketed ? rawHost.slice(0, closingBracket + 1) : `[${rawHost}]`;
+      try {
+        // Check runnable IP-literal syntax without normalizing the user's draft.
+        // Raw IPv6's final numeric segment is an address, not a separate port.
+        new URL(`http://${address}`);
+        if (bracketed && closingBracket !== rawHost.length - 1) {
+          hostError = rawHost[closingBracket + 1] === ":"
+            ? "Target host must not include a port; use the Port field."
+            : invalidIpMessage;
+        }
+      } catch (_error) {
+        hostError = invalidIpMessage;
+      }
+    } else if (rawHost.includes(":")) {
       hostError = "Target host must not include a port; use the Port field.";
     }
   }
@@ -23984,6 +24148,18 @@ function closeFilterModal() {
 
 function isModalVisible(modal) {
   return Boolean(modal) && !modal.classList.contains("hidden");
+}
+
+// Explicit pane dismissal may return to a programmatic-only region without
+// adding a Tab stop or changing the focus policy of background pane cleanup.
+function focusPaneCloseTarget(target) {
+  if (target?.isConnected && !target.disabled
+    && (target.tabIndex >= 0 || target.getAttribute("tabindex") === "-1")
+    && target.getClientRects().length && window.getComputedStyle(target).visibility !== "hidden") {
+    target.focus({ preventScroll: true });
+  } else {
+    restoreModalFocus(null);
+  }
 }
 
 function restoreModalFocus(previous, fallback = document.querySelector(".main-tab.active")) {
@@ -25094,13 +25270,21 @@ function syncHttpInScopePill() {
 
 // Paused is the state worth announcing: an empty history with capture off looks
 // exactly like an empty history with nothing happening.
-function syncHttpCapturePill() {
+function syncHttpCapturePill({ confirmed = false } = {}) {
+  // Only explicit Capture success or an ownership-accepted runtime GET clears
+  // this local warning. Other settings/workspace refreshes are conservative.
+  if (confirmed) state.httpCaptureUnconfirmedSessions?.delete(currentSessionId());
   const pill = document.getElementById("httpCaptureToggle");
   if (!pill) return;
+  const unconfirmed = state.httpCaptureUnconfirmedSessions?.has(currentSessionId()) || false;
   const capturing = state.runtime?.http_capture_enabled !== false;
-  pill.classList.toggle("active", capturing);
-  pill.classList.toggle("paused", !capturing);
-  pill.textContent = capturing ? "Capturing" : "Paused";
+  pill.classList.toggle("active", capturing && !unconfirmed);
+  pill.classList.toggle("paused", !capturing && !unconfirmed);
+  pill.textContent = unconfirmed ? "Capture unconfirmed" : capturing ? "Capturing" : "Paused";
+  if (unconfirmed) {
+    pill.title = `Capture state is unconfirmed. Last confirmed: ${capturing ? "Capturing" : "Paused"}. Click to request capture ${capturing ? "off" : "on"}. Traffic still passes through.`;
+    return;
+  }
   pill.title = capturing
     ? "Recording proxied traffic. Click to pause; traffic still passes through."
     : "Not recording. Traffic still passes through. Click to resume.";
@@ -29505,10 +29689,10 @@ function renderWsSetupQueue() {
     const sentClass = item.sent ? "sent" : "";
     const checked = item.autoSend ? "checked" : "";
     return `<div class="ws-setup-row ${sentClass}" data-idx="${i}">
-      <input type="checkbox" class="ws-setup-check" data-idx="${i}" ${checked} />
+      <input type="checkbox" class="ws-setup-check" data-idx="${i}" aria-label="Auto-send setup message ${i + 1}" ${checked} />
       <span class="ws-setup-index">#${i + 1}</span>
       <span class="ws-setup-label" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</span>
-      <button class="ws-setup-send" data-idx="${i}" title="Send this message">▶</button>
+      <button class="ws-setup-send" data-idx="${i}" aria-label="Send setup message ${i + 1}" title="Send this message">▶</button>
       ${item.sent ? '<span class="ws-setup-sent-badge">✓</span>' : ""}
     </div>`;
   }).join("");
@@ -31868,7 +32052,7 @@ function copyReplayUrl(tab = getActiveReplayTab()) {
   const match = text.match(/^[A-Z]+\s+(\S+)/i);
   const path = match ? match[1] : "/";
   const url = buildUrlFromTarget(scheme, host, port, path);
-  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => {});
+  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => showToast("Failed to copy", "error"));
 }
 
 function parseCurlCommand(text) {
@@ -32507,7 +32691,7 @@ function initReplayContextMenu() {
         const format = action.replace("copy-as-", "");
         const text = replayRequestToFormat(format, tab);
         if (text) {
-          copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => {});
+          copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => showToast("Failed to copy", "error"));
         }
       } else if (action === "import-curl") {
         openCurlImportModal();

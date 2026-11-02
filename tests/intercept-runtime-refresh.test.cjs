@@ -14,7 +14,7 @@ function deferred() {
 
 function fixture(replies) {
   const state = { activeTool: "proxy", activeProxyTab: "intercept", activeSession: { id: "s-1" },
-    runtime: { intercept_enabled: false, intercept_scope_only: true } };
+    runtime: { intercept_enabled: false, intercept_scope_only: true, http_capture_enabled: true } };
   const reads = [], renders = [];
   const c = loadFunctions(["pollAuxiliaryData", "loadRuntimeSettings", "postRuntimeSettings", "currentSessionId", "sessionQueryPath"], {
     state, workspaceStateGeneration: 0, RUNTIME_POLL_MS: 5000, _lastRuntimePoll: 0, _interceptToggleInFlight: false,
@@ -34,7 +34,7 @@ function fixture(replies) {
 }
 
 test("an open Intercept tab takes runtime changes another client made", async () => {
-  const f = fixture([{ intercept_enabled: true, intercept_scope_only: false }]);
+  const f = fixture([{ intercept_enabled: true, intercept_scope_only: false, http_capture_enabled: true }]);
   await f.c.pollAuxiliaryData();
   assert.deepEqual(f.reads, ["/api/runtime?session_id=s-1"]);
   assert.equal(f.state.runtime.intercept_enabled, true);
@@ -51,13 +51,13 @@ test("a read that began before this client wrote the runtime does not put back t
   // The operator turns intercept on while the read is out.
   f.state.runtime = { ...f.state.runtime, intercept_enabled: true };
   await f.c.postRuntimeSettings("/api/runtime", { intercept_enabled: true });
-  late.resolve({ intercept_enabled: false, intercept_scope_only: true });
+  late.resolve({ intercept_enabled: false, intercept_scope_only: true, http_capture_enabled: true });
   await polling;
   assert.equal(f.state.runtime.intercept_enabled, true);
 });
 
 test("no read starts while an intercept toggle is being sent", async () => {
-  const f = fixture([{ intercept_enabled: false }]);
+  const f = fixture([{ intercept_enabled: false, http_capture_enabled: true }]);
   f.c._interceptToggleInFlight = true;
   await f.c.pollAuxiliaryData();
   assert.equal(f.reads.length, 0);
