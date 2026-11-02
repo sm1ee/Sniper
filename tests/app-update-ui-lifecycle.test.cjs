@@ -222,7 +222,7 @@ for (const percent of [null, 42]) {
     const f = fixture();
     const first = await f.start();
     if (percent !== null) {
-      first.stream.event({ step: "Downloading update...", percent });
+      first.stream.event({ step: "Downloading update…", percent });
       await nextTurn();
     }
     assert.equal(f.button.getAttribute("aria-label"), percent === null
@@ -233,7 +233,7 @@ for (const percent of [null, 42]) {
       "The visible failure text must not be overridden by stale progress");
     const retry = await f.start();
     assert.equal(f.button.getAttribute("aria-label"), "Updating");
-    retry.stream.event({ step: "Downloading update...", percent: 17 });
+    retry.stream.event({ step: "Downloading update…", percent: 17 });
     await nextTurn();
     assert.equal(f.button.getAttribute("aria-label"), "Updating, 17 percent");
     await f.fail(retry);
@@ -285,14 +285,14 @@ test("normal progress and Restarting retain the pending-restart presentation", a
   const f = fixture();
   const attempt = await f.start();
   assertUpdating(f);
-  attempt.stream.event({ step: "Downloading update...", percent: 42 });
+  attempt.stream.event({ step: "Downloading update…", percent: 42 });
   await nextTurn();
   assert.equal(f.button.title, "42%");
   assert.equal(f.button.querySelector(".update-ring-arc").style.strokeDasharray, "42 100");
   attempt.stream.event({ step: "Synthetic diagnostic detail" });
   await nextTurn();
   assert.equal(f.button.title, "42%");
-  attempt.stream.event({ step: "Restarting..." });
+  attempt.stream.event({ step: "Restarting…" });
   attempt.stream.end();
   await attempt.task;
   assertUpdating(f);
@@ -369,7 +369,7 @@ test("connection loss before Restarting reports failure", async () => {
 test("connection loss after Restarting retains pending-restart presentation", async () => {
   const f = fixture();
   const attempt = await f.start();
-  attempt.stream.event({ step: "Restarting..." });
+  attempt.stream.event({ step: "Restarting…" });
   await nextTurn();
   attempt.stream.error();
   await attempt.task;
@@ -380,7 +380,7 @@ test("connection loss after Restarting retains pending-restart presentation", as
 test("fragmented progress and malformed frames preserve existing stream handling", async () => {
   const f = fixture();
   const attempt = await f.start();
-  attempt.stream.raw('data: not-json\n\ndata: {"step":"Downloading update...","percent":');
+  attempt.stream.raw('data: not-json\n\ndata: {"step":"Downloading update…","percent":');
   attempt.stream.raw("25}\n\n");
   await nextTurn();
   assert.equal(f.button.title, "25%");
@@ -394,9 +394,9 @@ test("a failed attempt stops consuming late progress while an explicit retry run
   await f.fail(first, "First synthetic failure");
   const previousReadCount = first.stream.readCount();
   const second = await f.start();
-  second.stream.event({ step: "Downloading update...", percent: 17 });
+  second.stream.event({ step: "Downloading update…", percent: 17 });
   await nextTurn();
-  first.stream.event({ step: "Downloading update...", percent: 99 });
+  first.stream.event({ step: "Downloading update…", percent: 99 });
   await nextTurn();
   assert.equal(first.stream.readCount(), previousReadCount);
   assert.equal(f.button.title, "17%");
@@ -409,7 +409,7 @@ test("a tool-state change leaves shared top-bar progress intact", async () => {
   const f = fixture();
   const attempt = await f.start();
   f.context.setActiveTool("replay", { persist: false });
-  attempt.stream.event({ step: "Downloading update...", percent: 51 });
+  attempt.stream.event({ step: "Downloading update…", percent: 51 });
   await nextTurn();
   assert.equal(f.state.activeTool, "replay");
   assert.equal(f.button.title, "51%");
@@ -424,7 +424,7 @@ test("a superseded failure callback cannot clear an active retry", async () => {
   await f.fail(await f.start(), "First synthetic failure");
   const oldTimer = f.timerHistory[0];
   const second = await f.start();
-  second.stream.event({ step: "Downloading update...", percent: 17 });
+  second.stream.event({ step: "Downloading update…", percent: 17 });
   await nextTurn();
   // Even a callback already queued before cancellation must respect ownership.
   oldTimer.callback();

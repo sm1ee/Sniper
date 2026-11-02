@@ -3257,11 +3257,11 @@ window.__sniperCheckForUpdates = checkForUpdatesNow;
 // for logs, such as where the installer's log file is; those are ignored here, so an
 // internal detail cannot end up in the top bar.
 const UPDATE_STEPS = new Set([
-  "Checking for updates...",
-  "Downloading update...",
-  "Installing update...",
-  "Verifying signature...",
-  "Restarting...",
+  "Checking for updates…",
+  "Downloading update…",
+  "Installing update…",
+  "Verifying signature…",
+  "Restarting…",
 ]);
 
 // A bare ring: its arc grows with the download, and spins for the steps with
@@ -3379,7 +3379,7 @@ async function performSelfUpdate() {
         if (!dataText) continue;
         try {
           const data = JSON.parse(dataText);
-          if (data.step === "Restarting...") restarting = true;
+          if (data.step === "Restarting…") restarting = true;
           if (!handleProgress(data)) return;
         } catch (_error) {
           // Ignore malformed progress frames.
@@ -3645,7 +3645,7 @@ function applyFuzzerWorkspace(fields, sessionId, { keepShownRun = false } = {}) 
       // Retire the picker read/confirmation, not the shown run or its polling.
       workflow.readGeneration += 1;
       workflow.readBusy = false;
-      if (workflow.notice === "Loading saved run..."
+      if (workflow.notice === "Loading saved run…"
         || workflow.notice === "Reuse requires confirmation. Original source and transport overrides are not retained.") {
         workflow.notice = "";
       }
@@ -3658,7 +3658,7 @@ function applyFuzzerWorkspace(fields, sessionId, { keepShownRun = false } = {}) 
   if (legacyAttackRecord) {
     scheduleWorkspaceStateSave();
   } else if (fuzzerAttackRecordId) {
-    state.fuzzerNotice = state.fuzzerNotice || "Loading saved fuzzer run...";
+    state.fuzzerNotice = state.fuzzerNotice || "Loading saved fuzzer run…";
     hydrateFuzzerAttackRecordById(fuzzerAttackRecordId, sessionId);
   }
 }
@@ -5681,7 +5681,7 @@ function renderReplayClearedState() {
   if (els.replayRequestCM) {
     updateCodePaneCM("replayReq", els.replayRequestCM, "", {
       mode: "http", readOnly: false,
-      placeholder: "Loading session...",
+      placeholder: "Loading session…",
       onChange: syncReplayRequestTextFromEditor,
     });
   } else {
@@ -5692,10 +5692,10 @@ function renderReplayClearedState() {
   if (els.replayPortInput) els.replayPortInput.value = "";
   if (els.replaySchemeSelect) els.replaySchemeSelect.value = "https";
   setReplayTargetInputValidity({ hostError: "", portError: "" });
-  if (els.replayResponseMeta) els.replayResponseMeta.textContent = "Loading session...";
-  renderReplayResponseView("Loading session...");
+  if (els.replayResponseMeta) els.replayResponseMeta.textContent = "Loading session…";
+  renderReplayResponseView("Loading session…");
   updateReplaySearchPane("request", "");
-  updateReplaySearchPane("response", "Loading session...");
+  updateReplaySearchPane("response", "Loading session…");
   if (els.replayBackButton) els.replayBackButton.disabled = true;
   if (els.replayForwardButton) els.replayForwardButton.disabled = true;
   if (els.replayFollowRedirectButton) els.replayFollowRedirectButton.classList.add("hidden");
@@ -6505,7 +6505,7 @@ async function selectHistoryTransaction(id, options = {}) {
     renderEmptyDetail();
     return null;
   }
-  scheduleHistoryDetailLoading(state.selectedId, "Loading selected transaction...", {
+  scheduleHistoryDetailLoading(state.selectedId, "Loading selected transaction…", {
     immediate: !hadRenderedDetail,
   });
   if (options.scroll) {
@@ -10570,12 +10570,12 @@ function renderFindingDetailLoading() {
     els.findingsDetailSeverity.textContent = "";
   }
   if (els.findingsDetailCategory) els.findingsDetailCategory.textContent = "";
-  if (els.findingsDetailTitle) els.findingsDetailTitle.textContent = "Loading finding...";
+  if (els.findingsDetailTitle) els.findingsDetailTitle.textContent = "Loading finding…";
   if (els.findingsDetailDesc) els.findingsDetailDesc.textContent = "";
   if (els.findingsReqCM) {
-    updateCodePaneCM("findingsReq", els.findingsReqCM, "Loading finding detail...", { mode: "http" });
+    updateCodePaneCM("findingsReq", els.findingsReqCM, "Loading finding detail…", { mode: "http" });
   } else if (els.findingsReqView) {
-    els.findingsReqView.innerHTML = '<span class="code-line code-line-empty">Loading finding detail...</span>';
+    els.findingsReqView.innerHTML = '<span class="code-line code-line-empty">Loading finding detail…</span>';
     if (els.findingsReqLines) els.findingsReqLines.textContent = "";
   }
   if (els.findingsResCM) {
@@ -11319,7 +11319,7 @@ function jumpToTransaction(recordId) {
   // Called from other tools too (Templates' scan results), so the main panel
   // switches as well, not only Capture's tabs.
   renderToolPanels();
-  scheduleHistoryDetailLoading(recordId, "Loading selected transaction...", {
+  scheduleHistoryDetailLoading(recordId, "Loading selected transaction…", {
     immediate: !hadRenderedDetail,
   });
   loadTransactionDetail(recordId, { isCurrent }).then(async (record) => {
@@ -12018,7 +12018,7 @@ function clearOastDetail() {
 }
 
 function renderOastDetailLoading() {
-  if (els.oastDetailView) els.oastDetailView.textContent = "Loading selected OAST callback...";
+  if (els.oastDetailView) els.oastDetailView.textContent = "Loading selected OAST callback…";
   if (els.oastDetailTitle) els.oastDetailTitle.textContent = "Loading callback";
 }
 
@@ -13286,7 +13286,7 @@ function cancelHistoryDetailLoading() {
   }
 }
 
-function scheduleHistoryDetailLoading(id, message = "Loading selected transaction...", options = {}) {
+function scheduleHistoryDetailLoading(id, message = "Loading selected transaction…", options = {}) {
   cancelHistoryDetailLoading();
   if (!id) return;
   const renderIfCurrent = () => {
@@ -13385,7 +13385,7 @@ function renderEmptyDetail(errorMessage = "") {
   renderMessagePanes();
 }
 
-function renderLoadingDetail(message = "Loading selected transaction...") {
+function renderLoadingDetail(message = "Loading selected transaction…") {
   state.selectedRecord = null;
   state.loadingDetailId = state.selectedId;
   state.historyDetailError = "";
@@ -13543,7 +13543,7 @@ function renderMessagePanes() {
     : record;
   const requestText = requestRecord
     ? buildMessagePresentation("request", requestRecord)
-    : (state.historyDetailError || (detailLoading ? "Loading selected transaction..." : "Select a transaction from HTTP."));
+    : (state.historyDetailError || (detailLoading ? "Loading selected transaction…" : "Select a transaction from HTTP."));
   const responseText = responseRecord
     ? buildMessagePresentation("response", responseRecord)
     : (state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected."));
@@ -14341,12 +14341,12 @@ function renderIntercepts() {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM, "", {
         mode: "http", readOnly: false,
         placeholder: feedback.loading ? "Loading selected request details…"
-          : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here...",
+          : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here…",
       });
     } else {
       els.interceptRequestEditor.value = "";
       els.interceptRequestEditor.placeholder = feedback.loading ? "Loading selected request details…"
-        : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here...";
+        : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here…";
       renderInterceptRequestHighlight("");
     }
     els.forwardInterceptButton.disabled = true;
@@ -14412,10 +14412,10 @@ function renderWebsocketSessionTable(sortedEntries = getSortedWebsocketEntries()
             state.websocketListError
               ? `WebSocket history filter error: ${state.websocketListError}`
               : (state.websocketPaging?.loading
-                ? "Loading WebSocket sessions..."
+                ? "Loading WebSocket sessions…"
                 : (state.websocketSessions.length || websocketFilterIsActive()
               ? (websocketFilterIsActive() && state.websocketPaging?.hasMore
-                ? "Loading more matching WebSocket sessions..."
+                ? "Loading more matching WebSocket sessions…"
                 : (websocketFilterIsActive() && state.websocketPaging?.capReached
                   ? "WebSocket history cap reached for this filter."
                   : "No WebSocket sessions match the current filter."))
@@ -14498,7 +14498,7 @@ function renderWebsocketSessions(options = {}) {
     }
     const noSessionMsg = state.selectedWebsocketDetailError
       || (detailLoading
-        ? "Loading selected WebSocket session..."
+        ? "Loading selected WebSocket session…"
         : (state.websocketSessions.length && !sortedEntries.length
           ? "No WebSocket session matches the current filter."
           : "Select a WebSocket session."));
@@ -14514,7 +14514,7 @@ function renderWebsocketSessions(options = {}) {
         state.selectedWebsocketDetailError
           ? "Select the session again or wait for the next refresh."
           : (detailLoading
-            ? "Loading captured frames..."
+            ? "Loading captured frames…"
             : (state.websocketSessions.length && !sortedEntries.length
               ? "Clear or adjust the filter to inspect captured frames."
               : "Frame capture will appear here after a WebSocket handshake completes."))
@@ -14625,7 +14625,7 @@ function renderWebsocketFrameTable(options = {}) {
             <td colspan="5">
               Showing ${frames.length} loaded frame${frames.length === 1 ? "" : "s"} (${olderFrameNotice}).
               ${canLoadOlderFrames
-                ? `<button type="button" class="link-button${olderFramesLoading ? " disabled" : ""}" data-ws-load-older-frames ${olderFramesLoading ? "disabled" : ""}>${olderFramesLoading ? "Loading..." : "Load older frames"}</button>`
+                ? `<button type="button" class="link-button${olderFramesLoading ? " disabled" : ""}" data-ws-load-older-frames ${olderFramesLoading ? "disabled" : ""}>${olderFramesLoading ? "Loading…" : "Load older frames"}</button>`
                 : ""}
             </td>
           </tr>`
@@ -15637,7 +15637,7 @@ function renderReplay(options = {}) {
     if (els.replayRequestCM) {
       updateCodePaneCM("replayReq", els.replayRequestCM, "", {
         mode: "http", readOnly: false,
-        placeholder: "Paste or type an HTTP request here...",
+        placeholder: "Paste or type an HTTP request here…",
         onChange: syncReplayRequestTextFromEditor,
       });
     } else {
@@ -17029,7 +17029,7 @@ async function refreshFuzzerSavedRuns() {
   const generation = ++workflow.listGeneration;
   const ownsRead = fuzzerSavedReadOwner(workflow, generation, "listGeneration");
   workflow.listBusy = true;
-  const loadingNotice = "Loading retained runs...";
+  const loadingNotice = "Loading retained runs…";
   // Refresh may update the picker while View/Reuse is pending, but must not
   // hide that read's progress or its eventual failure/confirmation notice.
   const preserveReadNotice = workflow.readBusy;
@@ -17106,7 +17106,7 @@ async function readFuzzerSavedRun(action) {
   const ownsRead = fuzzerSavedReadOwner(workflow, generation, "readGeneration");
   const ownsSelection = () => workspaceLoaded && ownsRead() && workflow.selectedRunId === recordId;
   workflow.readBusy = true;
-  const loadingNotice = "Loading saved run...";
+  const loadingNotice = "Loading saved run…";
   workflow.notice = loadingNotice;
   renderFuzzerResultsWorkflow();
   try {
@@ -17432,7 +17432,7 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
     }
     if (response.status === 404) {
       clearFuzzerAttackRecord();
-      if (!state.fuzzerNotice || state.fuzzerNotice === "Loading saved fuzzer run...") {
+      if (!state.fuzzerNotice || state.fuzzerNotice === "Loading saved fuzzer run…") {
         state.fuzzerNotice = "Saved fuzzer run is no longer available.";
       }
       scheduleWorkspaceStateSave();
@@ -17451,7 +17451,7 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
     if (!attackRecord) {
       return;
     }
-    if (state.fuzzerNotice === "Loading saved fuzzer run...") {
+    if (state.fuzzerNotice === "Loading saved fuzzer run…") {
       state.fuzzerNotice = "";
     }
     await followRestoredFuzzerAttack(attackRecord, expectedSessionId, ownsLoad);
@@ -17461,7 +17461,7 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
       return;
     }
     console.error(error);
-    if (!state.fuzzerNotice || state.fuzzerNotice === "Loading saved fuzzer run...") {
+    if (!state.fuzzerNotice || state.fuzzerNotice === "Loading saved fuzzer run…") {
       state.fuzzerNotice = error?.message || "Failed to load saved fuzzer run.";
     }
     renderFuzzer();
@@ -17512,7 +17512,7 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
   if (detailResizer) detailResizer.classList.remove("hidden");
   state._fuzzerDetailRecord = null;
   if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
-  updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, "Loading transaction...", { mode: "http" });
+  updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, "Loading transaction…", { mode: "http" });
   clearFuzzerResponsePane();
 
   try {
@@ -19784,7 +19784,7 @@ async function runCurrentSequence() {
 
     const runBtn = document.getElementById("runSequenceButton");
     runBtn.disabled = true;
-    runBtn.textContent = "Running...";
+    runBtn.textContent = "Running…";
 
     const response = await fetch(`/api/sequences/${runSequenceId}/run`, {
       method: "POST",
@@ -19844,7 +19844,7 @@ function syncSequenceRunButton() {
   const editing = state.editingSequence;
   const sequenceRunning = Boolean(state.sequenceRunning);
   runBtn.disabled = sequenceRunning || !editing || !editing.steps?.length;
-  runBtn.textContent = sequenceRunning ? "Running..." : "Run";
+  runBtn.textContent = sequenceRunning ? "Running…" : "Run";
 }
 
 function renderSequenceList() {
@@ -20913,12 +20913,12 @@ function renderResponseIntercepts() {
       setInterceptPaneContent("interceptRes", els.interceptResponseCM, "", {
         mode: "http", readOnly: false,
         placeholder: feedback.loading ? "Loading selected response details…"
-          : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here...",
+          : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here…",
       });
     } else {
       els.interceptResponseEditor.value = "";
       els.interceptResponseEditor.placeholder = feedback.loading ? "Loading selected response details…"
-        : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here...";
+        : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here…";
       renderInterceptResponseHighlight("");
     }
     if (state.interceptQueueTab === "response") {
@@ -21686,7 +21686,7 @@ async function followRedirect() {
   tab.requestBytes = null;
   tab.requestOriginalBytes = null;
   tab.responseRecord = null;
-  tab.notice = "Following redirect...";
+  tab.notice = "Following redirect…";
   if (state.replayMessageViews.request === "hex") {
     renderReplayViewContent("request");
   } else if (getCMView("replayReq")) {
@@ -23774,8 +23774,8 @@ function wireTabIndicator(strip) {
     // from wherever the indicator happened to be.
     if (!placed) indicator.style.transition = "none";
     indicator.style.opacity = "1";
-    indicator.style.left = `${active.offsetLeft}px`;
-    indicator.style.top = `${active.offsetTop}px`;
+    // A transform slides without re-running layout on every frame.
+    indicator.style.transform = `translate(${active.offsetLeft}px, ${active.offsetTop}px)`;
     indicator.style.width = `${active.offsetWidth}px`;
     indicator.style.height = `${active.offsetHeight}px`;
     if (!placed) {
@@ -23919,11 +23919,11 @@ function renderCliPathUi() {
   const button = document.getElementById("installCliPathButton");
   if (button) {
     button.disabled = busy || !cliPathCanInstall();
-    button.textContent = cliPathState.action === "install" ? "Adding to PATH..." : "Add sniper-cli to PATH";
+    button.textContent = cliPathState.action === "install" ? "Adding to PATH…" : "Add sniper-cli to PATH";
   }
   const refresh = document.getElementById("refreshCliPathButton");
   if (refresh) refresh.disabled = busy;
-  const message = cliPathState.message || cliPathState.status?.message || "Checking command-line availability...";
+  const message = cliPathState.message || cliPathState.status?.message || "Checking command-line availability…";
   for (const id of ["installCliPathStatus", "cliPathBannerStatus"]) {
     const element = document.getElementById(id);
     if (!element) continue;
@@ -23963,7 +23963,7 @@ function loadCliPathStatus({ allowPrompt = false } = {}) {
   const controller = new AbortController();
   cliPathState.readController = controller;
   cliPathState.loading = true;
-  cliPathState.message = "Checking command-line availability...";
+  cliPathState.message = "Checking command-line availability…";
   cliPathState.error = false;
   renderCliPathUi();
   const current = () => !cliPathState.disposed && requestId === cliPathState.readId;
@@ -24008,7 +24008,7 @@ async function installCliPath() {
   // A decision suppresses another prompt even if the response is lost. The
   // server persists the same decision before attempting any PATH changes.
   cliPathState.decided = true;
-  cliPathState.message = "Adding bundled sniper-cli to PATH...";
+  cliPathState.message = "Adding bundled sniper-cli to PATH…";
   cliPathState.error = false;
   if (cliPathState.banner !== "hidden") cliPathState.banner = "working";
   renderCliPathUi();
@@ -24056,7 +24056,7 @@ async function deferCliPath() {
   cliPathState.action = "defer";
   cliPathState.decided = true;
   cliPathState.banner = "working";
-  cliPathState.message = "Saving your choice...";
+  cliPathState.message = "Saving your choice…";
   cliPathState.error = false;
   renderCliPathUi();
   const current = () => !cliPathState.disposed && requestId === cliPathState.actionId;
@@ -29783,7 +29783,7 @@ function renderWsStatus() {
   const status = tab.wsStatus;
   els.wsStatusIndicator.className = `ws-status-dot ${status}`;
   let statusText = status === "connected" ? "Connected"
-    : status === "connecting" ? "Connecting..."
+    : status === "connecting" ? "Connecting…"
     : status === "error" ? `Error: ${tab.wsError || "unknown"}`
     : "Disconnected";
   if (status === "connected" && tab.wsFramesTruncated) {
@@ -30828,7 +30828,7 @@ async function beginNoteEdit(cell, transactionId) {
   input.type = "text";
   input.className = "note-inline-input";
   input.value = current;
-  input.placeholder = "Add a note...";
+  input.placeholder = "Add a note…";
   cell.innerHTML = "";
   cell.appendChild(input);
   input.focus();
@@ -31461,7 +31461,7 @@ function sendWsFrameToReplay(frameIdx) {
   }
   const frame = frames.find((candidate) => candidate.index === requestedIndex);
   if (!frame) {
-    showToast("That WebSocket frame is no longer loaded. Refreshing frames...", "error");
+    showToast("That WebSocket frame is no longer loaded. Refreshing frames…", "error");
     state.selectedFrameIdx = null;
     hideFrameDetail();
     if (session.id) {

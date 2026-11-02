@@ -106,11 +106,11 @@ for (const action of ['view', 'reuse']) for (const outcome of ['success', 'failu
     const f = await retainedNoticeFixture(), before = draft(f.state), read = f[action](), selected = f.requests.at(-1);
     assert.equal(f.els.fuzzerRefreshRunsButton.disabled, false);
     const listing = f.els.fuzzerRefreshRunsButton.dispatch('click');
-    assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run...');
+    assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run…');
     const updated = [...retainedNoticeRuns, { id: 'run-c', host: 'example.com', path: '/c' }];
     f.requests.at(-1).resolve(response(outcome === 'success' ? updated : null, outcome === 'success' ? 200 : 500));
     await listing;
-    assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run...');
+    assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run…');
     assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, true); assert.equal(f.els.fuzzerViewRunButton.disabled, true);
     assert.equal(f.els.fuzzerReuseRunButton.disabled, true); assert.equal(f.els.fuzzerRefreshRunsButton.disabled, false);
     assert.equal(f.c.fuzzerResultsWorkflowState().runs.length, outcome === 'success' ? 3 : 2);
@@ -135,7 +135,7 @@ for (const action of ['view', 'reuse']) for (const status of [404, 500]) for (co
     assert.equal(f.els.fuzzerViewRunButton.disabled, false); assert.equal(f.els.fuzzerReuseRunButton.disabled, false);
     assert.equal(f.state.fuzzerAttackRecordId, 'run-a'); assert.equal(draft(f.state), before); assert.equal(f.saves, 0);
     // A later explicit Refresh may own feedback normally after the read has settled.
-    const retry = f.els.fuzzerRefreshRunsButton.dispatch('click'); assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading retained runs...');
+    const retry = f.els.fuzzerRefreshRunsButton.dispatch('click'); assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading retained runs…');
     if (outcome === 'success') f.requests.at(-1).resolve(response(retainedNoticeRuns));
     else f.requests.at(-1).reject(new Error('Fresh retained-list refresh failed.'));
     await retry;
@@ -180,8 +180,8 @@ for (const outcome of ['success', 'failure']) test(`retained notice: newer repla
   const listing = f.els.fuzzerRefreshRunsButton.dispatch('click'), listRead = f.requests.at(-1);
   f.pick('run-a'); const current = f.view(), currentRead = f.requests.at(-1);
   listRead.resolve(response(outcome === 'success' ? [] : null, outcome === 'success' ? 200 : 500)); await listing;
-  assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run...'); assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, true);
-  oldRead.resolve(response(run('run-b'))); await old; assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run...');
+  assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run…'); assert.equal(f.c.fuzzerResultsWorkflowState().readBusy, true);
+  oldRead.resolve(response(run('run-b'))); await old; assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading saved run…');
   currentRead.resolve(response(run('run-a'))); await current;
   assert.match(f.els.fuzzerSavedRunNotice.textContent, /Viewing retained results/); assert.equal(f.state.fuzzerAttackRecordId, 'run-a');
 });
@@ -220,7 +220,7 @@ for (const action of ['view', 'reuse']) for (const outcome of ['success', 'failu
 
 for (const outcome of ['success', 'empty', 'failure']) test(`retained notice: plain Refresh still reports ${outcome}`, async () => {
   const f = fixture(), listing = f.els.fuzzerRefreshRunsButton.dispatch('click');
-  assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading retained runs...');
+  assert.equal(f.els.fuzzerSavedRunNotice.textContent, 'Loading retained runs…');
   f.requests.at(-1).resolve(response(outcome === 'success' ? retainedNoticeRuns : outcome === 'empty' ? [] : null, outcome === 'failure' ? 500 : 200));
   await listing;
   assert.match(f.els.fuzzerSavedRunNotice.textContent, outcome === 'success' ? /^2 retained runs/ : outcome === 'empty' ? /No retained fuzzer runs/ : /Synthetic read failure/);

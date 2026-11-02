@@ -115,7 +115,7 @@ test("Capture names remain distinct for no selection, loading and detail-error m
     assert.equal(f.name("request"), "Captured request");
     assert.equal(f.name("response"), "Captured response");
     assert.equal(f.captureView("request").getContent(), status === "empty" ? "Select a transaction from HTTP."
-      : status === "loading" ? "Loading selected transaction..." : "Synthetic detail error");
+      : status === "loading" ? "Loading selected transaction…" : "Synthetic detail error");
     assert.equal(f.captureView("response").getContent(), status === "empty" ? "No response selected."
       : status === "loading" ? "Loading response details." : "Synthetic detail error");
   }

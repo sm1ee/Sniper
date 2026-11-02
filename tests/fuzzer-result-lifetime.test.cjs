@@ -151,7 +151,7 @@ for (const stage of ['fetch', 'json']) test(`new session rejects an old ${stage}
   f.state.activeSession = { id: 'session-b' };
   (stage === 'json' ? body : old).reject(new Error('Old session failure'));
   await tick();
-  assert.equal(f.panes.get('fuzzerDetailReq'), 'Loading transaction...');
+  assert.equal(f.panes.get('fuzzerDetailReq'), 'Loading transaction…');
   assert.equal(f.state._fuzzerDetailRecord, null);
 });
 for (const boundary of ['reset', 'no-transaction', 'empty-results', 'hide-detail']) test(`${boundary} drops late detail work`, async () => {
@@ -208,7 +208,7 @@ for (const stage of ['fetch', 'json']) for (const outcome of ['success', 'failur
 }
 for (const outcome of ['missing', 'failure']) test(`the current saved-job ${outcome} replaces its loading notice`, async () => {
   const f = fixture(), read = f.restore();
-  assert.equal(f.els.fuzzerMeta.textContent, 'Loading saved fuzzer run...');
+  assert.equal(f.els.fuzzerMeta.textContent, 'Loading saved fuzzer run…');
   if (outcome === 'missing') read.resolve(response(null, 404)); else read.reject(new Error('Current job load failure'));
   await tick(); assert.equal(f.state.fuzzerAttackRecord, null);
   assert.equal(f.els.fuzzerMeta.textContent, outcome === 'missing' ? 'Saved fuzzer run is no longer available.' : 'Current job load failure');

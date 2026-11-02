@@ -88,7 +88,7 @@ for (const mode of ['request', 'response']) test(`${mode}: actual CM constructio
   const selected = response ? 'selectedResponseIntercept' : 'selectedIntercept';
   const prefix = response ? 'responseIntercept' : 'intercept';
   f.state[queue] = []; f.render();
-  assert.equal(created.at(-1), `Intercepted ${mode} will appear here...`);
+  assert.equal(created.at(-1), `Intercepted ${mode} will appear here…`);
   f.state[queue] = [f.a]; f.render();
   assert.equal(created.at(-1), `Loading selected ${mode} details…`);
   f.state[prefix + 'DetailGeneration'] = 1;

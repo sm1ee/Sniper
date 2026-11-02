@@ -260,7 +260,7 @@ test("install failure is actionable in Settings and a retry clears the prior res
   f.nodes.installCliPathButton.click();
   assert.equal(f.state.error, false);
   assert.equal(f.nodes.installCliPathStatus.classList.contains("error"), false);
-  assert.equal(f.nodes.installCliPathStatus.textContent, "Adding bundled sniper-cli to PATH...");
+  assert.equal(f.nodes.installCliPathStatus.textContent, "Adding bundled sniper-cli to PATH…");
   f.json(2, SUCCESS); await nextTurn();
   assert.equal(f.state.status.registered, true);
   assert.equal(hidden(f.nodes.cliPathBanner), true);
@@ -402,7 +402,7 @@ test("invalid install replies can be retried explicitly through Settings", async
   assert.equal(f.settingsOpened(), 1);
   f.nodes.installCliPathButton.click();
   assert.equal(f.requests.length, 3);
-  assert.equal(f.nodes.installCliPathStatus.textContent, "Adding bundled sniper-cli to PATH...");
+  assert.equal(f.nodes.installCliPathStatus.textContent, "Adding bundled sniper-cli to PATH…");
   f.json(2, SUCCESS); await nextTurn();
   assert.equal(f.state.status.registered, true);
   assert.equal(f.state.error, false);

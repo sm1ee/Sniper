@@ -99,7 +99,7 @@ test("textbox semantics belong to the existing plaintext-only multiline editor",
     "aria-multiline": "true",
     "aria-labelledby": "wsMessageLabel",
     spellcheck: "false",
-    "data-placeholder": "Type a message...",
+    "data-placeholder": "Type a message…",
   });
   assert.equal(editor.content, "");
 });
