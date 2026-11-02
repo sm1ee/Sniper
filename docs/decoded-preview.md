@@ -2,7 +2,7 @@
 
 Hover over an encoded token in an HTTP text editor for 300 ms to see a
 read-only decoded preview, with each decoding layer labeled. Move the pointer
-into the tooltip to select text; Escape, moving away, scrolling or editing
+into the tooltip to select text. Escape, moving away, scrolling or editing
 closes it.
 
 From the keyboard, put the cursor in a token (or select the exact value), Tab to
@@ -21,7 +21,7 @@ focus, the arrow, Page Up/Down and Home/End keys scroll a long preview.
 Malformed input, invalid UTF-8, control characters, whitespace-only output and
 binary data get no preview. Short Base64, hex, HTML entities, JavaScript
 escapes, compressed data and wrapped Base64 are not attempted. Input is limited
-to 4,096 UTF-16 code units and each result to 2,048; longer values are rejected,
+to 4,096 UTF-16 code units and each result to 2,048. Longer values are rejected,
 not cut.
 
 ## Where it works
@@ -40,4 +40,4 @@ change the source or captured bytes, send requests, save or log values, or run
 decoded code.
 
 `node --test tests/encoded-preview-*.test.cjs` runs the decoding and event
-tests; they do not cover WebKit/WebView2 layout or screen readers.
+tests. They do not cover WebKit/WebView2 layout or screen readers.

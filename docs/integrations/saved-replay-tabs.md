@@ -33,15 +33,15 @@ Read `GET /api/workspace-state?session_id=<uuid>`, then POST this body to
 
 Add `expected_active_session_id` when the selection came from the active
 session. The server persists the change before answering; a revision or session
-conflict changes nothing. Only HTTP tabs, including legacy tabs with an empty or
-missing type, are accepted.
+conflict changes nothing. Only HTTP tabs are accepted, including legacy tabs
+with an empty or missing type.
 
-- **Close** removes the tab and its history. If it was active, its previous
-  neighbor (pinned tabs first) becomes active, else the next one, else none.
-- **Duplicate** copies the tab into a new unpinned tab with a fresh UUID and
-  leaves focus alone.
-- **Set-pinned** changes only the flag. Repeating a value does not toggle it,
-  but still advances the revision.
+- Close removes the tab and its history. If it was active, its previous neighbor
+  (pinned tabs first) becomes active, else the next one, else none.
+- Duplicate copies the tab into a new unpinned tab with a fresh UUID and leaves
+  focus alone.
+- Set-pinned changes only the flag. Repeating a value does not toggle it, but
+  still advances the revision.
 
 A success returns exactly `session_id`, the new `revision` and `active_tab_id`,
 plus `closed_tab_id` (close), `tab_id` and `pinned` (set-pinned), or
@@ -65,5 +65,5 @@ session's saved tabs before acting again.
 
 A clean desktop workspace follows a tab closed elsewhere. If the desktop has an
 unsaved or conflicting draft, it keeps the editor and stops autosaving until the
-conflict is resolved; copy the draft before reloading. Pin changes made
+conflict is resolved. Copy the draft before reloading. Pin changes made
 elsewhere merge even during an edit, unless the pin was also changed locally.
