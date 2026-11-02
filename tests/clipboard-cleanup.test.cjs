@@ -7,7 +7,8 @@ const vm = require("node:vm");
 const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 
 const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
-const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+// Windows checkouts use CRLF; the rules below are matched line by line.
+const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
 
 test("OAST Copy uses visible text and an explicit purpose without changing its native action", () => {
   const buttons = [...html.matchAll(/<button\b([^>]*\bid="oastCopyPayloadButton"[^>]*)>([^]*?)<\/button>/g)];
