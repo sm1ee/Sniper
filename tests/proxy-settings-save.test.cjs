@@ -12,7 +12,7 @@ const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
 for (const [id, expected] of [
   ["oastPayloadText", { id: "oastPayloadText", class: "oast-payload-input", type: "text",
-    placeholder: "Generate or paste your OAST subdomain here", spellcheck: "false", "aria-label": "OAST payload" }],
+    placeholder: "Generate or paste a domain", spellcheck: "false", "aria-label": "OAST payload" }],
   ["proxySettingOastToken", { id: "proxySettingOastToken", type: "password", autocomplete: "off", spellcheck: "false",
     placeholder: "Server authentication token (optional)", "aria-label": "OAST token" }],
 ]) test(`${id} retains its explicit name, input policy and empty default`, () => {

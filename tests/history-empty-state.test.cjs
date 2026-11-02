@@ -17,10 +17,12 @@ function fixture(rows = [http, tunnel], query = "") {
     "selectedStatusClasses", "selectedMimeTypes", "inferMimeType", "extractSummaryPathExtension",
     "formatSize", "effectiveSummaryPort", "defaultSummaryPortForScheme", "extractHostPort",
     "foldHeaderSearchText", "isKnownCount", "countHiddenConnectItems", "renderHistory",
-    "humanizeSortKey", "isSessionEmpty", "emptySessionMessage", "historyEmptyMessage", "escapeHtml",
+    "describeHttpFilters", "isSessionEmpty", "emptySessionMessage", "historyEmptyMessage", "escapeHtml",
     "createHistoryQueryState", "historyQuerySignature", "isCurrentHistoryQuerySignature",
   ], {
     state, els, formatTimestamp: () => "", isInScopeHost: () => true,
+    SERVICE_MAP_FILTER_MIME_LABELS: { html: "HTML", script: "script", json: "JSON", css: "CSS", image: "images", websocket: "WebSocket", other: "other types" },
+    SERVICE_MAP_FILTER_STATUS_LABELS: { success: "2xx", redirect: "3xx", clientError: "4xx", serverError: "5xx", other: "other status" },
     currentSessionId: () => "fixture-session",
     getVisibleEntries: () => state.items.filter(row => c.summaryMatchesActiveHistoryFilters(row)).map(item => ({ item })),
     renderSortHeaders() {},
@@ -64,6 +66,24 @@ test("the same mixed session without a filter still displays its captured HTTP r
   assert.equal(f.render(), "");
   assert.deepEqual(Array.from(f.visibleRows), ["http"]);
   assert.equal(f.browserLaunchers, 0);
+});
+
+// It used to read "Filter settings: 1 loaded item visible | 1 CONNECT tunnel
+// hidden | 1/1 server-matched summaries loaded | 2 retained | sort: # desc".
+test("the filter summary is the match count and what the filter dialog hides", () => {
+  const f = fixture();
+  f.render();
+  assert.equal(f.els.historyMeta.textContent, "1 request · hiding png, ico, css +7");
+  f.state.filterSettings.hideWithoutResponses = true;
+  f.state.filterSettings.hiddenExtensions = "";
+  f.state.method = "GET";
+  f.state.historyPaging = { ...f.state.historyPaging, filteredTotal: null, fullyLoaded: false, hasMore: true };
+  f.render();
+  // The method has its own control beside the summary; more rows load on scroll.
+  assert.equal(f.els.historyMeta.textContent, "1+ requests · responses only");
+  f.state.items = [];
+  f.render();
+  assert.equal(f.els.historyMeta.textContent, "Loading requests… · responses only");
 });
 
 test("exact complete counts allow a conditional CA hint for an entirely tunnel-only session", () => {

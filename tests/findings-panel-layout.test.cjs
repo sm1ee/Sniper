@@ -141,10 +141,11 @@ test("split limits and chosen detail height survive repeated drags", () => {
 });
 
 test("a long URL in a toolbar kicker cannot push the card's buttons out of view", () => {
-  // A held item's title is its URL, beside Drop and Forward. A path with
-  // nothing to break at used to widen the card's grid track past the card.
+  // A held item's title is its URL, beside Drop and Forward, and Compare's
+  // title is two. A path with nothing to break at used to widen the card's
+  // grid track past the card.
   assert.match(css, /\.panel-card \{[^}]*grid-template-columns: minmax\(0, 1fr\);/);
-  assert.match(css, /\.panel-toolbar \.placeholder-kicker,\s*#interceptDetailTitle \{[^}]*overflow-wrap: anywhere;/);
+  assert.match(css, /#interceptDetailTitle,\s*#compareTitle \{[^}]*overflow-wrap: anywhere;/);
   // Squeezed by a long URL, Drop and Forward used to stack.
   assert.match(css, /#interceptRequestActions,\s*#responseInterceptActions \{[^}]*flex: none;/);
 });

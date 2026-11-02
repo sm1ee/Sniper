@@ -23,11 +23,9 @@ test("a null filtered count stays unknown for a partial WebSocket page", () => {
   });
 
   assert.equal(page.filteredTotal, null);
-  const summary = buildWebsocketFilterSummary(
-    1, 1, 1, page.total, page.filteredTotal, page.has_more, false, "example.com",
-  );
-  assert.match(summary, /1\/1000 sessions loaded/);
-  assert.doesNotMatch(summary, /\/0 matching sessions/);
+  // An unknown count is a lower bound while more sessions can load.
+  assert.equal(buildWebsocketFilterSummary(1, 1, page.filteredTotal, page.has_more, false), "1+ sessions");
+  assert.equal(buildWebsocketFilterSummary(500, 500, null, false, true), "500+ sessions · first 500 listed");
 });
 
 test("an omitted filtered count stays unknown", () => {
@@ -41,7 +39,9 @@ test("known zero and positive filtered counts are preserved", () => {
     const page = websocketPagePayload({ items: [], total: 50, filtered_total: value });
     assert.equal(page.filteredTotal, Number(value));
   }
-  assert.match(buildWebsocketFilterSummary(0, 0, 0, 50, 0, false, false, "missing"), /0 matching of 50 total/);
+  assert.equal(buildWebsocketFilterSummary(0, 0, 0, false, false), "0 sessions");
+  assert.equal(buildWebsocketFilterSummary(1, 1, 1, false, false), "1 session");
+  assert.equal(buildWebsocketFilterSummary(500, 500, 1200, false, true), `${(1200).toLocaleString()} sessions · first 500 listed`);
 });
 
 test("invalid filtered counts stay unknown and legacy arrays still load", () => {

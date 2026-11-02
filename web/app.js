@@ -945,7 +945,6 @@ const els = {
   eventLogTableBody: document.getElementById("eventLogTableBody"),
   clearEventLogButton: document.getElementById("clearEventLogButton"),
   matchReplaceTableBody: document.getElementById("matchReplaceTableBody"),
-  matchReplaceEditorPath: document.getElementById("matchReplaceEditorPath"),
   matchReplaceEditorTitle: document.getElementById("matchReplaceEditorTitle"),
   matchReplaceEditorHeader: document.getElementById("matchReplaceEditorHeader"),
   matchReplaceForm: document.getElementById("matchReplaceForm"),
@@ -3175,8 +3174,8 @@ async function _applySettings(response, { isCurrent = () => true } = {}) {
   els.specialHostHttps.textContent = certificate.special_host_https;
   els.dataDir.textContent = state.settings.data_dir;
   els.certificateNote.innerHTML = `
-    Download the local root certificate here, or visit <code>${escapeHtml(certificate.special_host_https)}</code>
-    from a proxied client. Trust the CA before expecting clean HTTPS flows.
+    Trust this CA to read HTTPS traffic. A proxied client can download it from
+    <code>${escapeHtml(certificate.special_host_https)}</code>.
   `;
 
   renderInterceptStatus();
@@ -11975,14 +11974,16 @@ async function loadOastCallbacks() {
     }
     const el = document.getElementById("oastStatusText");
     if (el) {
+      // Providers arrive as lowercase ids ("custom", "interactsh").
+      const provider = titleCase(status.provider);
       if (status.registered) {
-        el.textContent = `${status.provider} · Registered (${status.payload_domain || status.correlation_id || ""})`;
+        el.textContent = `${provider} · Registered (${status.payload_domain || status.correlation_id || ""})`;
         el.className = "oast-status-text registered";
       } else if (status.provider && status.provider !== "custom") {
-        el.textContent = `${status.provider} · Not registered`;
+        el.textContent = `${provider} · Not registered`;
         el.className = "oast-status-text not-registered";
       } else {
-        el.textContent = status.provider || "Not configured";
+        el.textContent = provider || "Not configured";
         el.className = "oast-status-text not-registered";
       }
     }
@@ -12001,7 +12002,7 @@ function renderOastCallbacks() {
           <td>${escapeHtml(cb.correlation_id)}</td>
         </tr>`;
       }).join("")
-    : '<tr class="empty-row"><td colspan="4">No OAST callbacks received yet. Generate a payload and use it in your tests.</td></tr>';
+    : '<tr class="empty-row"><td colspan="4">No callbacks yet.</td></tr>';
 }
 
 function updateOastBadge() {
@@ -12012,8 +12013,8 @@ function updateOastBadge() {
 }
 
 function clearOastDetail() {
-  if (els.oastDetailView) els.oastDetailView.textContent = "Select an OAST callback to view details.";
-  if (els.oastDetailTitle) els.oastDetailTitle.textContent = "Select a callback";
+  if (els.oastDetailView) els.oastDetailView.textContent = "";
+  if (els.oastDetailTitle) els.oastDetailTitle.textContent = "No callback selected";
 }
 
 function renderOastDetailLoading() {
@@ -12572,30 +12573,18 @@ function renderHistory(options = {}) {
   const visibleEntries = getVisibleEntries();
   const hiddenConnectCount = countHiddenConnectItems();
   const paging = state.historyPaging || createHistoryPagingState();
-  const hiddenConnectExact = isKnownCount(paging.hiddenConnectTotal);
-  const summary = [];
-  const totalCount = visibleEntries.length;
-  summary.push(`${totalCount} loaded item${totalCount === 1 ? "" : "s"} visible`);
-  if (hiddenConnectCount) summary.push(`${hiddenConnectCount}${hiddenConnectExact || paging.fullyLoaded ? "" : " loaded"} CONNECT tunnel${hiddenConnectCount === 1 ? "" : "s"} hidden`);
-  if (isKnownCount(paging.filteredTotal)) {
-    summary.push(`${state.items.length}/${paging.filteredTotal} server-matched summaries loaded`);
-  }
-  if (paging.total && (!isKnownCount(paging.filteredTotal) || paging.total !== paging.filteredTotal)) {
-    summary.push(`${paging.total} retained`);
-  }
-  if (!paging.fullyLoaded) {
-    summary.push(paging.loading ? "loading older history" : "scroll for older history");
-  }
-  if (state.query) summary.push(`search: "${state.query}"`);
-  if (state.method) summary.push(`method: ${state.method}`);
-  if (state.filterSettings.inScopeOnly) summary.push("scope only");
-  if (state.filterSettings.hideWithoutResponses) summary.push("responses only");
-  if (state.filterSettings.onlyParameterized) summary.push("query parameters only");
-  if (state.filterSettings.onlyNotes) summary.push("notes only");
-  if (state.filterSettings.searchTerm) summary.push(`advanced: ${state.filterSettings.searchTerm}`);
-  if (state.filterSettings.colorTags?.size) summary.push(`color: ${[...state.filterSettings.colorTags].join(", ")}`);
-  summary.push(`sort: ${humanizeSortKey(state.sortKey)} ${state.sortDirection}`);
-  els.historyMeta.textContent = `Filter settings: ${summary.join(" | ")}`;
+  // How many requests match, then what the filter dialog hides. Search, method,
+  // In scope and the colour dots show their own state beside it, the sort its
+  // arrow; CONNECT tunnels are never listed here.
+  const exact = isKnownCount(paging.filteredTotal);
+  const count = exact ? paging.filteredTotal : visibleEntries.length;
+  const more = !exact && !paging.fullyLoaded;
+  const summary = [
+    more && !count ? "Loading requests…" : `${count.toLocaleString()}${more ? "+" : ""} request${count === 1 && !more ? "" : "s"}`,
+    ...describeHttpFilters(state.filterSettings),
+  ].join(" · ");
+  els.historyMeta.textContent = summary;
+  els.historyMeta.title = summary;
   renderSortHeaders();
 
   // Store entries for virtual scroll
@@ -14388,13 +14377,10 @@ function renderWebsocketSessionTable(sortedEntries = getSortedWebsocketEntries()
   }
   els.websocketMeta.textContent = buildWebsocketFilterSummary(
     sortedEntries.length,
-    windowed.renderedEntries.length,
     state.websocketSessions.length,
-    state.websocketPaging?.total ?? state.websocketSessions.length,
     state.websocketPaging?.filteredTotal ?? null,
     Boolean(state.websocketPaging?.hasMore),
     Boolean(state.websocketPaging?.capReached),
-    state.websocketQuery,
   );
 
   updateWebsocketSortIndicators();
@@ -14511,7 +14497,7 @@ function renderWebsocketSessions(options = {}) {
             ? "Loading captured frames…"
             : (state.websocketSessions.length && !sortedEntries.length
               ? "Clear or adjust the filter to inspect captured frames."
-              : "Frame capture will appear here after a WebSocket handshake completes."))
+              : "No frames."))
         }</td>
       </tr>
     `;
@@ -14690,28 +14676,15 @@ function selectWebsocketFrameRow(row) {
   return true;
 }
 
-function buildWebsocketFilterSummary(visibleCount, renderedCount, loadedCount, totalCount, filteredCount, hasMore, capReached, query) {
-  const visibleLabel = renderedCount < visibleCount
-    ? `${renderedCount}/${visibleCount} session${visibleCount === 1 ? "" : "s"} shown`
-    : `${visibleCount} session${visibleCount === 1 ? "" : "s"} visible`;
-  const parts = [visibleLabel];
-  const filters = [];
-  if (state.websocketInScopeOnly) filters.push("in scope");
-  if (state.websocketLiveOnly) filters.push("live only");
-  if (query) filters.push(query);
-  if (filters.length) parts.push(`filter: ${filters.join(", ")}`);
-  if (isKnownCount(filteredCount)) {
-    parts.push((hasMore || capReached)
-      ? `${loadedCount}/${filteredCount} matching sessions loaded${capReached ? " (cap reached)" : ""}`
-      : `${filteredCount} matching of ${totalCount || filteredCount} total`);
-  } else if (totalCount) {
-    parts.push((hasMore || capReached)
-      ? `${loadedCount}/${totalCount} sessions loaded${capReached ? " (cap reached)" : ""}`
-      : `${totalCount} retained`);
-  } else {
-    parts.push("No sessions captured yet");
-  }
-  return parts.join(" · ");
+// How many sessions match, as History counts requests. The search box, In
+// scope and Live only show their own state beside it.
+function buildWebsocketFilterSummary(visibleCount, loadedCount, filteredCount, hasMore, capReached) {
+  const exact = isKnownCount(filteredCount);
+  const count = exact ? filteredCount : visibleCount;
+  const more = !exact && (hasMore || capReached);
+  const label = `${count.toLocaleString()}${more ? "+" : ""} session${count === 1 && !more ? "" : "s"}`;
+  // The list stops loading at a cap; past it, say how many it holds.
+  return capReached ? `${label} · first ${loadedCount.toLocaleString()} listed` : label;
 }
 
 function centeredWindow(items, selectedPosition, maxItems) {
@@ -15580,11 +15553,10 @@ function renderOastSettingsControls(options = {}) {
     els.proxySettingOastClearToken.textContent = state.oastTokenClearPending ? "Clearing" : "Clear";
   }
   if (els.proxySettingOastTokenHint) {
+    // The placeholder already says whether a token is saved and that it is optional.
     els.proxySettingOastTokenHint.textContent = state.oastTokenClearPending
       ? "Token will be cleared when settings are saved."
-      : tokenConfigured
-        ? "Leave blank to keep the saved token, or clear it explicitly."
-        : "Enter a token only if your OAST server requires one.";
+      : "";
   }
   if (hydrateValues && oastInterval && document.activeElement !== oastInterval) {
     oastInterval.value = state.runtime.oast_polling_interval_secs || 5;
@@ -15597,9 +15569,9 @@ function renderOastSettingsControls(options = {}) {
   }
   if (oastUrlHint) {
     const hints = {
-      interactsh: "Interactsh server. Sniper auto-registers with RSA encryption and polls for callbacks.",
-      boast: "BOAST server. Sniper polls the /events endpoint for callbacks.",
-      custom: "Custom OAST server. Sniper polls {url}/poll for JSON callbacks.",
+      interactsh: "Sniper registers with it and polls for callbacks.",
+      boast: "Sniper polls its /events endpoint for callbacks.",
+      custom: "Sniper polls {url}/poll for JSON callbacks.",
     };
     oastUrlHint.textContent = hints[prov] || hints.custom;
   }
@@ -16355,7 +16327,6 @@ function renderMatchReplaceRules() {
   updateMatchReplaceSaveState();
   if (!selected) return;
 
-  els.matchReplaceEditorPath.textContent = `${selected.scope} / ${selected.target}`;
   els.matchReplaceEditorTitle.textContent = matchReplaceRuleTitle(selected);
   els.matchReplaceScope.value = selected.scope;
   els.matchReplaceTarget.value = selected.target;
@@ -24115,8 +24086,6 @@ function openFilterModal(target) {
   const forMap = state.filterModalTarget === "serviceMap";
   const title = document.getElementById?.("filterModalTitle");
   if (title) title.textContent = forMap ? "Service Map filter" : "Filter settings";
-  const kicker = els.filterModal.querySelector?.(".modal-header .placeholder-kicker");
-  if (kicker) kicker.textContent = forMap ? "Scope" : "HTTP";
   // The map keeps scope on its own In scope only toggle.
   els.filterInScopeOnly?.closest?.("label")?.classList.toggle("hidden", forMap);
   filterSettingsReturnFocus = document.activeElement;
@@ -25408,21 +25377,29 @@ function serviceMapFilterQuery(filters = sanitizeHttpFilterSettings(state.servic
   return query;
 }
 
-// What the Service Map filter hides, for the map toolbar.
-function serviceMapFilterSummary() {
-  const filters = sanitizeHttpFilterSettings(state.serviceMapFilterSettings);
+// What the filter dialog History and the Service Map share hides, in the same
+// words for both.
+function describeHttpFilters(filters) {
   const parts = [];
-  const extensions = filters.hiddenExtensions.split(",").map((value) => value.trim()).filter(Boolean);
+  const extensions = String(filters.hiddenExtensions || "").split(",").map((value) => value.trim()).filter(Boolean);
   if (extensions.length) parts.push(`hiding ${extensions.slice(0, 3).join(", ")}${extensions.length > 3 ? ` +${extensions.length - 3}` : ""}`);
-  const mimeOff = Object.entries(SERVICE_MAP_FILTER_MIME_LABELS).filter(([key]) => (key === "websocket" ? filters.mime.websocket === false : !filters.mime[key])).map(([, label]) => label);
+  const mimeOff = Object.entries(SERVICE_MAP_FILTER_MIME_LABELS).filter(([key]) => filters.mime?.[key] === false).map(([, label]) => label);
   if (mimeOff.length) parts.push(`no ${mimeOff.join(", ")}`);
-  const statusOff = Object.entries(SERVICE_MAP_FILTER_STATUS_LABELS).filter(([key]) => !filters.status[key]).map(([, label]) => label);
+  const statusOff = Object.entries(SERVICE_MAP_FILTER_STATUS_LABELS).filter(([key]) => filters.status?.[key] === false).map(([, label]) => label);
   if (statusOff.length) parts.push(`no ${statusOff.join(", ")}`);
   if (filters.hideWithoutResponses) parts.push("responses only");
   if (filters.onlyParameterized) parts.push("query parameters only");
   if (filters.onlyNotes) parts.push("notes only");
   if (filters.port) parts.push(`port ${filters.port}`);
   if (filters.searchTerm) parts.push(`${filters.negativeSearch ? "without" : "with"} "${filters.searchTerm}"`);
+  return parts;
+}
+
+// What the Service Map filter hides, for the map toolbar.
+function serviceMapFilterSummary() {
+  const filters = sanitizeHttpFilterSettings(state.serviceMapFilterSettings);
+  const parts = describeHttpFilters(filters);
+  const extensions = filters.hiddenExtensions.split(",").map((value) => value.trim()).filter(Boolean);
   const text = parts.length ? parts.join(" · ") : "showing every row";
   return { text, detail: `Service Map filter: ${text}${extensions.length > 3 ? ` (extensions ${extensions.join(", ")})` : ""}` };
 }
@@ -28425,19 +28402,6 @@ function humanizeProxyTab(value) {
     .join(" ");
 }
 
-function humanizeSortKey(key) {
-  switch (key) {
-    case "index":
-      return "#";
-    case "started_at":
-      return "time";
-    case "path":
-      return "url";
-    default:
-      return key.replaceAll("_", " ");
-  }
-}
-
 function defaultSortDirection(key) {
   return ["index", "started_at", "status", "length", "notes", "tls", "edited"].includes(key) ? "desc" : "asc";
 }
@@ -30414,8 +30378,8 @@ function renderCompareModal() {
   const targetSequence = compareTargetRecord.sequence ?? targetItem?.sequence ?? targetItem?.index ?? "?";
   const baseLabel = `#${baseSequence} ${compareBaseRecord.method} ${compareBaseRecord.host}${compareBaseRecord.path}`;
   const targetLabel = `#${targetSequence} ${compareTargetRecord.method} ${compareTargetRecord.host}${compareTargetRecord.path}`;
-  document.getElementById("compareKicker").textContent = `${baseLabel}  vs  ${targetLabel}`;
-  document.getElementById("compareTitle").textContent = compareActiveTab === "request" ? "Request Diff" : "Response Diff";
+  // The Request and Response tabs say which side is compared.
+  document.getElementById("compareTitle").textContent = `${baseLabel}  vs  ${targetLabel}`;
   document.querySelectorAll("[data-compare-tab]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.compareTab === compareActiveTab);
   });

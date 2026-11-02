@@ -66,7 +66,7 @@ function fixture() {
     "createDefaultFilterSettings", "openFilterModal", "closeFilterModal", "isModalVisible", "restoreModalFocus", "trapModalFocus", "getActiveModalAction",
     "hydrateFilterForm", "applyFilterSettings", "syncColorTagFilterUI", "truncateUiSettingsText", "sanitizeHttpFilterSettings", "sanitizeHttpBooleanMap", "sanitizeHttpColorTags", "serializeHttpFilterSettings",
     "isUiSettingsLoadSnapshot", "loadUiSettings", "retireFindingActionProgress", "invalidateFindingNavigation", "applyUiSettingsSnapshot", "updateUiSettingsServerRevision", "snapshotUiSettings", "nextUiSettingsSnapshot", "scheduleUiSettingsSave", "scheduleUiSettingsRetry", "persistUiSettings",
-    "serviceMapFilterApplied", "serviceMapFilterQuery", "serviceMapFilterSummary", "selectedMimeTypes", "selectedStatusClasses",
+    "serviceMapFilterApplied", "serviceMapFilterQuery", "serviceMapFilterSummary", "describeHttpFilters", "selectedMimeTypes", "selectedStatusClasses",
   ], { refreshHistoryFindings() {},
     targetServiceMapController: { filterChanged: () => mapFilterChanges.push(true) },
     SERVICE_MAP_FILTER_MIME_LABELS: { html: "HTML", script: "script", json: "JSON", css: "CSS", image: "images", websocket: "WebSocket", other: "other types" },

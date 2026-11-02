@@ -128,9 +128,7 @@
           </nav>
 
           <section class="filter-bar" id="filterBar">
-            <button class="filter-summary" id="historyMeta" type="button">
-              Filter settings: showing captured traffic
-            </button>
+            <button class="filter-summary" id="historyMeta" type="button">Loading requests…</button>
 
             <label class="search-box" aria-label="Search history">
               <input id="searchInput" type="search" placeholder="Search" />
@@ -404,7 +402,7 @@
               <section class="websocket-workbench" id="websocketWorkbench">
                 <section class="panel-card websocket-handshake-column" id="websocketHandshakeColumn">
                   <header class="panel-toolbar panel-toolbar-compact">
-                    <p class="placeholder-kicker">Handshake</p>
+                    <h2>Handshake</h2>
                     <div class="ws-handshake-tabs">
                       <button class="ws-tab active" id="wsHandshakeReqBtn" type="button">Request</button>
                       <button class="ws-tab" id="wsHandshakeResBtn" type="button">Response</button>
@@ -425,7 +423,7 @@
 
                 <section class="panel-card websocket-frames-column" id="websocketFramesColumn" tabindex="-1" aria-label="WebSocket frames">
                   <header class="panel-toolbar panel-toolbar-compact">
-                    <p class="placeholder-kicker">Frames</p>
+                    <h2>Frames</h2>
                   </header>
                   <div class="history-table-shell">
                     <table class="mini-table frame-table">
@@ -458,10 +456,7 @@
             <div class="split-panel split-panel-tight">
               <section class="panel-card">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Proxy</p>
-                    <h2>Replace rules</h2>
-                  </div>
+                  <h2>Replace rules</h2>
                   <div class="toolbar-actions">
                     <button class="accent-action" id="addMatchReplaceRuleButton" type="button">Add</button>
                     <button class="danger-action" id="deleteMatchReplaceRuleButton" type="button" disabled>Delete</button>
@@ -496,10 +491,7 @@
 
               <section class="panel-card">
                 <header class="panel-toolbar hidden" id="matchReplaceEditorHeader">
-                  <div>
-                    <p class="placeholder-kicker" id="matchReplaceEditorPath">Rule</p>
-                    <h2 id="matchReplaceEditorTitle">New rule</h2>
-                  </div>
+                  <h2 id="matchReplaceEditorTitle">New rule</h2>
                   <div class="toolbar-actions">
                     <button class="primary-action" id="saveMatchReplaceRuleButton" type="button" disabled>Save</button>
                   </div>
@@ -707,17 +699,17 @@
               <section class="panel-card panel-card-top">
                 <header class="panel-toolbar">
                   <div>
-                    <p class="placeholder-kicker">Out-of-Band — <span id="oastStatusText" class="oast-status-text">Not configured</span></p>
-                    <h2>OAST Callbacks</h2>
+                    <h2>Callbacks</h2>
+                    <p id="oastStatusText" class="oast-status-text">Not configured</p>
                   </div>
                   <div class="toolbar-actions">
-                    <button class="primary-action" id="oastGenerateButton" type="button">Generate Payload</button>
+                    <button class="primary-action" id="oastGenerateButton" type="button">Generate payload</button>
                     <button class="secondary-action" id="oastClearButton" type="button">Clear</button>
                   </div>
                 </header>
                 <div id="oastPayloadDisplay" class="oast-payload-display">
-                  <span class="oast-payload-label">Payload:</span>
-                  <input id="oastPayloadText" class="oast-payload-input" type="text" placeholder="Generate or paste your OAST subdomain here" spellcheck="false" aria-label="OAST payload" />
+                  <span class="oast-payload-label">Payload</span>
+                  <input id="oastPayloadText" class="oast-payload-input" type="text" placeholder="Generate or paste a domain" spellcheck="false" aria-label="OAST payload" />
                   <button class="utility-button" id="oastCopyPayloadButton" type="button" title="Copy" aria-label="Copy OAST payload">Copy</button>
                 </div>
                 <div class="history-table-shell">
@@ -737,13 +729,10 @@
               <div class="stack-resizer" aria-hidden="true"></div>
               <section class="panel-card">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Detail</p>
-                    <h2 id="oastDetailTitle">Select a callback</h2>
-                  </div>
+                  <h2 id="oastDetailTitle">No callback selected</h2>
                 </header>
                 <div class="editor-panel">
-                  <pre class="simple-code-view" id="oastDetailView" tabindex="0">Select an OAST callback to view details.</pre>
+                  <pre class="simple-code-view" id="oastDetailView" tabindex="0"></pre>
                 </div>
               </section>
             </div>
@@ -755,9 +744,8 @@
                 <div><h2 id="upstreamPeerHeading">Upstream socket peer</h2><p>Current session: <strong id="upstreamPeerSession">Loading…</strong></p></div>
               </header>
               <div class="settings-form">
-                <label class="settings-toggle"><input id="upstreamPeerEnabled" type="checkbox" aria-describedby="upstreamPeerDisclosure upstreamPeerTiming" disabled /><span>Record upstream socket peer (default: Off)</span></label>
-                <p id="upstreamPeerDisclosure">Stores the observed upstream IP address and port with future captured HTTP(S) exchanges. This may be an internal or proxy address and may identify a proxy rather than the origin. Stored peers are included in session exports and full-record JSON. Turning this off does not remove previously stored peers.</p>
-                <p id="upstreamPeerTiming">Changes apply to new exchanges. Eligible exchanges already in flight may finish using the previous setting.</p>
+                <label class="settings-toggle"><input id="upstreamPeerEnabled" type="checkbox" aria-describedby="upstreamPeerDisclosure" disabled /><span>Record upstream socket peer</span></label>
+                <p id="upstreamPeerDisclosure">Saves the upstream IP address and port with new HTTP(S) exchanges. It can be an internal or proxy address rather than the origin. Saved peers go into session exports and full-record JSON, and stay when this is turned off.</p>
                 <p id="upstreamPeerError" class="upstream-peer-error" role="alert"></p>
                 <p id="upstreamPeerStatus" role="status" aria-live="polite">Loading saved setting…</p>
                 <div class="toolbar-actions"><button class="primary-action" id="upstreamPeerSave" type="button" disabled>Save</button><button class="secondary-action" id="upstreamPeerCancel" type="button" disabled>Cancel</button><button class="secondary-action hidden" id="upstreamPeerRefresh" type="button">Check status</button></div>
@@ -768,16 +756,15 @@
                 <div><h2 id="historyRetentionHeading">HTTP History automatic cleanup</h2><p>Current session: <strong id="historyRetentionSession">Loading…</strong></p></div>
               </header>
               <div class="settings-form">
-                <fieldset class="history-retention-fields" aria-describedby="historyRetentionWarning historyRetentionProtection">
-                  <legend>Saved HTTP History limit</legend>
-                  <label class="settings-toggle"><input id="historyRetentionEnabled" type="checkbox" disabled /><span>Enable automatic cleanup (default: Off)</span></label>
-                  <label class="settings-field" for="historyRetentionPreset"><span>Keep newest total entries</span>
+                <fieldset class="history-retention-fields" aria-labelledby="historyRetentionHeading" aria-describedby="historyRetentionWarning historyRetentionProtection">
+                  <label class="settings-toggle"><input id="historyRetentionEnabled" type="checkbox" disabled /><span>Enable automatic cleanup</span></label>
+                  <label class="settings-field" for="historyRetentionPreset"><span>Keep the newest</span>
                     <select id="historyRetentionPreset" disabled><option value="10000">10,000</option><option value="50000">50,000</option><option value="100000">100,000</option><option value="250000">250,000</option><option value="custom">Custom</option></select>
                   </label>
-                  <label class="settings-field hidden" id="historyRetentionCustomField" for="historyRetentionCustom"><span>Custom total entry limit</span><input id="historyRetentionCustom" type="text" inputmode="numeric" pattern="[0-9]+" aria-describedby="historyRetentionCustomHelp historyRetentionError" disabled /><small id="historyRetentionCustomHelp">Whole number from 1 to 4,294,967,295.</small></label>
+                  <label class="settings-field hidden" id="historyRetentionCustomField" for="historyRetentionCustom"><span>Custom limit</span><input id="historyRetentionCustom" type="text" inputmode="numeric" pattern="[0-9]+" aria-describedby="historyRetentionCustomHelp historyRetentionError" disabled /><small id="historyRetentionCustomHelp">Whole number from 1 to 4,294,967,295.</small></label>
                 </fieldset>
-                <p id="historyRetentionWarning" class="history-retention-warning">Saving an enabled policy permanently deletes the oldest unprotected entries above the total target, now and as history grows. Deleted requests, responses and notes cannot be restored. Turning cleanup off does not restore deleted entries.</p>
-                <p id="historyRetentionProtection">Original records referenced by durably saved HTTP tabs and in-progress stored records are protected. Protected entries count toward the total; if they exceed the target, the limit is soft. Unsaved tabs and note edits do not protect records.</p>
+                <p id="historyRetentionWarning" class="history-retention-warning">Saving with cleanup on deletes the oldest unprotected entries above the limit, now and as history grows. Deleted requests, responses and notes cannot be restored.</p>
+                <p id="historyRetentionProtection">Entries still being written, and originals that saved Replay tabs use, are kept, so the total can stay above the limit. Unsaved tabs and note edits do not keep an entry.</p>
                 <p id="historyRetentionError" class="history-retention-error" role="alert"></p>
                 <p id="historyRetentionStatus" role="status" aria-live="polite">Loading saved policy…</p>
                 <div class="toolbar-actions"><button class="primary-action" id="historyRetentionSave" type="button" disabled>Save cleanup policy</button><button class="secondary-action" id="historyRetentionCancel" type="button" disabled>Cancel</button><button class="secondary-action" id="historyRetentionRefresh" type="button">Check status</button></div>
@@ -786,10 +773,7 @@
             <div class="split-panel split-panel-tight">
               <section class="panel-card">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Runtime</p>
-                    <h2>Settings</h2>
-                  </div>
+                  <h2>Proxy</h2>
                   <div class="toolbar-actions">
                     <button class="secondary-action" id="reloadProxySettingsButton" type="button">Reload</button>
                     <button class="primary-action" id="saveProxySettingsButton" type="button">Save</button>
@@ -820,7 +804,7 @@
                   <label class="settings-field">
                     <span>Upstream proxy address</span>
                     <input id="proxyChainUrl" type="text" placeholder="http://127.0.0.1:8081 or socks5h://127.0.0.1:1080" autocomplete="off" spellcheck="false" />
-                    <small>Forward captured traffic and Replay through an HTTP or SOCKS5 proxy. SOCKS5 resolves destination names remotely. Connection failures do not fall back to a direct connection.</small>
+                    <small>HTTP or SOCKS5, for captured traffic and Replay. SOCKS5 resolves names on the proxy, and a failed connection never goes direct.</small>
                   </label>
                   <label class="settings-field">
                     <span>Proxy username (optional)</span>
@@ -829,23 +813,23 @@
                   <label class="settings-field">
                     <span>Proxy password</span>
                     <input id="proxyChainPassword" type="password" autocomplete="new-password" />
-                    <small>A masked value keeps the saved password. Empty the field to remove it. Credentials are stored with this session on disk.</small>
+                    <small>Saved with this session on disk. Empty the field to remove it.</small>
                   </label>
                   <label class="settings-field">
                     <span>Connect directly to</span>
                     <textarea id="proxyChainBypassHosts" rows="3" placeholder="localhost&#10;*.internal.example.com"></textarea>
-                    <small>Hosts listed here skip the proxy chain and are reached directly, for captured HTTP and HTTPS, WebSocket and Replay. Same patterns as scope.</small>
+                    <small>Reached without the proxy chain. Same patterns as Scope.</small>
                   </label>
                   <div class="settings-divider"></div>
                   <label class="settings-field">
                     <span>Scope patterns</span>
                     <textarea id="proxySettingScopePatterns" rows="6" placeholder="*.example.com&#10;api.example.com"></textarea>
-                    <small>Only in-scope hosts are intercepted when intercept is enabled. Leave empty to match all hosts.</small>
+                    <small>Empty puts every host in scope.</small>
                   </label>
                   <label class="settings-field">
                     <span>SSL passthrough hosts</span>
-                    <textarea id="proxySettingPassthroughHosts" rows="4" placeholder="*.pinned-app.com&#10;banking.example.com"></textarea>
-                    <small>Hosts listed here bypass TLS interception entirely. Use for certificate-pinned apps that reject the proxy CA. Wildcards supported.</small>
+                    <textarea id="proxySettingPassthroughHosts" rows="4" placeholder="*.pinned.example.com&#10;banking.example.com"></textarea>
+                    <small>Not decrypted. For apps that pin their certificate.</small>
                   </label>
                   <div class="settings-divider"></div>
                   <label class="settings-toggle">
@@ -863,7 +847,7 @@
                   <label class="settings-field">
                     <span>OAST server URL</span>
                     <input id="proxySettingOastServerUrl" type="text" placeholder="https://interact.sh" />
-                    <small id="oastServerUrlHint">Interactsh-compatible server. Sniper auto-registers and polls for callbacks.</small>
+                    <small id="oastServerUrlHint">Sniper registers with it and polls for callbacks.</small>
                   </label>
                   <div class="settings-field" id="oastTokenField">
                     <span>OAST token</span>
@@ -881,7 +865,7 @@
                   <label class="settings-field">
                     <span>Proxy bind host</span>
                     <input id="proxySettingBindHost" type="text" list="proxyBindHostPresets" placeholder="127.0.0.1 or 0.0.0.0" required />
-                    <small>Common values: <code>127.0.0.1</code> for local-only, <code>0.0.0.0</code> to accept traffic from other devices.</small>
+                    <small><code>127.0.0.1</code>: this machine only. <code>0.0.0.0</code>: other devices too.</small>
                   </label>
                   <label class="settings-field">
                     <span>Proxy port</span>
@@ -898,10 +882,7 @@
 
               <section class="panel-card">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Workspace</p>
-                    <h2>Runtime details</h2>
-                  </div>
+                  <h2>Runtime details</h2>
                   <div class="toolbar-actions">
                     <button class="secondary-action" id="openCertFolderButton" type="button">Root CA</button>
                   </div>
@@ -1867,10 +1848,7 @@
         <section class="logger-shell hidden" id="loggerShell">
           <section class="panel-card">
             <header class="panel-toolbar">
-              <div>
-                <p class="placeholder-kicker">Event log</p>
-                <h2>Runtime events</h2>
-              </div>
+              <h2>Event log</h2>
               <div class="toolbar-actions">
                 <button class="secondary-action" id="clearEventLogButton" type="button">Clear</button>
               </div>
@@ -1912,10 +1890,7 @@
     <div class="modal-backdrop hidden" id="filterModal">
       <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="filterModalTitle">
         <header class="modal-header">
-          <div>
-            <p class="placeholder-kicker">HTTP</p>
-            <h2 id="filterModalTitle">Filter settings</h2>
-          </div>
+          <h2 id="filterModalTitle">Filter settings</h2>
           <button class="modal-close" id="closeFilterModalButton" type="button">Close</button>
         </header>
 
@@ -1983,10 +1958,7 @@
     <div class="modal-backdrop hidden" id="displaySettingsModal">
       <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="displaySettingsTitle">
         <header class="modal-header">
-          <div>
-            <p class="placeholder-kicker">Application</p>
-            <h2 id="displaySettingsTitle">Settings</h2>
-          </div>
+          <h2 id="displaySettingsTitle">Settings</h2>
           <button class="modal-close" id="closeDisplaySettingsButton" type="button">Close</button>
         </header>
 
@@ -2031,7 +2003,7 @@
                 </div>
               </div>
               <p class="modal-copy" id="certificateNote">
-                Download the local root certificate and trust it before using HTTPS interception.
+                Trust this CA to read HTTPS traffic.
               </p>
 
               <dl class="modal-list">
@@ -2152,10 +2124,7 @@
     <div class="modal-backdrop hidden" id="compareModal">
       <div class="modal-card modal-card-wide">
         <header class="modal-header">
-          <div>
-            <p class="placeholder-kicker" id="compareKicker">Compare</p>
-            <h2 id="compareTitle">Request Diff</h2>
-          </div>
+          <h2 id="compareTitle">Compare</h2>
           <div class="compare-tabs">
             <button class="sub-tab active" data-compare-tab="request" type="button">Request</button>
             <button class="sub-tab" data-compare-tab="response" type="button">Response</button>

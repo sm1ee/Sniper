@@ -1123,7 +1123,6 @@ code {
 
 /* Session and Scope: a title and its actions, no bar beneath. */
 :is(.dashboard-shell, .target-shell) .panel-toolbar {
-  align-items: center;
   padding: 16px 18px 8px;
   border-bottom: 0;
   background: none;
@@ -3318,9 +3317,6 @@ body.pane-resizing-y {
   font-size: var(--font-md);
   line-height: 1.22;
 }
-.sequence-shell .panel-toolbar {
-  align-items: center;
-}
 .sequence-shell .inline-copy {
   display: flex;
   align-items: center;
@@ -3701,10 +3697,6 @@ body.pane-resizing-y {
 .fuzzer-shell .panel-toolbar h2 {
   font-size: var(--font-md);
   line-height: 1.22;
-}
-
-.fuzzer-shell .panel-toolbar {
-  align-items: center;
 }
 
 .fuzzer-shell .inline-copy {
@@ -4449,12 +4441,6 @@ body.pane-resizing-y {
   box-shadow: inset -1px 0 0 var(--point-border);
 }
 
-.websocket-handshake-column .panel-toolbar h2 {
-  font-size: var(--font-md);
-  line-height: 1.28;
-  word-break: break-word;
-}
-
 .websocket-workbench .dual-code-panel,
 .websocket-workbench .history-table-shell {
   min-height: 0;
@@ -4624,6 +4610,11 @@ body.pane-resizing-y {
   background: rgba(255, 255, 255, 0.02);
 }
 
+/* Titles are a line, not a kicker over a title; keep the controls level. */
+.panel-toolbar {
+  align-items: center;
+}
+
 .panel-toolbar h2,
 .replay-header h2,
 .filter-group h3 {
@@ -4666,10 +4657,10 @@ body.pane-resizing-y {
   color: var(--text-soft);
 }
 
-/* A kicker can hold a URL with nothing to break at, and so does the held
-   item's title beside Drop and Forward. Two lines are enough to place it. */
-.panel-toolbar .placeholder-kicker,
-#interceptDetailTitle {
+/* A held item's title beside Drop and Forward, and Compare's title beside its
+   tabs, are URLs with nothing to break at. Two lines are enough to place them. */
+#interceptDetailTitle,
+#compareTitle {
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -6220,8 +6211,6 @@ button.utility-button.replay-tab-add {
 .settings-field span {
   color: var(--text-dim);
   font-size: var(--font-xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 /* :where keeps the old specificity, so :focus and per-panel rules still win. */
@@ -6255,6 +6244,10 @@ button.utility-button.replay-tab-add {
 .settings-field small {
   color: var(--text-soft);
   line-height: 1.5;
+}
+
+.settings-field small:empty {
+  display: none;
 }
 
 .select-box select,
@@ -6574,10 +6567,6 @@ button.utility-button.replay-tab-add {
   text-transform: none;
 }
 
-#matchReplacePanel .settings-field span {
-  text-transform: none;
-}
-
 .match-replace-search-group {
   display: grid;
   gap: 8px;
@@ -6644,11 +6633,6 @@ button.utility-button.replay-tab-add {
 .intercept-left-panel {
   display: flex;
   flex-direction: column;
-}
-
-/* One-line titles sit level with the controls beside them. */
-#interceptPanel .panel-toolbar {
-  align-items: center;
 }
 
 #interceptQueueShell:focus-visible {
@@ -7366,8 +7350,6 @@ button.utility-button.replay-tab-add {
 .oast-payload-label {
   color: var(--text-dim);
   font-size: var(--font-xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   flex-shrink: 0;
 }
 
@@ -8536,8 +8518,7 @@ button.utility-button.replay-tab-add {
 #proxySettingsPanel > .split-panel > .panel-card > .settings-form { overflow: visible; }
 .history-retention-card { flex: 0 0 auto; margin-bottom: 12px; }
 .history-retention-card p { margin: 0; line-height: 1.5; }
-.history-retention-fields { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(150px, 1fr); gap: 12px; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-md); }
-.history-retention-fields legend { padding: 0 6px; color: var(--text-dim); }
+.history-retention-fields { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(150px, 1fr); gap: 12px; margin: 0; padding: 0; border: 0; }
 .history-retention-fields .settings-toggle { grid-column: 1 / -1; }
 .history-retention-warning { color: var(--text); font-weight: 600; }
 .history-retention-error { color: var(--danger, #df596a); }
@@ -9119,7 +9100,6 @@ button.utility-button.replay-tab-add {
 /* The list's filters keep their own width beside the search box: sized to the
    column like the form's controls, the search box shrinks to nothing. */
 .templates-shell .recon-search-controls select { width: auto; min-width: 130px; }
-.templates-shell .panel-toolbar { align-items: center; }
 .templates-shell .recon-form { gap: 10px; padding: 8px 14px 12px; }
 .templates-run-actions > button { width: 100%; }
 .templates-scan textarea { min-height: 5em; }
