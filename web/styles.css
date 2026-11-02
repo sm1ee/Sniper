@@ -9078,16 +9078,14 @@ button.utility-button.replay-tab-add {
   .recon-inventory { flex: 0 0 650px; }
   .recon-pagination { flex-wrap: wrap; }
 }
-/* Source groups expose the distinction between local crawl and external work. */
+/* One row per kind of source, so the crawl and the third-party services read
+   apart without a sentence saying so. */
 .recon-sources { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 10px 0 0; margin: 0; }
 .recon-sources legend { padding: 0 7px 0 0; font-size: var(--font-xs); color: var(--text-dim); }
-.recon-source-row > span { display: grid; gap: 3px; }
-.recon-source-row small { font-size: var(--font-xs); color: var(--text-dim); }
 .recon-source-group { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 7px 10px; }
 .recon-source-group + .recon-source-group { border-top: 1px solid var(--line); padding-top: 9px; }
 .recon-source-label { grid-row: 1 / span 2; font-size: var(--font-xs); color: var(--text-dim); }
 .recon-source-group .recon-check { grid-column: 2; }
-.recon-authorization { font-size: var(--font-xs); }
 .recon-start { justify-self: stretch; }
 .recon-setup .panel-toolbar { padding: 10px 14px; }
 .recon-setup .recon-form { gap: 10px; }

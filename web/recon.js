@@ -23,7 +23,7 @@
   function optionalBudget(value, label) {
     const number = Number(value ?? 0);
     if (!Number.isSafeInteger(number) || number < 0) {
-      throw new Error(`${label} must be a nonnegative safe integer (0 means unlimited).`);
+      throw new Error(`${label} must be a whole number. Leave it empty for no limit.`);
     }
     return number;
   }
@@ -287,7 +287,7 @@
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
     const guard = createSessionGuard(options.getSessionId, options.getSessionGeneration);
-    const ids = ["Form", "Target", "Subdomains", "Scope", "Crawler", "Urlscan", "Wayback", "HistoryConsentRow", "HistoryConsent", "HistoryConsentText", "UrlscanSubmit", "ScanOptions", "ScanVisibility", "ScanConsent", "ScanConsentText", "MaxRequests", "MaxDepth", "MaxEndpoints", "MaxPages", "Start", "Refresh", "ActionStatus", "Jobs", "JobsMeta", "Search", "Kind", "InventoryMeta", "LoadStatus", "Head", "Endpoints", "Detail", "PageMeta", "Previous", "Next", "CopyJson"];
+    const ids = ["Form", "Target", "Subdomains", "Crawler", "Urlscan", "Wayback", "HistoryConsentRow", "HistoryConsent", "HistoryConsentText", "UrlscanSubmit", "ScanOptions", "ScanVisibility", "ScanConsent", "ScanConsentText", "MaxRequests", "MaxDepth", "MaxEndpoints", "MaxPages", "Start", "Refresh", "ActionStatus", "Jobs", "JobsMeta", "Search", "Kind", "InventoryMeta", "LoadStatus", "Head", "Endpoints", "Detail", "PageMeta", "Previous", "Next", "CopyJson"];
     const els = Object.fromEntries(ids.map((id) => [id, shell.querySelector(`#recon${id}`)]));
     let visible = false;
     let sessionId = null;
@@ -380,11 +380,8 @@
       els.HistoryConsent.required = services.length > 0;
       els.ScanOptions.classList.toggle("hidden", !els.UrlscanSubmit.checked);
       els.ScanConsent.required = els.UrlscanSubmit.checked;
-      els.ScanConsentText.textContent = `Allow sharing ${target ? target.href : "the full target URL"} with urlscan.io for a new ${els.ScanVisibility.value} browser scan, including requests outside Sniper's scope.`;
-      els.HistoryConsentText.textContent = `Allow sending ${target ? target.hostname : "the target domain"}${els.Subdomains.checked ? " and its subdomain search scope" : ""} to ${services.join(" and ")} for historical lookups.`;
-      els.Scope.textContent = target
-        ? `Stays on ${target.protocol}//${target.hostname}:${target.port || (target.protocol === "https:" ? "443" : "80")}${els.Subdomains.checked ? " and its subdomains" : ""}; a same-host redirect from HTTP to HTTPS is followed.`
-        : "Discovery stays on the URL's scheme, host and port.";
+      els.ScanConsentText.textContent = `Let urlscan.io open ${target ? target.href : "this URL"} in its own browser (${els.ScanVisibility.value})`;
+      els.HistoryConsentText.textContent = `Send ${target ? target.hostname : "the target domain"}${els.Subdomains.checked ? " and its subdomains" : ""} to ${services.join(" and ")}`;
     }
     function renderJobs() {
       const fragment = doc.createDocumentFragment();
@@ -415,7 +412,7 @@
         }
         card.append(sources);
         if (job.error) card.append(element("p", "recon-warning", job.error));
-        if (["cancelled", "interrupted", "failed"].includes(job.status)) card.append(element("p", "recon-help", "Partial results are retained in this session's inventory."));
+        if (["cancelled", "interrupted", "failed"].includes(job.status)) card.append(element("p", "recon-help", "Results so far are kept."));
         fragment.append(card);
       }
       els.Jobs.replaceChildren(fragment);
@@ -587,7 +584,8 @@
           if (!job || job.stopped !== true || job.session_id !== token.sessionId) throw new Error("The stop response could not be verified.");
           jobs = jobs.map((item) => item.id === id && ACTIVE_STATUSES.has(item.status) ? { ...item, status: "stopping" } : item);
         }
-        setAction(type === "start" ? "Discovery started. Progress and any optional budgets appear below." : "Stop requested. Results already discovered are retained.");
+        // A started job shows itself in Jobs.
+        setAction(type === "start" ? "" : "Stop requested.");
       } catch (error) {
         if (!canUse(token) || mutation !== request || error.name === "AbortError") return;
         setAction(`${error.message || "The request failed."} Refresh jobs to confirm the current state before trying again.`, true);

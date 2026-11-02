@@ -163,7 +163,7 @@ test("a scan request names its targets, its selection and whether it only counts
   assert.equal(one.acknowledged, true);
   assert.equal(one.filter, undefined);
   // Its On box does not select a template; clicking its row does.
-  assert.throws(() => templates.scanRequest({ ...values, selection: "selected" }, {}, null, "s-1", true), /Click a template's row/);
+  assert.throws(() => templates.scanRequest({ ...values, selection: "selected" }, {}, null, "s-1", true), /Select a template row first/);
   assert.throws(() => templates.scanRequest(values, {}, null, null, true), /session/);
   assert.throws(() => templates.scanRequest({ ...values, rate: "51" }, {}, null, "s-1", true), /from 1 to 50/);
   for (const bad of ["", "app.example.com", "https://app.example.com/?q=1", "https://user:pw@app.example.com", "ftp://app.example.com"]) {

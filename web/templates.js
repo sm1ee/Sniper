@@ -280,7 +280,7 @@
       apply_match_replace: !!values.applyMatchReplace,
     };
     if (values.selection === "selected") {
-      if (!selectedId) throw new Error("Click a template's row in the list first; its On box does not select it.");
+      if (!selectedId) throw new Error("Select a template row first.");
       body.ids = [selectedId];
     } else if (values.selection === "on") {
       body.filter = { enabled: true };
@@ -987,7 +987,7 @@
       field(fields, "History", job.history === "all" ? "Every request" : "Matched requests");
       els.Detail.append(fields);
       for (const warning of job.warnings || []) els.Detail.append(element("p", "recon-warning", warning));
-      els.Detail.append(element("p", "recon-empty", "Select a request to see what was sent and what came back."));
+      els.Detail.append(element("p", "recon-empty", "Select a request."));
     }
 
     function scanOwner() {
@@ -1130,7 +1130,7 @@
         }), "Could not save the passive templates");
         // The count is in the library summary; what it does not say is that
         // traffic already captured waits for a Rescan.
-        notice(body.enabled ? "Checks new traffic. Rescan in Findings checks what is already captured." : "");
+        notice(body.enabled ? "Applies to new traffic. Rescan Findings for earlier traffic." : "");
         if (selected && Array.isArray(body.ids) && body.ids.includes(selected.id)) await open(selected.id, { navigate: false });
       });
     }

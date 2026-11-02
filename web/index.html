@@ -1648,13 +1648,12 @@
                 <input id="reconTarget" type="url" placeholder="https://example.com/" required autocomplete="off" spellcheck="false" />
               </label>
               <label class="recon-check"><input id="reconSubdomains" type="checkbox" /> Include subdomains · same port</label>
-              <p class="recon-help" id="reconScope">Discovery stays on the URL's scheme, host and port.</p>
               <fieldset class="recon-sources">
-                <legend>Crawl target</legend>
-                <label class="recon-check recon-source-row"><input id="reconCrawler" type="checkbox" checked /><span>HTML / JavaScript<small>GET only · No browser or forms</small></span></label>
-              </fieldset>
-              <fieldset class="recon-sources">
-                <legend>External services</legend>
+                <legend>Sources</legend>
+                <div class="recon-source-group" role="group" aria-label="Crawl">
+                  <span class="recon-source-label">Crawl</span>
+                  <label class="recon-check" title="GET requests only, without a browser or forms"><input id="reconCrawler" type="checkbox" checked /> HTML / JavaScript</label>
+                </div>
                 <div class="recon-source-group" role="group" aria-label="Historical URLs">
                   <span class="recon-source-label">History</span>
                   <label class="recon-check"><input id="reconUrlscan" type="checkbox" /> urlscan.io</label>
@@ -1665,21 +1664,18 @@
                   <label class="recon-check"><input id="reconUrlscanSubmit" type="checkbox" /> urlscan.io browser</label>
                 </div>
               </fieldset>
-              <p class="recon-help recon-authorization">Authorized targets only. History and candidate URLs may be offline.</p>
-              <label class="recon-check recon-history-consent hidden" id="reconHistoryConsentRow"><input id="reconHistoryConsent" type="checkbox" /><span id="reconHistoryConsentText">Allow sending the target domain to the selected history services.</span></label>
+              <label class="recon-check recon-history-consent hidden" id="reconHistoryConsentRow"><input id="reconHistoryConsent" type="checkbox" /><span id="reconHistoryConsentText">Send the target domain to the selected history services</span></label>
               <div id="reconScanOptions" class="recon-scan-options hidden">
-                <label class="recon-field" for="reconScanVisibility">New scan visibility<select id="reconScanVisibility"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></label>
-                <p class="recon-help">urlscan.io gets the full URL, so drop the query and fragment first, and its browser may load third-party resources. Public results are visible to everyone; unlisted ones are not private.</p>
-                <label class="recon-check"><input id="reconScanConsent" type="checkbox" /><span id="reconScanConsentText">Allow a new urlscan.io scan of this URL with the selected visibility.</span></label>
+                <label class="recon-field" for="reconScanVisibility">Visibility<select id="reconScanVisibility"><option value="private">Private</option><option value="unlisted">Unlisted · not private</option><option value="public">Public · searchable</option></select></label>
+                <label class="recon-check"><input id="reconScanConsent" type="checkbox" /><span id="reconScanConsentText">Let urlscan.io open this URL in its own browser</span></label>
               </div>
               <details class="recon-limits">
                 <summary>Limits</summary>
-                <p class="recon-help">0 = unlimited</p>
                 <div class="recon-limit-fields">
-                  <label class="recon-field" for="reconMaxRequests">Crawler requests<input id="reconMaxRequests" type="number" min="0" step="1" value="0" /></label>
-                  <label class="recon-field" for="reconMaxDepth">Crawl depth<input id="reconMaxDepth" type="number" min="0" step="1" value="0" /></label>
-                  <label class="recon-field" for="reconMaxEndpoints">Endpoints<input id="reconMaxEndpoints" type="number" min="0" step="1" value="0" /></label>
-                  <label class="recon-field" for="reconMaxPages">History pages per source<input id="reconMaxPages" type="number" min="0" step="1" value="0" /></label>
+                  <label class="recon-field" for="reconMaxRequests">Crawler requests<input id="reconMaxRequests" type="number" min="0" step="1" placeholder="No limit" /></label>
+                  <label class="recon-field" for="reconMaxDepth">Crawl depth<input id="reconMaxDepth" type="number" min="0" step="1" placeholder="No limit" /></label>
+                  <label class="recon-field" for="reconMaxEndpoints">Endpoints<input id="reconMaxEndpoints" type="number" min="0" step="1" placeholder="No limit" /></label>
+                  <label class="recon-field" for="reconMaxPages">History pages per source<input id="reconMaxPages" type="number" min="0" step="1" placeholder="No limit" /></label>
                 </div>
               </details>
               <button class="primary-action recon-start" id="reconStart" type="submit" disabled>Start discovery</button>
@@ -1802,7 +1798,7 @@
           </section>
           <section class="panel-card templates-auto" aria-labelledby="templatesAutoTitle">
             <header class="panel-toolbar">
-              <h2 id="templatesAutoTitle" title="Sends the Scan templates turned on in the list to each new host the proxy captures in Scope or listed here, once a host. Only for hosts you may test.">Auto scan</h2>
+              <h2 id="templatesAutoTitle" title="Sends the Scan templates turned on in the list once to each new host in Scope or listed here">Auto scan</h2>
               <div class="toolbar-actions"><button class="switch" id="templatesAutoToggle" type="button" role="switch" aria-checked="false" aria-label="Auto scan" disabled></button></div>
             </header>
             <div class="recon-form">
