@@ -62,7 +62,7 @@ function fixture(mode, cm = true) {
   };
   const els = {};
   for (const name of [
-    "interceptTableBody", "responseInterceptTableBody", "interceptDetailPath", "interceptDetailTitle", "interceptMeta",
+    "interceptTableBody", "responseInterceptTableBody", "interceptDetailTitle", "interceptMeta",
     "interceptDetailRetryButton", "interceptDetailStatus",
     "forwardInterceptButton", "dropInterceptButton", "forwardResponseInterceptButton", "dropResponseInterceptButton",
     "interceptRequestEditor", "interceptResponseEditor", "interceptQueueTabRequest", "interceptQueueTabResponse",
@@ -116,7 +116,7 @@ function fixture(mode, cm = true) {
   const click = id => els[config.table].rows.find(row => row.dataset.id === id).click();
   const respond = (index, value) => requests[index].resolve({ ok: true, json: async () => value });
   const content = () => cm ? views.get(config.key)?.text || "" : els[config.editor].value;
-  const labels = () => JSON.stringify([els.interceptDetailPath.textContent, els.interceptDetailTitle.textContent, els.interceptMeta.textContent]);
+  const labels = () => JSON.stringify([els.interceptDetailTitle.textContent, els.interceptMeta.textContent]);
   const reset = () => {
     const source = appSource.match(/^function resetSessionScopedUiState\([^]*?^\}/m)[0];
     const start = source.indexOf("  state.intercepts = [];");
@@ -230,7 +230,7 @@ for (const mode of Object.keys(modes)) for (const cm of [true, false]) {
     assert.equal(f.state[f.config.record].is_websocket, undefined);
     assert.equal(f.state[f.config.record].request.preview_truncated, undefined);
     assert.equal(f.content(), draft);
-    assert.doesNotMatch(f.els.interceptMeta.textContent, /WebSocket|preview-truncated/);
+    assert.doesNotMatch(f.els.interceptMeta.textContent, /WebSocket|truncated/);
   });
 }
 
@@ -289,7 +289,7 @@ for (const mode of Object.keys(modes)) for (const cm of [true, false]) {
     if (failure === "JSON") f.requests[0].resolve({ ok: true, json: async () => { throw new Error("synthetic private JSON text"); } });
     await tick();
     assert.equal(f.els.interceptDetailTitle.textContent, `Could not load ${mode}`);
-    assert.equal(f.els.interceptMeta.textContent, `Could not load ${mode} details. Retry to try again.`);
+    assert.equal(f.els.interceptMeta.textContent, `Could not load ${mode} details.`);
     assert.doesNotMatch(f.labels(), /private/);
     for (const error of f.errors) assert.doesNotMatch(String(error), /private/, "reported detail errors never expose parser or transport text");
     const button = f.els.interceptDetailRetryButton;
@@ -359,7 +359,7 @@ for (const mode of Object.keys(modes)) for (const cm of [true, false]) {
     assert.equal(f.els[f.config.button].disabled, failure === "HTTP");
     assert.equal(f.els.interceptDetailRetryButton.disabled, false);
     assert.equal(f.els.interceptDetailRetryButton.classList.contains("hidden"), false);
-    assert.equal(f.els.interceptMeta.textContent, `Could not ${failure === "HTTP" ? "load" : "refresh"} ${mode} details. Retry to try again.`);
+    assert.equal(f.els.interceptMeta.textContent, `Could not ${failure === "HTTP" ? "load" : "refresh"} ${mode} details.`);
     const retry = f.c.retrySelectedInterceptDetail();
     assert.equal(f.requests.length, 3); f.respond(2, record("held-a")); await retry;
     assert.equal(f.content(), failure === "HTTP" ? f.raw(record("held-a")) : draft);

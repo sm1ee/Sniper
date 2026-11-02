@@ -62,3 +62,20 @@ test("no read starts while an intercept toggle is being sent", async () => {
   await f.c.pollAuxiliaryData();
   assert.equal(f.reads.length, 0);
 });
+
+// It was a red Off pill that said its state in words, as Active Scan's was.
+test("Intercept is one labelled switch whose state is aria-checked", () => {
+  const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/index.html"), "utf8");
+  assert.match(html, /<h2 id="interceptTitle">Intercept<\/h2>/);
+  assert.match(html, /<button class="switch" id="interceptStatus" type="button" role="switch" aria-checked="false" aria-labelledby="interceptTitle"><\/button>/);
+  const attributes = {};
+  const state = { runtime: { intercept_enabled: true } };
+  const c = loadFunctions(["renderInterceptStatus"], {
+    state, els: { interceptStatus: { setAttribute: (name, value) => { attributes[name] = value; } } },
+  });
+  c.renderInterceptStatus();
+  assert.equal(attributes["aria-checked"], "true");
+  state.runtime.intercept_enabled = false;
+  c.renderInterceptStatus();
+  assert.equal(attributes["aria-checked"], "false");
+});

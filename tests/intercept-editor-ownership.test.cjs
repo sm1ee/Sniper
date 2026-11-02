@@ -8,7 +8,7 @@ const { editorFixture, source, CM } = require('./replay-editor-fixture.cjs');
 function fixture(mode) {
   const f = editorFixture(), { state, context, els } = f;
   const element = () => ({ value: '', innerHTML: '', textContent: '', querySelectorAll: () => [], classList: { toggle() {} } });
-  for (const name of ['interceptTableBody', 'responseInterceptTableBody', 'interceptDetailPath', 'interceptDetailTitle',
+  for (const name of ['interceptTableBody', 'responseInterceptTableBody', 'interceptDetailTitle',
     'interceptMeta', 'forwardInterceptButton', 'dropInterceptButton', 'forwardResponseInterceptButton',
     'dropResponseInterceptButton', 'interceptRequestCM', 'interceptResponseCM', 'interceptSearchInput']) els[name] = element();
   els.interceptSearchMeta = null;
@@ -88,7 +88,8 @@ for (const mode of ['request', 'response']) test(`${mode}: actual CM constructio
   const selected = response ? 'selectedResponseIntercept' : 'selectedIntercept';
   const prefix = response ? 'responseIntercept' : 'intercept';
   f.state[queue] = []; f.render();
-  assert.equal(created.at(-1), `Intercepted ${mode} will appear here…`);
+  // The title already says nothing is selected; the editor stays blank.
+  assert.equal(created.at(-1), '');
   f.state[queue] = [f.a]; f.render();
   assert.equal(created.at(-1), `Loading selected ${mode} details…`);
   f.state[prefix + 'DetailGeneration'] = 1;

@@ -289,18 +289,15 @@
             <div class="split-panel">
               <section class="panel-card intercept-left-panel">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Intercept</p>
-                    <h2>Held items</h2>
-                  </div>
+                  <h2 id="interceptTitle">Intercept</h2>
                   <div class="toolbar-actions">
                     <button class="scope-pill" id="interceptInScopeToggle" type="button" title="Only intercept in-scope hosts">In scope</button>
-                    <button class="toggle-pill" id="interceptStatus" type="button">Off</button>
+                    <button class="switch" id="interceptStatus" type="button" role="switch" aria-checked="false" aria-labelledby="interceptTitle"></button>
                   </div>
                 </header>
                 <nav class="intercept-queue-tabs">
-                  <button class="intercept-queue-tab active" data-queue="request" id="interceptQueueTabRequest">Request Queue</button>
-                  <button class="intercept-queue-tab" data-queue="response" id="interceptQueueTabResponse">Response Queue</button>
+                  <button class="intercept-queue-tab active" data-queue="request" id="interceptQueueTabRequest">Requests</button>
+                  <button class="intercept-queue-tab" data-queue="response" id="interceptQueueTabResponse">Responses</button>
                 </nav>
                 <p class="intercept-queue-accessibility" id="interceptQueueInstructions">Use Up and Down arrow keys to select a held item.</p>
                 <p class="intercept-queue-accessibility" id="interceptQueueSelectionStatus" role="status" aria-live="polite" aria-atomic="true">Request queue is empty.</p>
@@ -330,12 +327,9 @@
                   </table>
                 </div>
                 <header class="panel-toolbar intercept-rules-header">
-                  <div>
-                    <p class="placeholder-kicker">Conditions</p>
-                    <h2>Intercept Rules</h2>
-                  </div>
+                  <h2>Rules</h2>
                   <div class="toolbar-actions">
-                    <button class="secondary-action" id="addInterceptRuleButton" type="button">+ Rule</button>
+                    <button class="secondary-action" id="addInterceptRuleButton" type="button">Add rule</button>
                   </div>
                 </header>
                 <div class="intercept-rules-list" id="interceptRulesList"></div>
@@ -343,10 +337,7 @@
 
               <section class="panel-card" id="interceptDetailPanel">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker" id="interceptDetailPath">Intercept</p>
-                    <h2 id="interceptDetailTitle">No request selected</h2>
-                  </div>
+                  <h2 id="interceptDetailTitle">No request selected</h2>
                   <div class="toolbar-actions" id="interceptDetailActions">
                     <button class="secondary-action hidden" id="interceptDetailRetryButton" type="button" aria-describedby="interceptDetailStatus" aria-disabled="true" aria-busy="false">Retry detail</button>
                     <div class="toolbar-actions" id="interceptRequestActions">
@@ -371,7 +362,7 @@
                     <input id="interceptSearchInput" type="search" placeholder="Search" />
                   </label>
                   <span id="interceptSearchMeta">No highlights</span>
-                  <span id="interceptMeta">Intercept is empty.</span>
+                  <span id="interceptMeta"></span>
                 </footer>
               </section>
             </div>

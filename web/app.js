@@ -858,7 +858,6 @@ const els = {
   interceptQueueShell: document.getElementById("interceptQueueShell"),
   interceptQueueSelectionStatus: document.getElementById("interceptQueueSelectionStatus"),
   interceptTableBody: document.getElementById("interceptTableBody"),
-  interceptDetailPath: document.getElementById("interceptDetailPath"),
   interceptDetailTitle: document.getElementById("interceptDetailTitle"),
   interceptDetailRetryButton: document.getElementById("interceptDetailRetryButton"),
   interceptDetailStatus: document.getElementById("interceptDetailStatus"),
@@ -6769,7 +6768,7 @@ function renderInterceptRules() {
   if (!container) return;
   const rules = state.interceptRules || [];
   if (!rules.length) {
-    container.innerHTML = `<div class="intercept-rules-empty">No rules: every in-scope request and response is intercepted. Add a rule to narrow it to one direction, or to specific hosts, paths or methods.</div>`;
+    container.innerHTML = `<div class="intercept-rules-empty">No rules, so both requests and responses are held.</div>`;
     return;
   }
   container.innerHTML = rules.map((rule, index) => {
@@ -6777,7 +6776,7 @@ function renderInterceptRules() {
     const host = rule.host_pattern || "*";
     const path = rule.path_pattern || "*";
     const scope = rule.scope || "request";
-    const scopeLabel = scope === "both" ? "Req+Res" : scope === "response" ? "Res" : "Req";
+    const scopeLabel = scope === "both" ? "Both" : scope === "response" ? "Response" : "Request";
     return `<div class="intercept-rule-row${rule.enabled ? "" : " disabled"}" data-rule-id="${rule.id}">
       <label class="intercept-rule-toggle" title="Enable/disable">
         <input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" aria-label="Enable intercept rule ${index + 1}" />
@@ -6830,9 +6829,9 @@ function editInterceptRule(ruleId, { focusScope = false } = {}) {
       <option value="response"${scope === "response" ? " selected" : ""}>Response</option>
       <option value="both"${scope === "both" ? " selected" : ""}>Both</option>
     </select>
-    <input class="intercept-rule-input" type="text" data-field="method_filter" aria-label="Methods for ${context}" placeholder="Methods (e.g. GET,POST)" value="${escapeHtml((rule.method_filter || []).join(", "))}" />
-    <input class="intercept-rule-input" type="text" data-field="host_pattern" aria-label="Host pattern for ${context}" placeholder="Host (e.g. *.example.com)" value="${escapeHtml(rule.host_pattern || "")}" />
-    <input class="intercept-rule-input" type="text" data-field="path_pattern" aria-label="Path contains for ${context}" placeholder="Path contains (e.g. /api/)" value="${escapeHtml(rule.path_pattern || "")}" />
+    <input class="intercept-rule-input" type="text" data-field="method_filter" aria-label="Methods for ${context}" placeholder="GET, POST" value="${escapeHtml((rule.method_filter || []).join(", "))}" />
+    <input class="intercept-rule-input" type="text" data-field="host_pattern" aria-label="Host pattern for ${context}" placeholder="*.example.com" value="${escapeHtml(rule.host_pattern || "")}" />
+    <input class="intercept-rule-input" type="text" data-field="path_pattern" aria-label="Path contains for ${context}" placeholder="/api/" value="${escapeHtml(rule.path_pattern || "")}" />
     <button class="intercept-rule-save" type="button" data-rule-save="${rule.id}" aria-label="Save ${context}">&#10003;</button>
     <button class="intercept-rule-delete" type="button" data-rule-delete="${rule.id}" aria-label="Delete ${context}">&times;</button>
   `;
@@ -12539,9 +12538,7 @@ function renderInspectorPanels() {
 }
 
 function renderInterceptStatus() {
-  const enabled = Boolean(state.runtime?.intercept_enabled);
-  els.interceptStatus.textContent = enabled ? "On" : "Off";
-  els.interceptStatus.classList.toggle("online", enabled);
+  els.interceptStatus.setAttribute("aria-checked", String(Boolean(state.runtime?.intercept_enabled)));
 }
 
 // The UI listener is normally loopback-only. When it is not, say so wherever the
@@ -14108,7 +14105,7 @@ function updateInterceptDetailFeedback(queue) {
   const error = Boolean(read?.error && (!read.pending || !read.showPending));
   const loading = Boolean(id && !record && !error);
   const message = loading ? `Loading selected ${queue} details.`
-    : error ? `Could not ${record ? "refresh" : "load"} ${queue} details. Retry to try again.` : "";
+    : error ? `Could not ${record ? "refresh" : "load"} ${queue} details.` : "";
   // Both queues refresh independently; only the visible owner may announce or
   // expose Retry. Keep its button during a retry so focus is not hidden mid-read.
   if (state.interceptQueueTab === queue) {
@@ -14305,7 +14302,7 @@ function renderIntercepts() {
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="4">Intercept queue is empty.</td>
+          <td colspan="4">No held requests.</td>
         </tr>
       `;
 
@@ -14330,23 +14327,20 @@ function renderIntercepts() {
     state.interceptEditorSeedId = null;
     if (state.interceptQueueTab === "request") {
       const selected = filteredIntercepts.find((item) => item.id === state.selectedInterceptId);
-      els.interceptDetailPath.textContent = selected ? `${selected.method} ${selected.host}${selected.path || "/"}` : "Intercept";
       els.interceptDetailTitle.textContent = selected
         ? (feedback.error ? "Could not load request" : "Loading request…") : "No request selected";
-      els.interceptMeta.textContent = feedback.message || (state.runtime?.intercept_enabled
-        ? "Intercept is on. New requests will queue here."
-        : "Intercept is off. Toggle it on to pause requests before forwarding.");
+      els.interceptMeta.textContent = feedback.message;
     }
     if (els.interceptRequestCM) {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM, "", {
         mode: "http", readOnly: false,
         placeholder: feedback.loading ? "Loading selected request details…"
-          : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here…",
+          : feedback.error ? "Could not load request details. Use Retry detail." : "",
       });
     } else {
       els.interceptRequestEditor.value = "";
       els.interceptRequestEditor.placeholder = feedback.loading ? "Loading selected request details…"
-        : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here…";
+        : feedback.error ? "Could not load request details. Use Retry detail." : "";
       renderInterceptRequestHighlight("");
     }
     els.forwardInterceptButton.disabled = true;
@@ -14355,13 +14349,13 @@ function renderIntercepts() {
   }
 
   if (state.interceptQueueTab === "request") {
-    els.interceptDetailPath.textContent = `${state.selectedInterceptRecord.request.scheme.toUpperCase()} / ${state.selectedInterceptRecord.peer_addr}`;
-    els.interceptDetailTitle.textContent = `${state.selectedInterceptRecord.request.method} ${state.selectedInterceptRecord.request.host}`;
+    const { request, peer_addr: client, is_websocket: websocket } = state.selectedInterceptRecord;
+    els.interceptDetailTitle.textContent = `${request.method} ${request.scheme}://${request.host}${request.path || "/"}`;
     els.interceptMeta.textContent = feedback.message || [
-      state.selectedInterceptRecord.is_websocket ? "WebSocket upgrade" : "HTTP request",
-      `queued at ${formatTimestamp(state.selectedInterceptRecord.started_at)}`,
-      state.selectedInterceptRecord.request.preview_truncated ? "captured request body is preview-truncated" : "body captured in memory",
-    ].join(" · ");
+      `Client ${client}`,
+      websocket && "WebSocket upgrade",
+      request.preview_truncated && "Captured preview is truncated",
+    ].filter(Boolean).join(" · ");
   }
   // Polling refreshes the held record, but the editor owns its draft until the
   // selection changes. Losing focus (including to search) must not re-seed it.
@@ -20896,7 +20890,7 @@ function renderResponseIntercepts() {
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="5">Response intercept queue is empty.</td>
+          <td colspan="5">No held responses.</td>
         </tr>
       `;
 
@@ -20913,22 +20907,19 @@ function renderResponseIntercepts() {
       setInterceptPaneContent("interceptRes", els.interceptResponseCM, "", {
         mode: "http", readOnly: false,
         placeholder: feedback.loading ? "Loading selected response details…"
-          : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here…",
+          : feedback.error ? "Could not load response details. Use Retry detail." : "",
       });
     } else {
       els.interceptResponseEditor.value = "";
       els.interceptResponseEditor.placeholder = feedback.loading ? "Loading selected response details…"
-        : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here…";
+        : feedback.error ? "Could not load response details. Use Retry detail." : "";
       renderInterceptResponseHighlight("");
     }
     if (state.interceptQueueTab === "response") {
       const selected = filteredResponseIntercepts.find((item) => item.id === state.selectedResponseInterceptId);
-      els.interceptDetailPath.textContent = selected ? `${selected.status} / ${selected.method} ${selected.host}${selected.path || "/"}` : "Response Intercept";
       els.interceptDetailTitle.textContent = selected
         ? (feedback.error ? "Could not load response" : "Loading response…") : "No response selected";
-      els.interceptMeta.textContent = feedback.message || (state.runtime?.intercept_enabled
-        ? "Intercept is on. Matched responses will queue here."
-        : "Intercept is off. Toggle it on to pause responses before forwarding.");
+      els.interceptMeta.textContent = feedback.message;
     }
     els.forwardResponseInterceptButton.disabled = true;
     els.dropResponseInterceptButton.disabled = true;
@@ -20937,8 +20928,7 @@ function renderResponseIntercepts() {
 
   const rec = state.selectedResponseInterceptRecord;
   if (state.interceptQueueTab === "response") {
-    els.interceptDetailPath.textContent = `${rec.scheme.toUpperCase()} / ${rec.method} ${rec.host}${rec.path}`;
-    els.interceptDetailTitle.textContent = `${rec.status} Response`;
+    els.interceptDetailTitle.textContent = `${rec.status} · ${rec.method} ${rec.scheme}://${rec.host}${rec.path || "/"}`;
     // As with requests, preserve this record's draft and search state on polls.
     if (els.interceptResponseCM) {
       if (state.responseInterceptEditorSeedId !== rec.id) {
@@ -20956,7 +20946,7 @@ function renderResponseIntercepts() {
       }
       renderInterceptResponseHighlight(els.interceptResponseEditor.value);
     }
-    els.interceptMeta.textContent = feedback.message || `Response queued at ${formatTimestamp(rec.started_at)}`;
+    els.interceptMeta.textContent = feedback.message;
   }
   els.forwardResponseInterceptButton.disabled = false;
   els.dropResponseInterceptButton.disabled = false;
@@ -21043,8 +21033,8 @@ async function dropSelectedResponseIntercept() {
 function updateInterceptQueueBadges() {
   const reqCount = state.intercepts.length;
   const resCount = state.responseIntercepts.length;
-  els.interceptQueueTabRequest.textContent = reqCount > 0 ? `Request Queue (${reqCount})` : "Request Queue";
-  els.interceptQueueTabResponse.textContent = resCount > 0 ? `Response Queue (${resCount})` : "Response Queue";
+  els.interceptQueueTabRequest.textContent = reqCount > 0 ? `Requests (${reqCount})` : "Requests";
+  els.interceptQueueTabResponse.textContent = resCount > 0 ? `Responses (${resCount})` : "Responses";
 }
 
 /** Key of the intercept CM pane that is currently visible. */

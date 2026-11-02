@@ -62,7 +62,7 @@ function fixture(mode, cm) {
   };
   const els = {};
   for (const name of [
-    "interceptTableBody", "responseInterceptTableBody", "interceptDetailPath", "interceptDetailTitle", "interceptMeta",
+    "interceptTableBody", "responseInterceptTableBody", "interceptDetailTitle", "interceptMeta",
     "forwardInterceptButton", "dropInterceptButton", "forwardResponseInterceptButton", "dropResponseInterceptButton",
     "interceptRequestEditor", "interceptResponseEditor", "interceptQueueTabRequest", "interceptQueueTabResponse",
     "interceptRequestTable", "responseInterceptTable", "interceptRequestEditorPanel", "interceptResponseEditorPanel",

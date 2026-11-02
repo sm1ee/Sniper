@@ -1991,33 +1991,6 @@ code {
   box-shadow: 0 0 0 1px var(--point-soft);
 }
 
-.toggle-pill {
-  min-width: 48px;
-  padding: 6px 14px;
-  border: 1px solid var(--danger);
-  border-radius: var(--radius-md);
-  background: rgba(200, 80, 80, 0.1);
-  color: var(--danger);
-  cursor: pointer;
-  font-size: var(--font-xs);
-  font-family: var(--sans);
-  font-weight: 600;
-  white-space: nowrap;
-  text-align: center;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-
-.toggle-pill.online {
-  border-color: #50c878;
-  background: rgba(80, 200, 120, 0.12);
-  color: #50c878;
-}
-
-.toggle-pill:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
 /* On or off, as a settings switch reads. The state is aria-checked, so what
    it shows and what it announces cannot disagree. */
 .switch {
@@ -4693,9 +4666,10 @@ body.pane-resizing-y {
   color: var(--text-soft);
 }
 
-/* A kicker can hold a URL with nothing to break at; held responses show
-   theirs above Drop and Forward. Two lines are enough to place it. */
-.panel-toolbar .placeholder-kicker {
+/* A kicker can hold a URL with nothing to break at, and so does the held
+   item's title beside Drop and Forward. Two lines are enough to place it. */
+.panel-toolbar .placeholder-kicker,
+#interceptDetailTitle {
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -5029,12 +5003,6 @@ button.utility-button.replay-tab-add {
   padding: 4px 14px;
   font-size: var(--font-xs);
   border-radius: 6px;
-}
-
-.toolbar-actions .toggle-pill {
-  min-height: var(--control-h);
-  padding: 4px 14px;
-  font-size: var(--font-xs);
 }
 
 .mini-table {
@@ -6521,7 +6489,6 @@ button.utility-button.replay-tab-add {
 .secondary-action,
 .danger-action,
 .accent-action,
-.toggle-pill,
 .utility-button,
 .modal-close,
 .sub-tab,
@@ -6534,7 +6501,6 @@ button.utility-button.replay-tab-add {
 .secondary-action:active,
 .danger-action:active,
 .accent-action:active,
-.toggle-pill:active,
 .utility-button:active,
 .modal-close:active,
 .sub-tab:active,
@@ -6680,6 +6646,11 @@ button.utility-button.replay-tab-add {
   flex-direction: column;
 }
 
+/* One-line titles sit level with the controls beside them. */
+#interceptPanel .panel-toolbar {
+  align-items: center;
+}
+
 #interceptQueueShell:focus-visible {
   outline: 2px solid var(--point);
   outline-offset: -2px;
@@ -6774,6 +6745,15 @@ button.utility-button.replay-tab-add {
   flex: 0 0 auto;
 }
 
+/* Add rule and each rule's Edit stay quiet until pointed at, as Scan's header
+   actions do. */
+.intercept-rules-header .secondary-action:not(:hover),
+.intercept-rule-row .secondary-action:not(:hover) {
+  border-color: transparent;
+  background: none;
+  color: var(--text-soft);
+}
+
 .intercept-rules-list {
   flex: 0 0 auto;
   max-height: 180px;
@@ -6821,8 +6801,7 @@ button.utility-button.replay-tab-add {
   color: var(--accent);
   font-size: 0.7rem;
   font-weight: 600;
-  min-width: 32px;
-  text-transform: uppercase;
+  min-width: 56px;
 }
 .intercept-rule-scope-select {
   max-width: 80px;

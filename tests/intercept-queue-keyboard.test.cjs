@@ -50,7 +50,7 @@ function fixture(mode, cm = true) {
   }
   const els = {};
   for (const name of ["interceptQueueShell", "interceptQueueSelectionStatus", "interceptTableBody", "responseInterceptTableBody",
-    "interceptDetailPath", "interceptDetailTitle", "interceptMeta", "forwardInterceptButton", "dropInterceptButton",
+    "interceptDetailTitle", "interceptMeta", "forwardInterceptButton", "dropInterceptButton",
     "forwardResponseInterceptButton", "dropResponseInterceptButton", "interceptRequestEditor", "interceptResponseEditor",
     "interceptQueueTabRequest", "interceptQueueTabResponse", "interceptRequestTable", "responseInterceptTable",
     "interceptRequestEditorPanel", "interceptResponseEditorPanel", "interceptRequestActions", "responseInterceptActions",
