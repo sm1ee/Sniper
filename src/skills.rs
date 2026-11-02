@@ -355,12 +355,31 @@ mod tests {
     fn service_map_readme_collection_link_matches_integration_heading() {
         let readme = include_str!("../README.md");
         let contract = include_str!("../docs/integrations/service-map.md");
-        assert!(readme.contains(
-            "](docs/integrations/service-map.md#session-local-retained-relationship-collection-gui-only)"
-        ));
-        assert!(contract
+        // GitHub's anchor for a heading: lower case, punctuation other than
+        // hyphens dropped, spaces as hyphens.
+        let anchors: Vec<String> = contract
             .lines()
-            .any(|line| line == "## Session-local retained relationship collection (GUI only)"));
+            .filter(|line| line.starts_with('#'))
+            .map(|line| line.trim_start_matches('#').trim())
+            .map(|heading| {
+                heading
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+                    .map(|c| if c == ' ' { '-' } else { c })
+                    .collect()
+            })
+            .collect();
+        assert!(anchors
+            .contains(&"session-local-retained-relationship-collection-gui-only".to_string()));
+        // Every README link into the contract names a heading that exists.
+        for link in readme.split("](docs/integrations/service-map.md#").skip(1) {
+            let anchor = link.split(')').next().unwrap_or_default();
+            assert!(
+                anchors.iter().any(|known| known == anchor),
+                "stale anchor #{anchor}"
+            );
+        }
         assert!(!readme.contains("#temporary-body-reference-overlay-gui-only"));
     }
 

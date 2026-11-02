@@ -1,6 +1,6 @@
 # Using Sniper from Claude Code
 
-Claude Code drives Sniper through [`sniper-cli`](../../README.md#cli), not the
+Claude Code drives Sniper through [`sniper-cli`](../guides/cli.md), not the
 UI. A bundled skill teaches it the commands, that writes need `--dry-run` before
 `--yes`, and that captures carry real credentials.
 
@@ -21,7 +21,7 @@ The installed file is a copy of
 The desktop app overwrites the default-folder copy on every launch, so it
 tracks Sniper updates and loses local edits. A `--claude-dir` copy is not
 updated; reinstall it after an update. `skills install` needs no running Sniper
-and leaves `PATH` alone (see the [CLI section of the README](../../README.md#cli)).
+and leaves `PATH` alone (see the [CLI guide](../guides/cli.md#getting-it-on-path)).
 
 ### OpenCode
 
@@ -118,7 +118,7 @@ Findings and event logs are read-only: `findings list`,
 `findings get --id <uuid>`, `findings count` and `event-log list` need no
 `--yes`. Lists return the newest 100 entries by default, and `--session-id`
 reads another session without switching to it. See the
-[CLI contract](../../README.md#cli).
+[CLI contract](../guides/cli.md#reads-writes-and-the-manifest).
 
 ## What needs your approval
 

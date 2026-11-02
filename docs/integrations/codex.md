@@ -89,7 +89,7 @@ For anything else, `sniper-cli manifest` lists every operation,
 `sniper-cli examples <operation>` a sample input.
 `sniper-cli call <operation> --input '<json>'` runs any operation and returns
 the result under `data`; the older subcommands return raw JSON. See the
-[CLI contract](../../README.md#cli).
+[CLI contract](../guides/cli.md#reads-writes-and-the-manifest).
 
 ## What needs your approval
 
@@ -143,7 +143,7 @@ out of it.
 | Symptom | Cause and fix |
 | --- | --- |
 | Nothing is captured although requests succeed | `curl -x` honours `no_proxy`, which usually includes `127.0.0.1`, so requests to a local upstream bypass the proxy. Check `no_proxy` and `http_proxy`. |
-| `sniper-cli: command not found` | The binary ships inside the app bundle, and Sniper does not edit your shell profile unless asked. See the [README](../../README.md#cli). |
+| `sniper-cli: command not found` | The binary ships inside the app bundle, and Sniper does not edit your shell profile unless asked. See the [CLI guide](../guides/cli.md#getting-it-on-path). |
 | Codex does not use the skill | Check that `~/.codex/skills/sniper-operator/SKILL.md` exists and that `CODEX_HOME` does not point elsewhere. |
 
 ## Where Codex and Claude Code differ

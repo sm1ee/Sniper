@@ -58,6 +58,21 @@ PY
 python3 /tmp/sniper-doc-http-upstream.py &
 ```
 
+## Opening the UI from another machine
+
+A UI address other than loopback, such as `192.168.1.10`, or `0.0.0.0` for every
+interface, turns on authentication:
+
+```bash
+SNIPER_DATA_DIR=/tmp/sniper-headless \
+SNIPER_UI_ADDR=192.168.1.10:23001 \
+  cargo run --bin sniper
+```
+
+Clients on other hosts open the URL with the one-time bootstrap token that Sniper
+prints at startup. The UI is plain HTTP, so across an untrusted network use an SSH
+tunnel or an authenticated TLS reverse proxy.
+
 ## Pointing a client at it
 
 Set the browser's HTTP proxy to `127.0.0.1:8080` in the system network settings
@@ -105,6 +120,13 @@ and `auto` (**Use auto** in the menu) clears it. `--browser` takes `chrome`,
 saved, Sniper opens the first installed of ego, Aside, BrowserOS neo, Chrome,
 Edge, Brave and Chromium. If the saved browser was uninstalled, it falls back to
 that order and says so in `warnings`.
+
+| Browser | Platforms | An agent drives it through |
+|---|---|---|
+| Chrome, Edge, Brave, Chromium | macOS, Windows, Linux | the DevTools protocol (Playwright, chrome-devtools-mcp) |
+| [ego](https://lite.ego.app/) | macOS | ego's own CLI and agent skill |
+| [Aside](https://aside.com/) | macOS, Windows | Aside's CLI REPL |
+| [BrowserOS neo](https://docs.browseros.com/neo/install) | macOS, Windows | its MCP server |
 
 `capture browser open` starts a process, so it needs `--yes`, or `--dry-run` to
 see the request first. The result says how to reach the browser:
@@ -237,6 +259,20 @@ server has updated it. Use the persistent profile, which keeps the newer server.
   mostly on a new profile's first launch. Filter the history to your target's
   host to hide that traffic.
 
+## Sending traffic through another proxy
+
+In **Capture → Settings**, turn on **Proxy chain** and enter the upstream proxy,
+such as `http://127.0.0.1:8081` or `socks5h://127.0.0.1:1080`, with an optional
+username and password. Captured traffic, Replay, Fuzzer and Sequence then go
+through it. If it fails, requests fail; Sniper does not fall back to a direct
+connection. Hosts under **Connect directly to** (scope patterns such as
+`*.example.com`) skip it.
+
+Settings are per session, and the password is stored in the session files on
+disk. `sniper-cli capture proxy` reads the settings, and
+`sniper-cli capture proxy --stdin --yes` replaces them from JSON with `enabled`,
+`url`, `username`, `password` and an optional `bypass_hosts` array.
+
 ## Watching requests arrive
 
 In the UI, the **Capture** tab's **HTTP** sub-tab shows recorded traffic that
@@ -296,6 +332,22 @@ or the result passes the 16 MiB decoding limit, Sniper keeps the encoded bytes
 rather than a partial result. `body_size` stays the wire size; a decoded body
 adds `decoded_body_size` and `content_decoded`. Captures made before this change
 keep their previews; capture the traffic again to see the rest.
+
+## Rendering a response
+
+The **Render** tab in HTTP history, Replay and the Fuzzer's results draws HTML
+and images in a sandboxed frame, with scripts, forms, links and network access
+off. **Settings ▸ Display ▸ Render ▸ Load images, styles and fonts** lets it fetch
+the images, stylesheets and fonts a page names, through Sniper and the proxy
+chain. Those requests go to the target and any other host the page names, and
+HTTP history does not record them. Scripts never run.
+
+## Findings in the history
+
+With **Findings** on in HTTP (or **Mark in HTTP** in Findings), requests with a
+finding get a severity badge in Notes, a row tint (Settings ▸ Display) that the
+colour filter can gather, and the highlighted evidence. A note or colour tag you
+set takes precedence.
 
 ## Trusting the CA, and what that means
 

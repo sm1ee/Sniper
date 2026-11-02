@@ -54,7 +54,8 @@ test('CLI and public guides explain the unchanged URL-query flag', () => {
   const cli = fs.readFileSync(path.join(__dirname, '../src/bin/sniper-cli.rs'), 'utf8');
   assert.match(cli, /Keep only rows whose URL has a query string; body fields do not match\./);
   assert.match(cli, /Display filter: keep only rows whose URL has a query string; body fields do not match\. Null uses false\./);
-  for (const file of ['README.md', 'docs/integrations/service-map.md', 'packaging/skills/codex/sniper-operator/SKILL.md', 'packaging/skills/claude/sniper-operator/SKILL.md']) {
+  // The README points to the Service Map guide instead of explaining the flag.
+  for (const file of ['docs/integrations/service-map.md', 'packaging/skills/codex/sniper-operator/SKILL.md', 'packaging/skills/claude/sniper-operator/SKILL.md']) {
     const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
     assert.match(text, /JSON, form and multipart body fields do not\s+(?:affect|match)/, file);
   }

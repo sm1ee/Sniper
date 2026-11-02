@@ -87,7 +87,8 @@ node --test tests/*.test.cjs      # Fixture-only frontend regressions (Node.js 1
 
 1. Download and open Sniper.
 2. Click **Open browser** in the top bar. That browser already sends its traffic
-   through Sniper and trusts Sniper's certificate.
+   through Sniper and trusts Sniper's certificate
+   ([which browsers](docs/guides/http-debugging.md#or-open-a-browser-that-is-already-wired)).
    To use your own browser, set its HTTP proxy (not SOCKS) to `127.0.0.1:8080`
    and visit `https://sniper` to download and trust the root CA.
 3. Browse. Requests appear in HTTP history.
@@ -162,11 +163,7 @@ shows what to paste, how to mark a value and how to preview before sending.
 
 ### Findings
 
-Passive checks and template matches, each with its evidence highlighted. With
-**Findings** on in HTTP (or **Mark in HTTP** here), those requests get a
-severity badge in Notes, a row tint (Settings ▸ Display) that the colour filter
-can gather, and the highlighted evidence. A note or colour tag you set takes
-precedence.
+Passive checks and template matches, each with its evidence highlighted.
 
 <p align="center">
   <img src="docs/assets/sniper-v0.3.2-findings.jpg" width="800" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" />
@@ -188,218 +185,34 @@ A pasted JWT opens the JWT tool: header and claims decoded, <code>alg: none</cod
   <img src="docs/assets/sniper-v0.3.2-tools.jpg" width="800" alt="Tools with a JWT pasted in: the JWT tool opened by itself, with the decoded header and claims and alg none variants" />
 </p>
 
-## Wired browsers
+## CLI and AI agents
 
-**Open browser** opens ego, Aside or BrowserOS neo if one is installed,
-otherwise Chrome, Edge, Brave or Chromium, each with its own profile. The arrow
-beside it lists the others; **Make default** saves your choice.
-`sniper-cli capture browser open` does the same from a script. With `--agent` it
-also gives an AI agent what it needs to drive the browser while Sniper records
-the traffic.
-
-| Browser | Platforms | An agent drives it through |
-|---|---|---|
-| Chrome, Edge, Brave, Chromium | macOS, Windows, Linux | the DevTools protocol (Playwright, chrome-devtools-mcp) |
-| [ego](https://lite.ego.app/) | macOS | ego's own CLI and agent skill |
-| [Aside](https://aside.com/) | macOS, Windows | Aside's CLI REPL |
-| [BrowserOS neo](https://docs.browseros.com/neo/install) | macOS, Windows | its MCP server |
-
-Sniper does not install browsers; a missing one links to its download page. The
-[HTTP debugging guide](docs/guides/http-debugging.md#or-open-a-browser-that-is-already-wired)
-covers profiles, `--fresh` and each driver.
-
-## Remote headless UI
+`sniper-cli` runs every operation as JSON against the running Sniper. Writes
+need `--dry-run` to preview or `--yes` to apply.
 
 ```bash
-SNIPER_DATA_DIR=/tmp/sniper-headless \
-SNIPER_UI_ADDR=192.168.1.10:23001 \
-  cargo run --bin sniper
-```
-
-A UI address other than loopback (here `192.168.1.10`, or `0.0.0.0` for every
-interface) turns on authentication. Clients on other hosts open the URL with the
-one-time bootstrap token that Sniper prints at startup. The UI is plain HTTP, so
-across an untrusted network use an SSH tunnel or an authenticated TLS reverse
-proxy.
-
-## Proxy chain
-
-In **Capture → Settings**, turn on **Proxy chain** and enter the upstream proxy,
-such as `http://127.0.0.1:8081` or `socks5h://127.0.0.1:1080`, with an optional
-username and password. Captured traffic, Replay, Fuzzer and Sequence then go
-through it. If it fails, requests fail; Sniper does not fall back to a direct
-connection. Hosts under **Connect directly to** (scope patterns such as
-`*.example.com`) skip it. Settings are per session, and the password is stored in
-the session files on disk. `sniper-cli capture proxy` reads the settings, and
-`sniper-cli capture proxy --stdin --yes` replaces them from JSON with `enabled`,
-`url`, `username`, `password` and an optional `bypass_hosts` array.
-
-## Render
-
-The **Render** tab in HTTP history, Replay and the Fuzzer's results draws HTML
-and images in a sandboxed frame, with scripts, forms, links and network access
-off. **Settings ▸ Display ▸ Render ▸ Load images, styles and fonts** lets it fetch
-the images, stylesheets and fonts a page names, through Sniper and the proxy
-chain. Those requests go to the target and any other host the page names, and
-HTTP history does not record them. Scripts never run.
-
-## Passive Service Map
-
-The Map tool's Service Map summarizes the origins and endpoints in retained
-history: the clients that sent the requests, how requests authenticate (never
-the credential values), the technologies and exposures that scripts, pages and
-error responses reveal, and API docs for origins that serve API data. It sends
-nothing to a target, and it shows what was observed, not a verified topology.
-`sniper-cli scope service-map` reads the same data. The map's display filter
-hides images, styles and fonts by default. `--only-parameterized` keeps requests
-whose URL has a query string; JSON, form and multipart body fields do not match
-that filter.
-
-In the GUI, up to eight inspected body references, Response Link declarations
-and recorded socket-peer groups can be shown together in a
-[session-local collection](docs/integrations/service-map.md#session-local-retained-relationship-collection-gui-only)
-that is never saved. The optional **Upstream socket peer** card in Capture
-Settings (off by default) records the socket peer of future responses, which may
-be a proxy or CDN rather than the origin's owner. See the
-[Service Map contract](docs/integrations/service-map.md) and
-[observed socket peer capture](docs/integrations/observed-socket-peer.md).
-
-## Recon
-
-**Scan ▸ Recon** builds an endpoint inventory for the session from a scoped
-crawler, existing urlscan results and Wayback history. A new urlscan scan is a
-separate choice. Each endpoint's evidence says whether it was a live response,
-an observed reference, a historical record or an unvisited candidate.
-Discoveries also appear in Scope's site map without becoming captured
-transactions.
-
-The Codex and Claude Code operator skills can read, start and stop Recon:
-
-```bash
-sniper-cli recon list --session-id <session-uuid>
-sniper-cli recon start --session-id <session-uuid> --target-url https://example.com/ --source crawler --max-requests 50 --max-depth 2 --max-endpoints 200 --dry-run
-sniper-cli schema input recon.start
-```
-
-Use only a target you are authorized to test, and review the dry run before
-`--yes`. History services and new scans each need their own sharing
-acknowledgment. Limits default to 0 (no limit), and a CLI timeout does not stop
-the background job. See
-[Recon's scope, consent and CLI contract](docs/integrations/recon.md).
-
-## Nuclei templates
-
-**Scan ▸ Active Scan** runs the community templates of
-[projectdiscovery/nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)
-(MIT license) with Sniper's own engine; the `nuclei` program is not needed.
-
-While Passive Scan is on, the templates you turn on check responses from hosts
-that match a Scope include pattern, and send nothing. With no Scope includes
-they check nothing. A **manual scan** sends the templates you pick to the
-targets you name when you start it, and the plan under the form says what it
-will send.
-
-Templates tagged intrusive, default-login, bruteforce and the like, or that send
-PUT, DELETE or PATCH, run only if you allow each risk. `dos` templates never
-run. Out-of-band templates (`{{interactsh-url}}`) are sent where the session has
-an Interactsh server (**Capture ▸ OAST**) and match when the target calls back.
-Findings appear under `nuclei`. A library downloaded from GitHub updates itself
-once a day; **Update daily** in the library card turns that off.
-
-```bash
-sniper-cli templates library status
-sniper-cli templates library download --yes
-sniper-cli templates list --support passive --search wordpress
-sniper-cli templates passive set-enabled --enabled true --tag waf --yes
-sniper-cli templates scan preview --target https://app.example.com --severity critical
-sniper-cli templates scan start --target https://app.example.com --severity critical --yes
-```
-
-[The template contract](docs/integrations/nuclei-templates.md) covers what runs
-and where, the supported subset, the API and the CLI.
-
-## CLI
-
-`sniper-cli` ships with the macOS app and the Windows packages, and Homebrew puts
-it on `PATH`. Otherwise use **Add to PATH**, offered on first launch and under
-**Settings ▸ Runtime ▸ Command line**, or on macOS launch with
-`SNIPER_INSTALL_CLI_PATH=1 open -a Sniper`. On macOS, move Sniper.app to
-Applications first; registration adds one entry to your zsh profile and to an
-existing `~/.bash_profile` or `~/.bashrc`. On Windows it adds the app folder to
-your user PATH; before you move a portable folder, read
-[Windows PATH ownership](packaging/windows/README.md#cli-and-headless-mode).
-Open a new terminal afterwards.
-
-```bash
-sniper-cli session list
 sniper-cli --output compact capture http list --limit 10
-sniper-cli --output compact capture http search --value access_token
-sniper-cli capture browser open --yes
 sniper-cli capture http replay --id <id> --dry-run
-sniper-cli capture http replay --id <id> --yes
-sniper-cli scope set-scope --pattern '*.example.com' --yes
-sniper-cli fuzzer run --yes
-sniper-cli findings list --limit 20
-sniper-cli findings get --id <finding-uuid>
-sniper-cli findings count
-sniper-cli event-log list --limit 20
-```
-
-Operations marked `side_effect: "write"` in `sniper-cli manifest` need
-`--dry-run` to preview them or `--yes` to apply them. Subcommands print the API's
-raw JSON. `call` runs any manifest operation by name and wraps its result in an
-envelope; the result is in `data`. `--output compact` prints one-line JSON.
-
-```bash
-sniper-cli manifest
-sniper-cli schema input replay.send
-sniper-cli examples capture.http.list
-sniper-cli --output compact call capture.http.list --input '{"limit":20,"page":true}'
-sniper-cli --output compact call replay.send --input '{"tab_id":"<tab-id>"}' --dry-run
-sniper-cli --output compact call replay.send --input '{"tab_id":"<tab-id>"}' --yes
-printf "%s" "$OAST_TOKEN" | sniper-cli capture oast configure --provider custom --url https://oast.example --token-stdin --yes
-```
-
-The `findings` and `event-log` commands are reads and need no `--yes`. They read
-the active session, or another one with `--session-id <uuid>` without switching
-to it; `call` returns the ID it used in `meta.session_id`. Lists return the
-newest 100 entries by default, `--limit` must be positive, and there is no
-paging. `findings get` returns evidence as captured, unredacted, so review it
-before you give it to an agent or save it.
-
-Other CLI contracts:
-
-- [Recon endpoint discovery](docs/integrations/recon.md): read, start and stop discovery jobs, with explicit target and service consent.
-- [Passive scanner configuration](docs/integrations/passive-scanner.md): turn built-in checks on or off and manage custom rules.
-- [Saved configuration edits](docs/integrations/saved-configuration-edits.md): change a saved intercept rule or a Replay tab's label.
-- [Saved Replay tabs](docs/integrations/saved-replay-tabs.md): close, duplicate and pin saved HTTP Replay tabs.
-- [Saved data v1](docs/integrations/saved-data-v1.md): opt-in `saved.v1.*` operations with durable mutation receipts.
-- [HTTP history retention](docs/integrations/http-history-retention.md): automatic cleanup, off by default; when on, it permanently deletes the oldest unprotected rows.
-
-## AI integration
-
-```bash
-sniper-cli skills install --all --dry-run
 sniper-cli skills install --all --yes
 ```
 
-This installs the `sniper-operator` skill for Claude Code and Codex.
-`sniper-cli skills status --all` shows whether the installed copies match this
-build. Each launch of the desktop app overwrites the copies in the default
-folders (`~/.claude/skills` and `~/.codex/skills`, or `$CLAUDE_HOME/skills` and
-`$CODEX_HOME/skills` when set), so edits there do not last. A copy installed
-with `--claude-dir` or `--codex-dir` is left alone. OpenCode reads the Claude
-Code skill (see the [Claude Code guide](docs/integrations/claude-code.md#opencode)).
+The last command installs the `sniper-operator` skill for Claude Code and Codex.
+[Using sniper-cli](docs/guides/cli.md) covers PATH setup, the manifest and every
+CLI contract.
 
 ## Documentation
 
-| Guide | Answers |
+| Guide | Covers |
 | --- | --- |
-| [Debugging HTTP with Sniper](docs/guides/http-debugging.md) | What can I do with this as a plain intercepting proxy? |
-| [Sniper in an agent harness](docs/guides/agent-harness.md) | Which part of my harness is this, and what goes in and out? |
-| [Using Sniper from Claude Code](docs/integrations/claude-code.md) | How do I install it, confirm it works, and what can I ask for? |
+| [Debugging HTTP with Sniper](docs/guides/http-debugging.md) | Starting Sniper, wired browsers, the UI from another machine, proxy chains, Render, scope and Replay |
+| [Using sniper-cli](docs/guides/cli.md) | PATH setup, everyday commands, reads and writes, agent skills, CLI contracts |
+| [Service Map](docs/integrations/service-map.md) | The passive map of captured origins, their clients and the APIs they serve |
+| [Recon](docs/integrations/recon.md) | Endpoint discovery, consent for external services, limits |
+| [Nuclei templates](docs/integrations/nuclei-templates.md) | Passive templates, manual and auto scans, what never runs |
+| [Sniper in an agent harness](docs/guides/agent-harness.md) | Which part of a harness Sniper is, and what goes in and out |
+| [Using Sniper from Claude Code](docs/integrations/claude-code.md) | Installing the skill, checking that it works, what to ask for |
 | [Using Sniper from Codex](docs/integrations/codex.md) | The same, for Codex |
-| [Decoded value preview](docs/decoded-preview.md) | How do I read an encoded token without leaving the editor? |
+| [Decoded value preview](docs/decoded-preview.md) | Reading an encoded token without leaving the editor |
 | [Architecture](docs/architecture.md) | Why it is built this way, the tech stack, and where each part lives |
 | [Contributing](AGENTS.md) | Build, test, and the invariants to not break |
 
