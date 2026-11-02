@@ -940,7 +940,7 @@ for (const filter of ["Search", "Kind"]) {
     f.node(filter).value = filter === "Search" ? "no-synthetic-match" : "live";
     f.node(filter).emit(filter === "Search" ? "input" : "change");
     assert.equal(f.node("PageMeta").textContent, "0 matching endpoints");
-    assert.match(f.node("Endpoints").textContent, /No endpoints match these filters/);
+    assert.match(f.node("Endpoints").textContent, /No matching endpoints\./);
     assertSelectedEndpoint(f, selected, false);
     f.node(filter).value = "";
     f.node(filter).emit(filter === "Search" ? "input" : "change");
