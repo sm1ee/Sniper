@@ -26086,35 +26086,42 @@ function prettyFormat(text, message, { jsonLines = true } = {}) {
   const head = text.slice(0, boundary);
   const body = text.slice(boundary + divider.length);
   const contentType = (message.content_type || "").toLowerCase();
+  // Server-sent events, as streamed API replies send them, carry JSON after
+  // "data:" on their own lines.
+  const events = contentType.includes("text/event-stream");
   // Detect JSON even when Content-Type does not say json.
   const startsLikeJson = /^\s*[[{]/.test(body);
-  if (!contentType.includes("json") && !startsLikeJson) {
+  if (!contentType.includes("json") && !startsLikeJson && !events) {
     return text;
   }
-  try {
-    return `${head}${divider}${prettyJsonText(body)}`;
-  } catch (_error) {
-    // Not one JSON document.
+  if (!events) {
+    try {
+      return `${head}${divider}${prettyJsonText(body)}`;
+    } catch (_error) {
+      // Not one JSON document.
+    }
   }
-  if (!jsonLines || !startsLikeJson || !body.includes("\n")) {
+  if (!jsonLines || !(startsLikeJson || events) || !body.includes("\n")) {
     return text;
   }
 
   // NDJSON, JSON Lines, a Sentry envelope or an Elasticsearch bulk body: one
   // JSON document per line, each formatted on its own. A line that is not JSON,
-  // such as an envelope's attachment, stays as it is.
+  // such as an envelope's attachment or an event's "[DONE]", stays as it is.
   let documents = 0;
   const lines = body.split("\n").map((line) => {
-    if (!/^\s*[[{]/.test(line)) return line;
+    const field = events ? (/^data: ?/.exec(line)?.[0] ?? "") : "";
+    const value = line.slice(field.length);
+    if ((events && !field) || !/^\s*[[{]/.test(value)) return line;
     try {
-      const pretty = prettyJsonText(line);
+      const pretty = prettyJsonText(value);
       documents += 1;
-      return pretty;
+      return field + pretty;
     } catch (_error) {
       return line;
     }
   });
-  return documents > 1 ? `${head}${divider}${lines.join("\n")}` : text;
+  return documents > (events ? 0 : 1) ? `${head}${divider}${lines.join("\n")}` : text;
 }
 
 function compactFormat(text) {

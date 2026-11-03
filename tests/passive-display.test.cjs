@@ -121,6 +121,16 @@ test('Pretty leaves a body with one JSON line among text, or a broken document, 
     assert.equal(c.prettyFormat(text, message('', { content_type: 'text/plain' })), text, body);
   }
 });
+// Streamed API replies: each event's JSON follows "data:". Other fields and
+// data that is not JSON, such as "[DONE]", stay as they are.
+test('Pretty formats the JSON in server-sent events and leaves the other fields', () => {
+  const body = 'event: message\ndata: {"id":1,"delta":{"text":"Hi"}}\n\n: keep-alive\nid: 2\ndata:{"id":2}\n\ndata: [DONE]\n\n';
+  assert.equal(c.prettyFormat('HTTP/1.1 200 OK\n\n' + body, message('', { content_type: 'text/event-stream; charset=utf-8' })),
+    'HTTP/1.1 200 OK\n\nevent: message\ndata: {\n  "id": 1,\n  "delta": {\n    "text": "Hi"\n  }\n}\n\n'
+    + ': keep-alive\nid: 2\ndata:{\n  "id": 2\n}\n\ndata: [DONE]\n\n');
+  const plain = 'HTTP/1.1 200 OK\n\ndata: {"id":1}\n\n';
+  assert.equal(c.prettyFormat(plain, message('', { content_type: 'text/plain' })), plain, 'only an event stream reads "data:"');
+});
 test('Pretty can keep JSON lines unformatted for an editor whose text is sent', () => {
   const text = 'POST / HTTP/1.1\n\n{"a":1}\n{"b":2}';
   assert.equal(c.prettyFormat(text, message('', { content_type: 'application/x-ndjson' }), { jsonLines: false }), text);
