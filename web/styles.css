@@ -1127,6 +1127,19 @@ code {
   background: none;
 }
 
+/* Scope's Save shows only with unsaved edits. Appearing, it grew the header
+   and pushed the host lists down; saving pulled them back up. Hidden, it now
+   keeps its place, and both Scope headers keep the height a 26px button gives
+   them (16px and 8px of padding), so the Site map's header lines up. */
+#saveTargetScopeButton.hidden {
+  display: inline-block !important;
+  visibility: hidden;
+}
+
+.target-shell .panel-toolbar {
+  min-height: 50px;
+}
+
 :is(.dashboard-shell, .target-shell) .panel-toolbar h2 {
   font-size: var(--font-md);
 }
