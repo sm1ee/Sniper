@@ -4829,7 +4829,16 @@ async fn get_finding(
         Err(response) => return response,
     };
     match session.scanner.get(id).await {
-        Some(finding) => Json(finding).into_response(),
+        Some(mut finding) => {
+            if finding
+                .rule_id
+                .starts_with(crate::vulndata::findings::RULE_PREFIX)
+            {
+                finding.detail =
+                    crate::vulndata::findings::detail(state.vulndata.index().as_deref(), &finding);
+            }
+            Json(finding).into_response()
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -4950,7 +4959,9 @@ async fn rescan_findings(
     let Some((rescan, unreadable)) = session
         .store
         .visit_records(
-            crate::scanner::Rescan::new(config).with_templates(rescan_templates),
+            crate::scanner::Rescan::new(config)
+                .with_templates(rescan_templates)
+                .with_known_vulnerabilities(state.vulndata.index()),
             |rescan, record| rescan.scan(record),
         )
         .await
@@ -16085,6 +16096,51 @@ mod tests {
             second_task.await.unwrap(),
             ResponseInterceptResolution::Forward { .. }
         ));
+    }
+
+    // A known-vulnerability finding stores no advisory list; reading it joins
+    // the list from the data loaded now.
+    #[tokio::test]
+    async fn a_known_vulnerability_finding_reads_its_advisories_from_the_current_data() {
+        let config = test_app_config("sniper-known-cve-detail");
+        let data_dir = config.data_dir.clone();
+        let state = Arc::new(AppState::new(config).unwrap());
+        let session = state.session().await;
+        let record = crate::vulndata::findings::tests::script(
+            "/npm/jquery@3.4.1/dist/jquery.min.js",
+            Some("https://app.example.com/shop"),
+        );
+        let index = crate::vulndata::findings::tests::jquery_index(false);
+        let finding = crate::vulndata::findings::for_record(&index, &record).remove(0);
+        let id = finding.id;
+        session.scanner.push(finding).await;
+        let read = |state: Arc<AppState>| async move {
+            let response = super::get_finding(
+                State(state),
+                Path(id.to_string()),
+                Query(super::SessionScopedQuery { session_id: None }),
+            )
+            .await;
+            response_body_json(response).await["detail"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert!(read(state.clone())
+            .await
+            .contains("Vulnerability data has not been fetched yet."));
+
+        for file in [
+            r#"{"jquery": {"vulnerabilities": [{"atOrAbove": "1.0.3", "below": "3.5.0", "severity": "medium", "identifiers": {"CVE": ["CVE-2020-11023"]}, "info": []}]}}"#,
+            r#"{"catalogVersion": "1", "vulnerabilities": [{"cveID": "CVE-2020-11023"}]}"#,
+            "cve,epss,percentile\nCVE-2020-11023,0.94,0.99\n",
+        ] {
+            state.vulndata.import_blocking(file.as_bytes()).unwrap();
+        }
+        let detail = read(state.clone()).await;
+        assert!(detail.contains("CVE-2020-11023 · medium · KEV · EPSS 0.94 · fixed in 3.5.0"));
+        assert!(detail.contains("; fetched "));
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     // `sniper-cli capture intercept off` only changed the setting, so traffic held

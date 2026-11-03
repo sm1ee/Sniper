@@ -32,6 +32,7 @@ pub const BUILTIN_RULES: &[(&str, &str)] = &[
     ("misconfig", "Security Misconfiguration"),
     ("info", "Information Disclosure"),
     ("auth", "Authentication Issues"),
+    ("known_cve", "Known Vulnerabilities"),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -579,6 +580,7 @@ pub struct Rescan {
     findings: Vec<ScannerFinding>,
     scanned: HashSet<Uuid>,
     templates: Option<RescanTemplates>,
+    known: Option<std::sync::Arc<crate::vulndata::index::VulnIndex>>,
 }
 
 /// The passive Nuclei templates a rescan runs, with the scope they apply to,
@@ -597,11 +599,22 @@ impl Rescan {
             findings: Vec::new(),
             scanned: HashSet::new(),
             templates: None,
+            known: None,
         }
     }
 
     pub fn with_templates(mut self, templates: Option<RescanTemplates>) -> Self {
         self.templates = templates;
+        self
+    }
+
+    /// The vulnerability data, read once when the rescan starts; None until
+    /// it has loaded.
+    pub fn with_known_vulnerabilities(
+        mut self,
+        index: Option<std::sync::Arc<crate::vulndata::index::VulnIndex>>,
+    ) -> Self {
+        self.known = index;
         self
     }
 
@@ -621,6 +634,16 @@ impl Rescan {
                 })) {
                     found.extend(more);
                 }
+            }
+        }
+        if let Some(index) = self.known.as_ref().filter(|_| {
+            self.config
+                .is_rule_enabled(crate::vulndata::findings::CATEGORY)
+        }) {
+            if let Ok(more) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::vulndata::findings::for_record(index, record)
+            })) {
+                found.extend(more);
             }
         }
         for finding in found {
@@ -4631,6 +4654,42 @@ mod tests {
             path: "/".to_string(),
             location: None,
         }
+    }
+
+    // Review focus 4 and 5: a library two pages of one host load is one
+    // finding, on the page's host, and the rule switch turns it off.
+    #[test]
+    fn rescan_keeps_one_known_vulnerability_finding_per_page_library() {
+        use crate::vulndata::findings::tests::{jquery_index, script};
+        let index = std::sync::Arc::new(jquery_index(false));
+        let records = [
+            script(
+                "/npm/jquery@3.4.1/dist/jquery.min.js",
+                Some("https://app.example.com/shop"),
+            ),
+            script(
+                "/npm/jquery@3.4.1/dist/jquery.js",
+                Some("https://app.example.com/cart"),
+            ),
+        ];
+        let run = |config: ScannerConfig| {
+            let mut rescan = Rescan::new(config).with_known_vulnerabilities(Some(index.clone()));
+            for record in &records {
+                rescan.scan(record);
+            }
+            rescan
+                .finish()
+                .0
+                .into_iter()
+                .filter(|finding| finding.category == "known_cve")
+                .collect::<Vec<_>>()
+        };
+        let found = run(ScannerConfig::default());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "app.example.com");
+        let mut off = ScannerConfig::default();
+        off.rules.insert("known_cve".into(), false);
+        assert!(run(off).is_empty());
     }
 
     // The Findings Host column hides the scheme's default port. A finding had

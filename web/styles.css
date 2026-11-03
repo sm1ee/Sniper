@@ -5842,6 +5842,25 @@ button.utility-button.replay-tab-add {
   min-width: 0;
 }
 
+.findings-desc-more {
+  min-width: 0;
+}
+
+.findings-desc-summary {
+  cursor: pointer;
+}
+
+.findings-desc-rest {
+  white-space: pre-line;
+  max-height: 40vh;
+  overflow: auto;
+  margin-top: 4px;
+}
+
+.findings-detail-desc:has(.findings-desc-more[open]) {
+  align-items: flex-start;
+}
+
 .findings-detail-panes {
   display: flex;
   flex: 1;

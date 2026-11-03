@@ -44,6 +44,8 @@ pub struct VulnIndex {
     epss: HashMap<String, f32>,
     /// Changes whenever a source file does, so caches keyed on it go stale.
     pub revision: String,
+    /// When the newest of the three files loaded, for the finding detail.
+    pub fetched_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl VulnIndex {
@@ -86,6 +88,7 @@ impl VulnIndex {
             kev,
             epss,
             revision,
+            fetched_at: None,
         }
     }
 

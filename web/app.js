@@ -10452,6 +10452,7 @@ const BUILTIN_RULE_LABELS = {
   misconfig: "Security Misconfiguration",
   info: "Information Disclosure",
   auth: "Authentication Issues",
+  known_cve: "Known Vulnerabilities",
 };
 
 const BUILTIN_FINDING_CATEGORIES = new Set(Object.keys(BUILTIN_RULE_LABELS));
@@ -11201,7 +11202,15 @@ function renderFindingDescription(finding, fallbackLocation = null) {
   const locationHtml = locationLabel
     ? `<span class="findings-location-chip">${escapeHtml(locationLabel)}</span>`
     : "";
-  els.findingsDetailDesc.innerHTML = `${locationHtml}<span class="findings-desc-text">${escapeHtml(finding.detail || "")}</span>`;
+  // A known-vulnerability finding lists its advisories, and a template its
+  // references, below a first line: they open from it instead of hiding past
+  // the two-line clamp.
+  const detail = String(finding.detail || "");
+  const lineBreak = detail.indexOf("\n");
+  const text = lineBreak < 0
+    ? `<span class="findings-desc-text">${escapeHtml(detail)}</span>`
+    : `<details class="findings-desc-more"><summary class="findings-desc-summary">${escapeHtml(detail.slice(0, lineBreak))}</summary><div class="findings-desc-rest">${escapeHtml(detail.slice(lineBreak + 1))}</div></details>`;
+  els.findingsDetailDesc.innerHTML = `${locationHtml}${text}`;
 }
 
 function normalizeFindingLocation(location) {

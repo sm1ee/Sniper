@@ -3912,9 +3912,13 @@ fn scan_record_for_session(
     let scan_generation = scanner.clear_generation();
     let scan_session = Arc::clone(session);
     let templates = Arc::clone(&state.templates);
+    let vulndata = Arc::clone(&state.vulndata);
     spawn_tracked_proxy_task(session.id(), PROXY_WORK_CAPTURE_TASK, async move {
         let config = scanner.get_config().await;
         let mut findings = crate::scanner::scan_transaction(&record, &config);
+        if config.is_rule_enabled(crate::vulndata::findings::CATEGORY) {
+            findings.extend(known_vulnerability_findings(&vulndata, &record).await);
+        }
         if config.enabled {
             findings.extend(passive_template_findings(&templates, &scan_session, record).await);
         }
@@ -3930,6 +3934,31 @@ fn scan_record_for_session(
             persist_session_state_quiet(&scan_session);
         }
     });
+}
+
+/// The library versions a record names that the vulnerability data lists
+/// advisories for. Like the passive templates, matching runs on the blocking
+/// pool, and a record that finds no free permit skips it for Rescan.
+async fn known_vulnerability_findings(
+    vulndata: &crate::vulndata::VulnData,
+    record: &TransactionRecord,
+) -> Vec<crate::scanner::ScannerFinding> {
+    let Some(index) = vulndata.index() else {
+        return Vec::new();
+    };
+    if !crate::vulndata::findings::may_name_a_library(record) {
+        return Vec::new();
+    }
+    let Some(permit) = vulndata.try_permit() else {
+        return Vec::new();
+    };
+    let record = record.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::vulndata::findings::for_record(&index, &record)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// The findings of the Nuclei templates the operator turned on, for a record

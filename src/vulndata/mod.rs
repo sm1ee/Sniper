@@ -1,6 +1,7 @@
 //! Known vulnerabilities for the product versions Sniper detects, matched on
 //! this machine against public data files.
 
+pub mod findings;
 pub mod index;
 pub mod products;
 pub mod sources;
@@ -387,12 +388,21 @@ impl VulnData {
             let revision = [&retire, &kev, &epss]
                 .map(|bytes| crate::skill_status::sha256(bytes)[..12].to_string())
                 .join("-");
-            Ok(VulnIndex::build(
+            let mut index = VulnIndex::build(
                 sources::parse_retire(&retire)?,
                 sources::parse_kev(&kev)?,
                 sources::parse_epss(&epss)?,
                 revision,
-            ))
+            );
+            index.fetched_at = self
+                .manifest
+                .lock()
+                .unwrap()
+                .sources
+                .values()
+                .filter_map(|record| record.fetched_at)
+                .max();
+            Ok(index)
         })();
         match built {
             Ok(index) => *self.index.write().unwrap() = Some(Arc::new(index)),
