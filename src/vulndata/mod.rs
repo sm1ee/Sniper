@@ -2,4 +2,5 @@
 //! this machine against public data files.
 
 pub mod products;
+pub mod sources;
 pub mod version;
