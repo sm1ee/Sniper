@@ -42,6 +42,15 @@ test('Pretty view formats a JSON request body and Raw view shows the draft as st
   assert.equal(f.context.replayEditorShowsDraft(f.shown, RAW), false);
 });
 
+// History shows JSON lines formatted; the Replay editor's text is what is
+// sent, and a line spread over several would no longer be one document.
+test('Pretty view keeps a JSON lines request body one document per line', () => {
+  const f = setup();
+  const lines = 'POST /_bulk HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/x-ndjson\r\n\r\n{"index":{}}\n{"a":1}\n';
+  assert.equal(f.context.replayRequestEditorText(lines), lines);
+  assert.ok(f.context.replayEditorShowsDraft(lines, lines));
+});
+
 test('an untouched Pretty rendering keeps the captured bytes and the response', () => {
   const f = setup();
   f.context.syncReplayRequestTextFromEditor(f.shown);

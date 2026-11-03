@@ -15822,7 +15822,7 @@ function replayRequestEditorText(draft) {
   const text = draft || "";
   if (state.replayMessageViews.request !== "pretty") return text;
   const normalized = text.replace(/\r\n/g, "\n");
-  const pretty = prettyFormat(normalized, {});
+  const pretty = prettyFormat(normalized, {}, { jsonLines: false });
   return pretty === normalized ? text : pretty;
 }
 
@@ -25956,7 +25956,9 @@ function prettyJsonText(text) {
   return parts.join("");
 }
 
-function prettyFormat(text, message) {
+// `jsonLines: false` is for an editor whose text is sent: spreading a JSON line
+// over several would change a line-delimited stream.
+function prettyFormat(text, message, { jsonLines = true } = {}) {
   if (!message || message.body_encoding === "base64") {
     return text;
   }
@@ -25970,26 +25972,35 @@ function prettyFormat(text, message) {
   const head = text.slice(0, boundary);
   const body = text.slice(boundary + divider.length);
   const contentType = (message.content_type || "").toLowerCase();
-
-  if (contentType.includes("json")) {
-    try {
-      return `${head}${divider}${prettyJsonText(body)}`;
-    } catch (_error) {
-      return text;
-    }
+  // Detect JSON even when Content-Type does not say json.
+  const startsLikeJson = /^\s*[[{]/.test(body);
+  if (!contentType.includes("json") && !startsLikeJson) {
+    return text;
+  }
+  try {
+    return `${head}${divider}${prettyJsonText(body)}`;
+  } catch (_error) {
+    // Not one JSON document.
+  }
+  if (!jsonLines || !startsLikeJson || !body.includes("\n")) {
+    return text;
   }
 
-  // Fallback: try to detect JSON even if Content-Type doesn't say json
-  const trimmed = body.trimStart();
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+  // NDJSON, JSON Lines, a Sentry envelope or an Elasticsearch bulk body: one
+  // JSON document per line, each formatted on its own. A line that is not JSON,
+  // such as an envelope's attachment, stays as it is.
+  let documents = 0;
+  const lines = body.split("\n").map((line) => {
+    if (!/^\s*[[{]/.test(line)) return line;
     try {
-      return `${head}${divider}${prettyJsonText(body)}`;
+      const pretty = prettyJsonText(line);
+      documents += 1;
+      return pretty;
     } catch (_error) {
-      // not valid JSON, return as-is
+      return line;
     }
-  }
-
-  return text;
+  });
+  return documents > 1 ? `${head}${divider}${lines.join("\n")}` : text;
 }
 
 function compactFormat(text) {
