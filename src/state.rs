@@ -97,6 +97,8 @@ pub struct AppState {
     pub ui_settings: Arc<AppUiSettingsStore>,
     /// The Nuclei template library, shared by every session.
     pub templates: Arc<crate::templates::library::TemplateLibrary>,
+    /// Public vulnerability data for detected versions, shared by every session.
+    pub vulndata: Arc<crate::vulndata::VulnData>,
     pub sessions: Arc<SessionRegistry>,
     /// Durable receipts for explicitly identified saved-data mutations.
     pub saved_operations: Arc<SavedOperationLedger>,
@@ -187,6 +189,7 @@ impl AppState {
         )?);
         let ui_settings = Arc::new(AppUiSettingsStore::load_or_create(&config.data_dir)?);
         let templates = crate::templates::library::TemplateLibrary::load(&config.data_dir);
+        let vulndata = crate::vulndata::VulnData::load(&config.data_dir);
         let (sessions, active_session) = SessionRegistry::load_or_create_with_transaction_limit(
             &config.data_dir,
             config.max_entries,
@@ -205,6 +208,7 @@ impl AppState {
             startup,
             ui_settings,
             templates,
+            vulndata,
             sessions: Arc::new(sessions),
             saved_operations,
             proxy_online: Arc::new(AtomicBool::new(false)),

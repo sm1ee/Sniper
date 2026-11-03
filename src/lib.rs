@@ -87,6 +87,7 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
     tokio::spawn(templates::library::run_daily_update(
         state.templates.clone(),
     ));
+    tokio::spawn(vulndata::run_daily_update(state.vulndata.clone()));
 
     info!(
         proxy_addr = %config.proxy_addr,

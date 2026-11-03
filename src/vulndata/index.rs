@@ -49,10 +49,17 @@ pub struct VulnIndex {
 impl VulnIndex {
     pub fn build(
         retire: Vec<RetireAdvisory>,
-        kev: HashSet<String>,
-        epss: HashMap<String, f32>,
+        mut kev: HashSet<String>,
+        mut epss: HashMap<String, f32>,
         revision: String,
     ) -> Self {
+        // EPSS scores every published CVE; keep the few the advisories name.
+        let named: HashSet<&str> = retire
+            .iter()
+            .flat_map(|advisory| advisory.cves.iter().map(String::as_str))
+            .collect();
+        kev.retain(|cve| named.contains(cve.as_str()));
+        epss.retain(|cve, _| named.contains(cve.as_str()));
         let mut by_component: HashMap<String, Vec<Entry>> = HashMap::new();
         for advisory in retire {
             let from = match &advisory.at_or_above {
@@ -213,6 +220,23 @@ mod tests {
 
         assert!(index.advisories("jquery", "3").is_empty());
         assert_eq!(index.advisories("react", "16.0.0").len(), 1);
+    }
+
+    // EPSS scores every published CVE, some 300,000 of them; only the few the
+    // advisories name are ever read.
+    #[test]
+    fn the_index_keeps_only_the_scores_its_advisories_name() {
+        let index = VulnIndex::build(
+            vec![advisory("jquery", None, "3.5.0", "CVE-2020-11023")],
+            HashSet::from(["CVE-2020-11023".to_string(), "CVE-2021-44228".to_string()]),
+            HashMap::from([
+                ("CVE-2020-11023".to_string(), 0.94),
+                ("CVE-2021-44228".to_string(), 0.97),
+            ]),
+            "test".into(),
+        );
+        assert_eq!(index.epss.len(), 1);
+        assert_eq!(index.kev.len(), 1);
     }
 
     #[test]
