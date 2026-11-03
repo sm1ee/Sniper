@@ -22263,9 +22263,11 @@ function wireReplayTabDragReorder(tabElement, id) {
 }
 
 function renderReplayTabs(options = {}) {
-  const preserveScrollLeft = options.keepScroll
-    ? Array.from(els.replayTabStrip.querySelectorAll(".replay-tab-list"), (row) => row.scrollLeft)
-    : null;
+  // innerHTML below brings every row back at its start. Revealing the active
+  // tab from there pushes one that was already in view to the far edge, so each
+  // row goes back where the operator left it first.
+  const rowScroll = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab-list"),
+    (row) => ({ left: row.scrollLeft, top: row.scrollTop }));
   const focused = document.activeElement;
   const focusedTabId = els.replayTabStrip.contains?.(focused)
     ? focused?.closest?.(".replay-tab")?.dataset.replayTabId : null;
@@ -22460,17 +22462,14 @@ function renderReplayTabs(options = {}) {
     });
   });
 
+  els.replayTabStrip.querySelectorAll(".replay-tab-list").forEach((row, index) => {
+    row.scrollLeft = rowScroll[index]?.left || 0;
+    row.scrollTop = rowScroll[index]?.top || 0;
+  });
   // Reordering is the one re-render the operator did not ask to be scrolled by:
   // the tab they dragged is usually not the active one, so jumping to the active
-  // tab throws the strip somewhere they were not looking. Put the scroll back
-  // where innerHTML dropped it instead.
-  if (preserveScrollLeft) {
-    els.replayTabStrip.querySelectorAll(".replay-tab-list").forEach((row, index) => {
-      row.scrollLeft = preserveScrollLeft[index] || 0;
-    });
-  } else {
-    scrollActiveReplayTabIntoView();
-  }
+  // tab throws the strip somewhere they were not looking.
+  if (!options.keepScroll) scrollActiveReplayTabIntoView();
 
   // Rebuilding the strip detaches its focused button. Keep keyboard actions on
   // their logical control, without taking focus from an editor or newer dialog.

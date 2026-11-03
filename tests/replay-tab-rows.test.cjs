@@ -155,3 +155,34 @@ test("with every tab pinned, the pinned row shares its line with + and the gear"
   const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
   assert.match(css, /\.replay-tab-rows\.all-pinned > \.replay-tab-list-pinned \{[^}]*flex: 0 1 auto;/);
 });
+
+// Selecting a tab rebuilt the rows, which came back scrolled to their start,
+// and revealing the active tab from there pushed one already in view to the
+// far edge of the strip.
+test("a re-render keeps each row where it was scrolled and reveals the active tab from there", () => {
+  const scrolled = (scrollLeft, scrollTop) => ({ scrollLeft, scrollTop });
+  let rows = [scrolled(40, 0), scrolled(900, 30)];
+  const revealedFrom = [];
+  const state = {
+    replayTabs: [{ id: "a", pinned: false }, { id: "b", pinned: false }],
+    activeReplayTabId: "b", replayRenamingTabId: null,
+  };
+  const context = loadFunctions(["renderReplayTabs", "getReplayTabVisualOrder"], {
+    state,
+    els: { replayTabStrip: {
+      // Like the real innerHTML, both rows come back new and at their start.
+      set innerHTML(_value) { rows = [scrolled(0, 0), scrolled(0, 0)]; },
+      querySelectorAll: (selector) => (selector === ".replay-tab-list" ? rows : []),
+      classList: { toggle() {} },
+    } },
+    replayTabAutoLabel: (tab) => tab.id, replayTabLabel: (tab) => tab.id,
+    replayTabTooltipLabel: (tab, label) => label, escapeHtml: String,
+    scrollActiveReplayTabIntoView: () => revealedFrom.push(rows.map((row) => ({ ...row }))),
+    document: { activeElement: null },
+  });
+  context.renderReplayTabs();
+  assert.deepEqual(revealedFrom, [[scrolled(40, 0), scrolled(900, 30)]]);
+  context.renderReplayTabs({ keepScroll: true });
+  assert.equal(revealedFrom.length, 1, "a reorder does not reveal the active tab");
+  assert.deepEqual(rows, [scrolled(40, 0), scrolled(900, 30)], "the wrapped view's vertical scroll too");
+});
