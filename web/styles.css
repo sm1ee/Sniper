@@ -1984,7 +1984,8 @@ code {
 .compact-field select:focus,
 .settings-field input:focus,
 .settings-field textarea:focus,
-.settings-field select:focus {
+.settings-field select:focus,
+.session-table .session-name-input:focus {
   outline: none;
   border-color: var(--point-border);
   box-shadow: 0 0 0 1px var(--point-soft);
@@ -5156,6 +5157,20 @@ button.utility-button.replay-tab-add {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* Renaming: the name becomes a field of the same size in the same place. */
+.session-table .session-name-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  margin: -3px 0;
+  border: 1px solid var(--point-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-code);
+  color: var(--text);
+  font: inherit;
 }
 
 .session-table :is(.session-select-button, .session-open-button, .session-delete-button):focus-visible {

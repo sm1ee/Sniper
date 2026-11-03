@@ -447,6 +447,7 @@ const state = {
   sessions: [],
   activeSession: null,
   selectedSessionId: null,
+  sessionRename: null,
   dashboardStorageSessionId: null,
   sessionSortKey: "created_at",
   sessionSortDir: "desc",
@@ -644,7 +645,6 @@ const els = {
   reconShell: document.getElementById("reconShell"),
   templatesShell: document.getElementById("templatesShell"),
   dashboardShell: document.getElementById("dashboardShell"),
-  dashboardCurrentSessionName: document.getElementById("dashboardCurrentSessionName"),
   dashboardCurrentSessionPath: document.getElementById("dashboardCurrentSessionPath"),
   dashboardCurrentSessionStorage: document.getElementById("dashboardCurrentSessionStorage"),
   dashboardTiles: document.getElementById("dashboardTiles"),
@@ -1946,6 +1946,11 @@ function bindEvents() {
       console.error(error);
       showToast(error?.message || "Failed to open session folder.", "error");
     });
+  });
+  // On the table body, which outlives the rows each render replaces.
+  els.dashboardSessionsBody.addEventListener("dblclick", (event) => {
+    const id = event.target.closest?.(".session-select-button")?.closest("tr[data-id]")?.dataset.id;
+    if (id) startSessionRename(id);
   });
 
   // Session table sort headers
@@ -9949,6 +9954,9 @@ function renderDashboard() {
     .find((name) => focusedControl?.classList?.contains(name));
   const restoreListFocus = focusedClass && els.dashboardSessionsBody.contains?.(focusedControl);
   const focusedSessionId = restoreListFocus ? focusedRow?.dataset.id : null;
+  // A redraw replaces the rename field too; keep the caret where it was.
+  const renameSelection = focusedControl?.classList?.contains("session-name-input")
+    ? [focusedControl.selectionStart, focusedControl.selectionEnd] : null;
   // Ensure selectedSessionId defaults to active session
   const activeSession = state.sessions.find((session) => session.active)
     || state.sessions.find((session) => session.id === state.activeSession?.id) || null;
@@ -9962,7 +9970,6 @@ function renderDashboard() {
   // Activation changes selection before its reload finishes. Keep folder opens
   // bound to the path still on screen if that reload is delayed or fails.
   state.dashboardStorageSessionId = current?.id || null;
-  els.dashboardCurrentSessionName.textContent = current?.name || "No active session";
   els.dashboardCurrentSessionPath.textContent = current?.storage_path || "";
   // The header names where the selected session is kept; with none there is
   // nothing to name. Its counts are the row's own.
@@ -10062,11 +10069,15 @@ function renderDashboard() {
     });
   }
 
+  // The field being replaced is no longer the editor: its blur must not save.
+  sessionRenameInput = null;
   els.dashboardSessionsBody.innerHTML = sortedSessions.length
     ? sortedSessions
         .map((session) => `
           <tr class="${["history-row", session.id === state.selectedSessionId && "selected", session.active && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
-            <td><button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+            <td>${state.sessionRename?.id === session.id
+              ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(session.name)}" spellcheck="false" autocomplete="off" />`
+              : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>`}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -10092,11 +10103,14 @@ function renderDashboard() {
   Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]")).forEach((row) => {
     row.addEventListener("click", () => {
       const { id } = row.dataset;
-      if (!id) return;
+      // Clicking the selected row redraws nothing, so its second click is
+      // still on the name a double-click renames.
+      if (!id || id === state.selectedSessionId) return;
       state.selectedSessionId = id;
       renderDashboard();
     });
   });
+  if (state.sessionRename) wireSessionRenameInput(renameSelection);
 
   // Activate button = switch session
   Array.from(els.dashboardSessionsBody.querySelectorAll(".session-open-button")).forEach((btn) => {
@@ -10141,6 +10155,99 @@ function renderDashboard() {
   }
 }
 
+// ── Session rename ──
+// Double-click a session's name, or Rename in its menu, to edit it in place.
+// Enter or leaving the field saves, Escape cancels, as Replay tab names do.
+let sessionRenameInput = null;
+
+function startSessionRename(id) {
+  const session = state.sessions.find((entry) => entry.id === id);
+  if (!session) return;
+  state.sessionRename = { id, draft: session.name, pending: false, focus: true };
+  renderDashboard();
+}
+
+function cancelSessionRename({ refocus = false } = {}) {
+  const edit = state.sessionRename;
+  if (!edit) return;
+  state.sessionRename = null;
+  renderDashboard();
+  if (refocus) focusSessionNameButton(edit.id);
+}
+
+async function commitSessionRename({ refocus = false } = {}) {
+  const edit = state.sessionRename;
+  if (!edit || edit.pending) return;
+  const session = state.sessions.find((entry) => entry.id === edit.id);
+  const name = edit.draft.trim();
+  if (!session || !name || name === session.name) {
+    cancelSessionRename({ refocus });
+    return;
+  }
+  edit.pending = true;
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(edit.id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    await requireOkResponse(response, "Failed to rename session.");
+  } catch (error) {
+    edit.pending = false;
+    showToast(error?.message || "Failed to rename session.", "error");
+    // The field stays with what was typed, to fix and save again.
+    if (state.sessionRename === edit && refocus) {
+      edit.focus = true;
+      renderDashboard();
+    }
+    return;
+  }
+  session.name = name;
+  if (state.sessionRename === edit) state.sessionRename = null;
+  renderDashboard();
+  if (refocus) focusSessionNameButton(edit.id);
+  // The name also shows outside this list, for the session in use.
+  loadSessions().catch((error) => console.error(error));
+}
+
+function wireSessionRenameInput(selection) {
+  const input = els.dashboardSessionsBody.querySelector?.(".session-name-input");
+  const edit = state.sessionRename;
+  if (!input || !edit) return;
+  sessionRenameInput = input;
+  // A click in the field would select the row and redraw the table under it.
+  for (const type of ["click", "dblclick"]) input.addEventListener(type, (event) => event.stopPropagation());
+  input.addEventListener("input", () => { edit.draft = input.value; });
+  input.addEventListener("keydown", (event) => {
+    // Enter during IME composition picks a candidate; it does not save.
+    if (event.isComposing) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitSessionRename({ refocus: true });
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelSessionRename({ refocus: true });
+    }
+  });
+  input.addEventListener("blur", () => {
+    if (sessionRenameInput === input && state.sessionRename === edit) commitSessionRename();
+  });
+  if (edit.focus) {
+    edit.focus = false;
+    input.focus();
+    input.select();
+  } else if (selection) {
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(selection[0], selection[1]);
+  }
+}
+
+function focusSessionNameButton(id) {
+  Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]"))
+    .find((row) => row.dataset.id === id)
+    ?.querySelector(".session-select-button")?.focus({ preventScroll: true });
+}
+
 // ── Session context menu ──
 let sessionContextMenuEl = null;
 
@@ -10152,6 +10259,7 @@ function showSessionContextMenu(event, sessionId) {
   const menu = document.createElement("div");
   menu.className = "context-menu session-context-menu";
   menu.innerHTML = `
+    <button class="context-menu-item" data-action="rename">Rename session</button>
     <button class="context-menu-item" data-action="folder">Open session folder</button>
     ${session.active ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
   `;
@@ -10170,7 +10278,9 @@ function showSessionContextMenu(event, sessionId) {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
     const action = btn.dataset.action;
-    if (action === "folder") {
+    if (action === "rename") {
+      startSessionRename(sessionId);
+    } else if (action === "folder") {
       revealSessionFolder(sessionId).catch((error) => {
         console.error(error);
         showToast(error?.message || "Failed to open session folder.", "error");

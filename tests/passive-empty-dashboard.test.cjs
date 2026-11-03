@@ -17,7 +17,7 @@ for (const activeSession of [null, undefined, session("old-active", true)]) {
   test(`empty dashboard has a neutral status with ${JSON.stringify(activeSession)} workspace metadata`, () => {
     const f = fixture([], activeSession, "old-selection");
     f.c.renderDashboard();
-    assert.equal(f.els.dashboardCurrentSessionName.textContent, "No active session");
+    assert.equal(f.els.dashboardCurrentSessionPath.textContent, "");
     assert.equal(f.els.dashboardCurrentSessionStorage.hidden, true);
     assert.equal(f.state.selectedSessionId, null);
     assert.equal(f.state.activeSession, activeSession, "rendering must not change workspace ownership");

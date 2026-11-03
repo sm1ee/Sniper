@@ -4,7 +4,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 
-const session = (id, active = false) => ({ id, name: `Session ${id}`, active });
+const session = (id, active = false) => ({ id, name: `Session ${id}`, active, storage_path: `/fixture/sessions/${id}` });
 const response = body => ({ ok: true, json: async () => body });
 function fixture() {
   const active = session("fixture-active", true);
@@ -81,14 +81,14 @@ test("refreshing away a selected saved session selects the displayed active sess
   const f = dashboardFixture([session("fixture-active", true)], "fixture-removed");
   f.context.renderDashboard();
   assert.equal(f.state.selectedSessionId, "fixture-active", "Open storage must target the session that is displayed");
-  assert.equal(f.els.dashboardCurrentSessionName.textContent, "Session fixture-active");
+  assert.equal(f.els.dashboardCurrentSessionPath.textContent, "/fixture/sessions/fixture-active");
 });
 
 test("refresh preserves a selected saved session that still exists", () => {
   const f = dashboardFixture([session("fixture-active", true), session("fixture-stored")], "fixture-stored");
   f.context.renderDashboard();
   assert.equal(f.state.selectedSessionId, "fixture-stored");
-  assert.equal(f.els.dashboardCurrentSessionName.textContent, "Session fixture-stored");
+  assert.equal(f.els.dashboardCurrentSessionPath.textContent, "/fixture/sessions/fixture-stored");
 });
 
 test("an empty refreshed list clears an obsolete selection", () => {
@@ -150,7 +150,7 @@ test("a refreshed dashboard never restores a removed selection from a stale work
   f.state.activeSession = session("fixture-old-active", true);
   f.context.renderDashboard();
   assert.equal(f.state.selectedSessionId, "fixture-new-active");
-  assert.equal(f.els.dashboardCurrentSessionName.textContent, "Session fixture-new-active");
+  assert.equal(f.els.dashboardCurrentSessionPath.textContent, "/fixture/sessions/fixture-new-active");
   assert.equal(f.state.activeSession.id, "fixture-old-active", "render must not change workspace write ownership");
 });
 
@@ -291,4 +291,89 @@ test("errors from a current external-session handler are not swallowed by a newe
   const rejected = assert.rejects(first, /Fixture transition error/);
   change.reject(new Error("Fixture transition error"));
   await rejected;
+});
+
+// The header line was "<name> is stored in <path>"; the selected row and the
+// detail below already name the session.
+test("the storage line is the selected session's path and Open", () => {
+  const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/index.html"), "utf8");
+  const line = html.match(/<p class="dashboard-storage" id="dashboardCurrentSessionStorage">([^]*?)<\/p>/)[1];
+  assert.doesNotMatch(line, /stored in|dashboardCurrentSessionName/);
+  assert.match(line, /^<span class="dashboard-storage-path" id="dashboardCurrentSessionPath">Loading…<\/span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open<\/button>$/);
+});
+
+// Double-click a name (or Rename in its menu) edits it in place; Enter or
+// leaving the field saves, Escape cancels.
+function renameFixture(reply = { ok: true, json: async () => ({}) }) {
+  const sessions = [session("fixture-active", true), session("fixture-stored")];
+  const state = { sessions, activeSession: sessions[0], selectedSessionId: "fixture-stored", sessionRename: null };
+  const requests = [], toasts = [], reloads = [];
+  const els = new Proxy({}, { get: (obj, key) => obj[key] ||= { querySelectorAll: () => [], querySelector: () => null } });
+  const context = loadFunctions(["renderDashboard", "sessionFindingCount", "formatSize", "startSessionRename",
+    "cancelSessionRename", "commitSessionRename", "wireSessionRenameInput", "focusSessionNameButton"], {
+    state, els, document: { getElementById: () => null }, getSortedSessions: () => sessions,
+    formatCappedCount: value => String(value ?? 0), retainedTransactionsCap() {}, retainedEntriesCap() {},
+    formatTimestamp: () => "-", escapeHtml: value => String(value), sessionRenameInput: null,
+    fetch: async (url, init) => { requests.push([url, init]); return reply; },
+    requireOkResponse: async res => { if (!res.ok) throw new Error("session name cannot contain control characters"); },
+    showToast: (message, kind) => toasts.push([message, kind]),
+    loadSessions: async () => reloads.push(true),
+    console: { error() {} },
+  });
+  return { state, els, context, requests, toasts, reloads, sessions };
+}
+
+test("starting a rename shows the name in a field in place of the row's name", () => {
+  const f = renameFixture();
+  f.context.startSessionRename("fixture-stored");
+  const [, stored] = f.els.dashboardSessionsBody.innerHTML.split("</tr>");
+  assert.match(stored, /<input class="session-name-input" type="text" value="Session fixture-stored" aria-label="Rename session Session fixture-stored"/);
+  assert.doesNotMatch(stored, /session-select-button/);
+  f.state.sessionRename.draft = "Typed so far";
+  f.context.renderDashboard();
+  assert.match(f.els.dashboardSessionsBody.innerHTML, /value="Typed so far"/, "a redraw keeps what was typed");
+});
+
+test("Enter saves a changed name with PATCH and reloads the session list", async () => {
+  const f = renameFixture();
+  f.context.startSessionRename("fixture-stored");
+  f.state.sessionRename.draft = "  Checkout API  ";
+  await f.context.commitSessionRename();
+  assert.deepEqual(f.requests.map(([url, init]) => [url, init.method, init.body]),
+    [["/api/sessions/fixture-stored", "PATCH", JSON.stringify({ name: "Checkout API" })]]);
+  assert.equal(f.sessions[1].name, "Checkout API");
+  assert.equal(f.state.sessionRename, null);
+  assert.equal(f.reloads.length, 1);
+});
+
+test("an unchanged or blank name closes the field without a request", async () => {
+  for (const draft of ["Session fixture-stored", "   "]) {
+    const f = renameFixture();
+    f.context.startSessionRename("fixture-stored");
+    f.state.sessionRename.draft = draft;
+    await f.context.commitSessionRename();
+    assert.equal(f.requests.length, 0, JSON.stringify(draft));
+    assert.equal(f.state.sessionRename, null);
+  }
+});
+
+test("a refused name keeps the field and its text, and says why", async () => {
+  const f = renameFixture({ ok: false });
+  f.context.startSessionRename("fixture-stored");
+  f.state.sessionRename.draft = "Bad\u0007name";
+  await f.context.commitSessionRename();
+  assert.deepEqual(f.toasts, [["session name cannot contain control characters", "error"]]);
+  assert.equal(f.state.sessionRename.draft, "Bad\u0007name");
+  assert.equal(f.state.sessionRename.pending, false);
+  assert.equal(f.sessions[1].name, "Session fixture-stored");
+  assert.equal(f.reloads.length, 0);
+});
+
+test("Escape puts the name back", () => {
+  const f = renameFixture();
+  f.context.startSessionRename("fixture-stored");
+  f.state.sessionRename.draft = "Not this";
+  f.context.cancelSessionRename();
+  assert.equal(f.state.sessionRename, null);
+  assert.match(f.els.dashboardSessionsBody.innerHTML, /session-select-button[^>]*>Session fixture-stored</);
 });

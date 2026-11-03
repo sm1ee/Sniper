@@ -446,7 +446,9 @@ sends no request. Labels collapse whitespace and are limited to 80 characters.
 A session holds its own captured traffic, scope, replay tabs and settings.
 Sessions live under the data directory: `~/.sniper` by default, or whatever
 `SNIPER_DATA_DIR` names. `session list` shows each session's `storage_path`. A
-new session starts empty and becomes the active one at once.
+new session starts empty and becomes the active one at once. To rename a
+session, double-click its name on the Session screen and press Enter, or run
+`session rename --id <id> --name <name> --yes`.
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact session list
