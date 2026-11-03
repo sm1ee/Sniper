@@ -260,6 +260,10 @@ pub struct ScannerFinding {
     pub title: String,
     pub detail: String,
     pub evidence: String,
+    /// The record's scheme, which says whether the host's port is the default.
+    /// Empty on findings saved before it was kept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scheme: String,
     pub host: String,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,6 +280,8 @@ pub struct FindingSummary {
     pub severity: Severity,
     pub category: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scheme: String,
     pub host: String,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,6 +307,7 @@ impl ScannerFinding {
             severity: self.severity.clone(),
             category: self.category.clone(),
             title: self.title.clone(),
+            scheme: self.scheme.clone(),
             host: self.host.clone(),
             path: self.path.clone(),
             location: self.location.clone(),
@@ -847,6 +854,7 @@ fn make_finding(
         title: title.into(),
         detail: detail.into(),
         evidence: evidence.into(),
+        scheme: record.scheme.clone(),
         host: record.host.clone(),
         path: record.path.clone(),
         location: None,
@@ -4618,10 +4626,35 @@ mod tests {
             title: title.to_string(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "example.com".to_string(),
             path: "/".to_string(),
             location: None,
         }
+    }
+
+    // The Findings Host column hides the scheme's default port. A finding had
+    // only "host:443", so the column took every :443 as HTTPS.
+    #[test]
+    fn a_finding_keeps_its_records_scheme_and_old_ones_still_read() {
+        let mut record = make_record(vec![], vec![], "", 200);
+        record.scheme = "http".into();
+        record.host = "example.com:443".into();
+        let finding = make_finding(&record, Severity::Low, "test", "title", "", "");
+        assert_eq!(finding.scheme, "http");
+        assert_eq!(
+            serde_json::to_value(finding.summary()).unwrap()["scheme"],
+            "http"
+        );
+
+        let mut saved = serde_json::to_value(&finding).unwrap();
+        saved.as_object_mut().unwrap().remove("scheme");
+        let old: ScannerFinding = serde_json::from_value(saved).unwrap();
+        assert_eq!(old.scheme, "");
+        assert!(serde_json::to_value(old.summary())
+            .unwrap()
+            .get("scheme")
+            .is_none());
     }
 
     fn custom_rule(id: String) -> CustomRule {

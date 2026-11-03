@@ -9973,6 +9973,7 @@ mod tests {
             category: "header".into(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "example.com".into(),
             path: "/".into(),
             location: None,
@@ -13040,6 +13041,7 @@ mod tests {
             title: "Synthetic saved finding".into(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "example.com".into(),
             path: "/".into(),
             location: None,
@@ -19892,6 +19894,7 @@ mod tests {
             title: "Active finding".to_string(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "active.test".to_string(),
             path: "/".to_string(),
             location: None,
@@ -19906,6 +19909,7 @@ mod tests {
             title: "Inactive finding".to_string(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "inactive.test".to_string(),
             path: "/finding".to_string(),
             location: None,
@@ -20130,6 +20134,7 @@ mod tests {
             title: "Cookie without Secure flag".to_string(),
             detail: String::new(),
             evidence: "BIGipServerpool".to_string(),
+            scheme: String::new(),
             host: "example.com".to_string(),
             path: "/".to_string(),
             location: None,
@@ -20285,6 +20290,7 @@ mod tests {
                     title: "Example Active".into(),
                     detail: String::new(),
                     evidence: evidence.into(),
+                    scheme: String::new(),
                     host: "app.example.com".into(),
                     path: "/echo?q=1".into(),
                     location: None,
@@ -20323,6 +20329,7 @@ mod tests {
             .unwrap();
         assert_eq!(finding.category, "nuclei");
         assert_eq!(finding.title, "Example Detect");
+        assert_eq!(finding.scheme, "https");
         drop(session);
         drop(state);
         let _ = std::fs::remove_dir_all(path);

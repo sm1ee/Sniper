@@ -177,6 +177,7 @@ fn finding(
         title,
         detail: detail.join("\n"),
         evidence: truncate_chars(&evidence, MAX_EVIDENCE_CHARS),
+        scheme: record.scheme.clone(),
         host: record.host.clone(),
         path: record.path.clone(),
         location: None,

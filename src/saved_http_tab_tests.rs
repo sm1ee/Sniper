@@ -336,6 +336,7 @@ async fn saved_http_tab_duplicate_clones_every_saved_field_without_focus_or_capt
         title: "Generated finding".into(),
         detail: "Preserve saved detail".into(),
         evidence: "synthetic".into(),
+        scheme: String::new(),
         host: "example.com".into(),
         path: "/unrelated-capture".into(),
         location: None,

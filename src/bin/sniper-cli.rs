@@ -6695,7 +6695,7 @@ fn session_read_output_schema(operation: &str) -> Option<Value> {
             "rule_id":{"type":"string"},
             "severity":{"type":"string","enum":["info","low","medium","high","critical"]},
             "category":{"type":"string"}, "title":{"type":"string"},
-            "host":{"type":"string"}, "path":{"type":"string"},
+            "scheme":{"type":"string"}, "host":{"type":"string"}, "path":{"type":"string"},
             "location":{
                 "type":"object","required":["side"],
                 "properties":{
