@@ -13,7 +13,7 @@ function fixture(mode) {
     'dropResponseInterceptButton', 'interceptRequestCM', 'interceptResponseCM', 'interceptSearchInput']) els[name] = element();
   els.interceptSearchMeta = null;
   Object.assign(context, { escapeHtml: String, formatTimestamp: String });
-  for (const name of ['renderIntercepts', 'renderResponseIntercepts', 'getVisibleRequestInterceptSummaries',
+  for (const name of ['renderIntercepts', 'renderResponseIntercepts', 'displayHost', 'extractHostPort', 'defaultSummaryPortForScheme', 'getVisibleRequestInterceptSummaries',
     'getInterceptDraftRecovery', 'captureInterceptDraftRecoveryOwners', 'handleInterceptDraftReadFailure', 'takeInterceptDraftRecovery',
     'selectInterceptQueueItem', 'getInterceptDetailRead', 'updateInterceptDetailFeedback', 'retrySelectedInterceptDetail', 'updateInterceptQueueSelectionStatus', 'scrollSelectedInterceptRowIntoView',
     'getVisibleResponseInterceptSummaries', 'reconcileRequestInterceptSelection', 'reconcileResponseInterceptSelection',

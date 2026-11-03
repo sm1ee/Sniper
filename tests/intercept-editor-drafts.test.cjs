@@ -78,7 +78,7 @@ function fixture(mode, cm) {
   const document = { activeElement: null, getElementById: () => null };
   const context = loadFunctions([
     "loadIntercepts", "loadInterceptDetail", "loadResponseIntercepts", "loadResponseInterceptDetail",
-    "renderIntercepts", "renderResponseIntercepts", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
+    "renderIntercepts", "renderResponseIntercepts", "displayHost", "extractHostPort", "defaultSummaryPortForScheme", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
     "getInterceptDraftRecovery", "captureInterceptDraftRecoveryOwners", "handleInterceptDraftReadFailure", "takeInterceptDraftRecovery",
     "selectInterceptQueueItem", "getInterceptDetailRead", "updateInterceptDetailFeedback", "retrySelectedInterceptDetail", "updateInterceptQueueSelectionStatus", "scrollSelectedInterceptRowIntoView",
     "reconcileRequestInterceptSelection", "reconcileResponseInterceptSelection", "refreshInterceptDetailsForCurrentSelection",

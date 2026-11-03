@@ -72,7 +72,7 @@ function fixture(mode, cm = true) {
   if (cm) { els.interceptRequestCM = node(); els.interceptResponseCM = node(); }
   const c = loadFunctions([
     "loadIntercepts", "loadInterceptDetail", "loadResponseIntercepts", "loadResponseInterceptDetail",
-    "renderIntercepts", "renderResponseIntercepts", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
+    "renderIntercepts", "renderResponseIntercepts", "displayHost", "extractHostPort", "defaultSummaryPortForScheme", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
     "getInterceptDraftRecovery", "captureInterceptDraftRecoveryOwners", "handleInterceptDraftReadFailure", "takeInterceptDraftRecovery",
     "selectInterceptQueueItem", "getInterceptDetailRead", "updateInterceptDetailFeedback", "retrySelectedInterceptDetail", "updateInterceptQueueSelectionStatus", "scrollSelectedInterceptRowIntoView",
     "reconcileRequestInterceptSelection", "reconcileResponseInterceptSelection", "refreshInterceptDetailsForCurrentSelection",

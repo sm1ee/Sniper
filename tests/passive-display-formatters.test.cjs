@@ -174,3 +174,17 @@ test("the WebSocket table marks its sorted header active", () => {
   assert.deepEqual(buttons.map((b) => b.classList.contains("active")), [false, true]);
   assert.deepEqual(buttons.map((b) => b.indicator.textContent), ["↕", "↑"]);
 });
+
+// HTTPS captured through CONNECT keeps the tunnel's "host:443"; the column
+// showed that port on every row, beside a TLS column that already says it.
+test("the Host column leaves out the scheme's default port and keeps any other", () => {
+  const c = fixture(["renderHistoryCell", "displayHost", "extractHostPort", "defaultSummaryPortForScheme"]);
+  const cell = (host, scheme) => c.renderHistoryCell("host", { host, scheme }, {});
+  assert.equal(cell("www.example.com:443", "https"), '<td class="cell-host">www.example.com</td>');
+  assert.equal(cell("www.example.com:80", "http"), '<td class="cell-host">www.example.com</td>');
+  assert.equal(cell("[2001:db8::1]:443", "https"), '<td class="cell-host">[2001:db8::1]</td>');
+  for (const [host, scheme] of [["www.example.com:8443", "https"], ["www.example.com:443", "http"],
+    ["www.example.com:80", "https"], ["www.example.com", "https"], ["[2001:db8::1]", "https"]]) {
+    assert.equal(cell(host, scheme), `<td class="cell-host">${host}</td>`, `${scheme} ${host}`);
+  }
+});

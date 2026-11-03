@@ -37,7 +37,7 @@ test("virtual rows keep the index cell treatment after column reordering", () =>
   const state = { _historyEntries: [{ item, index: 0 }], historyColumnOrder: ["index", "host", "path"] };
   const shell = { clientHeight: 300, scrollTop: 0 };
   const body = { innerHTML: "" };
-  const c = loadFunctions(["renderHistoryVirtual", "renderHistoryCell", "escapeHtml"], {
+  const c = loadFunctions(["renderHistoryVirtual", "renderHistoryCell", "displayHost", "extractHostPort", "defaultSummaryPortForScheme", "escapeHtml"], {
     state, els: { historyTable: { closest: () => shell }, historyTableBody: body },
     getHistoryRowHeight: () => 27, HISTORY_BUFFER_ROWS: 30, HTTP_HISTORY_SCROLL_PREFETCH_ROWS: 120,
     scheduleHistoryBackfill() {},

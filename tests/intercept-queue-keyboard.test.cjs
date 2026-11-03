@@ -65,7 +65,7 @@ function fixture(mode, cm = true) {
     "onInterceptQueueKeydown", "getInterceptDraftRecovery", "captureInterceptDraftRecoveryOwners", "handleInterceptDraftReadFailure", "takeInterceptDraftRecovery",
     "selectInterceptQueueItem", "getInterceptDetailRead", "updateInterceptDetailFeedback", "retrySelectedInterceptDetail", "updateInterceptQueueSelectionStatus", "scrollSelectedInterceptRowIntoView",
     "tableArrowStep", "isEditableTarget", "loadIntercepts", "loadInterceptDetail", "loadResponseIntercepts", "loadResponseInterceptDetail",
-    "renderIntercepts", "renderResponseIntercepts", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
+    "renderIntercepts", "renderResponseIntercepts", "displayHost", "extractHostPort", "defaultSummaryPortForScheme", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
     "reconcileRequestInterceptSelection", "reconcileResponseInterceptSelection", "refreshInterceptDetailsForCurrentSelection",
     "applyInterceptScopeFilterLocally", "switchInterceptQueueTab", "updateInterceptQueueBadges", "activeInterceptCMKey",
     "updateInterceptSearch", "setInterceptPaneContent", "buildEditableRawRequest", "buildEditableRawResponse", "normalizedHeaders",

@@ -14392,7 +14392,7 @@ function renderIntercepts() {
           return `
             <tr class="history-row ${selected}" data-id="${item.id}">
               <td class="iq-col-method">${escapeHtml(item.method)}</td>
-              <td class="iq-col-host text-truncate">${escapeHtml(item.host)}</td>
+              <td class="iq-col-host text-truncate">${escapeHtml(displayHost(item.host, item.scheme))}</td>
               <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
               <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
             </tr>
@@ -20962,7 +20962,7 @@ function renderResponseIntercepts() {
             <tr class="history-row ${selected}" data-id="${item.id}">
               <td class="iq-col-status">${escapeHtml(String(item.status))}</td>
               <td class="iq-col-method">${escapeHtml(item.method)}</td>
-              <td class="iq-col-host text-truncate">${escapeHtml(item.host)}</td>
+              <td class="iq-col-host text-truncate">${escapeHtml(displayHost(item.host, item.scheme))}</td>
               <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
               <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
             </tr>
@@ -24576,7 +24576,7 @@ function renderHistoryCell(colKey, item, entry) {
       return `<td class="history-index-cell" title="${value}">${value}</td>`;
     }
     case "host":
-      return `<td class="cell-host">${escapeHtml(item.host)}</td>`;
+      return `<td class="cell-host">${escapeHtml(displayHost(item.host, item.scheme))}</td>`;
     case "method":
       return `<td><span class="method-pill ${methodTone(item.method)}">${escapeHtml(item.method)}</span></td>`;
     case "path":
@@ -28440,6 +28440,15 @@ function extractHostPort(host) {
     return end > 0 && value[end + 1] === ":" ? value.slice(end + 2) : "";
   }
   return (value.match(/:/g) || []).length === 1 ? value.split(":")[1] : "";
+}
+
+// A host to show in a table: HTTPS captured through CONNECT keeps the
+// tunnel's "host:443", and the scheme's own port tells nothing the scheme
+// does not. Filters, sorting and copies keep the host as captured.
+function displayHost(host, scheme) {
+  const value = String(host || "").trim();
+  const port = extractHostPort(value);
+  return port && port === defaultSummaryPortForScheme(scheme) ? value.slice(0, -(port.length + 1)) : value;
 }
 
 /** Pre-compute per-item display values and lookup indexes used by the history table. */
