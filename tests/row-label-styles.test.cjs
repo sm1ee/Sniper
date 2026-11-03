@@ -30,11 +30,10 @@ test("shared app surfaces use flat theme fills without decorative gloss", () => 
   const controls = css.match(/^\.metric-pill,\n\.utility-button,\n\.status-pill \{([^}]*)\}/m)[1];
   assert.match(body, /background: var\(--bg\);/);
   assert.match(controls, /background: var\(--panel-elevated\);/);
-  for (const block of [body, controls, rule(".placeholder-card"), rule(".modal-card"), rule(".primary-action")]) {
+  for (const block of [body, controls, rule(".modal-card"), rule(".primary-action")]) {
     assert.doesNotMatch(block, /(?:radial|linear)-gradient/);
   }
   assert.doesNotMatch(controls, /box-shadow:/);
-  assert.doesNotMatch(rule(".placeholder-card"), /box-shadow:/);
   assert.match(rule(".modal-card"), /box-shadow: var\(--shadow\);/, "floating dialogs retain depth");
   assert.match(rule(".primary-action"), /background: var\(--point-soft\);/);
   assert.match(rule(".primary-action"), /border-color: var\(--point-border\);/);

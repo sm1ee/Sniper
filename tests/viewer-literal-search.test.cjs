@@ -44,7 +44,6 @@ function fixture(area, side, text, query) {
       replayRequestSearchInput: input, replayResponseSearchInput: input,
       replayResponseCM: {},
     },
-    titleCase: value => value,
     syncReplayResponsePreview() {},
   });
   vm.runInContext(appSource.slice(fieldStart, fieldEnd), context);

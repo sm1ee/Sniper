@@ -856,8 +856,7 @@ code {
 
 .metric-pill span,
 .search-box span,
-.select-box span,
-.placeholder-kicker {
+.select-box span {
   color: var(--text-dim);
   font-size: var(--font-2xs);
   letter-spacing: 0.08em;
@@ -2475,8 +2474,7 @@ code {
   display: none;
 }
 
-.proxy-panel,
-.proxy-sub-placeholder {
+.proxy-panel {
   grid-row: 2 / -1;
   grid-column: 1;
   min-height: 0;
@@ -3213,13 +3211,6 @@ body.pane-resizing-y {
 .inspector-column.collapsed .inspector-layout,
 .lower-workbench.inspector-collapsed .inspector-column .inspector-layout {
   grid-template-columns: 0 46px;
-}
-
-.placeholder-screen,
-.proxy-sub-placeholder {
-  display: grid;
-  place-items: center;
-  background: var(--shell);
 }
 
 .proxy-panel {
@@ -6362,25 +6353,6 @@ button.utility-button.replay-tab-add {
   border-radius: 6px;
 }
 
-.placeholder-card {
-  width: min(620px, calc(100vw - 56px));
-  padding: 28px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: var(--panel);
-}
-
-.placeholder-card h2 {
-  margin: 8px 0 12px;
-  font-size: var(--font-xl);
-}
-
-.placeholder-card p:last-child {
-  margin-bottom: 0;
-  color: var(--text-soft);
-  line-height: 1.65;
-}
-
 .status-bar {
   display: flex;
   align-items: center;
@@ -7336,11 +7308,6 @@ button.utility-button.replay-tab-add {
   .header-row,
   .modal-list {
     grid-template-columns: 1fr;
-  }
-
-  .placeholder-card {
-    width: min(100%, calc(100vw - 24px));
-    padding: 22px;
   }
 
   .code-gutter {

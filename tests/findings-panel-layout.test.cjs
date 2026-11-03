@@ -23,15 +23,13 @@ function tabFixture() {
   const els = Object.fromEntries([
     "proxyShell", "colorTagFilter", "filterBar", "trafficRegion", "historyWorkbenchResizer",
     "lowerWorkbench", "interceptPanel", "websocketPanel", "matchReplacePanel", "findingsPanel",
-    "oastPanel", "proxySettingsPanel", "proxySubPlaceholder", "proxySubPath",
-    "proxySubTitle", "proxySubDescription",
+    "oastPanel", "proxySettingsPanel",
   ].map(key => [key, element()]));
   let loads = 0;
   const state = { activeProxyTab: "findings" };
   const context = loadFunctions(["renderProxyPanels"], {
     els, state, proxyTabs: [], sanitizeActiveProxyTab: value => value,
     loadFindings() { loads++; }, applySavedWebsocketPaneWidth() {}, renderMatchReplaceRules() {},
-    humanizeProxyTab: value => value,
   });
   return { els, state, render: () => context.renderProxyPanels(), get loads() { return loads; } };
 }

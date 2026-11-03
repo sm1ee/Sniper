@@ -695,10 +695,6 @@ const els = {
   requestColumn: document.getElementById("requestColumn"),
   responseColumn: document.getElementById("responseColumn"),
   inspectorColumn: document.querySelector(".inspector-column"),
-  proxySubPlaceholder: document.getElementById("proxySubPlaceholder"),
-  proxySubPath: document.getElementById("proxySubPath"),
-  proxySubTitle: document.getElementById("proxySubTitle"),
-  proxySubDescription: document.getElementById("proxySubDescription"),
   interceptPanel: document.getElementById("interceptPanel"),
   websocketPanel: document.getElementById("websocketPanel"),
   matchReplacePanel: document.getElementById("matchReplacePanel"),
@@ -12585,7 +12581,6 @@ function renderProxyPanels() {
   const showFindings = state.activeProxyTab === "findings";
   const showOast = state.activeProxyTab === "oast";
   const showProxySettings = state.activeProxyTab === "proxy-settings";
-  const showPlaceholder = !showHistory && !showIntercept && !showWebsockets && !showMatchReplace && !showFindings && !showOast && !showProxySettings;
 
   els.proxyShell?.classList.toggle("findings-active", showFindings);
   els.colorTagFilter.classList.toggle("hidden", !showHistory);
@@ -12597,19 +12592,12 @@ function renderProxyPanels() {
   els.websocketPanel.classList.toggle("hidden", !showWebsockets);
   els.matchReplacePanel.classList.toggle("hidden", !showMatchReplace);
   els.findingsPanel.classList.toggle("hidden", !showFindings);
-  if (els.oastPanel) els.oastPanel.classList.toggle("hidden", state.activeProxyTab !== "oast");
+  if (els.oastPanel) els.oastPanel.classList.toggle("hidden", !showOast);
   els.proxySettingsPanel.classList.toggle("hidden", !showProxySettings);
-  els.proxySubPlaceholder.classList.toggle("hidden", !showPlaceholder);
 
   if (showWebsockets) applySavedWebsocketPaneWidth();
   if (showMatchReplace) renderMatchReplaceRules();
   if (showFindings || (showHistory && state.httpShowFindings)) loadFindings();
-  if (!showPlaceholder) return;
-
-  const label = humanizeProxyTab(state.activeProxyTab);
-  els.proxySubPath.textContent = `Proxy / ${label}`;
-  els.proxySubTitle.textContent = `${label} is planned next`;
-  els.proxySubDescription.textContent = `${label} will plug into the same capture store and message workbench.`;
 }
 
 // Set by a rail-tab click so the next render scrolls to that section once.
@@ -28547,13 +28535,6 @@ function countHiddenConnectItems() {
   return state.items.filter((item) => item.method === "CONNECT").length;
 }
 
-function humanizeProxyTab(value) {
-  return value
-    .split("-")
-    .map((segment) => titleCase(segment))
-    .join(" ");
-}
-
 function defaultSortDirection(key) {
   return ["index", "started_at", "status", "length", "notes", "tls", "edited"].includes(key) ? "desc" : "asc";
 }
@@ -28626,11 +28607,6 @@ function formatSize(bytes) {
     index += 1;
   }
   return `${size.toFixed(size >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
-}
-
-function titleCase(value) {
-  const text = String(value || "");
-  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function escapeHtml(value) {

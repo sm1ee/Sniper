@@ -48,7 +48,7 @@ function fixture(record = savedRecord("foo foo ", "foo  foo  ")) {
     "getCMView", "updateCodePaneCM", "buildSearchMeta", "initCMSearchNavigation", "initSearchHitNavigation",
     "updateWsHandshakeSearch", "updateWsHandshakeLineNumbers", "renderWebsocketSessions",
     "buildRawWebsocketRequest", "buildRawWebsocketResponse", "mergeHeaders", "normalizedHeaders", "headerNameEquals",
-    "countLines", "buildLineNumbers", "titleCase",
+    "countLines", "buildLineNumbers",
   ], {
     CM, els, state, _cmViews: views, cmProgrammaticViews: new WeakSet(),
     CM_SEARCH_DECORATION_LIMIT: 5000, CM_DEFAULT_SEARCH_CLASSES: { hit: "tok-search-hit", active: "tok-search-active" },

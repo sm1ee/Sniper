@@ -36,7 +36,7 @@ function fixture() {
 
 test('cleanup section is in Capture Settings with independent native labels and irreversible warning', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
-  const section = html.slice(html.indexOf('id="proxySettingsPanel"'), html.indexOf('id="proxySubPlaceholder"'));
+  const section = html.slice(html.indexOf('id="proxySettingsPanel"'), html.indexOf('id="replayShell"'));
   assert.match(section, /HTTP History automatic cleanup/);
   assert.match(section, /<fieldset[^>]*aria-labelledby="historyRetentionHeading" aria-describedby="historyRetentionWarning historyRetentionProtection"/);
   assert.match(section, /deletes the oldest unprotected entries above the limit, now and as history grows/);

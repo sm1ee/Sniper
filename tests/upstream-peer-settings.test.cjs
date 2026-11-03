@@ -30,7 +30,7 @@ function fixture() {
 }
 test('card is independent, default Off, disclosed and absent from the compact Scope strip', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
-  const start = html.indexOf('id="proxySettingsPanel"'), end = html.indexOf('id="proxySubPlaceholder"');
+  const start = html.indexOf('id="proxySettingsPanel"'), end = html.indexOf('id="replayShell"');
   const section = html.slice(start, end);
   // Off by default is checked below; the disclosure keeps what is stored, that
   // it may not be the origin, where it goes, and that turning it off keeps it.

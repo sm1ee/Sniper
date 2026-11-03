@@ -83,7 +83,7 @@ function fixture() {
     "onClickWithProgress", "withButtonProgress", "requireOkResponse", "readApiErrorMessage",
     "formatStructuredApiErrorMessage", "resetFindingsUiState", "clearFindingDetail",
     "setFindingDetailActionsEnabled", "renderFindingDetailLoading", "updateFindingsSelection",
-    "resetFindingsSearchUi", "clearSearchHighlights", "buildSearchMeta", "titleCase",
+    "resetFindingsSearchUi", "clearSearchHighlights", "buildSearchMeta",
     "renderFindings", "getFilteredFindings", "updateCategoryFilter", "updateFindingsBadge",
     "retainedEntriesCap", "formatCappedCount", "loadFindings", "fetchFindingsCount",
     "commitFindingsBadgeCount", "loadFindingDetail",

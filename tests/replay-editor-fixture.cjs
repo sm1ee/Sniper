@@ -68,7 +68,7 @@ function editorFixture() {
     renderToolPanels: () => f.context.renderReplay(),
   });
   for (const name of [
-    "titleCase", "createBaseExtensions", "addCMUpdateListener", "normalizeSearchClasses", "normalizeSearchEffectValue",
+    "createBaseExtensions", "addCMUpdateListener", "normalizeSearchClasses", "normalizeSearchEffectValue",
     "forEachCodeSearchMatch", "buildSearchDecorations", "buildChangedLineDecorations", "buildSearchMeta",
     "updateCodePaneCM", "getCMView", "renderReplay", "renderReplayViewContent", "renderReplayViewTabs",
     "renderReplayClearedState", "syncReplayToolbar", "updateReplaySearchPane", "toHexDumpFromBytes",

@@ -101,7 +101,7 @@ function cmNavigationFixture(text = "x x x") {
     CM, CM_SEARCH_DECORATION_LIMIT: 5000,
     CM_DEFAULT_SEARCH_CLASSES: { hit: "tok-search-hit", active: "tok-search-active" },
     cmProgrammaticViews: new WeakSet(), _cmViews: pool,
-    titleCase: value => value, state: { messageSearch: { request: "x" }, messageViews: { request: "raw" } },
+    state: { messageSearch: { request: "x" }, messageViews: { request: "raw" } },
   });
   const fieldStart = appSource.indexOf("const setSearchQuery = CM.StateEffect.define();");
   const fieldEnd = appSource.indexOf("// Changed-line decoration:", fieldStart);
