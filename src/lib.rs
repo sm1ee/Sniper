@@ -54,6 +54,7 @@ pub mod templates;
 pub mod ui_settings;
 pub mod upstream_peer_settings;
 pub mod upstream_proxy;
+pub mod vulndata;
 pub mod websocket;
 pub mod workspace;
 pub mod ws_replay;
