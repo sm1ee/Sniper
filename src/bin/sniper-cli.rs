@@ -202,6 +202,12 @@ enum Command {
         #[command(subcommand)]
         command: TemplatesCommand,
     },
+    /// Public vulnerability data (retire.js, CISA KEV, FIRST EPSS) that lists
+    /// known advisories for the library versions Sniper detects.
+    Vulndata {
+        #[command(subcommand)]
+        command: VulndataCommand,
+    },
     /// Read stored session event messages.
     #[command(name = "event-log")]
     EventLog {
@@ -763,6 +769,93 @@ struct TemplatesImportArgs {
     /// A nuclei-templates release .tar.gz, at most 64 MiB.
     #[arg(long)]
     file: PathBuf,
+}
+
+#[derive(Subcommand, Debug)]
+enum VulndataCommand {
+    /// Each source's date, size, terms and last error, and whether the daily
+    /// update is on.
+    Status,
+    /// Fetch every source now: one request each to raw.githubusercontent.com,
+    /// www.cisa.gov and epss.empiricalsecurity.com.
+    Update,
+    /// Load a retire.js, CISA KEV or FIRST EPSS file from disk, for networks
+    /// that cannot reach those hosts.
+    Import(VulndataImportArgs),
+    /// Turn the daily update on or off.
+    AutoUpdate(VulndataAutoUpdateArgs),
+    /// The advisories the data lists for one product version.
+    Lookup(VulndataLookupArgs),
+}
+
+#[derive(Args, Debug)]
+struct VulndataImportArgs {
+    /// A jsrepository-v4.json, known_exploited_vulnerabilities.json or EPSS
+    /// .csv(.gz) file, at most 16 MiB.
+    #[arg(long)]
+    file: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct VulndataAutoUpdateArgs {
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+}
+
+#[derive(Args, Debug)]
+struct VulndataLookupArgs {
+    /// A product id as the Service Map names it, such as `jquery`.
+    #[arg(long)]
+    product: String,
+    #[arg(long)]
+    version: String,
+}
+
+impl VulndataCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Status => "vulndata.status",
+            Self::Update => "vulndata.update",
+            Self::Import(_) => "vulndata.import",
+            Self::AutoUpdate(_) => "vulndata.set_auto_update",
+            Self::Lookup(_) => "vulndata.lookup",
+        }
+    }
+
+    fn input_preview(&self) -> Value {
+        match self {
+            Self::Status | Self::Update => json!({}),
+            Self::Import(args) => json!({ "file": args.file }),
+            Self::AutoUpdate(args) => json!({ "enabled": args.enabled }),
+            Self::Lookup(args) => json!({ "product": args.product, "version": args.version }),
+        }
+    }
+
+    fn api_preview(&self) -> Value {
+        match self {
+            Self::Status => api_preview("GET", "/api/vulndata", None),
+            Self::Update => api_preview("POST", "/api/vulndata/update", Some(json!({}))),
+            Self::Import(args) => api_preview(
+                "POST",
+                "/api/vulndata/import",
+                Some(json!({ "file": args.file, "content_type": "application/octet-stream" })),
+            ),
+            Self::AutoUpdate(args) => api_preview(
+                "POST",
+                "/api/vulndata/auto-update",
+                Some(json!({ "enabled": args.enabled })),
+            ),
+            Self::Lookup(args) => api_preview("GET", vulndata_lookup_path(args), None),
+        }
+    }
+}
+
+fn vulndata_lookup_path(args: &VulndataLookupArgs) -> String {
+    let params = vec![
+        ("product".to_string(), args.product.clone()),
+        ("version".to_string(), args.version.clone()),
+    ];
+    format!("/api/vulndata/lookup?{}", encode_query(params))
 }
 
 #[derive(Args, Debug, Default, Clone)]
@@ -3417,6 +3510,7 @@ impl Command {
             Command::Recon { command } => command.operation_name(),
             Command::Scanner { command } => command.operation_name(),
             Command::Templates { command } => command.operation_name(),
+            Command::Vulndata { command } => command.operation_name(),
             Command::EventLog { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
             Command::Replay { command } => command.operation_name(),
@@ -3922,6 +4016,51 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             true,
             &["enabled"],
             vec![json!({"enabled":false}), json!({"enabled":true})],
+        ),
+        op(
+            "vulndata.status",
+            "vulndata status",
+            "Read the vulnerability data: for retire.js (Apache-2.0), CISA KEV (CC0) and FIRST EPSS, when each last loaded (fetched_at), from a download or an import (origin), its size and SHA-256 and the last error; whether the daily update is on and an update is running; and the revision of the loaded index, null until all three loaded once. verified is always false: no source signs its file, so TLS is the only check. Local; contacts nothing.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "vulndata.update",
+            "vulndata update",
+            "Fetch all three sources now, due or not and with the daily update off too: one request each to raw.githubusercontent.com, www.cisa.gov and epss.empiricalsecurity.com, through the environment's proxy. Nothing about any target is sent. A file over its limit or that does not parse keeps the previous one and shows in status as error. Waits until the update ends.",
+            Write,
+            true,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "vulndata.import",
+            "vulndata import --file <path>",
+            "Load a jsrepository-v4.json, known_exploited_vulnerabilities.json or EPSS .csv(.gz) file from this machine, at most 16 MiB, for networks that cannot reach the hosts. Sniper tells which source it is and checks it as a download; the next successful fetch replaces it.",
+            Write,
+            true,
+            &["file"],
+            vec![json!({"file":"known_exploited_vulnerabilities.json"})],
+        ),
+        op(
+            "vulndata.set_auto_update",
+            "vulndata auto-update --enabled <true|false>",
+            "Turn the daily update on or off; it starts on. While on, Sniper fetches each source a minute after launch when it never loaded, then hourly when it failed last time or loaded a day ago.",
+            Write,
+            true,
+            &["enabled"],
+            vec![json!({"enabled":false}), json!({"enabled":true})],
+        ),
+        op(
+            "vulndata.lookup",
+            "vulndata lookup --product <id> --version <version>",
+            "List the known advisories for one product version, as findings and the Service Map show them: id, CVEs, severity, summary, fixed_in, https links, kev and epss, exploited ones first. product is a Service Map product id such as jquery. A version too partial to place in a range, such as 3 against 3.5.0, matches nothing. A match is a lead from the version string alone, not a confirmed vulnerability. Local; contacts nothing.",
+            Read,
+            false,
+            &["product", "version"],
+            vec![json!({"product":"jquery","version":"3.4.1"})],
         ),
         op(
             "templates.list",
@@ -6483,6 +6622,30 @@ fn op(
     }
 }
 
+fn vulndata_input_schema(operation: &str) -> Option<Value> {
+    Some(match operation {
+        "vulndata.status" | "vulndata.update" => {
+            json!({"type":"object","additionalProperties":false,"required":[],"properties":{}})
+        }
+        "vulndata.import" => json!({
+            "type":"object","additionalProperties":false,"required":["file"],
+            "properties":{"file":{"type":"string","minLength":1,"description":"Path to a jsrepository-v4.json, known_exploited_vulnerabilities.json or EPSS .csv(.gz) file on this machine, at most 16 MiB."}}
+        }),
+        "vulndata.set_auto_update" => json!({
+            "type":"object","additionalProperties":false,"required":["enabled"],
+            "properties":{"enabled":{"type":"boolean","description":"Turn the daily update on (true) or off (false)."}}
+        }),
+        "vulndata.lookup" => json!({
+            "type":"object","additionalProperties":false,"required":["product","version"],
+            "properties":{
+                "product":{"type":"string","minLength":1,"maxLength":100,"description":"A Service Map product id, such as jquery."},
+                "version":{"type":"string","minLength":1,"maxLength":100,"description":"The version as detected, such as 3.4.1."}
+            }
+        }),
+        _ => return None,
+    })
+}
+
 fn templates_input_schema(operation: &str) -> Option<Value> {
     let filter = json!({
         "search":{"type":["string","null"],"maxLength":200,"description":"Substring of an id, name, path, tag, CVE, description or reference, case-insensitive."},
@@ -6901,6 +7064,9 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
     if let Some(schema) = templates_input_schema(operation) {
         return schema;
     }
+    if let Some(schema) = vulndata_input_schema(operation) {
+        return schema;
+    }
     let mut properties = serde_json::Map::new();
     let fields = call_allowed_fields(operation).unwrap_or(required_fields);
     for field in fields {
@@ -7121,6 +7287,10 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "templates.library.download" => &["main"],
         "templates.library.import" => &["file"],
         "templates.library.set_auto_update" => &["enabled"],
+        "vulndata.status" | "vulndata.update" => &[],
+        "vulndata.import" => &["file"],
+        "vulndata.set_auto_update" => &["enabled"],
+        "vulndata.lookup" => &["product", "version"],
         "templates.list" => &[
             "search",
             "severity",
@@ -7404,6 +7574,7 @@ fn command_input_preview(command: &Command) -> Value {
         Command::Recon { command } => recon_input_preview(command),
         Command::Scanner { command } => scanner_input_preview(command),
         Command::Templates { command } => templates_input_preview(command),
+        Command::Vulndata { command } => command.input_preview(),
         Command::Findings { command } => match command {
             FindingsCommand::List(args) => json!({"session_id":args.session_id,"limit":args.limit}),
             FindingsCommand::Get(args) => json!({"session_id":args.session_id,"id":args.id}),
@@ -7833,6 +8004,7 @@ fn command_api_preview(command: &Command) -> Result<Value> {
         Command::Recon { command } => recon_api_preview(command),
         Command::Scanner { command } => scanner_api_preview(command),
         Command::Templates { command } => templates_api_preview(command),
+        Command::Vulndata { command } => command.api_preview(),
         Command::Findings { command } => findings_api_preview(command),
         Command::EventLog {
             command: EventLogCommand::List(args),
@@ -8508,6 +8680,9 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
         "templates.library.check" | "templates.library.download" => notes.push("Contacts GitHub through the environment's proxy: the latest-release API, then for a download the release's checksums file and source .tar.gz; with main, the branch API and that commit's .tar.gz. A release that does not match its published SHA-256 is not installed; main has no checksum. Dry-run contacts nothing."),
         "templates.library.import" => notes.push("Reads the local .tar.gz and uploads it to the running Sniper, which installs it; nothing contacts GitHub. Dry-run reads nothing."),
         "templates.library.set_auto_update" => notes.push("While on, Sniper asks GitHub once a day through the environment's proxy and installs a newer release or main commit. Dry-run contacts nothing."),
+        "vulndata.update" => notes.push("Contacts raw.githubusercontent.com, www.cisa.gov and epss.empiricalsecurity.com through the environment's proxy, one file each; nothing about any target is sent. Dry-run contacts nothing."),
+        "vulndata.import" => notes.push("Reads the local file and uploads it to the running Sniper, which checks and loads it; nothing contacts the data hosts. Dry-run reads nothing."),
+        "vulndata.set_auto_update" => notes.push("While on, Sniper fetches the three files through the environment's proxy when they are due, at most once a day each after they load. Dry-run contacts nothing."),
         "templates.passive.set_enabled" => notes.push("Enabled passive templates judge captured responses whose host is in a non-empty Scope include list while Passive Scan is on, and never send requests. Run findings rescan to apply a change to stored history."),
         "templates.auto.set" => notes.push("While on, the auto scan sends requests to every new host the proxy captures in Scope or on its list. Dry-run contacts nothing."),
         "templates.scan.start" => notes.push("Sends the templates' requests to the targets once it runs. Dry-run contacts nothing; templates scan preview asks Sniper what would be sent and still sends nothing to a target."),
@@ -8863,6 +9038,28 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     enabled: call_required(operation, input, "enabled")?,
                 }),
             },
+        },
+        "vulndata.status" => Command::Vulndata {
+            command: VulndataCommand::Status,
+        },
+        "vulndata.update" => Command::Vulndata {
+            command: VulndataCommand::Update,
+        },
+        "vulndata.import" => Command::Vulndata {
+            command: VulndataCommand::Import(VulndataImportArgs {
+                file: call_required::<String>(operation, input, "file")?.into(),
+            }),
+        },
+        "vulndata.set_auto_update" => Command::Vulndata {
+            command: VulndataCommand::AutoUpdate(VulndataAutoUpdateArgs {
+                enabled: call_required(operation, input, "enabled")?,
+            }),
+        },
+        "vulndata.lookup" => Command::Vulndata {
+            command: VulndataCommand::Lookup(VulndataLookupArgs {
+                product: call_required(operation, input, "product")?,
+                version: call_required(operation, input, "version")?,
+            }),
         },
         "templates.list" => {
             let limit = call_optional::<u64>(operation, input, "limit")?.unwrap_or(200);
@@ -10529,6 +10726,7 @@ async fn run(cli: Cli) -> Result<()> {
                 Command::Recon { command } => handle_recon(api, command).await,
                 Command::Scanner { command } => handle_scanner(api, command).await,
                 Command::Templates { command } => handle_templates(api, command).await,
+                Command::Vulndata { command } => handle_vulndata(api, command).await,
                 Command::Findings { command } => handle_findings(api, command).await,
                 Command::EventLog { command } => handle_event_log(api, command).await,
                 Command::Scope { command } => handle_target(api, command).await,
@@ -10763,6 +10961,70 @@ async fn wait_for_template_library(api: &ApiClient) -> Result<Value> {
                 TEMPLATE_LIBRARY_WAIT.as_secs()
             ),
             _ => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+        }
+    }
+}
+
+const VULNDATA_UPDATE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+const MAX_VULNDATA_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+async fn handle_vulndata(api: ApiClient, command: VulndataCommand) -> Result<()> {
+    match command {
+        VulndataCommand::Status => print_json(&api.get_json::<Value>("/api/vulndata").await?),
+        VulndataCommand::Update => {
+            let _: Value = api.post_json("/api/vulndata/update", &json!({})).await?;
+            let deadline = std::time::Instant::now() + VULNDATA_UPDATE_WAIT;
+            loop {
+                let status: Value = api.get_json("/api/vulndata").await?;
+                if status["updating"] != json!(true) {
+                    return print_json(&status);
+                }
+                if std::time::Instant::now() >= deadline {
+                    bail!(
+                        "still updating after {} seconds; `vulndata status` reports the outcome",
+                        VULNDATA_UPDATE_WAIT.as_secs()
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+        VulndataCommand::Import(args) => {
+            let size = std::fs::metadata(&args.file)
+                .with_context(|| format!("cannot read {}", args.file.display()))?
+                .len();
+            if size > MAX_VULNDATA_FILE_BYTES {
+                bail!("{} is larger than 16 MiB", args.file.display());
+            }
+            let bytes = std::fs::read(&args.file)
+                .with_context(|| format!("cannot read {}", args.file.display()))?;
+            const PATH: &str = "/api/vulndata/import";
+            let response = api
+                .long_client
+                .post(api.url(PATH))
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes)
+                .send()
+                .await
+                .with_context(|| format!("failed to POST {PATH}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                let message = response.text().await.unwrap_or_default();
+                bail!(
+                    "request to {PATH} failed ({status}): {}",
+                    api_failure_detail(status, message)
+                );
+            }
+            print_json(&response.json::<Value>().await?)
+        }
+        VulndataCommand::AutoUpdate(args) => print_json(
+            &api.post_json::<_, Value>(
+                "/api/vulndata/auto-update",
+                &json!({ "enabled": args.enabled }),
+            )
+            .await?,
+        ),
+        VulndataCommand::Lookup(args) => {
+            print_json(&api.get_json::<Value>(&vulndata_lookup_path(&args)).await?)
         }
     }
 }
@@ -22002,6 +22264,30 @@ mod tests {
         assert!(
             Cli::try_parse_from(["sniper-cli", "templates", "library", "auto-update"]).is_err()
         );
+    }
+
+    #[test]
+    fn vulndata_commands_name_their_values() {
+        let set = |input: Value| command_from_operation_input("vulndata.set_auto_update", &input);
+        assert!(set(json!({})).is_err());
+        let off = set(json!({"enabled": false})).unwrap();
+        assert!(off.requires_confirmation());
+        let preview = super::command_api_preview(&off).unwrap();
+        assert_eq!(preview["path"], "/api/vulndata/auto-update");
+        assert_eq!(preview["body"], json!({ "enabled": false }));
+        assert!(
+            command_from_operation_input("vulndata.lookup", &json!({"product": "jquery"})).is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "vulndata",
+            "lookup",
+            "--product",
+            "jquery",
+            "--version",
+            "3.4.1"
+        ])
+        .is_ok());
     }
 
     // Turning passive templates on takes exactly one selection, so a missing

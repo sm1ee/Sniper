@@ -105,6 +105,7 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 | **Findings** | Passive checks for sensitive data, CORS, missing headers, JWT issues, and the management endpoints and backend addresses the Service Map names. One entry per issue per host, endpoint or value; **Rescan** re-checks captured traffic |
 | **Scan ▸ Recon** | Endpoint discovery per session from a scoped crawler, urlscan and Wayback, with consent per external service and optional limits |
 | **Scan ▸ Active Scan** | Nuclei community templates: turned-on templates check captured in-scope traffic without sending anything; a manual scan sends the ones you pick to targets you name |
+| **Known vulnerabilities** | Advisories for detected front-end library versions, from retire.js, CISA KEV and FIRST EPSS files fetched once a day and matched locally: Info findings and Service Map badges, leads to confirm |
 | **Replay** | Edit and resend any captured request, override host and port, render the response |
 | **Fuzzer** | Payload lists sent at marked positions (Sniper or Battering ram), in the background with progress and Stop |
 | **Tools** | Decode, encode, hash, JWT inspector, data transformations |
@@ -209,6 +210,7 @@ CLI contract.
 | [Service Map](docs/integrations/service-map.md) | The passive map of captured origins, their clients and the APIs they serve |
 | [Recon](docs/integrations/recon.md) | Endpoint discovery, consent for external services, limits |
 | [Nuclei templates](docs/integrations/nuclei-templates.md) | Passive templates, manual and auto scans, what never runs |
+| [Known vulnerabilities](docs/integrations/known-vulnerabilities.md) | The data files, when Sniper fetches them, how versions match, the findings |
 | [Sniper in an agent harness](docs/guides/agent-harness.md) | Which part of a harness Sniper is, and what goes in and out |
 | [Using Sniper from Claude Code](docs/integrations/claude-code.md) | Installing the skill, checking that it works, what to ask for |
 | [Using Sniper from Codex](docs/integrations/codex.md) | The same, for Codex |

@@ -251,6 +251,8 @@ sniper-cli --output compact templates scan preview --target <origin> --severity 
 sniper-cli templates scan start --target <origin> --severity high,critical --yes
 sniper-cli --output compact templates scan get --id <scan-id>
 sniper-cli templates scan stop --id <scan-id> --yes
+sniper-cli --output compact vulndata status
+sniper-cli --output compact vulndata lookup --product jquery --version 3.4.1
 sniper-cli skills install --codex --dry-run
 ```
 
@@ -264,6 +266,7 @@ On every launch the desktop app overwrites this skill in the default skill folde
 - Do not switch sessions silently before changing scope, Replay state or queued-request decisions.
 - Read `capture http get`, `replay list` or `capture web-socket get` before you assume anything about stored request state.
 - `templates library download` contacts GitHub; ask the user before you run it with `--yes`. `--main` takes main's newest commit: templates not released yet, with no checksum. A downloaded library then updates itself once a day; run `templates library auto-update --enabled false` only when the user asks. Turned-on templates check only captured traffic of in-scope hosts and never send requests; their findings appear under category `nuclei`.
+- Known-vulnerability findings (category `known_cve`) come from a library's version string alone. Report them as leads to confirm, never as confirmed vulnerabilities. Sniper fetches their data once a day; `vulndata update` contacts raw.githubusercontent.com, www.cisa.gov and epss.empiricalsecurity.com, so run it only when the user asks.
 - `templates scan start` sends requests to the targets. Run `templates scan preview` first, show the user what it will send, and start it with `--yes` only when they agree. Never add `--allow-risk` on your own. Its findings are `nuclei:<template-id>`. Every exchange joins HTTP history unless `--history matched`; `--on` sends the templates turned on.
 - `templates auto set --enabled true` makes Sniper send the templates turned on for it to every new host the proxy captures in Scope or on its list. Turn it on, add hosts or turn templates on for it only when the user asks; say what it will send to first.
 - Out-of-band templates (`{{interactsh-url}}`) make the target call the session's Interactsh server. When the preview reports `oast_unavailable`, tell the user those templates need one in `capture oast`; do not configure an OAST server on your own.

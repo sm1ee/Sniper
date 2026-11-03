@@ -387,6 +387,14 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/templates/library/auto-update",
             post(crate::templates::library::set_auto_update),
         )
+        .route("/api/vulndata", get(crate::vulndata::get_status))
+        .route("/api/vulndata/update", post(crate::vulndata::start_update))
+        .route("/api/vulndata/import", post(crate::vulndata::import))
+        .route(
+            "/api/vulndata/auto-update",
+            post(crate::vulndata::set_auto_update),
+        )
+        .route("/api/vulndata/lookup", get(crate::vulndata::lookup))
         .route(
             "/api/templates/passive",
             post(crate::templates::library::set_passive),

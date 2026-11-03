@@ -15,10 +15,16 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use axum::body::Bytes;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::state::AppState;
 use index::VulnIndex;
 use sources::SourceId;
 
@@ -478,6 +484,101 @@ async fn download(client: &reqwest::Client, id: SourceId) -> Result<Vec<u8>> {
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+// ---- API ----
+
+pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<VulnDataStatus> {
+    Json(state.vulndata.status())
+}
+
+/// Fetches every source now: 202 with the status, 409 while an update runs.
+pub async fn start_update(State(state): State<Arc<AppState>>) -> Response {
+    if !state.vulndata.update_now() {
+        return (
+            StatusCode::CONFLICT,
+            "Vulnerability data is already updating. Try again when it finishes.",
+        )
+            .into_response();
+    }
+    (StatusCode::ACCEPTED, Json(state.vulndata.status())).into_response()
+}
+
+/// The body is one retire.js, CISA KEV or FIRST EPSS file.
+pub async fn import(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    if body.is_empty() || body.len() > SourceId::Epss.max_bytes() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Send one retire.js, CISA KEV or FIRST EPSS file of at most 16 MiB.",
+        )
+            .into_response();
+    }
+    let data = Arc::clone(&state.vulndata);
+    match tokio::task::spawn_blocking(move || data.import_blocking(&body)).await {
+        Ok(Ok(source)) => Json(serde_json::json!({
+            "source": source,
+            "status": state.vulndata.status(),
+        }))
+        .into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, format!("{error:#}")).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoUpdateRequest {
+    enabled: bool,
+}
+
+pub async fn set_auto_update(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<AutoUpdateRequest>,
+) -> Response {
+    let data = Arc::clone(&state.vulndata);
+    match tokio::task::spawn_blocking(move || data.set_auto_update(request.enabled)).await {
+        Ok(Ok(())) => Json(state.vulndata.status()).into_response(),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "saving the vulnerability data switch failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LookupQuery {
+    product: String,
+    version: String,
+}
+
+/// The advisories for one product version, for agents; 409 until the data
+/// has loaded.
+pub async fn lookup(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LookupQuery>,
+) -> Response {
+    if query.product.len() > 100 || query.version.len() > 100 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "product and version are at most 100 characters",
+        )
+            .into_response();
+    }
+    let Some(index) = state.vulndata.index() else {
+        return (
+            StatusCode::CONFLICT,
+            "Vulnerability data has not loaded yet: it needs retire.js, CISA KEV and FIRST EPSS once each.",
+        )
+            .into_response();
+    };
+    Json(serde_json::json!({
+        "product": query.product,
+        "version": query.version,
+        "advisories": index.advisories(&query.product, &query.version),
+    }))
+    .into_response()
 }
 
 #[cfg(test)]
